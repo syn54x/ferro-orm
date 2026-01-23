@@ -14,6 +14,10 @@ from ._core import (
 
 
 class ModelMetaclass(type(BaseModel)):
+    """
+    Metaclass for Ferro models that automatically registers the model schema with the Rust core.
+    """
+
     def __new__(mcs, name, bases, namespace, **kwargs):
         # 1. Create the class using Pydantic's internal logic
         cls = super().__new__(mcs, name, bases, namespace, **kwargs)
@@ -32,11 +36,29 @@ class ModelMetaclass(type(BaseModel)):
 
 
 class Model(BaseModel, metaclass=ModelMetaclass):
+    """
+    Base class for all Ferro models.
+
+    Inherits from Pydantic's BaseModel and provides asynchronous CRUD operations
+    backed by a high-performance Rust engine.
+    """
+
     # This ensures Pydantic behaves like a standard object when needed
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+        use_attribute_docstrings=True,
+    )
 
     async def save(self) -> None:
-        """Persist the model instance to the database."""
+        """
+        Persist the model instance to the database.
+
+        This method performs an upsert (INSERT or UPDATE) based on the primary key.
+        After saving, the instance is registered with the internal Identity Map.
+
+        Returns:
+            None
+        """
         # Thin Bridge: Pass the model name and the serialized data
         await save_record(self.__class__.__name__, self.model_dump_json())
 
@@ -51,44 +73,35 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             register_instance(self.__class__.__name__, str(pk_val), self)
 
     @classmethod
-    async def all(cls) -> list:
-        """Fetch all records for this model."""
-        items = await fetch_all(cls.__name__)
-        results = []
-        for item in items:
-            if isinstance(item, dict):
-                obj = cls(**item)
-                # Find PK value from the object
-                pk_val = None
-                for field_name, field in cls.model_fields.items():
-                    if getattr(field, "json_schema_extra", {}).get("primary_key"):
-                        pk_val = getattr(obj, field_name)
-                        break
+    async def all(cls) -> list[Self]:
+        """
+        Fetch all records for this model.
 
-                if pk_val is not None:
-                    register_instance(cls.__name__, str(pk_val), obj)
-                results.append(obj)
-            else:
-                # It's already a Python object from the Identity Map
-                results.append(item)
-        return results
+        Uses Direct Injection to bypass standard Pydantic validation for
+        maximum performance during mass hydration.
+
+        Returns:
+            list[Self]: A list of model instances.
+        """
+        # Now passing 'cls' directly for Direct Injection in Rust
+        return await fetch_all(cls)
 
     @classmethod
     async def get(cls, value: Any) -> Self | None:
         """
         Fetch a single record by primary key.
 
+        The operation first checks the internal Identity Map (cache). if not found,
+        it performs a database lookup.
+
+        Args:
+            value: The primary key value to look up.
+
+        Returns:
+            Self | None: The model instance if found, otherwise None.
+
         Example:
-          User.get(1)
+            >>> user = await User.get(1)
         """
-        # 1. Call backend (Rust handles checking Identity Map)
-        result = await fetch_one(cls.__name__, str(value))
-        if result is None:
-            return None
-
-        if isinstance(result, dict):
-            obj = cls(**result)
-            register_instance(cls.__name__, str(value), obj)
-            return obj
-
-        return result
+        # Now passing 'cls' directly for Direct Injection in Rust
+        return await fetch_one(cls, str(value))
