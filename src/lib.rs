@@ -6,6 +6,7 @@
 
 mod connection;
 mod operations;
+mod query;
 mod schema;
 mod state;
 
@@ -41,9 +42,19 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(schema::register_model_schema, m)?)?;
     m.add_function(wrap_pyfunction!(connection::connect, m)?)?;
     m.add_function(wrap_pyfunction!(operations::fetch_all, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::fetch_filtered, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::count_filtered, m)?)?;
     m.add_function(wrap_pyfunction!(operations::fetch_one, m)?)?;
     m.add_function(wrap_pyfunction!(operations::register_instance, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::evict_instance, m)?)?;
     m.add_function(wrap_pyfunction!(operations::save_record, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::save_bulk_records, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::delete_record, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::delete_filtered, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::update_filtered, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::begin_transaction, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::commit_transaction, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::rollback_transaction, m)?)?;
     m.add_function(wrap_pyfunction!(connection::reset_engine, m)?)?;
     m.add_function(wrap_pyfunction!(clear_registry, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;

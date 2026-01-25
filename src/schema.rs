@@ -3,20 +3,34 @@
 //! This module handles converting Pydantic JSON schemas into Sea-Query
 //! table definitions and managing the model registry.
 
+use crate::state::{ENGINE, MODEL_REGISTRY};
 use pyo3::prelude::*;
-use sea_query::{ColumnDef, Alias, Table, SqliteQueryBuilder};
+use sea_query::{Alias, ColumnDef, Index, SqliteQueryBuilder, Table};
 use sqlx::{Any, Pool};
 use std::sync::Arc;
-use crate::state::{MODEL_REGISTRY, ENGINE};
 
 /// Maps a JSON schema type string to a Sea-Query `ColumnDef`.
 pub fn json_type_to_sea_query(col_def: &mut ColumnDef, json_type: &str) {
     match json_type {
-        "integer" => { col_def.big_integer(); },
-        "string" => { col_def.string(); },
-        "number" => { col_def.double(); },
-        "boolean" => { col_def.boolean(); },
-        _ => { col_def.string(); },
+        "integer" => {
+            col_def.integer();
+        }
+        "string" => {
+            col_def.string();
+        }
+        "number" => {
+            col_def.double();
+        }
+        "boolean" => {
+            // CX Choice: Use integer for booleans to satisfy SQLx Any driver quirks with SQLite.
+            col_def.integer();
+        }
+        "object" | "array" => {
+            col_def.text(); // SQLite stores JSON as text
+        }
+        _ => {
+            col_def.string();
+        }
     }
 }
 
@@ -35,50 +49,129 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
         registry.clone()
     };
 
+    let mut conn = pool.acquire().await.map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to acquire connection: {}", e))
+    })?;
+
     for (name, schema) in schemas {
-        let sql = {
+        let (sql, index_sqls) = {
+            let table_lower = name.to_lowercase();
             let mut table_stmt = Table::create()
-                .table(Alias::new(name.to_lowercase()))
+                .table(Alias::new(&table_lower))
                 .if_not_exists()
                 .to_owned();
+
+            let mut index_sqls = Vec::new();
 
             if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
                     let mut col_def = ColumnDef::new(Alias::new(col_name));
 
-                    if let Some(json_type) = col_info.get("type").and_then(|t| t.as_str()) {
-                        json_type_to_sea_query(&mut col_def, json_type);
+                    let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
+                        // Check anyOf for a type (common in Pydantic V2 for optional fields)
+                        col_info.get("anyOf").and_then(|a| a.as_array()).and_then(|types| {
+                            types.iter().find_map(|t| {
+                                let s = t.get("type")?.as_str()?;
+                                if s != "null" {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                    });
+
+                    let format = col_info.get("format").and_then(|f| f.as_str());
+
+                    if let Some(t) = json_type {
+                        match (t, format) {
+                            ("string", Some("date-time")) => {
+                                col_def.date_time();
+                            }
+                            ("string", Some("date")) => {
+                                col_def.date();
+                            }
+                            ("string", Some("uuid")) => {
+                                col_def.uuid();
+                            }
+                            ("string", Some("binary")) => {
+                                col_def.blob();
+                            }
+                            _ => json_type_to_sea_query(&mut col_def, t),
+                        }
                     }
 
-                    // Check for primary key
-                    let is_pk = col_info.get("primary_key")
+                    // Check for primary key and autoincrement from our custom metadata
+                    let is_pk = col_info
+                        .get("primary_key")
                         .and_then(|pk| pk.as_bool())
-                        .or_else(|| {
-                            col_info.get("json_schema_extra")
-                                .and_then(|extra| extra.get("primary_key"))
-                                .and_then(|pk| pk.as_bool())
-                        })
                         .unwrap_or(false);
 
+                    let is_auto = col_info
+                        .get("autoincrement")
+                        .and_then(|auto| auto.as_bool())
+                        .unwrap_or(true);
+
                     if is_pk {
-                        col_def.primary_key().auto_increment();
+                        col_def.primary_key();
+                        if is_auto {
+                            col_def.auto_increment();
+                        }
+                    }
+
+                    if col_info
+                        .get("unique")
+                        .and_then(|u| u.as_bool())
+                        .unwrap_or(false)
+                    {
+                        col_def.unique_key();
+                    }
+
+                    if col_info
+                        .get("index")
+                        .and_then(|i| i.as_bool())
+                        .unwrap_or(false)
+                    {
+                        let index_name = format!("idx_{}_{}", table_lower, col_name);
+                        let index_sql = Index::create()
+                            .name(&index_name)
+                            .table(Alias::new(&table_lower))
+                            .col(Alias::new(col_name))
+                            .if_not_exists()
+                            .to_string(SqliteQueryBuilder);
+                        index_sqls.push(index_sql);
                     }
 
                     table_stmt.col(&mut col_def);
                 }
             }
-            table_stmt.build(SqliteQueryBuilder)
+            (
+                table_stmt.build(SqliteQueryBuilder),
+                index_sqls,
+            )
         };
 
         sqlx::query(&sql)
-            .execute(pool.as_ref())
+            .execute(&mut *conn)
             .await
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "SQL Execution failed for '{}': {}",
+                    "SQL Execution failed for '{}' table: {}",
                     name, e
                 ))
             })?;
+
+        for index_sql in index_sqls {
+            sqlx::query(&index_sql)
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "SQL Execution failed for '{}' index: {}",
+                        name, e
+                    ))
+                })?;
+        }
 
         println!("✅ Ferro Engine: Table '{}' created", name);
     }
@@ -119,11 +212,13 @@ pub fn register_model_schema(name: String, schema: String) -> PyResult<()> {
 pub fn create_tables(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let pool = {
-            let engine_lock = ENGINE.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine")
-            })?;
+            let engine_lock = ENGINE
+                .read()
+                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine"))?;
             engine_lock.as_ref().cloned().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized. Call connect() first.")
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "Engine not initialized. Call connect() first.",
+                )
             })?
         };
 
