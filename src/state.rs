@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
-use sqlx::{Any, Pool, AnyConnection};
+use sqlx::{Any, AnyConnection, Pool};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;

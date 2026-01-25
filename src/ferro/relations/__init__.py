@@ -3,7 +3,7 @@ from typing import ForwardRef
 
 from .._core import register_model_schema
 from ..base import ForeignKey, ManyToManyField
-from ..state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+from ..state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS  # noqa: F401
 from .descriptors import RelationshipDescriptor
 
 
@@ -81,7 +81,7 @@ def resolve_relationships():
                     rel.related_name,
                     is_m2m=True,
                     join_table=join_table,
-                    source_col=target_col, # Reversed for the back side
+                    source_col=target_col,  # Reversed for the back side
                     target_col=source_col,
                 ),
             )
@@ -114,12 +114,12 @@ def resolve_relationships():
             if "properties" in schema:
                 for f_name, metadata in model_cls.ferro_fields.items():
                     if f_name in schema["properties"]:
-                        schema["properties"][f_name]["primary_key"] = (
-                            metadata.primary_key
-                        )
-                        schema["properties"][f_name]["autoincrement"] = (
-                            metadata.autoincrement
-                        )
+                        schema["properties"][f_name][
+                            "primary_key"
+                        ] = metadata.primary_key
+                        schema["properties"][f_name][
+                            "autoincrement"
+                        ] = metadata.autoincrement
                         schema["properties"][f_name]["unique"] = metadata.unique
                         schema["properties"][f_name]["index"] = metadata.index
 

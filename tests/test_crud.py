@@ -5,6 +5,7 @@ import uuid
 import ferro
 from ferro import Model
 
+
 @pytest.fixture
 def db_url():
     db_file = f"test_{uuid.uuid4()}.db"
@@ -13,9 +14,11 @@ def db_url():
     if os.path.exists(db_file):
         os.remove(db_file)
 
+
 @pytest.mark.asyncio
 async def test_model_save_new_record(db_url):
     """Test that calling .save() on a new model instance persists it to the database."""
+
     class User(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
         username: str
@@ -26,9 +29,11 @@ async def test_model_save_new_record(db_url):
     await user.save()
     assert user.id is not None
 
+
 @pytest.mark.asyncio
 async def test_model_save_update_record(db_url):
     """Test that calling .save() on an existing model instance updates it."""
+
     class User(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
         username: str
@@ -41,9 +46,11 @@ async def test_model_save_update_record(db_url):
     await user.save()
     assert True
 
+
 @pytest.mark.asyncio
 async def test_model_all_fetching(db_url):
     """Test that Model.all() retrieves all records from the database."""
+
     class User(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
         username: str
@@ -59,9 +66,11 @@ async def test_model_all_fetching(db_url):
     assert any(u.username == "alice" for u in users)
     assert any(u.username == "bob" for u in users)
 
+
 @pytest.mark.asyncio
 async def test_upsert_does_not_duplicate(db_url):
     """Test that saving a model with an existing ID updates it rather than inserting a new one."""
+
     class User(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
         username: str
@@ -77,6 +86,7 @@ async def test_upsert_does_not_duplicate(db_url):
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
     import sqlite3
+
     conn = sqlite3.connect(db_url.replace("sqlite:", "").split("?")[0])
     cursor = conn.cursor()
     cursor.execute("SELECT username FROM user WHERE id = 42")
@@ -84,9 +94,11 @@ async def test_upsert_does_not_duplicate(db_url):
     assert row[0] == "updated"
     conn.close()
 
+
 @pytest.mark.asyncio
 async def test_identity_map_consistency(db_url):
     """Test that fetching the same record twice returns the same Python object instance."""
+
     class User(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
         username: str
@@ -102,9 +114,11 @@ async def test_identity_map_consistency(db_url):
     assert user_a is user_b
     assert user_a.id == 100
 
+
 @pytest.mark.asyncio
 async def test_model_get_operation(db_url):
     """Test fetching a single record by primary key."""
+
     class User(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
         username: str
@@ -118,9 +132,11 @@ async def test_model_get_operation(db_url):
     assert user.id == 500
     assert user is u1
 
+
 @pytest.mark.asyncio
 async def test_model_get_invalid_usage(db_url):
     """Test that get() raises error with invalid arguments."""
+
     class User(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
         username: str
@@ -132,9 +148,11 @@ async def test_model_get_invalid_usage(db_url):
     with pytest.raises(TypeError):
         await User.get()
 
+
 @pytest.mark.asyncio
 async def test_model_get_not_found(db_url):
     """Test that get() returns None if the record does not exist."""
+
     class User(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
         username: str

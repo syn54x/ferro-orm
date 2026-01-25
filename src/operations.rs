@@ -37,20 +37,27 @@ macro_rules! decode_column {
             .get($name)
             .and_then(|s| s.get("properties"))
             .and_then(|p| p.get($col_name));
-        
-        let format = prop.and_then(|p| p.get("format")).and_then(|t| t.as_str());
-        let is_decimal = prop.and_then(|p| p.get("anyOf")).and_then(|a| a.as_array()).map(|types| {
-            types.iter().any(|t| t.get("pattern").is_some())
-        }).unwrap_or(false);
 
-        let json_type = prop.and_then(|p| p.get("type")).and_then(|t| t.as_str()).or_else(|| {
-            prop.and_then(|p| p.get("anyOf")).and_then(|a| a.as_array()).and_then(|types| {
-                types.iter().find_map(|t| {
-                    let s = t.get("type")?.as_str()?;
-                    if s != "null" { Some(s) } else { None }
-                })
-            })
-        });
+        let format = prop.and_then(|p| p.get("format")).and_then(|t| t.as_str());
+        let is_decimal = prop
+            .and_then(|p| p.get("anyOf"))
+            .and_then(|a| a.as_array())
+            .map(|types| types.iter().any(|t| t.get("pattern").is_some()))
+            .unwrap_or(false);
+
+        let json_type = prop
+            .and_then(|p| p.get("type"))
+            .and_then(|t| t.as_str())
+            .or_else(|| {
+                prop.and_then(|p| p.get("anyOf"))
+                    .and_then(|a| a.as_array())
+                    .and_then(|types| {
+                        types.iter().find_map(|t| {
+                            let s = t.get("type")?.as_str()?;
+                            if s != "null" { Some(s) } else { None }
+                        })
+                    })
+            });
 
         if is_decimal {
             if let Ok(v) = $row.try_get::<f64, _>($col_name) {
@@ -137,16 +144,22 @@ pub fn begin_transaction(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         };
 
         let mut conn = pool.acquire().await.map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to acquire connection: {}", e))
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to acquire connection: {}",
+                e
+            ))
         })?;
 
-        sqlx::query("BEGIN").execute(&mut *conn).await.map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
-        })?;
+        sqlx::query("BEGIN")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
+            })?;
 
         let tx_id = uuid::Uuid::new_v4().to_string();
         TRANSACTION_REGISTRY.insert(tx_id.clone(), Arc::new(Mutex::new(conn.detach())));
-        
+
         Ok(tx_id)
     })
 }
@@ -154,14 +167,18 @@ pub fn begin_transaction(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
 #[pyfunction]
 pub fn commit_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let conn_arc = TRANSACTION_REGISTRY.remove(&tx_id).ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("Transaction not found")
-        })?.1;
+        let conn_arc = TRANSACTION_REGISTRY
+            .remove(&tx_id)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?
+            .1;
 
         let mut conn = conn_arc.lock().await;
-        sqlx::query("COMMIT").execute(&mut *conn).await.map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to COMMIT: {}", e))
-        })?;
+        sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to COMMIT: {}", e))
+            })?;
 
         Ok(())
     })
@@ -170,14 +187,18 @@ pub fn commit_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, P
 #[pyfunction]
 pub fn rollback_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let conn_arc = TRANSACTION_REGISTRY.remove(&tx_id).ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("Transaction not found")
-        })?.1;
+        let conn_arc = TRANSACTION_REGISTRY
+            .remove(&tx_id)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?
+            .1;
 
         let mut conn = conn_arc.lock().await;
-        sqlx::query("ROLLBACK").execute(&mut *conn).await.map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to ROLLBACK: {}", e))
-        })?;
+        sqlx::query("ROLLBACK")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to ROLLBACK: {}", e))
+            })?;
 
         Ok(())
     })
@@ -219,18 +240,29 @@ pub fn fetch_all<'py>(
         let table_name = name.to_lowercase();
         // ... same sql generation ...
         let (sql, pk_col) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry"))?;
-            let schema = registry.get(&name).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name)))?;
+            let registry = MODEL_REGISTRY.read().map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+            })?;
+            let schema = registry.get(&name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+            })?;
             let mut pk = None;
             if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
-                    if col_info.get("primary_key").and_then(|pk| pk.as_bool()).unwrap_or(false) {
+                    if col_info
+                        .get("primary_key")
+                        .and_then(|pk| pk.as_bool())
+                        .unwrap_or(false)
+                    {
                         pk = Some(col_name.clone());
                         break;
                     }
                 }
             }
-            let s = Query::select().column(sea_query::Asterisk).from(Alias::new(&table_name)).to_string(SqliteQueryBuilder);
+            let s = Query::select()
+                .column(sea_query::Asterisk)
+                .from(Alias::new(&table_name))
+                .to_string(SqliteQueryBuilder);
             (s, pk)
         };
 
@@ -239,8 +271,8 @@ pub fn fetch_all<'py>(
             sqlx::query(&sql).fetch_all(&mut *conn).await
         } else {
             sqlx::query(&sql).fetch_all(pool.as_ref()).await
-        }.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e)))?;
-
+        }
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e)))?;
 
         let mut parsed_data = Vec::with_capacity(rows.len());
         for row in rows {
@@ -262,7 +294,7 @@ pub fn fetch_all<'py>(
             parsed_data.push((row_pk_val, fields));
         }
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
             let cls = cls_py.bind(py);
 
@@ -281,17 +313,16 @@ pub fn fetch_all<'py>(
             let new_str = pyo3::intern!(py, "__new__");
 
             for (row_pk_val, fields) in parsed_data {
-                if let Some(ref pk_val) = row_pk_val {
-                    if let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone())) {
-                        results.append(existing_obj.value().clone_ref(py))?;
-                        continue;
-                    }
+                if let Some(ref pk_val) = row_pk_val
+                    && let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone()))
+                {
+                    results.append(existing_obj.value().clone_ref(py))?;
+                    continue;
                 }
 
                 let instance = cls.call_method1(new_str, (cls,))?;
-                let dict = instance
-                    .getattr(dict_str)?
-                    .downcast_into::<pyo3::types::PyDict>()?;
+                let dict_attr = instance.getattr(dict_str)?;
+                let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
                 let fields_set = pyo3::types::PySet::empty(py)?;
 
                 for (col_name, val) in fields {
@@ -358,19 +389,32 @@ pub fn fetch_one<'py>(
         let table_name = name.to_lowercase();
         // ... sql logic ...
         let (sql, bind_values, _pk_col_name) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry"))?;
-            let schema = registry.get(&name).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name)))?;
+            let registry = MODEL_REGISTRY.read().map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+            })?;
+            let schema = registry.get(&name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+            })?;
             let mut pk = None;
             if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
-                    if col_info.get("primary_key").and_then(|pk| pk.as_bool()).unwrap_or(false) {
+                    if col_info
+                        .get("primary_key")
+                        .and_then(|pk| pk.as_bool())
+                        .unwrap_or(false)
+                    {
                         pk = Some(col_name.clone());
                         break;
                     }
                 }
             }
-            let pk_name = pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
-            let (s, values) = Query::select().column(sea_query::Asterisk).from(Alias::new(&table_name)).and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val.clone())).build(SqliteQueryBuilder);
+            let pk_name =
+                pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+            let (s, values) = Query::select()
+                .column(sea_query::Asterisk)
+                .from(Alias::new(&table_name))
+                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val.clone()))
+                .build(SqliteQueryBuilder);
             (s, values, pk_name)
         };
 
@@ -380,8 +424,8 @@ pub fn fetch_one<'py>(
             query.fetch_optional(&mut *conn).await
         } else {
             query.fetch_optional(pool.as_ref()).await
-        }.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e)))?;
-
+        }
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e)))?;
 
         let parsed_row = match row {
             Some(row) => {
@@ -397,12 +441,11 @@ pub fn fetch_one<'py>(
         };
 
         match parsed_row {
-            Some(fields) => Python::with_gil(|py| {
+            Some(fields) => Python::attach(|py| {
                 let cls = cls_py.bind(py);
                 let instance = cls.call_method1("__new__", (cls,))?;
-                let dict = instance
-                    .getattr(pyo3::intern!(py, "__dict__"))?
-                    .downcast_into::<pyo3::types::PyDict>()?;
+                let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
+                let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
                 let fields_set = pyo3::types::PySet::empty(py)?;
 
                 for (col_name, val) in fields {
@@ -416,7 +459,7 @@ pub fn fetch_one<'py>(
                 IDENTITY_MAP.insert((name.clone(), pk_val), instance.clone().unbind());
                 Ok(instance.into_any().unbind())
             }),
-            None => Ok(Python::with_gil(|py| py.None())),
+            None => Python::attach(|py| Ok(py.None())),
         }
     })
 }
@@ -451,10 +494,18 @@ pub fn save_record(
 
         // ... schema and record logic ...
         let (schema, record_obj) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry"))?;
-            let schema = registry.get(&name).cloned().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name)))?;
-            let record: serde_json::Value = serde_json::from_str(&data).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
-            let record_obj = record.as_object().cloned().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Record must be an object"))?;
+            let registry = MODEL_REGISTRY.read().map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+            })?;
+            let schema = registry.get(&name).cloned().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+            })?;
+            let record: serde_json::Value = serde_json::from_str(&data).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e))
+            })?;
+            let record_obj = record.as_object().cloned().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("Record must be an object")
+            })?;
             (schema, record_obj)
         };
 
@@ -463,9 +514,16 @@ pub fn save_record(
         let mut pk_is_auto = true;
         if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
             for (col_name, col_info) in properties {
-                if col_info.get("primary_key").and_then(|pk| pk.as_bool()).unwrap_or(false) {
+                if col_info
+                    .get("primary_key")
+                    .and_then(|pk| pk.as_bool())
+                    .unwrap_or(false)
+                {
                     pk_col = Some(col_name.clone());
-                    pk_is_auto = col_info.get("autoincrement").and_then(|auto| auto.as_bool()).unwrap_or(true);
+                    pk_is_auto = col_info
+                        .get("autoincrement")
+                        .and_then(|auto| auto.as_bool())
+                        .unwrap_or(true);
                     break;
                 }
             }
@@ -477,30 +535,56 @@ pub fn save_record(
             let mut values = Vec::new();
             let mut pk_provided = false;
             for (key, value) in &record_obj {
-                let is_pk = if let Some(ref pk) = pk_col { key == pk } else { false };
-                if is_pk && pk_is_auto && value.is_null() { continue; }
-                if is_pk && !value.is_null() { pk_provided = true; }
+                let is_pk = if let Some(ref pk) = pk_col {
+                    key == pk
+                } else {
+                    false
+                };
+                if is_pk && pk_is_auto && value.is_null() {
+                    continue;
+                }
+                if is_pk && !value.is_null() {
+                    pk_provided = true;
+                }
                 columns.push(Alias::new(key));
                 let val = match value {
                     serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() { sea_query::Value::BigInt(Some(i)) }
-                        else if let Some(f) = n.as_f64() { sea_query::Value::Double(Some(f)) }
-                        else { sea_query::Value::String(None) }
+                        if let Some(i) = n.as_i64() {
+                            sea_query::Value::BigInt(Some(i))
+                        } else if let Some(f) = n.as_f64() {
+                            sea_query::Value::Double(Some(f))
+                        } else {
+                            sea_query::Value::String(None)
+                        }
                     }
-                    serde_json::Value::String(s) => sea_query::Value::String(Some(Box::new(s.clone()))),
+                    serde_json::Value::String(s) => {
+                        sea_query::Value::String(Some(Box::new(s.clone())))
+                    }
                     serde_json::Value::Bool(b) => sea_query::Value::Bool(Some(*b)),
                     serde_json::Value::Null => sea_query::Value::String(None),
                     _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
                 };
                 values.push(Expr::value(val));
             }
-            let mut insert_stmt = InsertStatement::new().into_table(Alias::new(&table_name)).columns(columns.clone()).values(values).unwrap().to_owned();
-            if let Some(pk) = pk_col {
-                if pk_provided || !pk_is_auto {
-                    let mut on_conflict = OnConflict::column(Alias::new(&pk));
-                    let mut update_cols = Vec::new();
-                    for col in &columns { if col.to_string() != pk { update_cols.push(col.clone()); } }
-                    if !update_cols.is_empty() { on_conflict.update_columns(update_cols); insert_stmt.on_conflict(on_conflict); }
+            let mut insert_stmt = InsertStatement::new()
+                .into_table(Alias::new(&table_name))
+                .columns(columns.clone())
+                .values(values)
+                .unwrap()
+                .to_owned();
+            if let Some(pk) = pk_col
+                && (pk_provided || !pk_is_auto)
+            {
+                let mut on_conflict = OnConflict::column(Alias::new(&pk));
+                let mut update_cols = Vec::new();
+                for col in &columns {
+                    if col.to_string() != pk {
+                        update_cols.push(col.clone());
+                    }
+                }
+                if !update_cols.is_empty() {
+                    on_conflict.update_columns(update_cols);
+                    insert_stmt.on_conflict(on_conflict);
                 }
             }
             insert_stmt.build(SqliteQueryBuilder)
@@ -510,33 +594,52 @@ pub fn save_record(
         if let Some(conn_arc) = tx_conn {
             let mut conn = conn_arc.lock().await;
             let res = query.execute(&mut *conn).await;
-            if res.is_err() { return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", res.err().unwrap()))); }
+            if res.is_err() {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Save failed: {}",
+                    res.err().unwrap()
+                )));
+            }
             let exec_res = res.unwrap();
             let mut lid = exec_res.last_insert_id();
-            if lid.is_none() || lid == Some(0) {
-                if let Ok(row) = sqlx::query("SELECT last_insert_rowid()").fetch_one(&mut *conn).await {
-                    let id: i64 = row.try_get(0).unwrap_or(0);
-                    if id > 0 { lid = Some(id); }
+            if (lid.is_none() || lid == Some(0))
+                && let Ok(row) = sqlx::query("SELECT last_insert_rowid()")
+                    .fetch_one(&mut *conn)
+                    .await
+            {
+                let id: i64 = row.try_get(0).unwrap_or(0);
+                if id > 0 {
+                    lid = Some(id);
                 }
             }
             Ok(lid)
         } else {
-            let mut conn = pool.acquire().await.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Pool acquire failed: {}", e)))?;
+            let mut conn = pool.acquire().await.map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Pool acquire failed: {}", e))
+            })?;
             let res = query.execute(&mut *conn).await;
-            if res.is_err() { return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", res.err().unwrap()))); }
+            if res.is_err() {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Save failed: {}",
+                    res.err().unwrap()
+                )));
+            }
             let exec_res = res.unwrap();
             let mut lid = exec_res.last_insert_id();
-            if lid.is_none() || lid == Some(0) {
-                if let Ok(row) = sqlx::query("SELECT last_insert_rowid()").fetch_one(&mut *conn).await {
-                    let id: i64 = row.try_get(0).unwrap_or(0);
-                    if id > 0 { lid = Some(id); }
+            if (lid.is_none() || lid == Some(0))
+                && let Ok(row) = sqlx::query("SELECT last_insert_rowid()")
+                    .fetch_one(&mut *conn)
+                    .await
+            {
+                let id: i64 = row.try_get(0).unwrap_or(0);
+                if id > 0 {
+                    lid = Some(id);
                 }
             }
             Ok(lid)
         }
     })
 }
-
 
 /// Persists multiple model instances in a single batch operation.
 #[pyfunction]
@@ -614,7 +717,11 @@ pub fn save_bulk_records(
                 let mut row_values = Vec::new();
                 if i == 0 {
                     for (key, value) in record_obj {
-                        let is_pk = if let Some(ref pk) = pk_col { key == pk } else { false };
+                        let is_pk = if let Some(ref pk) = pk_col {
+                            key == pk
+                        } else {
+                            false
+                        };
                         if is_pk && pk_is_auto && value.is_null() {
                             continue;
                         }
@@ -624,7 +731,9 @@ pub fn save_bulk_records(
                 }
 
                 for key in &column_names {
-                    let value = record_obj.get(key.to_string().as_str()).unwrap_or(&serde_json::Value::Null);
+                    let value = record_obj
+                        .get(key.to_string().as_str())
+                        .unwrap_or(&serde_json::Value::Null);
                     let val = match value {
                         serde_json::Value::Number(n) => {
                             if let Some(i) = n.as_i64() {
@@ -645,7 +754,10 @@ pub fn save_bulk_records(
                     row_values.push(Expr::value(val));
                 }
                 insert_stmt.values(row_values).map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Statement build failed: {}", e))
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Statement build failed: {}",
+                        e
+                    ))
                 })?;
             }
 
@@ -655,7 +767,10 @@ pub fn save_bulk_records(
 
         let query = bind_query(sqlx::query(&sql), &bind_values.0);
         let result = query.execute(pool.as_ref()).await.map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Bulk save failed for '{}': {}", name, e))
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Bulk save failed for '{}': {}",
+                name, e
+            ))
         })?;
 
         Ok(result.rows_affected())
@@ -698,44 +813,68 @@ pub fn fetch_filtered<'py>(
         let table_name = name.to_lowercase();
         // ...
         let (sql, bind_values, pk_col) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry"))?;
-            let schema = registry.get(&name).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name)))?;
+            let registry = MODEL_REGISTRY.read().map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+            })?;
+            let schema = registry.get(&name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+            })?;
             let mut pk = None;
             if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
-                    if col_info.get("primary_key").and_then(|pk| pk.as_bool()).unwrap_or(false) {
+                    if col_info
+                        .get("primary_key")
+                        .and_then(|pk| pk.as_bool())
+                        .unwrap_or(false)
+                    {
                         pk = Some(col_name.clone());
                         break;
                     }
                 }
             }
-            
+
             let mut select = Query::select();
-            select.column((Alias::new(&table_name), sea_query::Asterisk)).from(Alias::new(&table_name));
+            select
+                .column((Alias::new(&table_name), sea_query::Asterisk))
+                .from(Alias::new(&table_name));
 
             if let Some(m2m) = &query_def.m2m {
                 let join_table = Alias::new(&m2m.join_table);
                 let source_col = Alias::new(&m2m.source_col);
                 let target_col = Alias::new(&m2m.target_col);
-                let pk_name = pk.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key for M2M join"))?;
-                
+                let pk_name = pk.as_ref().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("No primary key for M2M join")
+                })?;
+
                 select.inner_join(
                     join_table.clone(),
-                    Expr::col((Alias::new(&table_name), Alias::new(pk_name))).equals((join_table.clone(), target_col.clone()))
+                    Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
+                        .equals((join_table.clone(), target_col.clone())),
                 );
-                select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(query_def.value_to_sea_value(&m2m.source_id)));
+                select.and_where(
+                    Expr::col((join_table.clone(), source_col.clone()))
+                        .eq(query_def.value_to_sea_value(&m2m.source_id)),
+                );
             }
 
             select.cond_where(query_def.to_condition());
             if let Some(ref orders) = query_def.order_by {
                 for order in orders {
                     let col = Alias::new(&order.column);
-                    let dir = if order.direction.to_lowercase() == "desc" { Order::Desc } else { Order::Asc };
+                    let dir = if order.direction.to_lowercase() == "desc" {
+                        Order::Desc
+                    } else {
+                        Order::Asc
+                    };
                     select.order_by(col, dir);
                 }
             }
-            if let Some(limit) = query_def.limit { select.limit(limit); }
-            if let Some(offset) = query_def.offset { select.offset(offset); }
+            if let Some(limit) = query_def.limit {
+                select.limit(limit);
+            }
+            if let Some(offset) = query_def.offset {
+                select.offset(offset);
+            }
             let (s, values) = select.build(SqliteQueryBuilder);
             (s, values, pk)
         };
@@ -746,8 +885,8 @@ pub fn fetch_filtered<'py>(
             query.fetch_all(&mut *conn).await
         } else {
             query.fetch_all(pool.as_ref()).await
-        }.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e)))?;
-
+        }
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e)))?;
 
         let mut parsed_data = Vec::with_capacity(rows.len());
         for row in rows {
@@ -769,7 +908,7 @@ pub fn fetch_filtered<'py>(
             parsed_data.push((row_pk_val, fields));
         }
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
             let cls = cls_py.bind(py);
 
@@ -788,17 +927,16 @@ pub fn fetch_filtered<'py>(
             let new_str = pyo3::intern!(py, "__new__");
 
             for (row_pk_val, fields) in parsed_data {
-                if let Some(ref pk_val) = row_pk_val {
-                    if let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone())) {
-                        results.append(existing_obj.value().clone_ref(py))?;
-                        continue;
-                    }
+                if let Some(ref pk_val) = row_pk_val
+                    && let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone()))
+                {
+                    results.append(existing_obj.value().clone_ref(py))?;
+                    continue;
                 }
 
                 let instance = cls.call_method1(new_str, (cls,))?;
-                let dict = instance
-                    .getattr(dict_str)?
-                    .downcast_into::<pyo3::types::PyDict>()?;
+                let dict_attr = instance.getattr(dict_str)?;
+                let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
                 let fields_set = pyo3::types::PySet::empty(py)?;
 
                 for (col_name, val) in fields {
@@ -854,27 +992,40 @@ pub fn count_filtered(
                 let join_table = Alias::new(&m2m.join_table);
                 let source_col = Alias::new(&m2m.source_col);
                 let target_col = Alias::new(&m2m.target_col);
-                
+
                 // We need the PK name of the target table to join
-                let registry = MODEL_REGISTRY.read().map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry"))?;
-                let schema = registry.get(&name).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name)))?;
+                let registry = MODEL_REGISTRY.read().map_err(|_| {
+                    pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+                })?;
+                let schema = registry.get(&name).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+                })?;
                 let mut pk = None;
                 if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
                     for (col_name, col_info) in properties {
-                        if col_info.get("primary_key").and_then(|pk| pk.as_bool()).unwrap_or(false) {
+                        if col_info
+                            .get("primary_key")
+                            .and_then(|pk| pk.as_bool())
+                            .unwrap_or(false)
+                        {
                             pk = Some(col_name.clone());
                             break;
                         }
                     }
                 }
-                let pk_name = pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+                let pk_name =
+                    pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
 
                 select.from(Alias::new(&table_name));
                 select.inner_join(
                     join_table.clone(),
-                    Expr::col((Alias::new(&table_name), Alias::new(pk_name))).equals((join_table.clone(), target_col.clone()))
+                    Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
+                        .equals((join_table.clone(), target_col.clone())),
                 );
-                select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(query_def.value_to_sea_value(&m2m.source_id)));
+                select.and_where(
+                    Expr::col((join_table.clone(), source_col.clone()))
+                        .eq(query_def.value_to_sea_value(&m2m.source_id)),
+                );
             } else {
                 select.from(Alias::new(&table_name));
             }
@@ -889,17 +1040,17 @@ pub fn count_filtered(
             query.fetch_one(&mut *conn).await
         } else {
             query.fetch_one(pool.as_ref()).await
-        }.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Count failed: {}", e)))?;
+        }
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Count failed: {}", e)))?;
 
         let count: i64 = row.try_get(0).unwrap_or(0);
         Ok(count)
     })
 }
 
-
 /// Registers a live Python object in the global Identity Map.
 #[pyfunction]
-pub fn register_instance(name: String, pk: String, obj: PyObject) -> PyResult<()> {
+pub fn register_instance(name: String, pk: String, obj: Py<PyAny>) -> PyResult<()> {
     IDENTITY_MAP.insert((name, pk), obj);
     Ok(())
 }
@@ -933,19 +1084,31 @@ pub fn delete_record(
         let table_name = name.to_lowercase();
         // ... sql ...
         let (sql, bind_values) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry"))?;
-            let schema = registry.get(&name).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name)))?;
+            let registry = MODEL_REGISTRY.read().map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+            })?;
+            let schema = registry.get(&name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+            })?;
             let mut pk = None;
             if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
-                    if col_info.get("primary_key").and_then(|pk| pk.as_bool()).unwrap_or(false) {
+                    if col_info
+                        .get("primary_key")
+                        .and_then(|pk| pk.as_bool())
+                        .unwrap_or(false)
+                    {
                         pk = Some(col_name.clone());
                         break;
                     }
                 }
             }
-            let pk_name = pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
-            let (s, values) = Query::delete().from_table(Alias::new(&table_name)).and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val)).build(SqliteQueryBuilder);
+            let pk_name =
+                pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+            let (s, values) = Query::delete()
+                .from_table(Alias::new(&table_name))
+                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val))
+                .build(SqliteQueryBuilder);
             (s, values)
         };
 
@@ -955,12 +1118,12 @@ pub fn delete_record(
             query.execute(&mut *conn).await
         } else {
             query.execute(pool.as_ref()).await
-        }.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e)))?;
+        }
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e)))?;
 
         Ok(true)
     })
 }
-
 
 /// Deletes records matching a filtered query.
 #[pyfunction]
@@ -989,7 +1152,9 @@ pub fn delete_filtered(
         // ... sql ...
         let (sql, bind_values) = {
             let mut delete = Query::delete();
-            delete.from_table(Alias::new(&table_name)).cond_where(query_def.to_condition());
+            delete
+                .from_table(Alias::new(&table_name))
+                .cond_where(query_def.to_condition());
             delete.build(SqliteQueryBuilder)
         };
 
@@ -999,7 +1164,8 @@ pub fn delete_filtered(
             query.execute(&mut *conn).await
         } else {
             query.execute(pool.as_ref()).await
-        }.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e)))?;
+        }
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e)))?;
 
         // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
         IDENTITY_MAP.retain(|(m_name, _), _| m_name != &name);
@@ -1007,7 +1173,6 @@ pub fn delete_filtered(
         Ok(result.rows_affected())
     })
 }
-
 
 /// Updates records matching a filtered query with provided values.
 #[pyfunction]
@@ -1044,15 +1209,24 @@ pub fn update_filtered(
         let table_name = name.to_lowercase();
         // ... sql ...
         let (sql, bind_values) = {
-            let mut update = UpdateStatement::new().table(Alias::new(&table_name)).cond_where(query_def.to_condition()).to_owned();
+            let mut update = UpdateStatement::new()
+                .table(Alias::new(&table_name))
+                .cond_where(query_def.to_condition())
+                .to_owned();
             for (key, value) in update_map {
                 let val = match value {
                     serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() { sea_query::Value::BigInt(Some(i)) }
-                        else if let Some(f) = n.as_f64() { sea_query::Value::Double(Some(f)) }
-                        else { sea_query::Value::String(None) }
+                        if let Some(i) = n.as_i64() {
+                            sea_query::Value::BigInt(Some(i))
+                        } else if let Some(f) = n.as_f64() {
+                            sea_query::Value::Double(Some(f))
+                        } else {
+                            sea_query::Value::String(None)
+                        }
                     }
-                    serde_json::Value::String(s) => sea_query::Value::String(Some(Box::new(s.clone()))),
+                    serde_json::Value::String(s) => {
+                        sea_query::Value::String(Some(Box::new(s.clone())))
+                    }
                     serde_json::Value::Bool(b) => sea_query::Value::Bool(Some(b)),
                     serde_json::Value::Null => sea_query::Value::String(None),
                     _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
@@ -1068,7 +1242,8 @@ pub fn update_filtered(
             query.execute(&mut *conn).await
         } else {
             query.execute(pool.as_ref()).await
-        }.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Update failed: {}", e)))?;
+        }
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Update failed: {}", e)))?;
 
         // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
         IDENTITY_MAP.retain(|(m_name, _), _| m_name != &name);
@@ -1238,4 +1413,3 @@ fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
         Ok(sea_query::Value::String(Some(Box::new(val.to_string()))))
     }
 }
-

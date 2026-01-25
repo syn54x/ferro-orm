@@ -2,10 +2,12 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
+
 class QueryNode:
     """
     Represents a node in the query expression AST.
     """
+
     def __init__(
         self,
         column: str | None = None,
@@ -40,7 +42,7 @@ class QueryNode:
                 val = val.isoformat()
             elif isinstance(val, (Decimal, uuid.UUID)):
                 val = str(val)
-            
+
             return {
                 "column": self.column,
                 "operator": self.operator,
@@ -57,12 +59,16 @@ class QueryNode:
     def __repr__(self):
         if not self.is_compound:
             return f"QueryNode(column={self.column!r}, operator={self.operator!r}, value={self.value!r})"
-        return f"QueryNode(left={self.left!r}, op={self.operator!r}, right={self.right!r})"
+        return (
+            f"QueryNode(left={self.left!r}, op={self.operator!r}, right={self.right!r})"
+        )
+
 
 class FieldProxy:
     """
     A proxy for a model field that captures operators to build a QueryNode.
     """
+
     def __init__(self, column: str):
         self.column = column
 

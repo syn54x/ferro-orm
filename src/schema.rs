@@ -5,7 +5,7 @@
 
 use crate::state::{ENGINE, MODEL_REGISTRY};
 use pyo3::prelude::*;
-use sea_query::{Alias, ColumnDef, Index, SqliteQueryBuilder, Table, ForeignKey, ForeignKeyAction};
+use sea_query::{Alias, ColumnDef, ForeignKey, ForeignKeyAction, Index, SqliteQueryBuilder, Table};
 use sqlx::{Any, Pool};
 use std::sync::Arc;
 
@@ -69,16 +69,15 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
 
                     let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
                         // Check anyOf for a type (common in Pydantic V2 for optional fields)
-                        col_info.get("anyOf").and_then(|a| a.as_array()).and_then(|types| {
-                            types.iter().find_map(|t| {
-                                let s = t.get("type")?.as_str()?;
-                                if s != "null" {
-                                    Some(s)
-                                } else {
-                                    None
-                                }
+                        col_info
+                            .get("anyOf")
+                            .and_then(|a| a.as_array())
+                            .and_then(|types| {
+                                types.iter().find_map(|t| {
+                                    let s = t.get("type")?.as_str()?;
+                                    if s != "null" { Some(s) } else { None }
+                                })
                             })
-                        })
                     });
 
                     let format = col_info.get("format").and_then(|f| f.as_str());
@@ -145,10 +144,17 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                     table_stmt.col(&mut col_def);
 
                     // Check for Foreign Key from metadata
-                    if let Some(fk_info) = col_info.get("foreign_key").and_then(|fk| fk.as_object()) {
-                        let to_table = fk_info.get("to_table").and_then(|t| t.as_str()).unwrap_or("");
-                        let on_delete_str = fk_info.get("on_delete").and_then(|o| o.as_str()).unwrap_or("CASCADE");
-                        
+                    if let Some(fk_info) = col_info.get("foreign_key").and_then(|fk| fk.as_object())
+                    {
+                        let to_table = fk_info
+                            .get("to_table")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        let on_delete_str = fk_info
+                            .get("on_delete")
+                            .and_then(|o| o.as_str())
+                            .unwrap_or("CASCADE");
+
                         let action = match on_delete_str.to_uppercase().as_str() {
                             "RESTRICT" => ForeignKeyAction::Restrict,
                             "SET NULL" => ForeignKeyAction::SetNull,
@@ -162,26 +168,20 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                             .from(Alias::new(&table_lower), Alias::new(col_name))
                             .to(Alias::new(to_table), Alias::new("id")) // CX Choice: Assume target PK is 'id' for now
                             .on_delete(action);
-                        
+
                         table_stmt.foreign_key(&mut fk_stmt);
                     }
                 }
             }
-            (
-                table_stmt.build(SqliteQueryBuilder),
-                index_sqls,
-            )
+            (table_stmt.build(SqliteQueryBuilder), index_sqls)
         };
 
-        sqlx::query(&sql)
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "SQL Execution failed for '{}' table: {}",
-                    name, e
-                ))
-            })?;
+        sqlx::query(&sql).execute(&mut *conn).await.map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "SQL Execution failed for '{}' table: {}",
+                name, e
+            ))
+        })?;
 
         for index_sql in index_sqls {
             sqlx::query(&index_sql)

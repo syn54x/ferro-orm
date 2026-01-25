@@ -28,6 +28,7 @@ from ._core import (
     save_record,
 )
 
+
 @asynccontextmanager
 async def transaction():
     """
@@ -44,10 +45,12 @@ async def transaction():
     finally:
         _CURRENT_TRANSACTION.reset(token)
 
+
 class Model(BaseModel, metaclass=ModelMetaclass):
     """
     Base class for all Ferro models.
     """
+
     model_config = ConfigDict(
         from_attributes=True,
         use_attribute_docstrings=True,
@@ -72,7 +75,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 else:
                     # It's already an ID or something else
                     data[f"{field_name}_id"] = val
-        
+
         super().__init__(**data)
 
     async def save(self) -> None:
@@ -134,6 +137,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     actual_type = hint
                     origin = get_origin(hint)
                     from typing import Union as TypingUnion
+
                     if origin is TypingUnion:
                         args = get_args(hint)
                         for arg in args:
@@ -145,7 +149,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                                 pass
 
                     try:
-                        if isinstance(actual_type, type) and issubclass(actual_type, Enum):
+                        if isinstance(actual_type, type) and issubclass(
+                            actual_type, Enum
+                        ):
                             cls._enum_fields[field_name] = actual_type
                     except TypeError:
                         pass
