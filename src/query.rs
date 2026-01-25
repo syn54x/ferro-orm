@@ -21,12 +21,21 @@ pub struct OrderBy {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct M2mContext {
+    pub join_table: String,
+    pub source_col: String,
+    pub target_col: String,
+    pub source_id: Value,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct QueryDef {
     pub model_name: String,
     pub where_clause: Vec<QueryNode>,
     pub order_by: Option<Vec<OrderBy>>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
+    pub m2m: Option<M2mContext>,
 }
 
 impl QueryDef {
@@ -82,7 +91,7 @@ impl QueryDef {
         }
     }
 
-    fn value_to_sea_value(&self, value: &Value) -> sea_query::Value {
+    pub fn value_to_sea_value(&self, value: &Value) -> sea_query::Value {
         match value {
             Value::Number(n) => {
                 if let Some(i) = n.as_i64() {

@@ -709,8 +709,24 @@ pub fn fetch_filtered<'py>(
                     }
                 }
             }
+            
             let mut select = Query::select();
-            select.column(sea_query::Asterisk).from(Alias::new(&table_name)).cond_where(query_def.to_condition());
+            select.column((Alias::new(&table_name), sea_query::Asterisk)).from(Alias::new(&table_name));
+
+            if let Some(m2m) = &query_def.m2m {
+                let join_table = Alias::new(&m2m.join_table);
+                let source_col = Alias::new(&m2m.source_col);
+                let target_col = Alias::new(&m2m.target_col);
+                let pk_name = pk.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key for M2M join"))?;
+                
+                select.inner_join(
+                    join_table.clone(),
+                    Expr::col((Alias::new(&table_name), Alias::new(pk_name))).equals((join_table.clone(), target_col.clone()))
+                );
+                select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(query_def.value_to_sea_value(&m2m.source_id)));
+            }
+
+            select.cond_where(query_def.to_condition());
             if let Some(ref orders) = query_def.order_by {
                 for order in orders {
                     let col = Alias::new(&order.column);
@@ -832,7 +848,38 @@ pub fn count_filtered(
         // ... sql ...
         let (sql, bind_values) = {
             let mut select = Query::select();
-            select.expr(Expr::cust("COUNT(*)")).from(Alias::new(&table_name)).cond_where(query_def.to_condition());
+            select.expr(Expr::cust("COUNT(*)"));
+
+            if let Some(m2m) = &query_def.m2m {
+                let join_table = Alias::new(&m2m.join_table);
+                let source_col = Alias::new(&m2m.source_col);
+                let target_col = Alias::new(&m2m.target_col);
+                
+                // We need the PK name of the target table to join
+                let registry = MODEL_REGISTRY.read().map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry"))?;
+                let schema = registry.get(&name).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name)))?;
+                let mut pk = None;
+                if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+                    for (col_name, col_info) in properties {
+                        if col_info.get("primary_key").and_then(|pk| pk.as_bool()).unwrap_or(false) {
+                            pk = Some(col_name.clone());
+                            break;
+                        }
+                    }
+                }
+                let pk_name = pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+
+                select.from(Alias::new(&table_name));
+                select.inner_join(
+                    join_table.clone(),
+                    Expr::col((Alias::new(&table_name), Alias::new(pk_name))).equals((join_table.clone(), target_col.clone()))
+                );
+                select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(query_def.value_to_sea_value(&m2m.source_id)));
+            } else {
+                select.from(Alias::new(&table_name));
+            }
+
+            select.cond_where(query_def.to_condition());
             select.build(SqliteQueryBuilder)
         };
 
@@ -1028,5 +1075,167 @@ pub fn update_filtered(
 
         Ok(result.rows_affected())
     })
+}
+
+#[pyfunction]
+#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None))]
+pub fn add_m2m_links<'py>(
+    py: Python<'py>,
+    join_table: String,
+    source_col: String,
+    target_col: String,
+    source_id: Bound<'py, PyAny>,
+    target_ids: Vec<Bound<'py, PyAny>>,
+    tx_id: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let s_id = python_to_sea_value(source_id)?;
+    let t_ids: Vec<sea_query::Value> = target_ids
+        .into_iter()
+        .map(|id| python_to_sea_value(id))
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let (sql, bind_values) = {
+        let mut insert = InsertStatement::new()
+            .into_table(Alias::new(&join_table))
+            .columns(vec![Alias::new(&source_col), Alias::new(&target_col)])
+            .to_owned();
+
+        for t_id in t_ids {
+            insert
+                .values(vec![Expr::value(s_id.clone()), Expr::value(t_id)])
+                .unwrap();
+        }
+        insert.build(SqliteQueryBuilder)
+    };
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let (pool, tx_conn) = {
+            let engine_lock = ENGINE.read().unwrap();
+            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
+            })?;
+            let tx_conn = get_conn!(pool, tx_id);
+            (pool, tx_conn)
+        };
+
+        let query = bind_query(sqlx::query(&sql), &bind_values.0);
+        if let Some(conn_arc) = tx_conn {
+            let mut conn = conn_arc.lock().await;
+            query.execute(&mut *conn).await
+        } else {
+            query.execute(pool.as_ref()).await
+        }
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Add M2M links failed: {}", e))
+        })?;
+
+        Ok(())
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None))]
+pub fn remove_m2m_links<'py>(
+    py: Python<'py>,
+    join_table: String,
+    source_col: String,
+    target_col: String,
+    source_id: Bound<'py, PyAny>,
+    target_ids: Vec<Bound<'py, PyAny>>,
+    tx_id: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let s_id = python_to_sea_value(source_id)?;
+    let t_ids: Vec<sea_query::Value> = target_ids
+        .into_iter()
+        .map(|id| python_to_sea_value(id))
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let (sql, bind_values) = Query::delete()
+        .from_table(Alias::new(&join_table))
+        .and_where(Expr::col(Alias::new(&source_col)).eq(s_id))
+        .and_where(Expr::col(Alias::new(&target_col)).is_in(t_ids))
+        .build(SqliteQueryBuilder);
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let (pool, tx_conn) = {
+            let engine_lock = ENGINE.read().unwrap();
+            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
+            })?;
+            let tx_conn = get_conn!(pool, tx_id);
+            (pool, tx_conn)
+        };
+
+        let query = bind_query(sqlx::query(&sql), &bind_values.0);
+        if let Some(conn_arc) = tx_conn {
+            let mut conn = conn_arc.lock().await;
+            query.execute(&mut *conn).await
+        } else {
+            query.execute(pool.as_ref()).await
+        }
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Remove M2M links failed: {}", e))
+        })?;
+
+        Ok(())
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (join_table, source_col, source_id, tx_id=None))]
+pub fn clear_m2m_links<'py>(
+    py: Python<'py>,
+    join_table: String,
+    source_col: String,
+    source_id: Bound<'py, PyAny>,
+    tx_id: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let s_id = python_to_sea_value(source_id)?;
+
+    let (sql, bind_values) = Query::delete()
+        .from_table(Alias::new(&join_table))
+        .and_where(Expr::col(Alias::new(&source_col)).eq(s_id))
+        .build(SqliteQueryBuilder);
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let (pool, tx_conn) = {
+            let engine_lock = ENGINE.read().unwrap();
+            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
+            })?;
+            let tx_conn = get_conn!(pool, tx_id);
+            (pool, tx_conn)
+        };
+
+        let query = bind_query(sqlx::query(&sql), &bind_values.0);
+        if let Some(conn_arc) = tx_conn {
+            let mut conn = conn_arc.lock().await;
+            query.execute(&mut *conn).await
+        } else {
+            query.execute(pool.as_ref()).await
+        }
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Clear M2M links failed: {}", e))
+        })?;
+
+        Ok(())
+    })
+}
+
+fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
+    if val.is_none() {
+        Ok(sea_query::Value::String(None))
+    } else if let Ok(i) = val.extract::<i64>() {
+        Ok(sea_query::Value::BigInt(Some(i)))
+    } else if let Ok(f) = val.extract::<f64>() {
+        Ok(sea_query::Value::Double(Some(f)))
+    } else if let Ok(b) = val.extract::<bool>() {
+        Ok(sea_query::Value::Bool(Some(b)))
+    } else if let Ok(s) = val.extract::<String>() {
+        Ok(sea_query::Value::String(Some(Box::new(s))))
+    } else {
+        // Fallback to string representation for other types
+        Ok(sea_query::Value::String(Some(Box::new(val.to_string()))))
+    }
 }
 
