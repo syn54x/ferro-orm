@@ -13,6 +13,29 @@ mod state;
 use crate::state::MODEL_REGISTRY;
 use pyo3::prelude::*;
 
+/// Logs a debug message through Python's logging system.
+///
+/// This function imports the `ferro` logger and calls its `debug()` method.
+/// All Ferro engine messages are logged at DEBUG level.
+///
+/// This can be called from async contexts by acquiring the GIL.
+pub fn log_debug(message: String) {
+    // Use with_gil to safely access Python from async contexts
+    Python::attach(|py| {
+        if let Err(_e) = (|| -> PyResult<()> {
+            let logging = py.import("logging")?;
+            let get_logger = logging.getattr("getLogger")?;
+            let logger = get_logger.call1(("ferro",))?;
+            let debug_method = logger.getattr("debug")?;
+            debug_method.call1((message,))?;
+            Ok(())
+        })() {
+            // If logging fails, silently continue (don't break the application)
+            // In production, we might want to log this to stderr, but for now we'll be silent
+        }
+    });
+}
+
 /// Returns the current version of the Ferro core.
 #[pyfunction]
 fn version() -> String {
