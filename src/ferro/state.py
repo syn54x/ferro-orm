@@ -10,3 +10,6 @@ _MODEL_REGISTRY_PY = {}
 
 # Global registry for relationships that need deferred resolution
 _PENDING_RELATIONS = []
+
+# Global registry for automatically generated join tables
+_JOIN_TABLE_REGISTRY = {}

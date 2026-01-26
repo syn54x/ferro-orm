@@ -3,7 +3,11 @@ from typing import ForwardRef
 
 from .._core import register_model_schema
 from ..base import ForeignKey, ManyToManyField
-from ..state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS  # noqa: F401
+from ..state import (  # noqa: F401
+    _JOIN_TABLE_REGISTRY,
+    _MODEL_REGISTRY_PY,
+    _PENDING_RELATIONS,
+)
 from .descriptors import RelationshipDescriptor
 
 
@@ -106,6 +110,7 @@ def resolve_relationships():
                 }
             }
             register_model_schema(join_table, json.dumps(join_schema))
+            _JOIN_TABLE_REGISTRY[join_table] = join_schema
 
     # Second pass: Re-register schemas
     for model_name, model_cls in _MODEL_REGISTRY_PY.items():
