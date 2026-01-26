@@ -38,7 +38,7 @@ async def connect(url: str, auto_migrate: bool = False) -> None:
     Establish a connection to the database.
 
     Args:
-        url: The database connection string (e.g., "sqlite::memory:").
+        url: The database connection string (e.g., "sqlite:example.db?mode=rwc").
         auto_migrate: If True, automatically create tables for all registered models.
     """
     from .relations import resolve_relationships

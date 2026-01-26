@@ -16,7 +16,7 @@ def get_metadata() -> "sa.MetaData":
     if sa is None:
         raise ImportError(
             "SQLAlchemy is required to use the alembic bridge. "
-            "Install it via 'pip install ferro[alembic]'."
+            "Install it via 'pip install ferro-orm[alembic]'."
         )
 
     metadata = sa.MetaData()
