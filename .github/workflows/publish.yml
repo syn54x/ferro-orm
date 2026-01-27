@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build Wheels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -111,7 +111,7 @@ jobs:
           path: dist/*.tar.gz
 
   test-wheels:
-    name: Test wheels on ${{ matrix.os }}
+    name: Test Wheels (${{ matrix.os }})
     needs: [build-wheels]
     runs-on: ${{ matrix.os }}
     strategy:
@@ -141,7 +141,7 @@ jobs:
       - name: Test import
         shell: bash
         run: |
-          python -c "import ferro; print('✅ Ferro imported successfully')"
+          python -c "import ferro; print('Ferro imported successfully')"
 
       - name: Run basic test
         shell: bash
@@ -157,7 +157,7 @@ jobs:
 
           async def test():
               await connect('sqlite::memory:')
-              print('✅ Connection test passed')
+              print('Connection test passed')
 
           asyncio.run(test())
           "

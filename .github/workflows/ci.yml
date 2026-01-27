@@ -45,7 +45,7 @@ jobs:
           uv run prek run --all-files
 
   test-python:
-    name: Test Python (Python ${{ matrix.python-version }})
+    name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -112,7 +112,7 @@ jobs:
           cargo test --all-features
 
   build-check:
-    name: Build Check (Python ${{ matrix.python-version }})
+    name: Build Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -149,7 +149,7 @@ jobs:
       - name: Test import
         shell: bash
         run: |
-          uv run python -c "import ferro; print('✅ Ferro imported successfully')"
+          uv run python -c "import ferro; print('Ferro imported successfully')"
 
   check-conventional-commits:
     name: Check Conventional Commits
@@ -186,7 +186,7 @@ jobs:
 
             # Skip merge commits
             if [[ "$MESSAGE" == Merge* ]]; then
-              echo "⏭️  Skipping merge commit: $MESSAGE"
+              echo "Skipping merge commit: $MESSAGE"
               continue
             fi
 
@@ -197,7 +197,7 @@ jobs:
             fi
           done
 
-          echo "✅ All commit messages follow conventional format"
+          echo "All commit messages follow conventional format"
 
   all-checks:
     name: All Checks Passed
@@ -215,4 +215,4 @@ jobs:
             echo "❌ Some checks failed"
             exit 1
           fi
-          echo "✅ All checks passed!"
+          echo "All checks passed!"
