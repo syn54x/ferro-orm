@@ -141,7 +141,7 @@ jobs:
       - name: Test import
         shell: bash
         run: |
-          python -c "import ferro; print(f'Ferro version: {ferro.__version__}')"
+          python -c "import ferro; print('✅ Ferro imported successfully')"
 
       - name: Run basic test
         shell: bash

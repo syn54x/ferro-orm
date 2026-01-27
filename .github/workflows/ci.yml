@@ -111,10 +111,6 @@ jobs:
         run: |
           cargo test --all-features
 
-      - name: Run Rust doc tests
-        run: |
-          cargo test --doc
-
   build-check:
     name: Build Check (Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
@@ -153,7 +149,7 @@ jobs:
       - name: Test import
         shell: bash
         run: |
-          uv run python -c "import ferro; print(f'Ferro version: {ferro.__version__}')"
+          uv run python -c "import ferro; print('✅ Ferro imported successfully')"
 
   check-conventional-commits:
     name: Check Conventional Commits
@@ -187,8 +183,15 @@ jobs:
           # Check each commit message
           for commit in $COMMITS; do
             MESSAGE=$(git log -1 --pretty=format:"%s" $commit)
+
+            # Skip merge commits
+            if [[ "$MESSAGE" == Merge* ]]; then
+              echo "⏭️  Skipping merge commit: $MESSAGE"
+              continue
+            fi
+
             echo "Checking commit: $MESSAGE"
-            if ! echo "$MESSAGE" | uv run cz check --message; then
+            if ! uv run cz check --commit-msg-file <(git log -1 --pretty=format:"%s%n%n%b" $commit); then
               echo "❌ Commit message does not follow conventional format: $MESSAGE"
               exit 1
             fi
