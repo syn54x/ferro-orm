@@ -46,7 +46,7 @@ jobs:
       - name: Generate unreleased changelog
         run: |
           # Generate changelog for unreleased commits
-          uv run semantic-release changelog --unreleased
+          uv run semantic-release changelog
         continue-on-error: true
 
       - name: Check for changelog changes
