@@ -27,11 +27,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install Maturin
         run: |
@@ -39,7 +35,7 @@ jobs:
 
       - name: Build wheels (Linux)
         if: matrix.os == 'ubuntu-latest'
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.48.0
         with:
           target: x86_64
           args: --release --out dist --find-interpreter
@@ -47,29 +43,22 @@ jobs:
 
       - name: Build wheels (Linux ARM)
         if: matrix.os == 'ubuntu-latest'
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.48.0
         with:
           target: aarch64
           args: --release --out dist --find-interpreter
           manylinux: auto
 
-      - name: Build wheels (macOS x86_64)
-        if: matrix.os == 'macos-13'
-        uses: PyO3/maturin-action@v1
-        with:
-          target: x86_64
-          args: --release --out dist --find-interpreter
-
       - name: Build wheels (macOS ARM)
-        if: matrix.os == 'macos-14'
-        uses: PyO3/maturin-action@v1
+        if: matrix.os == 'macos-latest'
+        uses: PyO3/maturin-action@v1.48.0
         with:
           target: aarch64
           args: --release --out dist --find-interpreter
 
       - name: Build wheels (Windows)
         if: matrix.os == 'windows-latest'
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.48.0
         with:
           target: x64
           args: --release --out dist --find-interpreter
