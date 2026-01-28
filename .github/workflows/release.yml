@@ -9,6 +9,10 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release:
     name: Create Release
@@ -67,25 +71,5 @@ jobs:
           # 2. Update CHANGELOG.md
           # 3. Create a commit and push it
           # 4. Create a tag and push it
-          # 5. Create a GitHub Release (which triggers publish.yml)
+          # 5. Create a GitHub Release (publishing is handled by the wheels/publish workflow)
           uv run semantic-release version $PRERELEASE_FLAG
-
-      - name: Trigger publish workflow
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const pyproject = fs.readFileSync('pyproject.toml', 'utf8');
-            const versionMatch = pyproject.match(/^version = "(.*)"/m);
-            if (!versionMatch) {
-              throw new Error('Could not find version in pyproject.toml');
-            }
-            const version = versionMatch[1];
-            console.log(`Triggering publish workflow for version v${version}`);
-
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'publish.yml',
-              ref: `v${version}`
-            });
