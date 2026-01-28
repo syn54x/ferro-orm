@@ -528,6 +528,10 @@ dev = [
     { name = "rich" },
     { name = "sqlalchemy" },
 ]
+release = [
+    { name = "maturin" },
+    { name = "python-semantic-release" },
+]
 
 [package.metadata]
 requires-dist = [{ name = "pydantic", specifier = ">=2.0" }]
@@ -552,6 +556,10 @@ dev = [
     { name = "python-semantic-release", specifier = ">=9.0.0" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "sqlalchemy", specifier = ">=2.0.46" },
+]
+release = [
+    { name = "maturin", specifier = ">=1.11.5" },
+    { name = "python-semantic-release", specifier = ">=9.0.0" },
 ]
 
 [[package]]
