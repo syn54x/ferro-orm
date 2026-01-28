@@ -79,15 +79,53 @@ jobs:
         run: |
           cargo test --all-features
 
-  test-python:
-    name: Python tests (${{ matrix.python-version }})
+  test-python-pr:
+    name: Python tests (PR / 3.13)
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install UV
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1
+          cache-on-failure: true
+
+      - name: Install dependencies
+        run: |
+          uv sync --group dev
+
+      - name: Build Rust extension
+        run: |
+          uv run maturin develop
+
+      - name: Run pytest
+        run: |
+          uv run pytest -v --cov=src --cov-report=xml --cov-report=term
+
+  test-python-main:
+    name: Python tests (main / ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.13', '3.14']
-    # PR-fast: only run 3.13; main-full: run both
-    if: github.event_name != 'pull_request' || matrix.python-version == '3.13'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -124,7 +162,7 @@ jobs:
           uv run pytest -v --cov=src --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov
-        if: github.event_name == 'push' && matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13'
         uses: codecov/codecov-action@v4
         with:
           file: ./coverage.xml
@@ -230,7 +268,7 @@ jobs:
 
   all-checks:
     name: All Checks Passed
-    needs: [lint-and-format, test-python, test-rust, packaging-smoke]
+    needs: [lint-and-format, test-python-pr, test-python-main, test-rust, packaging-smoke]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -240,7 +278,8 @@ jobs:
           ok() { [[ "$1" == "success" || "$1" == "skipped" ]]; }
 
           if ! ok "${{ needs.lint-and-format.result }}"; then exit 1; fi
-          if ! ok "${{ needs.test-python.result }}"; then exit 1; fi
+          if ! ok "${{ needs.test-python-pr.result }}"; then exit 1; fi
+          if ! ok "${{ needs.test-python-main.result }}"; then exit 1; fi
           if ! ok "${{ needs.test-rust.result }}"; then exit 1; fi
           if ! ok "${{ needs.packaging-smoke.result }}"; then exit 1; fi
 
