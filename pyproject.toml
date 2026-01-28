@@ -68,7 +68,8 @@ version_toml = [
 ]
 version_variables = []
 build_command = "uv run maturin build --release"
-major_on_zero = true
+major_on_zero = false
+allow_zero_version = true
 branch = "main"
 upload_to_repository = false
 upload_to_release = true
