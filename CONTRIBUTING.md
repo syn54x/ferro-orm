@@ -236,11 +236,22 @@ Ferro uses automated releases. You don't need to manually bump versions or updat
 1. **Commits are merged to main**
    - Changelog is automatically updated with unreleased changes
 
-2. **Maintainer creates a GitHub release**
-   - Version is automatically determined from conventional commits
-   - Both `pyproject.toml` and `Cargo.toml` are updated
-   - Git tag is created
-   - CHANGELOG.md is finalized
+2. **Maintainer triggers the release workflow**
+
+   The release process is fully automated. To trigger a new release:
+
+   - **Via GitHub CLI (Recommended):**
+     ```bash
+     gh workflow run release.yml
+     ```
+   - **Via GitHub Web UI:** Go to the **Actions** tab, select the **Release** workflow, and click **Run workflow**.
+
+   This will:
+   - Automatically determine the next version from conventional commits.
+   - Update `pyproject.toml` and `Cargo.toml`.
+   - Finalize `CHANGELOG.md`.
+   - Create and push the Git tag.
+   - Trigger the **Build & Publish** workflow to upload wheels to PyPI.
 
 3. **Package is automatically published to PyPI**
    - Cross-platform wheels are built
@@ -330,7 +341,7 @@ ferro/
 
 - **Issues**: [GitHub Issues](https://github.com/syn54x/ferro-orm/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/syn54x/ferro-orm/discussions)
-- **Documentation**: [https://ferro.readthedocs.io](https://ferro.readthedocs.io)
+- **Documentation**: [https://syn54x.github.io/ferro-orm](https://syn54x.github.io/ferro-orm)
 
 ## License
 
