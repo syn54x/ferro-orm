@@ -123,17 +123,30 @@ permissions:
   id-token: write
 ```
 
+**For deploy-docs job:**
+```yaml
+permissions:
+  pages: write
+  id-token: write
+```
+
 **Why These Permissions:**
 - `id-token: write` - Allows the workflow to:
   - Request an OIDC token from GitHub
   - Authenticate with PyPI using Trusted Publishing
   - Publish packages without API tokens
 
+- `pages: write` - Allows the workflow to:
+  - Deploy the generated MkDocs static site to GitHub Pages
+  - Update the Pages deployment for the repository
+
 **What It Does:**
 - Builds wheels for multiple platforms
 - Builds source distribution
 - Tests built packages
 - Publishes to PyPI using OIDC authentication
+- Builds MkDocs docs on release
+- Deploys docs to GitHub Pages
 
 ---
 
@@ -170,6 +183,11 @@ Permission to request OIDC tokens:
 - Get JWT token from GitHub
 - Authenticate with external services (PyPI)
 - No access to repository contents
+
+### `pages: write`
+Permission to manage GitHub Pages deployments:
+- Create and update Pages deployments
+- Publish static site artifacts to Pages
 
 ---
 
