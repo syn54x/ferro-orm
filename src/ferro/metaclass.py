@@ -9,10 +9,11 @@ from typing import (
     get_origin,
 )
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field as PydanticField
 
 from ._core import register_model_schema
 from .base import FerroField, ForeignKey, ManyToManyField
+from .fields import FERRO_FIELD_EXTRA_KEY
 from .query import BackRelationship, FieldProxy
 from .relations.descriptors import ForwardDescriptor
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
@@ -72,7 +73,7 @@ class ModelMetaclass(type(BaseModel)):
                         id_field = f"{field_name}_id"
                         annotations[id_field] = Union[int, str, None]
                         # Set a default so Pydantic doesn't make it required
-                        namespace[id_field] = Field(default=None)
+                        namespace[id_field] = PydanticField(default=None)
                         break
 
                     if isinstance(metadata, ManyToManyField):
@@ -111,14 +112,29 @@ class ModelMetaclass(type(BaseModel)):
 
             # 4. Parse FerroField metadata
             ferro_fields = {}
-            try:
-                for f_name, field_info in cls.model_fields.items():
-                    for metadata in field_info.metadata:
-                        if isinstance(metadata, FerroField):
-                            ferro_fields[f_name] = metadata
-                            break
-            except Exception:
-                pass
+            for f_name, field_info in cls.model_fields.items():
+                annotated_metadata: FerroField | None = None
+                for metadata in field_info.metadata:
+                    if isinstance(metadata, FerroField):
+                        annotated_metadata = metadata
+                        break
+                wrapped_metadata = None
+                extra = getattr(field_info, "json_schema_extra", None)
+                if isinstance(extra, dict):
+                    wrapped_payload = extra.get(FERRO_FIELD_EXTRA_KEY)
+                    if wrapped_payload:
+                        wrapped_metadata = FerroField(**wrapped_payload)
+
+                if annotated_metadata and wrapped_metadata:
+                    raise TypeError(
+                        f"Field '{f_name}' cannot declare Ferro field metadata twice "
+                        "(Annotated[...] + ferro.Field(...))."
+                    )
+
+                if annotated_metadata:
+                    ferro_fields[f_name] = annotated_metadata
+                elif wrapped_metadata:
+                    ferro_fields[f_name] = wrapped_metadata
 
             # 5. Inject descriptors for ForeignKeys
             for field_name, metadata in local_relations.items():
