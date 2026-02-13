@@ -41,31 +41,9 @@ All workflows use explicit, fine-grained permissions (principle of least privile
 
 ---
 
-### 1. Update Changelog (`update-changelog.yml`)
+### 1. Release (`release.yml`)
 
-**Trigger:** Push to `main` branch
-
-**Permissions:**
-```yaml
-permissions:
-  contents: write
-```
-
-**Why These Permissions:**
-- `contents: write` - Allows the workflow to:
-  - Commit updated CHANGELOG.md back to the repository
-  - Push changes to the `main` branch
-
-**What It Does:**
-- Reads conventional commits since last release
-- Updates the `[Unreleased]` section of CHANGELOG.md
-- Commits and pushes the updated changelog
-
----
-
-### 2. Release (`release.yml`)
-
-**Trigger:** Manual workflow dispatch OR release published
+**Trigger:** Push to `main` branch OR manual workflow dispatch
 
 **Permissions:**
 ```yaml
@@ -100,10 +78,11 @@ permissions:
 - Creates git tag
 - Creates GitHub release
 - Triggers publish workflow
+- Validates that release commits include `CHANGELOG.md`
 
 ---
 
-### 3. Build & Publish (`publish.yml`)
+### 2. Build & Publish (`publish.yml`)
 
 **Trigger:** Workflow call, manual dispatch, or release published
 
@@ -278,11 +257,11 @@ Permission to manage GitHub Pages deployments:
 
 To verify permissions are working:
 
-### Test Update Changelog
+### Test Release Automation
 ```bash
-git commit --allow-empty -m "feat: test changelog workflow"
+git commit --allow-empty -m "feat: test release workflow"
 git push
-# Check Actions tab - should see commit from github-actions[bot]
+# Check Actions tab - release.yml should run on push to main
 ```
 
 ### Test Release
@@ -321,5 +300,5 @@ gh workflow run release.yml
 
 ---
 
-**Last Updated:** 2026-01-27
+**Last Updated:** 2026-02-13
 **Status:** ✅ All workflows properly configured with fine-grained permissions
