@@ -1,5 +1,9 @@
 # Field Metadata
 
+::: ferro.fields.Field
+    options:
+      show_root_heading: true
+
 ::: ferro.base.FerroField
     options:
       show_root_heading: true

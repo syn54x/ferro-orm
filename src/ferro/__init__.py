@@ -18,6 +18,7 @@ from ._core import (
     connect as _core_connect,
 )
 from .base import FerroField, ForeignKey, ManyToManyField
+from .fields import Field
 from .models import Model, transaction
 from .query import BackRelationship
 
@@ -54,6 +55,7 @@ __all__ = [
     "connect",
     "Model",
     "FerroField",
+    "Field",
     "ForeignKey",
     "ManyToManyField",
     "BackRelationship",
