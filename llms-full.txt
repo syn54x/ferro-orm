@@ -1,0 +1,2083 @@
+# Ferro ORM
+
+> A high-performance, Rust-backed, Pydantic driven ORM for Python.
+
+Ferro is a high-performance, Rust-backed ORM for Python with a familiar Pydantic-style API.
+
+# Guides
+
+# Overview
+
+Ferro is a high-performance, asynchronous ORM for Python, built with a Rust-backed core engine. It combines the ergonomics of Pydantic models with the speed and safety of Rust's SQLx and Sea-Query.
+
+## Key Features
+
+- **High-Performance Core**: All SQL generation and row hydration are handled by a dedicated Rust engine, minimizing "Python Tax" on data-heavy operations.
+- **Async First**: Built from the ground up for asynchronous applications, utilizing `pyo3-async-runtimes` for non-blocking I/O.
+- **Pydantic Integration**: Leverages Pydantic V2 for schema definition and data validation, providing full IDE support and type safety.
+- **Zero-Copy Intent**: Designed with zero-copy principles to maximize throughput during large-scale data retrieval.
+- **Identity Map**: Ensures object consistency across your application by tracking active model instances in a thread-safe registry.
+
+## Architecture
+
+Ferro operates through a dual-layer architecture connected via a high-performance FFI (Foreign Function Interface) bridge:
+
+1. **Python Layer**: Developers define models using standard Python classes; a metaclass registers them with the backend.
+1. **Rust Engine**: Built on `SQLx` and `Sea-Query` for GIL-free row parsing and object instantiation.
+
+## Installation
+
+Ferro is distributed as pre-compiled wheels for macOS, Linux, and Windows.
+
+```bash
+pip install ferro-orm
+# Or with migration support
+pip install "ferro-orm[alembic]"
+```
+
+## Quick Start
+
+```python
+import asyncio
+from typing import Annotated
+from ferro import Model, FerroField, connect
+
+class User(Model):
+    id: Annotated[int, FerroField(primary_key=True)]
+    username: str
+    is_active: bool = True
+
+async def main():
+    await connect("sqlite:example.db?mode=rwc", auto_migrate=True)
+
+    # Create
+    alice = await User.create(username="alice")
+
+    # Query
+    active_users = await User.where(User.is_active == True).all()
+    print(f"Found {len(active_users)} active users.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+# Connection
+
+Ferro requires an explicit connection to a database before any operations can be performed. Connectivity is managed by the high-performance Rust core using `SQLx`.
+
+## Establishing a Connection
+
+Use the `ferro.connect()` function to initialize the database engine. This is an asynchronous operation and must be awaited.
+
+```python
+import ferro
+
+async def main():
+    await ferro.connect("sqlite:example.db?mode=rwc")
+```
+
+## Connection Strings
+
+Ferro supports SQLite, Postgres, and MySQL. The connection string format follows standard URL patterns:
+
+| Database     | Connection String Example                         |
+| ------------ | ------------------------------------------------- |
+| **SQLite**   | `sqlite:path/to/database.db` or `sqlite::memory:` |
+| **Postgres** | `postgres://user:password@localhost:5432/dbname`  |
+| **MySQL**    | `mysql://user:password@localhost:3306/dbname`     |
+
+### SQLite Notes
+
+For SQLite, it is recommended to include `?mode=rwc` (Read/Write/Create) to ensure the database file is created if it does not exist.
+
+## Automatic Migrations (Dev Mode)
+
+During development, you can use the `auto_migrate=True` flag to automatically align the database schema with your Python models upon connection.
+
+```python
+await ferro.connect("sqlite:example.db?mode=rwc", auto_migrate=True)
+```
+
+Production Warning
+
+`auto_migrate=True` is intended for development only. For production environments, you should use **Alembic** for explicit schema versioning and migrations. See the [Migrations](https://syn54x.github.io/ferro-orm/migrations/index.md) section for details.
+
+## Manual Table Creation
+
+If you prefer to trigger table creation manually (without using `auto_migrate` during connect), you can use the `create_tables()` function:
+
+```python
+await ferro.connect("sqlite::memory:")
+# ... define or import models ...
+await ferro.create_tables()
+```
+
+# Models
+
+Models are the central building blocks of Ferro. They define your data schema in Python and are automatically mapped to database tables by the Rust engine.
+
+## Defining a Model
+
+To create a model, inherit from `ferro.Model`. Models use standard Python type hints, leveraging Pydantic V2 for validation and serialization.
+
+```python
+from typing import Annotated
+from ferro import Model, FerroField
+
+class User(Model):
+    id: Annotated[int, FerroField(primary_key=True)]
+    username: str
+    is_active: bool = True
+```
+
+## Internal Mechanics
+
+Ferro uses a custom `ModelMetaclass` to bridge the gap between Python and Rust:
+
+1. **Schema Capture**: When you define a class, the metaclass inspects its fields and constraints.
+1. **Rust Registration**: The schema is serialized to a JSON-AST and passed to the Rust core's `MODEL_REGISTRY`.
+1. **Table Generation**: When `auto_migrate=True` is used or `create_tables()` is called, the Rust engine generates the appropriate SQL `CREATE TABLE` statements.
+
+## Model Configuration
+
+Since Ferro models are Pydantic models, you can use the `model_config` attribute to control standard behaviors.
+
+```python
+from pydantic import ConfigDict
+from ferro import Model
+
+class Product(Model):
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True
+    )
+
+    sku: str
+    name: str
+```
+
+## The Identity Map
+
+Ferro implements an **Identity Map** pattern to ensure object consistency within a single application process.
+
+- **Consistency**: If you fetch the same record twice (e.g., once via `User.get(1)` and again via a query), Ferro returns the exact same Python object instance.
+- **Performance**: Returning existing instances from the identity map bypasses the hydration cost of creating new Python objects.
+- **In-Place Updates**: Changes made to an object are immediately visible to all other parts of your code holding a reference to that same object.
+
+To manually remove an object from the identity map (forcing a fresh database fetch on the next request), use `ferro.evict_instance(model_name, pk)`.
+
+# Fields
+
+Ferro supports a wide range of Python types, automatically mapping them to the most efficient database types available in the Rust engine.
+
+## Supported Types
+
+| Python Type     | Database Type (General)  | Notes                                                          |
+| --------------- | ------------------------ | -------------------------------------------------------------- |
+| `int`           | `INTEGER`                |                                                                |
+| `str`           | `TEXT` / `VARCHAR`       |                                                                |
+| `bool`          | `BOOLEAN` / `INTEGER`    | Stored as 0/1 in SQLite.                                       |
+| `float`         | `DOUBLE` / `FLOAT`       |                                                                |
+| `datetime`      | `DATETIME` / `TIMESTAMP` | Use `datetime.datetime` with timezone awareness.               |
+| `date`          | `DATE`                   | Use `datetime.date`.                                           |
+| `UUID`          | `UUID` / `TEXT`          | Stored as a 36-character string if native UUID is unavailable. |
+| `Decimal`       | `NUMERIC` / `DECIMAL`    | Use `decimal.Decimal` for high-precision financial data.       |
+| `bytes`         | `BLOB` / `BYTEA`         | Stored as binary data.                                         |
+| `Enum`          | `ENUM` / `TEXT`          | Python `enum.Enum` (typically string-backed).                  |
+| `dict` / `list` | `JSON` / `JSONB`         | Stored as JSON strings in SQLite.                              |
+
+## FerroField Metadata
+
+To configure database-level constraints and behaviors, use the `FerroField` metadata container. The preferred way to apply this is via `typing.Annotated`.
+
+```python
+from typing import Annotated
+from ferro import Model, FerroField
+
+class Product(Model):
+    sku: Annotated[str, FerroField(primary_key=True)]
+    slug: Annotated[str, FerroField(unique=True, index=True)]
+    price: Annotated[Decimal, FerroField(index=True)]
+```
+
+### Parameters
+
+| Parameter       | Type           | Default | Description                                                                                          |
+| --------------- | -------------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `primary_key`   | `bool`         | `False` | Marks the field as the primary key for the table.                                                    |
+| `autoincrement` | `bool \| None` | `None`  | If `True`, the database generates values automatically. Defaults to `True` for integer primary keys. |
+| `unique`        | `bool`         | `False` | Enforces a uniqueness constraint on the column.                                                      |
+| `index`         | `bool`         | `False` | Creates a database index for this column to improve query performance.                               |
+
+## Pydantic Integration
+
+Since Ferro is built on Pydantic, all standard Pydantic validation and field configuration still apply.
+
+```python
+from pydantic import Field
+from ferro import Model, FerroField
+
+class User(Model):
+    # Combine Ferro metadata with Pydantic validation
+    username: Annotated[
+        str,
+        FerroField(unique=True),
+        Field(min_length=3, max_length=50)
+    ]
+```
+
+# Relations
+
+Ferro provides a robust system for connecting models, supporting standard relational patterns with zero-boilerplate reverse lookups and automated join table management.
+
+## One-to-Many
+
+The most common relationship type. It is defined using a `ForeignKey` on the "child" model and a `BackRelationship` marker on the "parent" model.
+
+```python
+from typing import Annotated
+from ferro import Model, ForeignKey, BackRelationship
+
+class Author(Model):
+    id: int
+    name: str
+    # Marker for reverse lookup; provides full Query intellisense
+    posts: BackRelationship["Post"] = None
+
+class Post(Model):
+    id: int
+    title: str
+    # Defines the forward link and the name of the reverse field
+    author: Annotated[Author, ForeignKey(related_name="posts")]
+```
+
+### Shadow Fields
+
+For every `ForeignKey` field (e.g., `author`), Ferro automatically creates a "shadow" ID column in the database (e.g., `author_id`). You can access or filter by this field directly via `post.author_id`.
+
+## One-to-One
+
+A strict 1:1 link is created by adding `unique=True` to a `ForeignKey`.
+
+```python
+class Profile(Model):
+    user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+```
+
+**Behavioral Difference:**
+
+- **Forward**: Accessing `await profile.user` returns a single `User` object.
+- **Reverse**: Accessing `await user.profile` returns a single `Profile` object (internally calls `.first()`) instead of a `Query` object.
+
+## Many-to-Many
+
+Defined using the `ManyToManyField`. Ferro automatically manages the hidden join table required for this relationship.
+
+```python
+from ferro import ManyToManyField
+
+class Student(Model):
+    name: str
+    courses: Annotated[list["Course"], ManyToManyField(related_name="students")] = None
+
+class Course(Model):
+    title: str
+    students: BackRelationship["Student"] = None
+```
+
+### Join Table Management
+
+The Rust engine automatically registers and creates a join table (e.g., `student_courses`) when the models are initialized. You do not need to define a "through" model manually unless you need custom fields on the link.
+
+### Relationship Mutators
+
+Many-to-Many relationships provide specialized methods for managing links:
+
+- **`.add(*instances)`**: Create new links in the join table.
+- **`.remove(*instances)`**: Remove specific links.
+- **`.clear()`**: Remove all links for the current instance.
+
+```python
+await student.courses.add(math_101, physics_202)
+await student.courses.clear()
+```
+
+## Lazy Loading vs. Queries
+
+Ferro relations are **lazy**. Data is never fetched until you explicitly request it.
+
+1. **Forward Relations**: Accessing a `ForeignKey` returns an awaitable descriptor.
+
+   ```python
+   author = await post.author  # Database hit
+   ```
+
+1. **Reverse/M2M Relations**: Accessing a `BackRelationship` or `ManyToManyField` returns a `Query` object. This allows you to chain further filters before execution.
+
+   ```python
+   posts = await author.posts.where(Post.published == True).all()
+   ```
+
+# Queries
+
+Ferro provides a fluent, type-safe API for constructing and executing database queries. All queries are constructed in Python and executed by the high-performance Rust engine.
+
+## Fetching Data
+
+Queries are typically started using the `select()` or `where()` methods on a Model class.
+
+### Basic Filtering
+
+Use standard Python comparison operators on Model fields to create filter conditions.
+
+```python
+# Select all active users
+users = await User.where(User.is_active == True).all()
+
+# Select users with age >= 18
+adults = await User.where(User.age >= 18).all()
+```
+
+### Chaining
+
+Methods can be chained to build complex queries incrementally.
+
+```python
+results = await Product.select() \
+    .where(Product.category == "Electronics") \
+    .order_by(Product.price, "desc") \
+    .limit(10) \
+    .offset(5) \
+    .all()
+```
+
+### Logical Operators
+
+Use bitwise operators for complex logical conditions. Note that parentheses are required around each condition.
+
+- **AND**: `&`
+- **OR**: `|`
+
+```python
+# (age > 21 AND status == 'active') OR role == 'admin'
+query = User.where(
+    ((User.age > 21) & (User.status == "active")) | (User.role == "admin")
+)
+```
+
+## Terminal Operations
+
+These methods execute the query and return a result.
+
+| Method      | Return Type     | Description                                            |
+| ----------- | --------------- | ------------------------------------------------------ |
+| `.all()`    | `list[Model]`   | Executes the query and returns all matching records.   |
+| `.first()`  | `Model \| None` | Returns the first matching record or `None`.           |
+| `.count()`  | `int`           | Returns the total number of matching records.          |
+| `.exists()` | `bool`          | Returns `True` if at least one matching record exists. |
+
+## Mutations
+
+Ferro supports both instance-level and batch mutation operations.
+
+### Creating Records
+
+```python
+# Single record
+user = await User.create(username="alice", email="alice@example.com")
+
+# Bulk creation (highly efficient)
+users = [User(username=f"user_{i}") for i in range(100)]
+await User.bulk_create(users)
+```
+
+### Updating Records
+
+Batch updates can be performed directly on a query without loading instances into memory.
+
+```python
+# Update all products in a category
+await Product.where(Product.category == "Old").update(status="archived")
+```
+
+### Deleting Records
+
+```python
+# Delete specific instance
+await user.delete()
+
+# Batch deletion
+await User.where(User.is_active == False).delete()
+```
+
+## SQL Injection Protection
+
+All values passed to the fluent API (via `.where()`, `.update()`, etc.) are automatically parameterized by the Rust engine. Raw user input is never concatenated into SQL strings, ensuring built-in protection against SQL injection attacks.
+
+# Migrations
+
+Ferro integrates with **Alembic**, the industry-standard migration tool for Python, to provide robust and reliable schema management.
+
+## Integration Overview
+
+Instead of reinventing a migration system, Ferro utilizes a SQLAlchemy bridge. This bridge translates Ferro's internal model registry into an in-memory SQLAlchemy `MetaData` object, which Alembic then uses to detect changes.
+
+### Installation
+
+Ensure you have installed the migration dependencies:
+
+```bash
+pip install "ferro-orm[alembic]"
+```
+
+## Using `get_metadata()`
+
+To connect Ferro to Alembic, you must update your `env.py` file (typically found in the `migrations/` directory created by `alembic init`).
+
+The `get_metadata()` function automatically discovers all registered Ferro models and returns a SQLAlchemy `MetaData` object.
+
+```python
+# migrations/env.py
+from ferro.migrations import get_metadata
+from my_app.models import User, Post  # Ensure models are imported to register them
+
+# Pass the Ferro-generated metadata to Alembic
+target_metadata = get_metadata()
+```
+
+## Workflow
+
+1. **Initialize Alembic**: Run `alembic init migrations` if you haven't already.
+
+1. **Define Models**: Create your Ferro models as usual.
+
+1. **Generate Migration**: Run the autogenerate command:
+
+   ```bash
+   alembic revision --autogenerate -m "Initial schema"
+   ```
+
+1. **Apply Migration**: Update your database:
+
+   ```bash
+   alembic upgrade head
+   ```
+
+## Precision Mapping
+
+Ferro's migration bridge ensures high fidelity between your code and the database:
+
+- **Nullability**: Automatically detects whether a field is required or optional (e.g., `str` vs `str | None`).
+- **Complex Types**: Correctly maps Enums, Decimals, UUIDs, and JSON fields to the appropriate database-native types.
+- **Constraints**: Translates `primary_key`, `unique`, and `index` metadata directly into the migration script.
+- **Foreign Keys**: Automatically generates `FOREIGN KEY` constraints, including custom `on_delete` behaviors like `CASCADE` or `SET NULL`.
+- **Join Tables**: Automatically discovers and includes hidden join tables for Many-to-Many relationships.
+
+# Transactions
+
+Ferro provides a simple and robust way to ensure data integrity through atomic transactions using an asynchronous context manager.
+
+## Usage
+
+To group multiple database operations into a single atomic unit, use the `ferro.transaction()` context manager.
+
+```python
+from ferro import transaction
+
+async def process_order(user, product):
+    async with transaction():
+        # All operations inside this block are atomic
+        order = await Order.create(user=user, product=product)
+        await user.posts.add(order)
+
+        # If any error occurs here, everything above is rolled back
+        await product.refresh()
+```
+
+## Atomicity and Rollbacks
+
+When you enter a transaction block:
+
+1. **Automatic Commit**: If the block finishes without an exception, Ferro automatically commits all changes to the database.
+1. **Automatic Rollback**: If an exception is raised within the block, Ferro immediately rolls back all operations performed during that transaction, ensuring the database remains in a consistent state.
+
+```python
+try:
+    async with transaction():
+        await User.create(username="alice")
+        raise RuntimeError("Something went wrong")
+except RuntimeError:
+    # 'alice' was never persisted to the database
+    pass
+```
+
+## Connection Affinity
+
+Ferro's transaction engine uses **Connection Affinity** to guarantee correctness:
+
+- **Shared Connection**: All operations performed within a `transaction()` block are guaranteed to use the same underlying database connection.
+- **Task Safety**: Connection affinity is managed via `contextvars`, making it safe to use in highly concurrent asynchronous environments.
+
+## Manual Control
+
+While the context manager is the recommended way to handle transactions, you can also use the low-level API if you need finer control:
+
+| Method                        | Description                                                     |
+| ----------------------------- | --------------------------------------------------------------- |
+| `begin_transaction()`         | Manually starts a new transaction and returns a unique `tx_id`. |
+| `commit_transaction(tx_id)`   | Commits all changes for the given transaction ID.               |
+| `rollback_transaction(tx_id)` | Rolls back all changes for the given transaction ID.            |
+
+Note on Nesting
+
+Ferro currently supports single-level transactions. Nested `async with transaction():` calls will participate in the outermost transaction.
+
+# Contributing to Ferro
+
+We welcome contributions to Ferro! This guide will help you get started with developing Ferro locally.
+
+## Prerequisites
+
+Before starting, ensure you have:
+
+- **Python 3.13+**: Ferro requires Python 3.13 or later
+
+- **Rust toolchain**: Required for building the Rust core
+
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+
+- **UV**: Fast Python package manager
+
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+
+## Getting Started
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/syn54x/ferro-orm.git
+cd ferro-orm
+```
+
+### 2. Install Dependencies
+
+```bash
+uv sync --group dev
+```
+
+This will install all development dependencies including:
+
+- Testing tools (pytest, pytest-asyncio, pytest-cov)
+- Linting and formatting tools (ruff, prek)
+- Build tools (maturin)
+- Documentation tools (mkdocs-material)
+- Release tools (commitizen, python-semantic-release)
+
+### 3. Install Pre-commit Hooks
+
+```bash
+# Install all hooks (file checks, linting, formatting)
+uv run prek install
+
+# Install commit message validation hook
+uv run prek install --hook-type commit-msg
+```
+
+These hooks will automatically:
+
+- Check for trailing whitespace
+- Fix end-of-file issues
+- Validate YAML, TOML, and JSON files
+- Format Python code with Ruff
+- Format Rust code with rustfmt
+- Lint Rust code with clippy
+- Validate conventional commit messages
+
+### 4. Build the Rust Extension
+
+```bash
+uv run maturin develop
+```
+
+This compiles the Rust core and installs it in development mode. You'll need to re-run this command after making changes to Rust code.
+
+## Development Workflow
+
+### Running Tests
+
+```bash
+# Run all tests with coverage
+uv run pytest
+
+# Run specific test file
+uv run pytest tests/test_models.py
+
+# Run with verbose output
+uv run pytest -v
+
+# Run tests and generate coverage report
+uv run pytest --cov=src --cov-report=html
+```
+
+### Running Linters
+
+```bash
+# Run all pre-commit hooks
+uv run prek run --all-files
+
+# Run specific hooks
+uv run ruff check .        # Python linting
+uv run ruff format .       # Python formatting
+cargo fmt                  # Rust formatting
+cargo clippy               # Rust linting
+```
+
+### Building Documentation
+
+```bash
+# Serve documentation locally (with live reload)
+uv run mkdocs serve
+
+# Build documentation
+uv run mkdocs build
+
+# Documentation will be available at http://127.0.0.1:8000/
+```
+
+### Testing Your Changes
+
+Before submitting a PR, ensure:
+
+1. **All tests pass:**
+
+   ```bash
+   uv run pytest
+   ```
+
+1. **All linters pass:**
+
+   ```bash
+   uv run prek run --all-files
+   ```
+
+1. **Rust tests pass:**
+
+   ```bash
+   cargo test
+   ```
+
+1. **Code builds successfully:**
+
+   ```bash
+   uv run maturin develop
+   ```
+
+## Conventional Commits
+
+Ferro uses [Conventional Commits](https://www.conventionalcommits.org/) for automated version bumping and changelog generation. All commit messages **must** follow this format:
+
+```text
+<type>[optional scope]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### Commit Types
+
+- **feat**: New feature (triggers minor version bump)
+- **fix**: Bug fix (triggers patch version bump)
+- **docs**: Documentation changes only
+- **refactor**: Code refactoring (no functional changes)
+- **test**: Adding or updating tests
+- **perf**: Performance improvements (triggers patch version bump)
+- **build**: Build system changes
+- **ci**: CI/CD configuration changes
+- **chore**: Other changes that don't modify src or test files
+
+### Examples
+
+```bash
+# Feature commits
+git commit -m "feat: add support for many-to-many relations"
+git commit -m "feat(queries): implement OR operator for filters"
+
+# Bug fix commits
+git commit -m "fix: resolve connection pool deadlock"
+git commit -m "fix(migrations): handle nullable foreign keys correctly"
+
+# Documentation commits
+git commit -m "docs: update installation instructions"
+git commit -m "docs(api): add examples for transaction usage"
+
+# Breaking changes (triggers major version bump)
+git commit -m "feat!: change Model.create() to require explicit save()"
+# OR
+git commit -m "feat: redesign query API
+
+BREAKING CHANGE: Query.filter() now requires Q objects instead of kwargs"
+```
+
+### Commit Validation
+
+The pre-commit hook will automatically validate your commit message format. Invalid commits will be rejected with an error message.
+
+If you need to bypass the hook (not recommended), use:
+
+```bash
+git commit --no-verify -m "message"
+```
+
+## Pull Request Process
+
+1. **Create a feature branch:**
+
+   ```bash
+   git checkout -b feat/my-new-feature
+   ```
+
+1. **Make your changes and commit:**
+
+   ```bash
+   git add .
+   git commit -m "feat: add my new feature"
+   ```
+
+1. **Push to your fork:**
+
+   ```bash
+   git push origin feat/my-new-feature
+   ```
+
+1. **Open a Pull Request** on GitHub
+
+1. **Wait for CI checks to pass:**
+
+1. All linters must pass
+
+1. All tests must pass
+
+1. Code must build on all platforms
+
+1. **Address review feedback** if any
+
+1. **Merge** once approved!
+
+### PR Requirements
+
+- ✅ All CI checks pass
+- ✅ Conventional commit format followed
+- ✅ Tests added for new features
+- ✅ Documentation updated
+- ✅ No merge conflicts with main
+
+## Release Process
+
+Ferro uses automated releases. You don't need to manually bump versions or update the changelog.
+
+### How Releases Work
+
+1. **Commits are merged to main**
+1. Changelog is automatically updated with unreleased changes
+1. **Maintainer triggers the release workflow**
+
+The release process is fully automated. To trigger a new release:
+
+- **Via GitHub CLI (Recommended):**
+
+  ```bash
+  gh workflow run release.yml
+  ```
+
+- **Via GitHub Web UI:** Go to the **Actions** tab, select the **Release** workflow, and click **Run workflow**.
+
+This will:
+
+- Automatically determine the next version from conventional commits.
+- Update `pyproject.toml` and `Cargo.toml`.
+- Finalize `CHANGELOG.md`.
+- Create and push the Git tag.
+- Trigger the **Build & Publish** workflow to upload wheels to PyPI.
+
+1. **Package is automatically published to PyPI**
+1. Cross-platform wheels are built
+1. Package is uploaded using trusted publishing
+
+### Version Bumping
+
+Version bumps are determined by commit types:
+
+- **Major** (1.0.0 → 2.0.0): Commits with `BREAKING CHANGE:` in body or `!` after type
+- **Minor** (1.0.0 → 1.1.0): Commits with `feat:` type
+- **Patch** (1.0.0 → 1.0.1): Commits with `fix:` or `perf:` type
+
+## Code Style
+
+### Python
+
+- Follow PEP 8 style guide
+- Use type hints for all functions
+- Maximum line length: 100 characters (enforced by Ruff)
+- Use Pydantic for data validation
+- Write docstrings for all public APIs
+
+### Rust
+
+- Follow Rust style guidelines (enforced by rustfmt)
+- Use `cargo clippy` warnings as errors
+- Write documentation for public APIs
+- Use descriptive variable names
+- Prefer explicit types over inference in function signatures
+
+## Testing
+
+### Python Tests
+
+Located in `tests/` directory. Use pytest with async support:
+
+```python
+import pytest
+from ferro import Model, FerroField, connect
+
+@pytest.mark.asyncio
+async def test_create_model():
+    await connect("sqlite::memory:")
+    user = await User.create(name="Alice")
+    assert user.name == "Alice"
+```
+
+### Rust Tests
+
+Located alongside Rust code with `#[cfg(test)]`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sql_generation() {
+        let query = generate_select_query("users");
+        assert_eq!(query, "SELECT * FROM users");
+    }
+}
+```
+
+## Project Structure
+
+```text
+ferro/
+├── src/
+│   ├── ferro/           # Python package
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── queries.py
+│   │   └── ...
+│   └── lib.rs           # Rust core
+├── tests/               # Python tests
+├── docs/                # Documentation
+├── .github/
+│   └── workflows/       # CI/CD workflows
+├── Cargo.toml           # Rust dependencies
+├── pyproject.toml       # Python dependencies
+└── README.md
+```
+
+## Getting Help
+
+- **Issues**: [GitHub Issues](https://github.com/syn54x/ferro-orm/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/syn54x/ferro-orm/discussions)
+- **Documentation**: <https://syn54x.github.io/ferro-orm>
+
+## License
+
+By contributing to Ferro, you agree that your contributions will be licensed under the same license as the project (Apache 2.0 OR MIT).
+# API Reference
+
+# API Reference
+
+This section provides an automated technical reference for Ferro's public classes and functions. Documentation is pulled directly from source docstrings.
+
+Use the API subsection pages in the navigation:
+
+- Core Models
+- Query Builder
+- Field Metadata
+- Global Functions
+
+# Core Models
+
+## `Model`
+
+Bases: `BaseModel`
+
+Provide the base class for all Ferro models
+
+Inheriting from this class registers schema metadata with the Rust core and exposes high-performance CRUD and query entrypoints.
+
+Examples:
+
+```pycon
+>>> class User(Model):
+...     id: int | None = None
+...     name: str
+```
+
+### Attributes
+
+#### `model_config = ConfigDict(from_attributes=True, use_attribute_docstrings=True, arbitrary_types_allowed=True)`
+
+### Functions
+
+#### `__init__(**data)`
+
+Initialize a model instance and normalize relationship inputs
+
+Parameters:
+
+| Name     | Type  | Description                               | Default |
+| -------- | ----- | ----------------------------------------- | ------- |
+| `**data` | `Any` | Field values used to construct the model. | `{}`    |
+
+Examples:
+
+```pycon
+>>> user = User(name="Taylor")
+>>> isinstance(user, User)
+True
+```
+
+#### `save()`
+
+Persist the current model instance
+
+Returns:
+
+| Type   | Description |
+| ------ | ----------- |
+| `None` | None        |
+
+Examples:
+
+```pycon
+>>> user = User(name="Taylor")
+>>> await user.save()
+```
+
+#### `delete()`
+
+Delete the current model instance from storage
+
+Returns:
+
+| Type   | Description |
+| ------ | ----------- |
+| `None` | None        |
+
+Examples:
+
+```pycon
+>>> user = await User.get(1)
+>>> if user:
+...     await user.delete()
+```
+
+#### `all()`
+
+Fetch all records for this model class
+
+Returns:
+
+| Type         | Description                         |
+| ------------ | ----------------------------------- |
+| `list[Self]` | A list of hydrated model instances. |
+
+Examples:
+
+```pycon
+>>> users = await User.all()
+>>> isinstance(users, list)
+True
+```
+
+#### `get(pk)`
+
+Fetch one record by primary key value
+
+Parameters:
+
+| Name | Type  | Description                                 | Default    |
+| ---- | ----- | ------------------------------------------- | ---------- |
+| `pk` | `Any` | Primary key value to fetch a single record. | *required* |
+
+Returns:
+
+| Type   | Description |
+| ------ | ----------- |
+| \`Self | None\`      |
+
+Examples:
+
+```pycon
+>>> user = await User.get(1)
+>>> user is None or isinstance(user, User)
+True
+```
+
+#### `refresh()`
+
+Reload this instance from storage using its primary key
+
+Returns:
+
+| Type   | Description |
+| ------ | ----------- |
+| `None` | None        |
+
+Raises:
+
+| Type           | Description                                                    |
+| -------------- | -------------------------------------------------------------- |
+| `RuntimeError` | If no primary key is available or the record no longer exists. |
+
+Examples:
+
+```pycon
+>>> user = await User.get(1)
+>>> if user:
+...     await user.refresh()
+```
+
+#### `where(node)`
+
+Start a fluent query with an initial condition
+
+Parameters:
+
+| Name   | Type        | Description                          | Default    |
+| ------ | ----------- | ------------------------------------ | ---------- |
+| `node` | `QueryNode` | Query predicate node to apply first. | *required* |
+
+Returns:
+
+| Type          | Description                                |
+| ------------- | ------------------------------------------ |
+| `Query[Self]` | A query object scoped to this model class. |
+
+Examples:
+
+```pycon
+>>> query = User.where(User.id == 1)
+>>> isinstance(query, Query)
+True
+```
+
+#### `select()`
+
+Start an empty fluent query for this model class
+
+Returns:
+
+| Type          | Description                                |
+| ------------- | ------------------------------------------ |
+| `Query[Self]` | A query object scoped to this model class. |
+
+Examples:
+
+```pycon
+>>> query = User.select().limit(5)
+>>> isinstance(query, Query)
+True
+```
+
+#### `create(**fields)`
+
+Create and persist a new model instance
+
+Parameters:
+
+| Name       | Type | Description                          | Default |
+| ---------- | ---- | ------------------------------------ | ------- |
+| `**fields` |      | Field values to construct the model. | `{}`    |
+
+Returns:
+
+| Type   | Description                                     |
+| ------ | ----------------------------------------------- |
+| `Self` | The newly created and persisted model instance. |
+
+Examples:
+
+```pycon
+>>> user = await User.create(name="Taylor")
+>>> isinstance(user, User)
+True
+```
+
+#### `bulk_create(instances)`
+
+Persist multiple instances in a single bulk operation
+
+Parameters:
+
+| Name        | Type         | Description                 | Default    |
+| ----------- | ------------ | --------------------------- | ---------- |
+| `instances` | `list[Self]` | Model instances to persist. | *required* |
+
+Returns:
+
+| Type  | Description                     |
+| ----- | ------------------------------- |
+| `int` | The number of records inserted. |
+
+Examples:
+
+```pycon
+>>> rows = await User.bulk_create([User(name="A"), User(name="B")])
+>>> isinstance(rows, int)
+True
+```
+
+#### `get_or_create(defaults=None, **fields)`
+
+Fetch a record by filters or create one when missing
+
+Parameters:
+
+| Name       | Type             | Description                          | Default                                         |
+| ---------- | ---------------- | ------------------------------------ | ----------------------------------------------- |
+| `defaults` | \`dict[str, Any] | None\`                               | Values applied only when creating a new record. |
+| `**fields` |                  | Exact-match filters used for lookup. | `{}`                                            |
+
+Returns:
+
+| Type                | Description                                                           |
+| ------------------- | --------------------------------------------------------------------- |
+| `tuple[Self, bool]` | A tuple of (instance, created) where created is True for new records. |
+
+Examples:
+
+```pycon
+>>> user, created = await User.get_or_create(email="a@b.com")
+>>> isinstance(created, bool)
+True
+```
+
+#### `update_or_create(defaults=None, **fields)`
+
+Update a matched record or create one when missing
+
+Parameters:
+
+| Name       | Type             | Description                          | Default                                   |
+| ---------- | ---------------- | ------------------------------------ | ----------------------------------------- |
+| `defaults` | \`dict[str, Any] | None\`                               | Values applied on update or create paths. |
+| `**fields` |                  | Exact-match filters used for lookup. | `{}`                                      |
+
+Returns:
+
+| Type                | Description                                                           |
+| ------------------- | --------------------------------------------------------------------- |
+| `tuple[Self, bool]` | A tuple of (instance, created) where created is True for new records. |
+
+Examples:
+
+```pycon
+>>> user, created = await User.update_or_create(
+...     email="a@b.com",
+...     defaults={"name": "Taylor"},
+... )
+>>> isinstance(created, bool)
+True
+```
+
+# Field Metadata
+
+## `FerroField`
+
+Store database column metadata for a model field
+
+Attributes:
+
+```text
+primary_key: Mark the field as the table primary key.
+autoincrement: Override automatic increment behavior for primary key columns.
+unique: Enforce a uniqueness constraint for the column.
+index: Request an index for the column.
+```
+
+Examples:
+
+```pycon
+>>> from typing import Annotated
+>>> from ferro.models import Model
+>>>
+>>> class User(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+...     email: Annotated[str, FerroField(unique=True, index=True)]
+```
+
+Source code in `src/ferro/base.py`
+
+```python
+class FerroField:
+    """Store database column metadata for a model field
+
+    Attributes:
+
+        primary_key: Mark the field as the table primary key.
+        autoincrement: Override automatic increment behavior for primary key columns.
+        unique: Enforce a uniqueness constraint for the column.
+        index: Request an index for the column.
+
+    Examples:
+        >>> from typing import Annotated
+        >>> from ferro.models import Model
+        >>>
+        >>> class User(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     email: Annotated[str, FerroField(unique=True, index=True)]
+    """
+
+    def __init__(
+        self,
+        primary_key: bool = False,
+        autoincrement: bool | None = None,
+        unique: bool = False,
+        index: bool = False,
+    ):
+        """Initialize field metadata options
+
+        Args:
+
+            primary_key: Set to True when the field is the primary key.
+            autoincrement: Control whether the database auto-increments the value.
+                When not provided, the backend infers a default for integer primary keys.
+            unique: Set to True to enforce uniqueness.
+            index: Set to True to create a database index.
+
+        Examples:
+            >>> from typing import Annotated
+            >>> from ferro.models import Model
+            >>>
+            >>> class User(Model):
+            ...     id: Annotated[int, FerroField(primary_key=True)]
+            ...     created_at: Annotated[int, FerroField(index=True)]
+        """
+        self.primary_key = primary_key
+        self.autoincrement = autoincrement
+        self.unique = unique
+        self.index = index
+```
+
+### Attributes
+
+#### `primary_key = primary_key`
+
+#### `autoincrement = autoincrement`
+
+#### `unique = unique`
+
+#### `index = index`
+
+### Functions
+
+#### `__init__(primary_key=False, autoincrement=None, unique=False, index=False)`
+
+Initialize field metadata options
+
+Args:
+
+```text
+primary_key: Set to True when the field is the primary key.
+autoincrement: Control whether the database auto-increments the value.
+    When not provided, the backend infers a default for integer primary keys.
+unique: Set to True to enforce uniqueness.
+index: Set to True to create a database index.
+```
+
+Examples:
+
+```pycon
+>>> from typing import Annotated
+>>> from ferro.models import Model
+>>>
+>>> class User(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+...     created_at: Annotated[int, FerroField(index=True)]
+```
+
+Source code in `src/ferro/base.py`
+
+```python
+def __init__(
+    self,
+    primary_key: bool = False,
+    autoincrement: bool | None = None,
+    unique: bool = False,
+    index: bool = False,
+):
+    """Initialize field metadata options
+
+    Args:
+
+        primary_key: Set to True when the field is the primary key.
+        autoincrement: Control whether the database auto-increments the value.
+            When not provided, the backend infers a default for integer primary keys.
+        unique: Set to True to enforce uniqueness.
+        index: Set to True to create a database index.
+
+    Examples:
+        >>> from typing import Annotated
+        >>> from ferro.models import Model
+        >>>
+        >>> class User(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     created_at: Annotated[int, FerroField(index=True)]
+    """
+    self.primary_key = primary_key
+    self.autoincrement = autoincrement
+    self.unique = unique
+    self.index = index
+```
+
+## `ForeignKey`
+
+Describe a forward foreign-key relationship between models
+
+Attributes:
+
+```text
+to: Target model class resolved during model binding.
+related_name: Name of the reverse relationship attribute on the target model.
+on_delete: Referential action applied when the parent row is deleted.
+unique: Treat the relation as one-to-one when True.
+```
+
+Examples:
+
+```pycon
+>>> from typing import Annotated
+>>> from ferro.models import Model
+>>>
+>>> class User(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+>>>
+>>> class Post(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+...     author: Annotated[int, ForeignKey("posts", on_delete="CASCADE")]
+```
+
+Source code in `src/ferro/base.py`
+
+```python
+class ForeignKey:
+    """Describe a forward foreign-key relationship between models
+
+    Attributes:
+
+        to: Target model class resolved during model binding.
+        related_name: Name of the reverse relationship attribute on the target model.
+        on_delete: Referential action applied when the parent row is deleted.
+        unique: Treat the relation as one-to-one when True.
+
+    Examples:
+        >>> from typing import Annotated
+        >>> from ferro.models import Model
+        >>>
+        >>> class User(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        >>>
+        >>> class Post(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     author: Annotated[int, ForeignKey("posts", on_delete="CASCADE")]
+    """
+
+    def __init__(
+        self, related_name: str, on_delete: str = "CASCADE", unique: bool = False
+    ):
+        """Initialize foreign-key relationship metadata
+
+        Args:
+
+            related_name: Name for reverse access from the related model.
+            on_delete: Referential action for parent deletion.
+                Common values include "CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", and "NO ACTION".
+            unique: Set to True to enforce one-to-one behavior.
+
+        Examples:
+            >>> from typing import Annotated
+            >>> from ferro.models import Model
+            >>>
+            >>> class User(Model):
+            ...     id: Annotated[int, FerroField(primary_key=True)]
+            ...     profile_id: Annotated[int, ForeignKey("user", unique=True)]
+        """
+        self.to = None  # Resolved later
+        self.related_name = related_name
+        self.on_delete = on_delete
+        self.unique = unique
+```
+
+### Attributes
+
+#### `to = None`
+
+#### `related_name = related_name`
+
+#### `on_delete = on_delete`
+
+#### `unique = unique`
+
+### Functions
+
+#### `__init__(related_name, on_delete='CASCADE', unique=False)`
+
+Initialize foreign-key relationship metadata
+
+Args:
+
+```text
+related_name: Name for reverse access from the related model.
+on_delete: Referential action for parent deletion.
+    Common values include "CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", and "NO ACTION".
+unique: Set to True to enforce one-to-one behavior.
+```
+
+Examples:
+
+```pycon
+>>> from typing import Annotated
+>>> from ferro.models import Model
+>>>
+>>> class User(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+...     profile_id: Annotated[int, ForeignKey("user", unique=True)]
+```
+
+Source code in `src/ferro/base.py`
+
+```python
+def __init__(
+    self, related_name: str, on_delete: str = "CASCADE", unique: bool = False
+):
+    """Initialize foreign-key relationship metadata
+
+    Args:
+
+        related_name: Name for reverse access from the related model.
+        on_delete: Referential action for parent deletion.
+            Common values include "CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", and "NO ACTION".
+        unique: Set to True to enforce one-to-one behavior.
+
+    Examples:
+        >>> from typing import Annotated
+        >>> from ferro.models import Model
+        >>>
+        >>> class User(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     profile_id: Annotated[int, ForeignKey("user", unique=True)]
+    """
+    self.to = None  # Resolved later
+    self.related_name = related_name
+    self.on_delete = on_delete
+    self.unique = unique
+```
+
+## `ManyToManyField`
+
+Describe metadata for a many-to-many relationship
+
+Attributes:
+
+```text
+to: Target model class resolved during model binding.
+related_name: Name of the reverse relationship attribute on the target model.
+through: Optional join table name used for the association.
+```
+
+Examples:
+
+```pycon
+>>> from typing import Annotated
+>>> from ferro.models import Model
+>>>
+>>> class Tag(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+>>>
+>>> class Post(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+...     tags: Annotated[list[int], ManyToManyField("posts")]
+```
+
+Source code in `src/ferro/base.py`
+
+```python
+class ManyToManyField:
+    """Describe metadata for a many-to-many relationship
+
+    Attributes:
+
+        to: Target model class resolved during model binding.
+        related_name: Name of the reverse relationship attribute on the target model.
+        through: Optional join table name used for the association.
+
+    Examples:
+        >>> from typing import Annotated
+        >>> from ferro.models import Model
+        >>>
+        >>> class Tag(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        >>>
+        >>> class Post(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     tags: Annotated[list[int], ManyToManyField("posts")]
+    """
+
+    def __init__(self, related_name: str, through: str | None = None):
+        """Initialize many-to-many relationship metadata
+
+        Args:
+
+            related_name: Name for reverse access from the related model.
+            through: Explicit join table name.
+                When omitted, Ferro generates a join table name automatically.
+
+        Examples:
+            >>> from typing import Annotated
+            >>> from ferro.models import Model
+            >>>
+            >>> class User(Model):
+            ...     id: Annotated[int, FerroField(primary_key=True)]
+            ...     teams: Annotated[list[int], ManyToManyField("members", through="team_members")]
+        """
+        self.to = None  # Resolved later
+        self.related_name = related_name
+        self.through = through
+```
+
+### Attributes
+
+#### `to = None`
+
+#### `related_name = related_name`
+
+#### `through = through`
+
+### Functions
+
+#### `__init__(related_name, through=None)`
+
+Initialize many-to-many relationship metadata
+
+Args:
+
+```text
+related_name: Name for reverse access from the related model.
+through: Explicit join table name.
+    When omitted, Ferro generates a join table name automatically.
+```
+
+Examples:
+
+```pycon
+>>> from typing import Annotated
+>>> from ferro.models import Model
+>>>
+>>> class User(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+...     teams: Annotated[list[int], ManyToManyField("members", through="team_members")]
+```
+
+Source code in `src/ferro/base.py`
+
+```python
+def __init__(self, related_name: str, through: str | None = None):
+    """Initialize many-to-many relationship metadata
+
+    Args:
+
+        related_name: Name for reverse access from the related model.
+        through: Explicit join table name.
+            When omitted, Ferro generates a join table name automatically.
+
+    Examples:
+        >>> from typing import Annotated
+        >>> from ferro.models import Model
+        >>>
+        >>> class User(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     teams: Annotated[list[int], ManyToManyField("members", through="team_members")]
+    """
+    self.to = None  # Resolved later
+    self.related_name = related_name
+    self.through = through
+```
+
+# Global Functions
+
+## `connect(url, auto_migrate=False)`
+
+Establish a connection to the database.
+
+Parameters:
+
+| Name           | Type   | Description                                                          | Default    |
+| -------------- | ------ | -------------------------------------------------------------------- | ---------- |
+| `url`          | `str`  | The database connection string (e.g., "sqlite:example.db?mode=rwc"). | *required* |
+| `auto_migrate` | `bool` | If True, automatically create tables for all registered models.      | `False`    |
+
+Source code in `src/ferro/__init__.py`
+
+```python
+async def connect(url: str, auto_migrate: bool = False) -> None:
+    """
+    Establish a connection to the database.
+
+    Args:
+        url: The database connection string (e.g., "sqlite:example.db?mode=rwc").
+        auto_migrate: If True, automatically create tables for all registered models.
+    """
+    from .relations import resolve_relationships
+
+    resolve_relationships()
+
+    await _core_connect(url)
+    if auto_migrate:
+        await create_tables()
+```
+
+## `transaction()`
+
+Run database operations inside a transaction context
+
+Yields control to the caller within an open transaction.
+
+Examples:
+
+```pycon
+>>> async with transaction():
+...     user = await User.create(name="Taylor")
+...     await user.save()
+```
+
+Source code in `src/ferro/models.py`
+
+```python
+@asynccontextmanager
+async def transaction():
+    """Run database operations inside a transaction context
+
+    Yields control to the caller within an open transaction.
+
+    Examples:
+        >>> async with transaction():
+        ...     user = await User.create(name="Taylor")
+        ...     await user.save()
+    """
+    tx_id = await begin_transaction()
+    token = _CURRENT_TRANSACTION.set(tx_id)
+    try:
+        yield
+        await commit_transaction(tx_id)
+    except Exception:
+        await rollback_transaction(tx_id)
+        raise
+    finally:
+        _CURRENT_TRANSACTION.reset(token)
+```
+
+## `create_tables()`
+
+Manually triggers table creation for all registered models.
+
+Returns an awaitable object (Python coroutine).
+
+### Errors
+
+Returns a `PyErr` if the engine is not initialized or if SQL execution fails.
+
+## `reset_engine()`
+
+Shuts down the global engine and clears the Identity Map.
+
+This is useful for testing environments to ensure isolation between test runs.
+
+### Errors
+
+Returns a `PyErr` if the engine lock cannot be acquired.
+
+## `evict_instance(name, pk)`
+
+Evicts a specific model instance from the global Identity Map.
+
+# Query Builder
+
+## `Query`
+
+Bases: `Generic[T]`
+
+Build and execute fluent ORM queries.
+
+Attributes:
+
+| Name              | Type                   | Description                             |
+| ----------------- | ---------------------- | --------------------------------------- |
+| `model_cls`       |                        | Model class used to hydrate results.    |
+| `where_clause`    | `list[QueryNode]`      | Accumulated filter nodes for the query. |
+| `order_by_clause` | `list[dict[str, str]]` | Sort definitions sent to the Rust core. |
+
+### Attributes
+
+#### `model_cls = model_cls`
+
+#### `where_clause = []`
+
+#### `order_by_clause = []`
+
+### Functions
+
+#### `__init__(model_cls)`
+
+Initialize a query for a model class.
+
+Parameters:
+
+| Name        | Type      | Description                                | Default    |
+| ----------- | --------- | ------------------------------------------ | ---------- |
+| `model_cls` | `Type[T]` | Model class that defines the target table. | *required* |
+
+Examples:
+
+```pycon
+>>> query = Query(User)
+>>> query.model_cls is User
+True
+```
+
+#### `where(node)`
+
+Add a filter condition to the query
+
+Parameters:
+
+| Name   | Type        | Description                                                  | Default    |
+| ------ | ----------- | ------------------------------------------------------------ | ---------- |
+| `node` | `QueryNode` | A QueryNode representing the condition (e.g., User.id == 1). | *required* |
+
+Returns:
+
+| Type       | Description                              |
+| ---------- | ---------------------------------------- |
+| `Query[T]` | The current Query instance for chaining. |
+
+Examples:
+
+```pycon
+>>> query = User.where(User.id == 1)
+>>> isinstance(query, Query)
+True
+```
+
+#### `order_by(field, direction='asc')`
+
+Add an ordering clause to the query
+
+Parameters:
+
+| Name        | Type  | Description                                  | Default    |
+| ----------- | ----- | -------------------------------------------- | ---------- |
+| `field`     | `Any` | The field to order by (e.g., User.username). | *required* |
+| `direction` | `str` | The direction of the sort ("asc" or "desc"). | `'asc'`    |
+
+Returns:
+
+| Type       | Description                              |
+| ---------- | ---------------------------------------- |
+| `Query[T]` | The current Query instance for chaining. |
+
+Raises:
+
+| Type         | Description                          |
+| ------------ | ------------------------------------ |
+| `ValueError` | If direction is not "asc" or "desc". |
+
+Examples:
+
+```pycon
+>>> query = User.select().order_by(User.username, "desc")
+>>> query.order_by_clause[-1]["direction"]
+'desc'
+```
+
+#### `limit(value)`
+
+Limit the number of records returned
+
+Parameters:
+
+| Name    | Type  | Description                              | Default    |
+| ------- | ----- | ---------------------------------------- | ---------- |
+| `value` | `int` | The maximum number of records to return. | *required* |
+
+Returns:
+
+| Type       | Description                              |
+| ---------- | ---------------------------------------- |
+| `Query[T]` | The current Query instance for chaining. |
+
+Examples:
+
+```pycon
+>>> query = User.select().limit(10)
+>>> query._limit
+10
+```
+
+#### `offset(value)`
+
+Skip a specific number of records
+
+Parameters:
+
+| Name    | Type  | Description                    | Default    |
+| ------- | ----- | ------------------------------ | ---------- |
+| `value` | `int` | The number of records to skip. | *required* |
+
+Returns:
+
+| Type       | Description                              |
+| ---------- | ---------------------------------------- |
+| `Query[T]` | The current Query instance for chaining. |
+
+Examples:
+
+```pycon
+>>> query = User.select().offset(20)
+>>> query._offset
+20
+```
+
+#### `all()`
+
+Return all model instances that match the current query
+
+Returns:
+
+| Type      | Description                |
+| --------- | -------------------------- |
+| `list[T]` | A list of model instances. |
+
+Examples:
+
+```pycon
+>>> users = await User.where(User.active == True).all()
+>>> isinstance(users, list)
+True
+```
+
+#### `count()`
+
+Return the number of records that match the current query
+
+Returns:
+
+| Type  | Description                    |
+| ----- | ------------------------------ |
+| `int` | The count of matching records. |
+
+Examples:
+
+```pycon
+>>> total = await User.where(User.active == True).count()
+>>> isinstance(total, int)
+True
+```
+
+#### `update(**fields)`
+
+Update all records matching the current query
+
+Parameters:
+
+| Name       | Type | Description                       | Default |
+| ---------- | ---- | --------------------------------- | ------- |
+| `**fields` |      | Field names and values to update. | `{}`    |
+
+Returns:
+
+| Type  | Description                    |
+| ----- | ------------------------------ |
+| `int` | The number of records updated. |
+
+Examples:
+
+```pycon
+>>> updated = await User.where(User.id == 1).update(name="Taylor")
+>>> isinstance(updated, int)
+True
+```
+
+#### `first()`
+
+Return the first matching record, or None
+
+Returns:
+
+| Type | Description |
+| ---- | ----------- |
+| \`T  | None\`      |
+
+Examples:
+
+```pycon
+>>> user = await User.select().order_by(User.id).first()
+>>> user is None or isinstance(user, User)
+True
+```
+
+#### `delete()`
+
+Delete all records matching the current query
+
+Returns:
+
+| Type  | Description                    |
+| ----- | ------------------------------ |
+| `int` | The number of records deleted. |
+
+Examples:
+
+```pycon
+>>> deleted = await User.where(User.disabled == True).delete()
+>>> isinstance(deleted, int)
+True
+```
+
+#### `exists()`
+
+Return whether at least one record matches the current query
+
+Returns:
+
+| Type   | Description                             |
+| ------ | --------------------------------------- |
+| `bool` | True if records exist, otherwise False. |
+
+Examples:
+
+```pycon
+>>> found = await User.where(User.email == "a@b.com").exists()
+>>> isinstance(found, bool)
+True
+```
+
+#### `add(*instances)`
+
+Add links to a many-to-many relationship
+
+Parameters:
+
+| Name         | Type  | Description                                          | Default |
+| ------------ | ----- | ---------------------------------------------------- | ------- |
+| `*instances` | `Any` | Target model instances that provide an id attribute. | `()`    |
+
+Raises:
+
+| Type           | Description                                          |
+| -------------- | ---------------------------------------------------- |
+| `RuntimeError` | If the query is not bound to a many-to-many context. |
+
+Examples:
+
+```pycon
+>>> user = await User.create(email="taylor@example.com")
+>>> admin = await Group.create(name="admin")
+>>> staff = await Group.create(name="staff")
+>>> await user.groups.add(admin, staff)
+```
+
+#### `remove(*instances)`
+
+Remove links from a many-to-many relationship
+
+Parameters:
+
+| Name         | Type  | Description                                          | Default |
+| ------------ | ----- | ---------------------------------------------------- | ------- |
+| `*instances` | `Any` | Target model instances that provide an id attribute. | `()`    |
+
+Raises:
+
+| Type           | Description                                          |
+| -------------- | ---------------------------------------------------- |
+| `RuntimeError` | If the query is not bound to a many-to-many context. |
+
+Examples:
+
+```pycon
+>>> user = await User.create(email="taylor@example.com")
+>>> admin = await Group.create(name="admin")
+>>> await user.groups.remove(admin)
+```
+
+#### `clear()`
+
+Clear all links in a many-to-many relationship
+
+Raises:
+
+| Type           | Description                                          |
+| -------------- | ---------------------------------------------------- |
+| `RuntimeError` | If the query is not bound to a many-to-many context. |
+
+Examples:
+
+```pycon
+>>> user = await User.create(email="taylor@example.com")
+>>> await user.groups.clear()
+```
+
+#### `__repr__()`
+
+Return a developer-friendly representation of the query
+
+## `BackRelationship`
+
+Bases: `Query[T]`
+
+Represent reverse relationship queries with Query typing support
+
+Examples:
+
+```pycon
+>>> class User(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+...     name: str
+...     posts: BackRelationship[list["Post"]] = None
+```
+
+```pycon
+>>> class Post(Model):
+...     id: Annotated[int, FerroField(primary_key=True)]
+...     title: str
+...     user: Annotated[User, ForeignKey(related_name="posts")]
+```
+
+```pycon
+>>> user = await User.get(1)
+>>> posts = await user.posts.all()
+>>> isinstance(posts, list)
+True
+```
+
+### Functions
+
+#### `__get_pydantic_core_schema__(_source_type, _handler)`
+
+Allow pydantic-core to treat relationships as arbitrary runtime values

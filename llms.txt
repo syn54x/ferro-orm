@@ -1,0 +1,26 @@
+# Ferro ORM
+
+> A high-performance, Rust-backed, Pydantic driven ORM for Python.
+
+Ferro is a high-performance, Rust-backed ORM for Python with a familiar Pydantic-style API.
+
+## Guides
+
+- [Overview](https://syn54x.github.io/ferro-orm/index.md)
+- [Connection](https://syn54x.github.io/ferro-orm/connection/index.md)
+- [Models](https://syn54x.github.io/ferro-orm/models/index.md)
+- [Fields](https://syn54x.github.io/ferro-orm/fields/index.md)
+- [Relations](https://syn54x.github.io/ferro-orm/relations/index.md)
+- [Queries](https://syn54x.github.io/ferro-orm/queries/index.md)
+- [Migrations](https://syn54x.github.io/ferro-orm/migrations/index.md)
+- [Transactions](https://syn54x.github.io/ferro-orm/transactions/index.md)
+- [Contributing](https://syn54x.github.io/ferro-orm/contributing/index.md)
+
+## API Reference
+
+- [Overview](https://syn54x.github.io/ferro-orm/api/index.md)
+- [Core Models](https://syn54x.github.io/ferro-orm/api/core-models/index.md)
+- [Field Metadata](https://syn54x.github.io/ferro-orm/api/field-metadata/index.md)
+- [Global Functions](https://syn54x.github.io/ferro-orm/api/global-functions/index.md)
+- [Query Builder](https://syn54x.github.io/ferro-orm/api/query-builder/index.md)
+
