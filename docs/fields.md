@@ -18,9 +18,17 @@ Ferro supports a wide range of Python types, automatically mapping them to the m
 | `Enum` | `ENUM` / `TEXT` | Python `enum.Enum` (typically string-backed). |
 | `dict` / `list` | `JSON` / `JSONB` | Stored as JSON strings in SQLite. |
 
-## FerroField Metadata
+## Field Metadata
 
-To configure database-level constraints and behaviors, use the `FerroField` metadata container. The preferred way to apply this is via `typing.Annotated`.
+Ferro supports two equivalent ways to configure database-level constraints:
+
+1. `typing.Annotated[..., FerroField(...)]`
+2. `ferro.Field(..., primary_key=..., unique=..., index=...)`
+
+Use whichever style matches your codebase best.
+Do not declare both styles on the same field.
+
+### Option 1: `Annotated` + `FerroField`
 
 ```python
 from typing import Annotated
@@ -30,6 +38,18 @@ class Product(Model):
     sku: Annotated[str, FerroField(primary_key=True)]
     slug: Annotated[str, FerroField(unique=True, index=True)]
     price: Annotated[Decimal, FerroField(index=True)]
+```
+
+### Option 2: Wrapped `ferro.Field`
+
+```python
+from decimal import Decimal
+from ferro import Field, Model
+
+class Product(Model):
+    sku: str = Field(primary_key=True)
+    slug: str = Field(unique=True, index=True)
+    price: Decimal = Field(index=True)
 ```
 
 ### Parameters
@@ -43,17 +63,18 @@ class Product(Model):
 
 ## Pydantic Integration
 
-Since Ferro is built on Pydantic, all standard Pydantic validation and field configuration still apply.
+`ferro.Field` wraps Pydantic's `Field`, so all standard Pydantic validation and schema kwargs still apply:
 
 ```python
-from pydantic import Field
-from ferro import Model, FerroField
+from ferro import Field, Model
 
 class User(Model):
-    # Combine Ferro metadata with Pydantic validation
-    username: Annotated[
-        str,
-        FerroField(unique=True),
-        Field(min_length=3, max_length=50)
-    ]
+    username: str = Field(
+        unique=True,
+        min_length=3,
+        max_length=50,
+        description="Public handle"
+    )
 ```
+
+If you prefer `Annotated`, you can also compose `FerroField` with `pydantic.Field(...)` metadata in the same annotation.

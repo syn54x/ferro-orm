@@ -47,6 +47,6 @@ Ferro's migration bridge ensures high fidelity between your code and the databas
 
 -   **Nullability**: Automatically detects whether a field is required or optional (e.g., `str` vs `str | None`).
 -   **Complex Types**: Correctly maps Enums, Decimals, UUIDs, and JSON fields to the appropriate database-native types.
--   **Constraints**: Translates `primary_key`, `unique`, and `index` metadata directly into the migration script.
+-   **Constraints**: Translates `primary_key`, `unique`, and `index` metadata (from `FerroField` or `ferro.Field`) directly into the migration script.
 -   **Foreign Keys**: Automatically generates `FOREIGN KEY` constraints, including custom `on_delete` behaviors like `CASCADE` or `SET NULL`.
 -   **Join Tables**: Automatically discovers and includes hidden join tables for Many-to-Many relationships.
