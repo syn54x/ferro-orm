@@ -1,6 +1,9 @@
 name: Release
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       prerelease:
@@ -17,6 +20,8 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
+    # Prevent infinite loops when semantic-release pushes chore(release) commits.
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
     permissions:
       contents: write
       issues: write
@@ -74,3 +79,45 @@ jobs:
           # 4. Create a tag and push it
           # 5. Create a GitHub Release (publishing is handled by the wheels/publish workflow)
           uv run semantic-release version $PRERELEASE_FLAG
+
+      - name: Verify release commit updates changelog
+        id: verify_release
+        shell: bash
+        run: |
+          LAST_SUBJECT="$(git log -1 --pretty=%s)"
+          if [[ "$LAST_SUBJECT" != chore\(release\):* ]]; then
+            echo "No release commit created in this run; skipping changelog validation."
+            echo "release_created=false" >> "$GITHUB_OUTPUT"
+            echo "changelog_validated=skipped" >> "$GITHUB_OUTPUT"
+            echo "release_subject=$LAST_SUBJECT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "release_created=true" >> "$GITHUB_OUTPUT"
+          echo "release_subject=$LAST_SUBJECT" >> "$GITHUB_OUTPUT"
+
+          CHANGED_FILES="$(git show --name-only --pretty='' HEAD)"
+          if [[ "$CHANGED_FILES" != *"CHANGELOG.md"* ]]; then
+            echo "ERROR: release commit does not include CHANGELOG.md update."
+            echo "Changed files:"
+            echo "$CHANGED_FILES"
+            echo "changelog_validated=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "changelog_validated=passed" >> "$GITHUB_OUTPUT"
+          echo "Validated: release commit includes CHANGELOG.md."
+
+      - name: Release summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Release workflow summary"
+            echo ""
+            echo "- Trigger: \`${{ github.event_name }}\`"
+            echo "- Ref: \`${{ github.ref_name }}\`"
+            echo "- Release commit created: \`${{ steps.verify_release.outputs.release_created || 'unknown' }}\`"
+            echo "- Changelog validation: \`${{ steps.verify_release.outputs.changelog_validated || 'unknown' }}\`"
+            echo "- Last commit subject: \`${{ steps.verify_release.outputs.release_subject || 'n/a' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
