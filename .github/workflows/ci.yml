@@ -209,7 +209,7 @@ jobs:
             fi
 
             echo "Checking commit: $MESSAGE"
-            if ! uv run cz check --commit-msg-file <(git log -1 --pretty=format:"%s%n%n%b" $commit); then
+            if ! uv run --no-sync --python 3.13 cz check --commit-msg-file <(git log -1 --pretty=format:"%s%n%n%b" $commit); then
               echo "❌ Commit message does not follow conventional format: $MESSAGE"
               exit 1
             fi
