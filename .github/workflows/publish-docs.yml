@@ -33,7 +33,7 @@ jobs:
 
       - name: Install documentation dependencies
         run: |
-          uv sync --group dev
+          uv sync --only-group docs --no-install-project --python 3.13
 
       - name: Build MkDocs site
         run: |

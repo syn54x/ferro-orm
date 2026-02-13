@@ -53,7 +53,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --group dev
+          uv sync --only-group ci-lint --no-install-project --python 3.13
 
       - name: Run all pre-commit hooks
         run: |
@@ -108,7 +108,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --group dev
+          uv sync --only-group ci-test --no-install-project --python 3.13
 
       - name: Build Rust extension
         run: |
@@ -151,7 +151,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --group dev
+          uv sync --only-group ci-test --no-install-project --python ${{ matrix.python-version }}
 
       - name: Build Rust extension
         run: |
