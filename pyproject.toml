@@ -45,8 +45,10 @@ dev = [
     "alembic>=1.18.1",
     "sqlalchemy>=2.0.46",
     "mkdocs-material>=9.5.0",
+    "mkdocs-llmstxt>=0.3.0",
     "mkdocstrings[python]>=0.24.0",
     "pymdown-extensions>=10.7.0",
+    "pytest-examples>=0.0.18",
 ]
 
 [tool.pytest.ini_options]

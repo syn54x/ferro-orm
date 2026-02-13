@@ -1,3 +1,5 @@
+"""Define the core ORM model base and transaction helpers for Ferro."""
+
 import json
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -31,8 +33,14 @@ from .state import _CURRENT_TRANSACTION
 
 @asynccontextmanager
 async def transaction():
-    """
-    Asynchronous context manager for database transactions.
+    """Run database operations inside a transaction context
+
+    Yields control to the caller within an open transaction.
+
+    Examples:
+        >>> async with transaction():
+        ...     user = await User.create(name="Taylor")
+        ...     await user.save()
     """
     tx_id = await begin_transaction()
     token = _CURRENT_TRANSACTION.set(tx_id)
@@ -47,11 +55,15 @@ async def transaction():
 
 
 class Model(BaseModel, metaclass=ModelMetaclass):
-    """
-    The base class for all Ferro models.
+    """Provide the base class for all Ferro models
 
-    Inheriting from this class automatically registers your model with the Rust-backed
-    SQL engine and provides high-performance CRUD and query capabilities.
+    Inheriting from this class registers schema metadata with the Rust core and
+    exposes high-performance CRUD and query entrypoints.
+
+    Examples:
+        >>> class User(Model):
+        ...     id: int | None = None
+        ...     name: str
     """
 
     model_config = ConfigDict(
@@ -61,6 +73,16 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     )
 
     def __init__(self, **data: Any):
+        """Initialize a model instance and normalize relationship inputs
+
+        Args:
+            **data: Field values used to construct the model.
+
+        Examples:
+            >>> user = User(name="Taylor")
+            >>> isinstance(user, User)
+            True
+        """
         # 1. Handle relationship inputs (e.g. Product(category=my_cat))
         relations = getattr(self.__class__, "ferro_relations", {})
         for field_name, metadata in relations.items():
@@ -82,6 +104,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         super().__init__(**data)
 
     async def save(self) -> None:
+        """Persist the current model instance
+
+        Returns:
+            None
+
+        Examples:
+            >>> user = User(name="Taylor")
+            >>> await user.save()
+        """
         tx_id = _CURRENT_TRANSACTION.get()
         new_id = await save_record(
             self.__class__.__name__, self.model_dump_json(), tx_id
@@ -112,6 +143,16 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             register_instance(self.__class__.__name__, str(pk_val), self)
 
     async def delete(self) -> None:
+        """Delete the current model instance from storage
+
+        Returns:
+            None
+
+        Examples:
+            >>> user = await User.get(1)
+            >>> if user:
+            ...     await user.delete()
+        """
         pk_val = None
         for field_name, metadata in self.__class__.ferro_fields.items():
             if metadata.primary_key:
@@ -132,6 +173,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     @classmethod
     def _fix_types(cls, instance: Self) -> None:
+        """Normalize hydrated values to declared Python types
+
+        Args:
+            instance: Model instance to normalize in-place.
+
+        Returns:
+            None
+        """
         if not hasattr(cls, "_enum_fields"):
             cls._enum_fields = {}
             try:
@@ -174,6 +223,16 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     @classmethod
     async def all(cls) -> list[Self]:
+        """Fetch all records for this model class
+
+        Returns:
+            A list of hydrated model instances.
+
+        Examples:
+            >>> users = await User.all()
+            >>> isinstance(users, list)
+            True
+        """
         tx_id = _CURRENT_TRANSACTION.get()
         results = await fetch_all(cls, tx_id)
         for instance in results:
@@ -181,14 +240,40 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return results
 
     @classmethod
-    async def get(cls, value: Any) -> Self | None:
+    async def get(cls, pk: Any) -> Self | None:
+        """Fetch one record by primary key value
+
+        Args:
+            pk: Primary key value to fetch a single record.
+
+        Returns:
+            The matching model instance, or None when no record exists.
+
+        Examples:
+            >>> user = await User.get(1)
+            >>> user is None or isinstance(user, User)
+            True
+        """
         tx_id = _CURRENT_TRANSACTION.get()
-        instance = await fetch_one(cls, str(value), tx_id)
+        instance = await fetch_one(cls, str(pk), tx_id)
         if instance:
             cls._fix_types(instance)
         return instance
 
     async def refresh(self) -> None:
+        """Reload this instance from storage using its primary key
+
+        Returns:
+            None
+
+        Raises:
+            RuntimeError: If no primary key is available or the record no longer exists.
+
+        Examples:
+            >>> user = await User.get(1)
+            >>> if user:
+            ...     await user.refresh()
+        """
         pk_val = None
         for field_name, metadata in self.__class__.ferro_fields.items():
             if metadata.primary_key:
@@ -219,26 +304,69 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     @classmethod
     def where(cls, node: QueryNode) -> Query[Self]:
-        """
-        Start a fluent query with a condition.
+        """Start a fluent query with an initial condition
+
+        Args:
+            node: Query predicate node to apply first.
+
+        Returns:
+            A query object scoped to this model class.
+
+        Examples:
+            >>> query = User.where(User.id == 1)
+            >>> isinstance(query, Query)
+            True
         """
         return Query(cls).where(node)
 
     @classmethod
     def select(cls) -> Query[Self]:
-        """
-        Start an empty fluent query (e.g., User.select().limit(5)).
+        """Start an empty fluent query for this model class
+
+        Returns:
+            A query object scoped to this model class.
+
+        Examples:
+            >>> query = User.select().limit(5)
+            >>> isinstance(query, Query)
+            True
         """
         return Query(cls)
 
     @classmethod
-    async def create(cls, **kwargs) -> Self:
-        instance = cls(**kwargs)
+    async def create(cls, **fields) -> Self:
+        """Create and persist a new model instance
+
+        Args:
+            **fields: Field values to construct the model.
+
+        Returns:
+            The newly created and persisted model instance.
+
+        Examples:
+            >>> user = await User.create(name="Taylor")
+            >>> isinstance(user, User)
+            True
+        """
+        instance = cls(**fields)
         await instance.save()
         return instance
 
     @classmethod
     async def bulk_create(cls, instances: list[Self]) -> int:
+        """Persist multiple instances in a single bulk operation
+
+        Args:
+            instances: Model instances to persist.
+
+        Returns:
+            The number of records inserted.
+
+        Examples:
+            >>> rows = await User.bulk_create([User(name="A"), User(name="B")])
+            >>> isinstance(rows, int)
+            True
+        """
         if not instances:
             return 0
         # Use mode="json" to ensure Decimals, UUIDs, etc. are serialized correctly
@@ -247,25 +375,56 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     @classmethod
     async def get_or_create(
-        cls, defaults: dict[str, Any] | None = None, **kwargs
+        cls, defaults: dict[str, Any] | None = None, **fields
     ) -> tuple[Self, bool]:
+        """Fetch a record by filters or create one when missing
+
+        Args:
+            defaults: Values applied only when creating a new record.
+            **fields: Exact-match filters used for lookup.
+
+        Returns:
+            A tuple of ``(instance, created)`` where ``created`` is True for new records.
+
+        Examples:
+            >>> user, created = await User.get_or_create(email="a@b.com")
+            >>> isinstance(created, bool)
+            True
+        """
         query = Query(cls)
-        for key, val in kwargs.items():
+        for key, val in fields.items():
             query = query.where(getattr(cls, key) == val)
 
         instance = await query.first()
         if instance:
             return instance, False
 
-        params = {**kwargs, **(defaults or {})}
+        params = {**fields, **(defaults or {})}
         return await cls.create(**params), True
 
     @classmethod
     async def update_or_create(
-        cls, defaults: dict[str, Any] | None = None, **kwargs
+        cls, defaults: dict[str, Any] | None = None, **fields
     ) -> tuple[Self, bool]:
+        """Update a matched record or create one when missing
+
+        Args:
+            defaults: Values applied on update or create paths.
+            **fields: Exact-match filters used for lookup.
+
+        Returns:
+            A tuple of ``(instance, created)`` where ``created`` is True for new records.
+
+        Examples:
+            >>> user, created = await User.update_or_create(
+            ...     email="a@b.com",
+            ...     defaults={"name": "Taylor"},
+            ... )
+            >>> isinstance(created, bool)
+            True
+        """
         query = Query(cls)
-        for key, val in kwargs.items():
+        for key, val in fields.items():
             query = query.where(getattr(cls, key) == val)
 
         instance = await query.first()
@@ -275,5 +434,5 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             await instance.save()
             return instance, False
 
-        params = {**kwargs, **(defaults or {})}
+        params = {**fields, **(defaults or {})}
         return await cls.create(**params), True

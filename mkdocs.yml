@@ -1,6 +1,7 @@
 site_name: Ferro ORM
-site_description: A high-performance, Rust-backed ORM for Python.
-repo_url: https://github.com/syn54x/ferro
+site_description: A high-performance, Rust-backed, Pydantic driven ORM for Python.
+site_url: https://syn54x.github.io/ferro-orm/
+repo_url: https://github.com/syn54x/ferro-orm
 edit_uri: edit/main/docs/
 
 watch:
@@ -36,6 +37,23 @@ theme:
 
 plugins:
   - search
+  - llmstxt:
+      markdown_description: Ferro is a high-performance, Rust-backed ORM for Python with a familiar Pydantic-style API.
+      full_output: llms-full.txt
+      sections:
+        Guides:
+          - index.md
+          - connection.md
+          - models.md
+          - fields.md
+          - relations.md
+          - queries.md
+          - migrations.md
+          - transactions.md
+          - contributing.md
+        API Reference:
+          - api.md
+          - api/*.md
   - mkdocstrings:
       handlers:
         python:
@@ -77,5 +95,10 @@ nav:
   - Queries: queries.md
   - Migrations: migrations.md
   - Transactions: transactions.md
-  - API: api.md
+  - API:
+      - Overview: api.md
+      - Core Models: api/core-models.md
+      - Query Builder: api/query-builder.md
+      - Field Metadata: api/field-metadata.md
+      - Global Functions: api/global-functions.md
   - Contributing: contributing.md
