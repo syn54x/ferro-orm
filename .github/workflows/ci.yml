@@ -57,7 +57,7 @@ jobs:
 
       - name: Run all pre-commit hooks
         run: |
-          uv run prek run --all-files
+          uv run --no-sync --python 3.13 prek run --all-files
 
   test-rust:
     name: Rust tests
