@@ -2,6 +2,9 @@ name: Publish Docs
 
 on:
   workflow_dispatch:
+  release:
+    # Keep prereleased support for semantic-release pre-releases.
+    types: [published, prereleased]
 
 concurrency:
   group: docs-${{ github.workflow }}-${{ github.ref }}
@@ -34,7 +37,7 @@ jobs:
 
       - name: Build MkDocs site
         run: |
-          uv run mkdocs build
+          uv run mkdocs build --strict
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
