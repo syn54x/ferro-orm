@@ -58,7 +58,8 @@ jobs:
 
       - name: Run semantic-release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer a PAT so release events can trigger downstream workflows.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           # Use the --prerelease flag if requested via manual trigger
           PRERELEASE_FLAG=""
