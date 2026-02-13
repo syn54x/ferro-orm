@@ -1,4 +1,4 @@
-"""Provide Ferro's wrapped ``Field`` helper built on top of Pydantic."""
+"""Expose Ferro's wrapped Field helper on top of Pydantic."""
 
 from __future__ import annotations
 
@@ -343,19 +343,15 @@ def Field(
     fail_fast: bool | None = _Unset,
     **extra: Unpack[_EmptyKwargs],
 ) -> Any:
-    """Build a Pydantic field while accepting Ferro database kwargs.
-
-    This wrapper preserves Pydantic's ``Field`` behavior and stores Ferro-only
-    column metadata in ``json_schema_extra`` for the model metaclass to consume.
+    """Build field metadata with Pydantic and Ferro options
 
     Args:
-
+        default: Default value used when the field is not set.
         primary_key: Mark this column as the table primary key in Ferro.
         autoincrement: Override automatic increment behavior for primary key columns.
             When not provided, Ferro infers this for integer primary keys.
         unique: Add a uniqueness constraint for this column in Ferro.
         index: Request an index for this column in Ferro.
-        default: Default value if the field is not set.
         default_factory: A callable to generate the default value. The callable can either take 0 arguments
             (in which case it is called as is) or a single argument containing the already validated data.
         alias: The name to use for the attribute when validating or serializing by alias.
@@ -409,6 +405,15 @@ def Field(
     Returns:
         A new [`FieldInfo`][pydantic.fields.FieldInfo]. The return annotation is `Any` so `Field` can be used on
             type-annotated fields without causing a type error.
+
+    Raises:
+        TypeError: If Ferro kwargs are provided together with callable `json_schema_extra`.
+
+    Examples:
+        >>> from ferro import Field, Model
+        >>> class User(Model):
+        ...     id: int | None = Field(default=None, primary_key=True)
+        ...     username: str = Field(unique=True, min_length=3)
     """
     ferro_kwargs: dict[str, Any] = {}
     if primary_key is not _Unset:

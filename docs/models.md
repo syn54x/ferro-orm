@@ -8,11 +8,22 @@ To create a model, inherit from `ferro.Model`. Models use standard Python type h
 
 ```python
 from typing import Annotated
-from ferro import Model, FerroField
+from ferro import Field, Model, FerroField
 
 class User(Model):
     id: Annotated[int, FerroField(primary_key=True)]
     username: str
+    is_active: bool = True
+```
+
+Ferro field metadata can also be declared with the wrapped `ferro.Field` API:
+
+```python
+from ferro import Field, Model
+
+class User(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(unique=True, min_length=3)
     is_active: bool = True
 ```
 
