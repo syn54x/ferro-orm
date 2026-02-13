@@ -43,7 +43,7 @@ All workflows use explicit, fine-grained permissions (principle of least privile
 
 ### 1. Release (`release.yml`)
 
-**Trigger:** Push to `main` branch OR manual workflow dispatch
+**Trigger:** Manual workflow dispatch
 
 **Permissions:**
 ```yaml
@@ -79,6 +79,10 @@ permissions:
 - Creates GitHub release
 - Triggers publish workflow
 - Validates that release commits include `CHANGELOG.md`
+
+**Required Secrets:**
+- `RELEASE_DEPLOY_KEY` (private SSH key for a write-enabled deploy key)
+- `RELEASE_TOKEN` (recommended PAT for release API actions and downstream workflow triggering, falls back to `GITHUB_TOKEN`)
 
 ---
 
@@ -242,6 +246,15 @@ Permission to manage GitHub Pages deployments:
 - The `release.yml` workflow is configured to prefer `RELEASE_TOKEN` and fall back to `GITHUB_TOKEN`.
 - Re-run the Release workflow after adding the secret.
 
+### Release Fails to Push to `main` with GH013 Ruleset Error
+
+**Cause:** Repository rules require pull requests for `main`, and the release actor is not allowed to bypass.
+
+**Solution:**
+- Ensure the workflow uses the `RELEASE_DEPLOY_KEY` secret (configured in `release.yml`).
+- In repo rulesets for `main`, add the deploy key actor (or your release bot user) to bypass "Changes must be made through a pull request".
+- Re-run the Release workflow.
+
 ### PyPI Publishing Fails with Authentication Error
 
 **Cause:** Missing `id-token: write` permission
@@ -256,13 +269,6 @@ Permission to manage GitHub Pages deployments:
 ## Verification
 
 To verify permissions are working:
-
-### Test Release Automation
-```bash
-git commit --allow-empty -m "feat: test release workflow"
-git push
-# Check Actions tab - release.yml should run on push to main
-```
 
 ### Test Release
 ```bash
