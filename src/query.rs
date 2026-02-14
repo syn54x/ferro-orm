@@ -30,6 +30,7 @@ pub struct M2mContext {
 
 #[derive(Debug, Deserialize)]
 pub struct QueryDef {
+    #[allow(dead_code)]
     pub model_name: String,
     pub where_clause: Vec<QueryNode>,
     pub order_by: Option<Vec<OrderBy>>,

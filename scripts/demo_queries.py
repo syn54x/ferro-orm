@@ -170,7 +170,7 @@ async def run_demo():
         "Reverse Lookup with Filtering",
         "electronics_in_stock = await electronics.products.where(Product.in_stock == True).all()",
     )
-    stock_electronics = await electronics.products.where(Product.in_stock == True).all()
+    stock_electronics = await electronics.products.where(Product.in_stock == True).all()  # noqa
     console.print(
         f"📱 In-stock Electronics: [bold green]{len(stock_electronics)}[/bold green]"
     )

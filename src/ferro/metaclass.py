@@ -155,9 +155,9 @@ class ModelMetaclass(type(BaseModel)):
                     if "properties" in schema:
                         for f_name, metadata in ferro_fields.items():
                             if f_name in schema["properties"]:
-                                schema["properties"][f_name]["primary_key"] = (
-                                    metadata.primary_key
-                                )
+                                schema["properties"][f_name][
+                                    "primary_key"
+                                ] = metadata.primary_key
                                 prop = schema["properties"][f_name]
                                 is_int = prop.get("type") == "integer" or any(
                                     item.get("type") == "integer"
