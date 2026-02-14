@@ -155,6 +155,9 @@ jobs:
     needs: [release]
     if: needs.release.outputs.release_created == 'true'
     uses: ./.github/workflows/publish.yml
+    permissions:
+      contents: read
+      id-token: write
     with:
       ref: ${{ needs.release.outputs.release_ref }}
 
