@@ -195,7 +195,7 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                 })?;
         }
 
-        println!("✅ Ferro Engine: Table '{}' created", name);
+        crate::log_debug(format!("✅ Ferro Engine: Table '{}' created", name));
     }
 
     Ok(())
@@ -220,7 +220,7 @@ pub fn register_model_schema(name: String, schema: String) -> PyResult<()> {
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?;
 
     registry.insert(name.clone(), parsed_schema);
-    println!("⚙️  Ferro Engine: Map generated for '{}'", name);
+    crate::log_debug(format!("⚙️  Ferro Engine: Map generated for '{}'", name));
     Ok(())
 }
 
