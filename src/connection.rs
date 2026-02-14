@@ -45,7 +45,7 @@ pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Boun
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine"))?;
         *engine = Some(arc_pool);
 
-        println!("⚡️ Ferro Engine: Connected to {}", url);
+        crate::log_debug(format!("⚡️ Ferro Engine: Connected to {}", url));
         Ok(())
     })
 }
