@@ -48,7 +48,10 @@ async def transaction():
 
 class Model(BaseModel, metaclass=ModelMetaclass):
     """
-    Base class for all Ferro models.
+    The base class for all Ferro models.
+
+    Inheriting from this class automatically registers your model with the Rust-backed
+    SQL engine and provides high-performance CRUD and query capabilities.
     """
 
     model_config = ConfigDict(
