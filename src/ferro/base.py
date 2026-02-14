@@ -1,3 +1,8 @@
+"""Define field and relationship metadata primitives for Ferro models.
+
+This module provides lightweight configuration objects used by model annotations to describe column constraints and inter-model relationships.
+"""
+
 from typing import (
     TypeVar,
 )
@@ -6,11 +11,22 @@ T = TypeVar("T")
 
 
 class FerroField:
-    """
-    Metadata container for Ferro-specific field configuration.
+    """Store database column metadata for a model field
 
-    This class is used to define database-level constraints like primary keys,
-    uniqueness, and indexes. It is typically used within `typing.Annotated`.
+    Attributes:
+
+        primary_key: Mark the field as the table primary key.
+        autoincrement: Override automatic increment behavior for primary key columns.
+        unique: Enforce a uniqueness constraint for the column.
+        index: Request an index for the column.
+
+    Examples:
+        >>> from typing import Annotated
+        >>> from ferro.models import Model
+        >>>
+        >>> class User(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     email: Annotated[str, FerroField(unique=True, index=True)]
     """
 
     def __init__(
@@ -20,15 +36,23 @@ class FerroField:
         unique: bool = False,
         index: bool = False,
     ):
-        """
-        Initialize Ferro field metadata.
+        """Initialize field metadata options
 
         Args:
-            primary_key: Whether this field is the primary key.
-            autoincrement: Whether the database should automatically increment this value.
-                Defaults to True for integer primary keys.
-            unique: Whether to enforce a uniqueness constraint.
-            index: Whether to create a database index for this column.
+
+            primary_key: Set to True when the field is the primary key.
+            autoincrement: Control whether the database auto-increments the value.
+                When not provided, the backend infers a default for integer primary keys.
+            unique: Set to True to enforce uniqueness.
+            index: Set to True to create a database index.
+
+        Examples:
+            >>> from typing import Annotated
+            >>> from ferro.models import Model
+            >>>
+            >>> class User(Model):
+            ...     id: Annotated[int, FerroField(primary_key=True)]
+            ...     created_at: Annotated[int, FerroField(index=True)]
         """
         self.primary_key = primary_key
         self.autoincrement = autoincrement
@@ -37,21 +61,46 @@ class FerroField:
 
 
 class ForeignKey:
-    """
-    Metadata for a forward relationship (One-to-Many or One-to-One).
+    """Describe a forward foreign-key relationship between models
+
+    Attributes:
+
+        to: Target model class resolved during model binding.
+        related_name: Name of the reverse relationship attribute on the target model.
+        on_delete: Referential action applied when the parent row is deleted.
+        unique: Treat the relation as one-to-one when True.
+
+    Examples:
+        >>> from typing import Annotated
+        >>> from ferro.models import Model
+        >>>
+        >>> class User(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        >>>
+        >>> class Post(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     author: Annotated[int, ForeignKey("posts", on_delete="CASCADE")]
     """
 
     def __init__(
         self, related_name: str, on_delete: str = "CASCADE", unique: bool = False
     ):
-        """
-        Initialize a Foreign Key relationship.
+        """Initialize foreign-key relationship metadata
 
         Args:
-            related_name: The name of the field to be added to the target model for reverse lookup.
-            on_delete: The referential action to take when the parent record is deleted.
-                Options: "CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", "NO ACTION".
-            unique: If True, this relationship is treated as a strict One-to-One link.
+
+            related_name: Name for reverse access from the related model.
+            on_delete: Referential action for parent deletion.
+                Common values include "CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", and "NO ACTION".
+            unique: Set to True to enforce one-to-one behavior.
+
+        Examples:
+            >>> from typing import Annotated
+            >>> from ferro.models import Model
+            >>>
+            >>> class User(Model):
+            ...     id: Annotated[int, FerroField(primary_key=True)]
+            ...     profile_id: Annotated[int, ForeignKey("user", unique=True)]
         """
         self.to = None  # Resolved later
         self.related_name = related_name
@@ -60,17 +109,42 @@ class ForeignKey:
 
 
 class ManyToManyField:
-    """
-    Metadata for a Many-to-Many relationship.
+    """Describe metadata for a many-to-many relationship
+
+    Attributes:
+
+        to: Target model class resolved during model binding.
+        related_name: Name of the reverse relationship attribute on the target model.
+        through: Optional join table name used for the association.
+
+    Examples:
+        >>> from typing import Annotated
+        >>> from ferro.models import Model
+        >>>
+        >>> class Tag(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        >>>
+        >>> class Post(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     tags: Annotated[list[int], ManyToManyField("posts")]
     """
 
     def __init__(self, related_name: str, through: str | None = None):
-        """
-        Initialize a Many-to-Many relationship.
+        """Initialize many-to-many relationship metadata
 
         Args:
-            related_name: The name of the field to be added to the target model for reverse lookup.
-            through: The name of the join table. If None, Ferro automatically generates one.
+
+            related_name: Name for reverse access from the related model.
+            through: Explicit join table name.
+                When omitted, Ferro generates a join table name automatically.
+
+        Examples:
+            >>> from typing import Annotated
+            >>> from ferro.models import Model
+            >>>
+            >>> class User(Model):
+            ...     id: Annotated[int, FerroField(primary_key=True)]
+            ...     teams: Annotated[list[int], ManyToManyField("members", through="team_members")]
         """
         self.to = None  # Resolved later
         self.related_name = related_name
