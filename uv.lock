@@ -539,6 +539,16 @@ alembic = [
     { name = "alembic" },
     { name = "sqlalchemy" },
 ]
+ci-lint = [
+    { name = "prek" },
+]
+ci-test = [
+    { name = "maturin" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pytest-examples" },
+]
 dev = [
     { name = "alembic" },
     { name = "commitizen" },
@@ -557,6 +567,12 @@ dev = [
     { name = "rich" },
     { name = "sqlalchemy" },
 ]
+docs = [
+    { name = "mkdocs-llmstxt" },
+    { name = "mkdocs-material" },
+    { name = "mkdocstrings", extra = ["python"] },
+    { name = "pymdown-extensions" },
+]
 release = [
     { name = "maturin" },
     { name = "python-semantic-release" },
@@ -569,6 +585,14 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.0" }]
 alembic = [
     { name = "alembic", specifier = ">=1.18.1" },
     { name = "sqlalchemy", specifier = ">=2.0.46" },
+]
+ci-lint = [{ name = "prek", specifier = ">=0.2.25" }]
+ci-test = [
+    { name = "maturin", specifier = ">=1.11.5" },
+    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "pytest-cov", specifier = ">=7.0.0" },
+    { name = "pytest-examples", specifier = ">=0.0.18" },
 ]
 dev = [
     { name = "alembic", specifier = ">=1.18.1" },
@@ -587,6 +611,12 @@ dev = [
     { name = "python-semantic-release", specifier = ">=9.0.0" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "sqlalchemy", specifier = ">=2.0.46" },
+]
+docs = [
+    { name = "mkdocs-llmstxt", specifier = ">=0.3.0" },
+    { name = "mkdocs-material", specifier = ">=9.5.0" },
+    { name = "mkdocstrings", extras = ["python"], specifier = ">=0.24.0" },
+    { name = "pymdown-extensions", specifier = ">=10.7.0" },
 ]
 release = [
     { name = "maturin", specifier = ">=1.11.5" },

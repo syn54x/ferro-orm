@@ -28,6 +28,22 @@ alembic = [
     "alembic>=1.18.1",
     "sqlalchemy>=2.0.46",
 ]
+ci-lint = [
+    "prek>=0.2.25",
+]
+ci-test = [
+    "maturin>=1.11.5",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=7.0.0",
+    "pytest-examples>=0.0.18",
+]
+docs = [
+    "mkdocs-material>=9.5.0",
+    "mkdocs-llmstxt>=0.3.0",
+    "mkdocstrings[python]>=0.24.0",
+    "pymdown-extensions>=10.7.0",
+]
 release = [
     "python-semantic-release>=9.0.0",
     "maturin>=1.11.5",
