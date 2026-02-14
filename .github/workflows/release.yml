@@ -166,5 +166,9 @@ jobs:
     needs: [release, publish]
     if: needs.release.outputs.release_created == 'true'
     uses: ./.github/workflows/publish-docs.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     with:
       ref: ${{ needs.release.outputs.release_ref }}
