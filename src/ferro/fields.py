@@ -26,6 +26,11 @@ _T = TypeVar("_T")
 def Field(
     default: Literal[Ellipsis],
     *,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    back_ref: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -60,10 +65,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    primary_key: bool = ...,
-    autoincrement: bool | None = ...,
-    unique: bool = ...,
-    index: bool = ...,
     **extra: Any,
 ) -> Any: ...
 
@@ -72,6 +73,11 @@ def Field(
 def Field(
     default: Any,
     *,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    back_ref: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -106,10 +112,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    primary_key: bool = ...,
-    autoincrement: bool | None = ...,
-    unique: bool = ...,
-    index: bool = ...,
     **extra: Any,
 ) -> Any: ...
 
@@ -118,6 +120,11 @@ def Field(
 def Field(
     default: _T,
     *,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    back_ref: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -152,10 +159,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    primary_key: bool = ...,
-    autoincrement: bool | None = ...,
-    unique: bool = ...,
-    index: bool = ...,
     **extra: Any,
 ) -> _T: ...
 
@@ -163,6 +166,11 @@ def Field(
 @overload
 def Field(
     *,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    back_ref: bool = ...,
     default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -198,10 +206,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    primary_key: bool = ...,
-    autoincrement: bool | None = ...,
-    unique: bool = ...,
-    index: bool = ...,
     **extra: Any,
 ) -> Any: ...
 
@@ -209,6 +213,11 @@ def Field(
 @overload
 def Field(
     *,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    back_ref: bool = ...,
     default_factory: Callable[[], _T] | Callable[[dict[str, Any]], _T],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -244,10 +253,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    primary_key: bool = ...,
-    autoincrement: bool | None = ...,
-    unique: bool = ...,
-    index: bool = ...,
     **extra: Any,
 ) -> _T: ...
 
@@ -255,6 +260,11 @@ def Field(
 @overload
 def Field(
     *,
+    primary_key: bool = ...,
+    autoincrement: bool | None = ...,
+    unique: bool = ...,
+    index: bool = ...,
+    back_ref: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -289,10 +299,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    primary_key: bool = ...,
-    autoincrement: bool | None = ...,
-    unique: bool = ...,
-    index: bool = ...,
     **extra: Any,
 ) -> Any: ...
 
@@ -304,6 +310,7 @@ def Field(
     autoincrement: bool | None | Any = _Unset,
     unique: bool | Any = _Unset,
     index: bool | Any = _Unset,
+    back_ref: bool | Any = _Unset,
     default_factory: Callable[[], Any]
     | Callable[[dict[str, Any]], Any]
     | None = _Unset,
@@ -352,6 +359,8 @@ def Field(
             When not provided, Ferro infers this for integer primary keys.
         unique: Add a uniqueness constraint for this column in Ferro.
         index: Request an index for this column in Ferro.
+        back_ref: Mark this field as a reverse relationship (same as BackRef in the type).
+            Do not use together with a BackRef annotation on the same field.
         default_factory: A callable to generate the default value. The callable can either take 0 arguments
             (in which case it is called as is) or a single argument containing the already validated data.
         alias: The name to use for the attribute when validating or serializing by alias.
@@ -424,6 +433,8 @@ def Field(
         ferro_kwargs["unique"] = unique
     if index is not _Unset:
         ferro_kwargs["index"] = index
+    if back_ref is not _Unset:
+        ferro_kwargs["back_ref"] = back_ref
 
     schema_extra = json_schema_extra
     if ferro_kwargs:

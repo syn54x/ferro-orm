@@ -10,13 +10,24 @@ from typing import (
 )
 
 from pydantic import BaseModel, Field as PydanticField
+from pydantic.fields import FieldInfo
 
 from ._core import register_model_schema
 from .base import FerroField, ForeignKey, ManyToManyField
 from .fields import FERRO_FIELD_EXTRA_KEY
-from .query import BackRelationship, FieldProxy
+from .query import BackRef, FieldProxy
 from .relations.descriptors import ForwardDescriptor
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+
+def _field_has_back_ref(obj: Any) -> bool:
+    """Return True if obj is a FieldInfo with back_ref=True in its Ferro extra."""
+    if not isinstance(obj, FieldInfo):
+        return False
+    extra = getattr(obj, "json_schema_extra", None)
+    if not isinstance(extra, dict):
+        return False
+    return extra.get(FERRO_FIELD_EXTRA_KEY, {}).get("back_ref") is True
 
 
 class ModelMetaclass(type(BaseModel)):
@@ -43,20 +54,43 @@ class ModelMetaclass(type(BaseModel)):
         fields_to_remove = []
 
         for field_name, hint in list(annotations.items()):
-            is_back = False
             origin = get_origin(hint)
-            if origin is BackRelationship:
-                is_back = True
-            elif isinstance(hint, str) and "BackRelationship" in hint:
-                is_back = True
-            elif (
-                isinstance(hint, ForwardRef)
-                and "BackRelationship" in hint.__forward_arg__
+            # Type-side back-ref: BackRef[...] in annotation (or inside Annotated)
+            is_back_type = origin is BackRef
+            if not is_back_type and origin is Annotated:
+                args = get_args(hint)
+                if args and get_origin(args[0]) is BackRef:
+                    is_back_type = True
+            if not is_back_type and isinstance(hint, str) and "BackRef" in hint:
+                is_back_type = True
+            if (
+                not is_back_type
+                and isinstance(hint, ForwardRef)
+                and "BackRef" in hint.__forward_arg__
             ):
-                is_back = True
+                is_back_type = True
 
-            if is_back:
-                local_relations[field_name] = "BackRelationship"
+            # Field-side back-ref: Field(back_ref=True) as default or in Annotated
+            is_back_field = False
+            default_val = namespace.get(field_name)
+            if _field_has_back_ref(default_val):
+                is_back_field = True
+            if not is_back_field and origin is Annotated:
+                for metadata in get_args(hint)[1:]:
+                    if isinstance(metadata, FieldInfo) and _field_has_back_ref(
+                        metadata
+                    ):
+                        is_back_field = True
+                        break
+
+            if is_back_type and is_back_field:
+                raise TypeError(
+                    f"Cannot use both BackRef and Field(back_ref=True) on the same "
+                    f"field '{field_name}'."
+                )
+
+            if is_back_type or is_back_field:
+                local_relations[field_name] = "BackRef"
                 fields_to_remove.append(field_name)
                 continue
 

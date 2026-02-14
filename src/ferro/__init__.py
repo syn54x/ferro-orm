@@ -20,7 +20,7 @@ from ._core import (
 from .base import FerroField, ForeignKey, ManyToManyField
 from .fields import Field
 from .models import Model, transaction
-from .query import BackRelationship
+from .query import BackRef
 
 # Set up the Ferro logger
 _logger = logging.getLogger("ferro")
@@ -58,7 +58,7 @@ __all__ = [
     "Field",
     "ForeignKey",
     "ManyToManyField",
-    "BackRelationship",
+    "BackRef",
     "version",
     "create_tables",
     "reset_engine",
