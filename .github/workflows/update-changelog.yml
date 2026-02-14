@@ -44,9 +44,11 @@ jobs:
           git config --local user.name "github-actions[bot]"
 
       - name: Generate unreleased changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Generate changelog for unreleased commits
-          uv run semantic-release changelog --unreleased
+          uv run semantic-release changelog
         continue-on-error: true
 
       - name: Check for changelog changes

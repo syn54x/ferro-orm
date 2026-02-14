@@ -62,6 +62,8 @@ jobs:
 
       - name: Determine next version
         id: next_version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NEXT_VERSION=$(uv run semantic-release version --print)
           echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
