@@ -1,0 +1,33 @@
+[project]
+name = "ferro"
+version = "0.1.0"
+description = "A high-performance, Rust-backed ORM for Python."
+readme = "README.md"
+authors = [
+    { name = "0x54", email = "taylor@sondr.co" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[tool.maturin]
+module-name = "ferro._core"
+python-packages = ["ferro"]
+python-source = "src"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+    "maturin>=1.11.5",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "rich>=14.2.0",
+]
