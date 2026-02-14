@@ -240,3 +240,5 @@ ferro_test.db
 .cursorrules
 playground.ipynb
 IMPLEMENTATION.md
+.cursor/rules/google-style-docstrings.mdc
+.cursor/skills/write-module-docstrings/SKILL.md

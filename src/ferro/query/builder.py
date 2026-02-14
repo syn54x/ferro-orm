@@ -1,3 +1,5 @@
+"""Build fluent query objects that serialize filter definitions for the Rust core"""
+
 import json
 from typing import TYPE_CHECKING, Any, Generic, Type, TypeVar
 
@@ -18,12 +20,25 @@ T = TypeVar("T")
 
 
 class Query(Generic[T]):
-    """
-    A fluent query builder that collects conditions and parameters
-    to be executed by the Rust engine.
+    """Build and execute fluent ORM queries.
+
+    Attributes:
+        model_cls: Model class used to hydrate results.
+        where_clause: Accumulated filter nodes for the query.
+        order_by_clause: Sort definitions sent to the Rust core.
     """
 
     def __init__(self, model_cls: Type[T]):
+        """Initialize a query for a model class.
+
+        Args:
+            model_cls: Model class that defines the target table.
+
+        Examples:
+            >>> query = Query(User)
+            >>> query.model_cls is User
+            True
+        """
         self.model_cls = model_cls
         self.where_clause: list["QueryNode"] = []
         self.order_by_clause: list[dict[str, str]] = []
@@ -34,7 +49,7 @@ class Query(Generic[T]):
     def _m2m(
         self, join_table: str, source_col: str, target_col: str, source_id: Any
     ) -> "Query[T]":
-        """Internal helper to set Many-to-Many context."""
+        """Store many-to-many linkage context for relationship operations"""
         self._m2m_context = {
             "join_table": join_table,
             "source_col": source_col,
@@ -44,21 +59,24 @@ class Query(Generic[T]):
         return self
 
     def where(self, node: "QueryNode") -> "Query[T]":
-        """
-        Add a filter condition to the query.
+        """Add a filter condition to the query
 
         Args:
             node: A QueryNode representing the condition (e.g., User.id == 1).
 
         Returns:
             The current Query instance for chaining.
+
+        Examples:
+            >>> query = User.where(User.id == 1)
+            >>> isinstance(query, Query)
+            True
         """
         self.where_clause.append(node)
         return self
 
     def order_by(self, field: Any, direction: str = "asc") -> "Query[T]":
-        """
-        Add an ordering clause to the query.
+        """Add an ordering clause to the query
 
         Args:
             field: The field to order by (e.g., User.username).
@@ -66,6 +84,14 @@ class Query(Generic[T]):
 
         Returns:
             The current Query instance for chaining.
+
+        Raises:
+            ValueError: If direction is not "asc" or "desc".
+
+        Examples:
+            >>> query = User.select().order_by(User.username, "desc")
+            >>> query.order_by_clause[-1]["direction"]
+            'desc'
         """
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
@@ -77,37 +103,49 @@ class Query(Generic[T]):
         return self
 
     def limit(self, value: int) -> "Query[T]":
-        """
-        Limit the number of records returned.
+        """Limit the number of records returned
 
         Args:
             value: The maximum number of records to return.
 
         Returns:
             The current Query instance for chaining.
+
+        Examples:
+            >>> query = User.select().limit(10)
+            >>> query._limit
+            10
         """
         self._limit = value
         return self
 
     def offset(self, value: int) -> "Query[T]":
-        """
-        Skip a specific number of records.
+        """Skip a specific number of records
 
         Args:
             value: The number of records to skip.
 
         Returns:
             The current Query instance for chaining.
+
+        Examples:
+            >>> query = User.select().offset(20)
+            >>> query._offset
+            20
         """
         self._offset = value
         return self
 
     async def all(self) -> list[T]:
-        """
-        Execute the query and return all matching hydrated model instances.
+        """Return all model instances that match the current query
 
         Returns:
             A list of model instances.
+
+        Examples:
+            >>> users = await User.where(User.active == True).all()
+            >>> isinstance(users, list)
+            True
         """
         query_def = {
             "model_name": self.model_cls.__name__,
@@ -127,11 +165,15 @@ class Query(Generic[T]):
         return results
 
     async def count(self) -> int:
-        """
-        Execute the query and return the total number of matching records.
+        """Return the number of records that match the current query
 
         Returns:
             The count of matching records.
+
+        Examples:
+            >>> total = await User.where(User.active == True).count()
+            >>> isinstance(total, int)
+            True
         """
         query_def = {
             "model_name": self.model_cls.__name__,
@@ -145,15 +187,19 @@ class Query(Generic[T]):
             self.model_cls.__name__, json.dumps(query_def), tx_id
         )
 
-    async def update(self, **kwargs) -> int:
-        """
-        Execute a batch update on all records matching the current query.
+    async def update(self, **fields) -> int:
+        """Update all records matching the current query
 
         Args:
-            **kwargs: Field names and values to update.
+            **fields: Field names and values to update.
 
         Returns:
             The number of records updated.
+
+        Examples:
+            >>> updated = await User.where(User.id == 1).update(name="Taylor")
+            >>> isinstance(updated, int)
+            True
         """
         query_def = {
             "model_name": self.model_cls.__name__,
@@ -170,16 +216,20 @@ class Query(Generic[T]):
         return await update_filtered(
             self.model_cls.__name__,
             json.dumps(query_def),
-            to_json(kwargs).decode(),
+            to_json(fields).decode(),
             tx_id,
         )
 
     async def first(self) -> T | None:
-        """
-        Execute the query and return the first matching record, or None.
+        """Return the first matching record, or None
 
         Returns:
             A model instance or None.
+
+        Examples:
+            >>> user = await User.select().order_by(User.id).first()
+            >>> user is None or isinstance(user, User)
+            True
         """
         old_limit = self._limit
         self._limit = 1
@@ -190,11 +240,15 @@ class Query(Generic[T]):
             self._limit = old_limit
 
     async def delete(self) -> int:
-        """
-        Execute a batch deletion on all records matching the current query.
+        """Delete all records matching the current query
 
         Returns:
             The number of records deleted.
+
+        Examples:
+            >>> deleted = await User.where(User.disabled == True).delete()
+            >>> isinstance(deleted, int)
+            True
         """
         query_def = {
             "model_name": self.model_cls.__name__,
@@ -210,16 +264,33 @@ class Query(Generic[T]):
         )
 
     async def exists(self) -> bool:
-        """
-        Check if at least one record matches the current query.
+        """Return whether at least one record matches the current query
 
         Returns:
             True if records exist, otherwise False.
+
+        Examples:
+            >>> found = await User.where(User.email == "a@b.com").exists()
+            >>> isinstance(found, bool)
+            True
         """
         return await self.count() > 0
 
     async def add(self, *instances: Any) -> None:
-        """Add links to a Many-to-Many relationship."""
+        """Add links to a many-to-many relationship
+
+        Args:
+            *instances: Target model instances that provide an ``id`` attribute.
+
+        Raises:
+            RuntimeError: If the query is not bound to a many-to-many context.
+
+        Examples:
+            >>> user = await User.create(email="taylor@example.com")
+            >>> admin = await Group.create(name="admin")
+            >>> staff = await Group.create(name="staff")
+            >>> await user.groups.add(admin, staff)
+        """
         if not self._m2m_context:
             raise RuntimeError(
                 "'.add()' can only be used on Many-to-Many relationships"
@@ -243,7 +314,19 @@ class Query(Generic[T]):
         )
 
     async def remove(self, *instances: Any) -> None:
-        """Remove links from a Many-to-Many relationship."""
+        """Remove links from a many-to-many relationship
+
+        Args:
+            *instances: Target model instances that provide an ``id`` attribute.
+
+        Raises:
+            RuntimeError: If the query is not bound to a many-to-many context.
+
+        Examples:
+            >>> user = await User.create(email="taylor@example.com")
+            >>> admin = await Group.create(name="admin")
+            >>> await user.groups.remove(admin)
+        """
         if not self._m2m_context:
             raise RuntimeError(
                 "'.remove()' can only be used on Many-to-Many relationships"
@@ -266,7 +349,15 @@ class Query(Generic[T]):
         )
 
     async def clear(self) -> None:
-        """Clear all links in a Many-to-Many relationship."""
+        """Clear all links in a many-to-many relationship
+
+        Raises:
+            RuntimeError: If the query is not bound to a many-to-many context.
+
+        Examples:
+            >>> user = await User.create(email="taylor@example.com")
+            >>> await user.groups.clear()
+        """
         if not self._m2m_context:
             raise RuntimeError(
                 "'.clear()' can only be used on Many-to-Many relationships"
@@ -283,16 +374,33 @@ class Query(Generic[T]):
         )
 
     def __repr__(self):
+        """Return a developer-friendly representation of the query"""
         return f"<Query model={self.model_cls.__name__} where={self.where_clause}>"
 
 
 class BackRelationship(Query[T]):
-    """
-    Marker for a reverse relationship query that provides full Query intellisense.
+    """Represent reverse relationship queries with Query typing support
+
+    Examples:
+        >>> class User(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     name: str
+        ...     posts: BackRelationship[list["Post"]] = None
+
+        >>> class Post(Model):
+        ...     id: Annotated[int, FerroField(primary_key=True)]
+        ...     title: str
+        ...     user: Annotated[User, ForeignKey(related_name="posts")]
+
+        >>> user = await User.get(1)
+        >>> posts = await user.posts.all()
+        >>> isinstance(posts, list)
+        True
     """
 
     @classmethod
     def __get_pydantic_core_schema__(cls, _source_type, _handler):
+        """Allow pydantic-core to treat relationships as arbitrary runtime values"""
         from pydantic_core import core_schema
 
         return core_schema.any_schema()

@@ -1,11 +1,9 @@
 # /// script
 # dependencies = [
 #     "pydantic>=2.0",
-#     "ferro",
+#     "ferro-orm",
 #     "rich",
 # ]
-# [tool.uv.sources]
-# ferro = { path = ".." }
 # ///
 
 import os
