@@ -11,14 +11,21 @@ from ._core import (
     create_tables,
     reset_engine,
     version,
+    evict_instance,
+    begin_transaction,
+    commit_transaction,
+    rollback_transaction,
 )
-from .models import Model
+from .models import FerroField, Model, transaction
 
 __all__ = [
     "connect",
     "Model",
+    "FerroField",
     "version",
     "create_tables",
     "reset_engine",
     "clear_registry",
+    "evict_instance",
+    "transaction",
 ]
