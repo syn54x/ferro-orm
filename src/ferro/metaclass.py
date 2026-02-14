@@ -173,7 +173,7 @@ class ModelMetaclass(type(BaseModel)):
 
                         for f_name, metadata in local_relations.items():
                             if isinstance(metadata, ForeignKey):
-                                id_field = f"{field_name}_id"
+                                id_field = f"{f_name}_id"
                                 if id_field in schema["properties"]:
                                     target_name = (
                                         metadata.to

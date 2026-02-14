@@ -106,11 +106,17 @@ class Query(Generic[T]):
             "limit": self._limit,
             "offset": self._offset,
         }
+        from pydantic_core import to_json
+
         from ..state import _CURRENT_TRANSACTION
 
         tx_id = _CURRENT_TRANSACTION.get()
+        # Use pydantic_core.to_json to handle Decimals, UUIDs, etc. in kwargs
         return await update_filtered(
-            self.model_cls.__name__, json.dumps(query_def), json.dumps(kwargs), tx_id
+            self.model_cls.__name__,
+            json.dumps(query_def),
+            to_json(kwargs).decode(),
+            tx_id,
         )
 
     async def first(self) -> T | None:
