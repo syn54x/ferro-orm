@@ -8,18 +8,24 @@
 # ferro = { path = ".." }
 # ///
 
-from asyncio import run
 import os
 from datetime import datetime, timezone
 from typing import Annotated
 
 from pydantic import Field
 from rich.console import Console
-from rich.syntax import Syntax
 from rich.panel import Panel
-from rich.table import Table
+from rich.syntax import Syntax
 
-from ferro import FerroField, Model, connect
+from ferro import (
+    BackRelationship,
+    FerroField,
+    ForeignKey,
+    ManyToManyField,
+    Model,
+    connect,
+    transaction,
+)
 
 console = Console()
 
@@ -31,17 +37,37 @@ def show_step(title: str, code: str):
     console.print(Panel(syntax, expand=False, border_style="dim"))
 
 
-# 1. Define a high-performance model
+# 1. Define relationship-aware models
+class Category(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str
+    # Reverse lookup marker (Zero-Boilerplate)
+    products: BackRelationship[list["Product"]] = None
+
+
 class Product(Model):
-    id: Annotated[int | None, FerroField(primary_key=True, autoincrement=True)] = Field(
-        default=None
-    )
+    id: Annotated[int | None, FerroField(primary_key=True, autoincrement=True)] = None
     name: Annotated[str, FerroField(index=True)]
     price: float
-    category: Annotated[str, FerroField(index=True)]
+    # Foreign Key linking to Category
+    category: Annotated[
+        Category, ForeignKey(related_name="products", on_delete="CASCADE")
+    ]
     in_stock: bool
     sku: Annotated[str | None, FerroField(unique=True)] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class Actor(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str
+    movies: Annotated[list["Movie"], ManyToManyField(related_name="actors")] = None
+
+
+class Movie(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    title: str
+    actors: BackRelationship[list[Actor]] = None
 
 
 async def run_demo():
@@ -49,25 +75,36 @@ async def run_demo():
     db_file = "demo.db"
     if os.path.exists(db_file):
         os.remove(db_file)
-    
-    console.print(Panel.fit("[bold green]🚀 Ferro High-Performance ORM Demo[/bold green]", border_style="bold green"))
-    
+
+    console.print(
+        Panel.fit(
+            "[bold green]🚀 Ferro High-Performance ORM Demo[/bold green]",
+            border_style="bold green",
+        )
+    )
+
     console.print(f"🚀 Connecting to Ferro Engine ({db_file})...")
+    # connect() automatically resolves relationships and creates tables
     await connect(f"sqlite:{db_file}?mode=rwc", auto_migrate=True)
 
-    # 3. Seed 10 items (High-Performance .save())
-    console.print("📦 Seeding initial products...")
+    # 2. Seeding with Relationships
+    console.print("📦 Seeding initial data...")
+
+    electronics = await Category.create(name="Electronics")
+    appliances = await Category.create(name="Appliances")
+    furniture = await Category.create(name="Furniture")
+
     data = [
-        ("Laptop", 1200.0, "Electronics", True, "LPT-001"),
-        ("Smartphone", 800.0, "Electronics", True, "PHN-001"),
-        ("Headphones", 150.0, "Electronics", True, "HDP-001"),
-        ("Monitor", 300.0, "Electronics", False, "MON-001"),
-        ("Coffee Maker", 80.0, "Appliances", True, "COF-001"),
-        ("Toaster", 30.0, "Appliances", True, "TST-001"),
-        ("Desk Chair", 250.0, "Furniture", True, "CHR-001"),
-        ("Bookshelf", 120.0, "Furniture", True, "BSH-001"),
-        ("Mechanical Keyboard", 120.0, "Electronics", True, "KBD-001"),
-        ("Gaming Mouse", 60.0, "Electronics", True, "MSE-001"),
+        ("Laptop", 1200.0, electronics, True, "LPT-001"),
+        ("Smartphone", 800.0, electronics, True, "PHN-001"),
+        ("Headphones", 150.0, electronics, True, "HDP-001"),
+        ("Monitor", 300.0, electronics, False, "MON-001"),
+        ("Coffee Maker", 80.0, appliances, True, "COF-001"),
+        ("Toaster", 30.0, appliances, True, "TST-001"),
+        ("Desk Chair", 250.0, furniture, True, "CHR-001"),
+        ("Bookshelf", 120.0, furniture, True, "BSH-001"),
+        ("Mechanical Keyboard", 120.0, electronics, True, "KBD-001"),
+        ("Gaming Mouse", 60.0, electronics, True, "MSE-001"),
     ]
 
     for name, price, cat, stock, sku in data:
@@ -77,194 +114,142 @@ async def run_demo():
 
     console.print("\n[bold yellow]--- 🔍 Running Fluent Queries ---[/bold yellow]")
 
+    # 3. Filtering through relationships
+    show_step(
+        "Filter by Relationship ID",
+        "results = await Product.where(Product.category_id == electronics.id).all()",
+    )
+    electronics_products = await Product.where(
+        Product.category_id == electronics.id
+    ).all()
+    console.print(
+        f"✅ Found [bold green]{len(electronics_products)}[/bold green] Electronics products."
+    )
+
     # 4. Basic Filter (Operators)
-    show_step("Basic Filter (==)", 'electronics = await Product.where(Product.category == "Electronics").all()')
-    electronics = await Product.where(Product.category == "Electronics").all()
-    console.print(f"✅ Found [bold green]{len(electronics)}[/bold green] Electronics.")
-
-    # 5. Range Queries (>=, <)
-    show_step("Range Queries (>=)", 'expensive = await Product.where(Product.price >= 500).all()')
+    show_step(
+        "Range Queries (>=)",
+        "expensive = await Product.where(Product.price >= 500).all()",
+    )
     expensive = await Product.where(Product.price >= 500).all()
-    console.print(f"💰 Expensive items (>= 500): [cyan]{[p.name for p in expensive]}[/cyan]")
-
-    # 6. The 'IN' Operator (<< Shorthand)
-    show_step("The 'IN' Operator (<<)", 'subset = await Product.where(Product.name << ["Laptop", "Smartphone", "Monitor"]).all()')
-    subset = await Product.where(
-        Product.name << ["Laptop", "Smartphone", "Monitor"]
-    ).all()
-    console.print(f"📥 Batch Lookup: [cyan]{[p.name for p in subset]}[/cyan]")
-
-    # 7. Chaining & Pagination (.limit, .offset)
-    show_step("Pagination (.limit, .offset)", 'paged = await Product.where(Product.category == "Electronics").limit(2).offset(1).all()')
-    paged = (
-        await Product.where(Product.category == "Electronics").limit(2).offset(1).all()
+    console.print(
+        f"💰 Expensive items (>= 500): [cyan]{[p.name for p in expensive]}[/cyan]"
     )
-    console.print(f"📄 Electronics Page 2: [cyan]{[p.name for p in paged]}[/cyan]")
 
-    # 7.1 Ordering & Counting
-    show_step("Ordering & Counting", 'count = await Product.where(Product.category == "Electronics").count()\n'
-                                     'ordered = await Product.where(...).order_by(Product.price, direction="desc").all()')
-    
-    electronics_count = await Product.where(Product.category == "Electronics").count()
-    console.print(f"📱 Electronics count: [bold green]{electronics_count}[/bold green]")
-
-    ordered = (
-        await Product.where(Product.category == "Electronics")
-        .order_by(Product.price, direction="desc")
-        .all()
+    # 5. Chaining & Pagination
+    show_step(
+        "Pagination & Ordering",
+        'ordered = await Product.select().order_by(Product.price, "desc").limit(3).all()',
     )
-    console.print(f"⬇️  Electronics (Price Desc): [cyan]{[(p.name, p.price) for p in ordered]}[/cyan]")
+    top_3 = await Product.select().order_by(Product.price, "desc").limit(3).all()
+    for p in top_3:
+        console.print(f"🔝 [cyan]{p.name}[/cyan]: ${p.price}")
 
-    # 8. Single Result (.first())
-    show_step("Fetch Single Result (.first())", 'first_cheap = await Product.where(Product.price < 50).first()')
-    first_cheap = await Product.where(Product.price < 50).first()
-    console.print(f"🏷️ First item under $50: [bold cyan]{first_cheap.name if first_cheap else 'None'}[/bold cyan]")
+    # 6. RELATIONSHIP POWER
+    console.print("\n[bold yellow]--- 🔗 Relationship Features ---[/bold yellow]")
 
-    # 9. Complex Logic (OR/AND)
-    show_step("Complex Logic (OR / AND)", 'query = (Product.category == "Appliances") | (Product.price > 1000)\n'
-                                          'results = await Product.where(query).all()')
-    complex_query = await Product.where(
-        (Product.category == "Appliances") | (Product.price > 1000)
-    ).all()
-    console.print(f"🔹 (Appliances OR Price > 1000): [cyan]{[p.name for p in complex_query]}[/cyan]")
-
-    # 10. SQL Injection Protection
-    show_step("SQL Injection Protection", "injection = \"' OR '1'='1\"\n"
-                                           "safe = await Product.where(Product.name == injection).first()")
-    injection = "' OR '1'='1"
-    safe = await Product.where(Product.name == injection).first()
-    console.print(f"🛡️  SQL Injection check: {'[bold red]Bypassed![/bold red]' if safe else '[bold green]Safe (No results)[/bold green]'}")
-
-    # 11. Deletion
-    console.print("\n[bold yellow]--- 🗑️  Deletion ---[/bold yellow]")
-    show_step("Instance Deletion", 'await toaster.delete()')
-    toaster = await Product.where(Product.name == "Toaster").first()
-    if toaster:
-        await toaster.delete()
-        check = await Product.where(Product.name == "Toaster").first()
-        console.print(f"🔍 Toaster exists after delete? {'Yes' if check else '[bold green]No[/bold green]'}")
-
-    show_step("Bulk Deletion", 'await Product.where(Product.category == "Appliances").delete()')
-    deleted_count = await Product.where(Product.category == "Appliances").delete()
-    console.print(f"✅ Deleted [bold red]{deleted_count}[/bold red] records.")
-
-    # 12. Bulk Update
-    console.print("\n[bold yellow]--- 📝 Bulk Update ---[/bold yellow]")
-    show_step("Bulk Update", 'await Product.where(Product.category == "Electronics").update(price=999.99)')
-    updated = await Product.where(Product.category == "Electronics").update(
-        price=999.99
+    show_step(
+        "Lazy Loading (Forward)",
+        'laptop = await Product.where(Product.name == "Laptop").first()\n'
+        "category = await laptop.category  # Fetched on demand",
     )
-    console.print(f"✅ Updated [bold green]{updated}[/bold green] electronics.")
-
-    # 13. Convenience Helpers
-    console.print("\n[bold yellow]--- 🛠️  Convenience Helpers ---[/bold yellow]")
-    
-    show_step(".exists()", 'await Product.where(Product.name == "Laptop").exists()')
-    has_laptops = await Product.where(Product.name == "Laptop").exists()
-    console.print(f"🧐 Do we have Laptops? {'[bold green]Yes[/bold green]' if has_laptops else 'No'}")
-
-    show_step(".create()", 'new = await Product.create(name="VR Headset", ...)')
-    new_product = await Product.create(
-        name="VR Headset", price=499.99, category="Electronics", in_stock=True, sku="VR-001"
-    )
-    console.print(f"🆕 Created: [bold green]{new_product.name}[/bold green] (ID: {new_product.id})")
-
-    show_step(".get_or_create()", 'mouse, created = await Product.get_or_create(name="Gaming Mouse")')
-    mouse, created = await Product.get_or_create(name="Gaming Mouse")
-    console.print(f"🤝 Mouse: [bold cyan]{mouse.name}[/bold cyan], Created? {created}")
-
-    # 18. Instance Refreshing
-    console.print("\n[bold yellow]--- 🔄 Instance Refreshing ---[/bold yellow]")
-    show_step("Refreshing an instance", 'laptop = await Product.where(Product.name == "Laptop").first()\n'
-                                         'await Product.where(Product.id == laptop.id).update(price=50.0)\n'
-                                         '# laptop.price is still 999.99 in Python memory\n'
-                                         'await laptop.refresh()\n'
-                                         '# laptop.price is now 50.0')
-    
     laptop = await Product.where(Product.name == "Laptop").first()
-    old_price = laptop.price
-    await Product.where(Product.id == laptop.id).update(price=50.0)
-    
-    console.print(f"💻 Laptop price in memory: [cyan]{old_price}[/cyan]")
-    await laptop.refresh()
-    console.print(f"🔄 Laptop price after refresh: [bold green]{laptop.price}[/bold green]")
+    category = await laptop.category
+    console.print(f"💻 Laptop Category: [bold green]{category.name}[/bold green]")
 
-    # 14. String Searching
-    console.print("\n[bold yellow]--- 🔍 String Searching ---[/bold yellow]")
-    
-    show_step(".like()", 'results = await Product.where(Product.name.like("Lap%")).all()')
-    laptops = await Product.where(Product.name.like("Lap%")).all()
-    console.print(f"💻 Found Laptops: [cyan]{[p.name for p in laptops]}[/cyan]")
+    show_step(
+        "Reverse Lookup (Zero-Boilerplate)",
+        'cat = await Category.where(Category.name == "Appliances").first()\n'
+        "products = await cat.products.all()  # .products returns a Query object!",
+    )
+    app_cat = await Category.where(Category.name == "Appliances").first()
+    app_products = await app_cat.products.all()
+    console.print(f"🏠 Appliances found: [cyan]{[p.name for p in app_products]}[/cyan]")
 
-    show_step(".in_()", 'results = await Product.where(Product.category.in_(["Electronics", "Toys"])).all()')
-    in_results = await Product.where(Product.category.in_(["Electronics", "Toys"])).all()
-    console.print(f"📥 Found in Electronics or Toys: [bold green]{len(in_results)}[/bold green] products.")
+    show_step(
+        "Reverse Lookup with Filtering",
+        "electronics_in_stock = await electronics.products.where(Product.in_stock == True).all()",
+    )
+    stock_electronics = await electronics.products.where(Product.in_stock == True).all()
+    console.print(
+        f"📱 In-stock Electronics: [bold green]{len(stock_electronics)}[/bold green]"
+    )
 
-    # 15. Temporal Types
-    console.print("\n[bold yellow]--- ⏰ Temporal Types ---[/bold yellow]")
-    
-    show_step("Filtering by DateTime", 'now = datetime.now(timezone.utc)\n'
-                                       'old_products = await Product.where(Product.created_at < now).all()')
-    now = datetime.now(timezone.utc)
-    old_products = await Product.where(Product.created_at < now).all()
-    console.print(f"⌛ Found [bold green]{len(old_products)}[/bold green] products created before now.")
-    if old_products:
-        p = old_products[0]
-        console.print(f"👤 Product: {p.name}, Created At: [cyan]{p.created_at}[/cyan] (Type: {type(p.created_at).__name__})")
+    # 7. MANY-TO-MANY (M2M)
+    console.print("\n[bold yellow]--- 🤝 Many-to-Many Relationships ---[/bold yellow]")
 
-    # 16. Structural Types
-    console.print("\n[bold yellow]--- 🏗️ Structural Types ---[/bold yellow]")
-    
-    import uuid
-    from decimal import Decimal
-    show_step("UUID & Decimal Filtering", 'uid = uuid.uuid4()\n'
-                                           'await Product.create(name="Special Item", sku=str(uid), price=99.99)\n'
-                                           'item = await Product.where(Product.sku == uid).first()')
-    
-    # Use a real UUID for testing (sku is a string field but we can use UUID objects in queries)
-    test_uid = uuid.uuid4()
-    await Product.create(name="Special Item", sku=str(test_uid), price=99.99, category="Special", in_stock=True)
-    
-    special_item = await Product.where(Product.sku == test_uid).first()
-    if special_item:
-        console.print(f"🆔 Found by UUID: [bold green]{special_item.name}[/bold green]")
-    
-    show_step("Decimal Support", 'await Product.where(Product.price > Decimal("500.00")).all()')
-    expensive_decimal = await Product.where(Product.price > Decimal("500.00")).all()
-    console.print(f"💰 Found [bold green]{len(expensive_decimal)}[/bold green] expensive items using Decimal.")
+    show_step(
+        "M2M Setup & Mutation",
+        'keanu = await Actor.create(name="Keanu Reeves")\n'
+        'laurence = await Actor.create(name="Laurence Fishburne")\n'
+        'matrix = await Movie.create(title="The Matrix")\n'
+        "await keanu.movies.add(matrix)\n"
+        "await laurence.movies.add(matrix)",
+    )
 
-    # 17. Transaction Support
+    keanu = await Actor.create(name="Keanu Reeves")
+    laurence = await Actor.create(name="Laurence Fishburne")
+    matrix = await Movie.create(title="The Matrix")
+
+    await keanu.movies.add(matrix)
+    await laurence.movies.add(matrix)
+
+    show_step(
+        "M2M Querying (Bi-directional)",
+        "keanu_movies = await keanu.movies.all()\n"
+        "matrix_actors = await matrix.actors.all()",
+    )
+
+    keanu_movies = await keanu.movies.all()
+    matrix_actors = await matrix.actors.all()
+
+    console.print(f"🎬 Keanu's Movies: [cyan]{[m.title for m in keanu_movies]}[/cyan]")
+    console.print(f"👥 Matrix Actors: [cyan]{[a.name for a in matrix_actors]}[/cyan]")
+
+    # 8. Transactions
     console.print("\n[bold yellow]--- ⚛️ Transaction Support ---[/bold yellow]")
-    from ferro import transaction
-    
-    show_step("Atomic Transaction (Success)", 'async with ferro.transaction():\n'
-                                               '    await Product.create(name="Atomic Item 1", ...)\n'
-                                               '    await Product.create(name="Atomic Item 2", ...)')
-    
-    async with transaction():
-        await Product.create(name="Atomic Item 1", price=10.0, category="Atomic", in_stock=True, sku="ATM-001")
-        await Product.create(name="Atomic Item 2", price=20.0, category="Atomic", in_stock=True, sku="ATM-002")
-    
-    atomic_count = await Product.where(Product.category == "Atomic").count()
-    console.print(f"✅ Transaction Committed: [bold green]{atomic_count}[/bold green] items created.")
 
-    show_step("Atomic Transaction (Rollback)", 'try:\n'
-                                               '    async with ferro.transaction():\n'
-                                               '        await Product.create(name="Fail Item", ...)\n'
-                                               '        raise ValueError("Rollback!")\n'
-                                               'except ValueError: pass')
-    
-    try:
-        async with transaction():
-            await Product.create(name="Fail Item", price=0.0, category="Atomic", in_stock=True, sku="FAIL-001")
-            raise ValueError("Intentional Failure")
-    except ValueError:
-        pass
-    
-    fail_check = await Product.where(Product.name == "Fail Item").exists()
-    console.print(f"🛡️  Transaction Rolled Back: Fail Item exists? {'Yes' if fail_check else '[bold green]No[/bold green]'}")
+    show_step(
+        "Atomic Transaction",
+        "async with ferro.transaction():\n"
+        '    new_cat = await Category.create(name="New Category")\n'
+        '    await Product.create(name="Atomic Item", category=new_cat, ...)',
+    )
+
+    async with transaction():
+        new_cat = await Category.create(name="Gaming")
+        await Product.create(
+            name="RTX 5090",
+            price=1999.99,
+            category=new_cat,
+            in_stock=True,
+            sku="GPU-5090",
+        )
+
+    gpu = await Product.where(Product.name == "RTX 5090").first()
+    gpu_cat = await gpu.category
+    console.print(
+        f"✅ Transaction Committed: [bold green]{gpu.name}[/bold green] in [bold green]{gpu_cat.name}[/bold green]"
+    )
+
+    # 9. Instance Refreshing
+    console.print("\n[bold yellow]--- 🔄 Instance Refreshing ---[/bold yellow]")
+    show_step(
+        "Refreshing an instance",
+        "await Product.where(Product.id == laptop.id).update(price=50.0)\n"
+        "await laptop.refresh()",
+    )
+
+    await Product.where(Product.id == laptop.id).update(price=50.0)
+    await laptop.refresh()
+    console.print(
+        f"🔄 Laptop price after refresh: [bold green]${laptop.price}[/bold green]"
+    )
+
+    console.print("\n[bold green]🏁 Demo Complete![/bold green]")
 
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(run_demo())
