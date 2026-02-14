@@ -41,6 +41,7 @@ async def db_engine():
 def cleanup_models():
     """Clear the Model engine and registry between tests."""
     from ferro import reset_engine, clear_registry
+
     yield
     reset_engine()
     clear_registry()

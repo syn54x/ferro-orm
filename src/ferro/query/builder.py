@@ -145,7 +145,9 @@ class Query(Generic[T]):
     async def add(self, *instances: Any) -> None:
         """Add links to a Many-to-Many relationship."""
         if not self._m2m_context:
-            raise RuntimeError("'.add()' can only be used on Many-to-Many relationships")
+            raise RuntimeError(
+                "'.add()' can only be used on Many-to-Many relationships"
+            )
 
         ids = []
         for inst in instances:
@@ -190,7 +192,9 @@ class Query(Generic[T]):
     async def clear(self) -> None:
         """Clear all links in a Many-to-Many relationship."""
         if not self._m2m_context:
-            raise RuntimeError("'.clear()' can only be used on Many-to-Many relationships")
+            raise RuntimeError(
+                "'.clear()' can only be used on Many-to-Many relationships"
+            )
 
         from ..state import _CURRENT_TRANSACTION
 

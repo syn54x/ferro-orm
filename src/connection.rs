@@ -3,11 +3,11 @@
 //! This module handles database connections, pool initialization,
 //! and engine resets.
 
+use crate::schema::internal_create_tables;
+use crate::state::{ENGINE, IDENTITY_MAP};
 use pyo3::prelude::*;
 use sqlx::any::AnyPoolOptions;
 use std::sync::Arc;
-use crate::state::{ENGINE, IDENTITY_MAP};
-use crate::schema::internal_create_tables;
 
 /// Initializes the global database connection pool.
 ///
@@ -40,9 +40,9 @@ pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Boun
             internal_create_tables(arc_pool.clone()).await?;
         }
 
-        let mut engine = ENGINE.write().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine")
-        })?;
+        let mut engine = ENGINE
+            .write()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine"))?;
         *engine = Some(arc_pool);
 
         println!("⚡️ Ferro Engine: Connected to {}", url);
@@ -59,9 +59,9 @@ pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Boun
 /// Returns a `PyErr` if the engine lock cannot be acquired.
 #[pyfunction]
 pub fn reset_engine() -> PyResult<()> {
-    let mut engine = ENGINE.write().map_err(|_| {
-        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine")
-    })?;
+    let mut engine = ENGINE
+        .write()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine"))?;
     *engine = None;
     IDENTITY_MAP.clear();
     Ok(())

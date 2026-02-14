@@ -2,13 +2,23 @@ import pytest
 import sqlite3
 import os
 from typing import Annotated
-from ferro import Model, connect, FerroField, ForeignKey, BackRelationship, reset_engine, clear_registry
+from ferro import (
+    Model,
+    connect,
+    FerroField,
+    ForeignKey,
+    BackRelationship,
+    reset_engine,
+    clear_registry,
+)
+
 
 @pytest.fixture(autouse=True)
 def cleanup():
     reset_engine()
     clear_registry()
     from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
     _MODEL_REGISTRY_PY.clear()
     _PENDING_RELATIONS.clear()
     if os.path.exists("test_1to1.db"):
@@ -16,6 +26,7 @@ def cleanup():
     yield
     if os.path.exists("test_1to1.db"):
         os.remove("test_1to1.db")
+
 
 @pytest.mark.asyncio
 async def test_one_to_one_relationship():
@@ -55,7 +66,7 @@ async def test_one_to_one_relationship():
     cursor = conn.cursor()
     cursor.execute("PRAGMA index_list('profile')")
     indexes = cursor.fetchall()
-    
+
     # One of the indexes should be unique for user_id
     has_unique_user_id = False
     for idx in indexes:
@@ -63,10 +74,12 @@ async def test_one_to_one_relationship():
         cursor.execute(f"PRAGMA index_info('{idx_name}')")
         info = cursor.fetchall()
         # info rows: (seqno, cid, name)
-        if any(row[2] == "user_id" for row in info) and idx[2] == 1: # idx[2] is unique flag
+        if (
+            any(row[2] == "user_id" for row in info) and idx[2] == 1
+        ):  # idx[2] is unique flag
             has_unique_user_id = True
             break
-    
+
     assert has_unique_user_id, "Expected unique index on profile.user_id"
     conn.close()
 
@@ -74,6 +87,7 @@ async def test_one_to_one_relationship():
     with pytest.raises(Exception):
         # Should fail because alice already has a profile
         await Profile.create(bio="Another bio", user=alice)
+
 
 if __name__ == "__main__":
     pytest.main([__file__])
