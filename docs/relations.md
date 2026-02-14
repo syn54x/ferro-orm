@@ -4,17 +4,17 @@ Ferro provides a robust system for connecting models, supporting standard relati
 
 ## One-to-Many
 
-The most common relationship type. It is defined using a `ForeignKey` on the "child" model and a `BackRelationship` marker on the "parent" model.
+The most common relationship type. It is defined using a `ForeignKey` on the "child" model and a `BackRef` marker (or `Field(back_ref=True)`) on the "parent" model.
 
 ```python
 from typing import Annotated
-from ferro import Model, ForeignKey, BackRelationship
+from ferro import Model, ForeignKey, BackRef
 
 class Author(Model):
     id: int
     name: str
     # Marker for reverse lookup; provides full Query intellisense
-    posts: BackRelationship["Post"] = None
+    posts: BackRef[list["Post"]] = None
 
 class Post(Model):
     id: int
@@ -22,6 +22,24 @@ class Post(Model):
     # Defines the forward link and the name of the reverse field
     author: Annotated[Author, ForeignKey(related_name="posts")]
 ```
+
+You can also declare the reverse relation with `Field(back_ref=True)` so the annotation stays a plain type:
+
+```python
+from ferro import Model, ForeignKey, Field
+
+class Author(Model):
+    id: int
+    name: str
+    posts: list["Post"] | None = Field(default=None, back_ref=True)
+
+class Post(Model):
+    id: int
+    title: str
+    author: Annotated[Author, ForeignKey(related_name="posts")]
+```
+
+Or with `Annotated`: `posts: Annotated[list["Post"] | None, Field(back_ref=True)] = None`. Do not use both `BackRef` and `back_ref=True` on the same field.
 
 ### Shadow Fields
 For every `ForeignKey` field (e.g., `author`), Ferro automatically creates a "shadow" ID column in the database (e.g., `author_id`). You can access or filter by this field directly via `post.author_id`.
@@ -53,7 +71,7 @@ class Student(Model):
 
 class Course(Model):
     title: str
-    students: BackRelationship["Student"] = None
+    students: list["Student"] | None = Field(default=None, back_ref=True)
 ```
 
 ### Join Table Management
@@ -79,7 +97,7 @@ Ferro relations are **lazy**. Data is never fetched until you explicitly request
     ```python
     author = await post.author  # Database hit
     ```
-2.  **Reverse/M2M Relations**: Accessing a `BackRelationship` or `ManyToManyField` returns a `Query` object. This allows you to chain further filters before execution.
+2.  **Reverse/M2M Relations**: Accessing a `BackRef` (or a field declared with `back_ref=True`) or `ManyToManyField` returns a `Query` object. This allows you to chain further filters before execution.
     ```python
     posts = await author.posts.where(Post.published == True).all()
     ```

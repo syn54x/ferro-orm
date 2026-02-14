@@ -57,9 +57,10 @@ class Product(Model):
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `primary_key` | `bool` | `False` | Marks the field as the primary key for the table. |
-| `autoincrement`| `bool \| None` | `None` | If `True`, the database generates values automatically. Defaults to `True` for integer primary keys. |
+| `autoincrement`| `bool | None` | `None` | If `True`, the database generates values automatically. Defaults to `True` for integer primary keys. |
 | `unique` | `bool` | `False` | Enforces a uniqueness constraint on the column. |
 | `index` | `bool` | `False` | Creates a database index for this column to improve query performance. |
+| `back_ref` | `bool` | `False` | Marks the field as a reverse relationship (same as using `BackRef` in the type). See [Relations](../relations.md). Do not use together with a `BackRef` annotation on the same field. |
 
 ## Pydantic Integration
 
