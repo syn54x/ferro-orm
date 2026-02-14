@@ -241,4 +241,3 @@ ferro_test.db
 .cursor
 playground.ipynb
 IMPLEMENTATION.md
-src/ferro/fields.py
