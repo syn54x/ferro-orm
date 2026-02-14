@@ -39,9 +39,10 @@ async def db_engine():
 
 @pytest.fixture(autouse=True)
 def cleanup_models():
-    """Clear the Model engine and registry between tests."""
-    from ferro import reset_engine, clear_registry
+    """Reset the engine between tests. Registry is not cleared so module-level
+    models (e.g. in test_documentation_features) remain registered; tests that
+    need a clean registry call clear_registry() in their own fixture."""
+    from ferro import reset_engine
 
     yield
     reset_engine()
-    clear_registry()
