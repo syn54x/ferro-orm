@@ -238,7 +238,7 @@ __marimo__/
 .streamlit/secrets.toml
 ferro_test.db
 .cursorrules
+.cursor
 playground.ipynb
 IMPLEMENTATION.md
-.cursor/rules/google-style-docstrings.mdc
-.cursor/skills/write-module-docstrings/SKILL.md
+src/ferro/fields.py
