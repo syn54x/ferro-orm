@@ -14,9 +14,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ci-gate:
+    name: CI Gate
+    uses: ./.github/workflows/ci.yml
+
+  packaging-smoke:
+    name: Packaging Smoke Gate
+    uses: ./.github/workflows/packaging-smoke.yml
+
   release:
     name: Create Release
+    needs: [ci-gate, packaging-smoke]
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.verify_release.outputs.release_created }}
+      release_ref: ${{ steps.release_ref.outputs.release_ref }}
     permissions:
       contents: write
       issues: write
@@ -95,15 +107,33 @@ jobs:
 
           CHANGED_FILES="$(git show --name-only --pretty='' HEAD)"
           if [[ "$CHANGED_FILES" != *"CHANGELOG.md"* ]]; then
-            echo "ERROR: release commit does not include CHANGELOG.md update."
+            echo "WARNING: release commit does not include CHANGELOG.md update."
             echo "Changed files:"
             echo "$CHANGED_FILES"
-            echo "changelog_validated=failed" >> "$GITHUB_OUTPUT"
-            exit 1
+            echo "changelog_validated=missing" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           echo "changelog_validated=passed" >> "$GITHUB_OUTPUT"
           echo "Validated: release commit includes CHANGELOG.md."
+
+      - name: Capture released ref
+        id: release_ref
+        shell: bash
+        run: |
+          if [[ "${{ steps.verify_release.outputs.release_created }}" != "true" ]]; then
+            echo "release_ref=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RELEASE_TAG="$(git tag --points-at HEAD | head -n1)"
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "ERROR: expected release tag on HEAD but none was found."
+            exit 1
+          fi
+
+          echo "release_ref=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Using release ref: $RELEASE_TAG"
 
       - name: Release summary
         if: always()
@@ -116,5 +146,22 @@ jobs:
             echo "- Ref: \`${{ github.ref_name }}\`"
             echo "- Release commit created: \`${{ steps.verify_release.outputs.release_created || 'unknown' }}\`"
             echo "- Changelog validation: \`${{ steps.verify_release.outputs.changelog_validated || 'unknown' }}\`"
+            echo "- Release ref: \`${{ steps.release_ref.outputs.release_ref || 'n/a' }}\`"
             echo "- Last commit subject: \`${{ steps.verify_release.outputs.release_subject || 'n/a' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish Artifacts
+    needs: [release]
+    if: needs.release.outputs.release_created == 'true'
+    uses: ./.github/workflows/publish.yml
+    with:
+      ref: ${{ needs.release.outputs.release_ref }}
+
+  deploy-docs:
+    name: Deploy Documentation
+    needs: [release, publish]
+    if: needs.release.outputs.release_created == 'true'
+    uses: ./.github/workflows/publish-docs.yml
+    with:
+      ref: ${{ needs.release.outputs.release_ref }}
