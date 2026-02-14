@@ -11,10 +11,6 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict
 
-from .state import _CURRENT_TRANSACTION
-from .base import ForeignKey
-from .metaclass import ModelMetaclass
-from .query import Query, QueryNode
 from ._core import (
     begin_transaction,
     commit_transaction,
@@ -27,6 +23,10 @@ from ._core import (
     save_bulk_records,
     save_record,
 )
+from .base import ForeignKey
+from .metaclass import ModelMetaclass
+from .query import Query, QueryNode
+from .state import _CURRENT_TRANSACTION
 
 
 @asynccontextmanager
@@ -238,7 +238,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     async def bulk_create(cls, instances: list[Self]) -> int:
         if not instances:
             return 0
-        data = [i.model_dump() for i in instances]
+        # Use mode="json" to ensure Decimals, UUIDs, etc. are serialized correctly
+        data = [i.model_dump(mode="json") for i in instances]
         return await save_bulk_records(cls.__name__, json.dumps(data))
 
     @classmethod

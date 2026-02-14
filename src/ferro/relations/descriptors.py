@@ -34,19 +34,34 @@ class RelationshipDescriptor:
                     f"Model '{self.target_model_name}' not found in registry"
                 )
 
+        # Find the primary key value of the current instance
+        pk_field = "id"
+        if hasattr(instance.__class__, "ferro_fields"):
+            for f_name, f_meta in instance.__class__.ferro_fields.items():
+                if f_meta.primary_key:
+                    pk_field = f_name
+                    break
+        pk_val = getattr(instance, pk_field)
+
         if self.is_m2m:
-            # Special Query for M2M that knows about the join table
-            # For now we'll just return a regular query but we need to update
-            # the Rust engine to support JOINs or subqueries.
-            # We'll pass the M2M context to the Query object.
             from ..query.builder import Query
 
             return Query(self._target_model)._m2m(
-                self.join_table, self.source_col, self.target_col, instance.id
+                self.join_table, self.source_col, self.target_col, pk_val
             )
 
+        # Find the primary key value of the current instance
+        pk_field = "id"
+        if hasattr(instance.__class__, "ferro_fields"):
+            for f_name, f_meta in instance.__class__.ferro_fields.items():
+                if f_meta.primary_key:
+                    pk_field = f_name
+                    break
+
+        pk_val = getattr(instance, pk_field)
+
         query = self._target_model.where(
-            getattr(self._target_model, f"{self.field_name}_id") == instance.id
+            getattr(self._target_model, f"{self.field_name}_id") == pk_val
         )
 
         if self.is_one_to_one:
