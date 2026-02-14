@@ -40,7 +40,7 @@ Use this checklist to track your progress setting up PyPI Trusted Publishing.
 
 ## Testing
 
-- [ ] Test workflow triggered manually (optional)
+- [ ] Test release workflow triggered manually
 - [ ] Reviewed workflow logs for authentication
 - [ ] No OIDC errors in logs
 
@@ -64,14 +64,11 @@ Use this checklist to track your progress setting up PyPI Trusted Publishing.
 ## Quick Commands
 
 ```bash
-# Manual workflow trigger
-gh workflow run publish.yml
-
-# Create a test release
-gh release create v0.1.1 --generate-notes
+# Manual release workflow trigger
+gh workflow run release.yml
 
 # Check workflow status
-gh run list --workflow=publish.yml
+gh run list --workflow=release.yml
 
 # Install and test
 pip install ferro-orm
