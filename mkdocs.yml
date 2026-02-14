@@ -8,20 +8,23 @@ watch:
   - src
   - docs
 
+extra_css:
+  - stylesheets/extra.css
+
 theme:
   name: material
   palette:
     - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: indigo
-      accent: deep orange
+      scheme: light-rust
+      primary: custom
+      accent: amber
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: indigo
-      accent: deep orange
+      primary: custom
+      accent: amber
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
