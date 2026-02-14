@@ -28,6 +28,10 @@ alembic = [
     "alembic>=1.18.1",
     "sqlalchemy>=2.0.46",
 ]
+release = [
+    "python-semantic-release>=9.0.0",
+    "maturin>=1.11.5",
+]
 dev = [
     "jupyter>=1.1.1",
     "maturin>=1.11.5",
@@ -68,7 +72,8 @@ version_toml = [
 ]
 version_variables = []
 build_command = "uv run maturin build --release"
-major_on_zero = true
+major_on_zero = false
+allow_zero_version = true
 branch = "main"
 upload_to_repository = false
 upload_to_release = true
