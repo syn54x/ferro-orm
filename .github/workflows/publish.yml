@@ -6,11 +6,12 @@
 name: Build & Publish
 
 on:
-  workflow_dispatch:
   workflow_call:
-  release:
-    # Include prereleased to support semantic-release pre-releases.
-    types: [published, prereleased]
+    inputs:
+      ref:
+        description: Git ref (branch, tag, or SHA) to build/publish
+        required: true
+        type: string
 
 concurrency:
   group: publish-${{ github.workflow }}-${{ github.ref }}
@@ -47,6 +48,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -73,6 +76,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1.48.0
@@ -97,6 +102,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
