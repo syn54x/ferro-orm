@@ -238,3 +238,5 @@ __marimo__/
 .streamlit/secrets.toml
 ferro_test.db
 .cursorrules
+playground.ipynb
+IMPLEMENTATION.md
