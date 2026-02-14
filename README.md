@@ -1,4 +1,4 @@
-# Ferro: A High-Performance Rust-Backed Python ORM
+# Ferro: The Pydantic x Rust ORM
 
 <!-- --8<-- [start:main] -->
 
@@ -14,7 +14,7 @@
 [![Codecov](https://img.shields.io/codecov/c/github/syn54x/ferro-orm?style=for-the-badge&logo=codecov&logoColor=white)](https://codecov.io/gh/syn54x/ferro-orm)
 [![Issues](https://img.shields.io/github/issues/syn54x/ferro-orm?style=for-the-badge&logo=github&logoColor=white)](https://github.com/syn54x/ferro-orm/issues)
 
-Ferro is a high-performance, asynchronous ORM for Python, built with a Rust-backed core engine. It combines the ergonomics of Pydantic models with the speed and safety of Rust's SQLx and Sea-Query.
+Ferro is a high-performance, asynchronous ORM for Python, powered by a core engine written in Rust. Designed for simplicity and it only has one dependency: Pydantic.  Delivering ergonomics familiar to the modern Pythonista and the speed and safety of Rust's SQLx and Sea-Query.
 
 ## Key Features
 
