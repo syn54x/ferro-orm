@@ -6,7 +6,7 @@ from ferro import (
     connect,
     FerroField,
     ForeignKey,
-    BackRelationship,
+    BackRef,
     reset_engine,
     clear_registry,
 )
@@ -33,7 +33,7 @@ async def test_foreign_key_constraint_exists():
     class Category(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        products: BackRelationship[list["Product"]] = None
+        products: BackRef[list["Product"]] = None
 
     class Product(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None

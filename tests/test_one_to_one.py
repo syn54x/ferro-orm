@@ -7,7 +7,7 @@ from ferro import (
     connect,
     FerroField,
     ForeignKey,
-    BackRelationship,
+    BackRef,
     reset_engine,
     clear_registry,
 )
@@ -37,7 +37,7 @@ async def test_one_to_one_relationship():
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: BackRelationship["Profile"] = None
+        profile: BackRef["Profile"] = None
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
