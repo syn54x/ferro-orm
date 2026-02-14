@@ -61,9 +61,10 @@ If you want to reserve the package name before publishing:
    PyPI Project Name: ferro-orm
    Owner: syn54x
    Repository name: ferro-orm
-   Workflow filename: publish.yml
+   Workflow filename: release.yml
    Environment name: pypi (optional but recommended)
    ```
+   **Important:** Use `release.yml`, not `publish.yml`. The release workflow calls publish.yml; PyPI's OIDC token reflects the top-level workflow (release.yml), so the trusted publisher must match.
 
 4. **Click "Add"**
 
@@ -86,9 +87,10 @@ If you want to reserve the package name before publishing:
    ```
    Owner: syn54x
    Repository: ferro-orm
-   Workflow: publish.yml
+   Workflow: release.yml
    Environment: pypi (optional)
    ```
+   Use `release.yml` (the workflow that triggers the run). Do not use `publish.yml` when it is invoked via workflow_call from release.yml, or uploads will fail with "Build Config URI does not match expected Trusted Publisher".
 
 6. **Click "Add"**
 
@@ -103,7 +105,7 @@ After adding the trusted publisher, you should see:
 
 Owner:        syn54x
 Repository:   ferro-orm
-Workflow:     publish.yml
+Workflow:     release.yml
 Environment:  pypi
 ```
 
@@ -175,7 +177,7 @@ Before doing a real release, test the workflow:
 
 2. **Trigger the workflow manually:**
    ```bash
-   gh workflow run publish.yml
+   gh workflow run release.yml
    ```
 
 3. **Check the logs:**
@@ -208,6 +210,12 @@ Before doing a real release, test the workflow:
 
 ## Troubleshooting
 
+### Error: "Certificate's Build Config URI ... does not match expected Trusted Publisher (publish.yml @ ...)"
+
+**Cause:** PyPI Trusted Publishing uses the **top-level** workflow for OIDC. This repo runs `publish.yml` via `workflow_call` from `release.yml`, so the token identifies `release.yml`, not `publish.yml`. If PyPI is configured for `publish.yml`, uploads fail.
+
+**Solution:** On PyPI, set the trusted publisher **Workflow** to `release.yml` (not `publish.yml`). Update or add the publisher: Owner `syn54x`, Repository `ferro-orm`, Workflow **release.yml**, Environment `pypi` (optional).
+
 ### Error: "Trusted publishing authentication failed"
 
 **Cause:** OIDC token is rejected by PyPI
@@ -216,7 +224,7 @@ Before doing a real release, test the workflow:
 1. Verify all fields match exactly on PyPI:
    - Owner name (case-sensitive)
    - Repository name (case-sensitive)
-   - Workflow filename (must include `.yml`)
+   - Workflow filename: use **release.yml** (the workflow that starts the run)
    - Environment name (if specified)
 
 2. Check GitHub environment exists:
@@ -241,10 +249,9 @@ Before doing a real release, test the workflow:
 **Cause:** PyPI can't find the workflow file
 
 **Solutions:**
-1. Ensure `publish.yml` exists in `.github/workflows/`
-2. Verify filename matches exactly (case-sensitive)
+1. Ensure `release.yml` exists in `.github/workflows/` (this is the workflow PyPI should reference)
+2. Verify the workflow filename on PyPI matches exactly (case-sensitive): `release.yml`
 3. Check workflow is committed to `main` branch
-4. Workflow must be in the repository (not a reusable workflow)
 
 ### Error: "Environment not found"
 
@@ -318,7 +325,7 @@ After completing setup, verify:
 - [ ] PyPI trusted publisher configured
 - [ ] GitHub environment `pypi` created (if using)
 - [ ] Workflow permissions set to read/write
-- [ ] Workflow file `publish.yml` exists
+- [ ] Workflow file `release.yml` exists (trusted publisher must use this name)
 - [ ] Workflow has `id-token: write` permission
 - [ ] Test workflow runs successfully
 - [ ] Can authenticate with PyPI (check logs)
@@ -342,7 +349,7 @@ After completing setup, verify:
 Project: ferro-orm
 Owner: syn54x
 Repository: ferro-orm
-Workflow: publish.yml
+Workflow: release.yml
 Environment: pypi (optional)
 ```
 

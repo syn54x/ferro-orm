@@ -15,7 +15,7 @@ Use this checklist to track your progress setting up PyPI Trusted Publishing.
 - [ ] Added trusted publisher with correct details:
   - [ ] Owner: `syn54x`
   - [ ] Repository: `ferro-orm`
-  - [ ] Workflow: `publish.yml`
+  - [ ] Workflow: `release.yml` (must be the top-level workflow that runs the job; do not use `publish.yml` when it is called from release.yml)
   - [ ] Environment: `pypi` (optional)
 - [ ] Verified configuration appears in publisher list
 
@@ -33,9 +33,9 @@ Use this checklist to track your progress setting up PyPI Trusted Publishing.
 
 ## Workflow Verification
 
-- [ ] Confirmed `.github/workflows/publish.yml` exists
-- [ ] Verified workflow has `id-token: write` permission
-- [ ] Verified workflow has `environment: pypi` (if using environment)
+- [ ] Confirmed `.github/workflows/release.yml` and `.github/workflows/publish.yml` exist
+- [ ] Verified the job that publishes to PyPI has `id-token: write` (in publish.yml, used by release.yml)
+- [ ] Verified publish-pypi job has `environment: pypi` (if using environment)
 - [ ] All workflows pass pre-commit hooks
 
 ## Testing

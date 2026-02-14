@@ -1,7 +1,9 @@
 # Build & Publish workflow (customized from `maturin generate-ci` output)
 #
-# This replaces the legacy `publish.yml` and keeps the filename stable for
-# PyPI Trusted Publishing configuration.
+# NOTE: The main release flow no longer calls this workflow. Release (release.yml)
+# inlines the build/publish jobs so PyPI Trusted Publishing works (reusable
+# workflows are not supported). This file remains for optional manual or
+# external use (e.g. workflow_dispatch with a ref).
 
 name: Build & Publish
 

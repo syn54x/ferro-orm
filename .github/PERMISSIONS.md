@@ -86,19 +86,15 @@ permissions:
 
 ---
 
-### 2. Build & Publish (`publish.yml`)
+### 2. Build & Publish (jobs in `release.yml`)
 
-**Trigger:** Workflow call from `release.yml`
+**Trigger:** Part of `release.yml` after the release job (no reusable workflow).
+
+Build, test, and publish jobs are defined directly in `release.yml` so PyPI Trusted Publishing receives a token with `workflow_ref: release.yml` (reusable workflows are not supported by PyPI).
 
 **Permissions:**
 
-**For build/test jobs:** (default - read-only)
-```yaml
-# No explicit permissions needed
-# Uses default read permissions to:
-# - Checkout code
-# - Read repository contents
-```
+**For build-wheels, build-sdist, test-wheels:** (default - read-only)
 
 **For publish-pypi job:**
 ```yaml
@@ -107,13 +103,10 @@ permissions:
 ```
 
 **Why These Permissions:**
-- `id-token: write` - Allows the workflow to:
-  - Request an OIDC token from GitHub
-  - Authenticate with PyPI using Trusted Publishing
-  - Publish packages without API tokens
+- `id-token: write` - Allows the job to request an OIDC token and authenticate with PyPI using Trusted Publishing.
 
 **What It Does:**
-- Builds wheels for multiple platforms
+- Builds wheels for multiple platforms from the release tag
 - Builds source distribution
 - Tests built packages
 - Publishes to PyPI using OIDC authentication

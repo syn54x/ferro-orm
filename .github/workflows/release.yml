@@ -150,20 +150,166 @@ jobs:
             echo "- Last commit subject: \`${{ steps.verify_release.outputs.release_subject || 'n/a' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  publish:
-    name: Publish Artifacts
+  # Build and publish jobs are inlined here (not in a reusable workflow) so that
+  # PyPI Trusted Publishing sees workflow_ref = release.yml. Reusable workflows
+  # are not supported by PyPI Trusted Publishing.
+  build-wheels:
+    name: Build wheels (${{ matrix.platform.name }})
     needs: [release]
     if: needs.release.outputs.release_created == 'true'
-    uses: ./.github/workflows/publish.yml
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64
+            manylinux: auto
+          - name: linux-aarch64
+            runner: ubuntu-latest
+            target: aarch64
+            manylinux: auto
+          - name: macos-aarch64
+            runner: macos-latest
+            target: aarch64
+            manylinux: ''
+          - name: windows-x64
+            runner: windows-latest
+            target: x64
+            manylinux: ''
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.release_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1.48.0
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          manylinux: ${{ matrix.platform.manylinux }}
+          sccache: 'true'
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.name }}
+          path: dist/*.whl
+
+  build-sdist:
+    name: Build sdist
+    needs: [release]
+    if: needs.release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.release_ref }}
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1.48.0
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  test-wheels:
+    name: Test wheels (${{ matrix.os }})
+    needs: [release, build-wheels]
+    if: needs.release.outputs.release_created == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.release_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+
+      - name: Install wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --find-links dist ferro-orm
+
+      - name: Test import
+        shell: bash
+        run: |
+          python -c "import ferro; print('Ferro imported successfully')"
+
+      - name: Run basic smoke test
+        shell: bash
+        run: |
+          python -c "
+          import asyncio
+          from ferro import Model, FerroField, connect
+          from typing import Annotated
+
+          class TestModel(Model):
+              id: Annotated[int, FerroField(primary_key=True)]
+              name: str
+
+          async def test():
+              await connect('sqlite::memory:')
+              print('Connection test passed')
+
+          asyncio.run(test())
+          "
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [release, build-wheels, build-sdist, test-wheels]
+    if: needs.release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ferro-orm
     permissions:
-      contents: read
       id-token: write
-    with:
-      ref: ${{ needs.release.outputs.release_ref }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+          verbose: true
 
   deploy-docs:
     name: Deploy Documentation
-    needs: [release, publish]
+    needs: [release, publish-pypi]
     if: needs.release.outputs.release_created == 'true'
     uses: ./.github/workflows/publish-docs.yml
     permissions:
