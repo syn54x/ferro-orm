@@ -44,10 +44,29 @@ class Query(Generic[T]):
         return self
 
     def where(self, node: "QueryNode") -> "Query[T]":
+        """
+        Add a filter condition to the query.
+
+        Args:
+            node: A QueryNode representing the condition (e.g., User.id == 1).
+
+        Returns:
+            The current Query instance for chaining.
+        """
         self.where_clause.append(node)
         return self
 
     def order_by(self, field: Any, direction: str = "asc") -> "Query[T]":
+        """
+        Add an ordering clause to the query.
+
+        Args:
+            field: The field to order by (e.g., User.username).
+            direction: The direction of the sort ("asc" or "desc").
+
+        Returns:
+            The current Query instance for chaining.
+        """
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
 
@@ -58,16 +77,37 @@ class Query(Generic[T]):
         return self
 
     def limit(self, value: int) -> "Query[T]":
+        """
+        Limit the number of records returned.
+
+        Args:
+            value: The maximum number of records to return.
+
+        Returns:
+            The current Query instance for chaining.
+        """
         self._limit = value
         return self
 
     def offset(self, value: int) -> "Query[T]":
+        """
+        Skip a specific number of records.
+
+        Args:
+            value: The number of records to skip.
+
+        Returns:
+            The current Query instance for chaining.
+        """
         self._offset = value
         return self
 
     async def all(self) -> list[T]:
         """
-        Execute the query and return hydrated model instances.
+        Execute the query and return all matching hydrated model instances.
+
+        Returns:
+            A list of model instances.
         """
         query_def = {
             "model_name": self.model_cls.__name__,
@@ -87,6 +127,12 @@ class Query(Generic[T]):
         return results
 
     async def count(self) -> int:
+        """
+        Execute the query and return the total number of matching records.
+
+        Returns:
+            The count of matching records.
+        """
         query_def = {
             "model_name": self.model_cls.__name__,
             "where_clause": [node.to_dict() for node in self.where_clause],
@@ -100,6 +146,15 @@ class Query(Generic[T]):
         )
 
     async def update(self, **kwargs) -> int:
+        """
+        Execute a batch update on all records matching the current query.
+
+        Args:
+            **kwargs: Field names and values to update.
+
+        Returns:
+            The number of records updated.
+        """
         query_def = {
             "model_name": self.model_cls.__name__,
             "where_clause": [node.to_dict() for node in self.where_clause],
@@ -121,7 +176,10 @@ class Query(Generic[T]):
 
     async def first(self) -> T | None:
         """
-        Execute the query and return the first hydrated model instance, or None.
+        Execute the query and return the first matching record, or None.
+
+        Returns:
+            A model instance or None.
         """
         old_limit = self._limit
         self._limit = 1
@@ -132,6 +190,12 @@ class Query(Generic[T]):
             self._limit = old_limit
 
     async def delete(self) -> int:
+        """
+        Execute a batch deletion on all records matching the current query.
+
+        Returns:
+            The number of records deleted.
+        """
         query_def = {
             "model_name": self.model_cls.__name__,
             "where_clause": [node.to_dict() for node in self.where_clause],
@@ -146,6 +210,12 @@ class Query(Generic[T]):
         )
 
     async def exists(self) -> bool:
+        """
+        Check if at least one record matches the current query.
+
+        Returns:
+            True if records exist, otherwise False.
+        """
         return await self.count() > 0
 
     async def add(self, *instances: Any) -> None:

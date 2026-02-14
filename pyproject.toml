@@ -1,5 +1,5 @@
 [project]
-name = "ferro"
+name = "ferro-orm"
 version = "0.1.0"
 description = "A high-performance, Rust-backed ORM for Python."
 readme = "README.md"
@@ -38,6 +38,9 @@ dev = [
     "prek>=0.2.25",
     "alembic>=1.18.1",
     "sqlalchemy>=2.0.46",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0",
+    "pymdown-extensions>=10.7.0",
 ]
 
 [tool.pytest.ini_options]
