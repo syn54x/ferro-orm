@@ -3,98 +3,111 @@
 
 ## Unreleased
 
-### Chores
+### Continuous Integration
 
-- Add docs publish workflow
-  ([`8e5fdac`](https://github.com/syn54x/ferro-orm/commit/8e5fdac509b6f860d411c5ca91b9a19aa32aaf55))
+- **docs**: Publish docs site and relax strict commit checks
+  ([`9b2af96`](https://github.com/syn54x/ferro-orm/commit/9b2af96684e8208ee0d17ce1e57df15063153ea0))
 
-- Enhance release workflow with CI gate and improved documentation triggers
-  ([`cb28ca6`](https://github.com/syn54x/ferro-orm/commit/cb28ca6e1a947a204e685c677c882a07561ee78d))
+- **release**: Consolidate changelog and release workflow orchestration
+  ([`2724bcc`](https://github.com/syn54x/ferro-orm/commit/2724bcc67f40343f341dffdd923735ccf127ef52))
 
-- Remove strict mode
-  ([`3dc75e2`](https://github.com/syn54x/ferro-orm/commit/3dc75e298e4238ae866ccbb1f1fb2f86469d2be1))
+- **release**: Update permissions for publish workflow
+  ([`02ecf9f`](https://github.com/syn54x/ferro-orm/commit/02ecf9f07a48916467b33daa9d55b5b7312d777c))
 
-- Update readme
-  ([`3390879`](https://github.com/syn54x/ferro-orm/commit/33908799de19e97ab39a0826d9a5ebc0376a2021))
-
-- Update release workflow to trigger only on manual dispatch
-  ([`dab69a4`](https://github.com/syn54x/ferro-orm/commit/dab69a4c133d723e40ff6b61c015cb3c7a90e4d1))
+- **release**: Update permissions for publish workflow
+  ([`d9d7243`](https://github.com/syn54x/ferro-orm/commit/d9d724399aa6005716b3d4b9fc0b2bde76cffe8a))
 
 ### Features
 
 - **fields**: Add wrapped Field helper for ferro metadata
-  ([#3](https://github.com/syn54x/ferro-orm/pull/3),
-  [`75b9072`](https://github.com/syn54x/ferro-orm/commit/75b907264e5e4d246d0f30f30ffe2a3cf45fff26))
-
-### Refactoring
-
-- Consolidate changelog and release workflows
-  ([`8336365`](https://github.com/syn54x/ferro-orm/commit/83363650995c70b1bbb64a40c5b7a7c7a57f30cb))
+  ([`2795ed9`](https://github.com/syn54x/ferro-orm/commit/2795ed9b86f93bd8b35591a40dd3e29b133b3026))
 
 
 ## v0.1.1 (2026-02-13)
 
-### Bug Fixes
-
-- Execute publish action from release action
-  ([`5de9190`](https://github.com/syn54x/ferro-orm/commit/5de919019b014c6f0b722a0270f82d6a78c40675))
-
 ### Chores
 
-- Cargo lock
-  ([`2bccc58`](https://github.com/syn54x/ferro-orm/commit/2bccc58d70d098c74c3ad03c6ad4702bf46fccd7))
+- **project**: Refine tooling configuration and code quality gates
+  ([`d91aadd`](https://github.com/syn54x/ferro-orm/commit/d91aaddb0ac6764833d0742ae18bf0a897e5fe4a))
 
+- **query**: Update demo script and dependency metadata
+  ([`b737b12`](https://github.com/syn54x/ferro-orm/commit/b737b129fd257fe69eba9417dab6674c554afcfb))
 
-## v0.1.0-rc.2 (2026-02-13)
+- **release**: Publish v0.1.0-rc.1
+  ([`a37d0d4`](https://github.com/syn54x/ferro-orm/commit/a37d0d44e2397cf23f05b3153685ddbfc435ab91))
 
-### Chores
+- **release**: Publish v0.1.0-rc.2
+  ([`529801a`](https://github.com/syn54x/ferro-orm/commit/529801ac051f2b16d05ef58626fb646479eb3247))
 
-- Publish prereleases
-  ([`8477749`](https://github.com/syn54x/ferro-orm/commit/847774964c2028ec91c17d03b095b58c1922c9ac))
+- **release**: Publish v0.1.1
+  ([`c9ee751`](https://github.com/syn54x/ferro-orm/commit/c9ee751c198ea50e1aed5b38781a1d2f3cf53b65))
 
+### Continuous Integration
 
-## v0.1.0-rc.1 (2026-02-13)
+- Optimize caching and split PR vs main test execution
+  ([`e84344c`](https://github.com/syn54x/ferro-orm/commit/e84344cfe88c67b747d46ae289bda97ecb8f7772))
 
-### Bug Fixes
+- **docs**: Add MkDocs build and deploy workflows
+  ([`363ffa1`](https://github.com/syn54x/ferro-orm/commit/363ffa18255d1861c97eb807ab7437a052dc12db))
 
-- Fix release workflow
-  ([`359aed1`](https://github.com/syn54x/ferro-orm/commit/359aed1f7952cce2daa9bff132095c15dc5856f7))
+- **release**: Add end-to-end CI, publish, and changelog pipelines
+  ([`1589dda`](https://github.com/syn54x/ferro-orm/commit/1589dda5502c71c5553cc870d3a4d4364fd49e48))
 
-- Remove extra readme file
-  ([`dc1b7b1`](https://github.com/syn54x/ferro-orm/commit/dc1b7b172bf2db91fb552d3df18540e52721c342))
+- **release**: Configure changelog generation and release token wiring
+  ([`9b95e41`](https://github.com/syn54x/ferro-orm/commit/9b95e415b89b4862a6fdbc62985ec4df0ec63d2c))
 
-- Update Rust toolchain setup in CI workflows
-  ([`49a1b14`](https://github.com/syn54x/ferro-orm/commit/49a1b14ec289c8c21af4eb85c12ce9056411a106))
+- **release**: Enable prerelease publication path
+  ([`eab9a18`](https://github.com/syn54x/ferro-orm/commit/eab9a1827f8882cfdb35c7e065dd9dcf90d402c4))
 
-- Use macos-latest
-  ([`2bf06be`](https://github.com/syn54x/ferro-orm/commit/2bf06be0538b427f30e6ac254f53879180764c61))
-
-- Use macos-latest
-  ([`d972de6`](https://github.com/syn54x/ferro-orm/commit/d972de6be84ee116cfb96056937499943d65ed09))
-
-### Chores
-
-- Add GitHub Actions workflows for building and deploying MkDocs documentation
-  ([`8d81815`](https://github.com/syn54x/ferro-orm/commit/8d818159bb5e56bc87d17dea522d4bab32465aeb))
-
-- Enhance CI workflows with separate Python test jobs for PRs and main branch
-  ([`513e90e`](https://github.com/syn54x/ferro-orm/commit/513e90e3eebae8f71fb0a69c1b462f74eb941405))
-
-- Update .gitignore to include playground.ipynb and IMPLEMENTATION.md
-  ([`3880e78`](https://github.com/syn54x/ferro-orm/commit/3880e786a7856ca06a15770d22002a11cd3203b0))
-
-- Update CI workflows for improved caching and release process
-  ([`746ec3f`](https://github.com/syn54x/ferro-orm/commit/746ec3f20d69014e5fa47cb3dfa5f00ab182d0ce))
+- **release**: Stabilize workflow stages and macOS/toolchain settings
+  ([`dbf9a3e`](https://github.com/syn54x/ferro-orm/commit/dbf9a3ec49a964d4b1136c0f64f97d98e65bf0ae))
 
 ### Documentation
 
-- Update documentation structure and add examples validation tests
-  ([`b199e57`](https://github.com/syn54x/ferro-orm/commit/b199e57855796676ae4860fa90e384398a71ebfb))
+- **api**: Reorganize docs structure and validate code examples
+  ([`cd5b7b2`](https://github.com/syn54x/ferro-orm/commit/cd5b7b29554076b6f9f06be4b087144e1ea3c4fe))
 
-- Update readme
-  ([`193c6b7`](https://github.com/syn54x/ferro-orm/commit/193c6b71ecee48c3b5dd4203a67cc13a29697108))
+- **community**: Add contributor and release documentation set
+  ([`f9fb40e`](https://github.com/syn54x/ferro-orm/commit/f9fb40e5e9ab638d2743626da0f30730fa698eb1))
+
+- **readme**: Clean duplicated content and streamline guidance
+  ([`785573a`](https://github.com/syn54x/ferro-orm/commit/785573a9e06f355408b30b95a063e9f94da01dc1))
+
+- **site**: Add MkDocs structure and ORM usage guides
+  ([`d5b4955`](https://github.com/syn54x/ferro-orm/commit/d5b4955943d2ece669f2afc5cb7d61f42af14d9d))
+
+### Features
+
+- **connection**: Add pool management and schema registration APIs
+  ([`2fa9fd7`](https://github.com/syn54x/ferro-orm/commit/2fa9fd794b0586d77175ee076a2777f30dfa224b))
+
+- **core**: Add async CRUD engine and identity map bridge
+  ([`64ea39f`](https://github.com/syn54x/ferro-orm/commit/64ea39f10ccb06a77ee6985ebfe8aecfe702ca0b))
+
+- **logging**: Route Ferro logs through Python logging
+  ([`df6be66`](https://github.com/syn54x/ferro-orm/commit/df6be66111fe7494513a5bbd284ece95fbbc2172))
+
+- **migrations**: Integrate Alembic-backed migration management
+  ([`c244996`](https://github.com/syn54x/ferro-orm/commit/c244996838bc3cfd98421ad71b7a18aff5d391ba))
+
+- **query**: Add fluent query builder and predicate execution
+  ([`11d0a5c`](https://github.com/syn54x/ferro-orm/commit/11d0a5c6b409e59c21ba03b50989555024d8c1cd))
+
+- **relations**: Add relationship descriptors and query node modules
+  ([`c8e72bd`](https://github.com/syn54x/ferro-orm/commit/c8e72bd0c5769574469711332d78855bb04151d2))
+
+### Testing
+
+- **core**: Add integration coverage for CRUD and schema behavior
+  ([`e5b3e51`](https://github.com/syn54x/ferro-orm/commit/e5b3e51bbed1e98bb486dd8aa6b4ccf112d891dd))
+
+- **query**: Add coverage for builder operations and advanced types
+  ([`6e33f40`](https://github.com/syn54x/ferro-orm/commit/6e33f400990ce82aa4732e0122e95b95a2431a57))
+
+- **relations**: Cover one-to-one behavior and schema constraints
+  ([`7cc8377`](https://github.com/syn54x/ferro-orm/commit/7cc83779fff8839c2519703eb41083f1f907656f))
 
 
-## v0.1.0 (2026-01-28)
+## v0.1.0 (2026-02-13)
 
 - Initial Release
