@@ -67,41 +67,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Contributing
-
-We welcome contributions to Ferro! Whether you're fixing bugs, adding features, or improving documentation, your help is appreciated.
-
-For detailed development setup, testing guidelines, and contribution workflow, please see:
-
-**[CONTRIBUTING.md](CONTRIBUTING.md)** - Complete contributor guide
-
-### Quick Start for Contributors
-
-```bash
-# Clone and setup
-git clone https://github.com/syn54x/ferro-orm.git
-cd ferro-orm
-uv sync --group dev
-
-# Install pre-commit hooks
-uv run prek install
-uv run prek install --hook-type commit-msg
-
-# Build and test
-uv run maturin develop
-uv run pytest
-```
-
-### Conventional Commits
-
-Ferro uses [Conventional Commits](https://www.conventionalcommits.org/) for automated releases. All commits must follow this format:
-
-```bash
-git commit -m "feat: add new feature"
-git commit -m "fix: resolve bug"
-git commit -m "docs: update documentation"
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for complete commit guidelines and development workflow.
-
 <!-- --8<-- [end:main] -->
