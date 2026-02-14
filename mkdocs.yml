@@ -78,3 +78,4 @@ nav:
   - Migrations: migrations.md
   - Transactions: transactions.md
   - API: api.md
+  - Contributing: contributing.md
