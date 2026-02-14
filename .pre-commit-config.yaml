@@ -1,5 +1,6 @@
 # Pre-commit hooks configuration for Ferro
 # Compatible with both pre-commit and Prek
+default_stages: [commit-msg]
 
 repos:
   # General file checks
