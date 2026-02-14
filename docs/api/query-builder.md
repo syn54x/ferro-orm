@@ -5,7 +5,7 @@
       show_root_heading: true
       show_source: false
 
-::: ferro.query.builder.BackRelationship
+::: ferro.query.builder.BackRef
     options:
       show_root_heading: true
       show_source: false
