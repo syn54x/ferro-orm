@@ -1,7 +1,15 @@
 # CHANGELOG
 
 
-## Unreleased
+## v0.2.0 (2026-02-14)
+
+### Chores
+
+- **.gitignore**: Remove src/ferro/fields.py from ignore list
+  ([`1c46851`](https://github.com/syn54x/ferro-orm/commit/1c46851abe49b55fb7582759b4a2a1d812803199))
+
+- **changelog**: Fix changelog format
+  ([`579bb10`](https://github.com/syn54x/ferro-orm/commit/579bb109579c4b4f93712a523f36d1f783702c20))
 
 ### Continuous Integration
 
@@ -16,6 +24,9 @@
 
 - **release**: Update permissions for publish workflow
   ([`d9d7243`](https://github.com/syn54x/ferro-orm/commit/d9d724399aa6005716b3d4b9fc0b2bde76cffe8a))
+
+- **release**: Update workflows for PyPI Trusted Publishing
+  ([`75195d5`](https://github.com/syn54x/ferro-orm/commit/75195d5d612448dedc00bada3fc2be6097bb82cb))
 
 ### Features
 
