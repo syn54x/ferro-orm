@@ -104,7 +104,8 @@ match = "main"
 prerelease = false
 
 [tool.semantic_release.changelog]
-template_dir = "templates"
+# Regenerate changelog from full git history each time (no insertion-flag lookup).
+mode = "init"
 exclude_commit_patterns = []
 
 [tool.semantic_release.changelog.default_templates]
