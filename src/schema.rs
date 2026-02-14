@@ -5,7 +5,7 @@
 
 use crate::state::{ENGINE, MODEL_REGISTRY};
 use pyo3::prelude::*;
-use sea_query::{Alias, ColumnDef, Index, SqliteQueryBuilder, Table};
+use sea_query::{Alias, ColumnDef, Index, SqliteQueryBuilder, Table, ForeignKey, ForeignKeyAction};
 use sqlx::{Any, Pool};
 use std::sync::Arc;
 
@@ -143,6 +143,28 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                     }
 
                     table_stmt.col(&mut col_def);
+
+                    // Check for Foreign Key from metadata
+                    if let Some(fk_info) = col_info.get("foreign_key").and_then(|fk| fk.as_object()) {
+                        let to_table = fk_info.get("to_table").and_then(|t| t.as_str()).unwrap_or("");
+                        let on_delete_str = fk_info.get("on_delete").and_then(|o| o.as_str()).unwrap_or("CASCADE");
+                        
+                        let action = match on_delete_str.to_uppercase().as_str() {
+                            "RESTRICT" => ForeignKeyAction::Restrict,
+                            "SET NULL" => ForeignKeyAction::SetNull,
+                            "SET DEFAULT" => ForeignKeyAction::SetDefault,
+                            "NO ACTION" => ForeignKeyAction::NoAction,
+                            _ => ForeignKeyAction::Cascade, // Default
+                        };
+
+                        let mut fk_stmt = ForeignKey::create();
+                        fk_stmt
+                            .from(Alias::new(&table_lower), Alias::new(col_name))
+                            .to(Alias::new(to_table), Alias::new("id")) // CX Choice: Assume target PK is 'id' for now
+                            .on_delete(action);
+                        
+                        table_stmt.foreign_key(&mut fk_stmt);
+                    }
                 }
             }
             (

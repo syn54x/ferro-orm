@@ -52,6 +52,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(operations::delete_record, m)?)?;
     m.add_function(wrap_pyfunction!(operations::delete_filtered, m)?)?;
     m.add_function(wrap_pyfunction!(operations::update_filtered, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::add_m2m_links, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::remove_m2m_links, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::clear_m2m_links, m)?)?;
     m.add_function(wrap_pyfunction!(operations::begin_transaction, m)?)?;
     m.add_function(wrap_pyfunction!(operations::commit_transaction, m)?)?;
     m.add_function(wrap_pyfunction!(operations::rollback_transaction, m)?)?;
