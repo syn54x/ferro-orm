@@ -9,7 +9,8 @@ on:
   workflow_dispatch:
   workflow_call:
   release:
-    types: [published]
+    # Include prereleased to support semantic-release pre-releases.
+    types: [published, prereleased]
 
 concurrency:
   group: publish-${{ github.workflow }}-${{ github.ref }}
