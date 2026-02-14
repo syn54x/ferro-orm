@@ -7,6 +7,10 @@ on:
     paths-ignore:
       - 'CHANGELOG.md'
 
+concurrency:
+  group: changelog-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   update-changelog:
     name: Update Unreleased Changelog
@@ -36,7 +40,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --group dev
+          uv sync --only-group release
 
       - name: Configure Git
         run: |
