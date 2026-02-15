@@ -169,10 +169,10 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await shutdown()
+```
 
 !!! note "disconnect() Not Available"
     The `disconnect()` function is not yet implemented. Connection cleanup happens automatically on process exit. See [Coming Soon](../coming-soon.md#disconnect) for more information.
-```
 
 ### Use Connection Pooling
 

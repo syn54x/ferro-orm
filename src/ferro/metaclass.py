@@ -243,6 +243,7 @@ class ModelMetaclass(type(BaseModel)):
                                         "unique": metadata.unique,
                                     }
 
+                    setattr(cls, "__ferro_schema__", schema)
                     register_model_schema(name, json.dumps(schema))
             except Exception as e:
                 raise RuntimeError(f"Ferro failed to register model '{name}': {e}")

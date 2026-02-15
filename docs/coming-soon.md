@@ -480,24 +480,6 @@ profile = await user.profile
 
 ---
 
-## Documentation
-
-### Version Information
-
-**Status:** Missing
-
-**Description:**
-Many features are documented with notes like "Check your Ferro version" but there's no version changelog or feature matrix showing which features were added in which versions.
-
-**Recommendation:**
-Add version indicators to feature documentation:
-```python
-!!! info "Added in v0.2.0"
-    The `BackRef` type was introduced in version 0.2.0.
-```
-
----
-
 ## Summary
 
 ### Definitely Not Implemented

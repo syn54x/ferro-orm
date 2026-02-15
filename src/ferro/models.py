@@ -66,6 +66,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         ...     name: str
     """
 
+    @classmethod
+    def _reregister_ferro(cls) -> None:
+        """Re-register this model's schema with the Rust core (e.g. after clear_registry)."""
+        schema = getattr(cls, "__ferro_schema__", None)
+        if schema is not None:
+            from ._core import register_model_schema
+
+            register_model_schema(cls.__name__, json.dumps(schema))
+
     model_config = ConfigDict(
         from_attributes=True,
         use_attribute_docstrings=True,

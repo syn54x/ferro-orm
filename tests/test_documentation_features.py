@@ -6,18 +6,17 @@ work as expected. Each test corresponds to a specific documented capability.
 """
 
 import asyncio
-from datetime import datetime, date
+from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Annotated
-from uuid import uuid4
 
 import pytest
 
 from ferro import (
     BackRef,
-    Field,
     FerroField,
+    Field,
     ForeignKey,
     ManyToManyField,
     Model,
@@ -30,6 +29,7 @@ from ferro import (
 # Test Models
 class UserRole(Enum):
     """Test enum for role field"""
+
     USER = "user"
     ADMIN = "admin"
     MODERATOR = "moderator"
@@ -37,6 +37,7 @@ class UserRole(Enum):
 
 class User(Model):
     """User model for testing"""
+
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     username: Annotated[str, FerroField(unique=True)]
     email: Annotated[str, FerroField(unique=True, index=True)]
@@ -48,6 +49,7 @@ class User(Model):
 
 class Post(Model):
     """Post model for testing"""
+
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str
     content: str
@@ -60,6 +62,7 @@ class Post(Model):
 
 class Comment(Model):
     """Comment model for testing"""
+
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     text: str
     created_at: datetime = Field(default_factory=datetime.now)
@@ -69,6 +72,7 @@ class Comment(Model):
 
 class Tag(Model):
     """Tag model for testing many-to-many"""
+
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: Annotated[str, FerroField(unique=True)]
     posts: BackRef[list["Post"]] = None
@@ -76,6 +80,7 @@ class Tag(Model):
 
 class Product(Model):
     """Product model for testing field types"""
+
     sku: str = Field(primary_key=True)
     name: str
     price: Decimal = Field(ge=0, decimal_places=2)
@@ -84,15 +89,29 @@ class Product(Model):
     metadata_json: dict | None = None
 
 
+# Re-register models before each test so they are in the Rust and Python
+# registries even if another test's fixture cleared them (e.g. alembic/schema).
+@pytest.fixture(autouse=True)
+def _ensure_models_registered():
+    from ferro.state import _MODEL_REGISTRY_PY
+
+    for model_cls in (User, Post, Comment, Tag, Product):
+        model_cls._reregister_ferro()
+        _MODEL_REGISTRY_PY[model_cls.__name__] = model_cls
+    yield
+
+
 @pytest.fixture
 def db_url():
     """Generate a unique database URL for each test"""
     import uuid
+
     db_file = f"test_{uuid.uuid4()}.db"
     url = f"sqlite:{db_file}?mode=rwc"
     yield url
     # Cleanup
     import os
+
     if os.path.exists(db_file):
         os.remove(db_file)
 
@@ -101,10 +120,12 @@ def db_url():
 # MODELS & FIELDS TESTS (docs/guide/models-and-fields.md)
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_basic_model_definition(db_url):
     """Test basic model definition from docs"""
     await connect(db_url, auto_migrate=True)
+
     class SimpleUser(Model):
         id: int
         username: str
@@ -126,7 +147,7 @@ async def test_field_types(db_url):
         name="Test Product",
         price=Decimal("19.99"),
         stock=100,
-        metadata_json={"color": "blue", "size": "large"}
+        metadata_json={"color": "blue", "size": "large"},
     )
 
     assert product.sku == "PROD-001"
@@ -141,9 +162,7 @@ async def test_enum_field_type(db_url):
     """Test enum field type works as documented"""
     await connect(db_url, auto_migrate=True)
     user = await User.create(
-        username="admin_user",
-        email="admin@example.com",
-        role=UserRole.ADMIN
+        username="admin_user", email="admin@example.com", role=UserRole.ADMIN
     )
 
     fetched = await User.get(user.id)
@@ -155,11 +174,7 @@ async def test_enum_field_type(db_url):
 async def test_field_constraints_pydantic_style(db_url):
     """Test Field() constraint syntax"""
     await connect(db_url, auto_migrate=True)
-    product = await Product.create(
-        sku="TEST-001",
-        name="Test",
-        price=Decimal("10.00")
-    )
+    product = await Product.create(sku="TEST-001", name="Test", price=Decimal("10.00"))
     assert product.sku == "TEST-001"
 
 
@@ -179,14 +194,13 @@ async def test_field_constraints_annotated_style(db_url):
 # CRUD OPERATIONS TESTS (docs/guide/mutations.md)
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_create_method(db_url):
     """Test Model.create() as documented"""
     await connect(db_url, auto_migrate=True)
     user = await User.create(
-        username="alice",
-        email="alice@example.com",
-        is_active=True
+        username="alice", email="alice@example.com", is_active=True
     )
 
     assert user.id is not None
@@ -264,8 +278,7 @@ async def test_bulk_create(db_url):
     """Test Model.bulk_create() as documented"""
     await connect(db_url, auto_migrate=True)
     users = [
-        User(username=f"user_{i}", email=f"user{i}@example.com")
-        for i in range(100)
+        User(username=f"user_{i}", email=f"user{i}@example.com") for i in range(100)
     ]
 
     count = await User.bulk_create(users)
@@ -281,16 +294,14 @@ async def test_get_or_create(db_url):
     await connect(db_url, auto_migrate=True)
     # First call creates
     user1, created1 = await User.get_or_create(
-        email="test@example.com",
-        defaults={"username": "testuser"}
+        email="test@example.com", defaults={"username": "testuser"}
     )
     assert created1 is True
     assert user1.username == "testuser"
 
     # Second call retrieves
     user2, created2 = await User.get_or_create(
-        email="test@example.com",
-        defaults={"username": "different"}
+        email="test@example.com", defaults={"username": "different"}
     )
     assert created2 is False
     assert user2.id == user1.id
@@ -303,15 +314,13 @@ async def test_update_or_create(db_url):
     await connect(db_url, auto_migrate=True)
     # First call creates
     user1, created1 = await User.update_or_create(
-        email="test@example.com",
-        defaults={"username": "testuser"}
+        email="test@example.com", defaults={"username": "testuser"}
     )
     assert created1 is True
 
     # Second call updates
     user2, created2 = await User.update_or_create(
-        email="test@example.com",
-        defaults={"username": "updated"}
+        email="test@example.com", defaults={"username": "updated"}
     )
     assert created2 is False
     assert user2.id == user1.id
@@ -321,6 +330,7 @@ async def test_update_or_create(db_url):
 # ============================================================================
 # QUERY OPERATIONS TESTS (docs/guide/queries.md)
 # ============================================================================
+
 
 @pytest.mark.asyncio
 async def test_where_equality(db_url):
@@ -340,9 +350,7 @@ async def test_where_comparison_operators(db_url):
     await connect(db_url, auto_migrate=True)
     for i in range(5):
         await Product.create(
-            sku=f"PROD-{i}",
-            name=f"Product {i}",
-            price=Decimal(str(i * 10))
+            sku=f"PROD-{i}", name=f"Product {i}", price=Decimal(str(i * 10))
         )
 
     # Greater than
@@ -372,10 +380,14 @@ async def test_where_in_operator(db_url):
     await connect(db_url, auto_migrate=True)
     await User.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
     await User.create(username="bob", email="bob@example.com", role=UserRole.MODERATOR)
-    await User.create(username="charlie", email="charlie@example.com", role=UserRole.USER)
+    await User.create(
+        username="charlie", email="charlie@example.com", role=UserRole.USER
+    )
 
     # Use enum values instead of enum instances
-    staff = await User.where(User.role.in_([UserRole.ADMIN.value, UserRole.MODERATOR.value])).all()
+    staff = await User.where(
+        User.role.in_([UserRole.ADMIN.value, UserRole.MODERATOR.value])
+    ).all()
     assert len(staff) == 2
 
 
@@ -383,9 +395,18 @@ async def test_where_in_operator(db_url):
 async def test_logical_and_operator(db_url):
     """Test & (AND) operator in queries"""
     await connect(db_url, auto_migrate=True)
-    await User.create(username="alice", email="alice@example.com", is_active=True, role=UserRole.ADMIN)
-    await User.create(username="bob", email="bob@example.com", is_active=True, role=UserRole.USER)
-    await User.create(username="charlie", email="charlie@example.com", is_active=False, role=UserRole.ADMIN)
+    await User.create(
+        username="alice", email="alice@example.com", is_active=True, role=UserRole.ADMIN
+    )
+    await User.create(
+        username="bob", email="bob@example.com", is_active=True, role=UserRole.USER
+    )
+    await User.create(
+        username="charlie",
+        email="charlie@example.com",
+        is_active=False,
+        role=UserRole.ADMIN,
+    )
 
     active_admins = await User.where(
         (User.is_active == True) & (User.role == UserRole.ADMIN.value)
@@ -400,7 +421,9 @@ async def test_logical_or_operator(db_url):
     await connect(db_url, auto_migrate=True)
     await User.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
     await User.create(username="bob", email="bob@example.com", role=UserRole.MODERATOR)
-    await User.create(username="charlie", email="charlie@example.com", role=UserRole.USER)
+    await User.create(
+        username="charlie", email="charlie@example.com", role=UserRole.USER
+    )
 
     staff = await User.where(
         (User.role == UserRole.ADMIN.value) | (User.role == UserRole.MODERATOR.value)
@@ -516,6 +539,7 @@ async def test_query_delete(db_url):
 # RELATIONSHIPS TESTS (docs/guide/relationships.md)
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_foreign_key_creation(db_url):
     """Test creating records with ForeignKey relationships"""
@@ -523,11 +547,7 @@ async def test_foreign_key_creation(db_url):
     author = await User.create(username="alice", email="alice@example.com")
 
     # Pass model instance
-    post = await Post.create(
-        title="My Post",
-        content="Content here",
-        author=author
-    )
+    post = await Post.create(title="My Post", content="Content here", author=author)
 
     assert post.author_id == author.id
 
@@ -565,7 +585,9 @@ async def test_reverse_relation_filtering(db_url):
     await connect(db_url, auto_migrate=True)
     author = await User.create(username="alice", email="alice@example.com")
 
-    await Post.create(title="Published", content="Content", author=author, published=True)
+    await Post.create(
+        title="Published", content="Content", author=author, published=True
+    )
     await Post.create(title="Draft", content="Content", author=author, published=False)
 
     published = await author.posts.where(Post.published == True).all()
@@ -588,7 +610,9 @@ async def test_shadow_field_access(db_url):
     assert len(posts) == 1
 
 
-@pytest.mark.skip(reason="Many-to-many join tables not automatically created - see coming-soon.md")
+@pytest.mark.skip(
+    reason="Many-to-many join tables not automatically created - see coming-soon.md"
+)
 @pytest.mark.asyncio
 async def test_many_to_many_add(db_url):
     """Test .add() for many-to-many relationships"""
@@ -596,7 +620,7 @@ async def test_many_to_many_add(db_url):
     post = await Post.create(
         title="Test Post",
         content="Content",
-        author=await User.create(username="alice", email="alice@example.com")
+        author=await User.create(username="alice", email="alice@example.com"),
     )
 
     tag1 = await Tag.create(name="python")
@@ -608,7 +632,9 @@ async def test_many_to_many_add(db_url):
     assert len(post_tags) == 2
 
 
-@pytest.mark.skip(reason="Many-to-many join tables not automatically created - see coming-soon.md")
+@pytest.mark.skip(
+    reason="Many-to-many join tables not automatically created - see coming-soon.md"
+)
 @pytest.mark.asyncio
 async def test_many_to_many_remove(db_url):
     """Test .remove() for many-to-many relationships"""
@@ -616,7 +642,7 @@ async def test_many_to_many_remove(db_url):
     post = await Post.create(
         title="Test Post",
         content="Content",
-        author=await User.create(username="alice", email="alice@example.com")
+        author=await User.create(username="alice", email="alice@example.com"),
     )
 
     tag1 = await Tag.create(name="python")
@@ -630,7 +656,9 @@ async def test_many_to_many_remove(db_url):
     assert post_tags[0].name == "rust"
 
 
-@pytest.mark.skip(reason="Many-to-many join tables not automatically created - see coming-soon.md")
+@pytest.mark.skip(
+    reason="Many-to-many join tables not automatically created - see coming-soon.md"
+)
 @pytest.mark.asyncio
 async def test_many_to_many_clear(db_url):
     """Test .clear() for many-to-many relationships"""
@@ -638,7 +666,7 @@ async def test_many_to_many_clear(db_url):
     post = await Post.create(
         title="Test Post",
         content="Content",
-        author=await User.create(username="alice", email="alice@example.com")
+        author=await User.create(username="alice", email="alice@example.com"),
     )
 
     tag1 = await Tag.create(name="python")
@@ -651,7 +679,9 @@ async def test_many_to_many_clear(db_url):
     assert len(post_tags) == 0
 
 
-@pytest.mark.skip(reason="Many-to-many join tables not automatically created - see coming-soon.md")
+@pytest.mark.skip(
+    reason="Many-to-many join tables not automatically created - see coming-soon.md"
+)
 @pytest.mark.asyncio
 async def test_many_to_many_reverse(db_url):
     """Test many-to-many from both sides"""
@@ -659,7 +689,7 @@ async def test_many_to_many_reverse(db_url):
     post = await Post.create(
         title="Test Post",
         content="Content",
-        author=await User.create(username="alice", email="alice@example.com")
+        author=await User.create(username="alice", email="alice@example.com"),
     )
     tag = await Tag.create(name="python")
 
@@ -674,6 +704,7 @@ async def test_many_to_many_reverse(db_url):
 # ============================================================================
 # TRANSACTIONS TESTS (docs/guide/transactions.md)
 # ============================================================================
+
 
 @pytest.mark.asyncio
 async def test_transaction_commit(db_url):
@@ -710,6 +741,7 @@ async def test_transaction_rollback(db_url):
 async def test_transaction_isolation(db_url):
     """Test transaction isolation between concurrent tasks"""
     await connect(db_url, auto_migrate=True)
+
     async def task_a():
         async with transaction():
             await User.create(username="task_a_user", email="a@example.com")
@@ -729,6 +761,7 @@ async def test_transaction_isolation(db_url):
 # TUTORIAL EXAMPLES TESTS (docs/getting-started/tutorial.md)
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_tutorial_blog_example(db_url):
     """Test the complete tutorial blog example"""
@@ -742,35 +775,27 @@ async def test_tutorial_blog_example(db_url):
         title="Why Ferro is Fast",
         content="Ferro uses a Rust engine...",
         published=True,
-        author=alice
+        author=alice,
     )
 
     post2 = await Post.create(
         title="Getting Started with Async Python",
         content="Async programming can be tricky...",
         published=True,
-        author=alice
+        author=alice,
     )
 
     draft = await Post.create(
         title="Draft Post",
         content="This is not published yet",
         published=False,
-        author=bob
+        author=bob,
     )
 
     # Create comments
-    comment1 = await Comment.create(
-        text="Great article!",
-        author=bob,
-        post=post1
-    )
+    comment1 = await Comment.create(text="Great article!", author=bob, post=post1)
 
-    comment2 = await Comment.create(
-        text="Thanks for sharing",
-        author=alice,
-        post=post1
-    )
+    comment2 = await Comment.create(text="Thanks for sharing", author=alice, post=post1)
 
     # Query: Find all published posts
     published = await Post.where(Post.published == True).all()
