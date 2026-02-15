@@ -165,25 +165,20 @@ if not has_admin:
 
 ## Aggregations
 
-!!! note
-    Aggregation support varies by Ferro version. Check your version's capabilities.
+Currently, only `.count()` is implemented:
 
 ```python
-# Count
-total_users = await User.count()
-
-# Group by (if supported)
-# Check API documentation for your version
+# Count (implemented)
+total_users = await User.where(User.active == True).count()
 ```
+
+!!! warning "Feature Not Implemented"
+    Aggregation functions like `sum()`, `avg()`, `min()`, `max()` are not yet available. See [Coming Soon](../coming-soon.md#aggregation-functions) for more information.
 
 ## Selecting Specific Fields
 
-By default, Ferro loads all fields. To select specific fields:
-
-```python
-# Select specific fields (if supported in your version)
-users = await User.select(User.id, User.username).all()
-```
+!!! warning "Feature Not Implemented"
+    Selecting specific fields is not yet available. Ferro currently loads all model fields. See [Coming Soon](../coming-soon.md#select-specific-fields) for more information.
 
 ## Working with Relationships
 
@@ -215,8 +210,8 @@ post_count = await author.posts.count()
 
 ### Eager Loading
 
-!!! note
-    Check your Ferro version for `.prefetch_related()` or similar eager-loading support to avoid N+1 queries.
+!!! warning "Feature Not Implemented"
+    Eager loading with `prefetch_related()` is not yet available. See [Coming Soon](../coming-soon.md#eager-loading--prefetch-related) for current workarounds.
 
 ## Advanced Filtering
 
@@ -236,10 +231,10 @@ users_with_phone = await User.where(User.phone != None).all()
 # Using .in_()
 active_statuses = ["active", "pending", "verified"]
 users = await User.where(User.status.in_(active_statuses)).all()
-
-# NOT IN
-banned_users = await User.where(User.status.not_in_(["banned", "suspended"])).all()
 ```
+
+!!! warning "Feature Not Implemented"
+    The `not_in_()` method is not yet available. See [Coming Soon](../coming-soon.md#not-in-operator-not_in) for workarounds using `!=` with `&`.
 
 ### LIKE Patterns
 
@@ -249,29 +244,15 @@ gmail_users = await User.where(User.email.like("%.gmail.com")).all()
 
 # Contains
 smith_users = await User.where(User.name.like("%Smith%")).all()
-
-# Case-insensitive (if supported)
-users = await User.where(User.email.ilike("%EXAMPLE.COM")).all()
 ```
+
+!!! warning "Feature Not Implemented"
+    Case-insensitive `ilike()` is not yet available. See [Coming Soon](../coming-soon.md#case-insensitive-like-ilike) for workarounds.
 
 ## Raw SQL
 
-For complex queries not supported by the query builder:
-
-```python
-# Check your version's API for raw SQL support
-# Example (API may vary):
-from ferro import raw_query
-
-results = await raw_query(
-    "SELECT * FROM users WHERE age > $1 AND status = $2",
-    18,
-    "active"
-)
-```
-
-!!! warning "SQL Injection"
-    Always use parameterized queries (e.g., `$1`, `$2`). Never interpolate user input directly into SQL strings.
+!!! warning "Feature Not Implemented"
+    Raw SQL query execution is not yet available. Use the query builder API for all queries. See [Coming Soon](../coming-soon.md#raw-sql-queries) for more information.
 
 ## Performance Tips
 
@@ -315,15 +296,17 @@ await User.where(User.id.in_([u.id for u in users])).update(is_active=False)
 
 ### Avoid N+1 Queries
 
+Be aware of N+1 query patterns:
+
 ```python
-# Bad (N+1 queries)
+# This causes N+1 queries (one for posts, then one per post for author)
 posts = await Post.all()
 for post in posts:
     author = await post.author  # Separate query for each post!
-
-# Good (prefetch if supported)
-# Check your version's API for eager loading patterns
 ```
+
+!!! warning "Feature Not Implemented"
+    Eager loading / prefetching is not yet available. See [Coming Soon](../coming-soon.md#eager-loading--prefetch-related) for more information. Be mindful of N+1 patterns and load relationships efficiently.
 
 ## SQL Injection Protection
 

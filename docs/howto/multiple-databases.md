@@ -1,11 +1,17 @@
 # How-To: Multiple Databases
 
-Connect to and query multiple databases in Ferro.
+!!! warning "Feature Not Implemented"
+    **Multi-database support is not currently available in Ferro.** This documentation describes planned features. See [Coming Soon](../coming-soon.md#multiple-database-support) for more information.
 
-!!! note
-    Multi-database support varies by Ferro version. Check your version's documentation for specific capabilities.
+    Ferro currently supports only a single database connection per application. The examples below show the planned API.
 
-## Basic Configuration
+---
+
+Connect to and query multiple databases in Ferro (planned feature).
+
+## Basic Configuration (Planned)
+
+The following shows the planned API for multi-database support:
 
 ```python
 import ferro

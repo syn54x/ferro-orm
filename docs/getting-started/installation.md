@@ -11,6 +11,10 @@
 Ferro is distributed as pre-compiled wheels for all major platforms:
 
 ```bash
+# UV
+uv add ferro-orm
+
+# Or pip
 pip install ferro-orm
 ```
 
@@ -19,7 +23,7 @@ pip install ferro-orm
 For production use with Alembic migrations:
 
 ```bash
-pip install "ferro-orm[alembic]"
+uv add "ferro-orm[alembic]"
 ```
 
 This installs Alembic and SQLAlchemy (used only for migration generation, not at runtime).
@@ -40,15 +44,6 @@ No additional setup needed. PostgreSQL support is built into Ferro.
 
 No additional setup needed. MySQL/MariaDB support is built into Ferro.
 
-## Verify Installation
-
-Check that Ferro is installed correctly:
-
-```python
-import ferro
-
-print(ferro.__version__)
-```
 
 ## Optional Dependencies
 

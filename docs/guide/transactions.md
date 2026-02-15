@@ -90,20 +90,18 @@ await asyncio.gather(task_a(), task_b())
 
 ## Nested Transactions
 
-!!! warning "Current Limitation"
-    Ferro currently supports single-level transactions. Nested `async with transaction():` calls will participate in the outermost transaction.
+!!! warning "Feature Not Implemented"
+    Ferro currently supports single-level transactions only. Nested `transaction()` calls participate in the outermost transaction. True nested transactions with savepoints are not yet available. See [Coming Soon](../coming-soon.md#nested-transactions--savepoints) for more information.
 
 ```python
 async with transaction():  # Outer transaction
     await User.create(username="alice")
 
-    async with transaction():  # Participates in outer transaction
+    async with transaction():  # Participates in outer transaction (no savepoint)
         await Post.create(title="Hello")
 
     # If an exception occurs here, both User and Post are rolled back
 ```
-
-**Future support**: Savepoints for true nested transactions are planned.
 
 ## Error Handling Patterns
 

@@ -132,7 +132,7 @@ async def main():
         published=False,
         author=bob
     )
-    print(f"✅ Created {await Post.count()} posts")
+    print(f"✅ Created {await Post.select().count()} posts")
 
     # Create comments
     comment1 = await Comment.create(
@@ -145,7 +145,7 @@ async def main():
         author=alice,
         post=post1
     )
-    print(f"✅ Created {await Comment.count()} comments")
+    print(f"✅ Created {await Comment.select().count()} comments")
 ```
 
 Run it again:

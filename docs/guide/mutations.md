@@ -128,14 +128,16 @@ await Product.where(Product.category == "Electronics").update(
 
 ### Atomic Operations
 
-!!! note
-    Check your Ferro version for atomic increment/decrement support.
+!!! warning "Feature Not Implemented"
+    Atomic field increment/decrement operations are not yet available. See [Coming Soon](../coming-soon.md#atomic-field-updates) for workarounds.
 
+**Workaround:**
 ```python
-# Increment view count (if supported)
-await Post.where(Post.id == post_id).update(
-    view_count=Post.view_count + 1
-)
+# Load, modify, and save
+post = await Post.where(Post.id == post_id).first()
+if post:
+    post.view_count += 1
+    await post.save()
 ```
 
 ### Updating Relationships
@@ -216,7 +218,7 @@ await user.delete()  # Posts remain, author_id becomes NULL
 # RESTRICT: Deleting user fails if they have posts
 try:
     await user.delete()
-except IntegrityError:
+except Exception:  # Use specific exception type from your driver
     print("Cannot delete user with existing posts")
 ```
 
@@ -376,12 +378,15 @@ await User.bulk_create(users)
 
 ## Error Handling
 
+!!! note "Exception Types"
+    The documentation references exception types like `IntegrityError` and `ValidationError`. These exceptions come from the underlying database driver or Pydantic. Import paths may vary. Catch general `Exception` or check your specific database driver's exceptions.
+
 ### Unique Constraint Violations
 
 ```python
 try:
     await User.create(username="alice", email="existing@example.com")
-except IntegrityError as e:
+except Exception as e:  # Use specific exception type from your driver
     print(f"User with this email already exists: {e}")
 ```
 
@@ -393,13 +398,15 @@ try:
         title="Orphan Post",
         author_id=99999  # Non-existent user
     )
-except IntegrityError as e:
+except Exception as e:  # Use specific exception type from your driver
     print(f"Invalid author ID: {e}")
 ```
 
 ### Not Null Violations
 
 ```python
+from pydantic import ValidationError
+
 try:
     await User.create(username="bob")  # Missing required 'email'
 except ValidationError as e:

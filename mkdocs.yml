@@ -73,6 +73,7 @@ plugins:
           - faq.md
           - contributing.md
           - changelog.md
+          - coming-soon.md
   - mkdocstrings:
       handlers:
         python:
@@ -86,9 +87,15 @@ plugins:
             members_order: source
 
 markdown_extensions:
+  - attr_list
+  - md_in_html
   - admonition
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.snippets:
       base_path: ["."]
   - pymdownx.highlight:
@@ -101,6 +108,9 @@ markdown_extensions:
   - pymdownx.smartsymbols
   - pymdownx.tabbed:
       alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - tables
   - toc:
       permalink: true
@@ -148,3 +158,4 @@ nav:
       - FAQ: faq.md
       - Contributing: contributing.md
       - Changelog: changelog.md
+      - Coming Soon: coming-soon.md

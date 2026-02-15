@@ -74,34 +74,6 @@ await ferro.connect("sqlite:dev.db?mode=rwc", auto_migrate=True)
 !!! danger "Production Warning"
     `auto_migrate=True` is intended for development only. For production, use [Alembic migrations](migrations.md).
 
-### Connection Pooling
-
-Control the connection pool size:
-
-```python
-await ferro.connect(
-    "postgresql://user:password@localhost/dbname",
-    max_connections=20,      # Maximum pool size
-    min_connections=5,       # Minimum idle connections
-    connect_timeout=30       # Connection timeout in seconds
-)
-```
-
-Default pool sizes:
-- SQLite: 1 (single connection)
-- PostgreSQL/MySQL: 10
-
-### Connection Timeout
-
-Set a timeout for establishing connections:
-
-```python
-await ferro.connect(
-    "postgresql://localhost/dbname",
-    connect_timeout=10  # seconds
-)
-```
-
 ## Manual Table Creation
 
 Create tables manually without `auto_migrate`:
@@ -122,61 +94,28 @@ async def main():
 
 ## Multiple Databases
 
-!!! note
-    Multi-database support varies by Ferro version. Check your version's documentation.
-
-Basic pattern for multiple databases:
-
-```python
-# Primary database
-await ferro.connect(
-    "postgresql://localhost/main_db",
-    name="primary"
-)
-
-# Analytics database (read-only)
-await ferro.connect(
-    "postgresql://localhost/analytics_db",
-    name="analytics",
-    read_only=True
-)
-
-# Use specific database
-users = await User.using("primary").all()
-metrics = await Metric.using("analytics").all()
-```
-
-See [How-To: Multiple Databases](../howto/multiple-databases.md) for details.
+!!! warning "Feature Not Implemented"
+    Multi-database support is not yet available. Ferro currently supports only a single database connection per application. See [Coming Soon](../coming-soon.md#multiple-database-support) and [How-To: Multiple Databases](../howto/multiple-databases.md) for planned features.
 
 ## Health Checks
 
-Check database connectivity:
+!!! warning "Feature Not Implemented"
+    `check_connection()` is not yet available. See [Coming Soon](../coming-soon.md#check_connection) for workarounds.
 
+**Workaround:**
 ```python
-from ferro import check_connection
-
-# Returns True if connected
-is_connected = await check_connection()
-
-if not is_connected:
-    # Reconnect logic
-    await ferro.connect("postgresql://localhost/dbname")
+# Attempt a simple query to verify connectivity
+try:
+    await User.select().limit(1).all()
+    is_connected = True
+except Exception:
+    is_connected = False
 ```
 
 ## Connection Context
 
-For request-scoped connections (e.g., in web apps):
-
-```python
-from ferro import connection_context
-
-async def handle_request():
-    async with connection_context():
-        # All queries in this context use the same connection
-        user = await User.create(username="alice")
-        await Post.create(title="Hello", author=user)
-    # Connection released
-```
+!!! warning "Feature Not Implemented"
+    `connection_context()` is not yet available. See [Coming Soon](../coming-soon.md#connection_context) for more information. Use `transaction()` for scoped database operations.
 
 ## Environment Variables
 
@@ -215,8 +154,8 @@ async def startup():
     print("Database connected")
 
 async def shutdown():
-    await ferro.disconnect()
-    print("Database disconnected")
+    # Graceful shutdown (manual cleanup if needed)
+    print("Database connection will be cleaned up on process exit")
 
 # FastAPI example
 from fastapi import FastAPI
@@ -230,19 +169,21 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await shutdown()
+
+!!! note "disconnect() Not Available"
+    The `disconnect()` function is not yet implemented. Connection cleanup happens automatically on process exit. See [Coming Soon](../coming-soon.md#disconnect) for more information.
 ```
 
 ### Use Connection Pooling
 
-For web applications, connection pooling is essential:
+!!! note
+    Advanced connection pool parameters may not be fully supported. See [Coming Soon](../coming-soon.md#connection-pool-configuration).
+
+For web applications with basic connection support:
 
 ```python
-# Production config
-await ferro.connect(
-    "postgresql://localhost/proddb",
-    max_connections=50,  # Tune based on load
-    min_connections=10
-)
+# Basic connection for production
+await ferro.connect("postgresql://localhost/proddb")
 ```
 
 ### Separate Dev/Prod Configs
@@ -265,13 +206,11 @@ else:
 ### Handle Connection Errors
 
 ```python
-from ferro import ConnectionError
-
+# Connection errors will raise exceptions
 try:
     await ferro.connect("postgresql://localhost/dbname")
-except ConnectionError as e:
+except Exception as e:
     logger.error(f"Failed to connect: {e}")
-    # Fallback or exit
     sys.exit(1)
 ```
 

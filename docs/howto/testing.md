@@ -56,7 +56,8 @@ async def test_user_unique_email(db_transaction):
     """Test unique email constraint."""
     await User.create(username="user1", email="same@example.com")
 
-    with pytest.raises(IntegrityError):
+    # Use general Exception or your database driver's specific exception
+    with pytest.raises(Exception):  # Or use specific exception from driver
         await User.create(username="user2", email="same@example.com")
 ```
 
