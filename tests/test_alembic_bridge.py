@@ -4,7 +4,7 @@ import pytest
 import sqlalchemy as sa
 
 from ferro import (
-    BackRelationship,
+    BackRef,
     FerroField,
     ForeignKey,
     ManyToManyField,
@@ -34,7 +34,7 @@ def test_metadata_translation():
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: Annotated[str, FerroField(unique=True, index=True)]
         is_active: bool = True
-        posts: BackRelationship["Post"] = None
+        posts: BackRef["Post"] = None
 
     class Post(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -75,7 +75,7 @@ def test_m2m_translation():
     class Movie(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        actors: BackRelationship[Actor] = None
+        actors: BackRef[Actor] = None
 
     metadata = get_metadata()
 
@@ -99,7 +99,7 @@ def test_on_delete_translation():
     class Category(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        products: BackRelationship["Product"] = None
+        products: BackRef["Product"] = None
 
     class Product(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None

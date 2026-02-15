@@ -15,3 +15,13 @@
     --md-primary-fg-color--light: #ECB7B7;
     --md-primary-fg-color--dark:  #B7410E;
 }
+
+/* Keep parameter table columns (Parameter, Type, Default) from wrapping */
+.md-typeset table th:nth-child(1),
+.md-typeset table th:nth-child(2),
+.md-typeset table th:nth-child(3),
+.md-typeset table td:nth-child(1),
+.md-typeset table td:nth-child(2),
+.md-typeset table td:nth-child(3) {
+    white-space: nowrap;
+}

@@ -378,14 +378,14 @@ class Query(Generic[T]):
         return f"<Query model={self.model_cls.__name__} where={self.where_clause}>"
 
 
-class BackRelationship(Query[T]):
+class BackRef(Query[T]):
     """Represent reverse relationship queries with Query typing support
 
     Examples:
         >>> class User(Model):
         ...     id: Annotated[int, FerroField(primary_key=True)]
         ...     name: str
-        ...     posts: BackRelationship[list["Post"]] = None
+        ...     posts: BackRef[list["Post"]] = None
 
         >>> class Post(Model):
         ...     id: Annotated[int, FerroField(primary_key=True)]

@@ -44,19 +44,36 @@ plugins:
       markdown_description: Ferro is a high-performance, Rust-backed ORM for Python with a familiar Pydantic-style API.
       full_output: llms-full.txt
       sections:
-        Guides:
-          - index.md
-          - connection.md
-          - models.md
-          - fields.md
-          - relations.md
-          - queries.md
-          - migrations.md
-          - transactions.md
-          - contributing.md
+        Getting Started:
+          - getting-started/installation.md
+          - getting-started/tutorial.md
+          - getting-started/next-steps.md
+        User Guide:
+          - guide/models-and-fields.md
+          - guide/relationships.md
+          - guide/queries.md
+          - guide/mutations.md
+          - guide/transactions.md
+          - guide/database.md
+          - guide/migrations.md
+        How-To:
+          - howto/pagination.md
+          - howto/testing.md
+          - howto/timestamps.md
+          - howto/soft-deletes.md
+          - howto/multiple-databases.md
+        Concepts:
+          - concepts/architecture.md
+          - concepts/identity-map.md
+          - concepts/type-safety.md
+          - concepts/performance.md
         API Reference:
-          - api.md
           - api/*.md
+        Community:
+          - faq.md
+          - contributing.md
+          - changelog.md
+          - coming-soon.md
   - mkdocstrings:
       handlers:
         python:
@@ -70,9 +87,15 @@ plugins:
             members_order: source
 
 markdown_extensions:
+  - attr_list
+  - md_in_html
   - admonition
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.snippets:
       base_path: ["."]
   - pymdownx.highlight:
@@ -85,23 +108,54 @@ markdown_extensions:
   - pymdownx.smartsymbols
   - pymdownx.tabbed:
       alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - tables
   - toc:
       permalink: true
 
 nav:
-  - Overview: index.md
-  - Connection: connection.md
-  - Models: models.md
-  - Fields: fields.md
-  - Relations: relations.md
-  - Queries: queries.md
-  - Migrations: migrations.md
-  - Transactions: transactions.md
-  - API:
-      - Overview: api.md
-      - Core Models: api/core-models.md
-      - Query Builder: api/query-builder.md
-      - Field Metadata: api/field-metadata.md
-      - Global Functions: api/global-functions.md
-  - Contributing: contributing.md
+  - Home: index.md
+  - Why Ferro?: why-ferro.md
+
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Tutorial: getting-started/tutorial.md
+      - Next Steps: getting-started/next-steps.md
+
+  - User Guide:
+      - Models & Fields: guide/models-and-fields.md
+      - Relationships: guide/relationships.md
+      - Queries: guide/queries.md
+      - Mutations: guide/mutations.md
+      - Transactions: guide/transactions.md
+      - Database Setup: guide/database.md
+      - Schema Management: guide/migrations.md
+
+  - How-To:
+      - Pagination: howto/pagination.md
+      - Testing: howto/testing.md
+      - Timestamps: howto/timestamps.md
+      - Soft Deletes: howto/soft-deletes.md
+      - Multiple Databases: howto/multiple-databases.md
+
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - Identity Map: concepts/identity-map.md
+      - Type Safety: concepts/type-safety.md
+      - Performance: concepts/performance.md
+
+  - API Reference:
+      - Model: api/model.md
+      - Query: api/query.md
+      - Fields: api/fields.md
+      - Relationships: api/relationships.md
+      - Transactions: api/transactions.md
+      - Utilities: api/utilities.md
+
+  - Community:
+      - FAQ: faq.md
+      - Contributing: contributing.md
+      - Changelog: changelog.md
+      - Coming Soon: coming-soon.md

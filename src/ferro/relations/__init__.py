@@ -31,13 +31,13 @@ def resolve_relationships():
                 )
             rel.to = target_model
 
-        # 2. Cross-validate with BackRelationship
+        # 2. Cross-validate with BackRef
         target_model = rel.to
         if not hasattr(target_model, rel.related_name):
             raise RuntimeError(
                 f"Model '{model_name}' defines a relationship to '{target_model.__name__}' "
                 f"with related_name='{rel.related_name}', but '{target_model.__name__}' "
-                f"does not have that field defined as a BackRelationship."
+                f"does not have that field defined as a BackRef (or back_ref=True)."
             )
 
         # 3. Inject Descriptor into target model

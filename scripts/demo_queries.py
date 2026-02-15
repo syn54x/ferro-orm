@@ -16,7 +16,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 from ferro import (
-    BackRelationship,
+    BackRef,
     FerroField,
     ForeignKey,
     ManyToManyField,
@@ -40,7 +40,7 @@ class Category(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str
     # Reverse lookup marker (Zero-Boilerplate)
-    products: BackRelationship[list["Product"]] = None
+    products: BackRef[list["Product"]] = None
 
 
 class Product(Model):
@@ -65,7 +65,7 @@ class Actor(Model):
 class Movie(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str
-    actors: BackRelationship[list[Actor]] = None
+    actors: BackRef[list[Actor]] = None
 
 
 async def run_demo():

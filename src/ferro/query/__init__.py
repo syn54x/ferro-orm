@@ -1,6 +1,6 @@
 """Expose query-building primitives used by Ferro models"""
 
-from .builder import BackRelationship, Query
+from .builder import BackRef, Query
 from .nodes import FieldProxy, QueryNode
 
-__all__ = ["Query", "BackRelationship", "QueryNode", "FieldProxy"]
+__all__ = ["Query", "BackRef", "QueryNode", "FieldProxy"]
