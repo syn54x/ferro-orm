@@ -23,7 +23,7 @@ graph TB
         SQLx[SQLx Driver]
     end
 
-    subgraph db [(Database)]
+    subgraph db [Database]
         SQL[SQL Queries]
         Rows[Row Data]
     end
