@@ -9,7 +9,8 @@ from typing import (
     get_origin,
 )
 
-from pydantic import BaseModel, Field as PydanticField
+from pydantic import BaseModel
+from pydantic import Field as PydanticField
 from pydantic.fields import FieldInfo
 
 from ._core import register_model_schema
@@ -188,7 +189,14 @@ class ModelMetaclass(type(BaseModel)):
                     if isinstance(metadata.to, ForwardRef):
                         target_name = metadata.to.__forward_arg__
 
-                    setattr(cls, field_name, ForwardDescriptor(field_name, target_name))
+                    setattr(
+                        cls,
+                        field_name,
+                        ForwardDescriptor(
+                            target_model_name=target_name,
+                            field_name=field_name,
+                        ),
+                    )
                 else:
                     setattr(cls, field_name, None)
 
@@ -205,9 +213,9 @@ class ModelMetaclass(type(BaseModel)):
                     if "properties" in schema:
                         for f_name, metadata in ferro_fields.items():
                             if f_name in schema["properties"]:
-                                schema["properties"][f_name][
-                                    "primary_key"
-                                ] = metadata.primary_key
+                                schema["properties"][f_name]["primary_key"] = (
+                                    metadata.primary_key
+                                )
                                 prop = schema["properties"][f_name]
                                 is_int = prop.get("type") == "integer" or any(
                                     item.get("type") == "integer"

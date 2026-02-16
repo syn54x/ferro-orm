@@ -1,13 +1,15 @@
-import pytest
 from typing import Annotated, ForwardRef
+
+import pytest
+
 from ferro import (
-    Model,
+    BackRef,
     FerroField,
     Field,
-    reset_engine,
-    clear_registry,
     ForeignKey,
-    BackRef,
+    Model,
+    clear_registry,
+    reset_engine,
 )
 
 
@@ -150,9 +152,7 @@ def test_back_ref_via_annotated_field():
     class UserAnnotated(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        posts: Annotated[
-            list["PostAnnotated"] | None, Field(back_ref=True)
-        ] = None
+        posts: Annotated[list["PostAnnotated"] | None, Field(back_ref=True)] = None
 
     class PostAnnotated(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -179,9 +179,7 @@ def test_back_ref_and_field_back_ref_raises():
         class UserDouble(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             username: str
-            posts: BackRef[list["PostDouble"]] = Field(
-                default=None, back_ref=True
-            )
+            posts: BackRef[list["PostDouble"]] = Field(default=None, back_ref=True)
 
         class PostDouble(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
