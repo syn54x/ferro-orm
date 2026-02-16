@@ -1,27 +1,24 @@
+from typing import TYPE_CHECKING
+
+from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from ferro.models import Model
+
 from ..state import _MODEL_REGISTRY_PY
 
 
-class RelationshipDescriptor:
+class RelationshipDescriptor(BaseModel):
     """Descriptor that returns either a Query object or a single object (for 1:1)."""
 
-    def __init__(
-        self,
-        target_model_name: str,
-        field_name: str,
-        is_one_to_one: bool = False,
-        is_m2m: bool = False,
-        join_table: str | None = None,
-        source_col: str | None = None,
-        target_col: str | None = None,
-    ):
-        self.target_model_name = target_model_name
-        self.field_name = field_name
-        self.is_one_to_one = is_one_to_one
-        self.is_m2m = is_m2m
-        self.join_table = join_table
-        self.source_col = source_col
-        self.target_col = target_col
-        self._target_model = None
+    target_model_name: str
+    field_name: str
+    is_one_to_one: bool = False
+    is_m2m: bool = False
+    join_table: str | None = None
+    source_col: str | None = None
+    target_col: str | None = None
+    _target_model: Model | None = None
 
     def __get__(self, instance, owner):
         if instance is None:
@@ -70,13 +67,12 @@ class RelationshipDescriptor:
         return query
 
 
-class ForwardDescriptor:
+class ForwardDescriptor(BaseModel):
     """Descriptor that handles lazy loading of a related object."""
 
-    def __init__(self, field_name: str, target_model_name: str):
-        self.field_name = field_name
-        self.target_model_name = target_model_name
-        self._target_model = None
+    target_model_name: str
+    field_name: str
+    _target_model: Model | None = None
 
     def __get__(self, instance, owner):
         if instance is None:

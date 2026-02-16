@@ -1,14 +1,16 @@
-import pytest
 import sqlite3
 from typing import Annotated
+
+import pytest
+
 from ferro import (
-    Model,
-    connect,
+    BackRef,
     FerroField,
     ForeignKey,
-    BackRef,
-    reset_engine,
+    Model,
     clear_registry,
+    connect,
+    reset_engine,
 )
 
 

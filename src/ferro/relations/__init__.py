@@ -46,7 +46,9 @@ def resolve_relationships():
                 target_model,
                 rel.related_name,
                 RelationshipDescriptor(
-                    model_name, field_name, is_one_to_one=getattr(rel, "unique", False)
+                    target_model_name=model_name,
+                    field_name=field_name,
+                    is_one_to_one=getattr(rel, "unique", False),
                 ),
             )
         elif isinstance(rel, ManyToManyField):
@@ -68,8 +70,8 @@ def resolve_relationships():
                 _MODEL_REGISTRY_PY[model_name],
                 field_name,
                 RelationshipDescriptor(
-                    target_model.__name__,
-                    field_name,
+                    target_model_name=target_model.__name__,
+                    field_name=field_name,
                     is_m2m=True,
                     join_table=join_table,
                     source_col=source_col,
@@ -81,8 +83,8 @@ def resolve_relationships():
                 target_model,
                 rel.related_name,
                 RelationshipDescriptor(
-                    model_name,
-                    rel.related_name,
+                    target_model_name=model_name,
+                    field_name=rel.related_name,
                     is_m2m=True,
                     join_table=join_table,
                     source_col=target_col,  # Reversed for the back side
@@ -119,12 +121,12 @@ def resolve_relationships():
             if "properties" in schema:
                 for f_name, metadata in model_cls.ferro_fields.items():
                     if f_name in schema["properties"]:
-                        schema["properties"][f_name][
-                            "primary_key"
-                        ] = metadata.primary_key
-                        schema["properties"][f_name][
-                            "autoincrement"
-                        ] = metadata.autoincrement
+                        schema["properties"][f_name]["primary_key"] = (
+                            metadata.primary_key
+                        )
+                        schema["properties"][f_name]["autoincrement"] = (
+                            metadata.autoincrement
+                        )
                         schema["properties"][f_name]["unique"] = metadata.unique
                         schema["properties"][f_name]["index"] = metadata.index
 
