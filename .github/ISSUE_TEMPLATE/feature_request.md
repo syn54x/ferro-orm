@@ -1,7 +1,7 @@
 ---
 name: Feature request
 about: Suggest a new feature or enhancement for Ferro
-title: "[feat]: "
+title: "`feat` "
 labels: feature
 assignees: Ox54
 
