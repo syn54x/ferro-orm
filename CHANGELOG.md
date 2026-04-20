@@ -1,6 +1,54 @@
 # CHANGELOG
 
 
+## v0.2.1 (2026-04-20)
+
+### Bug Fixes
+
+- Defer annotations resolution
+  ([`edd39ab`](https://github.com/syn54x/ferro-orm/commit/edd39abdec7b34410040394d430fd30833e02aee))
+
+### Chores
+
+- Update patch_tags in pyproject.toml to include refactor
+  ([`36c29a7`](https://github.com/syn54x/ferro-orm/commit/36c29a71f0f95845d50d1dd6fdbc14b2c4b20ac2))
+
+### Continuous Integration
+
+- Fix release & mkdocs publish workflows
+  ([`630dc7c`](https://github.com/syn54x/ferro-orm/commit/630dc7cea32da02602acc037e1d8da722d3fb593))
+
+### Documentation
+
+- Restructure documentation following Diátaxis framework
+  ([`b3c2cde`](https://github.com/syn54x/ferro-orm/commit/b3c2cde1d0bde589ad0f08a34002202bca81e5e5))
+
+- Update BackRef references and enhance field documentation
+  ([`baf73ba`](https://github.com/syn54x/ferro-orm/commit/baf73ba03abd554ca8159bc718aa1785b08691ae))
+
+- Update model field annotations to support optional back references
+  ([`2044896`](https://github.com/syn54x/ferro-orm/commit/20448966854d33e64c03a97831f640af279e93b4))
+
+### Refactoring
+
+- Enhance model relationship descriptors and improve field handling
+  ([`6275ebb`](https://github.com/syn54x/ferro-orm/commit/6275ebb9be3ce7a419fb84c381c0a90eec22a5e9))
+
+- Modularize metaclass __new__ method for easier testing and maintenance
+  ([`e514b95`](https://github.com/syn54x/ferro-orm/commit/e514b950cb94e333418f7bd556b8e5b48bf7298e))
+
+- Rename BackRelationship to BackRef and add back_ref to Field
+  ([`d24d32d`](https://github.com/syn54x/ferro-orm/commit/d24d32d3402b51cb738ac2a2c8f396b98d4de632))
+
+- Update demo_queries to use BackRef instead of BackRelationship
+  ([`51799ad`](https://github.com/syn54x/ferro-orm/commit/51799adc1a0b90f937cab7651cf8276f53a16100))
+
+### Testing
+
+- Update references from BackRelationship to BackRef in test files
+  ([`60a1d87`](https://github.com/syn54x/ferro-orm/commit/60a1d87d88fe93996dc0b479c75d40aad3ff143b))
+
+
 ## v0.2.0 (2026-02-14)
 
 ### Chores
