@@ -1,4 +1,5 @@
 import json
+import types
 from typing import (
     Annotated,
     Any,
@@ -63,6 +64,29 @@ class ModelMetaclass(type(BaseModel)):
         return extra.get(FERRO_FIELD_EXTRA_KEY, {}).get("back_ref") is True
 
     @staticmethod
+    def _strip_optional_union(hint: Any) -> Any:
+        """Unwrap ``T | None`` / ``Optional[T]`` to ``T`` for relationship detection."""
+        while True:
+            origin = get_origin(hint)
+            if origin is Union or origin is types.UnionType:
+                args = get_args(hint)
+                non_none = [a for a in args if a is not type(None)]
+                if len(non_none) == 1:
+                    hint = non_none[0]
+                    continue
+            return hint
+
+    @staticmethod
+    def _backref_marker_from_annotation(hint: Any) -> Any:
+        """Inner type used to detect ``BackRef`` (unwraps ``Annotated``, ``| None``)."""
+        if get_origin(hint) is Annotated:
+            args = get_args(hint)
+            if args:
+                return ModelMetaclass._strip_optional_union(args[0])
+            return hint
+        return ModelMetaclass._strip_optional_union(hint)
+
+    @staticmethod
     def _is_back_ref_field(
         field_name: str, hint: Any, namespace: dict
     ) -> tuple[bool, bool]:
@@ -74,12 +98,9 @@ class ModelMetaclass(type(BaseModel)):
         """
         origin = get_origin(hint)
 
-        # Type-side back-ref: BackRef[...] in annotation (or inside Annotated)
-        is_back_type = origin is BackRef
-        if not is_back_type and origin is Annotated:
-            args = get_args(hint)
-            if args and get_origin(args[0]) is BackRef:
-                is_back_type = True
+        # Type-side back-ref: BackRef[...] in annotation (or inside Annotated), optional ``| None``
+        marker = ModelMetaclass._backref_marker_from_annotation(hint)
+        is_back_type = get_origin(marker) is BackRef
         if not is_back_type and isinstance(hint, str) and "BackRef" in hint:
             is_back_type = True
         if (

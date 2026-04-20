@@ -32,8 +32,8 @@ class User(Model):
     id: Annotated[int, FerroField(primary_key=True)]
     username: Annotated[str, FerroField(unique=True)]
     email: Annotated[str, FerroField(unique=True)]
-    posts: BackRef[list["Post"]] = None
-    comments: BackRef[list["Comment"]] = None
+    posts: BackRef[list["Post"]] | None = None
+    comments: BackRef[list["Comment"]] | None = None
 
 class Post(Model):
     id: Annotated[int, FerroField(primary_key=True)]
@@ -42,7 +42,7 @@ class Post(Model):
     published: bool = False
     created_at: datetime = datetime.now()
     author: Annotated[User, ForeignKey(related_name="posts")]
-    comments: BackRef[list["Comment"]] = None
+    comments: BackRef[list["Comment"]] | None = None
 
 class Comment(Model):
     id: Annotated[int, FerroField(primary_key=True)]
@@ -311,8 +311,8 @@ class User(Model):
     id: Annotated[int, FerroField(primary_key=True)]
     username: Annotated[str, FerroField(unique=True)]
     email: Annotated[str, FerroField(unique=True)]
-    posts: BackRef[list["Post"]] = None
-    comments: BackRef[list["Comment"]] = None
+    posts: BackRef[list["Post"]] | None = None
+    comments: BackRef[list["Comment"]] | None = None
 
 class Post(Model):
     id: Annotated[int, FerroField(primary_key=True)]
@@ -321,7 +321,7 @@ class Post(Model):
     published: bool = False
     created_at: datetime = datetime.now()
     author: Annotated[User, ForeignKey(related_name="posts")]
-    comments: BackRef[list["Comment"]] = None
+    comments: BackRef[list["Comment"]] | None = None
 
 class Comment(Model):
     id: Annotated[int, FerroField(primary_key=True)]

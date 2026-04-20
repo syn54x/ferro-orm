@@ -75,6 +75,22 @@ class TestIsBackRefField:
         assert is_type is True
         assert is_field is False
 
+    def test_backref_pep604_optional_union(self):
+        """``BackRef[...] | None`` should be detected as a type-side back-reference."""
+        hint = BackRef[int] | None
+        namespace = {"field": None}
+        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
+        assert is_type is True
+        assert is_field is False
+
+    def test_annotated_backref_optional_union(self):
+        """``Annotated[BackRef[...] | None, ...]`` should be detected."""
+        hint = Annotated[BackRef[int] | None, "metadata"]
+        namespace = {"field": None}
+        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
+        assert is_type is True
+        assert is_field is False
+
     def test_string_with_backref(self):
         """String annotation containing 'BackRef' should be detected."""
         hint = "BackRef[User]"

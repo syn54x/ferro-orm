@@ -60,7 +60,7 @@ from ferro import Model, ForeignKey, BackRef
 class Author(Model):
     id: int
     name: str
-    posts: BackRef[list["Post"]] = None
+    posts: BackRef[list["Post"]] | None = None
 
 class Post(Model):
     id: int
@@ -143,7 +143,7 @@ from ferro import Model, ForeignKey, BackRef
 class User(Model):
     id: int
     username: str
-    profile: BackRef["Profile"] = None  # Note: singular, not list
+    profile: BackRef["Profile"] | None = None  # Note: singular, not list
 
 class Profile(Model):
     id: int
@@ -203,7 +203,7 @@ class Student(Model):
 class Course(Model):
     id: int
     title: str
-    students: BackRef[list["Student"]] = None
+    students: BackRef[list["Student"]] | None = None
 ```
 
 ### Pydantic-style (with `Field(back_ref=True)`)
@@ -299,7 +299,7 @@ class Employee(Model):
     id: int
     name: str
     manager: Annotated["Employee", ForeignKey(related_name="reports")] | None = None
-    reports: BackRef[list["Employee"]] = None
+    reports: BackRef[list["Employee"]] | None = None
 
 # Usage
 manager = await Employee.create(name="Jane")

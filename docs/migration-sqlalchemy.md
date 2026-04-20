@@ -90,7 +90,7 @@ class Post(Base):
 # Ferro
 class User(Model):
     id: Annotated[int, FerroField(primary_key=True)]
-    posts: BackRef[list["Post"]] = None
+    posts: BackRef[list["Post"]] | None = None
 
 class Post(Model):
     id: Annotated[int, FerroField(primary_key=True)]

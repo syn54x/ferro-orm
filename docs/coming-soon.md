@@ -435,7 +435,7 @@ class Post(Model):
 
 class Tag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
-    posts: BackRef[list["Post"]] = None
+    posts: BackRef[list["Post"]] | None = None
 
 # Models created, but join table 'post_tags' is NOT auto-created
 # This causes errors when trying to use M2M methods:
@@ -463,7 +463,7 @@ Documentation states that one-to-one reverse relations automatically return a si
 ```python
 class User(Model):
     id: int
-    profile: BackRef["Profile"] = None
+    profile: BackRef["Profile"] | None = None
 
 class Profile(Model):
     id: int

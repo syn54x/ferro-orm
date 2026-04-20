@@ -385,7 +385,7 @@ class BackRef(Query[T]):
         >>> class User(Model):
         ...     id: Annotated[int, FerroField(primary_key=True)]
         ...     name: str
-        ...     posts: BackRef[list["Post"]] = None
+        ...     posts: BackRef[list["Post"]] | None = None
 
         >>> class Post(Model):
         ...     id: Annotated[int, FerroField(primary_key=True)]

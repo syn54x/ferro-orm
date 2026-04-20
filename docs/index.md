@@ -34,7 +34,7 @@ from ferro import Model, FerroField, ForeignKey, BackRef, connect
 class Author(Model):
     id: Annotated[int, FerroField(primary_key=True)]
     name: str
-    posts: BackRef[list["Post"]] = None
+    posts: BackRef[list["Post"]] | None = None
 
 class Post(Model):
     id: Annotated[int, FerroField(primary_key=True)]
