@@ -357,7 +357,8 @@ def Field(
         primary_key: Mark this column as the table primary key in Ferro.
         autoincrement: Override automatic increment behavior for primary key columns.
             When not provided, Ferro infers this for integer primary keys.
-        unique: Add a uniqueness constraint for this column in Ferro.
+        unique: Add a **single-column** uniqueness constraint for this column in Ferro.
+            Multi-column uniqueness is declared with ``__ferro_composite_uniques__`` on the model.
         index: Request an index for this column in Ferro.
         back_ref: Mark this field as a reverse relationship (same as BackRef in the type).
             Do not use together with a BackRef annotation on the same field.

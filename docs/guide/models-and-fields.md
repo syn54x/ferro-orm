@@ -76,7 +76,7 @@ Both styles support the same database constraint parameters:
 | :--- | :--- | :--- | :--- |
 | `primary_key` | `bool` | `False` | Marks the field as the primary key for the table. |
 | `autoincrement` | `bool \| None` | `None` | If `True`, the database generates values automatically. Defaults to `True` for integer primary keys. |
-| `unique` | `bool` | `False` | Enforces a uniqueness constraint on the column. |
+| `unique` | `bool` | `False` | Enforces a **single-column** uniqueness constraint on that column only. For uniqueness on a combination of columns, see [Composite unique constraints](#composite-unique-constraints) below. |
 | `index` | `bool` | `False` | Creates a database index for this column to improve query performance. |
 
 #### Examples
@@ -112,6 +112,38 @@ slug: str = Field(unique=True, index=True)
 # Annotated-style
 email: Annotated[str, FerroField(unique=True)]
 ```
+
+### Composite unique constraints
+
+Sometimes a row should be unique **across several columns together** (for example one membership per `(user_id, org_id)` pair). That is a *composite* unique: in SQL this is typically expressed as `UNIQUE (user_id, org_id)` on the table, or an equivalent unique index on those columns.
+
+Ferro does **not** use `FerroField(unique=True)` for that case (`unique=True` is only per column). Instead, set the **`typing.ClassVar`** `__ferro_composite_uniques__` on your model (the base `Model` defines it as `()` so IDEs and type checkers know the hook exists; subclasses override when needed):
+
+```python
+from typing import Annotated, ClassVar
+import uuid
+
+from ferro import Model, FerroField
+
+class OrgMembership(Model):
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("user_id", "org_id"),
+    )
+
+    id: Annotated[uuid.UUID | None, FerroField(primary_key=True)] = None
+    user_id: Annotated[uuid.UUID, FerroField()]
+    org_id: Annotated[uuid.UUID, FerroField()]
+```
+
+- Each inner tuple lists **database column names** as they appear in the generated schema (the same names as your Pydantic fields for scalar columns; for `ForeignKey("user")` use `user_id` in the tuple).
+- You can list several groups for multiple composite uniques on one model.
+- Invalid or unknown column names raise when the model is registered.
+
+**Null semantics:** In SQLite, `UNIQUE` treats `NULL` as distinct from other `NULL` values for the purposes of uniqueness in multi-column constraints unless columns are `NOT NULL`. Ferro maps nullability from your types and defaults like other fields; optional composite columns can therefore allow multiple rows that differ only by `NULL` in a nullable column. Prefer `NOT NULL` on composite members when you need strict “at most one row per pair” semantics.
+
+**Many-to-many join tables:** When you use `ManyToManyField` without a custom `through` table, Ferro creates a default join table with two foreign-key columns. That table automatically gets a composite unique on those two columns so the same link cannot be stored twice. If you already have duplicate rows in such a table, adding this constraint in a migration may require a data cleanup step first.
+
+See also [Schema management / migrations](migrations.md) for how composite uniques appear in Alembic metadata.
 
 **Indexes:**
 
@@ -171,7 +203,7 @@ class Product(Model):
 Ferro uses a custom `ModelMetaclass` to bridge Python and Rust:
 
 1. **Schema Capture**: When you define a class, the metaclass inspects its fields and constraints.
-2. **Rust Registration**: The schema is serialized to a JSON-AST and passed to the Rust core's `MODEL_REGISTRY`.
+2. **Rust Registration**: The schema is serialized to a JSON-AST (including Ferro-specific keys such as `ferro_composite_uniques` when declared) and passed to the Rust core's `MODEL_REGISTRY`.
 3. **Table Generation**: When `auto_migrate=True` is used or `create_tables()` is called, the Rust engine generates the appropriate SQL `CREATE TABLE` statements.
 
 This architecture allows Ferro to leverage Rust's performance for SQL generation and row hydration while maintaining a pure Python interface.

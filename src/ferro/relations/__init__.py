@@ -3,6 +3,7 @@ from typing import ForwardRef
 
 from .._core import register_model_schema
 from ..base import ForeignKey, ManyToManyField
+from ..composite_uniques import apply_composite_uniques_to_schema
 from ..state import (  # noqa: F401
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
@@ -109,7 +110,8 @@ def resolve_relationships():
                             "on_delete": "CASCADE",
                         },
                     },
-                }
+                },
+                "ferro_composite_uniques": [[source_col, target_col]],
             }
             register_model_schema(join_table, json.dumps(join_schema))
             _JOIN_TABLE_REGISTRY[join_table] = join_schema
@@ -148,6 +150,7 @@ def resolve_relationships():
                                 "on_delete": metadata.on_delete,
                                 "unique": metadata.unique,
                             }
+                apply_composite_uniques_to_schema(model_cls, schema)
             register_model_schema(model_name, json.dumps(schema))
         except Exception:
             pass

@@ -173,6 +173,34 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                     }
                 }
             }
+
+            if let Some(groups) = schema
+                .get("ferro_composite_uniques")
+                .and_then(|g| g.as_array())
+            {
+                for group in groups {
+                    let cols: Vec<&str> = group
+                        .as_array()
+                        .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
+                        .unwrap_or_default();
+                    if cols.len() < 2 {
+                        continue;
+                    }
+                    let cols_join = cols.join("_");
+                    let idx_name = format!("uq_{}_{}", table_lower, cols_join);
+                    let mut stmt = Index::create()
+                        .unique()
+                        .name(&idx_name)
+                        .table(Alias::new(&table_lower))
+                        .if_not_exists()
+                        .to_owned();
+                    for c in &cols {
+                        stmt.col(Alias::new(*c));
+                    }
+                    index_sqls.push(stmt.to_string(SqliteQueryBuilder));
+                }
+            }
+
             (table_stmt.build(SqliteQueryBuilder), index_sqls)
         };
 
