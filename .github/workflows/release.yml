@@ -171,6 +171,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-patch
+          path: release-patch
 
       - name: Apply release patch
         shell: bash
@@ -213,6 +214,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-patch
+          path: release-patch
 
       - name: Apply release patch
         shell: bash
@@ -252,6 +254,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-patch
+          path: release-patch
 
       - name: Apply release patch
         shell: bash
@@ -317,6 +320,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-patch
+          path: release-patch
 
       - name: Apply release patch
         shell: bash
@@ -365,6 +369,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-patch
+          path: release-patch
 
       - name: Apply release patch and push release commit
         env:
