@@ -1,6 +1,57 @@
 # CHANGELOG
 
 
+## v0.3.0 (2026-04-22)
+
+### Bug Fixes
+
+- Align composite unique index names and harden Alembic/Rust handling
+  ([`3350481`](https://github.com/syn54x/ferro-orm/commit/33504812d37d93bf69c2be8f6bee6f390803a460))
+
+- Refresh Pydantic FieldInfo when reconciling shadow FK types
+  ([`6cf1ac8`](https://github.com/syn54x/ferro-orm/commit/6cf1ac8c2e361df8de11795a8151c34d17a39445))
+
+### Chores
+
+- Remove doc
+  ([`16e4028`](https://github.com/syn54x/ferro-orm/commit/16e4028f72fc47109b2511d1feb23811c831f32c))
+
+### Continuous Integration
+
+- Fix release
+  ([`249e460`](https://github.com/syn54x/ferro-orm/commit/249e46058bac87215920083a9d45557f3c58b62f))
+
+- Fix release
+  ([`888e15e`](https://github.com/syn54x/ferro-orm/commit/888e15eff693d1e1bfa279d809e790e52cd7ce25))
+
+- Fix release
+  ([`58bb5b2`](https://github.com/syn54x/ferro-orm/commit/58bb5b2b0962481b3cfbf3ffbe6c6a2653b213c0))
+
+- Reorder release steps to prevent tagging before checks are complete
+  ([`ad1fd8d`](https://github.com/syn54x/ferro-orm/commit/ad1fd8d5ba08bdd7a1bcd257fff3fc12ff458c12))
+
+### Documentation
+
+- Complete documentation restructure and implementation summary
+  ([`937e75e`](https://github.com/syn54x/ferro-orm/commit/937e75ee7b5c526aca776dd8409f9e0df5f0e892))
+
+- Enhance shadow field documentation and clarify relationship resolution process
+  ([`1d350fd`](https://github.com/syn54x/ferro-orm/commit/1d350fd728310a5b9a24f129986f873a84a8592f))
+
+### Features
+
+- Composite unique constraints and default M2M pair uniqueness
+  ([`dc12880`](https://github.com/syn54x/ferro-orm/commit/dc12880b7b8676c088183edf1f32b48a36314448))
+
+- Derive shadow FK types from related PK and reconcile after resolve
+  ([`d3ae486`](https://github.com/syn54x/ferro-orm/commit/d3ae4862858ccd51f62d62a939e6a90b8efb8980))
+
+### Testing
+
+- UUID FK save reparenting and bulk_create coverage
+  ([`6c93cea`](https://github.com/syn54x/ferro-orm/commit/6c93cea7906ac264b266342ecf71602c7aff6ed6))
+
+
 ## v0.2.1 (2026-04-20)
 
 ### Bug Fixes
