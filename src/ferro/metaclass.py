@@ -15,6 +15,7 @@ from pydantic import Field as PydanticField
 from pydantic.fields import FieldInfo
 
 from ._core import register_model_schema
+from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyField
 from .composite_uniques import apply_composite_uniques_to_schema
 from .fields import FERRO_FIELD_EXTRA_KEY
@@ -183,7 +184,8 @@ class ModelMetaclass(type(BaseModel)):
                 args = get_args(hint)
                 for metadata in args:
                     if isinstance(metadata, ForeignKey):
-                        metadata.to = args[0]
+                        inner = ModelMetaclass._strip_optional_union(args[0])
+                        metadata.to = inner
                         local_relations[field_name] = metadata
                         _PENDING_RELATIONS.append((model_name, field_name, metadata))
                         fields_to_remove.append(field_name)
@@ -194,9 +196,11 @@ class ModelMetaclass(type(BaseModel)):
                         if origin_inner is list:
                             inner_args = get_args(args[0])
                             if inner_args:
-                                metadata.to = inner_args[0]
+                                metadata.to = ModelMetaclass._strip_optional_union(
+                                    inner_args[0]
+                                )
                         else:
-                            metadata.to = args[0]
+                            metadata.to = ModelMetaclass._strip_optional_union(args[0])
                         local_relations[field_name] = metadata
                         _PENDING_RELATIONS.append((model_name, field_name, metadata))
                         fields_to_remove.append(field_name)
@@ -217,7 +221,7 @@ class ModelMetaclass(type(BaseModel)):
             if isinstance(metadata, ForeignKey):
                 # INJECT SHADOW FIELD into annotations
                 id_field = f"{field_name}_id"
-                annotations[id_field] = Union[int, str, None]
+                annotations[id_field] = shadow_annotation_for_foreign_key(metadata)
                 # Set a default so Pydantic doesn't make it required
                 namespace[id_field] = PydanticField(default=None)
 

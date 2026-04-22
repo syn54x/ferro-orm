@@ -2,6 +2,7 @@ import json
 from typing import ForwardRef
 
 from .._core import register_model_schema
+from .._shadow_fk_types import reconcile_shadow_fk_types
 from ..base import ForeignKey, ManyToManyField
 from ..composite_uniques import apply_composite_uniques_to_schema
 from ..state import (  # noqa: F401
@@ -115,6 +116,8 @@ def resolve_relationships():
             }
             register_model_schema(join_table, json.dumps(join_schema))
             _JOIN_TABLE_REGISTRY[join_table] = join_schema
+
+    reconcile_shadow_fk_types(_MODEL_REGISTRY_PY)
 
     # Second pass: Re-register schemas
     for model_name, model_cls in _MODEL_REGISTRY_PY.items():
