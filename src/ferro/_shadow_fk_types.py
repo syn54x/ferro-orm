@@ -97,7 +97,7 @@ def reconcile_shadow_fk_types(registry: dict[str, type[Any]]) -> list[type[Any]]
         relations = getattr(model_cls, "ferro_relations", None)
         if not relations:
             continue
-        changed = False
+        id_fields_updated: list[str] = []
         for fname, meta in relations.items():
             if not isinstance(meta, ForeignKey):
                 continue
@@ -122,8 +122,16 @@ def reconcile_shadow_fk_types(registry: dict[str, type[Any]]) -> list[type[Any]]
             else:
                 model_cls.__annotations__ = dict(ann)
             model_cls.__annotations__[id_field] = desired
-            changed = True
-        if changed:
+            id_fields_updated.append(id_field)
+        if id_fields_updated:
+            # Pydantic only re-evaluates a field when FieldInfo._complete is False; without
+            # this, model_rebuild updates __annotations__ but model_fields stays stale (#16).
+            pydantic_fields = model_cls.__pydantic_fields__
+            for id_field in id_fields_updated:
+                fi = pydantic_fields.get(id_field)
+                if fi is not None:
+                    fi._complete = False
+                    fi._original_annotation = model_cls.__annotations__[id_field]
             model_cls.model_rebuild(force=True)
             rebuilt.append(model_cls)
     return rebuilt
