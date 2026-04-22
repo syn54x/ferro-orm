@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 from ferro import (
     BackRef,
-    FerroField,
+    Field,
     ManyToManyField,
     Model,
     clear_registry,
@@ -68,7 +68,7 @@ def test_composite_unique_unknown_column_raises():
                 ("alpha_id", "nonexistent"),
             )
 
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            id: int | None = Field(default=None, primary_key=True)
             alpha_id: int
             beta_id: int
 
@@ -82,7 +82,7 @@ async def test_composite_unique_enforced_on_user_model(db_url):
             ("alpha_id", "beta_id"),
         )
 
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         alpha_id: int
         beta_id: int
 
@@ -101,12 +101,12 @@ async def test_m2m_duplicate_link_rejected(db_url):
     """Default M2M join table must reject inserting the same pair twice."""
 
     class Actor(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         name: str
         movies: Annotated[list["Movie"], ManyToManyField(related_name="actors")] = None
 
     class Movie(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         title: str
         actors: BackRef[Actor] = None
 
@@ -129,17 +129,17 @@ def test_alembic_metadata_has_unique_constraints():
             ("alpha_id", "beta_id"),
         )
 
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         alpha_id: int
         beta_id: int
 
     class Actor(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         name: str
         movies: Annotated[list["Movie"], ManyToManyField(related_name="actors")] = None
 
     class Movie(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         title: str
         actors: BackRef[Actor] = None
 
@@ -167,7 +167,7 @@ async def test_composite_unique_index_exists_in_sqlite(db_url):
             ("alpha_id", "beta_id"),
         )
 
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         alpha_id: int
         beta_id: int
 
@@ -202,7 +202,7 @@ async def test_composite_unique_truncated_name_matches_alembic_and_sqlite(db_url
             ),
         )
 
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         very_long_column_name_alpha_for_composite_unique_test: int
         very_long_column_name_beta_for_composite_unique_test: int
 
@@ -255,7 +255,7 @@ def test_composite_unique_multiple_groups_in_metadata_and_sqlite():
             ("c_id", "d_id"),
         )
 
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         a_id: int
         b_id: int
         c_id: int
@@ -283,7 +283,7 @@ def test_composite_unique_order_matters_two_separate_constraints():
             ("y_id", "x_id"),
         )
 
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        id: int | None = Field(default=None, primary_key=True)
         x_id: int
         y_id: int
 
@@ -311,14 +311,14 @@ def test_build_sa_table_warns_on_invalid_composite_unique_group():
 
 
 def test_single_column_composite_unique_raises_with_guidance():
-    """A single-column group must error with guidance toward FerroField(unique=True)."""
+    """A single-column group must error with guidance toward Field(unique=True)."""
 
-    with pytest.raises(RuntimeError, match="at least two columns|FerroField"):
+    with pytest.raises(RuntimeError, match="at least two columns|Field\\(unique=True\\)"):
 
         class BadSingle(Model):
             __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
                 ("only_col",),
             )
 
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            id: int | None = Field(default=None, primary_key=True)
             only_col: int

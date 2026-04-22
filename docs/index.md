@@ -29,15 +29,15 @@
 ```python
 import asyncio
 from typing import Annotated
-from ferro import Model, FerroField, ForeignKey, BackRef, connect
+from ferro import Model, Field, ForeignKey, BackRef, connect
 
 class Author(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
     name: str
     posts: BackRef[list["Post"]] | None = None
 
 class Post(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
     title: str
     published: bool = False
     author: Annotated[Author, ForeignKey(related_name="posts")]

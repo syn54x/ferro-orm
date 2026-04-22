@@ -273,11 +273,11 @@ if await User.where(User.email == email).exists():
 Add indexes to frequently filtered fields:
 
 ```python
-from ferro import Field, FerroField
+from ferro import Field, Model
 
 class User(Model):
-    email: Annotated[str, FerroField(unique=True, index=True)]
-    status: Annotated[str, FerroField(index=True)]
+    email: str = Field(unique=True, index=True)
+    status: str = Field(index=True)
 ```
 
 ### Batch Operations

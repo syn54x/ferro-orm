@@ -37,13 +37,16 @@ Ferro supports a wide range of Python types, automatically mapping them to the m
 
 ## Field Constraints
 
-Ferro provides two equivalent API styles for declaring database constraints like primary keys, unique constraints, and indexes. Choose one style and use it consistently throughout your codebase.
+Use **`ferro.Field`** for database constraints (primary key, unique, index, and Pydantic validation). Pydantic merges `Field()` the same way whether you attach it on the right-hand side of `=` or inside `typing.Annotated[...]`; Ferro reads the resulting `FieldInfo` and does not require you to know internal details.
 
-### Pydantic-style: `ferro.Field`
+**Recommended patterns (pick one and stay consistent in a project):**
 
-If you're already familiar with Pydantic's `Field()`, this style will feel natural. You get all of Pydantic's validation options plus Ferro's database constraints.
+### Assignment pattern
+
+Put defaults and Ferro options on the **assignment** side (classic Pydantic model field):
 
 ```python
+from decimal import Decimal
 from ferro import Field, Model
 
 class Product(Model):
@@ -53,14 +56,30 @@ class Product(Model):
     price: Decimal = Field(ge=0, decimal_places=2)
 ```
 
-### Annotated-style: `FerroField`
+### Annotation pattern
 
-This type-first approach keeps the field type explicit and separates Ferro-specific constraints from Pydantic metadata.
+Keep the **plain type** on the left and pass **`Field(...)`** as `Annotated` metadata (all defaults and DB flags live inside `Field`):
 
 ```python
 from typing import Annotated
 from decimal import Decimal
-from ferro import Model, FerroField
+from ferro import Field, Model
+
+class Product(Model):
+    sku: Annotated[str, Field(primary_key=True)]
+    slug: Annotated[str, Field(unique=True, index=True)]
+    name: Annotated[str, Field(max_length=200, description="Display name")]
+    price: Annotated[Decimal, Field(ge=0, decimal_places=2)]
+```
+
+### Advanced: `FerroField` in `Annotated`
+
+For a type-first style without going through `Field()`, you can attach **`FerroField(...)`** as metadata. This is equivalent for Ferro’s database flags; you lose the single-call surface that combines Pydantic validation kwargs on `Field`.
+
+```python
+from typing import Annotated
+from decimal import Decimal
+from ferro import FerroField, Model
 
 class Product(Model):
     sku: Annotated[str, FerroField(primary_key=True)]
@@ -70,7 +89,7 @@ class Product(Model):
 
 ### Constraint parameters
 
-Both styles support the same database constraint parameters:
+All of the above support the same database constraint parameters on `Field` / `FerroField`:
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -84,13 +103,12 @@ Both styles support the same database constraint parameters:
 **Primary key:**
 
 ```python
-# Pydantic-style
+# Pydantic-style (preferred in docs)
 id: int = Field(primary_key=True)
 sku: str = Field(primary_key=True)  # natural key
-
-# Annotated-style
-id: Annotated[int, FerroField(primary_key=True)]
 ```
+
+For the **`Annotated[..., Field(...)]`** form, see the [Annotation pattern](#annotation-pattern) above.
 
 **Autoincrement:**
 
@@ -105,34 +123,31 @@ id: int = Field(primary_key=True, autoincrement=False)
 **Unique constraints:**
 
 ```python
-# Pydantic-style
+# Pydantic-style (preferred in docs)
 email: str = Field(unique=True)
 slug: str = Field(unique=True, index=True)
-
-# Annotated-style
-email: Annotated[str, FerroField(unique=True)]
 ```
 
 ### Composite unique constraints
 
 Sometimes a row should be unique **across several columns together** (for example one membership per `(user_id, org_id)` pair). That is a *composite* unique: in SQL this is typically expressed as `UNIQUE (user_id, org_id)` on the table, or an equivalent unique index on those columns.
 
-Ferro does **not** use `FerroField(unique=True)` for that case (`unique=True` is only per column). Instead, set the **`typing.ClassVar`** `__ferro_composite_uniques__` on your model (the base `Model` defines it as `()` so IDEs and type checkers know the hook exists; subclasses override when needed):
+Ferro does **not** use per-column `Field(unique=True)` (assignment or `Annotated[..., Field(unique=True)]`) or `FerroField(unique=True)` for that case—`unique=True` is only for a **single** column. Instead, set the **`typing.ClassVar`** `__ferro_composite_uniques__` on your model (the base `Model` defines it as `()` so IDEs and type checkers know the hook exists; subclasses override when needed):
 
 ```python
-from typing import Annotated, ClassVar
+from typing import ClassVar
 import uuid
 
-from ferro import Model, FerroField
+from ferro import Field, Model
 
 class OrgMembership(Model):
     __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
         ("user_id", "org_id"),
     )
 
-    id: Annotated[uuid.UUID | None, FerroField(primary_key=True)] = None
-    user_id: Annotated[uuid.UUID, FerroField()]
-    org_id: Annotated[uuid.UUID, FerroField()]
+    id: uuid.UUID | None = Field(default=None, primary_key=True)
+    user_id: uuid.UUID = Field()
+    org_id: uuid.UUID = Field()
 ```
 
 - Each inner tuple lists **database column names** as they appear in the generated schema (the same names as your Pydantic fields for scalar columns; for `ForeignKey("user")` use `user_id` in the tuple).
@@ -150,17 +165,14 @@ See also [Schema management / migrations](migrations.md) for how composite uniqu
 **Indexes:**
 
 ```python
-# Pydantic-style
+# Pydantic-style (preferred in docs)
 created_at: datetime = Field(index=True)
 status: str = Field(index=True)
-
-# Annotated-style
-created_at: Annotated[datetime, FerroField(index=True)]
 ```
 
 ## Pydantic Validation
 
-When using the Pydantic-style API, you can combine Ferro's database constraints with Pydantic's validation options in a single `Field()` call:
+With the **assignment** or **`Annotated[..., Field(...)]`** pattern, you can combine Ferro's database constraints with Pydantic's validation options in a single `Field()` call:
 
 ```python
 from ferro import Field, Model

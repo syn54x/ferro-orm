@@ -27,7 +27,7 @@ All field types and constraints work as documented:
 - Basic model definition ✅
 - All documented field types (str, int, Decimal, date, dict, Enum) ✅
 - Enum field type with proper serialization/deserialization ✅
-- Field() Pydantic-style constraints ✅
+- Field() Pydantic-style constraints ✅ (preferred in user-facing docs)
 - FerroField() Annotated-style constraints ✅
 - Unique constraints ✅
 
@@ -131,8 +131,10 @@ await User.where(User.role.in_([UserRole.ADMIN.value, UserRole.MODERATOR.value])
 **Working Pattern**: Primary keys should be optional with None default:
 
 ```python
+from ferro import Field, Model
+
 class User(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    id: int | None = Field(default=None, primary_key=True)
     username: str
 ```
 

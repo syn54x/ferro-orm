@@ -249,17 +249,17 @@ class User(Model):
 ### Constraints
 
 ```python
-from ferro import Field, FerroField
+from ferro import Field, Model
 
 class Product(Model):
     # PRIMARY KEY
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
 
     # UNIQUE constraint
-    sku: Annotated[str, FerroField(unique=True)]
+    sku: str = Field(unique=True)
 
     # INDEX
-    category: Annotated[str, FerroField(index=True)]
+    category: str = Field(index=True)
 ```
 
 ### Foreign Keys

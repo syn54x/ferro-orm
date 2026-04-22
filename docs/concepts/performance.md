@@ -102,10 +102,14 @@ await User.where(User.is_active == False).update(status="archived")
 ### 3. Index Frequently Filtered Fields
 
 ```python
+from datetime import datetime
+
+from ferro import Field, Model
+
 class User(Model):
-    email: Annotated[str, FerroField(unique=True, index=True)]
-    status: Annotated[str, FerroField(index=True)]
-    created_at: Annotated[datetime, FerroField(index=True)]
+    email: str = Field(unique=True, index=True)
+    status: str = Field(index=True)
+    created_at: datetime = Field(index=True)
 ```
 
 ### 4. Use `.exists()` Instead of `.count()`

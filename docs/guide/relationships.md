@@ -8,7 +8,7 @@ Relationships in Ferro are **lazy** — data is never fetched until you explicit
 
 ### API Styles
 
-Like field constraints, relationships can be declared in two equivalent styles:
+Like scalar field constraints ([assignment vs `Annotated[..., Field(...)]`](models-and-fields.md#field-constraints)), relationships can be declared in two equivalent styles:
 
 - **Annotated-style** (`BackRef`): Type-first approach using `typing.Annotated`
 - **Pydantic-style** (`Field(back_ref=True)`): Familiar `Field()` syntax

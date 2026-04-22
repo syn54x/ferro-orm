@@ -264,7 +264,12 @@ class ModelMetaclass(type(BaseModel)):
     @staticmethod
     def _parse_ferro_field_metadata(cls) -> dict[str, FerroField]:
         """
-        Parse FerroField metadata from Annotated or Field(...) declarations.
+        Parse Ferro column metadata from model fields.
+
+        Sources: ``Annotated[..., FerroField(...)]``, assignment ``Field(...)``
+        (Ferro kwargs live under ``json_schema_extra["ferro_field"]``), and
+        ``Annotated[..., Field(...)]`` (Pydantic merges that ``Field`` into the
+        same ``FieldInfo`` shape as assignment).
 
         Returns:
             Dictionary mapping field names to FerroField metadata

@@ -429,12 +429,16 @@ Many-to-many relationships are defined with `ManyToManyField`, but the join tabl
 
 **Example (Partially Working):**
 ```python
+from typing import Annotated
+
+from ferro import BackRef, Field, ManyToManyField, Model
+
 class Post(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    id: int | None = Field(default=None, primary_key=True)
     tags: Annotated[list["Tag"], ManyToManyField(related_name="posts")] = None
 
 class Tag(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    id: int | None = Field(default=None, primary_key=True)
     posts: BackRef[list["Post"]] | None = None
 
 # Models created, but join table 'post_tags' is NOT auto-created

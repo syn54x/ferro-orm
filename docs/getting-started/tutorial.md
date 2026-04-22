@@ -26,17 +26,17 @@ Let's create a blog with users, posts, and comments:
 import asyncio
 from datetime import datetime
 from typing import Annotated
-from ferro import Model, FerroField, ForeignKey, BackRef, connect
+from ferro import Model, Field, ForeignKey, BackRef, connect
 
 class User(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
-    username: Annotated[str, FerroField(unique=True)]
-    email: Annotated[str, FerroField(unique=True)]
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(unique=True)
+    email: str = Field(unique=True)
     posts: BackRef[list["Post"]] | None = None
     comments: BackRef[list["Comment"]] | None = None
 
 class Post(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
     title: str
     content: str
     published: bool = False
@@ -45,7 +45,7 @@ class Post(Model):
     comments: BackRef[list["Comment"]] | None = None
 
 class Comment(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
     text: str
     created_at: datetime = datetime.now()
     author: Annotated[User, ForeignKey(related_name="comments")]
@@ -305,17 +305,17 @@ Here's the full tutorial code:
 import asyncio
 from datetime import datetime
 from typing import Annotated
-from ferro import Model, FerroField, ForeignKey, BackRef, connect
+from ferro import Model, Field, ForeignKey, BackRef, connect
 
 class User(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
-    username: Annotated[str, FerroField(unique=True)]
-    email: Annotated[str, FerroField(unique=True)]
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(unique=True)
+    email: str = Field(unique=True)
     posts: BackRef[list["Post"]] | None = None
     comments: BackRef[list["Comment"]] | None = None
 
 class Post(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
     title: str
     content: str
     published: bool = False
@@ -324,7 +324,7 @@ class Post(Model):
     comments: BackRef[list["Comment"]] | None = None
 
 class Comment(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
     text: str
     created_at: datetime = datetime.now()
     author: Annotated[User, ForeignKey(related_name="comments")]
@@ -367,7 +367,7 @@ if __name__ == "__main__":
 In this tutorial, you learned:
 
 ✅ How to define models with `Model` and type hints
-✅ How to add constraints with `FerroField` or `Field`
+✅ How to add constraints with `Field()` (assignment or `Annotated[..., Field(...)]`)
 ✅ How to create relationships with `ForeignKey` and `BackRef`
 ✅ How to connect to a database with `connect()`
 ✅ How to create records with `.create()`

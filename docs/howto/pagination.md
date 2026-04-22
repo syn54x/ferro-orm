@@ -285,11 +285,13 @@ products = await Product.order_by(Product.id).limit(20).offset(40).all()
 ### Index Sort Columns
 
 ```python
-from ferro import FerroField
+from datetime import datetime
+
+from ferro import Field, Model
 
 class Product(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
-    created_at: Annotated[datetime, FerroField(index=True)]  # Index for sorting
+    id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(index=True)  # Index for sorting
 ```
 
 ### Cache Counts

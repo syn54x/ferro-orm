@@ -420,10 +420,14 @@ def Field(
         TypeError: If Ferro kwargs are provided together with callable `json_schema_extra`.
 
     Examples:
+        >>> from typing import Annotated
         >>> from ferro import Field, Model
         >>> class User(Model):
         ...     id: int | None = Field(default=None, primary_key=True)
         ...     username: str = Field(unique=True, min_length=3)
+        >>> class UserAnnotated(Model):
+        ...     id: Annotated[int | None, Field(default=None, primary_key=True)]
+        ...     username: Annotated[str, Field(unique=True, min_length=3)]
     """
     ferro_kwargs: dict[str, Any] = {}
     if primary_key is not _Unset:

@@ -192,9 +192,11 @@ sequenceDiagram
 
 Python model:
 ```python
+from ferro import Field, Model
+
 class User(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
-    username: Annotated[str, FerroField(unique=True)]
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(unique=True)
     email: str
 ```
 

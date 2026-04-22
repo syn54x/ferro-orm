@@ -33,12 +33,11 @@ class User(Base):
 ### Ferro
 
 ```python
-from typing import Annotated
-from ferro import Model, FerroField
+from ferro import Field, Model
 
 class User(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
-    username: Annotated[str, FerroField(unique=True)]
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(unique=True)
     email: str
 ```
 
@@ -88,12 +87,16 @@ class Post(Base):
     author: Mapped["User"] = relationship(back_populates="posts")
 
 # Ferro
+from typing import Annotated
+
+from ferro import BackRef, Field, ForeignKey, Model
+
 class User(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
     posts: BackRef[list["Post"]] | None = None
 
 class Post(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
     author: Annotated[User, ForeignKey(related_name="posts")]
 ```
 

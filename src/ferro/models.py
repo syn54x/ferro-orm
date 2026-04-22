@@ -64,8 +64,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     **Composite unique constraints:** declare a ``typing.ClassVar`` named
     ``__ferro_composite_uniques__`` as a tuple of tuples of column names
     (for example ``(("user_id", "org_id"),)``) to enforce uniqueness on those
-    columns together. This is separate from ``FerroField(unique=True)``, which
-    applies to a single column only. Default many-to-many join tables get a
+    columns together. This is separate from per-column uniqueness
+    (``Field(unique=True)`` on the field, ``Annotated[..., Field(unique=True)]``,
+    or ``Annotated[..., FerroField(unique=True)]``), each of which applies to a
+    single column only. Default many-to-many join tables get a
     composite unique on their two foreign-key columns automatically.
 
     Examples:

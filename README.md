@@ -45,11 +45,10 @@ pip install "ferro-orm[alembic]"
 
 ```python
 import asyncio
-from typing import Annotated
-from ferro import Model, FerroField, connect
+from ferro import Field, Model, connect
 
 class User(Model):
-    id: Annotated[int, FerroField(primary_key=True)]
+    id: int | None = Field(default=None, primary_key=True)
     username: str
     is_active: bool = True
 

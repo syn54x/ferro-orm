@@ -45,8 +45,9 @@ def _normalized_groups(cls: type[Any]) -> tuple[tuple[str, ...], ...]:
         if len(names) < 2:
             raise ValueError(
                 f"{cls.__qualname__}.{FERRO_COMPOSITE_UNIQUES}[{i}] must name at least two columns "
-                f"(for single-column uniqueness use :class:`ferro.base.FerroField` with "
-                f"``unique=True`` on that field instead)"
+                f"(for single-column uniqueness use Field(unique=True) or "
+                f"Annotated[..., Field(unique=True)], "
+                f"or Annotated[..., FerroField(unique=True)] if you use raw Ferro metadata)"
             )
         out.append(tuple(names))
     seen: set[tuple[str, ...]] = set()
