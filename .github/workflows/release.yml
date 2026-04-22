@@ -378,7 +378,8 @@ jobs:
           ref: ${{ needs.prepare-release.outputs.release_base_sha }}
           fetch-depth: 0
           ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
-          persist-credentials: false
+          # Required so the deploy key stays loaded for git push in the next step.
+          persist-credentials: true
 
       - name: Download release patch
         uses: actions/download-artifact@v4
