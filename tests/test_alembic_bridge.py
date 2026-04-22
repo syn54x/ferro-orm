@@ -1,7 +1,9 @@
 from typing import Annotated
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from pydantic import Field
 
 from ferro import (
     BackRef,
@@ -91,6 +93,26 @@ def test_m2m_translation():
     assert "actor.id" in fks
     assert "movie.id" in fks
     assert fks["actor.id"].ondelete == "CASCADE"
+
+
+def test_uuid_foreign_key_shadow_column_type():
+    """Alembic bridge: UUID PK targets produce a UUID-capable SQLAlchemy type on *_id columns."""
+
+    class UuidAlembicOrg(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        name: str
+        members: BackRef[list["UuidAlembicMember"]] = None
+
+    class UuidAlembicMember(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        org: Annotated[UuidAlembicOrg, ForeignKey(related_name="members")]
+
+    metadata = get_metadata()
+    member_table = metadata.tables["uuidalembicmember"]
+    col = member_table.c.org_id
+    assert isinstance(col.type, sa.Uuid) or (
+        isinstance(col.type, sa.String) and getattr(col.type, "length", None) == 36
+    )
 
 
 def test_on_delete_translation():

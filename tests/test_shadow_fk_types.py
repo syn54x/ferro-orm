@@ -80,6 +80,7 @@ def test_reconcile_upgrades_forward_ref_shadow(_cleanup_registry):
     resolve_relationships()
 
     assert ReconcileChild.__annotations__["parent_id"] == (int | None)
+    assert ReconcileChild.model_fields["parent_id"].annotation == (int | None)
 
 
 @pytest.mark.asyncio
@@ -105,15 +106,67 @@ async def test_uuid_fk_create_get_dump():
     fetched = await UuidIssueChild.get(child.id)
     assert fetched.parent_id == parent.id
 
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        fetched.model_dump_json()
-    unexpected = [
-        x
-        for x in w
-        if x.category.__name__ == "PydanticSerializationUnexpectedValue"
-    ]
-    assert not unexpected
+    by_shadow = await UuidIssueChild.where(UuidIssueChild.parent_id == parent.id).first()
+    assert by_shadow is not None
+    assert by_shadow.id == child.id
+
+    for dumper in (fetched.model_dump, fetched.model_dump_json):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            dumper()
+        unexpected = [
+            x
+            for x in w
+            if x.category.__name__ == "PydanticSerializationUnexpectedValue"
+        ]
+        assert not unexpected
+
+
+@pytest.mark.asyncio
+async def test_uuid_fk_forward_ref_child_declared_first():
+    """Circular-import style: child model references parent by string before parent exists."""
+    ferro.reset_engine()
+    ferro.clear_registry()
+
+    class UuidFrwChild(Model):
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
+        parent: Annotated["UuidFrwParent", ForeignKey(related_name="children")]
+
+    class UuidFrwParent(Model):
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
+        name: str
+        children: BackRef[list[UuidFrwChild]] = None
+
+    await connect("sqlite::memory:", auto_migrate=True)
+
+    parent = await UuidFrwParent.create(name="p")
+    child = await UuidFrwChild.create(parent=parent)
+    fetched = await UuidFrwChild.get(child.id)
+    assert fetched.parent_id == parent.id
+
+
+def test_uuid_child_model_validate_accepts_string_parent_id():
+    """API / JSON payloads often send UUID FKs as strings; shadow typing should coerce."""
+    ferro.clear_registry()
+
+    class VParent(Model):
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
+        name: str
+        children: BackRef[list["VChild"]] = None
+
+    class VChild(Model):
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
+        parent: Annotated[VParent, ForeignKey(related_name="children")]
+
+    from ferro.relations import resolve_relationships
+
+    resolve_relationships()
+
+    pid = uuid4()
+    cid = uuid4()
+    row = VChild.model_validate({"id": cid, "parent_id": str(pid)})
+    assert row.parent_id == pid
+    assert isinstance(row.parent_id, UUID)
 
 
 def test_nullable_fk_annotation_does_not_crash():

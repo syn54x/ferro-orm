@@ -102,6 +102,7 @@ async def test_forward_ref_resolution():
     # Now it should be the class
     assert Post.ferro_relations["author"].to is Author
     assert Post.__annotations__["author_id"] == (int | None)
+    assert Post.model_fields["author_id"].annotation == (int | None)
 
 
 def test_relationship_validation_failure():
