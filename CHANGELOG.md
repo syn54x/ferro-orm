@@ -5,6 +5,8 @@
 
 ### Bug Fixes
 
+- Name SQLAlchemy enum types in the Alembic metadata bridge for PostgreSQL compatibility
+
 - Align composite unique index names and harden Alembic/Rust handling
   ([`3350481`](https://github.com/syn54x/ferro-orm/commit/33504812d37d93bf69c2be8f6bee6f390803a460))
 

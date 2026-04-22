@@ -306,7 +306,7 @@ def test_build_sa_table_warns_on_invalid_composite_unique_group():
         "ferro_composite_uniques": [["n"]],
     }
     with pytest.warns(UserWarning, match="ferro_composite_uniques"):
-        _build_sa_table(md, "warncomposite", schema)
+        _build_sa_table(md, "warncomposite", schema, model_cls=None)
     assert "warncomposite" in md.tables
 
 
