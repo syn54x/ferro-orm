@@ -186,3 +186,73 @@ def test_nullable_fk_annotation_does_not_crash():
 
     resolve_relationships()
     assert NullableFkChild.ferro_relations["parent"].to is NullableFkParent
+
+
+@pytest.mark.asyncio
+async def test_uuid_fk_save_after_reparenting():
+    """Update an existing row: change only the UUID foreign key, then save() and re-fetch."""
+    ferro.reset_engine()
+    ferro.clear_registry()
+
+    class UuidMutParent(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        name: str
+        kids: BackRef[list["UuidMutChild"]] = None
+
+    class UuidMutChild(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        label: str
+        parent: Annotated[UuidMutParent, ForeignKey(related_name="kids")]
+
+    await connect("sqlite::memory:", auto_migrate=True)
+
+    parent_a = await UuidMutParent.create(name="a")
+    parent_b = await UuidMutParent.create(name="b")
+    child = await UuidMutChild.create(label="row", parent=parent_a)
+    assert child.parent_id == parent_a.id
+
+    child.parent_id = parent_b.id
+    await child.save()
+
+    refetched = await UuidMutChild.get(child.id)
+    assert refetched is not None
+    assert refetched.parent_id == parent_b.id
+    assert refetched.label == "row"
+
+
+@pytest.mark.asyncio
+async def test_uuid_fk_bulk_create():
+    """bulk_create serializes UUID FK columns via model_dump(mode='json')."""
+    ferro.reset_engine()
+    ferro.clear_registry()
+
+    class UuidBulkParent(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        name: str
+        items: BackRef[list["UuidBulkItem"]] = None
+
+    class UuidBulkItem(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        sku: str
+        parent: Annotated[UuidBulkParent, ForeignKey(related_name="items")]
+
+    await connect("sqlite::memory:", auto_migrate=True)
+
+    px = await UuidBulkParent.create(name="x")
+    py = await UuidBulkParent.create(name="y")
+
+    rows = [
+        UuidBulkItem(sku="1", parent_id=px.id),
+        UuidBulkItem(sku="2", parent_id=py.id),
+        UuidBulkItem(sku="3", parent_id=px.id),
+    ]
+    inserted = await UuidBulkItem.bulk_create(rows)
+    assert inserted == 3
+
+    all_items = await UuidBulkItem.all()
+    assert len(all_items) == 3
+    by_sku = {item.sku: item for item in all_items}
+    # Hydration may return UUID or TEXT from SQLite; compare normalized strings.
+    assert str(by_sku["1"].parent_id) == str(px.id)
+    assert str(by_sku["2"].parent_id) == str(py.id)
+    assert str(by_sku["3"].parent_id) == str(px.id)
