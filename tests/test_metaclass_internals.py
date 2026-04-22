@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 from pydantic.fields import FieldInfo
 
+from ferro import Model
 from ferro.base import FerroField, ForeignKey, ManyToManyField
 from ferro.fields import FERRO_FIELD_EXTRA_KEY
 from ferro.metaclass import ModelMetaclass
@@ -223,6 +224,24 @@ class TestInjectShadowFields:
         assert "owner_id" in namespace
         assert isinstance(namespace["owner_id"], FieldInfo)
 
+    def test_foreign_key_injects_id_field_concrete_pk(self):
+        """Concrete FK target: shadow type follows related model PK annotation."""
+
+        class ShadowOwner(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            name: str
+
+        annotations = {"name": str}
+        namespace = {}
+        fk = ForeignKey(related_name="items")
+        fk.to = ShadowOwner
+        local_relations = {"owner": fk}
+
+        ModelMetaclass._inject_shadow_fields(annotations, namespace, local_relations)
+
+        assert annotations["owner_id"] == (int | None)
+        assert "owner_id" in namespace
+
     def test_multiple_foreign_keys(self):
         """Multiple ForeignKeys should inject multiple shadow fields."""
         annotations = {"name": str}
@@ -257,7 +276,7 @@ class TestPrepareNamespaceForPydantic:
 
         assert get_origin(annotations["owner"]) is ClassVar
         assert get_origin(annotations["posts"]) is ClassVar
-        assert annotations["name"] == str
+        assert annotations["name"] is str
 
     def test_removes_annotate_func(self):
         """__annotate_func__ should be removed if present."""
