@@ -415,6 +415,11 @@ jobs:
           git tag "${TAG}"
           git push origin "refs/tags/${TAG}"
 
+      # semantic-release matches branch config (e.g. branches.main); detached HEAD fails with
+      # "Detached HEAD state cannot match any release groups".
+      - name: Attach HEAD to branch for semantic-release
+        run: git switch -C "${{ github.ref_name }}"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
