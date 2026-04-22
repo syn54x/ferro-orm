@@ -88,15 +88,24 @@ You can also use `Annotated` with `Field`: `posts: Annotated[list["Post"] | None
 
 ### Shadow Fields
 
-For every `ForeignKey` field (e.g., `author`), Ferro automatically creates a "shadow" ID column in the database (e.g., `author_id`). You can access or filter by it directly:
+For every `ForeignKey` field (e.g., `author`), Ferro automatically creates a **shadow** scalar column and a matching Pydantic field named `{field}_id` (e.g., `author_id`). It holds the related row’s primary key value. You can read or filter on it like any other column:
+
+**Typing:** The shadow field’s Python type **follows the related model’s primary key annotation**, wrapped as optional (`| None`) for ORM defaults (the value starts as `None` until you set the relation or the ID). If the parent uses `UUID` for its PK, `author_id` is `UUID | None`; if the parent uses `int | None`, the shadow field matches that shape.
+
+**Forward references:** When the FK target is only a **string** or `ForwardRef` (e.g., `Annotated["Author", ForeignKey(...)]`) because the parent class is not defined yet, Ferro may start with a **broad fallback** union for the shadow field until the target class exists. After **`resolve_relationships()`** runs—which **`connect()`** calls for you, or which you can call explicitly in tests once every model is registered—the shadow type is **reconciled** to the real PK type and Pydantic’s schema is rebuilt so validation and serialization match the resolved model graph.
 
 ```python
-# Access the ID directly
+# Read the stored FK value (same logical type as the parent's PK)
 post_author_id = post.author_id
 
-# Filter by foreign key ID
+# Filter — use the same value type as Author.id (integer PK example)
 recent_posts = await Post.where(Post.author_id == 123).all()
+
+# With a UUID (or other non-int) primary key on Author, compare using that type
+# recent_posts = await Post.where(Post.author_id == author.id).all()
 ```
+
+Nullable relations such as `Annotated[Author | None, ForeignKey(...)]` are supported: the inner target type is normalized so metadata and shadow columns behave consistently.
 
 ### Usage Examples
 

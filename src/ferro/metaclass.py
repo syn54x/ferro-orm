@@ -215,6 +215,10 @@ class ModelMetaclass(type(BaseModel)):
         """
         Inject shadow {field_name}_id fields for ForeignKeys.
 
+        When ``ForeignKey.to`` is already a concrete model class, the shadow type is
+        derived from that model's primary key annotation; otherwise a broad fallback
+        union is used until ``resolve_relationships()`` can reconcile it.
+
         Mutates annotations and namespace in place.
         """
         for field_name, metadata in local_relations.items():

@@ -14,7 +14,13 @@ from .descriptors import RelationshipDescriptor
 
 
 def resolve_relationships():
-    """Finalize all pending relationships and cross-validate."""
+    """Finalize all pending relationships and cross-validate.
+
+    After binding each ``ForeignKey.to`` to a concrete model, upgrades shadow
+    ``{name}_id`` Pydantic annotations from the forward-ref fallback to the related
+    model's PK type where applicable, then ``model_rebuild``s affected classes before
+    the schema re-registration pass.
+    """
     global _PENDING_RELATIONS
 
     # Copy and clear so that we don't process the same relations multiple times
