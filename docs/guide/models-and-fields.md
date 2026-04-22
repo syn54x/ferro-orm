@@ -139,7 +139,9 @@ class OrgMembership(Model):
 - You can list several groups for multiple composite uniques on one model.
 - Invalid or unknown column names raise when the model is registered.
 
-**Null semantics:** In SQLite, `UNIQUE` treats `NULL` as distinct from other `NULL` values for the purposes of uniqueness in multi-column constraints unless columns are `NOT NULL`. Ferro maps nullability from your types and defaults like other fields; optional composite columns can therefore allow multiple rows that differ only by `NULL` in a nullable column. Prefer `NOT NULL` on composite members when you need strict “at most one row per pair” semantics.
+**Null semantics (SQLite):** With the default local SQLite engine, `UNIQUE` treats `NULL` as distinct from other `NULL` values for multi-column constraints unless columns are `NOT NULL`. Ferro maps nullability from your types and defaults like other fields; optional composite columns can therefore allow multiple rows that differ only by `NULL` in a nullable column. Prefer `NOT NULL` on composite members when you need strict “at most one row per pair” semantics. Other databases can differ; consult your backend’s documentation when you target PostgreSQL, MySQL, and so on.
+
+**Wire format:** Declarations use nested tuples in Python; the schema JSON sent to the Rust engine uses nested lists (`ferro_composite_uniques`) because JSON has no tuple type.
 
 **Many-to-many join tables:** When you use `ManyToManyField` without a custom `through` table, Ferro creates a default join table with two foreign-key columns. That table automatically gets a composite unique on those two columns so the same link cannot be stored twice. If you already have duplicate rows in such a table, adding this constraint in a migration may require a data cleanup step first.
 

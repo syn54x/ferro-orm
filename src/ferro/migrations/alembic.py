@@ -1,3 +1,4 @@
+import warnings
 from typing import Any, Dict
 
 try:
@@ -163,6 +164,13 @@ def _build_sa_table(metadata: "sa.MetaData", table_name: str, schema: Dict[str, 
     composites = schema.get("ferro_composite_uniques") or []
     for group in composites:
         if not isinstance(group, (list, tuple)) or len(group) < 2:
+            warnings.warn(
+                f"Ignoring invalid ferro_composite_uniques entry for table "
+                f"{table_name!r} (expected a list/tuple of at least two column names): "
+                f"{group!r}",
+                UserWarning,
+                stacklevel=2,
+            )
             continue
         col_ids = [str(c) for c in group]
         uc_name = f"uq_{table_name}_{'_'.join(col_ids)}"
