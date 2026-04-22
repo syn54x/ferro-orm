@@ -34,6 +34,54 @@ pub fn json_type_to_sea_query(col_def: &mut ColumnDef, json_type: &str) {
     }
 }
 
+/// Unique index name for `ferro_composite_uniques`; matches Python Alembic `_build_sa_table`.
+fn composite_unique_index_name(table_lower: &str, col_names: &[&str]) -> String {
+    let joined = col_names.join("_");
+    let raw = format!("uq_{}_{}", table_lower, joined);
+    if raw.chars().count() > 63 {
+        return format!("{}_uq", raw.chars().take(60).collect::<String>());
+    }
+    raw
+}
+
+fn append_composite_unique_index_sqls(
+    table_lower: &str,
+    schema: &serde_json::Value,
+    index_sqls: &mut Vec<String>,
+) {
+    let Some(groups) = schema
+        .get("ferro_composite_uniques")
+        .and_then(|g| g.as_array())
+    else {
+        return;
+    };
+    for group in groups {
+        let cols: Vec<&str> = group
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
+            .unwrap_or_default();
+        if cols.len() < 2 {
+            crate::log_debug(format!(
+                "Skipping invalid ferro_composite_uniques group for table '{}': {}",
+                table_lower,
+                serde_json::to_string(group).unwrap_or_else(|_| "<json>".to_string())
+            ));
+            continue;
+        }
+        let idx_name = composite_unique_index_name(table_lower, &cols);
+        let mut stmt = Index::create()
+            .unique()
+            .name(&idx_name)
+            .table(Alias::new(table_lower))
+            .if_not_exists()
+            .to_owned();
+        for c in &cols {
+            stmt.col(Alias::new(*c));
+        }
+        index_sqls.push(stmt.to_string(SqliteQueryBuilder));
+    }
+}
+
 /// Internal utility to create all registered tables in the database.
 ///
 /// This is used by both the `connect(auto_migrate=True)` flow and the
@@ -174,32 +222,7 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                 }
             }
 
-            if let Some(groups) = schema
-                .get("ferro_composite_uniques")
-                .and_then(|g| g.as_array())
-            {
-                for group in groups {
-                    let cols: Vec<&str> = group
-                        .as_array()
-                        .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
-                        .unwrap_or_default();
-                    if cols.len() < 2 {
-                        continue;
-                    }
-                    let cols_join = cols.join("_");
-                    let idx_name = format!("uq_{}_{}", table_lower, cols_join);
-                    let mut stmt = Index::create()
-                        .unique()
-                        .name(&idx_name)
-                        .table(Alias::new(&table_lower))
-                        .if_not_exists()
-                        .to_owned();
-                    for c in &cols {
-                        stmt.col(Alias::new(*c));
-                    }
-                    index_sqls.push(stmt.to_string(SqliteQueryBuilder));
-                }
-            }
+            append_composite_unique_index_sqls(&table_lower, &schema, &mut index_sqls);
 
             (table_stmt.build(SqliteQueryBuilder), index_sqls)
         };

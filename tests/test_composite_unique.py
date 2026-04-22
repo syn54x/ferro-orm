@@ -20,6 +20,14 @@ from ferro import (
 from ferro.migrations import get_metadata
 
 
+def _expected_uq_constraint_name(table_name: str, col_ids: list[str]) -> str:
+    """Match Alembic `_build_sa_table` naming (63-char cap)."""
+    raw = f"uq_{table_name}_{'_'.join(col_ids)}"
+    if len(raw) > 63:
+        return raw[:60] + "_uq"
+    return raw
+
+
 @pytest.fixture
 def db_url():
     db_file = f"test_composite_{uuid.uuid4()}.db"
@@ -81,11 +89,11 @@ async def test_composite_unique_enforced_on_user_model(db_url):
     await connect(db_url, auto_migrate=True)
 
     await PairRow(alpha_id=1, beta_id=2).save()
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(RuntimeError, match="Save failed") as excinfo:
         await PairRow(alpha_id=1, beta_id=2).save()
 
     msg = str(excinfo.value)
-    assert "UNIQUE constraint failed" in msg or "uniqueness" in msg.lower()
+    assert "UNIQUE constraint failed" in msg
 
 
 @pytest.mark.asyncio
@@ -107,10 +115,10 @@ async def test_m2m_duplicate_link_rejected(db_url):
     actor = await Actor.create(name="Alice")
     movie = await Movie.create(title="Matrix")
     await actor.movies.add(movie)
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(RuntimeError, match="Add M2M links failed") as excinfo:
         await actor.movies.add(movie)
     msg = str(excinfo.value)
-    assert "UNIQUE constraint failed" in msg or "uniqueness" in msg.lower()
+    assert "UNIQUE constraint failed" in msg
 
 
 def test_alembic_metadata_has_unique_constraints():
@@ -180,3 +188,137 @@ async def test_composite_unique_index_exists_in_sqlite(db_url):
         for r in rows
     )
     assert unique_on_both, f"expected unique index on pairrow, got: {rows}"
+
+
+@pytest.mark.asyncio
+async def test_composite_unique_truncated_name_matches_alembic_and_sqlite(db_url):
+    """Long uq_* names must be <=63 chars and match between Alembic metadata and Rust-created SQLite indexes."""
+
+    class VeryLongCompositeUniqueModelNameForIndexTruncationTest(Model):
+        __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            (
+                "very_long_column_name_alpha_for_composite_unique_test",
+                "very_long_column_name_beta_for_composite_unique_test",
+            ),
+        )
+
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        very_long_column_name_alpha_for_composite_unique_test: int
+        very_long_column_name_beta_for_composite_unique_test: int
+
+    table = VeryLongCompositeUniqueModelNameForIndexTruncationTest.__name__.lower()
+    col_a = "very_long_column_name_alpha_for_composite_unique_test"
+    col_b = "very_long_column_name_beta_for_composite_unique_test"
+    expected = _expected_uq_constraint_name(table, [col_a, col_b])
+    assert len(expected) <= 63, "fixture must exceed 63 before truncation"
+    full_raw = f"uq_{table}_{col_a}_{col_b}"
+    assert len(full_raw) > 63, "fixture must require truncation"
+
+    metadata = get_metadata()
+    ucs = _unique_constraints(metadata.tables[table])
+    assert len(ucs) == 1
+    assert ucs[0].name == expected
+
+    await connect(db_url, auto_migrate=True)
+
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='index' "
+        "AND tbl_name=? AND sql IS NOT NULL",
+        (table,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    composite_rows = [
+        r
+        for r in rows
+        if r[1]
+        and "UNIQUE" in r[1].upper()
+        and col_a in r[1]
+        and col_b in r[1]
+    ]
+    assert composite_rows, f"expected unique composite index on {table}, got: {rows}"
+    idx_name = composite_rows[0][0]
+    assert idx_name == expected
+    assert len(idx_name) <= 63
+
+
+def test_composite_unique_multiple_groups_in_metadata_and_sqlite():
+    """Two disjoint composite groups should yield two UniqueConstraint objects."""
+
+    class MultiGroup(Model):
+        __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("a_id", "b_id"),
+            ("c_id", "d_id"),
+        )
+
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        a_id: int
+        b_id: int
+        c_id: int
+        d_id: int
+
+    metadata = get_metadata()
+    table = metadata.tables["multigroup"]
+    ucs = _unique_constraints(table)
+    assert len(ucs) == 2
+    col_sets = {tuple(sorted(c.key for c in uc.columns)) for uc in ucs}
+    assert ("a_id", "b_id") in col_sets
+    assert ("c_id", "d_id") in col_sets
+    names = {uc.name for uc in ucs}
+    assert len(names) == 2
+    for uc in ucs:
+        assert len(uc.name or "") <= 63
+
+
+def test_composite_unique_order_matters_two_separate_constraints():
+    """(x_id, y_id) and (y_id, x_id) are distinct groups — no silent merge."""
+
+    class OrderMatters(Model):
+        __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("x_id", "y_id"),
+            ("y_id", "x_id"),
+        )
+
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        x_id: int
+        y_id: int
+
+    metadata = get_metadata()
+    ucs = _unique_constraints(metadata.tables["ordermatters"])
+    assert len(ucs) == 2
+
+
+def test_build_sa_table_warns_on_invalid_composite_unique_group():
+    """Malformed ferro_composite_uniques entries should warn, not fail silently."""
+    from ferro.migrations.alembic import _build_sa_table
+
+    md = sa.MetaData()
+    schema = {
+        "properties": {
+            "id": {"type": "integer", "primary_key": True},
+            "n": {"type": "integer"},
+        },
+        "required": ["id", "n"],
+        "ferro_composite_uniques": [["n"]],
+    }
+    with pytest.warns(UserWarning, match="ferro_composite_uniques"):
+        _build_sa_table(md, "warncomposite", schema)
+    assert "warncomposite" in md.tables
+
+
+def test_single_column_composite_unique_raises_with_guidance():
+    """A single-column group must error with guidance toward FerroField(unique=True)."""
+
+    with pytest.raises(RuntimeError, match="at least two columns|FerroField"):
+
+        class BadSingle(Model):
+            __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+                ("only_col",),
+            )
+
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            only_col: int

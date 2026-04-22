@@ -1,4 +1,9 @@
-"""Table-level composite unique constraints declared on Ferro models."""
+"""Table-level composite unique constraints declared on Ferro models.
+
+Composite groups are declared on models as ``tuple[tuple[str, ...], ...]`` and
+serialized to JSON for the Rust registry as nested lists (``list[list[str]]``),
+since JSON has no tuple type.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +17,8 @@ def _normalized_groups(cls: type[Any]) -> tuple[tuple[str, ...], ...]:
 
     ``cls`` must be a :class:`ferro.models.Model` subclass; the base defines
     ``__ferro_composite_uniques__`` so normal access is always valid.
+
+    Duplicate identical column tuples are dropped; the first occurrence is kept.
     """
     raw = cls.__ferro_composite_uniques__
     if raw in ((), None):
@@ -37,7 +44,9 @@ def _normalized_groups(cls: type[Any]) -> tuple[tuple[str, ...], ...]:
             names.append(col)
         if len(names) < 2:
             raise ValueError(
-                f"{cls.__qualname__}.{FERRO_COMPOSITE_UNIQUES}[{i}] must name at least two columns"
+                f"{cls.__qualname__}.{FERRO_COMPOSITE_UNIQUES}[{i}] must name at least two columns "
+                f"(for single-column uniqueness use :class:`ferro.base.FerroField` with "
+                f"``unique=True`` on that field instead)"
             )
         out.append(tuple(names))
     seen: set[tuple[str, ...]] = set()
