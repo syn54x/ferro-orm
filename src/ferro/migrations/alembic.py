@@ -5,6 +5,7 @@ try:
 except ImportError:
     sa = None
 
+from ..composite_uniques import apply_composite_uniques_to_schema
 from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 
 
@@ -94,6 +95,8 @@ def _enrich_schema_with_ferro_metadata(model_cls, schema: Dict[str, Any]):
                     "unique": metadata.unique,
                 }
 
+    apply_composite_uniques_to_schema(model_cls, schema)
+
 
 def _build_sa_table(metadata: "sa.MetaData", table_name: str, schema: Dict[str, Any]):
     """Build a SQLAlchemy Table object from a Ferro JSON schema."""
@@ -156,7 +159,18 @@ def _build_sa_table(metadata: "sa.MetaData", table_name: str, schema: Dict[str, 
 
         columns.append(sa.Column(*args, **kwargs))
 
-    sa.Table(table_name, metadata, *columns)
+    table_args: list[Any] = list(columns)
+    composites = schema.get("ferro_composite_uniques") or []
+    for group in composites:
+        if not isinstance(group, (list, tuple)) or len(group) < 2:
+            continue
+        col_ids = [str(c) for c in group]
+        uc_name = f"uq_{table_name}_{'_'.join(col_ids)}"
+        if len(uc_name) > 63:
+            uc_name = uc_name[:60] + "_uq"
+        table_args.append(sa.UniqueConstraint(*col_ids, name=uc_name))
+
+    sa.Table(table_name, metadata, *table_args)
 
 
 def _map_to_sa_type(

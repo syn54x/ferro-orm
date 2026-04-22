@@ -16,6 +16,7 @@ from pydantic.fields import FieldInfo
 
 from ._core import register_model_schema
 from .base import FerroField, ForeignKey, ManyToManyField
+from .composite_uniques import apply_composite_uniques_to_schema
 from .fields import FERRO_FIELD_EXTRA_KEY
 from .query import BackRef, FieldProxy
 from .relations.descriptors import ForwardDescriptor
@@ -384,6 +385,8 @@ class ModelMetaclass(type(BaseModel)):
                                     "on_delete": metadata.on_delete,
                                     "unique": metadata.unique,
                                 }
+
+                    apply_composite_uniques_to_schema(cls, schema)
 
                 setattr(cls, "__ferro_schema__", schema)
                 register_model_schema(name, json.dumps(schema))

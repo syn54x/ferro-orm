@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from enum import Enum
 from typing import (
     Any,
+    ClassVar,
     Self,
     get_args,
     get_origin,
@@ -60,11 +61,20 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     Inheriting from this class registers schema metadata with the Rust core and
     exposes high-performance CRUD and query entrypoints.
 
+    **Composite unique constraints:** declare a ``typing.ClassVar`` named
+    ``__ferro_composite_uniques__`` as a tuple of tuples of column names
+    (for example ``(("user_id", "org_id"),)``) to enforce uniqueness on those
+    columns together. This is separate from ``FerroField(unique=True)``, which
+    applies to a single column only. Default many-to-many join tables get a
+    composite unique on their two foreign-key columns automatically.
+
     Examples:
         >>> class User(Model):
         ...     id: int | None = None
         ...     name: str
     """
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = ()
 
     @classmethod
     def _reregister_ferro(cls) -> None:

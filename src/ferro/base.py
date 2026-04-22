@@ -17,7 +17,10 @@ class FerroField:
 
         primary_key: Mark the field as the table primary key.
         autoincrement: Override automatic increment behavior for primary key columns.
-        unique: Enforce a uniqueness constraint for the column.
+        unique: Enforce a **single-column** uniqueness constraint for this column only.
+            For uniqueness on multiple columns together, declare
+            ``__ferro_composite_uniques__`` on the :class:`ferro.models.Model` subclass
+            (see the models guide).
         index: Request an index for the column.
 
     Examples:
@@ -43,7 +46,7 @@ class FerroField:
             primary_key: Set to True when the field is the primary key.
             autoincrement: Control whether the database auto-increments the value.
                 When not provided, the backend infers a default for integer primary keys.
-            unique: Set to True to enforce uniqueness.
+            unique: Set to True to enforce **single-column** uniqueness only.
             index: Set to True to create a database index.
 
         Examples:
