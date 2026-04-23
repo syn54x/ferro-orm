@@ -4,10 +4,24 @@ This module provides lightweight configuration objects used by model annotations
 """
 
 from typing import (
+    Any,
+    Literal,
     TypeVar,
 )
 
+from ._annotation_utils import annotation_allows_none
+
 T = TypeVar("T")
+
+FerroNullable = Literal["infer"] | bool
+"""Alembic column nullability: ``'infer'`` from the field type, or forced bool."""
+
+
+def _validate_nullable_option(nullable: FerroNullable, owner: str) -> FerroNullable:
+    """Validate the public ``nullable`` tri-state option."""
+    if nullable == "infer" or isinstance(nullable, bool):
+        return nullable
+    raise TypeError(f"{owner} nullable must be 'infer', True, or False")
 
 
 class FerroField:
@@ -22,6 +36,10 @@ class FerroField:
             ``__ferro_composite_uniques__`` on the :class:`ferro.models.Model` subclass
             (see the models guide).
         index: Request an index for the column.
+        nullable: Alembic ``Column.nullable`` when using :func:`~ferro.migrations.get_metadata`.
+            ``'infer'`` (default) uses whether the annotation allows ``None``.
+            ``False`` / ``True`` force NOT NULL / NULL regardless of the type (for
+            advanced cases such as ``int | None`` used only for static typing).
 
     Examples:
         >>> from typing import Annotated
@@ -38,6 +56,7 @@ class FerroField:
         autoincrement: bool | None = None,
         unique: bool = False,
         index: bool = False,
+        nullable: FerroNullable = "infer",
     ):
         """Initialize field metadata options
 
@@ -48,6 +67,7 @@ class FerroField:
                 When not provided, the backend infers a default for integer primary keys.
             unique: Set to True to enforce **single-column** uniqueness only.
             index: Set to True to create a database index.
+            nullable: See :class:`FerroField` attribute ``nullable`` in the class docstring.
 
         Examples:
             >>> from typing import Annotated
@@ -61,6 +81,7 @@ class FerroField:
         self.autoincrement = autoincrement
         self.unique = unique
         self.index = index
+        self.nullable = _validate_nullable_option(nullable, "FerroField")
 
 
 class ForeignKey:
@@ -72,6 +93,9 @@ class ForeignKey:
         related_name: Name of the reverse relationship attribute on the target model.
         on_delete: Referential action applied when the parent row is deleted.
         unique: Treat the relation as one-to-one when True.
+        nullable: Alembic nullability for the shadow ``*_id`` column (see
+            :class:`FerroField` ``nullable``). When ``'infer'``, uses whether the
+            **relation** annotation allows ``None``.
 
     Examples:
         >>> from typing import Annotated
@@ -86,7 +110,11 @@ class ForeignKey:
     """
 
     def __init__(
-        self, related_name: str, on_delete: str = "CASCADE", unique: bool = False
+        self,
+        related_name: str,
+        on_delete: str = "CASCADE",
+        unique: bool = False,
+        nullable: FerroNullable = "infer",
     ):
         """Initialize foreign-key relationship metadata
 
@@ -96,6 +124,7 @@ class ForeignKey:
             on_delete: Referential action for parent deletion.
                 Common values include "CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", and "NO ACTION".
             unique: Set to True to enforce one-to-one behavior.
+            nullable: See :class:`ForeignKey` class docstring.
 
         Examples:
             >>> from typing import Annotated
@@ -109,6 +138,26 @@ class ForeignKey:
         self.related_name = related_name
         self.on_delete = on_delete
         self.unique = unique
+        self.nullable = _validate_nullable_option(nullable, "ForeignKey")
+        if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
+            raise ValueError("ForeignKey(on_delete='SET NULL') requires nullable=True or 'infer'")
+        #: First type argument of ``Annotated[..., ForeignKey]``; set by the metaclass
+        #: for Alembic nullability inference (forward fields are not in ``model_fields``).
+        self.relation_annotation: Any | None = None
+
+
+def foreign_key_allows_none(metadata: "ForeignKey") -> bool | None:
+    """Effective FK nullability from explicit override, delete action, and relation type."""
+    if metadata.nullable is True:
+        return True
+    if metadata.nullable is False:
+        return False
+    if str(metadata.on_delete).upper() == "SET NULL":
+        return True
+    relation_annotation = getattr(metadata, "relation_annotation", None)
+    if relation_annotation is None:
+        return None
+    return annotation_allows_none(relation_annotation)
 
 
 class ManyToManyField:

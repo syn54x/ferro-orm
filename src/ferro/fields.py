@@ -9,6 +9,8 @@ from pydantic.fields import Field as PydanticField
 from pydantic.fields import _EmptyKwargs, _Unset
 from pydantic_core import PydanticUndefined
 
+from .base import FerroNullable, _validate_nullable_option
+
 if TYPE_CHECKING:
     import re
 
@@ -31,6 +33,7 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    nullable: FerroNullable = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -78,6 +81,7 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    nullable: FerroNullable = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -125,6 +129,7 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    nullable: FerroNullable = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -171,6 +176,7 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    nullable: FerroNullable = ...,
     default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -218,6 +224,7 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    nullable: FerroNullable = ...,
     default_factory: Callable[[], _T] | Callable[[dict[str, Any]], _T],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -265,6 +272,7 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    nullable: FerroNullable = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -311,6 +319,7 @@ def Field(
     unique: bool | Any = _Unset,
     index: bool | Any = _Unset,
     back_ref: bool | Any = _Unset,
+    nullable: FerroNullable | Any = _Unset,
     default_factory: Callable[[], Any]
     | Callable[[dict[str, Any]], Any]
     | None = _Unset,
@@ -362,6 +371,8 @@ def Field(
         index: Request an index for this column in Ferro.
         back_ref: Mark this field as a reverse relationship (same as BackRef in the type).
             Do not use together with a BackRef annotation on the same field.
+        nullable: Alembic ``Column.nullable`` override for :func:`~ferro.migrations.get_metadata`.
+            ``\"infer\"`` (default) derives nullability from the field annotation.
         default_factory: A callable to generate the default value. The callable can either take 0 arguments
             (in which case it is called as is) or a single argument containing the already validated data.
         alias: The name to use for the attribute when validating or serializing by alias.
@@ -440,6 +451,9 @@ def Field(
         ferro_kwargs["index"] = index
     if back_ref is not _Unset:
         ferro_kwargs["back_ref"] = back_ref
+    if nullable is not _Unset:
+        _validate_nullable_option(nullable, "Field")
+        ferro_kwargs["nullable"] = nullable
 
     schema_extra = json_schema_extra
     if ferro_kwargs:

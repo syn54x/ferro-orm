@@ -153,3 +153,4 @@ def test_on_delete_translation():
     product_table = metadata.tables["product"]
     fk = list(product_table.c.category_id.foreign_keys)[0]
     assert fk.ondelete == "SET NULL"
+    assert product_table.c.category_id.nullable is True
