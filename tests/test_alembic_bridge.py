@@ -66,6 +66,25 @@ def test_metadata_translation():
     assert fk.ondelete == "CASCADE"
 
 
+def test_foreign_key_unique_true_propagates_to_shadow_column():
+    """1:1 relations use ForeignKey(unique=True); Alembic metadata must expose UNIQUE."""
+
+    class Parent(Model):
+        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        child: BackRef["Child"] = None
+
+    class Child(Model):
+        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        parent: Annotated[
+            Parent,
+            ForeignKey(related_name="child", unique=True, on_delete="CASCADE"),
+        ]
+
+    metadata = get_metadata()
+    child_table = metadata.tables["child"]
+    assert child_table.columns["parent_id"].unique is True
+
+
 def test_m2m_translation():
     """Verify that M2M join tables are also translated."""
 

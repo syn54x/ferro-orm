@@ -22,6 +22,10 @@ def get_metadata() -> "sa.MetaData":
     When the field annotation is a Python ``enum.Enum`` subclass, the database
     type name defaults to the enum class name in lowercase; otherwise the
     column name is used as the type name.
+
+    For :class:`~ferro.base.ForeignKey` fields with ``unique=True`` (one-to-one
+    relations), the shadow ``*_id`` column is emitted with ``Column(unique=True)``
+    so Alembic autogenerate includes the matching UNIQUE constraint.
     """
     if sa is None:
         raise ImportError(
@@ -193,10 +197,12 @@ def _build_sa_table(
         if "default" in col_info and col_info["default"] is not None:
             is_nullable = False
 
+        fk_info = col_info.get("foreign_key") or {}
+        column_unique = bool(col_info.get("unique")) or bool(fk_info.get("unique"))
         kwargs = {
             "primary_key": col_info.get("primary_key", False),
             "nullable": is_nullable,
-            "unique": col_info.get("unique", False),
+            "unique": column_unique,
             "index": col_info.get("index", False),
         }
 
@@ -207,8 +213,7 @@ def _build_sa_table(
         args = [col_name, sa_type]
 
         # Handle Foreign Keys
-        if "foreign_key" in col_info:
-            fk_info = col_info["foreign_key"]
+        if fk_info:
             on_delete = fk_info.get("on_delete")
             args.append(sa.ForeignKey(f"{fk_info['to_table']}.id", ondelete=on_delete))
 
