@@ -3,10 +3,10 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from pydantic import Field
 
 from ferro import (
     BackRef,
+    Field,
     FerroField,
     ForeignKey,
     ManyToManyField,
@@ -70,11 +70,11 @@ def test_foreign_key_unique_true_propagates_to_shadow_column():
     """1:1 relations use ForeignKey(unique=True); Alembic metadata must expose UNIQUE."""
 
     class Parent(Model):
-        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
         child: BackRef["Child"] = None
 
     class Child(Model):
-        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
         parent: Annotated[
             Parent,
             ForeignKey(related_name="child", unique=True, on_delete="CASCADE"),
