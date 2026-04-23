@@ -184,6 +184,7 @@ class ModelMetaclass(type(BaseModel)):
                 args = get_args(hint)
                 for metadata in args:
                     if isinstance(metadata, ForeignKey):
+                        metadata.relation_annotation = args[0]
                         inner = ModelMetaclass._strip_optional_union(args[0])
                         metadata.to = inner
                         local_relations[field_name] = metadata

@@ -53,6 +53,17 @@ target_metadata = get_metadata()
 # Rest of env.py remains unchanged
 ```
 
+### Column nullability (`get_metadata()`)
+
+Ferro maps each model field to a SQLAlchemy `Column` with a `nullable` flag used by autogenerate.
+
+- With the default **`nullable="infer"`** on `FerroField`, `ForeignKey`, and `ferro.Field(...)`, the column is nullable if and only if the field’s **Python annotation** allows `None` (for example `T | None`). Having a default or `default_factory` does **not** by itself make a column nullable in the migration metadata.
+- Shadow **`{name}_id`** foreign-key columns infer from the **forward relation** field’s annotation, not from the synthetic `*_id` field (which often uses `| None` for assignment convenience).
+- `ForeignKey(..., on_delete="SET NULL")` implies a nullable shadow FK column unless you explicitly override it; `nullable=False` is rejected for that combination.
+- Set **`nullable=False`** or **`nullable=True`** on `FerroField`, `ForeignKey`, or `ferro.Field(...)` to force NOT NULL or NULL when you intentionally diverge from the type (for example `int | None` for a type checker while keeping a NOT NULL column).
+
+Primary keys are always emitted as `nullable=False`.
+
 ### 3. Generate Your First Migration
 
 ```bash
