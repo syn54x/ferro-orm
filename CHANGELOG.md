@@ -1,11 +1,40 @@
 # CHANGELOG
 
 
-## v0.3.0 (2026-04-22)
+## v0.3.1 (2026-04-23)
 
 ### Bug Fixes
 
-- Name SQLAlchemy enum types in the Alembic metadata bridge for PostgreSQL compatibility
+- Alembic autogenerate named SQLAlchemy enums for PostgreSQL
+  ([`25a00e8`](https://github.com/syn54x/ferro-orm/commit/25a00e84502ae1f8ba502718934d93eedfa4ce09))
+
+- **migrations**: Align nullable inference with field types
+  ([`885f0fe`](https://github.com/syn54x/ferro-orm/commit/885f0fe155dfa643e29b9425ff1ede62f3f0b269))
+
+- **migrations**: Propagate ForeignKey(unique=True) to Alembic metadata
+  ([#22](https://github.com/syn54x/ferro-orm/pull/22),
+  [`9329e8f`](https://github.com/syn54x/ferro-orm/commit/9329e8fba2f0efd201bea4545393654c7d1dd34e))
+
+### Continuous Integration
+
+- Fix release
+  ([`e2822f6`](https://github.com/syn54x/ferro-orm/commit/e2822f6c9bacc6fc955e56b2ca8e120cc22b0b72))
+
+- Fix release
+  ([`e5c1adc`](https://github.com/syn54x/ferro-orm/commit/e5c1adcc10eb44845ef95d78226840ecdbfd0ebd))
+
+- Fix release
+  ([`688d01b`](https://github.com/syn54x/ferro-orm/commit/688d01bdae0aff1f82e4a1bb60dd1b8ab35e1d01))
+
+### Documentation
+
+- Prefer Field over FerroField
+  ([`3385cfa`](https://github.com/syn54x/ferro-orm/commit/3385cfadf0951f80827dac1aa08f73430a02023f))
+
+
+## v0.3.0 (2026-04-23)
+
+### Bug Fixes
 
 - Align composite unique index names and harden Alembic/Rust handling
   ([`3350481`](https://github.com/syn54x/ferro-orm/commit/33504812d37d93bf69c2be8f6bee6f390803a460))
