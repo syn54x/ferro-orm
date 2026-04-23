@@ -45,7 +45,37 @@ All workflows use explicit, fine-grained permissions (principle of least privile
 
 **Trigger:** Manual workflow dispatch
 
-**Permissions:**
+**Job graph (top to bottom is execution order):**
+
+```
+ci-gate        packaging-smoke
+        \      /
+      prepare-release                 (computes bump, writes release.patch; no pushes)
+     /    |    |    \
+build-wheels build-sdist test-wheels verify-docs
+                  \    |    /
+                promote-pypi           (PyPI Trusted Publishing; first irreversible step)
+                      |
+                 promote-git           (commit bump, push main, tag, create GH Release + assets)
+                      |
+                 promote-docs          (deploys MkDocs site pinned to the new tag)
+```
+
+Nothing is pushed, tagged, or published until every validation job above
+`promote-pypi` has succeeded. PyPI is published first so that if anything
+fails, `main` is never advanced to an "orphan" version.
+
+**Permissions (prepare-release):**
+```yaml
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+```
+
+Prepare-release only needs read access because it just computes the bump and uploads a patch artifact — it does not push anything.
+
+**Permissions (promote-git):**
 ```yaml
 permissions:
   contents: write
@@ -53,32 +83,23 @@ permissions:
   pull-requests: write
 ```
 
-**Why These Permissions:**
-- `contents: write` - Allows the workflow to:
-  - Commit version bumps to pyproject.toml and Cargo.toml
+- `contents: write` - Allows the job to:
+  - Commit version bumps to `pyproject.toml` and `Cargo.toml`
   - Push commits to the `main` branch
-  - Create and push git tags (e.g., `v0.2.0`)
-  - Create GitHub releases
+  - Create and push git tags (e.g., `v0.3.1`)
+  - Create GitHub Releases
 
-- `issues: write` - Allows the workflow to:
-  - Update issue references in release notes
-  - Close issues automatically via commit messages
-  - Add labels or comments to issues
+- `issues: write` / `pull-requests: write` - Allows semantic-release to
+  update issue/PR references in generated release notes.
 
-- `pull-requests: write` - Allows the workflow to:
-  - Update PR references in release notes
-  - Close PRs automatically via commit messages
-  - Add labels or comments to PRs
-
-**What It Does:**
-- Analyzes conventional commits
-- Determines next version
-- Updates version in both Python and Rust files
-- Finalizes CHANGELOG.md
-- Creates git tag
-- Creates GitHub release
-- Triggers publish workflow
-- Reports whether release commits include `CHANGELOG.md`
+**What the release flow does:**
+- Analyzes conventional commits since the latest tag (fetched explicitly via `fetch-tags: true`)
+- Fails fast if the computed version collides with an existing tag (indicates a tag-fetch bug)
+- Bumps version in `pyproject.toml` and `Cargo.toml` and finalizes `CHANGELOG.md`
+- Validates the bumped tree across wheel builds, sdist, install smoke tests, and `mkdocs build`
+- Publishes to PyPI before touching `main`
+- Commits bump to `main`, creates the tag, creates the GitHub Release with generated notes, attaches wheels + sdist
+- Deploys the MkDocs site pinned to the new tag
 
 **Required Secrets:**
 - `RELEASE_DEPLOY_KEY` (private SSH key for a write-enabled deploy key)
@@ -88,15 +109,15 @@ permissions:
 
 ### 2. Build & Publish (jobs in `release.yml`)
 
-**Trigger:** Part of `release.yml` after the release job (no reusable workflow).
+**Trigger:** Part of `release.yml` — all build and publish jobs live in the same workflow file.
 
 Build, test, and publish jobs are defined directly in `release.yml` so PyPI Trusted Publishing receives a token with `workflow_ref: release.yml` (reusable workflows are not supported by PyPI).
 
 **Permissions:**
 
-**For build-wheels, build-sdist, test-wheels:** (default - read-only)
+**For build-wheels, build-sdist, test-wheels, verify-docs:** (default - read-only)
 
-**For publish-pypi job:**
+**For promote-pypi job:**
 ```yaml
 permissions:
   id-token: write
@@ -106,10 +127,10 @@ permissions:
 - `id-token: write` - Allows the job to request an OIDC token and authenticate with PyPI using Trusted Publishing.
 
 **What It Does:**
-- Builds wheels for multiple platforms from the release tag
-- Builds source distribution
-- Tests built packages
-- Publishes to PyPI using OIDC authentication
+- Builds wheels for multiple platforms against the patched (bumped) tree
+- Builds source distribution against the patched tree
+- Installs wheels and runs a smoke import + in-memory SQLite check
+- `promote-pypi` publishes the validated wheels + sdist to PyPI via OIDC
 
 ---
 
@@ -268,9 +289,17 @@ Permission to manage GitHub Pages deployments:
 **Cause:** Missing `id-token: write` permission
 
 **Solution:**
-- Ensure `publish-pypi` job has `id-token: write`
+- Ensure `promote-pypi` job has `id-token: write`
 - Verify PyPI trusted publisher is configured correctly
 - Check environment name matches (`pypi`)
+
+### Release says "0.3.0 has already been released!" for a version that was already shipped
+
+**Cause:** `actions/checkout@v4` runs `git fetch --no-tags` by default, even with `fetch-depth: 0`. Without tags, `semantic-release` picks an older baseline tag, computes a minor/patch bump, and lands on the same version number as a prior release.
+
+**Solution:**
+- The `prepare-release` job sets `fetch-tags: true` on its checkout step and then runs a `git describe` vs `semantic-release --print-last-released-tag` comparison as a guard. Both must be present.
+- If this check fails in a run, confirm no one has removed `fetch-tags: true` from the checkout step.
 
 ---
 
