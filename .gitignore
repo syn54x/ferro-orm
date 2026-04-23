@@ -243,5 +243,4 @@ playground.ipynb
 IMPLEMENTATION.md
 Cargo.lock
 demo.db
-docs/superpowers/plans/2026-04-22-shadow-fk-types.md
-docs/superpowers/specs/2026-04-22-shadow-fk-types-design.md
+docs/superpowers
