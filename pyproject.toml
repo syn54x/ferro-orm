@@ -11,6 +11,14 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[project.optional-dependencies]
+# Install with: pip install "ferro-orm[alembic]"
+# Enables the ferro.migrations Alembic bridge for schema migrations.
+alembic = [
+    "alembic>=1.18.1",
+    "sqlalchemy>=2.0.46",
+]
+
 [tool.maturin]
 module-name = "ferro._core"
 python-packages = ["ferro"]
@@ -24,10 +32,6 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [dependency-groups]
-alembic = [
-    "alembic>=1.18.1",
-    "sqlalchemy>=2.0.46",
-]
 ci-lint = [
     "prek>=0.2.25",
 ]

@@ -534,11 +534,13 @@ dependencies = [
     { name = "pydantic" },
 ]
 
-[package.dev-dependencies]
+[package.optional-dependencies]
 alembic = [
     { name = "alembic" },
     { name = "sqlalchemy" },
 ]
+
+[package.dev-dependencies]
 ci-lint = [
     { name = "prek" },
 ]
@@ -579,13 +581,14 @@ release = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.0" }]
+requires-dist = [
+    { name = "alembic", marker = "extra == 'alembic'", specifier = ">=1.18.1" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "sqlalchemy", marker = "extra == 'alembic'", specifier = ">=2.0.46" },
+]
+provides-extras = ["alembic"]
 
 [package.metadata.requires-dev]
-alembic = [
-    { name = "alembic", specifier = ">=1.18.1" },
-    { name = "sqlalchemy", specifier = ">=2.0.46" },
-]
 ci-lint = [{ name = "prek", specifier = ">=0.2.25" }]
 ci-test = [
     { name = "maturin", specifier = ">=1.11.5" },
