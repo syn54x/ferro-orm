@@ -3,10 +3,10 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from pydantic import Field
 
 from ferro import (
     BackRef,
+    Field,
     FerroField,
     ForeignKey,
     ManyToManyField,
@@ -64,6 +64,25 @@ def test_metadata_translation():
     fk = list(post_table.c.author_id.foreign_keys)[0]
     assert fk.target_fullname == "user.id"
     assert fk.ondelete == "CASCADE"
+
+
+def test_foreign_key_unique_true_propagates_to_shadow_column():
+    """1:1 relations use ForeignKey(unique=True); Alembic metadata must expose UNIQUE."""
+
+    class Parent(Model):
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
+        child: BackRef["Child"] = None
+
+    class Child(Model):
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
+        parent: Annotated[
+            Parent,
+            ForeignKey(related_name="child", unique=True, on_delete="CASCADE"),
+        ]
+
+    metadata = get_metadata()
+    child_table = metadata.tables["child"]
+    assert child_table.columns["parent_id"].unique is True
 
 
 def test_m2m_translation():
