@@ -41,8 +41,9 @@ def test_complex_type_mapping():
     metadata = get_metadata()
     table = metadata.tables["complexmodel"]
 
-    # Enum
+    # Enum (named for PostgreSQL compatibility)
     assert isinstance(table.c.status.type, sa.Enum)
+    assert table.c.status.type.name == "userstatus"
     assert set(table.c.status.type.enums) == {"active", "inactive"}
 
     # Numeric/Decimal
@@ -68,6 +69,7 @@ def test_optional_complex_types():
     table = metadata.tables["optionalcomplexmodel"]
 
     assert isinstance(table.c.status.type, sa.Enum)
+    assert table.c.status.type.name == "userstatus"
     assert table.c.status.nullable is True
     assert isinstance(table.c.price.type, (sa.Numeric, sa.Float))
     assert table.c.price.nullable is True

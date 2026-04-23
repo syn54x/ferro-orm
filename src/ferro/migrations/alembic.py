@@ -1,5 +1,7 @@
+import enum
+import types
 import warnings
-from typing import Any, Dict
+from typing import Annotated, Any, Dict, Union, get_args, get_origin
 
 try:
     import sqlalchemy as sa
@@ -14,6 +16,12 @@ def get_metadata() -> "sa.MetaData":
     """
     Generate a SQLAlchemy MetaData object representing all registered Ferro models.
     This is intended to be used in alembic's env.py for autogenerate support.
+
+    Enum columns are mapped to named ``sqlalchemy.Enum`` types so PostgreSQL
+    autogenerate and DDL compilation succeed (anonymous enums are rejected).
+    When the field annotation is a Python ``enum.Enum`` subclass, the database
+    type name defaults to the enum class name in lowercase; otherwise the
+    column name is used as the type name.
     """
     if sa is None:
         raise ImportError(
@@ -47,11 +55,11 @@ def get_metadata() -> "sa.MetaData":
         # Enrich schema with Ferro-specific metadata (PKs, FKs, etc.)
         _enrich_schema_with_ferro_metadata(model_cls, schema)
 
-        _build_sa_table(metadata, table_name, schema)
+        _build_sa_table(metadata, table_name, schema, model_cls)
 
     # 3. Process join tables
     for join_table_name, join_schema in _JOIN_TABLE_REGISTRY.items():
-        _build_sa_table(metadata, join_table_name, join_schema)
+        _build_sa_table(metadata, join_table_name, join_schema, model_cls=None)
 
     return metadata
 
@@ -99,7 +107,52 @@ def _enrich_schema_with_ferro_metadata(model_cls, schema: Dict[str, Any]):
     apply_composite_uniques_to_schema(model_cls, schema)
 
 
-def _build_sa_table(metadata: "sa.MetaData", table_name: str, schema: Dict[str, Any]):
+def _strip_optional_union(annotation: Any) -> Any:
+    """Unwrap ``T | None`` / ``Optional[T]`` to ``T``."""
+    hint = annotation
+    while True:
+        origin = get_origin(hint)
+        if origin is Union or origin is types.UnionType:
+            args = [a for a in get_args(hint) if a is not type(None)]
+            if len(args) == 1:
+                hint = args[0]
+                continue
+        return hint
+
+
+def _annotation_as_enum_subclass(annotation: Any) -> type[enum.Enum] | None:
+    """If ``annotation`` denotes a Python ``Enum`` type, return that class."""
+    hint = _strip_optional_union(annotation)
+    origin = get_origin(hint)
+    if origin is Annotated:
+        args = get_args(hint)
+        if args:
+            return _annotation_as_enum_subclass(args[0])
+        return None
+    if isinstance(hint, type) and issubclass(hint, enum.Enum):
+        return hint
+    return None
+
+
+def _field_python_enum(model_cls: type[Any] | None, field_name: str) -> type[enum.Enum] | None:
+    """Return the ``Enum`` class for a model field, if any."""
+    if model_cls is None:
+        return None
+    model_fields = getattr(model_cls, "model_fields", None)
+    if not model_fields:
+        return None
+    field = model_fields.get(field_name)
+    if field is None:
+        return None
+    return _annotation_as_enum_subclass(field.annotation)
+
+
+def _build_sa_table(
+    metadata: "sa.MetaData",
+    table_name: str,
+    schema: Dict[str, Any],
+    model_cls: type[Any] | None = None,
+):
     """Build a SQLAlchemy Table object from a Ferro JSON schema."""
     columns = []
 
@@ -110,7 +163,8 @@ def _build_sa_table(metadata: "sa.MetaData", table_name: str, schema: Dict[str, 
         # Resolve $ref if present
         col_info = _resolve_ref(schema, col_info)
 
-        sa_type = _map_to_sa_type(schema, col_info)
+        python_enum = _field_python_enum(model_cls, col_name)
+        sa_type = _map_to_sa_type(schema, col_info, col_name, python_enum)
 
         # Better nullability detection
         is_nullable = True
@@ -182,9 +236,19 @@ def _build_sa_table(metadata: "sa.MetaData", table_name: str, schema: Dict[str, 
 
 
 def _map_to_sa_type(
-    schema: Dict[str, Any], col_info: Dict[str, Any]
+    schema: Dict[str, Any],
+    col_info: Dict[str, Any],
+    field_name: str,
+    python_enum: type[enum.Enum] | None = None,
 ) -> "sa.types.TypeEngine":
-    """Map Ferro/JSON schema types to SQLAlchemy types."""
+    """Map Ferro/JSON schema types to SQLAlchemy types.
+
+    ``field_name`` is used as the PostgreSQL enum type name when the column is
+    not backed by a Python ``Enum`` subclass (for example join-table schemas
+    built only from JSON schema). When ``python_enum`` is set, the type name is
+    ``python_enum.__name__.lower()`` and member *values* are used as enum labels
+    so string and integer Python enums map consistently.
+    """
     # Resolve $ref if present
     col_info = _resolve_ref(schema, col_info)
 
@@ -204,7 +268,14 @@ def _map_to_sa_type(
                 break
 
     if enum_values:
-        return sa.Enum(*enum_values)
+        string_values = [str(v) for v in enum_values]
+        if python_enum is not None:
+            return sa.Enum(
+                python_enum,
+                name=python_enum.__name__.lower(),
+                values_callable=lambda obj: [str(m.value) for m in obj],
+            )
+        return sa.Enum(*string_values, name=field_name)
 
     if json_type == "integer":
         return sa.Integer()
