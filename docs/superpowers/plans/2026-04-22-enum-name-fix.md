@@ -23,24 +23,24 @@ Add to `tests/test_alembic_autogenerate.py`:
 def test_enum_generates_with_name():
     """Verify that Enum columns generate with an explicit name for Postgres compatibility."""
     from enum import StrEnum
-    
+
     class Status(StrEnum):
         DRAFT = "draft"
         ACTIVE = "active"
         ARCHIVED = "archived"
-    
+
     class Article(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         status: Status
-    
+
     metadata = get_metadata()
     article_table = metadata.tables["article"]
-    
+
     # The enum type should have a name
     assert isinstance(article_table.c.status.type, sa.Enum)
     assert article_table.c.status.type.name is not None
     assert article_table.c.status.type.name == "status"
-    
+
     # The enum should still have the correct values
     assert set(article_table.c.status.type.enums) == {"draft", "active", "archived"}
 ```
@@ -72,24 +72,24 @@ Add to `tests/test_alembic_autogenerate.py`:
 def test_standard_enum_generates_with_name():
     """Verify that standard (non-StrEnum) Enum columns also generate with names."""
     from enum import Enum
-    
+
     class Priority(Enum):
         LOW = 1
         MEDIUM = 2
         HIGH = 3
-    
+
     class Task(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         priority: Priority
-    
+
     metadata = get_metadata()
     task_table = metadata.tables["task"]
-    
+
     # The enum type should have a name
     assert isinstance(task_table.c.priority.type, sa.Enum)
     assert task_table.c.priority.type.name is not None
     assert task_table.c.priority.type.name == "priority"
-    
+
     # The enum should have the correct values (as strings)
     assert set(task_table.c.priority.type.enums) == {"1", "2", "3"}
 ```
@@ -121,25 +121,25 @@ Add to `tests/test_alembic_autogenerate.py`:
 def test_optional_enum_generates_with_name():
     """Verify that Optional[Enum] columns still generate with proper names."""
     from enum import StrEnum
-    
+
     class Color(StrEnum):
         RED = "red"
         GREEN = "green"
         BLUE = "blue"
-    
+
     class Widget(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         color: Color | None = None
-    
+
     metadata = get_metadata()
     widget_table = metadata.tables["widget"]
-    
+
     # The enum type should have a name even when optional
     assert isinstance(widget_table.c.color.type, sa.Enum)
     assert widget_table.c.color.type.name is not None
     assert widget_table.c.color.type.name == "color"
     assert widget_table.c.color.nullable is True
-    
+
     # The enum should have the correct values
     assert set(widget_table.c.color.type.enums) == {"red", "green", "blue"}
 ```
@@ -172,7 +172,7 @@ def _map_to_sa_type(
     schema: Dict[str, Any], col_info: Dict[str, Any], field_name: str | None = None
 ) -> "sa.types.TypeEngine":
     """Map Ferro/JSON schema types to SQLAlchemy types.
-    
+
     Args:
         schema: The full model JSON schema
         col_info: The specific column's schema info
@@ -216,7 +216,7 @@ def _map_to_sa_type(
     schema: Dict[str, Any], col_info: Dict[str, Any], field_name: str | None = None
 ) -> "sa.types.TypeEngine":
     """Map Ferro/JSON schema types to SQLAlchemy types.
-    
+
     Args:
         schema: The full model JSON schema
         col_info: The specific column's schema info
@@ -284,38 +284,38 @@ def test_alembic_can_render_enum_for_postgres():
     from enum import StrEnum
     from sqlalchemy import create_mock_engine
     from sqlalchemy.schema import CreateTable
-    
+
     class Status(StrEnum):
         PENDING = "pending"
         APPROVED = "approved"
         REJECTED = "rejected"
-    
+
     class Request(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         status: Status
         description: str
-    
+
     metadata = get_metadata()
     request_table = metadata.tables["request"]
-    
+
     # Mock a Postgres engine to test dialect-specific rendering
     def dump(sql, *multiparams, **params):
         # Store the SQL for inspection
         dump.statements.append(str(sql.compile(dialect=engine.dialect)))
-    
+
     dump.statements = []
     engine = create_mock_engine(lambda *args, **kwargs: None, lambda: None)
     engine.dialect.name = "postgresql"
-    
+
     # This should not raise 'PostgreSQL ENUM type requires a name'
     try:
         create_ddl = CreateTable(request_table).compile(dialect=engine.dialect)
         sql_text = str(create_ddl)
-        
+
         # Verify the SQL contains enum type creation
         assert "status" in sql_text.lower()
         assert "pending" in sql_text.lower() or "CREATE TYPE" in sql_text
-        
+
     except Exception as e:
         if "requires a name" in str(e):
             pytest.fail(f"Enum type missing name: {e}")
@@ -375,29 +375,29 @@ def get_metadata() -> "sa.MetaData":
     """
     Generate a SQLAlchemy MetaData object representing all registered Ferro models.
     This is intended to be used in alembic's env.py for autogenerate support.
-    
+
     The generated metadata includes:
     - All model tables with their columns and types
     - Primary key, foreign key, and unique constraints
     - Indexes and composite unique constraints
     - Named Enum types for Postgres compatibility
-    
+
     Enum Handling:
         Python Enum and StrEnum fields are converted to SQLAlchemy Enum types
         with explicit names derived from the field name. This ensures compatibility
         with PostgreSQL, which requires named enum types. On SQLite, these degrade
         gracefully to VARCHAR with CHECK constraints.
-    
+
     Returns:
         sa.MetaData: A SQLAlchemy MetaData object containing all registered models
-    
+
     Examples:
         >>> from ferro.migrations import get_metadata
         >>> from myapp.models import User, Post
-        >>> 
+        >>>
         >>> # Generate metadata for Alembic
         >>> target_metadata = get_metadata()
-        >>> 
+        >>>
         >>> # Inspect generated tables
         >>> print(target_metadata.tables.keys())
         dict_keys(['user', 'post'])
@@ -427,20 +427,20 @@ def _map_to_sa_type(
     schema: Dict[str, Any], col_info: Dict[str, Any], field_name: str | None = None
 ) -> "sa.types.TypeEngine":
     """Map Ferro/JSON schema types to SQLAlchemy types.
-    
+
     This function translates Pydantic/JSON schema type information into
     SQLAlchemy column types for migration generation.
-    
+
     Args:
         schema: The full model JSON schema with $defs for reference resolution
         col_info: The specific column's schema info
         field_name: The name of the field, used for naming enum types to ensure
                    Postgres compatibility. Without explicit names, PostgreSQL
                    rejects enum type creation.
-    
+
     Returns:
         sa.types.TypeEngine: A SQLAlchemy type instance
-    
+
     Type Mappings:
         - Enum values → sa.Enum (with name=field_name for Postgres)
         - integer → sa.Integer
@@ -454,7 +454,7 @@ def _map_to_sa_type(
         - number → sa.Float
         - object → sa.JSON
         - array → sa.JSON
-    
+
     Examples:
         >>> schema = {"type": "string", "enum": ["a", "b"]}
         >>> _map_to_sa_type({}, schema, "status")
@@ -690,7 +690,7 @@ Expected: All documentation is clear and comprehensive
 
 **Placeholder scan:** No TBD, TODO, or placeholders present. All code is concrete.
 
-**Type consistency:** 
+**Type consistency:**
 - `field_name: str | None` is consistent across all uses
 - `sa.Enum(*enum_values, name=field_name)` signature is correct
 - All return types match function signatures
