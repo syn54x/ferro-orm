@@ -94,7 +94,8 @@ major_on_zero = false
 allow_zero_version = true
 branch = "main"
 upload_to_repository = false
-# GitHub Release is created in CI via `semantic-release publish` after wheels/sdist/tests/docs succeed.
+# GitHub Release: CI runs `semantic-release changelog --post-to-release-tag` then `semantic-release publish`
+# (publish only uploads assets to an existing release). This flag disables attaching assets from `version`.
 upload_to_release = false
 hvcs = "github"
 commit_author = "semantic-release <semantic-release@github>"

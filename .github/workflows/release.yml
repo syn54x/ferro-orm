@@ -442,11 +442,29 @@ jobs:
         run: |
           uv sync --only-group release --no-install-project --python 3.13
 
-      - name: Publish GitHub release (assets + VCS release)
+      # `semantic-release publish` only uploads files to an existing GitHub Release for the tag.
+      # Create the release (and generated notes) first, then attach wheels/sdist from prior jobs.
+      - name: Download sdist for GitHub Release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: Download wheels for GitHub Release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release and upload assets
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          uv run semantic-release publish --tag "${{ needs.prepare-release.outputs.release_tag }}"
+          set -euo pipefail
+          TAG="${{ needs.prepare-release.outputs.release_tag }}"
+          uv run semantic-release changelog --post-to-release-tag "$TAG"
+          uv run semantic-release publish --tag "$TAG"
 
   publish-pypi:
     name: Publish to PyPI
