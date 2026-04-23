@@ -12,7 +12,7 @@ from typing import (
     get_type_hints,
 )
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from ._core import (
     begin_transaction,
@@ -26,7 +26,7 @@ from ._core import (
     save_bulk_records,
     save_record,
 )
-from .base import ForeignKey
+from .base import ForeignKey, foreign_key_allows_none
 from .metaclass import ModelMetaclass
 from .query import Query, QueryNode
 from .state import _CURRENT_TRANSACTION
@@ -123,6 +123,18 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     data[f"{field_name}_id"] = val
 
         super().__init__(**data)
+
+    @model_validator(mode="after")
+    def _validate_required_foreign_keys(self) -> Self:
+        """Keep Python model validation aligned with required FK nullability."""
+        relations = getattr(self.__class__, "ferro_relations", {})
+        for field_name, metadata in relations.items():
+            if not isinstance(metadata, ForeignKey):
+                continue
+            if foreign_key_allows_none(metadata) is False:
+                if getattr(self, f"{field_name}_id", None) is None:
+                    raise ValueError(f"{field_name} is required")
+        return self
 
     async def save(self) -> None:
         """Persist the current model instance

@@ -97,6 +97,7 @@ All of the above support the same database constraint parameters on `Field` / `F
 | `autoincrement` | `bool \| None` | `None` | If `True`, the database generates values automatically. Defaults to `True` for integer primary keys. |
 | `unique` | `bool` | `False` | Enforces a **single-column** uniqueness constraint on that column only. For uniqueness on a combination of columns, see [Composite unique constraints](#composite-unique-constraints) below. |
 | `index` | `bool` | `False` | Creates a database index for this column to improve query performance. |
+| `nullable` | `"infer" \| bool` | `"infer"` | Controls Alembic `Column.nullable` emitted by `get_metadata()`. `"infer"` follows whether the Python annotation allows `None`; `True` / `False` force NULL / NOT NULL. |
 
 #### Examples
 

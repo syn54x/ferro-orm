@@ -8,6 +8,8 @@ try:
 except ImportError:
     sa = None
 
+from .._annotation_utils import annotation_allows_none
+from ..base import ForeignKey, foreign_key_allows_none
 from ..composite_uniques import apply_composite_uniques_to_schema
 from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 
@@ -26,6 +28,14 @@ def get_metadata() -> "sa.MetaData":
     For :class:`~ferro.base.ForeignKey` fields with ``unique=True`` (one-to-one
     relations), the shadow ``*_id`` column is emitted with ``Column(unique=True)``
     so Alembic autogenerate includes the matching UNIQUE constraint.
+
+    **Column nullability:** ``Column.nullable`` follows :class:`~ferro.base.FerroField`
+    / :class:`~ferro.base.ForeignKey` ``nullable`` when set to a boolean (force
+    NULL / NOT NULL). The default ``nullable='infer'`` uses whether the Python
+    annotation allows ``None`` (after unwrapping ``Annotated``). Shadow ``*_id``
+    columns infer from the **forward relation** field's annotation, not from the
+    synthetic ``*_id`` field. Primary key columns are always ``nullable=False``.
+    Pydantic "required" and JSON-schema defaults do not change inferred nullability.
     """
     if sa is None:
         raise ImportError(
@@ -89,11 +99,12 @@ def _enrich_schema_with_ferro_metadata(model_cls, schema: Dict[str, Any]):
             schema["properties"][f_name]["primary_key"] = metadata.primary_key
             schema["properties"][f_name]["unique"] = metadata.unique
             schema["properties"][f_name]["index"] = metadata.index
+            fn = getattr(metadata, "nullable", "infer")
+            if isinstance(fn, bool):
+                schema["properties"][f_name]["ferro_nullable"] = fn
 
     # Apply ForeignKey metadata
     for f_name, metadata in model_cls.ferro_relations.items():
-        from ..base import ForeignKey
-
         if isinstance(metadata, ForeignKey):
             id_field = f"{f_name}_id"
             if id_field in schema["properties"]:
@@ -107,6 +118,9 @@ def _enrich_schema_with_ferro_metadata(model_cls, schema: Dict[str, Any]):
                     "on_delete": metadata.on_delete,
                     "unique": metadata.unique,
                 }
+                fk_nullable = getattr(metadata, "nullable", "infer")
+                if isinstance(fk_nullable, bool):
+                    schema["properties"][id_field]["ferro_nullable"] = fk_nullable
 
     apply_composite_uniques_to_schema(model_cls, schema)
 
@@ -151,6 +165,55 @@ def _field_python_enum(model_cls: type[Any] | None, field_name: str) -> type[enu
     return _annotation_as_enum_subclass(field.annotation)
 
 
+def _infer_nullable_join_table(
+    col_name: str,
+    col_info: Dict[str, Any],
+    required_fields: list[str],
+) -> bool:
+    """Join-table schemas without a model class: JSON-schema-only nullability."""
+    if "anyOf" in col_info:
+        return any(item.get("type") == "null" for item in col_info["anyOf"])
+    if col_info.get("type") == "null":
+        return True
+    return col_name not in required_fields
+
+
+def _resolve_sa_column_nullable(
+    col_name: str,
+    col_info: Dict[str, Any],
+    model_cls: type[Any] | None,
+    required_fields: list[str],
+) -> bool:
+    """SQLAlchemy ``Column.nullable`` for one table column."""
+    if col_info.get("primary_key"):
+        return False
+
+    override = col_info.get("ferro_nullable")
+    if isinstance(override, bool):
+        return override
+
+    if model_cls is not None:
+        model_fields = getattr(model_cls, "model_fields", None)
+        fk_info = col_info.get("foreign_key") or {}
+        if model_fields and fk_info and col_name.endswith("_id"):
+            rel_name = col_name[:-3]
+            rels = getattr(model_cls, "ferro_relations", {})
+            meta = rels.get(rel_name)
+            if isinstance(meta, ForeignKey):
+                fk_nullable = foreign_key_allows_none(meta)
+                if fk_nullable is not None:
+                    return fk_nullable
+                rel_field = model_fields.get(rel_name)
+                if rel_field is not None:
+                    return annotation_allows_none(rel_field.annotation)
+        if model_fields:
+            field_info = model_fields.get(col_name)
+            if field_info is not None:
+                return annotation_allows_none(field_info.annotation)
+
+    return _infer_nullable_join_table(col_name, col_info, required_fields)
+
+
 def _build_sa_table(
     metadata: "sa.MetaData",
     table_name: str,
@@ -170,32 +233,9 @@ def _build_sa_table(
         python_enum = _field_python_enum(model_cls, col_name)
         sa_type = _map_to_sa_type(schema, col_info, col_name, python_enum)
 
-        # Better nullability detection
-        is_nullable = True
-
-        # 1. If it's in required, it's definitely not nullable
-        if col_name in required_fields:
-            is_nullable = False
-
-        # 2. Check for explicit null in anyOf
-        if "anyOf" in col_info:
-            has_null = any(item.get("type") == "null" for item in col_info["anyOf"])
-            if not has_null:
-                # If there's an anyOf but none of them are null, it's not nullable
-                is_nullable = False
-            else:
-                is_nullable = True
-        elif col_info.get("type") == "null":
-            is_nullable = True
-        elif "type" in col_info and col_info["type"] != "null":
-            # If it has a single type that is not null, and it's not in anyOf
-            # We still respect 'required_fields' for the 'optional' case
-            pass
-
-        # 3. Special case: if it has a default value that is not None,
-        # it is often intended to be NOT NULL in the DB with a default.
-        if "default" in col_info and col_info["default"] is not None:
-            is_nullable = False
+        is_nullable = _resolve_sa_column_nullable(
+            col_name, col_info, model_cls, required_fields
+        )
 
         fk_info = col_info.get("foreign_key") or {}
         column_unique = bool(col_info.get("unique")) or bool(fk_info.get("unique"))
@@ -205,10 +245,6 @@ def _build_sa_table(
             "unique": column_unique,
             "index": col_info.get("index", False),
         }
-
-        # For primary keys, we often want nullable=False explicitly
-        if kwargs["primary_key"]:
-            kwargs["nullable"] = False
 
         args = [col_name, sa_type]
 
