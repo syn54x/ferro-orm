@@ -870,7 +870,7 @@ pub fn fetch_filtered<'py>(
                 );
                 select.and_where(
                     Expr::col((join_table.clone(), source_col.clone()))
-                        .eq(query_def.value_to_sea_value(&m2m.source_id)),
+                        .eq(query_def.value_rhs_simple_expr(&m2m.source_col, &m2m.source_id, true)),
                 );
             }
 
@@ -1041,7 +1041,7 @@ pub fn count_filtered(
                 );
                 select.and_where(
                     Expr::col((join_table.clone(), source_col.clone()))
-                        .eq(query_def.value_to_sea_value(&m2m.source_id)),
+                        .eq(query_def.value_rhs_simple_expr(&m2m.source_col, &m2m.source_id, true)),
                 );
             } else {
                 select.from(Alias::new(&table_name));

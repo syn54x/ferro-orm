@@ -1,3 +1,4 @@
+use crate::state::{sql_dialect, SqlDialect, MODEL_REGISTRY};
 use sea_query::{Alias, Condition, Expr, SimpleExpr};
 use serde::Deserialize;
 use serde_json::Value;
@@ -64,19 +65,21 @@ impl QueryDef {
             let col = Expr::col(Alias::new(col_name));
 
             let expr: SimpleExpr = match node.operator.as_str() {
-                "==" => col.eq(self.value_to_sea_value(val)),
-                "!=" => col.ne(self.value_to_sea_value(val)),
-                "<" => col.lt(self.value_to_sea_value(val)),
-                "<=" => col.lte(self.value_to_sea_value(val)),
-                ">" => col.gt(self.value_to_sea_value(val)),
-                ">=" => col.gte(self.value_to_sea_value(val)),
+                "==" => col.eq(self.value_rhs_simple_expr(col_name, val, false)),
+                "!=" => col.ne(self.value_rhs_simple_expr(col_name, val, false)),
+                "<" => col.lt(self.value_rhs_simple_expr(col_name, val, false)),
+                "<=" => col.lte(self.value_rhs_simple_expr(col_name, val, false)),
+                ">" => col.gt(self.value_rhs_simple_expr(col_name, val, false)),
+                ">=" => col.gte(self.value_rhs_simple_expr(col_name, val, false)),
                 "IN" => {
                     if let Some(vals) = val.as_array() {
-                        let sea_vals: Vec<sea_query::Value> =
-                            vals.iter().map(|v| self.value_to_sea_value(v)).collect();
-                        col.is_in(sea_vals)
+                        let rhs: Vec<SimpleExpr> = vals
+                            .iter()
+                            .map(|v| self.value_rhs_simple_expr(col_name, v, false))
+                            .collect();
+                        col.is_in(rhs)
                     } else {
-                        col.eq(self.value_to_sea_value(val))
+                        col.eq(self.value_rhs_simple_expr(col_name, val, false))
                     }
                 }
                 "LIKE" => {
@@ -86,27 +89,85 @@ impl QueryDef {
                     };
                     col.like(pattern)
                 }
-                _ => col.eq(self.value_to_sea_value(val)),
+                _ => col.eq(self.value_rhs_simple_expr(col_name, val, false)),
             };
             Condition::all().add(expr)
         }
     }
 
-    pub fn value_to_sea_value(&self, value: &Value) -> sea_query::Value {
-        match value {
-            Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    sea_query::Value::BigInt(Some(i))
-                } else if let Some(f) = n.as_f64() {
-                    sea_query::Value::Double(Some(f))
-                } else {
-                    sea_query::Value::String(None)
+    /// Right-hand side for a filter comparison.
+    ///
+    /// On Postgres, UUID columns compared to JSON string parameters need an explicit
+    /// `CAST(... AS uuid)` so the bind stays text-typed (compatible with `sqlx::Any`)
+    /// while the comparison is `uuid = uuid`.
+    ///
+    /// `infer_uuid_without_schema` is used for M2M join filters where the RHS is a UUID
+    /// string but the join column is not described on the queried model's schema.
+    pub fn value_rhs_simple_expr(
+        &self,
+        col_name: &str,
+        val: &Value,
+        infer_uuid_without_schema: bool,
+    ) -> SimpleExpr {
+        if let Value::String(s) = val {
+            if sql_dialect() == SqlDialect::Postgres && uuid::Uuid::parse_str(s).is_ok() {
+                let schema_uuid = model_column_is_uuid(&self.model_name, col_name);
+                if schema_uuid || infer_uuid_without_schema {
+                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                        .cast_as("uuid");
                 }
             }
-            Value::String(s) => sea_query::Value::String(Some(Box::new(s.clone()))),
-            Value::Bool(b) => sea_query::Value::Bool(Some(*b)),
-            Value::Null => sea_query::Value::String(None),
-            _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
         }
+        Expr::value(json_to_sea_value(val))
     }
+}
+
+fn json_to_sea_value(value: &Value) -> sea_query::Value {
+    match value {
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                sea_query::Value::BigInt(Some(i))
+            } else if let Some(f) = n.as_f64() {
+                sea_query::Value::Double(Some(f))
+            } else {
+                sea_query::Value::String(None)
+            }
+        }
+        Value::String(s) => sea_query::Value::String(Some(Box::new(s.clone()))),
+        Value::Bool(b) => sea_query::Value::Bool(Some(*b)),
+        Value::Null => sea_query::Value::String(None),
+        _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
+    }
+}
+
+fn model_column_is_uuid(model_name: &str, col: &str) -> bool {
+    let Ok(registry) = MODEL_REGISTRY.read() else {
+        return false;
+    };
+    let Some(schema) = registry.get(model_name) else {
+        return false;
+    };
+    column_is_uuid_property(schema, col)
+}
+
+fn column_is_uuid_property(schema: &Value, col: &str) -> bool {
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return false;
+    };
+    let Some(col_info) = props.get(col) else {
+        return false;
+    };
+    let format = col_info.get("format").and_then(|f| f.as_str());
+    let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
+        col_info
+            .get("anyOf")
+            .and_then(|a| a.as_array())
+            .and_then(|types| {
+                types.iter().find_map(|t| {
+                    let s = t.get("type")?.as_str()?;
+                    if s == "null" { None } else { Some(s) }
+                })
+            })
+    });
+    json_type == Some("string") && format == Some("uuid")
 }
