@@ -162,3 +162,41 @@ async def test_native_postgres_enum_column_decodes_via_text_cast(
     fetched = await Transcript.get(1)
     assert fetched is not None
     assert fetched.format == TranscriptFormat.PDF
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_native_postgres_enum_plain_str_column(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Native PG enum columns work when the model field is plain `str` (no `enum_type_name` in schema)."""
+
+    class StrFieldEnumModel(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        status: str
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        conn.execute(
+            """
+            CREATE TYPE strfieldrowstatus AS ENUM ('active', 'inactive')
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE strfieldenummodel (
+                id BIGSERIAL PRIMARY KEY,
+                status strfieldrowstatus NOT NULL
+            )
+            """
+        )
+
+    await connect(db_url, auto_migrate=False)
+
+    row = await StrFieldEnumModel.create(status="active")
+    fetched = await StrFieldEnumModel.get(row.id)
+
+    assert fetched is not None
+    assert fetched.status == "active"

@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, ForwardRef
+import types
+from enum import Enum
+from typing import (
+    Annotated,
+    Any,
+    ForwardRef,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from ._annotation_utils import annotation_allows_none
 from .base import ForeignKey, foreign_key_allows_none
@@ -13,6 +23,31 @@ def _property_is_integer(prop: dict[str, Any]) -> bool:
     return prop.get("type") == "integer" or any(
         item.get("type") == "integer" for item in prop.get("anyOf", [])
     )
+
+
+def _strip_optional_union(hint: Any) -> Any:
+    """Unwrap ``T | None`` to ``T`` (same as ``ModelMetaclass``)."""
+    while True:
+        origin = get_origin(hint)
+        if origin is Union or origin is types.UnionType:
+            args = get_args(hint)
+            non_none = [a for a in args if a is not type(None)]
+            if len(non_none) == 1:
+                hint = non_none[0]
+                continue
+        return hint
+
+
+def _enum_subclass_from_annotation(hint: Any) -> type[Enum] | None:
+    hint = _strip_optional_union(hint)
+    if get_origin(hint) is Annotated:
+        args = get_args(hint)
+        if args:
+            return _enum_subclass_from_annotation(args[0])
+        return None
+    if isinstance(hint, type) and issubclass(hint, Enum):
+        return hint
+    return None
 
 
 def _target_table_name(target: Any) -> str:
@@ -83,6 +118,18 @@ def build_model_schema(
         fk_nullable = foreign_key_allows_none(metadata)
         if fk_nullable is not None:
             prop["ferro_nullable"] = fk_nullable
+
+    try:
+        resolved_annotations = get_type_hints(model_cls, include_extras=True)
+    except Exception:
+        resolved_annotations = {}
+    for field_name, finfo in model_fields.items():
+        if field_name not in properties or not isinstance(properties[field_name], dict):
+            continue
+        ann_hint = resolved_annotations.get(field_name, finfo.annotation)
+        enum_cls = _enum_subclass_from_annotation(ann_hint)
+        if enum_cls is not None:
+            properties[field_name]["enum_type_name"] = enum_cls.__name__.lower()
 
     apply_composite_uniques_to_schema(model_cls, schema)
     return schema

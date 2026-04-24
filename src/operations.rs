@@ -12,8 +12,10 @@ use sea_query::{
     Alias, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query,
     SimpleExpr, SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
-use sqlx::{Column, Row};
+use sqlx::{Any, AnyConnection, Column, Pool, Row};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 macro_rules! get_conn {
     ($pool:expr, $tx_id:expr) => {{
@@ -244,6 +246,70 @@ fn resolve_ref<'a>(
     col_info
 }
 
+/// Maps each table column to its PostgreSQL enum `typname` (``typtype = 'e'``) for the current schema.
+async fn postgres_enum_udt_by_column(
+    table_name: &str,
+    pool: &Arc<Pool<Any>>,
+    tx_conn: Option<Arc<Mutex<AnyConnection>>>,
+) -> PyResult<HashMap<String, String>> {
+    if crate::state::sql_dialect() != crate::state::SqlDialect::Postgres {
+        return Ok(HashMap::new());
+    }
+
+    let query = sqlx::query(
+        r#"
+        SELECT a.attname::text AS column_name, t.typname::text AS udt_name
+        FROM pg_attribute a
+        JOIN pg_class c ON a.attrelid = c.oid
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        JOIN pg_type t ON a.atttypid = t.oid
+        WHERE n.nspname = current_schema()
+          AND c.relname = $1
+          AND t.typtype = 'e'
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+        "#,
+    )
+    .bind(table_name);
+
+    let rows = if let Some(conn_arc) = tx_conn {
+        let mut conn = conn_arc.lock().await;
+        query.fetch_all(&mut *conn).await
+    } else {
+        query.fetch_all(pool.as_ref()).await
+    }
+    .map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Failed to inspect enum columns for '{}': {}",
+            table_name, e
+        ))
+    })?;
+
+    let mut out = HashMap::new();
+    for row in rows {
+        let column_name: String = row.try_get("column_name").unwrap_or_default();
+        let udt_name: String = row.try_get("udt_name").unwrap_or_default();
+        if !column_name.is_empty() && !udt_name.is_empty() {
+            out.insert(column_name, udt_name);
+        }
+    }
+
+    Ok(out)
+}
+
+fn postgres_enum_type_name_for_column(
+    col_name: &str,
+    enum_udt: &HashMap<String, String>,
+    col_info: Option<&serde_json::Value>,
+) -> Option<String> {
+    enum_udt.get(col_name).cloned().or_else(|| {
+        col_info?
+            .get("enum_type_name")?
+            .as_str()
+            .map(std::string::ToString::to_string)
+    })
+}
+
 fn schema_property<'a>(
     schema: &'a serde_json::Value,
     col_name: &str,
@@ -258,8 +324,16 @@ fn schema_value_expr(
     schema: &serde_json::Value,
     col_name: &str,
     value: &serde_json::Value,
+    enum_udt: &HashMap<String, String>,
 ) -> SimpleExpr {
     let col_info = schema_property(schema, col_name);
+    if let serde_json::Value::String(s) = value
+        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && let Some(tn) = postgres_enum_type_name_for_column(col_name, enum_udt, col_info)
+    {
+        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+            .cast_as(Alias::new(tn.as_str()));
+    }
     let format = col_info.and_then(property_format);
     let json_type = col_info.and_then(property_json_type);
     let is_decimal = col_info
@@ -678,7 +752,13 @@ pub fn fetch_one<'py>(
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let mut stmt = Query::select();
             apply_postgres_text_select_columns(&mut stmt, &table_name, schema);
-            let pk_expr = schema_value_expr(schema, &pk_name, &serde_json::Value::String(pk_val.clone()));
+            let no_enum_udt = HashMap::new();
+            let pk_expr = schema_value_expr(
+                schema,
+                &pk_name,
+                &serde_json::Value::String(pk_val.clone()),
+                &no_enum_udt,
+            );
             let (s, values) = sea_query_build!(stmt
                 .from(Alias::new(&table_name))
                 .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)));
@@ -796,6 +876,7 @@ pub fn save_record(
         }
 
         let table_name = name.to_lowercase();
+        let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
         let (sql, bind_values, needs_postgres_returning) = {
             let mut columns = Vec::new();
             let mut values = Vec::new();
@@ -813,7 +894,7 @@ pub fn save_record(
                     pk_provided = true;
                 }
                 columns.push(Alias::new(key));
-                values.push(schema_value_expr(&schema, key, value));
+                values.push(schema_value_expr(&schema, key, value, &enum_udt));
             }
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -980,6 +1061,7 @@ pub fn save_bulk_records(
         }
 
         let table_name = name.to_lowercase();
+        let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
         let (sql, bind_values) = {
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -1011,7 +1093,12 @@ pub fn save_bulk_records(
                     let value = record_obj
                         .get(key.to_string().as_str())
                         .unwrap_or(&serde_json::Value::Null);
-                    row_values.push(schema_value_expr(&schema, key.to_string().as_str(), value));
+                    row_values.push(schema_value_expr(
+                        &schema,
+                        key.to_string().as_str(),
+                        value,
+                        &enum_udt,
+                    ));
                 }
                 insert_stmt.values(row_values).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -1367,7 +1454,13 @@ pub fn delete_record(
             }
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
-            let pk_expr = schema_value_expr(&schema, &pk_name, &serde_json::Value::String(pk_val));
+            let no_enum_udt = HashMap::new();
+            let pk_expr = schema_value_expr(
+                &schema,
+                &pk_name,
+                &serde_json::Value::String(pk_val),
+                &no_enum_udt,
+            );
             let (s, values) = sea_query_build!(Query::delete()
                 .from_table(Alias::new(&table_name))
                 .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)));
@@ -1467,6 +1560,7 @@ pub fn update_filtered(
         };
 
         let table_name = name.to_lowercase();
+        let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
         // ... sql ...
         let (sql, bind_values) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1480,7 +1574,10 @@ pub fn update_filtered(
                 .cond_where(query_def.to_condition())
                 .to_owned();
             for (key, value) in update_map {
-                update.value(Alias::new(&key), schema_value_expr(&schema, &key, &value));
+                update.value(
+                    Alias::new(&key),
+                    schema_value_expr(&schema, &key, &value, &enum_udt),
+                );
             }
             sea_query_build!(update)
         };
