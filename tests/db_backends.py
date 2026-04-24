@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 
 SUPPORTED_BACKENDS = ("sqlite", "postgres")
+LOCAL_POSTGRES_PROVIDER = "local"
 
 
 def load_env_value(env_file: Path, key: str) -> str | None:
@@ -25,8 +27,26 @@ def load_env_value(env_file: Path, key: str) -> str | None:
     return None
 
 
+def get_postgres_url(env: dict[str, str], env_file: Path) -> str | None:
+    """Return an externally managed Postgres URL, if one is configured."""
+    if env.get("FERRO_POSTGRES_PROVIDER") == LOCAL_POSTGRES_PROVIDER:
+        return None
+
+    return (
+        env.get("FERRO_POSTGRES_URL")
+        or load_env_value(env_file, "FERRO_POSTGRES_URL")
+        or env.get("FERRO_SUPABASE_URL")
+        or load_env_value(env_file, "FERRO_SUPABASE_URL")
+    )
+
+
 def get_supabase_url(env: dict[str, str], env_file: Path) -> str | None:
-    return env.get("FERRO_SUPABASE_URL") or load_env_value(env_file, "FERRO_SUPABASE_URL")
+    """Backward-compatible alias for the old Supabase-only test setting."""
+    return get_postgres_url(env, env_file)
+
+
+def has_pytest_postgresql() -> bool:
+    return importlib.util.find_spec("pytest_postgresql") is not None
 
 
 def parse_backend_option(raw_value: str) -> tuple[str, ...]:
@@ -65,3 +85,31 @@ def build_postgres_test_url(base_url: str, schema_name: str) -> str:
     params = parse_qsl(parsed.query, keep_blank_values=True)
     params.append(("ferro_search_path", schema_name))
     return urlunparse(parsed._replace(query=urlencode(params)))
+
+
+def build_postgres_url_from_connection_params(params: dict[str, str]) -> str:
+    dbname = params.get("dbname") or params.get("database") or "postgres"
+    host = params.get("host") or "localhost"
+    port = params.get("port")
+    user = params.get("user")
+    password = params.get("password")
+
+    userinfo = ""
+    if user:
+        userinfo = quote(user, safe="")
+        if password:
+            userinfo += f":{quote(password, safe='')}"
+        userinfo += "@"
+
+    # libpq can report a Unix socket path as host; keep the URL TCP-shaped and
+    # pass the socket through the query string for psycopg/sqlx compatibility.
+    query = ""
+    if host.startswith("/"):
+        query = urlencode({"host": host})
+        host = "localhost"
+
+    netloc = f"{userinfo}{host}"
+    if port:
+        netloc += f":{port}"
+
+    return urlunparse(("postgresql", netloc, f"/{quote(dbname, safe='')}", "", query, ""))
