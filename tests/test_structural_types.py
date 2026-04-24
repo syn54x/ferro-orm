@@ -200,3 +200,40 @@ async def test_native_postgres_enum_plain_str_column(
 
     assert fetched is not None
     assert fetched.status == "active"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_native_uuid_null_inserts(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Optional ``UUID`` columns on Postgres need ``::uuid`` casts, including for ``NULL``."""
+
+    class UuidRun(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        run_id: uuid.UUID | None = None
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        conn.execute(
+            """
+            CREATE TABLE uuidrun (
+                id BIGSERIAL PRIMARY KEY,
+                run_id uuid
+            )
+            """
+        )
+        conn.commit()
+
+    await connect(db_url, auto_migrate=False)
+
+    row = await UuidRun.create()
+    assert row.id is not None
+    assert row.run_id is None
+    u = uuid.uuid4()
+    row2 = await UuidRun.create(run_id=u)
+    f2 = await UuidRun.get(row2.id)
+    assert f2 is not None
+    assert f2.run_id == u

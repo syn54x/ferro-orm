@@ -13,7 +13,7 @@ use sea_query::{
     SimpleExpr, SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
 use sqlx::{Any, AnyConnection, Column, Pool, Row};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -297,6 +297,50 @@ async fn postgres_enum_udt_by_column(
     Ok(out)
 }
 
+/// Column names on `table_name` in the current schema whose SQL type is `uuid`.
+async fn postgres_uuid_column_names(
+    table_name: &str,
+    pool: &Arc<Pool<Any>>,
+    tx_conn: Option<Arc<Mutex<AnyConnection>>>,
+) -> PyResult<HashSet<String>> {
+    if crate::state::sql_dialect() != crate::state::SqlDialect::Postgres {
+        return Ok(HashSet::new());
+    }
+
+    let query = sqlx::query(
+        r#"
+        SELECT column_name::text
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = $1
+          AND (data_type = 'uuid' OR udt_name = 'uuid')
+        "#,
+    )
+    .bind(table_name);
+
+    let rows = if let Some(conn_arc) = tx_conn {
+        let mut conn = conn_arc.lock().await;
+        query.fetch_all(&mut *conn).await
+    } else {
+        query.fetch_all(pool.as_ref()).await
+    }
+    .map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Failed to inspect uuid columns for '{}': {}",
+            table_name, e
+        ))
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            r.try_get::<String, _>("column_name")
+                .ok()
+                .filter(|n| !n.is_empty())
+        })
+        .collect())
+}
+
 fn postgres_enum_type_name_for_column(
     col_name: &str,
     enum_udt: &HashMap<String, String>,
@@ -325,6 +369,7 @@ fn schema_value_expr(
     col_name: &str,
     value: &serde_json::Value,
     enum_udt: &HashMap<String, String>,
+    uuid_columns: &HashSet<String>,
 ) -> SimpleExpr {
     let col_info = schema_property(schema, col_name);
     if let serde_json::Value::String(s) = value
@@ -333,6 +378,19 @@ fn schema_value_expr(
     {
         return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
             .cast_as(Alias::new(tn.as_str()));
+    }
+    if value.is_null()
+        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && uuid_columns.contains(col_name)
+    {
+        return Expr::value(sea_query::Value::String(None)).cast_as("uuid");
+    }
+    if let serde_json::Value::String(s) = value
+        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && uuid_columns.contains(col_name)
+        && uuid::Uuid::parse_str(s).is_ok()
+    {
+        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid");
     }
     let format = col_info.and_then(property_format);
     let json_type = col_info.and_then(property_json_type);
@@ -753,11 +811,13 @@ pub fn fetch_one<'py>(
             let mut stmt = Query::select();
             apply_postgres_text_select_columns(&mut stmt, &table_name, schema);
             let no_enum_udt = HashMap::new();
+            let no_uuid = HashSet::new();
             let pk_expr = schema_value_expr(
                 schema,
                 &pk_name,
                 &serde_json::Value::String(pk_val.clone()),
                 &no_enum_udt,
+                &no_uuid,
             );
             let (s, values) = sea_query_build!(stmt
                 .from(Alias::new(&table_name))
@@ -877,6 +937,7 @@ pub fn save_record(
 
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
+        let uuid_columns = postgres_uuid_column_names(&table_name, &pool, tx_conn.clone()).await?;
         let (sql, bind_values, needs_postgres_returning) = {
             let mut columns = Vec::new();
             let mut values = Vec::new();
@@ -894,7 +955,13 @@ pub fn save_record(
                     pk_provided = true;
                 }
                 columns.push(Alias::new(key));
-                values.push(schema_value_expr(&schema, key, value, &enum_udt));
+                values.push(schema_value_expr(
+                    &schema,
+                    key,
+                    value,
+                    &enum_udt,
+                    &uuid_columns,
+                ));
             }
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -1062,6 +1129,7 @@ pub fn save_bulk_records(
 
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
+        let uuid_columns = postgres_uuid_column_names(&table_name, &pool, tx_conn.clone()).await?;
         let (sql, bind_values) = {
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -1098,6 +1166,7 @@ pub fn save_bulk_records(
                         key.to_string().as_str(),
                         value,
                         &enum_udt,
+                        &uuid_columns,
                     ));
                 }
                 insert_stmt.values(row_values).map_err(|e| {
@@ -1455,11 +1524,13 @@ pub fn delete_record(
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let no_enum_udt = HashMap::new();
+            let no_uuid = HashSet::new();
             let pk_expr = schema_value_expr(
                 &schema,
                 &pk_name,
                 &serde_json::Value::String(pk_val),
                 &no_enum_udt,
+                &no_uuid,
             );
             let (s, values) = sea_query_build!(Query::delete()
                 .from_table(Alias::new(&table_name))
@@ -1561,6 +1632,7 @@ pub fn update_filtered(
 
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
+        let uuid_columns = postgres_uuid_column_names(&table_name, &pool, tx_conn.clone()).await?;
         // ... sql ...
         let (sql, bind_values) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1576,7 +1648,13 @@ pub fn update_filtered(
             for (key, value) in update_map {
                 update.value(
                     Alias::new(&key),
-                    schema_value_expr(&schema, &key, &value, &enum_udt),
+                    schema_value_expr(
+                        &schema,
+                        &key,
+                        &value,
+                        &enum_udt,
+                        &uuid_columns,
+                    ),
                 );
             }
             sea_query_build!(update)
