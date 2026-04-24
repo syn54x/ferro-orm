@@ -5,6 +5,7 @@ from ferro.query import Query, QueryNode
 
 pytestmark = pytest.mark.backend_matrix
 
+
 def test_field_proxy_operator_overloading():
     """
     Test that accessing a field on the Model class returns a FieldProxy

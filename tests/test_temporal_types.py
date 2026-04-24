@@ -5,6 +5,7 @@ from ferro import Model, connect, FerroField
 
 pytestmark = pytest.mark.backend_matrix
 
+
 @pytest.mark.asyncio
 async def test_temporal_types_roundtrip(db_url):
     """Test that datetime and date objects are correctly saved and hydrated."""

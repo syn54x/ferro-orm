@@ -111,10 +111,21 @@ impl QueryDef {
     ) -> SimpleExpr {
         if let Value::String(s) = val {
             if sql_dialect() == SqlDialect::Postgres {
-                let schema_uuid = model_column_is_uuid(&self.model_name, col_name);
-                if uuid::Uuid::parse_str(s).is_ok() && (schema_uuid || infer_uuid_without_schema) {
+                if uuid::Uuid::parse_str(s).is_ok() {
+                    let schema_uuid = model_column_is_uuid(&self.model_name, col_name);
+                    if schema_uuid || infer_uuid_without_schema {
+                        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                            .cast_as("uuid");
+                    }
+                }
+
+                if model_column_format(&self.model_name, col_name) == Some("date-time") {
                     return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                        .cast_as("uuid");
+                        .cast_as("timestamptz");
+                }
+                if model_column_format(&self.model_name, col_name) == Some("date") {
+                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                        .cast_as("date");
                 }
                 if model_column_format(&self.model_name, col_name).as_deref() == Some("date") {
                     return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
@@ -192,6 +203,27 @@ fn model_column_is_decimal(model_name: &str, col: &str) -> bool {
     property_schema_is_decimal(col_info)
 }
 
+fn model_column_format(model_name: &str, col: &str) -> Option<&'static str> {
+    let Ok(registry) = MODEL_REGISTRY.read() else {
+        return None;
+    };
+    let Some(schema) = registry.get(model_name) else {
+        return None;
+    };
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return None;
+    };
+    let Some(col_info) = props.get(col) else {
+        return None;
+    };
+    match property_schema_format(col_info) {
+        Some("uuid") => Some("uuid"),
+        Some("date-time") => Some("date-time"),
+        Some("date") => Some("date"),
+        _ => None,
+    }
+}
+
 fn column_is_uuid_property(schema: &Value, col: &str) -> bool {
     let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
         return false;
@@ -247,6 +279,24 @@ pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
             })
     });
     json_type == Some("string") && format == Some("uuid")
+}
+
+fn property_schema_format(col_info: &Value) -> Option<&str> {
+    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
+        col_info
+            .get("anyOf")
+            .and_then(|a| a.as_array())
+            .and_then(|types| {
+                types.iter().find_map(|t| {
+                    let s = t.get("type")?.as_str()?;
+                    if s == "null" {
+                        None
+                    } else {
+                        t.get("format").and_then(|f| f.as_str())
+                    }
+                })
+            })
+    })
 }
 
 fn property_schema_is_decimal(col_info: &Value) -> bool {

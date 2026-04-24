@@ -26,6 +26,84 @@ fn resolve_ref<'a>(
     col_info
 }
 
+fn property_json_type_and_format(col_info: &serde_json::Value) -> (Option<&str>, Option<&str>) {
+    let top_type = col_info.get("type").and_then(|t| t.as_str());
+    let top_format = col_info.get("format").and_then(|f| f.as_str());
+    if top_type.is_some() || top_format.is_some() {
+        return (top_type, top_format);
+    }
+
+    if let Some(items) = col_info.get("anyOf").and_then(|a| a.as_array()) {
+        for item in items {
+            let item_type = item.get("type").and_then(|t| t.as_str());
+            if item_type == Some("null") {
+                continue;
+            }
+            let item_format = item.get("format").and_then(|f| f.as_str());
+            return (item_type, item_format);
+        }
+    }
+
+    (None, None)
+}
+
+fn schema_dependencies(schema: &serde_json::Value) -> Vec<String> {
+    let mut deps = Vec::new();
+    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+        for col_info in properties.values() {
+            let col_info = resolve_ref(schema, col_info);
+            if let Some(to_table) = col_info
+                .get("foreign_key")
+                .and_then(|fk| fk.get("to_table"))
+                .and_then(|t| t.as_str())
+            {
+                deps.push(to_table.to_string());
+            }
+        }
+    }
+    deps.sort();
+    deps.dedup();
+    deps
+}
+
+fn order_schemas_for_creation(
+    schemas: std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<(String, serde_json::Value)> {
+    let mut remaining: Vec<(String, serde_json::Value)> = schemas.into_iter().collect();
+    remaining.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut ordered = Vec::with_capacity(remaining.len());
+    let mut created = HashSet::new();
+
+    while !remaining.is_empty() {
+        let available_names: HashSet<String> =
+            remaining.iter().map(|(name, _)| name.to_lowercase()).collect();
+        let mut progress = false;
+        let mut index = 0;
+
+        while index < remaining.len() {
+            let deps = schema_dependencies(&remaining[index].1);
+            if deps
+                .iter()
+                .all(|dep| created.contains(dep) || !available_names.contains(dep))
+            {
+                let item = remaining.remove(index);
+                created.insert(item.0.to_lowercase());
+                ordered.push(item);
+                progress = true;
+            } else {
+                index += 1;
+            }
+        }
+
+        if !progress {
+            ordered.append(&mut remaining);
+        }
+    }
+
+    ordered
+}
+
 /// Maps a JSON schema type string to a Sea-Query `ColumnDef`.
 pub fn json_type_to_sea_query(col_def: &mut ColumnDef, json_type: &str) {
     match json_type {
@@ -210,32 +288,12 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                     let mut col_def = ColumnDef::new(Alias::new(col_name));
                     let col_info = resolve_ref(&schema, col_info);
 
-                    let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
-                        // Check anyOf for a type (common in Pydantic V2 for optional fields)
-                        col_info
-                            .get("anyOf")
-                            .and_then(|a| a.as_array())
-                            .and_then(|types| {
-                                types.iter().find_map(|t| {
-                                    let s = t.get("type")?.as_str()?;
-                                    if s != "null" { Some(s) } else { None }
-                                })
-                            })
-                    });
-
-                    let format = schema_format(col_info);
+                    let (json_type, format) = property_json_type_and_format(col_info);
 
                     if let Some(t) = json_type {
                         match (t, format) {
                             ("string", Some("date-time")) => {
-                                match sql_dialect() {
-                                    SqlDialect::Sqlite => {
-                                        col_def.date_time();
-                                    }
-                                    SqlDialect::Postgres => {
-                                        col_def.timestamp_with_time_zone();
-                                    }
-                                }
+                                col_def.timestamp_with_time_zone();
                             }
                             ("string", Some("date")) => {
                                 col_def.date();

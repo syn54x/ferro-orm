@@ -3,7 +3,7 @@
 //! This module implements high-performance CRUD operations, leveraging
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
-use crate::query::{property_schema_is_uuid, QueryDef};
+use crate::query::QueryDef;
 use crate::state::{
     engine_pool, IDENTITY_MAP, MODEL_REGISTRY, RustValue, TRANSACTION_REGISTRY, TransactionHandle,
 };
@@ -57,7 +57,7 @@ macro_rules! decode_column {
             .and_then(|s| s.get("properties"))
             .and_then(|p| p.get($col_name));
 
-        let format = prop.and_then(|p| p.get("format")).and_then(|t| t.as_str());
+        let format = prop.and_then(property_format);
         let is_decimal = prop
             .and_then(|p| p.get("anyOf"))
             .and_then(|a| a.as_array())
@@ -73,19 +73,7 @@ macro_rules! decode_column {
             })
             .unwrap_or(false);
 
-        let json_type = prop
-            .and_then(|p| p.get("type"))
-            .and_then(|t| t.as_str())
-            .or_else(|| {
-                prop.and_then(|p| p.get("anyOf"))
-                    .and_then(|a| a.as_array())
-                    .and_then(|types| {
-                        types.iter().find_map(|t| {
-                            let s = t.get("type")?.as_str()?;
-                            if s != "null" { Some(s) } else { None }
-                        })
-                    })
-            });
+        let json_type = prop.and_then(property_json_type);
 
         if is_decimal {
             if let Ok(v) = $row.try_get::<f64, _>($col_name) {
@@ -136,9 +124,42 @@ macro_rules! decode_column {
     }};
 }
 
-/// On Postgres, `sqlx::Any` cannot decode some native types we use in tests. Expand `SELECT *`
-/// into explicit columns with `::text` casts so decoding uses the text-first path.
-fn apply_postgres_text_cast_select_columns(
+/// On Postgres, `sqlx::Any` cannot decode native `uuid` columns. When the model schema marks
+/// UUID fields, expand `SELECT *` into explicit columns with `::text` casts so decoding uses
+/// text (same representation as SQLite).
+fn property_json_type(col_info: &serde_json::Value) -> Option<&str> {
+    col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
+        col_info
+            .get("anyOf")
+            .and_then(|a| a.as_array())
+            .and_then(|types| {
+                types.iter().find_map(|t| {
+                    let s = t.get("type")?.as_str()?;
+                    if s != "null" { None.or(Some(s)) } else { None }
+                })
+            })
+    })
+}
+
+fn property_format(col_info: &serde_json::Value) -> Option<&str> {
+    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
+        col_info
+            .get("anyOf")
+            .and_then(|a| a.as_array())
+            .and_then(|types| {
+                types.iter().find_map(|t| {
+                    let ty = t.get("type")?.as_str()?;
+                    if ty == "null" {
+                        None
+                    } else {
+                        t.get("format").and_then(|f| f.as_str())
+                    }
+                })
+            })
+    })
+}
+
+fn apply_postgres_text_select_columns(
     select: &mut sea_query::SelectStatement,
     table_name: &str,
     schema: &serde_json::Value,
@@ -154,20 +175,16 @@ fn apply_postgres_text_cast_select_columns(
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     };
-    if !properties.values().any(|col_info| {
-        property_schema_is_uuid(col_info)
-            || property_schema_format(col_info) == Some("date")
-            || property_schema_format(col_info) == Some("date-time")
-    }) {
+    if !properties
+        .values()
+        .any(|col_info| matches!(property_format(col_info), Some("uuid" | "date-time" | "date")))
+    {
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     }
     for (col_name, col_info) in properties {
         let col_iden = Alias::new(col_name.as_str());
-        if property_schema_is_uuid(col_info)
-            || property_schema_format(col_info) == Some("date")
-            || property_schema_format(col_info) == Some("date-time")
-        {
+        if matches!(property_format(col_info), Some("uuid" | "date-time" | "date")) {
             let expr = Expr::cast_as(
                 Expr::col((tbl.clone(), col_iden.clone())),
                 Alias::new("text"),
@@ -232,21 +249,8 @@ fn schema_value_expr(
     value: &serde_json::Value,
 ) -> SimpleExpr {
     let col_info = schema_property(schema, col_name);
-    let format = col_info.and_then(|prop| prop.get("format")).and_then(|f| f.as_str());
-    let json_type = col_info
-        .and_then(|prop| prop.get("type"))
-        .and_then(|t| t.as_str())
-        .or_else(|| {
-            col_info
-                .and_then(|prop| prop.get("anyOf"))
-                .and_then(|a| a.as_array())
-                .and_then(|items| {
-                    items.iter().find_map(|item| {
-                        let ty = item.get("type")?.as_str()?;
-                        if ty == "null" { None } else { Some(ty) }
-                    })
-                })
-        });
+    let format = col_info.and_then(property_format);
+    let json_type = col_info.and_then(property_json_type);
     let is_decimal = col_info
         .and_then(|prop| prop.get("anyOf"))
         .and_then(|a| a.as_array())
@@ -259,6 +263,19 @@ fn schema_value_expr(
                 && format == Some("uuid") =>
         {
             Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid")
+        }
+        serde_json::Value::String(s)
+            if crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+                && format == Some("date-time") =>
+        {
+            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as("timestamptz")
+        }
+        serde_json::Value::String(s)
+            if crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+                && format == Some("date") =>
+        {
+            Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("date")
         }
         serde_json::Value::String(s) if json_type == Some("integer") => {
             if let Ok(parsed) = s.parse::<i64>() {
@@ -297,6 +314,9 @@ fn schema_value_expr(
         }
         serde_json::Value::String(s) => {
             Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+        }
+        serde_json::Value::Bool(b) if json_type == Some("boolean") => {
+            Expr::value(sea_query::Value::BigInt(Some(if *b { 1 } else { 0 })))
         }
         serde_json::Value::Bool(b) => Expr::value(sea_query::Value::Bool(Some(*b))),
         serde_json::Value::Null => Expr::value(sea_query::Value::String(None)),
@@ -494,7 +514,7 @@ pub fn fetch_all<'py>(
                 }
             }
             let mut stmt = Query::select();
-            apply_postgres_text_cast_select_columns(&mut stmt, &table_name, schema);
+            apply_postgres_text_select_columns(&mut stmt, &table_name, schema);
             let s = sea_query_to_string!(stmt.from(Alias::new(&table_name)));
             (s, pk)
         };
@@ -643,7 +663,7 @@ pub fn fetch_one<'py>(
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let mut stmt = Query::select();
-            apply_postgres_uuid_select_columns(&mut stmt, &table_name, schema);
+            apply_postgres_text_select_columns(&mut stmt, &table_name, schema);
             let pk_expr = schema_value_expr(schema, &pk_name, &serde_json::Value::String(pk_val.clone()));
             let (s, values) = sea_query_build!(stmt
                 .from(Alias::new(&table_name))
@@ -1099,7 +1119,7 @@ pub fn fetch_filtered<'py>(
             }
 
             let mut select = Query::select();
-            apply_postgres_text_cast_select_columns(&mut select, &table_name, schema);
+            apply_postgres_text_select_columns(&mut select, &table_name, schema);
             select.from(Alias::new(&table_name));
 
             if let Some(m2m) = &query_def.m2m {

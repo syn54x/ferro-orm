@@ -4,6 +4,7 @@ from ferro import Model, connect, FerroField
 
 pytestmark = pytest.mark.backend_matrix
 
+
 @pytest.mark.asyncio
 async def test_instance_refresh(db_url):
     """Test that .refresh() updates the instance from the database."""

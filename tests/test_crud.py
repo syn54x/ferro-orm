@@ -1,9 +1,7 @@
 import pytest
 from pydantic import Field
-
 import ferro
 from ferro import Model
-
 
 pytestmark = pytest.mark.backend_matrix
 
