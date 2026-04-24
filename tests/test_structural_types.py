@@ -96,3 +96,25 @@ async def test_structural_filtering(db_url):
     res = await ComplexModel.where(ComplexModel.balance > Decimal("15.0")).first()
     assert res is not None
     assert res.balance == Decimal("20.0")
+
+
+@pytest.mark.asyncio
+async def test_uuid_in_filter_serializes_collection_values(db_url):
+    """UUID values inside IN filters should serialize the same way as scalar UUID filters."""
+
+    class ComplexModel(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        user_id: uuid.UUID
+
+    await connect(db_url, auto_migrate=True)
+
+    uid1 = uuid.uuid4()
+    uid2 = uuid.uuid4()
+    uid3 = uuid.uuid4()
+
+    await ComplexModel.create(user_id=uid1)
+    await ComplexModel.create(user_id=uid2)
+    await ComplexModel.create(user_id=uid3)
+
+    results = await ComplexModel.where(ComplexModel.user_id << [uid1, uid3]).all()
+    assert {row.user_id for row in results} == {uid1, uid3}

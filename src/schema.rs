@@ -3,7 +3,7 @@
 //! This module handles converting Pydantic JSON schemas into Sea-Query
 //! table definitions and managing the model registry.
 
-use crate::state::{sql_dialect, ENGINE, MODEL_REGISTRY, SqlDialect};
+use crate::state::{engine_pool, sql_dialect, MODEL_REGISTRY, SqlDialect};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, ColumnDef, ForeignKey, ForeignKeyAction, Index, PostgresQueryBuilder, SqliteQueryBuilder,
@@ -12,6 +12,19 @@ use sea_query::{
 use sqlx::{Any, Pool};
 use std::collections::HashSet;
 use std::sync::Arc;
+
+fn resolve_ref<'a>(
+    schema: &'a serde_json::Value,
+    col_info: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    if let Some(ref_path) = col_info.get("$ref").and_then(|r| r.as_str())
+        && let Some(def_name) = ref_path.strip_prefix("#/$defs/")
+        && let Some(def) = schema.get("$defs").and_then(|defs| defs.get(def_name))
+    {
+        return def;
+    }
+    col_info
+}
 
 /// Maps a JSON schema type string to a Sea-Query `ColumnDef`.
 pub fn json_type_to_sea_query(col_def: &mut ColumnDef, json_type: &str) {
@@ -195,6 +208,7 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
             if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
                     let mut col_def = ColumnDef::new(Alias::new(col_name));
+                    let col_info = resolve_ref(&schema, col_info);
 
                     let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
                         // Check anyOf for a type (common in Pydantic V2 for optional fields)
@@ -254,6 +268,14 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                         if is_auto {
                             col_def.auto_increment();
                         }
+                    }
+
+                    if col_info
+                        .get("ferro_nullable")
+                        .and_then(|nullable| nullable.as_bool())
+                        == Some(false)
+                    {
+                        col_def.not_null();
                     }
 
                     if col_info
@@ -382,16 +404,11 @@ pub fn register_model_schema(name: String, schema: String) -> PyResult<()> {
 #[pyfunction]
 pub fn create_tables(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let pool = {
-            let engine_lock = ENGINE
-                .read()
-                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine"))?;
-            engine_lock.as_ref().cloned().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "Engine not initialized. Call connect() first.",
-                )
-            })?
-        };
+        let pool = engine_pool().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "Engine not initialized. Call connect() first.",
+            )
+        })?;
 
         internal_create_tables(pool).await
     })

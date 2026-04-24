@@ -155,7 +155,7 @@ class OrgMembership(Model):
 - You can list several groups for multiple composite uniques on one model.
 - Invalid or unknown column names raise when the model is registered.
 
-**Null semantics (SQLite):** With the default local SQLite engine, `UNIQUE` treats `NULL` as distinct from other `NULL` values for multi-column constraints unless columns are `NOT NULL`. Ferro maps nullability from your types and defaults like other fields; optional composite columns can therefore allow multiple rows that differ only by `NULL` in a nullable column. Prefer `NOT NULL` on composite members when you need strict “at most one row per pair” semantics. Other databases can differ; consult your backend’s documentation when you target PostgreSQL, MySQL, and so on.
+**Null semantics (SQLite):** With the default local SQLite engine, `UNIQUE` treats `NULL` as distinct from other `NULL` values for multi-column constraints unless columns are `NOT NULL`. Ferro maps nullability from your types and defaults like other fields; optional composite columns can therefore allow multiple rows that differ only by `NULL` in a nullable column. Prefer `NOT NULL` on composite members when you need strict “at most one row per pair” semantics. Other databases can differ; consult your backend's documentation when you target PostgreSQL or another backend with different unique/null behavior.
 
 **Wire format:** Declarations use nested tuples in Python; the schema JSON sent to the Rust engine uses nested lists (`ferro_composite_uniques`) because JSON has no tuple type.
 

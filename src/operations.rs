@@ -3,23 +3,23 @@
 //! This module implements high-performance CRUD operations, leveraging
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
-use crate::query::{property_schema_format, property_schema_is_decimal, property_schema_is_uuid, QueryDef};
-use crate::state::{ENGINE, IDENTITY_MAP, MODEL_REGISTRY, RustValue, TRANSACTION_REGISTRY};
+use crate::query::{property_schema_is_uuid, QueryDef};
+use crate::state::{
+    engine_pool, IDENTITY_MAP, MODEL_REGISTRY, RustValue, TRANSACTION_REGISTRY, TransactionHandle,
+};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query,
-    SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
+    SimpleExpr, SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
 use sqlx::{Column, Row};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 macro_rules! get_conn {
     ($pool:expr, $tx_id:expr) => {{
         if let Some(tx_id) = $tx_id {
-            if let Some(conn_arc) = TRANSACTION_REGISTRY.get(&tx_id) {
-                let conn = conn_arc.value().clone();
+            if let Some(tx_handle) = TRANSACTION_REGISTRY.get(&tx_id) {
+                let conn = tx_handle.value().conn.clone();
                 Some(conn)
             } else {
                 None
@@ -203,81 +203,160 @@ fn bind_query<'a>(
     query
 }
 
-fn json_value_to_simple_expr(
-    value: &serde_json::Value,
-    col_info: Option<&serde_json::Value>,
-) -> sea_query::SimpleExpr {
-    if let serde_json::Value::String(s) = value
-        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+fn resolve_ref<'a>(
+    schema: &'a serde_json::Value,
+    col_info: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    if let Some(ref_path) = col_info.get("$ref").and_then(|r| r.as_str())
+        && let Some(def_name) = ref_path.strip_prefix("#/$defs/")
+        && let Some(def) = schema.get("$defs").and_then(|defs| defs.get(def_name))
     {
-        if col_info.is_some_and(property_schema_is_uuid) && uuid::Uuid::parse_str(s).is_ok() {
-            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                .cast_as("uuid");
-        }
-        if col_info.and_then(property_schema_format) == Some("date") {
-            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                .cast_as("date");
-        }
-        if col_info.and_then(property_schema_format) == Some("date-time") {
-            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                .cast_as("timestamptz");
-        }
-        if col_info.and_then(property_schema_format) == Some("binary") {
-            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                .cast_as("bytea");
-        }
-        if col_info.is_some_and(property_schema_is_decimal) {
-            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                .cast_as("numeric");
-        }
+        return def;
     }
+    col_info
+}
 
-    let val = match value {
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                sea_query::Value::BigInt(Some(i))
-            } else if let Some(f) = n.as_f64() {
-                sea_query::Value::Double(Some(f))
+fn schema_property<'a>(
+    schema: &'a serde_json::Value,
+    col_name: &str,
+) -> Option<&'a serde_json::Value> {
+    schema
+        .get("properties")
+        .and_then(|p| p.get(col_name))
+        .map(|prop| resolve_ref(schema, prop))
+}
+
+fn schema_value_expr(
+    schema: &serde_json::Value,
+    col_name: &str,
+    value: &serde_json::Value,
+) -> SimpleExpr {
+    let col_info = schema_property(schema, col_name);
+    let format = col_info.and_then(|prop| prop.get("format")).and_then(|f| f.as_str());
+    let json_type = col_info
+        .and_then(|prop| prop.get("type"))
+        .and_then(|t| t.as_str())
+        .or_else(|| {
+            col_info
+                .and_then(|prop| prop.get("anyOf"))
+                .and_then(|a| a.as_array())
+                .and_then(|items| {
+                    items.iter().find_map(|item| {
+                        let ty = item.get("type")?.as_str()?;
+                        if ty == "null" { None } else { Some(ty) }
+                    })
+                })
+        });
+    let is_decimal = col_info
+        .and_then(|prop| prop.get("anyOf"))
+        .and_then(|a| a.as_array())
+        .map(|items| items.iter().any(|item| item.get("pattern").is_some()))
+        .unwrap_or(false);
+
+    match value {
+        serde_json::Value::String(s)
+            if crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+                && format == Some("uuid") =>
+        {
+            Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid")
+        }
+        serde_json::Value::String(s) if json_type == Some("integer") => {
+            if let Ok(parsed) = s.parse::<i64>() {
+                Expr::value(sea_query::Value::BigInt(Some(parsed)))
             } else {
-                sea_query::Value::String(None)
+                Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
             }
         }
-        serde_json::Value::String(s) => sea_query::Value::String(Some(Box::new(s.clone()))),
-        serde_json::Value::Bool(b) => sea_query::Value::Bool(Some(*b)),
-        serde_json::Value::Null => sea_query::Value::String(None),
-        _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
-    };
-
-    Expr::value(val)
+        serde_json::Value::String(s) if json_type == Some("number") => {
+            if let Ok(parsed) = s.parse::<f64>() {
+                Expr::value(sea_query::Value::Double(Some(parsed)))
+            } else {
+                Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+            }
+        }
+        serde_json::Value::String(s) if format == Some("binary") => {
+            Expr::value(sea_query::Value::Bytes(Some(Box::new(
+                s.as_bytes().to_vec(),
+            ))))
+        }
+        serde_json::Value::String(s) if is_decimal => {
+            if let Ok(parsed) = s.parse::<f64>() {
+                Expr::value(sea_query::Value::Double(Some(parsed)))
+            } else {
+                Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+            }
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Expr::value(sea_query::Value::BigInt(Some(i)))
+            } else if let Some(f) = n.as_f64() {
+                Expr::value(sea_query::Value::Double(Some(f)))
+            } else {
+                Expr::value(sea_query::Value::String(None))
+            }
+        }
+        serde_json::Value::String(s) => {
+            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+        }
+        serde_json::Value::Bool(b) => Expr::value(sea_query::Value::Bool(Some(*b))),
+        serde_json::Value::Null => Expr::value(sea_query::Value::String(None)),
+        _ => Expr::value(sea_query::Value::String(Some(Box::new(value.to_string())))),
+    }
 }
 
 #[pyfunction]
-#[pyo3(signature = ())]
-pub fn begin_transaction(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+#[pyo3(signature = (parent_tx_id=None))]
+pub fn begin_transaction(
+    py: Python<'_>,
+    parent_tx_id: Option<String>,
+) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let pool = {
-            let engine_lock = ENGINE.read().unwrap();
-            engine_lock.as_ref().cloned().ok_or_else(|| {
+        let tx_id = uuid::Uuid::new_v4().to_string();
+        if let Some(parent_tx_id) = parent_tx_id {
+            let parent = TRANSACTION_REGISTRY.get(&parent_tx_id).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Parent transaction not found")
+            })?;
+            let conn = parent.conn.clone();
+            drop(parent);
+
+            let savepoint_name = format!("sp_{}", tx_id.replace('-', "_"));
+            let mut locked_conn = conn.lock().await;
+            sqlx::query(&format!("SAVEPOINT {savepoint_name}"))
+                .execute(&mut *locked_conn)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to create SAVEPOINT: {}",
+                        e
+                    ))
+                })?;
+            drop(locked_conn);
+
+            TRANSACTION_REGISTRY.insert(
+                tx_id.clone(),
+                TransactionHandle::nested(conn, savepoint_name),
+            );
+        } else {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?
-        };
-
-        let mut conn = pool.acquire().await.map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Failed to acquire connection: {}",
-                e
-            ))
-        })?;
-
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
             })?;
 
-        let tx_id = uuid::Uuid::new_v4().to_string();
-        TRANSACTION_REGISTRY.insert(tx_id.clone(), Arc::new(Mutex::new(conn.detach())));
+            let mut conn = pool.acquire().await.map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to acquire connection: {}",
+                    e
+                ))
+            })?;
+
+            sqlx::query("BEGIN")
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
+                })?;
+
+            TRANSACTION_REGISTRY.insert(tx_id.clone(), TransactionHandle::root(conn.detach()));
+        }
 
         Ok(tx_id)
     })
@@ -286,18 +365,30 @@ pub fn begin_transaction(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
 #[pyfunction]
 pub fn commit_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let conn_arc = TRANSACTION_REGISTRY
+        let tx_handle = TRANSACTION_REGISTRY
             .remove(&tx_id)
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?
             .1;
 
-        let mut conn = conn_arc.lock().await;
-        sqlx::query("COMMIT")
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to COMMIT: {}", e))
-            })?;
+        let mut conn = tx_handle.conn.lock().await;
+        if let Some(savepoint_name) = tx_handle.savepoint_name {
+            sqlx::query(&format!("RELEASE SAVEPOINT {savepoint_name}"))
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to RELEASE SAVEPOINT: {}",
+                        e
+                    ))
+                })?;
+        } else {
+            sqlx::query("COMMIT")
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to COMMIT: {}", e))
+                })?;
+        }
 
         Ok(())
     })
@@ -306,19 +397,44 @@ pub fn commit_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, P
 #[pyfunction]
 pub fn rollback_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let conn_arc = TRANSACTION_REGISTRY
+        let tx_handle = TRANSACTION_REGISTRY
             .remove(&tx_id)
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?
             .1;
 
-        let mut conn = conn_arc.lock().await;
-        sqlx::query("ROLLBACK")
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to ROLLBACK: {}", e))
-            })?;
+        let mut conn = tx_handle.conn.lock().await;
+        if let Some(savepoint_name) = tx_handle.savepoint_name {
+            sqlx::query(&format!("ROLLBACK TO SAVEPOINT {savepoint_name}"))
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to ROLLBACK TO SAVEPOINT: {}",
+                        e
+                    ))
+                })?;
+            sqlx::query(&format!("RELEASE SAVEPOINT {savepoint_name}"))
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to RELEASE SAVEPOINT: {}",
+                        e
+                    ))
+                })?;
+        } else {
+            sqlx::query("ROLLBACK")
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to ROLLBACK: {}",
+                        e
+                    ))
+                })?;
+        }
 
+        IDENTITY_MAP.clear();
         Ok(())
     })
 }
@@ -348,8 +464,7 @@ pub fn fetch_all<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
@@ -496,8 +611,7 @@ pub fn fetch_one<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
@@ -529,10 +643,11 @@ pub fn fetch_one<'py>(
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let mut stmt = Query::select();
-            apply_postgres_text_cast_select_columns(&mut stmt, &table_name, schema);
+            apply_postgres_uuid_select_columns(&mut stmt, &table_name, schema);
+            let pk_expr = schema_value_expr(schema, &pk_name, &serde_json::Value::String(pk_val.clone()));
             let (s, values) = sea_query_build!(stmt
                 .from(Alias::new(&table_name))
-                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val.clone())));
+                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)));
             (s, values, pk_name)
         };
 
@@ -602,8 +717,7 @@ pub fn save_record(
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
@@ -648,7 +762,7 @@ pub fn save_record(
         }
 
         let table_name = name.to_lowercase();
-        let (sql, bind_values, should_return_pk, pk_name_for_returning) = {
+        let (sql, bind_values, needs_postgres_returning) = {
             let mut columns = Vec::new();
             let mut values = Vec::new();
             let mut pk_provided = false;
@@ -666,10 +780,7 @@ pub fn save_record(
                     pk_provided = true;
                 }
                 columns.push(Alias::new(key));
-                values.push(json_value_to_simple_expr(
-                    value,
-                    properties.and_then(|props| props.get(key)),
-                ));
+                values.push(schema_value_expr(&schema, key, value));
             }
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -677,7 +788,7 @@ pub fn save_record(
                 .values(values)
                 .unwrap()
                 .to_owned();
-            if let Some(ref pk) = pk_col
+            if let Some(pk) = pk_col.as_ref()
                 && (pk_provided || !pk_is_auto)
             {
                 let mut on_conflict = OnConflict::column(Alias::new(pk));
@@ -692,18 +803,18 @@ pub fn save_record(
                     insert_stmt.on_conflict(on_conflict);
                 }
             }
-            let should_return_pk = crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+            let needs_postgres_returning = crate::state::sql_dialect()
+                == crate::state::SqlDialect::Postgres
                 && pk_col.is_some()
                 && pk_is_auto
                 && !pk_provided;
-            let pk_name_for_returning = pk_col.clone();
             let (mut sql, values) = sea_query_build!(insert_stmt);
-            if should_return_pk
-                && let Some(ref pk_name) = pk_name_for_returning
+            if needs_postgres_returning
+                && let Some(pk) = pk_col.as_ref()
             {
-                sql.push_str(&format!(" RETURNING {}", pk_name));
+                sql.push_str(&format!(" RETURNING \"{}\"", pk));
             }
-            (sql, values, should_return_pk, pk_name_for_returning)
+            (sql, values, needs_postgres_returning)
         };
 
         let query = bind_query(sqlx::query(&sql), &bind_values.0);
@@ -740,50 +851,68 @@ pub fn save_record(
             }
         } else if let Some(conn_arc) = tx_conn {
             let mut conn = conn_arc.lock().await;
-            let res = query.execute(&mut *conn).await;
-            if res.is_err() {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Save failed: {}",
-                    res.err().unwrap()
-                )));
-            }
-            let exec_res = res.unwrap();
-            let mut lid = exec_res.last_insert_id();
-            if (lid.is_none() || lid == Some(0))
-                && let Ok(row) = sqlx::query("SELECT last_insert_rowid()")
-                    .fetch_one(&mut *conn)
-                    .await
-            {
+            if needs_postgres_returning {
+                let row = query.fetch_one(&mut *conn).await.map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
+                })?;
                 let id: i64 = row.try_get(0).unwrap_or(0);
-                if id > 0 {
-                    lid = Some(id);
+                Ok((id > 0).then_some(id))
+            } else {
+                let res = query.execute(&mut *conn).await;
+                if res.is_err() {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Save failed: {}",
+                        res.err().unwrap()
+                    )));
                 }
+                let exec_res = res.unwrap();
+                let mut lid = exec_res.last_insert_id();
+                if crate::state::sql_dialect() == crate::state::SqlDialect::Sqlite
+                    && (lid.is_none() || lid == Some(0))
+                    && let Ok(row) = sqlx::query("SELECT last_insert_rowid()")
+                        .fetch_one(&mut *conn)
+                        .await
+                {
+                    let id: i64 = row.try_get(0).unwrap_or(0);
+                    if id > 0 {
+                        lid = Some(id);
+                    }
+                }
+                Ok(lid)
             }
-            Ok(lid)
         } else {
             let mut conn = pool.acquire().await.map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Pool acquire failed: {}", e))
             })?;
-            let res = query.execute(&mut *conn).await;
-            if res.is_err() {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Save failed: {}",
-                    res.err().unwrap()
-                )));
-            }
-            let exec_res = res.unwrap();
-            let mut lid = exec_res.last_insert_id();
-            if (lid.is_none() || lid == Some(0))
-                && let Ok(row) = sqlx::query("SELECT last_insert_rowid()")
-                    .fetch_one(&mut *conn)
-                    .await
-            {
+            if needs_postgres_returning {
+                let row = query.fetch_one(&mut *conn).await.map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
+                })?;
                 let id: i64 = row.try_get(0).unwrap_or(0);
-                if id > 0 {
-                    lid = Some(id);
+                Ok((id > 0).then_some(id))
+            } else {
+                let res = query.execute(&mut *conn).await;
+                if res.is_err() {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Save failed: {}",
+                        res.err().unwrap()
+                    )));
                 }
+                let exec_res = res.unwrap();
+                let mut lid = exec_res.last_insert_id();
+                if crate::state::sql_dialect() == crate::state::SqlDialect::Sqlite
+                    && (lid.is_none() || lid == Some(0))
+                    && let Ok(row) = sqlx::query("SELECT last_insert_rowid()")
+                        .fetch_one(&mut *conn)
+                        .await
+                {
+                    let id: i64 = row.try_get(0).unwrap_or(0);
+                    if id > 0 {
+                        lid = Some(id);
+                    }
+                }
+                Ok(lid)
             }
-            Ok(lid)
         }
     })
 }
@@ -794,17 +923,17 @@ pub fn save_bulk_records(
     py: Python<'_>,
     name: String,
     data_list_json: String,
+    tx_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let pool = {
-            let engine_lock = ENGINE
-                .read()
-                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine"))?;
-            engine_lock.as_ref().cloned().ok_or_else(|| {
+        let (pool, tx_conn) = {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(
                     "Engine not initialized. Call connect() first.",
                 )
-            })?
+            })?;
+            let tx_conn = get_conn!(pool, tx_id);
+            (pool, tx_conn)
         };
 
         let schema = {
@@ -882,10 +1011,7 @@ pub fn save_bulk_records(
                     let value = record_obj
                         .get(key.to_string().as_str())
                         .unwrap_or(&serde_json::Value::Null);
-                    row_values.push(json_value_to_simple_expr(
-                        value,
-                        properties.and_then(|props| props.get(key.to_string().as_str())),
-                    ));
+                    row_values.push(schema_value_expr(&schema, key.to_string().as_str(), value));
                 }
                 insert_stmt.values(row_values).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -900,7 +1026,13 @@ pub fn save_bulk_records(
         };
 
         let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        let result = query.execute(pool.as_ref()).await.map_err(|e| {
+        let result = if let Some(conn_arc) = tx_conn {
+            let mut conn = conn_arc.lock().await;
+            query.execute(&mut *conn).await
+        } else {
+            query.execute(pool.as_ref()).await
+        }
+        .map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Bulk save failed for '{}': {}",
                 name, e
@@ -936,8 +1068,7 @@ pub fn fetch_filtered<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
@@ -1107,8 +1238,7 @@ pub fn count_filtered(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
@@ -1206,8 +1336,7 @@ pub fn delete_record(
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
@@ -1238,9 +1367,10 @@ pub fn delete_record(
             }
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+            let pk_expr = schema_value_expr(&schema, &pk_name, &serde_json::Value::String(pk_val));
             let (s, values) = sea_query_build!(Query::delete()
                 .from_table(Alias::new(&table_name))
-                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val)));
+                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)));
             (s, values)
         };
 
@@ -1272,8 +1402,7 @@ pub fn delete_filtered(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
@@ -1330,12 +1459,20 @@ pub fn update_filtered(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
             (pool, tx_conn)
+        };
+
+        let schema = {
+            let registry = MODEL_REGISTRY.read().map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+            })?;
+            registry.get(&name).cloned().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+            })?
         };
 
         let table_name = name.to_lowercase();
@@ -1353,10 +1490,7 @@ pub fn update_filtered(
                 .cond_where(query_def.to_condition())
                 .to_owned();
             for (key, value) in update_map {
-                update.value(
-                    Alias::new(&key),
-                    json_value_to_simple_expr(&value, properties.and_then(|props| props.get(&key))),
-                );
+                update.value(Alias::new(&key), schema_value_expr(&schema, &key, &value));
             }
             sea_query_build!(update)
         };
@@ -1410,8 +1544,7 @@ pub fn add_m2m_links<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
@@ -1457,8 +1590,7 @@ pub fn remove_m2m_links<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);
@@ -1497,8 +1629,7 @@ pub fn clear_m2m_links<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
-            let engine_lock = ENGINE.read().unwrap();
-            let pool = engine_lock.as_ref().cloned().ok_or_else(|| {
+            let pool = engine_pool().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
             })?;
             let tx_conn = get_conn!(pool, tx_id);

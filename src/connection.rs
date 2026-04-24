@@ -3,8 +3,9 @@
 //! This module handles database connections, pool initialization,
 //! and engine resets.
 
+use crate::backend::{BackendKind, EngineHandle};
 use crate::schema::internal_create_tables;
-use crate::state::{set_sql_dialect, ENGINE, IDENTITY_MAP, SqlDialect};
+use crate::state::{ENGINE, IDENTITY_MAP};
 use pyo3::prelude::*;
 use sqlx::any::AnyPoolOptions;
 use std::sync::Arc;
@@ -55,18 +56,15 @@ fn is_safe_search_path(search_path: &str) -> bool {
 #[pyfunction]
 #[pyo3(signature = (url, auto_migrate=false))]
 pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Bound<'_, PyAny>> {
+    let (connection_url, search_path) = split_search_path(&url);
+    let backend = BackendKind::from_url(&connection_url).map_err(|e| {
+        pyo3::exceptions::PyConnectionError::new_err(format!("DB Connection failed: {}", e))
+    })?;
+
     sqlx::any::install_default_drivers();
     let (connection_url, search_path) = split_search_path(&url);
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let dialect = if connection_url.starts_with("postgres://")
-            || connection_url.starts_with("postgresql://")
-        {
-            SqlDialect::Postgres
-        } else {
-            SqlDialect::Sqlite
-        };
-
         if let Some(ref search_path) = search_path
             && !is_safe_search_path(search_path)
         {
@@ -77,16 +75,14 @@ pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Boun
         }
 
         let mut pool_options = AnyPoolOptions::new().max_connections(5);
-        if dialect == SqlDialect::Postgres
+        if backend == BackendKind::Postgres
             && let Some(search_path) = search_path
         {
             let set_search_path_sql = Arc::new(format!("SET search_path TO {}", search_path));
             pool_options = pool_options.after_connect(move |conn, _meta| {
                 let set_search_path_sql = set_search_path_sql.clone();
                 Box::pin(async move {
-                    sqlx::query(set_search_path_sql.as_str())
-                        .execute(conn)
-                        .await?;
+                    sqlx::query(set_search_path_sql.as_str()).execute(conn).await?;
                     Ok(())
                 })
             });
@@ -99,18 +95,16 @@ pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Boun
                 pyo3::exceptions::PyConnectionError::new_err(format!("DB Connection failed: {}", e))
             })?;
 
-        set_sql_dialect(dialect);
-
-        let arc_pool = Arc::new(pool);
+        let engine_handle = Arc::new(EngineHandle::new(backend, pool));
 
         if auto_migrate {
-            internal_create_tables(arc_pool.clone()).await?;
+            internal_create_tables(engine_handle.pool()).await?;
         }
 
         let mut engine = ENGINE
             .write()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine"))?;
-        *engine = Some(arc_pool);
+        *engine = Some(engine_handle);
 
         crate::log_debug(format!("⚡️ Ferro Engine: Connected to {}", connection_url));
         Ok(())
@@ -130,7 +124,6 @@ pub fn reset_engine() -> PyResult<()> {
         .write()
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine"))?;
     *engine = None;
-    set_sql_dialect(SqlDialect::Sqlite);
     IDENTITY_MAP.clear();
     Ok(())
 }

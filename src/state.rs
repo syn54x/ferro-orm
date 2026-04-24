@@ -3,6 +3,7 @@
 //! This module holds the global connection pool, the model registry,
 //! and the Identity Map used for object tracking.
 
+use crate::backend::{BackendKind, EngineHandle};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pyo3::IntoPyObjectExt;
@@ -12,36 +13,60 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
-/// SQL dialect for SeaQuery / placeholder style (`?` vs `$1`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SqlDialect {
-    #[default]
-    Sqlite,
-    Postgres,
-}
-
-static SQL_DIALECT: Lazy<RwLock<SqlDialect>> = Lazy::new(|| RwLock::new(SqlDialect::default()));
+/// Backward-compatible name for query/DDL builder selection.
+pub type SqlDialect = BackendKind;
 
 /// Returns the dialect selected at [`crate::connection::connect`] time.
 #[inline]
 pub fn sql_dialect() -> SqlDialect {
-    *SQL_DIALECT.read().unwrap()
-}
-
-pub(crate) fn set_sql_dialect(dialect: SqlDialect) {
-    *SQL_DIALECT.write().unwrap() = dialect;
+    ENGINE
+        .read()
+        .ok()
+        .and_then(|engine| engine.as_ref().map(|engine| engine.backend()))
+        .unwrap_or_default()
 }
 
 /// Global registry mapping model names to their Pydantic-generated JSON schemas.
 pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, serde_json::Value>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
-/// The global SQLx connection pool, initialized via `connect()`.
-pub static ENGINE: Lazy<RwLock<Option<Arc<Pool<Any>>>>> = Lazy::new(|| RwLock::new(None));
+/// The global runtime engine, initialized via `connect()`.
+pub static ENGINE: Lazy<RwLock<Option<Arc<EngineHandle>>>> = Lazy::new(|| RwLock::new(None));
+
+/// Returns a clone of the active pool when the engine is initialized.
+pub fn engine_pool() -> Option<Arc<Pool<Any>>> {
+    ENGINE
+        .read()
+        .ok()
+        .and_then(|engine| engine.as_ref().map(|engine| engine.pool()))
+}
+
+/// Active transaction handle.
+#[derive(Clone)]
+pub struct TransactionHandle {
+    pub conn: Arc<Mutex<AnyConnection>>,
+    pub savepoint_name: Option<String>,
+}
+
+impl TransactionHandle {
+    pub fn root(conn: AnyConnection) -> Self {
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+            savepoint_name: None,
+        }
+    }
+
+    pub fn nested(conn: Arc<Mutex<AnyConnection>>, savepoint_name: String) -> Self {
+        Self {
+            conn,
+            savepoint_name: Some(savepoint_name),
+        }
+    }
+}
 
 /// Global registry for active transactions.
-/// Maps Transaction ID -> Mutex-protected Connection.
-pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, Arc<Mutex<AnyConnection>>>> =
+/// Maps Transaction ID -> backend connection plus optional savepoint.
+pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> =
     Lazy::new(DashMap::new);
 
 /// Identity Map used for object tracking and deduplication.

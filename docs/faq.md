@@ -137,7 +137,7 @@ Check your Ferro version's API for raw SQL support. Most versions provide an esc
 
 ### Does Ferro support multiple databases?
 
-Multi-database support varies by version. Check your version's documentation for `using()` or similar APIs.
+Not yet. Ferro currently supports a single active database connection per application process.
 
 See [How-To: Multiple Databases](howto/multiple-databases.md).
 
@@ -198,14 +198,11 @@ Check the error message for details.
 ### How do I reset the database?
 
 ```python
-# Drop all tables
-await ferro.drop_all_tables()
-
-# Recreate
-await ferro.create_tables()
+# Reconnect to a fresh SQLite test database
+await ferro.connect("sqlite::memory:", auto_migrate=True)
 ```
 
-Or use Alembic migrations:
+For persistent environments, use Alembic migrations:
 
 ```bash
 alembic downgrade base

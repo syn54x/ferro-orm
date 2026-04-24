@@ -43,7 +43,8 @@ async def transaction():
         ...     user = await User.create(name="Taylor")
         ...     await user.save()
     """
-    tx_id = await begin_transaction()
+    parent_tx_id = _CURRENT_TRANSACTION.get()
+    tx_id = await begin_transaction(parent_tx_id)
     token = _CURRENT_TRANSACTION.set(tx_id)
     try:
         yield
@@ -400,7 +401,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             return 0
         # Use mode="json" to ensure Decimals, UUIDs, etc. are serialized correctly
         data = [i.model_dump(mode="json") for i in instances]
-        return await save_bulk_records(cls.__name__, json.dumps(data))
+        tx_id = _CURRENT_TRANSACTION.get()
+        return await save_bulk_records(cls.__name__, json.dumps(data), tx_id)
 
     @classmethod
     async def get_or_create(

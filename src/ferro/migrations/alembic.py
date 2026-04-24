@@ -10,7 +10,7 @@ except ImportError:
 
 from .._annotation_utils import annotation_allows_none
 from ..base import ForeignKey, foreign_key_allows_none
-from ..composite_uniques import apply_composite_uniques_to_schema
+from ..schema_metadata import build_model_schema
 from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 
 
@@ -58,16 +58,11 @@ def get_metadata() -> "sa.MetaData":
 
         table_name = model_name.lower()
 
-        # Get the schema that was registered with Rust
         try:
-            # Generate schema with internal references for resolution
-            schema = model_cls.model_json_schema()
+            schema = build_model_schema(model_cls)
         except Exception:
             # Fallback if standard pydantic schema fails (e.g. circular refs)
             continue
-
-        # Enrich schema with Ferro-specific metadata (PKs, FKs, etc.)
-        _enrich_schema_with_ferro_metadata(model_cls, schema)
 
         _build_sa_table(metadata, table_name, schema, model_cls)
 
@@ -86,44 +81,6 @@ def _resolve_ref(schema: Dict[str, Any], col_info: Dict[str, Any]) -> Dict[str, 
             def_name = ref_path.split("/")[-1]
             return schema.get("$defs", {}).get(def_name, col_info)
     return col_info
-
-
-def _enrich_schema_with_ferro_metadata(model_cls, schema: Dict[str, Any]):
-    """Enrich the Pydantic schema with Ferro-specific metadata like PKs and FKs."""
-    if "properties" not in schema:
-        return
-
-    # Apply FerroField metadata (PK, Unique, Index)
-    for f_name, metadata in model_cls.ferro_fields.items():
-        if f_name in schema["properties"]:
-            schema["properties"][f_name]["primary_key"] = metadata.primary_key
-            schema["properties"][f_name]["unique"] = metadata.unique
-            schema["properties"][f_name]["index"] = metadata.index
-            fn = getattr(metadata, "nullable", "infer")
-            if isinstance(fn, bool):
-                schema["properties"][f_name]["ferro_nullable"] = fn
-
-    # Apply ForeignKey metadata
-    for f_name, metadata in model_cls.ferro_relations.items():
-        if isinstance(metadata, ForeignKey):
-            id_field = f"{f_name}_id"
-            if id_field in schema["properties"]:
-                target_name = (
-                    metadata.to.__name__
-                    if hasattr(metadata.to, "__name__")
-                    else str(metadata.to)
-                )
-                schema["properties"][id_field]["foreign_key"] = {
-                    "to_table": target_name.lower(),
-                    "on_delete": metadata.on_delete,
-                    "unique": metadata.unique,
-                }
-                fk_nullable = getattr(metadata, "nullable", "infer")
-                if isinstance(fk_nullable, bool):
-                    schema["properties"][id_field]["ferro_nullable"] = fk_nullable
-
-    apply_composite_uniques_to_schema(model_cls, schema)
-
 
 def _strip_optional_union(annotation: Any) -> Any:
     """Unwrap ``T | None`` / ``Optional[T]`` to ``T``."""

@@ -67,24 +67,23 @@ If `FERRO_SUPABASE_URL` is not set, `postgres_only` tests are skipped and `backe
 import pytest
 import ferro
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def db():
-    """Connect to test database once per session."""
+    """Connect to a fresh test database for one test."""
     await ferro.connect("sqlite::memory:", auto_migrate=True)
     yield
-    await ferro.disconnect()
+    ferro.reset_engine()
 
 @pytest.fixture
 async def db_transaction(db):
-    """Wrap each test in a transaction that rolls back."""
-    from ferro import begin_transaction, rollback_transaction
+    """Wrap each test in Ferro's transaction() helper."""
+    from ferro import transaction
 
-    tx_id = await begin_transaction()
-    try:
+    async with transaction():
         yield
-    finally:
-        await rollback_transaction(tx_id)
 ```
+
+For backend-matrix tests, Ferro's own suite uses `--db-backends=sqlite,postgres` together with `backend_matrix` / `postgres_only` markers and a `FERRO_SUPABASE_URL` environment variable.
 
 ## Test Example
 

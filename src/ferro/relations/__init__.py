@@ -2,9 +2,9 @@ import json
 from typing import ForwardRef
 
 from .._core import register_model_schema
-from .._shadow_fk_types import reconcile_shadow_fk_types
+from .._shadow_fk_types import pk_python_type_for_model, reconcile_shadow_fk_types, schema_fragment_for_pk
 from ..base import ForeignKey, ManyToManyField
-from ..composite_uniques import apply_composite_uniques_to_schema
+from ..schema_metadata import build_model_schema
 from ..state import (  # noqa: F401
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
@@ -101,17 +101,21 @@ def resolve_relationships():
             )
 
             # 4. Register Join Table schema with Rust
+            source_schema = schema_fragment_for_pk(
+                pk_python_type_for_model(_MODEL_REGISTRY_PY[model_name])
+            )
+            target_schema = schema_fragment_for_pk(pk_python_type_for_model(target_model))
             join_schema = {
                 "properties": {
                     source_col: {
-                        "type": "integer",
+                        **source_schema,
                         "foreign_key": {
                             "to_table": model_name.lower(),
                             "on_delete": "CASCADE",
                         },
                     },
                     target_col: {
-                        "type": "integer",
+                        **target_schema,
                         "foreign_key": {
                             "to_table": target_model.__name__.lower(),
                             "on_delete": "CASCADE",
@@ -128,38 +132,7 @@ def resolve_relationships():
     # Second pass: Re-register schemas
     for model_name, model_cls in _MODEL_REGISTRY_PY.items():
         try:
-            schema = model_cls.model_json_schema()
-            if "properties" in schema:
-                for f_name, metadata in model_cls.ferro_fields.items():
-                    if f_name in schema["properties"]:
-                        schema["properties"][f_name]["primary_key"] = (
-                            metadata.primary_key
-                        )
-                        schema["properties"][f_name]["autoincrement"] = (
-                            metadata.autoincrement
-                        )
-                        schema["properties"][f_name]["unique"] = metadata.unique
-                        schema["properties"][f_name]["index"] = metadata.index
-
-                for f_name, metadata in model_cls.ferro_relations.items():
-                    if isinstance(metadata, ForeignKey):
-                        id_field = f"{f_name}_id"
-                        if id_field in schema["properties"]:
-                            target_name = (
-                                metadata.to.__name__
-                                if hasattr(metadata.to, "__name__")
-                                else str(metadata.to)
-                            )
-                            # Apply unique constraint to the ID column if it's a 1:1
-                            if metadata.unique:
-                                schema["properties"][id_field]["unique"] = True
-
-                            schema["properties"][id_field]["foreign_key"] = {
-                                "to_table": target_name.lower(),  # Rust expects lowercase
-                                "on_delete": metadata.on_delete,
-                                "unique": metadata.unique,
-                            }
-                apply_composite_uniques_to_schema(model_cls, schema)
+            schema = build_model_schema(model_cls)
             register_model_schema(model_name, json.dumps(schema))
         except Exception:
             pass

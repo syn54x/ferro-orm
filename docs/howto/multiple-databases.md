@@ -3,7 +3,7 @@
 !!! warning "Feature Not Implemented"
     **Multi-database support is not currently available in Ferro.** This documentation describes planned features. See [Coming Soon](../coming-soon.md#multiple-database-support) for more information.
 
-    Ferro currently supports only a single database connection per application. The examples below show the planned API.
+    Ferro currently supports only a single active database connection per application process. The examples below show the planned API, not something you can call today.
 
 ---
 

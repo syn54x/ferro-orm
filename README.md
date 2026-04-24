@@ -41,6 +41,8 @@ pip install ferro-orm
 pip install "ferro-orm[alembic]"
 ```
 
+Ferro currently supports SQLite and PostgreSQL as runtime backends. Named multi-database routing and custom connection-pool kwargs are planned, but not part of the current public API.
+
 ## Quick Start
 
 ```python

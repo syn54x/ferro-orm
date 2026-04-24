@@ -114,6 +114,29 @@ def test_m2m_translation():
     assert fks["actor.id"].ondelete == "CASCADE"
 
 
+def test_uuid_m2m_join_table_uses_uuid_capable_column_types():
+    """Join-table FK columns should inherit UUID-capable types from UUID PK models."""
+
+    class UuidTeam(Model):
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
+        name: str
+        members: Annotated[list["UuidMember"], ManyToManyField(related_name="teams")] = None
+
+    class UuidMember(Model):
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
+        email: str
+        teams: BackRef[UuidTeam] = None
+
+    metadata = get_metadata()
+    join_table = metadata.tables["uuidteam_members"]
+
+    for column_name in ("uuidteam_id", "uuidmember_id"):
+        col = join_table.c[column_name]
+        assert isinstance(col.type, sa.Uuid) or (
+            isinstance(col.type, sa.String) and getattr(col.type, "length", None) == 36
+        )
+
+
 def test_uuid_foreign_key_shadow_column_type():
     """Alembic bridge: UUID PK targets produce a UUID-capable SQLAlchemy type on *_id columns."""
 
