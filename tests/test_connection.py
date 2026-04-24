@@ -2,12 +2,13 @@ import pytest
 
 import ferro
 
+pytestmark = pytest.mark.backend_matrix
+
 
 @pytest.mark.asyncio
-async def test_sqlite_memory_connection():
-    """Test connecting to an in-memory SQLite database."""
-    # This should succeed and print the success message from Rust
-    await ferro.connect("sqlite::memory:")
+async def test_connection_smoke(db_url):
+    """Test connecting to the configured backend."""
+    await ferro.connect(db_url)
 
 
 @pytest.mark.asyncio
@@ -20,8 +21,8 @@ async def test_invalid_connection_string():
     assert "DB Connection failed" in str(excinfo.value)
 
 
-@pytest.mark.skip(reason="Requires a running Postgres instance")
 @pytest.mark.asyncio
-async def test_postgres_connection():
-    """Placeholder for postgres testing."""
-    await ferro.connect("postgres://user:pass@localhost/db")
+@pytest.mark.postgres_only
+async def test_postgres_connection(db_url):
+    """Test connecting to the configured Postgres backend."""
+    await ferro.connect(db_url)

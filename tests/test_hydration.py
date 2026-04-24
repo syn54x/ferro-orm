@@ -1,20 +1,10 @@
-import os
-import uuid
-
 import pytest
 from pydantic import Field
 
 import ferro
 from ferro import Model
 
-
-@pytest.fixture
-def db_url():
-    db_file = f"test_hydration_{uuid.uuid4()}.db"
-    url = f"sqlite:{db_file}?mode=rwc"
-    yield url
-    if os.path.exists(db_file):
-        os.remove(db_file)
+pytestmark = pytest.mark.backend_matrix
 
 
 INIT_CALLED_COUNT = 0

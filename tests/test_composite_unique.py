@@ -1,8 +1,6 @@
 """Composite unique constraints and default M2M join-table uniqueness (TDD)."""
 
-import os
 import sqlite3
-import uuid
 from typing import Annotated, ClassVar
 
 import pytest
@@ -19,6 +17,7 @@ from ferro import (
 )
 from ferro.migrations import get_metadata
 
+pytestmark = pytest.mark.backend_matrix
 
 def _expected_uq_constraint_name(table_name: str, col_ids: list[str]) -> str:
     """Match Alembic `_build_sa_table` naming (63-char cap)."""
@@ -26,15 +25,6 @@ def _expected_uq_constraint_name(table_name: str, col_ids: list[str]) -> str:
     if len(raw) > 63:
         return raw[:60] + "_uq"
     return raw
-
-
-@pytest.fixture
-def db_url():
-    db_file = f"test_composite_{uuid.uuid4()}.db"
-    url = f"sqlite:{db_file}?mode=rwc"
-    yield url
-    if os.path.exists(db_file):
-        os.remove(db_file)
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +83,7 @@ async def test_composite_unique_enforced_on_user_model(db_url):
         await PairRow(alpha_id=1, beta_id=2).save()
 
     msg = str(excinfo.value)
-    assert "UNIQUE constraint failed" in msg
+    assert "unique" in msg.lower()
 
 
 @pytest.mark.asyncio
@@ -118,7 +108,7 @@ async def test_m2m_duplicate_link_rejected(db_url):
     with pytest.raises(RuntimeError, match="Add M2M links failed") as excinfo:
         await actor.movies.add(movie)
     msg = str(excinfo.value)
-    assert "UNIQUE constraint failed" in msg
+    assert "unique" in msg.lower()
 
 
 def test_alembic_metadata_has_unique_constraints():
@@ -159,6 +149,7 @@ def test_alembic_metadata_has_unique_constraints():
 
 
 @pytest.mark.asyncio
+@pytest.mark.sqlite_only
 async def test_composite_unique_index_exists_in_sqlite(db_url):
     """SQLite should have a unique index spanning both columns."""
 
@@ -191,6 +182,7 @@ async def test_composite_unique_index_exists_in_sqlite(db_url):
 
 
 @pytest.mark.asyncio
+@pytest.mark.sqlite_only
 async def test_composite_unique_truncated_name_matches_alembic_and_sqlite(db_url):
     """Long uq_* names must be <=63 chars and match between Alembic metadata and Rust-created SQLite indexes."""
 
@@ -244,6 +236,61 @@ async def test_composite_unique_truncated_name_matches_alembic_and_sqlite(db_url
     idx_name = composite_rows[0][0]
     assert idx_name == expected
     assert len(idx_name) <= 63
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_composite_unique_truncated_name_matches_postgres_catalog(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Long uq_* names must match between Alembic metadata and Postgres catalogs."""
+
+    class VeryLongCompositeUniqueModelNameForIndexTruncationTest(Model):
+        __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            (
+                "very_long_column_name_alpha_for_composite_unique_test",
+                "very_long_column_name_beta_for_composite_unique_test",
+            ),
+        )
+
+        id: int | None = Field(default=None, primary_key=True)
+        very_long_column_name_alpha_for_composite_unique_test: int
+        very_long_column_name_beta_for_composite_unique_test: int
+
+    table = VeryLongCompositeUniqueModelNameForIndexTruncationTest.__name__.lower()
+    col_a = "very_long_column_name_alpha_for_composite_unique_test"
+    col_b = "very_long_column_name_beta_for_composite_unique_test"
+    expected = _expected_uq_constraint_name(table, [col_a, col_b])
+
+    metadata = get_metadata()
+    ucs = _unique_constraints(metadata.tables[table])
+    assert len(ucs) == 1
+    assert ucs[0].name == expected
+
+    await connect(db_url, auto_migrate=True)
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        row = conn.execute(
+            """
+            SELECT indexname, indexdef
+            FROM pg_indexes
+            WHERE schemaname = %s
+              AND tablename = %s
+              AND indexname = %s
+            """,
+            (db_schema_name, table, expected),
+        ).fetchone()
+
+    assert row is not None
+    idx_name, indexdef = row
+    assert idx_name == expected
+    assert len(idx_name) <= 63
+    assert "UNIQUE" in indexdef.upper()
+    assert col_a in indexdef
+    assert col_b in indexdef
 
 
 def test_composite_unique_multiple_groups_in_metadata_and_sqlite():

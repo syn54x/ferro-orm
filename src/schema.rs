@@ -10,6 +10,7 @@ use sea_query::{
     Table,
 };
 use sqlx::{Any, Pool};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Maps a JSON schema type string to a Sea-Query `ColumnDef`.
@@ -25,8 +26,15 @@ pub fn json_type_to_sea_query(col_def: &mut ColumnDef, json_type: &str) {
             col_def.double();
         }
         "boolean" => {
-            // CX Choice: Use integer for booleans to satisfy SQLx Any driver quirks with SQLite.
-            col_def.integer();
+            match sql_dialect() {
+                SqlDialect::Sqlite => {
+                    // SQLite stores booleans as integers.
+                    col_def.integer();
+                }
+                SqlDialect::Postgres => {
+                    col_def.boolean();
+                }
+            }
         }
         "object" | "array" => {
             col_def.text(); // SQLite stores JSON as text
@@ -35,6 +43,19 @@ pub fn json_type_to_sea_query(col_def: &mut ColumnDef, json_type: &str) {
             col_def.string();
         }
     }
+}
+
+fn schema_format(col_info: &serde_json::Value) -> Option<&str> {
+    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
+        col_info
+            .get("anyOf")
+            .and_then(|a| a.as_array())
+            .and_then(|variants| {
+                variants
+                    .iter()
+                    .find_map(|variant| variant.get("format").and_then(|f| f.as_str()))
+            })
+    })
 }
 
 /// Unique index name for `ferro_composite_uniques`; matches Python Alembic `_build_sa_table`.
@@ -89,6 +110,59 @@ fn append_composite_unique_index_sqls(
     }
 }
 
+fn schema_dependencies(schema: &serde_json::Value) -> HashSet<String> {
+    schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|properties| {
+            properties
+                .values()
+                .filter_map(|col_info| {
+                    col_info
+                        .get("foreign_key")
+                        .and_then(|fk| fk.get("to_table"))
+                        .and_then(|t| t.as_str())
+                        .map(|name| name.to_lowercase())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn order_schemas_for_creation(
+    schemas: std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<(String, serde_json::Value)> {
+    let mut remaining: Vec<(String, serde_json::Value)> = schemas.into_iter().collect();
+    let mut created = HashSet::new();
+    let mut ordered = Vec::new();
+
+    while !remaining.is_empty() {
+        let mut progressed = false;
+        let mut deferred = Vec::new();
+
+        for (name, schema) in remaining {
+            let deps = schema_dependencies(&schema);
+            if deps.iter().all(|dep| dep == &name.to_lowercase() || created.contains(dep)) {
+                created.insert(name.to_lowercase());
+                ordered.push((name, schema));
+                progressed = true;
+            } else {
+                deferred.push((name, schema));
+            }
+        }
+
+        if !progressed {
+            deferred.sort_by(|(left, _), (right, _)| left.cmp(right));
+            ordered.extend(deferred);
+            break;
+        }
+
+        remaining = deferred;
+    }
+
+    ordered
+}
+
 /// Internal utility to create all registered tables in the database.
 ///
 /// This is used by both the `connect(auto_migrate=True)` flow and the
@@ -108,7 +182,7 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
         pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to acquire connection: {}", e))
     })?;
 
-    for (name, schema) in schemas {
+    for (name, schema) in order_schemas_for_creation(schemas) {
         let (sql, index_sqls) = {
             let table_lower = name.to_lowercase();
             let mut table_stmt = Table::create()
@@ -135,12 +209,19 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                             })
                     });
 
-                    let format = col_info.get("format").and_then(|f| f.as_str());
+                    let format = schema_format(col_info);
 
                     if let Some(t) = json_type {
                         match (t, format) {
                             ("string", Some("date-time")) => {
-                                col_def.date_time();
+                                match sql_dialect() {
+                                    SqlDialect::Sqlite => {
+                                        col_def.date_time();
+                                    }
+                                    SqlDialect::Postgres => {
+                                        col_def.timestamp_with_time_zone();
+                                    }
+                                }
                             }
                             ("string", Some("date")) => {
                                 col_def.date();
@@ -153,6 +234,8 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                             }
                             _ => json_type_to_sea_query(&mut col_def, t),
                         }
+                    } else {
+                        col_def.string();
                     }
 
                     // Check for primary key and autoincrement from our custom metadata

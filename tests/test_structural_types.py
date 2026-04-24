@@ -1,24 +1,16 @@
 import pytest
 import uuid
-import os
 from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Dict, List
 from ferro import Model, connect, FerroField
 
+pytestmark = pytest.mark.backend_matrix
+
 
 class UserRole(str, Enum):
     ADMIN = "admin"
     USER = "user"
-
-
-@pytest.fixture
-def db_url():
-    db_file = f"test_struct_{uuid.uuid4()}.db"
-    url = f"sqlite:{db_file}?mode=rwc"
-    yield url
-    if os.path.exists(db_file):
-        os.remove(db_file)
 
 
 @pytest.mark.asyncio
