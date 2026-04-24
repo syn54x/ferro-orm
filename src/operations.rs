@@ -169,6 +169,7 @@ fn apply_postgres_text_select_columns(
     select: &mut sea_query::SelectStatement,
     table_name: &str,
     schema: &serde_json::Value,
+    pg_native_enum_columns: &HashSet<String>,
 ) {
     use sea_query::{Alias, Expr};
 
@@ -181,14 +182,17 @@ fn apply_postgres_text_select_columns(
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     };
-    if !properties.values().any(|col_info| {
+    let need_text_from_schema = properties.values().any(|col_info| {
         let resolved = resolve_ref(schema, col_info);
         matches!(
             property_format(resolved),
             Some("uuid" | "date-time" | "date")
         ) || property_is_enum(resolved)
-    })
-    {
+    });
+    let need_text_from_native_enum = properties
+        .keys()
+        .any(|k| pg_native_enum_columns.contains(k.as_str()));
+    if !need_text_from_schema && !need_text_from_native_enum {
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     }
@@ -197,6 +201,7 @@ fn apply_postgres_text_select_columns(
         let col_info = resolve_ref(schema, col_info);
         if matches!(property_format(col_info), Some("uuid" | "date-time" | "date"))
             || property_is_enum(col_info)
+            || pg_native_enum_columns.contains(col_name.as_str())
         {
             let expr = Expr::cast_as(
                 Expr::col((tbl.clone(), col_iden.clone())),
@@ -710,6 +715,10 @@ pub fn fetch_all<'py>(
         };
 
         let table_name = name.to_lowercase();
+        let pg_native_enum_cols: HashSet<String> = {
+            let m = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
+            m.keys().cloned().collect()
+        };
         // ... same sql generation ...
         let (sql, pk_col) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -732,7 +741,7 @@ pub fn fetch_all<'py>(
                 }
             }
             let mut stmt = Query::select();
-            apply_postgres_text_select_columns(&mut stmt, &table_name, schema);
+            apply_postgres_text_select_columns(&mut stmt, &table_name, schema, &pg_native_enum_cols);
             let s = sea_query_to_string!(stmt.from(Alias::new(&table_name)));
             (s, pk)
         };
@@ -857,6 +866,10 @@ pub fn fetch_one<'py>(
         };
 
         let table_name = name.to_lowercase();
+        let pg_native_enum_cols: HashSet<String> = {
+            let m = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
+            m.keys().cloned().collect()
+        };
         // ... sql logic ...
         let (sql, bind_values, _pk_col_name) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -881,7 +894,7 @@ pub fn fetch_one<'py>(
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let mut stmt = Query::select();
-            apply_postgres_text_select_columns(&mut stmt, &table_name, schema);
+            apply_postgres_text_select_columns(&mut stmt, &table_name, schema, &pg_native_enum_cols);
             let no_enum_udt = HashMap::new();
             let no_uuid = HashSet::new();
             let no_ts: HashMap<String, String> = HashMap::new();
@@ -1310,6 +1323,10 @@ pub fn fetch_filtered<'py>(
         };
 
         let table_name = name.to_lowercase();
+        let pg_native_enum_cols: HashSet<String> = {
+            let m = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
+            m.keys().cloned().collect()
+        };
         // ...
         let (sql, bind_values, pk_col) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1333,7 +1350,12 @@ pub fn fetch_filtered<'py>(
             }
 
             let mut select = Query::select();
-            apply_postgres_text_select_columns(&mut select, &table_name, schema);
+            apply_postgres_text_select_columns(
+                &mut select,
+                &table_name,
+                schema,
+                &pg_native_enum_cols,
+            );
             select.from(Alias::new(&table_name));
 
             if let Some(m2m) = &query_def.m2m {
