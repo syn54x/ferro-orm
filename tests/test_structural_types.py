@@ -1,5 +1,6 @@
 import pytest
 import uuid
+import psycopg
 from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Dict, List
@@ -114,3 +115,43 @@ async def test_optional_uuid_roundtrip_with_null(db_url):
 
     assert fetched is not None
     assert fetched.scorecard_flow_run_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_native_postgres_enum_roundtrip(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Native Postgres enum columns should accept enum-backed string values."""
+
+    class NativeUserStatus(str, Enum):
+        ACTIVE = "active"
+        INACTIVE = "inactive"
+
+    class NativeEnumModel(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        status: NativeUserStatus
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        conn.execute(
+            """
+            CREATE TYPE nativeuserstatus AS ENUM ('active', 'inactive')
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE nativeenummodel (
+                id BIGSERIAL PRIMARY KEY,
+                status nativeuserstatus NOT NULL
+            )
+            """
+        )
+
+    await connect(db_url, auto_migrate=False)
+
+    row = await NativeEnumModel.create(status=NativeUserStatus.ACTIVE)
+    fetched = await NativeEnumModel.get(row.id)
+
+    assert fetched is not None
+    assert fetched.status == NativeUserStatus.ACTIVE

@@ -11,7 +11,7 @@ use sea_query::{
     SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
 use sqlx::{Column, Row};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -156,6 +156,7 @@ fn apply_postgres_text_cast_select_columns(
     };
     if !properties.values().any(|col_info| {
         property_schema_is_uuid(col_info)
+            || col_info.get("enum_type_name").and_then(|name| name.as_str()).is_some()
             || property_schema_format(col_info) == Some("date")
             || property_schema_format(col_info) == Some("date-time")
     }) {
@@ -165,6 +166,7 @@ fn apply_postgres_text_cast_select_columns(
     for (col_name, col_info) in properties {
         let col_iden = Alias::new(col_name.as_str());
         if property_schema_is_uuid(col_info)
+            || col_info.get("enum_type_name").and_then(|name| name.as_str()).is_some()
             || property_schema_format(col_info) == Some("date")
             || property_schema_format(col_info) == Some("date-time")
         {
@@ -206,6 +208,7 @@ fn bind_query<'a>(
 fn json_value_to_simple_expr(
     value: &serde_json::Value,
     col_info: Option<&serde_json::Value>,
+    native_enum_type_name: Option<&str>,
 ) -> sea_query::SimpleExpr {
     if value.is_null()
         && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
@@ -231,6 +234,11 @@ fn json_value_to_simple_expr(
     if let serde_json::Value::String(s) = value
         && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
     {
+        if let Some(enum_type_name) = native_enum_type_name {
+            let enum_type_name = Alias::new(enum_type_name);
+            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as(enum_type_name);
+        }
         if col_info.is_some_and(property_schema_is_uuid) && uuid::Uuid::parse_str(s).is_ok() {
             return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
                 .cast_as("uuid");
@@ -270,6 +278,59 @@ fn json_value_to_simple_expr(
     };
 
     Expr::value(val)
+}
+
+async fn native_postgres_enum_columns_for_table(
+    table_name: &str,
+    enum_candidates: &HashMap<String, String>,
+    pool: &Arc<sqlx::Pool<sqlx::Any>>,
+    tx_conn: Option<Arc<Mutex<sqlx::AnyConnection>>>,
+) -> PyResult<HashSet<String>> {
+    if crate::state::sql_dialect() != crate::state::SqlDialect::Postgres || enum_candidates.is_empty()
+    {
+        return Ok(HashSet::new());
+    }
+
+    let query = sqlx::query(
+        r#"
+        SELECT column_name::text AS column_name,
+               data_type::text AS data_type,
+               udt_name::text AS udt_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = $1
+        "#,
+    )
+    .bind(table_name);
+
+    let rows = if let Some(conn_arc) = tx_conn {
+        let mut conn = conn_arc.lock().await;
+        query.fetch_all(&mut *conn).await
+    } else {
+        query.fetch_all(pool.as_ref()).await
+    }
+    .map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Failed to inspect enum columns for '{}': {}",
+            table_name, e
+        ))
+    })?;
+
+    let mut native_enum_columns = HashSet::new();
+    for row in rows {
+        let column_name: String = row.try_get("column_name").unwrap_or_default();
+        let data_type: String = row.try_get("data_type").unwrap_or_default();
+        let udt_name: String = row.try_get("udt_name").unwrap_or_default();
+        if data_type == "USER-DEFINED"
+            && enum_candidates
+                .get(&column_name)
+                .is_some_and(|expected| expected == &udt_name)
+        {
+            native_enum_columns.insert(column_name);
+        }
+    }
+
+    Ok(native_enum_columns)
 }
 
 #[pyfunction]
@@ -669,6 +730,28 @@ pub fn save_record(
         }
 
         let table_name = name.to_lowercase();
+        let native_enum_columns = {
+            let properties = schema.get("properties").and_then(|p| p.as_object());
+            let enum_candidates: HashMap<String, String> = properties
+                .map(|props| {
+                    props.iter()
+                        .filter_map(|(col_name, col_info)| {
+                            col_info
+                                .get("enum_type_name")
+                                .and_then(|name| name.as_str())
+                                .map(|name| (col_name.clone(), name.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            native_postgres_enum_columns_for_table(
+                &table_name,
+                &enum_candidates,
+                &pool,
+                tx_conn.clone(),
+            )
+            .await?
+        };
         let (sql, bind_values, should_return_pk, pk_name_for_returning) = {
             let mut columns = Vec::new();
             let mut values = Vec::new();
@@ -690,6 +773,14 @@ pub fn save_record(
                 values.push(json_value_to_simple_expr(
                     value,
                     properties.and_then(|props| props.get(key)),
+                    if native_enum_columns.contains(key) {
+                        properties
+                            .and_then(|props| props.get(key))
+                            .and_then(|col_info| col_info.get("enum_type_name"))
+                            .and_then(|name| name.as_str())
+                    } else {
+                        None
+                    },
                 ));
             }
             let mut insert_stmt = InsertStatement::new()
@@ -870,6 +961,28 @@ pub fn save_bulk_records(
         }
 
         let table_name = name.to_lowercase();
+        let native_enum_columns = {
+            let properties = schema.get("properties").and_then(|p| p.as_object());
+            let enum_candidates: HashMap<String, String> = properties
+                .map(|props| {
+                    props.iter()
+                        .filter_map(|(col_name, col_info)| {
+                            col_info
+                                .get("enum_type_name")
+                                .and_then(|name| name.as_str())
+                                .map(|name| (col_name.clone(), name.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            native_postgres_enum_columns_for_table(
+                &table_name,
+                &enum_candidates,
+                &pool,
+                None,
+            )
+            .await?
+        };
         let (sql, bind_values) = {
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -906,6 +1019,14 @@ pub fn save_bulk_records(
                     row_values.push(json_value_to_simple_expr(
                         value,
                         properties.and_then(|props| props.get(key.to_string().as_str())),
+                        if native_enum_columns.contains(key.to_string().as_str()) {
+                            properties
+                                .and_then(|props| props.get(key.to_string().as_str()))
+                                .and_then(|col_info| col_info.get("enum_type_name"))
+                                .and_then(|name| name.as_str())
+                        } else {
+                            None
+                        },
                     ));
                 }
                 insert_stmt.values(row_values).map_err(|e| {
@@ -1360,7 +1481,36 @@ pub fn update_filtered(
         };
 
         let table_name = name.to_lowercase();
-        // ... sql ...
+        let enum_candidates: HashMap<String, String> = {
+            let registry = MODEL_REGISTRY.read().map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+            })?;
+            let schema = registry.get(&name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+            })?;
+            schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|props| {
+                    props.iter()
+                        .filter_map(|(col_name, col_info)| {
+                            col_info
+                                .get("enum_type_name")
+                                .and_then(|enum_name| enum_name.as_str())
+                                .map(|enum_name| (col_name.clone(), enum_name.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let native_enum_columns = native_postgres_enum_columns_for_table(
+            &table_name,
+            &enum_candidates,
+            &pool,
+            tx_conn.clone(),
+        )
+        .await?;
+
         let (sql, bind_values) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
                 pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
@@ -1376,7 +1526,18 @@ pub fn update_filtered(
             for (key, value) in update_map {
                 update.value(
                     Alias::new(&key),
-                    json_value_to_simple_expr(&value, properties.and_then(|props| props.get(&key))),
+                    json_value_to_simple_expr(
+                        &value,
+                        properties.and_then(|props| props.get(&key)),
+                        if native_enum_columns.contains(&key) {
+                            properties
+                                .and_then(|props| props.get(&key))
+                                .and_then(|col_info| col_info.get("enum_type_name"))
+                                .and_then(|name| name.as_str())
+                        } else {
+                            None
+                        },
+                    ),
                 );
             }
             sea_query_build!(update)

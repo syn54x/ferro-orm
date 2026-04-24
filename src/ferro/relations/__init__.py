@@ -141,6 +141,16 @@ def resolve_relationships():
                         schema["properties"][f_name]["unique"] = metadata.unique
                         schema["properties"][f_name]["index"] = metadata.index
 
+                for f_name, field in model_cls.model_fields.items():
+                    if f_name in schema["properties"]:
+                        enum_cls = model_cls._enum_subclass_from_annotation(
+                            field.annotation
+                        )
+                        if enum_cls is not None:
+                            schema["properties"][f_name]["enum_type_name"] = (
+                                enum_cls.__name__.lower()
+                            )
+
                 for f_name, metadata in model_cls.ferro_relations.items():
                     if isinstance(metadata, ForeignKey):
                         id_field = f"{f_name}_id"

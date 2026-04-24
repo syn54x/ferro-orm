@@ -1,5 +1,6 @@
 import json
 import types
+from enum import Enum
 from typing import (
     Annotated,
     Any,
@@ -87,6 +88,19 @@ class ModelMetaclass(type(BaseModel)):
                 return ModelMetaclass._strip_optional_union(args[0])
             return hint
         return ModelMetaclass._strip_optional_union(hint)
+
+    @staticmethod
+    def _enum_subclass_from_annotation(hint: Any) -> type[Enum] | None:
+        """Return the Python Enum subclass for a field annotation, if any."""
+        hint = ModelMetaclass._strip_optional_union(hint)
+        if get_origin(hint) is Annotated:
+            args = get_args(hint)
+            if args:
+                return ModelMetaclass._enum_subclass_from_annotation(args[0])
+            return None
+        if isinstance(hint, type) and issubclass(hint, Enum):
+            return hint
+        return None
 
     @staticmethod
     def _is_back_ref_field(
@@ -377,6 +391,16 @@ class ModelMetaclass(type(BaseModel)):
                             schema["properties"][f_name]["autoincrement"] = auto
                             schema["properties"][f_name]["unique"] = metadata.unique
                             schema["properties"][f_name]["index"] = metadata.index
+
+                    for f_name, field in cls.model_fields.items():
+                        if f_name in schema["properties"]:
+                            enum_cls = cls._enum_subclass_from_annotation(
+                                field.annotation
+                            )
+                            if enum_cls is not None:
+                                schema["properties"][f_name]["enum_type_name"] = (
+                                    enum_cls.__name__.lower()
+                                )
 
                     for f_name, metadata in local_relations.items():
                         if isinstance(metadata, ForeignKey):
