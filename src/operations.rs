@@ -341,6 +341,64 @@ async fn postgres_uuid_column_names(
         .collect())
 }
 
+/// For each column whose SQL type is a date or timestamp family, the ``CAST ( … AS … )`` target
+/// (``date``, ``timestamp``, ``timestamptz``) so parameters are not sent as untyped text.
+async fn postgres_temporal_cast_by_column(
+    table_name: &str,
+    pool: &Arc<Pool<Any>>,
+    tx_conn: Option<Arc<Mutex<AnyConnection>>>,
+) -> PyResult<HashMap<String, String>> {
+    if crate::state::sql_dialect() != crate::state::SqlDialect::Postgres {
+        return Ok(HashMap::new());
+    }
+
+    let query = sqlx::query(
+        r#"
+        SELECT column_name::text,
+               CASE data_type::text
+                   WHEN 'timestamp without time zone' THEN 'timestamp'
+                   WHEN 'timestamp with time zone' THEN 'timestamptz'
+                   WHEN 'date' THEN 'date'
+                   ELSE NULL
+               END AS cast_type
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = $1
+          AND data_type::text IN (
+              'timestamp without time zone',
+              'timestamp with time zone',
+              'date'
+          )
+        "#,
+    )
+    .bind(table_name);
+
+    let rows = if let Some(conn_arc) = tx_conn {
+        let mut conn = conn_arc.lock().await;
+        query.fetch_all(&mut *conn).await
+    } else {
+        query.fetch_all(pool.as_ref()).await
+    }
+    .map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Failed to inspect temporal columns for '{}': {}",
+            table_name, e
+        ))
+    })?;
+
+    let mut out = HashMap::new();
+    for row in rows {
+        let col: String = row.try_get("column_name").unwrap_or_default();
+        let ct: Option<String> = row.try_get("cast_type").ok();
+        if let (cn, Some(cast)) = (col, ct) {
+            if !cn.is_empty() && !cast.is_empty() {
+                out.insert(cn, cast);
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn postgres_enum_type_name_for_column(
     col_name: &str,
     enum_udt: &HashMap<String, String>,
@@ -370,6 +428,7 @@ fn schema_value_expr(
     value: &serde_json::Value,
     enum_udt: &HashMap<String, String>,
     uuid_columns: &HashSet<String>,
+    ts_cast: &HashMap<String, String>,
 ) -> SimpleExpr {
     let col_info = schema_property(schema, col_name);
     if let serde_json::Value::String(s) = value
@@ -391,6 +450,19 @@ fn schema_value_expr(
         && uuid::Uuid::parse_str(s).is_ok()
     {
         return Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid");
+    }
+    if value.is_null()
+        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && let Some(cast) = ts_cast.get(col_name)
+    {
+        return Expr::value(sea_query::Value::String(None)).cast_as(Alias::new(cast.as_str()));
+    }
+    if let serde_json::Value::String(s) = value
+        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && let Some(cast) = ts_cast.get(col_name)
+    {
+        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+            .cast_as(Alias::new(cast.as_str()));
     }
     let format = col_info.and_then(property_format);
     let json_type = col_info.and_then(property_json_type);
@@ -812,12 +884,14 @@ pub fn fetch_one<'py>(
             apply_postgres_text_select_columns(&mut stmt, &table_name, schema);
             let no_enum_udt = HashMap::new();
             let no_uuid = HashSet::new();
+            let no_ts: HashMap<String, String> = HashMap::new();
             let pk_expr = schema_value_expr(
                 schema,
                 &pk_name,
                 &serde_json::Value::String(pk_val.clone()),
                 &no_enum_udt,
                 &no_uuid,
+                &no_ts,
             );
             let (s, values) = sea_query_build!(stmt
                 .from(Alias::new(&table_name))
@@ -938,6 +1012,7 @@ pub fn save_record(
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
         let uuid_columns = postgres_uuid_column_names(&table_name, &pool, tx_conn.clone()).await?;
+        let ts_cast = postgres_temporal_cast_by_column(&table_name, &pool, tx_conn.clone()).await?;
         let (sql, bind_values, needs_postgres_returning) = {
             let mut columns = Vec::new();
             let mut values = Vec::new();
@@ -961,6 +1036,7 @@ pub fn save_record(
                     value,
                     &enum_udt,
                     &uuid_columns,
+                    &ts_cast,
                 ));
             }
             let mut insert_stmt = InsertStatement::new()
@@ -1130,6 +1206,7 @@ pub fn save_bulk_records(
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
         let uuid_columns = postgres_uuid_column_names(&table_name, &pool, tx_conn.clone()).await?;
+        let ts_cast = postgres_temporal_cast_by_column(&table_name, &pool, tx_conn.clone()).await?;
         let (sql, bind_values) = {
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -1167,6 +1244,7 @@ pub fn save_bulk_records(
                         value,
                         &enum_udt,
                         &uuid_columns,
+                        &ts_cast,
                     ));
                 }
                 insert_stmt.values(row_values).map_err(|e| {
@@ -1525,12 +1603,14 @@ pub fn delete_record(
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let no_enum_udt = HashMap::new();
             let no_uuid = HashSet::new();
+            let no_ts: HashMap<String, String> = HashMap::new();
             let pk_expr = schema_value_expr(
                 &schema,
                 &pk_name,
                 &serde_json::Value::String(pk_val),
                 &no_enum_udt,
                 &no_uuid,
+                &no_ts,
             );
             let (s, values) = sea_query_build!(Query::delete()
                 .from_table(Alias::new(&table_name))
@@ -1633,6 +1713,7 @@ pub fn update_filtered(
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
         let uuid_columns = postgres_uuid_column_names(&table_name, &pool, tx_conn.clone()).await?;
+        let ts_cast = postgres_temporal_cast_by_column(&table_name, &pool, tx_conn.clone()).await?;
         // ... sql ...
         let (sql, bind_values) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1654,6 +1735,7 @@ pub fn update_filtered(
                         &value,
                         &enum_udt,
                         &uuid_columns,
+                        &ts_cast,
                     ),
                 );
             }

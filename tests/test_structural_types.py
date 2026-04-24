@@ -237,3 +237,41 @@ async def test_native_uuid_null_inserts(
     f2 = await UuidRun.get(row2.id)
     assert f2 is not None
     assert f2.run_id == u
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_native_timestamp_without_time_zone_null_and_value(
+    db_url, postgres_base_url, db_schema_name
+):
+    """``datetime | None`` on ``timestamp without time zone`` must not bind as plain text."""
+
+    from datetime import UTC, datetime
+
+    class RowWithTs(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        scrubbed_at: datetime | None = None
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        conn.execute(
+            """
+            CREATE TABLE rowwithts (
+                id BIGSERIAL PRIMARY KEY,
+                scrubbed_at timestamp without time zone
+            )
+            """
+        )
+        conn.commit()
+
+    await connect(db_url, auto_migrate=False)
+
+    row = await RowWithTs.create()
+    assert row.scrubbed_at is None
+    d = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
+    row2 = await RowWithTs.create(scrubbed_at=d)
+    f2 = await RowWithTs.get(row2.id)
+    assert f2 is not None
+    assert f2.scrubbed_at is not None
