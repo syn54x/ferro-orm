@@ -31,6 +31,7 @@ await ferro.connect("sqlite::memory:")
 ```
 
 **Modes:**
+
 - `rwc` - Read/Write/Create (creates database if it doesn't exist)
 - `rw` - Read/Write (database must exist)
 - `ro` - Read-only
@@ -50,6 +51,37 @@ await ferro.connect(
     max_connections=20
 )
 ```
+
+### Supabase (managed PostgreSQL)
+
+[Supabase](https://supabase.com/) hosts PostgreSQL behind TLS. Ferro’s Rust driver stack connects with **Rustls** and the **webpki** CA bundle, so TLS to public Supabase endpoints works out of the box in published wheels and in normal `maturin` / `uv` builds from this repository.
+
+**Connection string**
+
+1. In the Supabase project dashboard, open **Project Settings → Database** and copy the URI (direct or pooler—use the string Supabase gives you for your client type).
+2. Append TLS if it is not already present:
+
+```python
+import os
+
+url = os.environ["DATABASE_URL"]
+if "sslmode=" not in url:
+    sep = "&" if "?" in url else "?"
+    url = f"{url}{sep}sslmode=require"
+
+await ferro.connect(url)
+```
+
+Supabase’s pooler hostname often looks like `*.pooler.supabase.com`; the database name is usually `postgres`, and the username may include the project ref (for example `postgres.<project_ref>`). Prefer the **exact** URI from the dashboard so host, port, and user stay correct when Supabase changes defaults.
+
+**Secrets and shells**
+
+- Load the URI from an environment variable or secret manager—never commit it to git.
+- Passwords can contain characters that shells treat specially (for example `$`). In POSIX shells, wrap the value in **single quotes** when exporting, or put the URL in a `.env` file read by your app instead of the shell.
+
+**Password characters in the URL**
+
+If you assemble the URI yourself, percent-encode reserved characters in the password (for example `%24` for `$`, `%5E` for `^`) per [RFC 3986](https://datatracker.ietf.org/doc/html/rfc3986#section-2.1) userinfo rules. Many drivers accept unencoded passwords until one character breaks parsing; encoding avoids surprises.
 
 ### MySQL
 
@@ -103,6 +135,7 @@ async def main():
     `check_connection()` is not yet available. See [Coming Soon](../coming-soon.md#check_connection) for workarounds.
 
 **Workaround:**
+
 ```python
 # Attempt a simple query to verify connectivity
 try:
@@ -241,6 +274,16 @@ await ferro.connect("postgresql://correct_user:correct_pass@localhost/dbname")
 # PostgreSQL: createdb dbname
 # Or use SQLite which auto-creates
 ```
+
+### TLS / SSL errors (PostgreSQL, Supabase)
+
+```text
+# Error: TLS upgrade required ... SQLx was built without TLS support
+```
+
+Ferro’s default build enables PostgreSQL TLS via SQLx (`tls-rustls-ring-webpki` in `Cargo.toml`). If you see the message above, you are using an extension built **without** that feature (for example a stripped-down local `cargo build`). Reinstall the published wheel or rebuild from this repo’s `Cargo.toml` without removing TLS features.
+
+If the server requires TLS but the URL omits it, add `?sslmode=require` (or `&sslmode=require` after other query parameters) as shown in the Supabase subsection above.
 
 ### Pool Exhaustion
 
