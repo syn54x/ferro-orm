@@ -280,29 +280,3 @@ pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
     });
     json_type == Some("string") && format == Some("uuid")
 }
-
-fn property_schema_format(col_info: &Value) -> Option<&str> {
-    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let s = t.get("type")?.as_str()?;
-                    if s == "null" {
-                        None
-                    } else {
-                        t.get("format").and_then(|f| f.as_str())
-                    }
-                })
-            })
-    })
-}
-
-fn property_schema_is_decimal(col_info: &Value) -> bool {
-    col_info
-        .get("anyOf")
-        .and_then(|a| a.as_array())
-        .map(|items| items.iter().any(|item| item.get("pattern").is_some()))
-        .unwrap_or(false)
-}

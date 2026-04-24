@@ -62,7 +62,6 @@ pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Boun
     })?;
 
     sqlx::any::install_default_drivers();
-    let (connection_url, search_path) = split_search_path(&url);
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         if let Some(ref search_path) = search_path

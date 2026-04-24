@@ -136,19 +136,6 @@ pub fn json_type_to_sea_query(col_def: &mut ColumnDef, json_type: &str) {
     }
 }
 
-fn schema_format(col_info: &serde_json::Value) -> Option<&str> {
-    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|variants| {
-                variants
-                    .iter()
-                    .find_map(|variant| variant.get("format").and_then(|f| f.as_str()))
-            })
-    })
-}
-
 /// Unique index name for `ferro_composite_uniques`; matches Python Alembic `_build_sa_table`.
 fn composite_unique_index_name(table_lower: &str, col_names: &[&str]) -> String {
     let joined = col_names.join("_");
@@ -199,59 +186,6 @@ fn append_composite_unique_index_sqls(
         };
         index_sqls.push(sql);
     }
-}
-
-fn schema_dependencies(schema: &serde_json::Value) -> HashSet<String> {
-    schema
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .map(|properties| {
-            properties
-                .values()
-                .filter_map(|col_info| {
-                    col_info
-                        .get("foreign_key")
-                        .and_then(|fk| fk.get("to_table"))
-                        .and_then(|t| t.as_str())
-                        .map(|name| name.to_lowercase())
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn order_schemas_for_creation(
-    schemas: std::collections::HashMap<String, serde_json::Value>,
-) -> Vec<(String, serde_json::Value)> {
-    let mut remaining: Vec<(String, serde_json::Value)> = schemas.into_iter().collect();
-    let mut created = HashSet::new();
-    let mut ordered = Vec::new();
-
-    while !remaining.is_empty() {
-        let mut progressed = false;
-        let mut deferred = Vec::new();
-
-        for (name, schema) in remaining {
-            let deps = schema_dependencies(&schema);
-            if deps.iter().all(|dep| dep == &name.to_lowercase() || created.contains(dep)) {
-                created.insert(name.to_lowercase());
-                ordered.push((name, schema));
-                progressed = true;
-            } else {
-                deferred.push((name, schema));
-            }
-        }
-
-        if !progressed {
-            deferred.sort_by(|(left, _), (right, _)| left.cmp(right));
-            ordered.extend(deferred);
-            break;
-        }
-
-        remaining = deferred;
-    }
-
-    ordered
 }
 
 /// Internal utility to create all registered tables in the database.
