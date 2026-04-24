@@ -19,6 +19,7 @@ from ferro.migrations import get_metadata
 
 pytestmark = pytest.mark.backend_matrix
 
+
 def _expected_uq_constraint_name(table_name: str, col_ids: list[str]) -> str:
     """Match Alembic `_build_sa_table` naming (63-char cap)."""
     raw = f"uq_{table_name}_{'_'.join(col_ids)}"

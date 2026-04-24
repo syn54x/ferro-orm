@@ -353,10 +353,7 @@ class ModelMetaclass(type(BaseModel)):
             RuntimeError: If schema generation or registration fails
         """
         try:
-            try:
-                schema = build_model_schema(cls)
-            except Exception:
-                schema = None
+            schema = build_model_schema(cls)
 
             if schema:
                 setattr(cls, "__ferro_schema__", schema)
