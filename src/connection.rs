@@ -4,7 +4,7 @@
 //! and engine resets.
 
 use crate::schema::internal_create_tables;
-use crate::state::{ENGINE, IDENTITY_MAP};
+use crate::state::{set_sql_dialect, ENGINE, IDENTITY_MAP, SqlDialect};
 use pyo3::prelude::*;
 use sqlx::any::AnyPoolOptions;
 use std::sync::Arc;
@@ -26,6 +26,12 @@ pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Boun
     sqlx::any::install_default_drivers();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let dialect = if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+            SqlDialect::Postgres
+        } else {
+            SqlDialect::Sqlite
+        };
+
         let pool = AnyPoolOptions::new()
             .max_connections(5)
             .connect(&url)
@@ -33,6 +39,8 @@ pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Boun
             .map_err(|e| {
                 pyo3::exceptions::PyConnectionError::new_err(format!("DB Connection failed: {}", e))
             })?;
+
+        set_sql_dialect(dialect);
 
         let arc_pool = Arc::new(pool);
 
@@ -63,6 +71,7 @@ pub fn reset_engine() -> PyResult<()> {
         .write()
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Engine"))?;
     *engine = None;
+    set_sql_dialect(SqlDialect::Sqlite);
     IDENTITY_MAP.clear();
     Ok(())
 }

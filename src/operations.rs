@@ -7,8 +7,8 @@ use crate::query::QueryDef;
 use crate::state::{ENGINE, IDENTITY_MAP, MODEL_REGISTRY, RustValue, TRANSACTION_REGISTRY};
 use pyo3::prelude::*;
 use sea_query::{
-    Alias, Expr, Iden, InsertStatement, OnConflict, Order, Query, SqliteQueryBuilder,
-    UpdateStatement, Value as SeaValue,
+    Alias, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query,
+    SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
 use sqlx::{Column, Row};
 use std::collections::HashMap;
@@ -26,6 +26,25 @@ macro_rules! get_conn {
             }
         } else {
             None
+        }
+    }};
+}
+
+/// Build SQL with the dialect set at `connect()` time (`?` for SQLite, `$n` for Postgres).
+macro_rules! sea_query_build {
+    ($stmt:expr) => {{
+        match crate::state::sql_dialect() {
+            crate::state::SqlDialect::Sqlite => $stmt.build(SqliteQueryBuilder),
+            crate::state::SqlDialect::Postgres => $stmt.build(PostgresQueryBuilder),
+        }
+    }};
+}
+
+macro_rules! sea_query_to_string {
+    ($stmt:expr) => {{
+        match crate::state::sql_dialect() {
+            crate::state::SqlDialect::Sqlite => $stmt.to_string(SqliteQueryBuilder),
+            crate::state::SqlDialect::Postgres => $stmt.to_string(PostgresQueryBuilder),
         }
     }};
 }
@@ -259,10 +278,9 @@ pub fn fetch_all<'py>(
                     }
                 }
             }
-            let s = Query::select()
+            let s = sea_query_to_string!(Query::select()
                 .column(sea_query::Asterisk)
-                .from(Alias::new(&table_name))
-                .to_string(SqliteQueryBuilder);
+                .from(Alias::new(&table_name)));
             (s, pk)
         };
 
@@ -410,11 +428,10 @@ pub fn fetch_one<'py>(
             }
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
-            let (s, values) = Query::select()
+            let (s, values) = sea_query_build!(Query::select()
                 .column(sea_query::Asterisk)
                 .from(Alias::new(&table_name))
-                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val.clone()))
-                .build(SqliteQueryBuilder);
+                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val.clone())));
             (s, values, pk_name)
         };
 
@@ -587,7 +604,7 @@ pub fn save_record(
                     insert_stmt.on_conflict(on_conflict);
                 }
             }
-            insert_stmt.build(SqliteQueryBuilder)
+            sea_query_build!(insert_stmt)
         };
 
         let query = bind_query(sqlx::query(&sql), &bind_values.0);
@@ -761,7 +778,7 @@ pub fn save_bulk_records(
                 })?;
             }
 
-            let (s, values) = insert_stmt.build(SqliteQueryBuilder);
+            let (s, values) = sea_query_build!(insert_stmt);
             (s, values)
         };
 
@@ -875,7 +892,7 @@ pub fn fetch_filtered<'py>(
             if let Some(offset) = query_def.offset {
                 select.offset(offset);
             }
-            let (s, values) = select.build(SqliteQueryBuilder);
+            let (s, values) = sea_query_build!(select);
             (s, values, pk)
         };
 
@@ -1031,7 +1048,7 @@ pub fn count_filtered(
             }
 
             select.cond_where(query_def.to_condition());
-            select.build(SqliteQueryBuilder)
+            sea_query_build!(select)
         };
 
         let query = bind_query(sqlx::query(&sql), &bind_values.0);
@@ -1105,10 +1122,9 @@ pub fn delete_record(
             }
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
-            let (s, values) = Query::delete()
+            let (s, values) = sea_query_build!(Query::delete()
                 .from_table(Alias::new(&table_name))
-                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val))
-                .build(SqliteQueryBuilder);
+                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val)));
             (s, values)
         };
 
@@ -1155,7 +1171,7 @@ pub fn delete_filtered(
             delete
                 .from_table(Alias::new(&table_name))
                 .cond_where(query_def.to_condition());
-            delete.build(SqliteQueryBuilder)
+            sea_query_build!(delete)
         };
 
         let query = bind_query(sqlx::query(&sql), &bind_values.0);
@@ -1233,7 +1249,7 @@ pub fn update_filtered(
                 };
                 update.value(Alias::new(key), Expr::value(val));
             }
-            update.build(SqliteQueryBuilder)
+            sea_query_build!(update)
         };
 
         let query = bind_query(sqlx::query(&sql), &bind_values.0);
@@ -1280,7 +1296,7 @@ pub fn add_m2m_links<'py>(
                 .values(vec![Expr::value(s_id.clone()), Expr::value(t_id)])
                 .unwrap();
         }
-        insert.build(SqliteQueryBuilder)
+        sea_query_build!(insert)
     };
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1325,11 +1341,10 @@ pub fn remove_m2m_links<'py>(
         .map(|id| python_to_sea_value(id))
         .collect::<PyResult<Vec<_>>>()?;
 
-    let (sql, bind_values) = Query::delete()
+    let (sql, bind_values) = sea_query_build!(Query::delete()
         .from_table(Alias::new(&join_table))
         .and_where(Expr::col(Alias::new(&source_col)).eq(s_id))
-        .and_where(Expr::col(Alias::new(&target_col)).is_in(t_ids))
-        .build(SqliteQueryBuilder);
+        .and_where(Expr::col(Alias::new(&target_col)).is_in(t_ids)));
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {
@@ -1367,10 +1382,9 @@ pub fn clear_m2m_links<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
 
-    let (sql, bind_values) = Query::delete()
+    let (sql, bind_values) = sea_query_build!(Query::delete()
         .from_table(Alias::new(&join_table))
-        .and_where(Expr::col(Alias::new(&source_col)).eq(s_id))
-        .build(SqliteQueryBuilder);
+        .and_where(Expr::col(Alias::new(&source_col)).eq(s_id)));
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (pool, tx_conn) = {

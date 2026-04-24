@@ -3,9 +3,12 @@
 //! This module handles converting Pydantic JSON schemas into Sea-Query
 //! table definitions and managing the model registry.
 
-use crate::state::{ENGINE, MODEL_REGISTRY};
+use crate::state::{sql_dialect, ENGINE, MODEL_REGISTRY, SqlDialect};
 use pyo3::prelude::*;
-use sea_query::{Alias, ColumnDef, ForeignKey, ForeignKeyAction, Index, SqliteQueryBuilder, Table};
+use sea_query::{
+    Alias, ColumnDef, ForeignKey, ForeignKeyAction, Index, PostgresQueryBuilder, SqliteQueryBuilder,
+    Table,
+};
 use sqlx::{Any, Pool};
 use std::sync::Arc;
 
@@ -78,7 +81,11 @@ fn append_composite_unique_index_sqls(
         for c in &cols {
             stmt.col(Alias::new(*c));
         }
-        index_sqls.push(stmt.to_string(SqliteQueryBuilder));
+        let sql = match sql_dialect() {
+            SqlDialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
+            SqlDialect::Postgres => stmt.to_string(PostgresQueryBuilder),
+        };
+        index_sqls.push(sql);
     }
 }
 
@@ -180,12 +187,16 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
                         .unwrap_or(false)
                     {
                         let index_name = format!("idx_{}_{}", table_lower, col_name);
-                        let index_sql = Index::create()
+                        let index_stmt = Index::create()
                             .name(&index_name)
                             .table(Alias::new(&table_lower))
                             .col(Alias::new(col_name))
                             .if_not_exists()
-                            .to_string(SqliteQueryBuilder);
+                            .to_owned();
+                        let index_sql = match sql_dialect() {
+                            SqlDialect::Sqlite => index_stmt.to_string(SqliteQueryBuilder),
+                            SqlDialect::Postgres => index_stmt.to_string(PostgresQueryBuilder),
+                        };
                         index_sqls.push(index_sql);
                     }
 
@@ -224,7 +235,11 @@ pub async fn internal_create_tables(pool: Arc<Pool<Any>>) -> PyResult<()> {
 
             append_composite_unique_index_sqls(&table_lower, &schema, &mut index_sqls);
 
-            (table_stmt.build(SqliteQueryBuilder), index_sqls)
+            let table_sql = match sql_dialect() {
+                SqlDialect::Sqlite => table_stmt.build(SqliteQueryBuilder),
+                SqlDialect::Postgres => table_stmt.build(PostgresQueryBuilder),
+            };
+            (table_sql, index_sqls)
         };
 
         sqlx::query(&sql).execute(&mut *conn).await.map_err(|e| {

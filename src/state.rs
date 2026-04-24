@@ -12,6 +12,26 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
+/// SQL dialect for SeaQuery / placeholder style (`?` vs `$1`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SqlDialect {
+    #[default]
+    Sqlite,
+    Postgres,
+}
+
+static SQL_DIALECT: Lazy<RwLock<SqlDialect>> = Lazy::new(|| RwLock::new(SqlDialect::default()));
+
+/// Returns the dialect selected at [`crate::connection::connect`] time.
+#[inline]
+pub fn sql_dialect() -> SqlDialect {
+    *SQL_DIALECT.read().unwrap()
+}
+
+pub(crate) fn set_sql_dialect(dialect: SqlDialect) {
+    *SQL_DIALECT.write().unwrap() = dialect;
+}
+
 /// Global registry mapping model names to their Pydantic-generated JSON schemas.
 pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, serde_json::Value>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
