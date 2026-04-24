@@ -71,7 +71,7 @@ permissions:
   - Add labels or comments to PRs
 
 **What It Does:**
-- After CI and packaging smoke, **preflight** builds all release wheels at the workflow SHA (same matrix as post-release wheel builds). If any platform fails, the Create Release job does not run.
+- **Preflight** builds all release wheels at the workflow SHA (same matrix as post-release wheel builds), in parallel with the CI gate and packaging smoke jobs. If any platform fails, the Create Release job does not run.
 - Analyzes conventional commits
 - Determines next version
 - Updates version in both Python and Rust files
@@ -89,7 +89,7 @@ permissions:
 
 ### 2. Build & Publish (jobs in `release.yml`)
 
-**Trigger:** Part of `release.yml` after the Create Release job (no reusable workflow). Wheel preflight runs earlier in the same workflow, before that job.
+**Trigger:** Part of `release.yml` after the Create Release job (no reusable workflow). Wheel preflight runs in parallel with CI and packaging smoke, before that job.
 
 Build, test, and publish jobs are defined directly in `release.yml` so PyPI Trusted Publishing receives a token with `workflow_ref: release.yml` (reusable workflows are not supported by PyPI).
 

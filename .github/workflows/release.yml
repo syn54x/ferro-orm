@@ -14,20 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci-gate:
-    name: CI Gate
-    uses: ./.github/workflows/ci.yml
-
-  packaging-smoke:
-    name: Packaging Smoke Gate
-    uses: ./.github/workflows/packaging-smoke.yml
-
   # Same maturin targets as build-wheels, but against the current ref *before*
-  # semantic-release mutates the repo. Catches cross-compile / native build
-  # failures before any release commit, tag, or push.
+  # semantic-release mutates the repo. Runs in parallel with CI gate and
+  # packaging smoke so the wall-clock pipeline stays shorter.
   preflight-build-wheels:
     name: Preflight build wheels (${{ matrix.platform.name }})
-    needs: [ci-gate, packaging-smoke]
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
@@ -72,6 +63,14 @@ jobs:
           args: --release --out dist --find-interpreter
           manylinux: ${{ matrix.platform.manylinux }}
           sccache: 'true'
+
+  ci-gate:
+    name: CI Gate
+    uses: ./.github/workflows/ci.yml
+
+  packaging-smoke:
+    name: Packaging Smoke Gate
+    uses: ./.github/workflows/packaging-smoke.yml
 
   release:
     name: Create Release
