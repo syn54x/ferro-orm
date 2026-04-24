@@ -22,9 +22,60 @@ jobs:
     name: Packaging Smoke Gate
     uses: ./.github/workflows/packaging-smoke.yml
 
+  # Same maturin targets as build-wheels, but against the current ref *before*
+  # semantic-release mutates the repo. Catches cross-compile / native build
+  # failures before any release commit, tag, or push.
+  preflight-build-wheels:
+    name: Preflight build wheels (${{ matrix.platform.name }})
+    needs: [ci-gate, packaging-smoke]
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64
+            manylinux: auto
+          - name: linux-aarch64
+            runner: ubuntu-latest
+            target: aarch64
+            manylinux: auto
+          - name: macos-aarch64
+            runner: macos-latest
+            target: aarch64
+            manylinux: ''
+          - name: windows-x64
+            runner: windows-latest
+            target: x64
+            manylinux: ''
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build wheels (preflight)
+        uses: PyO3/maturin-action@v1.48.0
+        env:
+          # ring (via rustls/sqlx): manylinux2014-cross gcc does not define __ARM_ARCH for .S asm.
+          # https://github.com/briansmith/ring/issues/1728
+          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.platform.name == 'linux-aarch64' && '-D__ARM_ARCH=8' || '' }}
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          manylinux: ${{ matrix.platform.manylinux }}
+          sccache: 'true'
+
   release:
     name: Create Release
-    needs: [ci-gate, packaging-smoke]
+    needs: [ci-gate, packaging-smoke, preflight-build-wheels]
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.verify_release.outputs.release_created }}
