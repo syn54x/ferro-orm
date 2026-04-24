@@ -37,7 +37,7 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "postgres_only: run this test only against Postgres/Supabase.",
+        "postgres_only: run this test only against Postgres.",
     )
 
 
@@ -93,6 +93,7 @@ def _connect_postgres_admin(base_url: str):
 
 def _create_postgres_schema(base_url: str, schema_name: str) -> None:
     with _connect_postgres_admin(base_url) as conn:
+        conn.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
         conn.execute(f'CREATE SCHEMA "{schema_name}"')
 
 
@@ -162,6 +163,12 @@ def db_backend(db_url: str) -> str:
     if db_url.startswith("postgres://") or db_url.startswith("postgresql://"):
         return "postgres"
     return "sqlite"
+
+
+@pytest.fixture(scope="function")
+async def db_engine():
+    """Compatibility fixture for older tests that only need a SQLite URL."""
+    yield "sqlite::memory:"
 
 
 @pytest.fixture(autouse=True)

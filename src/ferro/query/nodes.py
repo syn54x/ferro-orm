@@ -99,16 +99,10 @@ class QueryNode:
             True
         """
         if not self.is_compound:
-            val = self.value
-            if hasattr(val, "isoformat"):
-                val = val.isoformat()
-            elif isinstance(val, (Decimal, uuid.UUID)):
-                val = str(val)
-
             return {
                 "column": self.column,
                 "operator": self.operator,
-                "value": val,
+                "value": _serialize_query_value(self.value),
                 "is_compound": False,
             }
         return {
@@ -125,6 +119,19 @@ class QueryNode:
         return (
             f"QueryNode(left={self.left!r}, op={self.operator!r}, right={self.right!r})"
         )
+
+
+def _serialize_query_value(value: Any) -> Any:
+    """Normalize Python values into JSON-friendly query payloads."""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, (Decimal, uuid.UUID)):
+        return str(value)
+    if isinstance(value, (list, tuple, set)):
+        return [_serialize_query_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _serialize_query_value(item) for key, item in value.items()}
+    return value
 
 
 class FieldProxy:

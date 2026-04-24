@@ -546,6 +546,7 @@ ci-lint = [
 ]
 ci-test = [
     { name = "maturin" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -593,6 +594,7 @@ provides-extras = ["alembic"]
 ci-lint = [{ name = "prek", specifier = ">=0.2.25" }]
 ci-test = [
     { name = "maturin", specifier = ">=1.11.5" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.3" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },

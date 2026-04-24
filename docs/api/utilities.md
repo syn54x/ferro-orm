@@ -17,24 +17,19 @@ await connect("sqlite:example.db?mode=rwc")
 # PostgreSQL
 await connect("postgresql://user:password@localhost/dbname")
 
-# With options
-await connect(
-    "postgresql://localhost/dbname",
-    max_connections=20,
-    auto_migrate=True  # Development only
-)
+# Auto-migrate during development
+await connect("postgresql://localhost/dbname", auto_migrate=True)
 ```
 
 See [Database Setup Guide](../guide/database.md) for complete connection options.
 
 ### disconnect()
 
-Close the database connection.
+This function is not implemented yet.
 
 ```python
-from ferro import disconnect
-
-await disconnect()
+# Current pattern: connect once during startup
+await connect("sqlite:example.db?mode=rwc")
 ```
 
 ### create_tables()

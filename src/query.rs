@@ -137,6 +137,12 @@ impl QueryDef {
                         .cast_as("numeric");
                 }
             }
+
+            if model_column_is_decimal(&self.model_name, col_name)
+                && let Ok(parsed) = s.parse::<f64>()
+            {
+                return Expr::value(sea_query::Value::Double(Some(parsed)));
+            }
         }
         Expr::value(json_to_sea_value(val))
     }
@@ -168,6 +174,22 @@ fn model_column_is_uuid(model_name: &str, col: &str) -> bool {
         return false;
     };
     column_is_uuid_property(schema, col)
+}
+
+fn model_column_is_decimal(model_name: &str, col: &str) -> bool {
+    let Ok(registry) = MODEL_REGISTRY.read() else {
+        return false;
+    };
+    let Some(schema) = registry.get(model_name) else {
+        return false;
+    };
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return false;
+    };
+    let Some(col_info) = props.get(col) else {
+        return false;
+    };
+    property_schema_is_decimal(col_info)
 }
 
 fn column_is_uuid_property(schema: &Value, col: &str) -> bool {
@@ -227,34 +249,10 @@ pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
     json_type == Some("string") && format == Some("uuid")
 }
 
-fn model_column_format(model_name: &str, col: &str) -> Option<String> {
-    let Ok(registry) = MODEL_REGISTRY.read() else {
-        return None;
-    };
-    let Some(schema) = registry.get(model_name) else {
-        return None;
-    };
-    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
-        return None;
-    };
-    let Some(col_info) = props.get(col) else {
-        return None;
-    };
-    property_schema_format(col_info).map(str::to_string)
-}
-
-fn model_column_is_decimal(model_name: &str, col: &str) -> bool {
-    let Ok(registry) = MODEL_REGISTRY.read() else {
-        return false;
-    };
-    let Some(schema) = registry.get(model_name) else {
-        return false;
-    };
-    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
-        return false;
-    };
-    let Some(col_info) = props.get(col) else {
-        return false;
-    };
-    property_schema_is_decimal(col_info)
+fn property_schema_is_decimal(col_info: &Value) -> bool {
+    col_info
+        .get("anyOf")
+        .and_then(|a| a.as_array())
+        .map(|items| items.iter().any(|item| item.get("pattern").is_some()))
+        .unwrap_or(false)
 }

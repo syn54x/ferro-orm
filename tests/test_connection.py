@@ -22,6 +22,15 @@ async def test_invalid_connection_string():
 
 
 @pytest.mark.asyncio
+async def test_unsupported_database_scheme_is_rejected_before_connect_attempt():
+    """Unsupported schemes should fail classification before any DB driver connect attempt."""
+    with pytest.raises(Exception) as excinfo:
+        await ferro.connect("mysql://user:pass@localhost/db")
+
+    assert "Unsupported database URL scheme" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
 @pytest.mark.postgres_only
 async def test_postgres_connection(db_url):
     """Test connecting to the configured Postgres backend."""

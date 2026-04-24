@@ -15,7 +15,7 @@ async def main():
 
 ## Connection Strings
 
-Ferro supports SQLite, PostgreSQL, and MySQL. The connection string format follows standard URL patterns:
+Ferro currently supports SQLite and PostgreSQL. The connection string format follows standard URL patterns:
 
 ### SQLite
 
@@ -45,10 +45,10 @@ await ferro.connect("postgresql://user:password@localhost:5432/dbname")
 # With SSL
 await ferro.connect("postgresql://user:password@localhost:5432/dbname?sslmode=require")
 
-# Connection pooling (custom pool size)
+# Development connection with auto-migrate
 await ferro.connect(
     "postgresql://user:password@localhost:5432/dbname",
-    max_connections=20
+    auto_migrate=True,
 )
 ```
 
@@ -82,16 +82,6 @@ Supabase’s pooler hostname often looks like `*.pooler.supabase.com`; the datab
 **Password characters in the URL**
 
 If you assemble the URI yourself, percent-encode reserved characters in the password (for example `%24` for `$`, `%5E` for `^`) per [RFC 3986](https://datatracker.ietf.org/doc/html/rfc3986#section-2.1) userinfo rules. Many drivers accept unencoded passwords until one character breaks parsing; encoding avoids surprises.
-
-### MySQL
-
-```python
-# Basic connection
-await ferro.connect("mysql://user:password@localhost:3306/dbname")
-
-# With charset
-await ferro.connect("mysql://user:password@localhost:3306/dbname?charset=utf8mb4")
-```
 
 ## Connection Options
 
@@ -166,8 +156,7 @@ DATABASE_URL = os.getenv(
 async def init_db():
     await connect(
         DATABASE_URL,
-        max_connections=int(os.getenv("DB_POOL_SIZE", "10")),
-        connect_timeout=int(os.getenv("DB_TIMEOUT", "30"))
+        auto_migrate=os.getenv("ENV") != "production"
     )
 ```
 
@@ -207,12 +196,12 @@ async def on_shutdown():
 !!! note "disconnect() Not Available"
     The `disconnect()` function is not yet implemented. Connection cleanup happens automatically on process exit. See [Coming Soon](../coming-soon.md#disconnect) for more information.
 
-### Use Connection Pooling
+### Use One Long-Lived Connection
 
 !!! note
-    Advanced connection pool parameters may not be fully supported. See [Coming Soon](../coming-soon.md#connection-pool-configuration).
+    Advanced pool configuration such as `max_connections`, `min_connections`, and `connect_timeout` is not exposed by Ferro's current Python API. See [Coming Soon](../coming-soon.md#connection-pool-configuration).
 
-For web applications with basic connection support:
+For web applications, connect once at startup and reuse that engine:
 
 ```python
 # Basic connection for production
@@ -225,10 +214,7 @@ await ferro.connect("postgresql://localhost/proddb")
 import os
 
 if os.getenv("ENV") == "production":
-    await ferro.connect(
-        "postgresql://prodhost/proddb",
-        max_connections=50
-    )
+    await ferro.connect("postgresql://prodhost/proddb")
 else:
     await ferro.connect(
         "sqlite:dev.db?mode=rwc",
@@ -255,7 +241,6 @@ except Exception as e:
 # Error: Connection refused at localhost:5432
 # Solution: Check database is running
 # PostgreSQL: sudo service postgresql start
-# MySQL: sudo service mysql start
 ```
 
 ### Authentication Failed
@@ -285,21 +270,14 @@ Ferro’s default build enables PostgreSQL TLS via SQLx (`tls-rustls-ring-webpki
 
 If the server requires TLS but the URL omits it, add `?sslmode=require` (or `&sslmode=require` after other query parameters) as shown in the Supabase subsection above.
 
-### Pool Exhaustion
+### Unsupported connect() kwargs
 
 ```python
-# Error: Too many connections
-# Solution: Increase max_connections or fix connection leaks
-await ferro.connect(
-    "postgresql://localhost/dbname",
-    max_connections=100  # Increase pool size
-)
-
-# Also ensure connections are released:
-# - Use context managers (async with)
-# - Close connections after use
-# - Fix stuck transactions
+# Example of kwargs Ferro does not currently accept:
+# await ferro.connect("postgresql://localhost/dbname", max_connections=100)
 ```
+
+If you need custom pool sizing or timeout controls today, Ferro does not expose them yet through `connect()`.
 
 ## See Also
 

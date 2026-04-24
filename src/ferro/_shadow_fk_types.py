@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import types
 from typing import Annotated, Any, Union, get_args, get_origin
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -54,6 +55,35 @@ def shadow_annotation_for_pk(pk_ann: Any) -> Any:
         if type(None) in args:
             return pk_ann
     return pk_ann | None
+
+
+def schema_fragment_for_pk(pk_ann: Any) -> dict[str, Any]:
+    """JSON-schema fragment for a primary-key scalar annotation."""
+    if pk_ann is None:
+        return {"type": "string"}
+
+    pk_ann = _scalar_part_of_annotation(pk_ann)
+    origin = get_origin(pk_ann)
+    args = get_args(pk_ann)
+    if origin is Union or origin is types.UnionType:
+        non_none = [arg for arg in args if arg is not type(None)]
+        if len(non_none) == 1:
+            pk_ann = _scalar_part_of_annotation(non_none[0])
+
+    if pk_ann is int:
+        return {"type": "integer"}
+    if pk_ann is str:
+        return {"type": "string"}
+    if pk_ann is UUID:
+        return {"type": "string", "format": "uuid"}
+    if pk_ann is float:
+        return {"type": "number"}
+    if pk_ann is bool:
+        return {"type": "boolean"}
+    if pk_ann is bytes:
+        return {"type": "string", "format": "binary"}
+
+    return {"type": "string"}
 
 
 def shadow_annotation_for_foreign_key(metadata: Any) -> Any:

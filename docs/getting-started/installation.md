@@ -4,7 +4,7 @@
 
 - Python 3.10 or higher
 - Supported platforms: macOS, Linux, Windows
-- Database: SQLite, PostgreSQL, or MySQL
+- Database: SQLite or PostgreSQL
 
 ## Install Ferro
 
@@ -30,7 +30,7 @@ This installs Alembic and SQLAlchemy (used only for migration generation, not at
 
 ## Database Drivers
 
-Ferro uses SQLx under the hood, which includes drivers for all supported databases. No additional database-specific packages are required.
+Ferro uses SQLx under the hood. SQLite and PostgreSQL support are built into Ferro's published packages, so no additional database-specific packages are required for those backends.
 
 ### SQLite
 
@@ -40,10 +40,6 @@ No additional setup needed. SQLite is embedded in Ferro.
 
 No additional setup needed. PostgreSQL support is built into Ferro.
 
-### MySQL
-
-No additional setup needed. MySQL/MariaDB support is built into Ferro.
-
 
 ## Optional Dependencies
 
@@ -52,10 +48,10 @@ No additional setup needed. MySQL/MariaDB support is built into Ferro.
 For running tests and linting:
 
 ```bash
-pip install "ferro-orm[dev]"
+uv sync --group dev
 ```
 
-This includes pytest, ruff, mypy, and other development tools.
+This workspace group includes pytest, maturin, docs tooling, and other development dependencies used in this repository.
 
 ## Building from Source
 

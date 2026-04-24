@@ -199,6 +199,7 @@ def test_override_field_nullable_false_on_optional_type():
 
     t = get_metadata().tables["row"]
     assert t.c.field_a.nullable is False
+    assert Row.__ferro_schema__["properties"]["field_a"]["ferro_nullable"] is False
 
 
 def test_override_ferrofield_nullable_true_on_required_type():

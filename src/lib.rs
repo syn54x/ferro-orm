@@ -4,6 +4,7 @@
 //! database connectivity, schema management, and high-speed object
 //! hydration using PyO3 and SQLx.
 
+mod backend;
 mod connection;
 mod operations;
 mod query;

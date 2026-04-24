@@ -137,14 +137,11 @@ for post in posts:
 posts = await Post.select().prefetch_related("author").all()
 ```
 
-### 6. Use Connection Pooling
+### 6. Reuse a Long-Lived Connection
 
 ```python
-await ferro.connect(
-    "postgresql://localhost/db",
-    max_connections=50,  # Tune for your load
-    min_connections=10
-)
+# Current API: connect once during startup and reuse it.
+await ferro.connect("postgresql://localhost/db")
 ```
 
 ### 7. Keep Transactions Short

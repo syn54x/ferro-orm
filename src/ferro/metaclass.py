@@ -17,10 +17,10 @@ from pydantic.fields import FieldInfo
 from ._core import register_model_schema
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyField
-from .composite_uniques import apply_composite_uniques_to_schema
 from .fields import FERRO_FIELD_EXTRA_KEY
 from .query import BackRef, FieldProxy
 from .relations.descriptors import ForwardDescriptor
+from .schema_metadata import build_model_schema
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
 
@@ -354,54 +354,11 @@ class ModelMetaclass(type(BaseModel)):
         """
         try:
             try:
-                schema = cls.model_json_schema()
+                schema = build_model_schema(cls)
             except Exception:
                 schema = None
 
             if schema:
-                if "properties" in schema:
-                    for f_name, metadata in ferro_fields.items():
-                        if f_name in schema["properties"]:
-                            schema["properties"][f_name]["primary_key"] = (
-                                metadata.primary_key
-                            )
-                            prop = schema["properties"][f_name]
-                            is_int = prop.get("type") == "integer" or any(
-                                item.get("type") == "integer"
-                                for item in prop.get("anyOf", [])
-                            )
-                            auto = metadata.autoincrement
-                            if auto is None:
-                                auto = metadata.primary_key and is_int
-                            metadata.autoincrement = auto
-                            schema["properties"][f_name]["autoincrement"] = auto
-                            schema["properties"][f_name]["unique"] = metadata.unique
-                            schema["properties"][f_name]["index"] = metadata.index
-
-                    for f_name, metadata in local_relations.items():
-                        if isinstance(metadata, ForeignKey):
-                            id_field = f"{f_name}_id"
-                            if id_field in schema["properties"]:
-                                target_name = (
-                                    metadata.to
-                                    if isinstance(metadata.to, str)
-                                    else (
-                                        metadata.to.__name__
-                                        if hasattr(metadata.to, "__name__")
-                                        else str(metadata.to)
-                                    )
-                                )
-                                if isinstance(metadata.to, ForwardRef):
-                                    target_name = metadata.to.__forward_arg__
-
-                                schema["properties"][id_field]["foreign_key"] = {
-                                    "to_table": target_name.lower(),
-                                    "on_delete": metadata.on_delete,
-                                    "unique": metadata.unique,
-                                }
-
-                    apply_composite_uniques_to_schema(cls, schema)
-
                 setattr(cls, "__ferro_schema__", schema)
                 register_model_schema(name, json.dumps(schema))
         except Exception as e:
