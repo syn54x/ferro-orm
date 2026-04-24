@@ -118,3 +118,41 @@ async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_ur
     assert columns["uuidmovie_id"][2].upper() in {"UUID", "UUID_TEXT", "TEXT", "CHAR", "VARCHAR"}
     assert columns["uuidactor_id"][3] == 1
     assert columns["uuidmovie_id"][3] == 1
+
+
+@pytest.mark.asyncio
+async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
+    """UUID source PKs in M2M contexts should serialize for all query operations."""
+    from ferro import Field as FerroFieldFn
+    from ferro import clear_registry, connect, reset_engine
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    reset_engine()
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+    class UuidTag(Model):
+        id: UUID = FerroFieldFn(default_factory=uuid4, primary_key=True)
+        name: str = ""
+        posts: BackRef[list["UuidPost"]] | None = None
+
+    class UuidPost(Model):
+        id: UUID = FerroFieldFn(default_factory=uuid4, primary_key=True)
+        title: str = ""
+        tags: Annotated[list[UuidTag], ManyToManyField(related_name="posts")] = None
+
+    await connect(db_url, auto_migrate=True)
+
+    post = await UuidPost.create(title="Hello")
+    tag = await UuidTag.create(name="python")
+
+    await post.tags.add(tag)
+
+    linked = await post.tags.all()
+    assert [row.id for row in linked] == [tag.id]
+    assert await post.tags.count() == 1
+
+    await post.tags.remove(tag)
+    assert await post.tags.count() == 0

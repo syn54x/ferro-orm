@@ -12,11 +12,17 @@ from .._core import (
     remove_m2m_links,
     update_filtered,
 )
+from .nodes import _serialize_query_value
 
 if TYPE_CHECKING:
     from .nodes import QueryNode
 
 T = TypeVar("T")
+
+
+def _query_def_to_json(query_def: dict[str, Any]) -> str:
+    """Serialize query definitions while preserving typed values in live Query state."""
+    return json.dumps(_serialize_query_value(query_def))
 
 
 class Query(Generic[T]):
@@ -158,7 +164,7 @@ class Query(Generic[T]):
         from ..state import _CURRENT_TRANSACTION
 
         tx_id = _CURRENT_TRANSACTION.get()
-        results = await fetch_filtered(self.model_cls, json.dumps(query_def), tx_id)
+        results = await fetch_filtered(self.model_cls, _query_def_to_json(query_def), tx_id)
         for instance in results:
             if hasattr(self.model_cls, "_fix_types"):
                 self.model_cls._fix_types(instance)
@@ -184,7 +190,7 @@ class Query(Generic[T]):
 
         tx_id = _CURRENT_TRANSACTION.get()
         return await count_filtered(
-            self.model_cls.__name__, json.dumps(query_def), tx_id
+            self.model_cls.__name__, _query_def_to_json(query_def), tx_id
         )
 
     async def update(self, **fields) -> int:
@@ -215,7 +221,7 @@ class Query(Generic[T]):
         # Use pydantic_core.to_json to handle Decimals, UUIDs, etc. in kwargs
         return await update_filtered(
             self.model_cls.__name__,
-            json.dumps(query_def),
+            _query_def_to_json(query_def),
             to_json(fields).decode(),
             tx_id,
         )
@@ -260,7 +266,7 @@ class Query(Generic[T]):
 
         tx_id = _CURRENT_TRANSACTION.get()
         return await delete_filtered(
-            self.model_cls.__name__, json.dumps(query_def), tx_id
+            self.model_cls.__name__, _query_def_to_json(query_def), tx_id
         )
 
     async def exists(self) -> bool:

@@ -591,6 +591,20 @@ fn schema_value_expr(
     }
 }
 
+fn backend_column_value_expr(
+    col_name: &str,
+    value: sea_query::Value,
+    uuid_columns: &HashSet<String>,
+    backend: SqlDialect,
+) -> SimpleExpr {
+    let expr = Expr::value(value);
+    if backend == SqlDialect::Postgres && uuid_columns.contains(col_name) {
+        expr.cast_as("uuid")
+    } else {
+        expr
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (parent_tx_id=None))]
 pub fn begin_transaction(
@@ -1862,6 +1876,8 @@ pub fn add_m2m_links<'py>(
             });
             (engine, tx_conn, backend)
         };
+        let uuid_columns =
+            postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
 
         let (sql, bind_values) = {
             let mut insert = InsertStatement::new()
@@ -1871,7 +1887,15 @@ pub fn add_m2m_links<'py>(
 
             for t_id in t_ids {
                 insert
-                    .values(vec![Expr::value(s_id.clone()), Expr::value(t_id)])
+                    .values(vec![
+                        backend_column_value_expr(
+                            &source_col,
+                            s_id.clone(),
+                            &uuid_columns,
+                            backend,
+                        ),
+                        backend_column_value_expr(&target_col, t_id, &uuid_columns, backend),
+                    ])
                     .unwrap();
             }
             sea_query_build_for_backend!(insert, backend)
@@ -1915,12 +1939,30 @@ pub fn remove_m2m_links<'py>(
             });
             (engine, tx_conn, backend)
         };
+        let uuid_columns =
+            postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
 
         let (sql, bind_values) = sea_query_build_for_backend!(
             Query::delete()
                 .from_table(Alias::new(&join_table))
-                .and_where(Expr::col(Alias::new(&source_col)).eq(s_id))
-                .and_where(Expr::col(Alias::new(&target_col)).is_in(t_ids)),
+                .and_where(
+                    Expr::col(Alias::new(&source_col)).eq(backend_column_value_expr(
+                        &source_col,
+                        s_id,
+                        &uuid_columns,
+                        backend
+                    ))
+                )
+                .and_where(
+                    Expr::col(Alias::new(&target_col)).is_in(
+                        t_ids
+                            .into_iter()
+                            .map(|t_id| {
+                                backend_column_value_expr(&target_col, t_id, &uuid_columns, backend)
+                            })
+                            .collect::<Vec<_>>()
+                    )
+                ),
             backend
         );
 
@@ -1956,11 +1998,20 @@ pub fn clear_m2m_links<'py>(
             });
             (engine, tx_conn, backend)
         };
+        let uuid_columns =
+            postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
 
         let (sql, bind_values) = sea_query_build_for_backend!(
             Query::delete()
                 .from_table(Alias::new(&join_table))
-                .and_where(Expr::col(Alias::new(&source_col)).eq(s_id)),
+                .and_where(
+                    Expr::col(Alias::new(&source_col)).eq(backend_column_value_expr(
+                        &source_col,
+                        s_id,
+                        &uuid_columns,
+                        backend
+                    ))
+                ),
             backend
         );
 
