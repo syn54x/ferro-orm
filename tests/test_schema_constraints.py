@@ -14,7 +14,7 @@ from ferro import (
     reset_engine,
 )
 
-pytestmark = pytest.mark.sqlite_only
+pytestmark = pytest.mark.backend_matrix
 
 
 @pytest.fixture(autouse=True)
@@ -25,22 +25,16 @@ def cleanup():
 
 
 @pytest.mark.asyncio
-async def test_runtime_create_tables_respects_explicit_nullable_override():
+@pytest.mark.sqlite_only
+async def test_runtime_create_tables_respects_explicit_nullable_override(db_url):
     """Rust DDL should honor the same explicit nullable override that Alembic sees."""
-    db_path = "test_nullable_override.db"
-    import os
-
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
-    url = f"sqlite:{db_path}?mode=rwc"
-
     class NullableOverrideRow(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         field_a: int | None = Field(default=None, nullable=False)
 
-    await connect(url, auto_migrate=True)
+    await connect(db_url, auto_migrate=True)
 
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info('nullableoverriderow')")
@@ -49,21 +43,11 @@ async def test_runtime_create_tables_respects_explicit_nullable_override():
 
     assert columns["field_a"][3] == 1, "field_a should be NOT NULL in runtime DDL"
 
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
 
 @pytest.mark.asyncio
-async def test_foreign_key_constraint_exists():
+@pytest.mark.sqlite_only
+async def test_foreign_key_constraint_exists(db_url):
     """Verify that Rust generates the actual FOREIGN KEY constraint in SQL."""
-    db_path = "test_constraints.db"
-    import os
-
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
-    url = f"sqlite:{db_path}?mode=rwc"
-
     class Category(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
@@ -77,9 +61,10 @@ async def test_foreign_key_constraint_exists():
         ]
 
     # 1. Connect and Migrate
-    await connect(url, auto_migrate=True)
+    await connect(db_url, auto_migrate=True)
 
     # 2. Inspect the SQLite schema directly
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -97,5 +82,56 @@ async def test_foreign_key_constraint_exists():
     assert fk[4] == "id", f"Expected reference to 'id', got {fk[4]}"
     assert fk[6] == "CASCADE", f"Expected ON DELETE CASCADE, got {fk[6]}"
 
-    if os.path.exists(db_path):
-        os.remove(db_path)
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_foreign_key_constraint_exists_in_postgres(
+    db_url, postgres_base_url, db_schema_name
+):
+    class Category(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        products: BackRef[list["Product"]] = None
+
+    class Product(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        category: Annotated[
+            Category, ForeignKey(related_name="products", on_delete="CASCADE")
+        ]
+
+    await connect(db_url, auto_migrate=True)
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        row = conn.execute(
+            """
+            SELECT
+                ccu.table_name,
+                kcu.column_name,
+                ccu.column_name,
+                rc.delete_rule
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.constraint_schema = kcu.constraint_schema
+            JOIN information_schema.constraint_column_usage ccu
+              ON ccu.constraint_name = tc.constraint_name
+             AND ccu.constraint_schema = tc.constraint_schema
+            JOIN information_schema.referential_constraints rc
+              ON rc.constraint_name = tc.constraint_name
+             AND rc.constraint_schema = tc.constraint_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_schema = %s
+              AND tc.table_name = 'product'
+            """,
+            (db_schema_name,),
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == "category"
+    assert row[1] == "category_id"
+    assert row[2] == "id"
+    assert row[3] == "CASCADE"

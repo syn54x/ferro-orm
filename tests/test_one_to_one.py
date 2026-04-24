@@ -1,6 +1,5 @@
 import pytest
 import sqlite3
-import os
 from typing import Annotated
 from ferro import (
     Model,
@@ -12,7 +11,7 @@ from ferro import (
     clear_registry,
 )
 
-pytestmark = pytest.mark.sqlite_only
+pytestmark = pytest.mark.backend_matrix
 
 
 @pytest.fixture(autouse=True)
@@ -23,18 +22,12 @@ def cleanup():
 
     _MODEL_REGISTRY_PY.clear()
     _PENDING_RELATIONS.clear()
-    if os.path.exists("test_1to1.db"):
-        os.remove("test_1to1.db")
     yield
-    if os.path.exists("test_1to1.db"):
-        os.remove("test_1to1.db")
 
 
 @pytest.mark.asyncio
-async def test_one_to_one_relationship():
+async def test_one_to_one_relationship(db_url):
     """Verify strict 1:1 relationship behavior."""
-    db_path = "test_1to1.db"
-    url = f"sqlite:{db_path}?mode=rwc"
 
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -46,7 +39,7 @@ async def test_one_to_one_relationship():
         bio: str
         user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
 
-    await connect(url, auto_migrate=True)
+    await connect(db_url, auto_migrate=True)
 
     # 1. Create User and Profile
     alice = await User.create(username="alice")
@@ -63,32 +56,77 @@ async def test_one_to_one_relationship():
     p1_user = await p1.user
     assert p1_user.username == "alice"
 
-    # 4. Verify Uniqueness Constraint in DB
+    # 4. Verify Uniqueness Enforcement
+    with pytest.raises(Exception):
+        # Should fail because alice already has a profile
+        await Profile.create(bio="Another bio", user=alice)
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_one_to_one_unique_index_in_sqlite(db_url):
+    class User(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+        profile: BackRef["Profile"] = None
+
+    class Profile(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        bio: str
+        user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+
+    await connect(db_url, auto_migrate=True)
+
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("PRAGMA index_list('profile')")
     indexes = cursor.fetchall()
 
-    # One of the indexes should be unique for user_id
     has_unique_user_id = False
     for idx in indexes:
         idx_name = idx[1]
         cursor.execute(f"PRAGMA index_info('{idx_name}')")
         info = cursor.fetchall()
-        # info rows: (seqno, cid, name)
-        if (
-            any(row[2] == "user_id" for row in info) and idx[2] == 1
-        ):  # idx[2] is unique flag
+        if any(row[2] == "user_id" for row in info) and idx[2] == 1:
             has_unique_user_id = True
             break
 
-    assert has_unique_user_id, "Expected unique index on profile.user_id"
     conn.close()
+    assert has_unique_user_id, "Expected unique index on profile.user_id"
 
-    # 5. Verify Uniqueness Enforcement
-    with pytest.raises(Exception):
-        # Should fail because alice already has a profile
-        await Profile.create(bio="Another bio", user=alice)
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_one_to_one_unique_index_in_postgres(db_url, postgres_base_url, db_schema_name):
+    class User(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+        profile: BackRef["Profile"] = None
+
+    class Profile(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        bio: str
+        user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+
+    await connect(db_url, auto_migrate=True)
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        row = conn.execute(
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = %s
+              AND tablename = 'profile'
+              AND indexdef ILIKE %s
+            """,
+            (db_schema_name, "%UNIQUE%user_id%"),
+        ).fetchone()
+
+    assert row is not None
 
 
 if __name__ == "__main__":

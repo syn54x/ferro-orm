@@ -16,7 +16,6 @@ class Product(Model):
 @pytest.mark.asyncio
 async def test_create_tables_success(db_url):
     """Test that create_tables generates and executes SQL correctly."""
-    # Connect to in-memory SQLite
     await ferro.connect(db_url)
 
     # This should generate CREATE TABLE product (...)
