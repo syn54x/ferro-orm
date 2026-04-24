@@ -96,3 +96,21 @@ async def test_structural_filtering(db_url):
     res = await ComplexModel.where(ComplexModel.balance > Decimal("15.0")).first()
     assert res is not None
     assert res.balance == Decimal("20.0")
+
+
+@pytest.mark.asyncio
+async def test_optional_uuid_roundtrip_with_null(db_url):
+    """Optional UUID columns should persist NULL cleanly on every backend."""
+
+    class OptionalUuidModel(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        scorecard_flow_run_id: uuid.UUID | None = None
+
+    await connect(db_url, auto_migrate=True)
+
+    row = await OptionalUuidModel.create(name="job-role")
+    fetched = await OptionalUuidModel.get(row.id)
+
+    assert fetched is not None
+    assert fetched.scorecard_flow_run_id is None

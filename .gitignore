@@ -244,3 +244,4 @@ IMPLEMENTATION.md
 Cargo.lock
 demo.db
 docs/superpowers
+.worktrees/

@@ -207,6 +207,27 @@ fn json_value_to_simple_expr(
     value: &serde_json::Value,
     col_info: Option<&serde_json::Value>,
 ) -> sea_query::SimpleExpr {
+    if value.is_null()
+        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && let Some(col_info) = col_info
+    {
+        if property_schema_is_uuid(col_info) {
+            return Expr::value(sea_query::Value::String(None)).cast_as("uuid");
+        }
+        if property_schema_format(col_info) == Some("date") {
+            return Expr::value(sea_query::Value::String(None)).cast_as("date");
+        }
+        if property_schema_format(col_info) == Some("date-time") {
+            return Expr::value(sea_query::Value::String(None)).cast_as("timestamptz");
+        }
+        if property_schema_format(col_info) == Some("binary") {
+            return Expr::value(sea_query::Value::String(None)).cast_as("bytea");
+        }
+        if property_schema_is_decimal(col_info) {
+            return Expr::value(sea_query::Value::String(None)).cast_as("numeric");
+        }
+    }
+
     if let serde_json::Value::String(s) = value
         && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
     {
