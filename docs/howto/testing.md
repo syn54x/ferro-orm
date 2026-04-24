@@ -7,7 +7,7 @@ Test your Ferro applications with pytest and test database isolation strategies.
 The repository test suite supports two database modes:
 
 - **Default SQLite run** for the full fast suite
-- **Dual-backend matrix** for ORM coverage on both SQLite and PostgreSQL/Supabase
+- **Dual-backend matrix** for ORM coverage on both SQLite and PostgreSQL
 
 The matrix is opt-in so day-to-day test runs stay quick and deterministic.
 
@@ -20,13 +20,25 @@ uv sync --group dev
 uv run maturin develop
 ```
 
-Set `FERRO_SUPABASE_URL` to a PostgreSQL connection string. A root `.env` file works well for local development:
+For local PostgreSQL matrix runs, install PostgreSQL server binaries so `pytest-postgresql` can start an ephemeral database:
 
 ```bash
-FERRO_SUPABASE_URL='postgresql://...'
+brew install postgresql@16
 ```
 
-The Postgres matrix reads `FERRO_SUPABASE_URL` from either the environment or the project `.env` file. Tests create a dedicated schema per test and use that schema as the search path so one shared Supabase database can still run isolated tests safely.
+You can also point the suite at an externally managed PostgreSQL database. A root `.env` file works well for local development:
+
+```bash
+FERRO_POSTGRES_URL='postgresql://...'
+```
+
+The Postgres matrix first reads `FERRO_POSTGRES_URL` from either the environment or the project `.env` file. It still accepts the older `FERRO_SUPABASE_URL` name as a compatibility fallback. Tests create a dedicated schema per test and use that schema as the search path so one shared external database can still run isolated tests safely.
+
+To force the local `pytest-postgresql` provider even when `.env` contains an external URL:
+
+```bash
+FERRO_POSTGRES_PROVIDER=local uv run pytest -m "backend_matrix or postgres_only" --db-backends=postgres -q
+```
 
 ### Run The Default Suite
 
@@ -56,9 +68,9 @@ The repository uses three database markers:
 
 - `backend_matrix`: run this test once per selected backend
 - `sqlite_only`: keep SQLite-specific catalog, file-path, or pragma assertions on SQLite
-- `postgres_only`: run Postgres/Supabase-specific assertions only when `FERRO_SUPABASE_URL` is configured
+- `postgres_only`: run Postgres-specific assertions when either an external Postgres URL is configured or `pytest-postgresql` can start a local server
 
-If `FERRO_SUPABASE_URL` is not set, `postgres_only` tests are skipped and `backend_matrix` tests run only on SQLite.
+If no external Postgres URL is set and local PostgreSQL server binaries are unavailable, `postgres_only` tests are skipped and `backend_matrix` tests run only on SQLite.
 
 ### Bridge-Boundary Regressions
 
@@ -96,7 +108,7 @@ async def db_transaction(db):
         yield
 ```
 
-For backend-matrix tests, Ferro's own suite uses `--db-backends=sqlite,postgres` together with `backend_matrix` / `postgres_only` markers and a `FERRO_SUPABASE_URL` environment variable.
+For backend-matrix tests, Ferro's own suite uses `--db-backends=sqlite,postgres` together with `backend_matrix` / `postgres_only` markers. Postgres coverage uses `pytest-postgresql` locally, or `FERRO_POSTGRES_URL` / `FERRO_SUPABASE_URL` when an external database is configured.
 
 ## Test Example
 

@@ -8,8 +8,10 @@ import pytest
 from ferro import version
 from tests.db_backends import (
     backends_for_test,
+    build_postgres_url_from_connection_params,
     build_postgres_test_url,
-    get_supabase_url,
+    get_postgres_url,
+    has_pytest_postgresql,
     parse_backend_option,
 )
 
@@ -49,7 +51,11 @@ def _selected_backends(config: pytest.Config) -> tuple[str, ...]:
 
 
 def _available_postgres_url() -> str | None:
-    return get_supabase_url(dict(os.environ), ENV_FILE)
+    return get_postgres_url(dict(os.environ), ENV_FILE)
+
+
+def _has_postgres_provider() -> bool:
+    return bool(_available_postgres_url()) or has_pytest_postgresql()
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
@@ -63,7 +69,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         is not None,
         is_sqlite_only=metafunc.definition.get_closest_marker("sqlite_only") is not None,
         is_postgres_only=metafunc.definition.get_closest_marker("postgres_only") is not None,
-        has_postgres_url=bool(_available_postgres_url()),
+        has_postgres_url=_has_postgres_provider(),
     )
 
     if not test_backends:
@@ -73,7 +79,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
                 pytest.param(
                     None,
                     marks=pytest.mark.skip(
-                        reason="FERRO_SUPABASE_URL is not configured for Postgres-backed tests.",
+                        reason="No Postgres provider is configured for Postgres-backed tests.",
                     ),
                 )
             ],
@@ -100,6 +106,19 @@ def _create_postgres_schema(base_url: str, schema_name: str) -> None:
 def _drop_postgres_schema(base_url: str, schema_name: str) -> None:
     with _connect_postgres_admin(base_url) as conn:
         conn.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
+
+
+def _pytest_postgresql_base_url(request: pytest.FixtureRequest) -> str:
+    try:
+        conn = request.getfixturevalue("postgresql")
+    except Exception as exc:
+        pytest.skip(
+            "pytest-postgresql could not start local Postgres. "
+            "Install Postgres server binaries or set FERRO_POSTGRES_URL. "
+            f"Original error: {exc}"
+        )
+
+    return build_postgres_url_from_connection_params(conn.info.get_parameters())
 
 
 # This fixture ensures the Rust binary is actually loaded and working
@@ -131,13 +150,14 @@ def db_url(request: pytest.FixtureRequest, tmp_path: Path):
         yield f"sqlite:{db_file}?mode=rwc"
         return
 
-    base_url = _available_postgres_url()
+    base_url = _available_postgres_url() or _pytest_postgresql_base_url(request)
     if not base_url:
-        pytest.skip("FERRO_SUPABASE_URL is not configured for Postgres-backed tests.")
+        pytest.skip("No Postgres provider is configured for Postgres-backed tests.")
 
     schema_name = f"ferro_{uuid.uuid4().hex[:16]}"
     _create_postgres_schema(base_url, schema_name)
     request.node._ferro_db_schema = schema_name
+    request.node._ferro_postgres_base_url = base_url
 
     try:
         yield build_postgres_test_url(base_url, schema_name)
@@ -148,13 +168,21 @@ def db_url(request: pytest.FixtureRequest, tmp_path: Path):
         _drop_postgres_schema(base_url, schema_name)
 
 
-@pytest.fixture(scope="session")
-def postgres_base_url() -> str | None:
-    return _available_postgres_url()
+@pytest.fixture(scope="function")
+def postgres_base_url(request: pytest.FixtureRequest, db_url: str | None) -> str | None:
+    if db_url is None or not (
+        db_url.startswith("postgres://") or db_url.startswith("postgresql://")
+    ):
+        return None
+    return getattr(request.node, "_ferro_postgres_base_url", _available_postgres_url())
 
 
 @pytest.fixture(scope="function")
-def db_schema_name(request: pytest.FixtureRequest) -> str | None:
+def db_schema_name(request: pytest.FixtureRequest, db_url: str | None) -> str | None:
+    if db_url is None or not (
+        db_url.startswith("postgres://") or db_url.startswith("postgresql://")
+    ):
+        return None
     return getattr(request.node, "_ferro_db_schema", None)
 
 
