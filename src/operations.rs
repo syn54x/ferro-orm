@@ -159,6 +159,10 @@ fn property_format(col_info: &serde_json::Value) -> Option<&str> {
     })
 }
 
+fn property_is_enum(col_info: &serde_json::Value) -> bool {
+    col_info.get("enum").and_then(|e| e.as_array()).is_some()
+}
+
 fn apply_postgres_text_select_columns(
     select: &mut sea_query::SelectStatement,
     table_name: &str,
@@ -175,16 +179,23 @@ fn apply_postgres_text_select_columns(
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     };
-    if !properties
-        .values()
-        .any(|col_info| matches!(property_format(col_info), Some("uuid" | "date-time" | "date")))
+    if !properties.values().any(|col_info| {
+        let resolved = resolve_ref(schema, col_info);
+        matches!(
+            property_format(resolved),
+            Some("uuid" | "date-time" | "date")
+        ) || property_is_enum(resolved)
+    })
     {
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     }
     for (col_name, col_info) in properties {
         let col_iden = Alias::new(col_name.as_str());
-        if matches!(property_format(col_info), Some("uuid" | "date-time" | "date")) {
+        let col_info = resolve_ref(schema, col_info);
+        if matches!(property_format(col_info), Some("uuid" | "date-time" | "date"))
+            || property_is_enum(col_info)
+        {
             let expr = Expr::cast_as(
                 Expr::col((tbl.clone(), col_iden.clone())),
                 Alias::new("text"),

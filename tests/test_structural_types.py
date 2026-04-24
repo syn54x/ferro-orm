@@ -13,6 +13,14 @@ class UserRole(str, Enum):
     USER = "user"
 
 
+class TranscriptFormat(str, Enum):
+    PDF = "pdf"
+    DOCX = "docx"
+    MD = "md"
+    TXT = "txt"
+    JSON = "json"
+
+
 @pytest.mark.asyncio
 async def test_structural_types_roundtrip(db_url):
     """Test that UUID, JSON, Enum, BLOB, and Decimal objects are correctly saved and hydrated."""
@@ -118,3 +126,39 @@ async def test_uuid_in_filter_serializes_collection_values(db_url):
 
     results = await ComplexModel.where(ComplexModel.user_id << [uid1, uid3]).all()
     assert {row.user_id for row in results} == {uid1, uid3}
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_native_postgres_enum_column_decodes_via_text_cast(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Reading a native Postgres enum column should not fail through sqlx::Any."""
+
+    class Transcript(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        format: TranscriptFormat
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        conn.execute(
+            "CREATE TYPE transcriptformat AS ENUM ('pdf', 'docx', 'md', 'txt', 'json')"
+        )
+        conn.execute(
+            """
+            CREATE TABLE transcript (
+                id integer PRIMARY KEY,
+                format transcriptformat NOT NULL
+            )
+            """
+        )
+        conn.execute("INSERT INTO transcript (id, format) VALUES (1, 'pdf')")
+        conn.commit()
+
+    await connect(db_url)
+
+    fetched = await Transcript.get(1)
+    assert fetched is not None
+    assert fetched.format == TranscriptFormat.PDF
