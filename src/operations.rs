@@ -3,7 +3,7 @@
 //! This module implements high-performance CRUD operations, leveraging
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
-use crate::query::QueryDef;
+use crate::query::{property_schema_is_uuid, QueryDef};
 use crate::state::{ENGINE, IDENTITY_MAP, MODEL_REGISTRY, RustValue, TRANSACTION_REGISTRY};
 use pyo3::prelude::*;
 use sea_query::{
@@ -125,6 +125,43 @@ macro_rules! decode_column {
             RustValue::None
         }
     }};
+}
+
+/// On Postgres, `sqlx::Any` cannot decode native `uuid` columns. When the model schema marks
+/// UUID fields, expand `SELECT *` into explicit columns with `::text` casts so decoding uses
+/// text (same representation as SQLite).
+fn apply_postgres_uuid_select_columns(
+    select: &mut sea_query::SelectStatement,
+    table_name: &str,
+    schema: &serde_json::Value,
+) {
+    use sea_query::{Alias, Expr};
+
+    let tbl = Alias::new(table_name);
+    if crate::state::sql_dialect() != crate::state::SqlDialect::Postgres {
+        select.column((tbl.clone(), sea_query::Asterisk));
+        return;
+    }
+    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
+        select.column((tbl.clone(), sea_query::Asterisk));
+        return;
+    };
+    if !properties.values().any(property_schema_is_uuid) {
+        select.column((tbl.clone(), sea_query::Asterisk));
+        return;
+    }
+    for (col_name, col_info) in properties {
+        let col_iden = Alias::new(col_name.as_str());
+        if property_schema_is_uuid(col_info) {
+            let expr = Expr::cast_as(
+                Expr::col((tbl.clone(), col_iden.clone())),
+                Alias::new("text"),
+            );
+            select.expr_as(expr, col_iden);
+        } else {
+            select.column((tbl.clone(), col_iden));
+        }
+    }
 }
 
 /// Helper to bind Sea-Query values to a SQLx Any query.
@@ -278,9 +315,9 @@ pub fn fetch_all<'py>(
                     }
                 }
             }
-            let s = sea_query_to_string!(Query::select()
-                .column(sea_query::Asterisk)
-                .from(Alias::new(&table_name)));
+            let mut stmt = Query::select();
+            apply_postgres_uuid_select_columns(&mut stmt, &table_name, schema);
+            let s = sea_query_to_string!(stmt.from(Alias::new(&table_name)));
             (s, pk)
         };
 
@@ -428,8 +465,9 @@ pub fn fetch_one<'py>(
             }
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
-            let (s, values) = sea_query_build!(Query::select()
-                .column(sea_query::Asterisk)
+            let mut stmt = Query::select();
+            apply_postgres_uuid_select_columns(&mut stmt, &table_name, schema);
+            let (s, values) = sea_query_build!(stmt
                 .from(Alias::new(&table_name))
                 .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val.clone())));
             (s, values, pk_name)
@@ -851,9 +889,8 @@ pub fn fetch_filtered<'py>(
             }
 
             let mut select = Query::select();
-            select
-                .column((Alias::new(&table_name), sea_query::Asterisk))
-                .from(Alias::new(&table_name));
+            apply_postgres_uuid_select_columns(&mut select, &table_name, schema);
+            select.from(Alias::new(&table_name));
 
             if let Some(m2m) = &query_def.m2m {
                 let join_table = Alias::new(&m2m.join_table);

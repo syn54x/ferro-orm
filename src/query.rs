@@ -157,6 +157,11 @@ fn column_is_uuid_property(schema: &Value, col: &str) -> bool {
     let Some(col_info) = props.get(col) else {
         return false;
     };
+    property_schema_is_uuid(col_info)
+}
+
+/// JSON Schema fragment for one model field: `string` + `format: uuid` (incl. optional `anyOf`).
+pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
     let format = col_info.get("format").and_then(|f| f.as_str());
     let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
         col_info
