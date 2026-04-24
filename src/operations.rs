@@ -326,7 +326,10 @@ fn schema_value_expr(
         serde_json::Value::String(s) => {
             Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
         }
-        serde_json::Value::Bool(b) if json_type == Some("boolean") => {
+        serde_json::Value::Bool(b)
+            if json_type == Some("boolean")
+                && crate::state::sql_dialect() == crate::state::SqlDialect::Sqlite =>
+        {
             Expr::value(sea_query::Value::BigInt(Some(if *b { 1 } else { 0 })))
         }
         serde_json::Value::Bool(b) => Expr::value(sea_query::Value::Bool(Some(*b))),
