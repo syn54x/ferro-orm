@@ -797,7 +797,6 @@ pub fn save_record(
             let mut columns = Vec::new();
             let mut values = Vec::new();
             let mut pk_provided = false;
-            let properties = schema.get("properties").and_then(|p| p.as_object());
             for (key, value) in &record_obj {
                 let is_pk = if let Some(ref pk) = pk_col {
                     key == pk
@@ -849,38 +848,7 @@ pub fn save_record(
         };
 
         let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        if should_return_pk {
-            let pk_name = pk_name_for_returning.ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Missing primary key for RETURNING")
-            })?;
-            if let Some(conn_arc) = tx_conn {
-                let mut conn = conn_arc.lock().await;
-                let row = query.fetch_one(&mut *conn).await.map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
-                })?;
-                let returned_id: i64 = row.try_get(pk_name.as_str()).or_else(|_| row.try_get(0)).map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to decode returned primary key '{}': {}",
-                        pk_name, e
-                    ))
-                })?;
-                Ok(Some(returned_id))
-            } else {
-                let mut conn = pool.acquire().await.map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Pool acquire failed: {}", e))
-                })?;
-                let row = query.fetch_one(&mut *conn).await.map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
-                })?;
-                let returned_id: i64 = row.try_get(pk_name.as_str()).or_else(|_| row.try_get(0)).map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to decode returned primary key '{}': {}",
-                        pk_name, e
-                    ))
-                })?;
-                Ok(Some(returned_id))
-            }
-        } else if let Some(conn_arc) = tx_conn {
+        if let Some(conn_arc) = tx_conn {
             let mut conn = conn_arc.lock().await;
             if needs_postgres_returning {
                 let row = query.fetch_one(&mut *conn).await.map_err(|e| {
@@ -1015,8 +983,6 @@ pub fn save_bulk_records(
                 .to_owned();
 
             let mut column_names = Vec::new();
-            let properties = schema.get("properties").and_then(|p| p.as_object());
-
             for (i, record) in records.iter().enumerate() {
                 let record_obj = record.as_object().ok_or_else(|| {
                     pyo3::exceptions::PyValueError::new_err("Each record must be a JSON object")
@@ -1497,15 +1463,6 @@ pub fn update_filtered(
             (pool, tx_conn)
         };
 
-        let schema = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
-            })?;
-            registry.get(&name).cloned().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-            })?
-        };
-
         let table_name = name.to_lowercase();
         // ... sql ...
         let (sql, bind_values) = {
@@ -1515,7 +1472,6 @@ pub fn update_filtered(
             let schema = registry.get(&name).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
             })?;
-            let properties = schema.get("properties").and_then(|p| p.as_object());
             let mut update = UpdateStatement::new()
                 .table(Alias::new(&table_name))
                 .cond_where(query_def.to_condition())
