@@ -8,6 +8,7 @@ from ferro import Model
 from ferro.base import FerroField, ManyToManyField
 from ferro.query import BackRef
 
+pytestmark = pytest.mark.backend_matrix
 
 class AutoMigratedUser(Model):
     id: int = Field(json_schema_extra={"primary_key": True})
@@ -15,14 +16,14 @@ class AutoMigratedUser(Model):
 
 
 @pytest.mark.asyncio
-async def test_connect_with_auto_migrate():
+async def test_connect_with_auto_migrate(db_url):
     """Test that connect(auto_migrate=True) creates tables automatically."""
     # Reset engine to ensure clean state
     ferro.reset_engine()
 
     # Connect with auto_migrate=True
     # This should internally call the same logic as create_tables()
-    await ferro.connect("sqlite::memory:", auto_migrate=True)
+    await ferro.connect(db_url, auto_migrate=True)
 
     # We can verify it works by trying to call create_tables again
     # or by just ensuring it doesn't crash.
@@ -32,18 +33,18 @@ async def test_connect_with_auto_migrate():
 
 
 @pytest.mark.asyncio
-async def test_connect_without_auto_migrate():
+async def test_connect_without_auto_migrate(db_url):
     """Test that connect(auto_migrate=False) does not create tables (manual mode)."""
     ferro.reset_engine()
 
-    await ferro.connect("sqlite::memory:", auto_migrate=False)
+    await ferro.connect(db_url, auto_migrate=False)
     # Manual call still works
     await ferro.create_tables()
     assert True
 
 
 @pytest.mark.asyncio
-async def test_m2m_join_table_created_during_auto_migrate():
+async def test_m2m_join_table_created_during_auto_migrate(db_url):
     """Verify that the many-to-many join table is created when auto_migrate=True.
     We clear registries, migrate a fresh in-memory DB, then use the M2M API; if the
     join table were not created, .add() would fail. No second connection needed."""
@@ -66,7 +67,7 @@ async def test_m2m_join_table_created_during_auto_migrate():
         title: str
         actors: BackRef[Actor] = None
 
-    await connect("sqlite::memory:", auto_migrate=True)
+    await connect(db_url, auto_migrate=True)
 
     actor = await Actor.create(name="Alice")
     movie = await Movie.create(title="Matrix")

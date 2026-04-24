@@ -1,18 +1,11 @@
 import pytest
 from pydantic import Field
-import os
-import uuid
+
 import ferro
 from ferro import Model
 
 
-@pytest.fixture
-def db_url():
-    db_file = f"test_{uuid.uuid4()}.db"
-    url = f"sqlite:{db_file}?mode=rwc"
-    yield url
-    if os.path.exists(db_file):
-        os.remove(db_file)
+pytestmark = pytest.mark.backend_matrix
 
 
 @pytest.mark.asyncio
@@ -85,14 +78,9 @@ async def test_upsert_does_not_duplicate(db_url):
     await user_dup.save()
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
-    import sqlite3
-
-    conn = sqlite3.connect(db_url.replace("sqlite:", "").split("?")[0])
-    cursor = conn.cursor()
-    cursor.execute("SELECT username FROM cruduser WHERE id = 42")
-    row = cursor.fetchone()
-    assert row[0] == "updated"
-    conn.close()
+    fetched = await CrudUser.get(42)
+    assert fetched is not None
+    assert fetched.username == "updated"
 
 
 @pytest.mark.asyncio

@@ -1,18 +1,8 @@
 import pytest
-import uuid
-import os
 from typing import Annotated
 from ferro import Model, connect, FerroField
 
-
-@pytest.fixture
-def db_url():
-    db_file = f"test_const_{uuid.uuid4()}.db"
-    url = f"sqlite:{db_file}?mode=rwc"
-    yield url
-    if os.path.exists(db_file):
-        os.remove(db_file)
-
+pytestmark = pytest.mark.backend_matrix
 
 @pytest.mark.asyncio
 async def test_unique_constraint(db_url):
@@ -31,13 +21,11 @@ async def test_unique_constraint(db_url):
     with pytest.raises(Exception) as excinfo:
         await UniqueUser(email="test@example.com").save()
 
-    assert (
-        "UNIQUE constraint failed" in str(excinfo.value)
-        or "uniqueness" in str(excinfo.value).lower()
-    )
+    assert "unique" in str(excinfo.value).lower()
 
 
 @pytest.mark.asyncio
+@pytest.mark.sqlite_only
 async def test_index_creation(db_url):
     """Test that index=True creates an index (verified via SQLite schema)."""
 
@@ -59,6 +47,36 @@ async def test_index_creation(db_url):
     )
     index = cursor.fetchone()
     conn.close()
+
+    assert index is not None
+    assert "sku" in index[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_index_creation_in_postgres(db_url, postgres_base_url, db_schema_name):
+    """Test that index=True creates an index in the active Postgres schema."""
+
+    class IndexedProduct(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        sku: Annotated[str, FerroField(index=True)]
+
+    await connect(db_url, auto_migrate=True)
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        index = conn.execute(
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = %s
+              AND tablename = 'indexedproduct'
+              AND indexname LIKE %s
+            """,
+            (db_schema_name, "%sku%"),
+        ).fetchone()
 
     assert index is not None
     assert "sku" in index[0]

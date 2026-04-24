@@ -11,7 +11,10 @@ from decimal import Decimal
 from enum import Enum
 from typing import Annotated
 
+
 import pytest
+
+pytestmark = pytest.mark.backend_matrix
 
 from ferro import (
     BackRef,
@@ -99,22 +102,6 @@ def _ensure_models_registered():
         model_cls._reregister_ferro()
         _MODEL_REGISTRY_PY[model_cls.__name__] = model_cls
     yield
-
-
-@pytest.fixture
-def db_url():
-    """Generate a unique database URL for each test"""
-    import uuid
-
-    db_file = f"test_{uuid.uuid4()}.db"
-    url = f"sqlite:{db_file}?mode=rwc"
-    yield url
-    # Cleanup
-    import os
-
-    if os.path.exists(db_file):
-        os.remove(db_file)
-
 
 # ============================================================================
 # MODELS & FIELDS TESTS (docs/guide/models-and-fields.md)

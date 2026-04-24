@@ -13,6 +13,8 @@ from ferro import (
     reset_engine,
 )
 
+pytestmark = pytest.mark.sqlite_only
+
 
 @pytest.fixture(autouse=True)
 def cleanup():

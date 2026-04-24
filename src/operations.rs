@@ -3,7 +3,7 @@
 //! This module implements high-performance CRUD operations, leveraging
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
-use crate::query::{property_schema_is_uuid, QueryDef};
+use crate::query::{property_schema_format, property_schema_is_decimal, property_schema_is_uuid, QueryDef};
 use crate::state::{ENGINE, IDENTITY_MAP, MODEL_REGISTRY, RustValue, TRANSACTION_REGISTRY};
 use pyo3::prelude::*;
 use sea_query::{
@@ -61,7 +61,16 @@ macro_rules! decode_column {
         let is_decimal = prop
             .and_then(|p| p.get("anyOf"))
             .and_then(|a| a.as_array())
-            .map(|types| types.iter().any(|t| t.get("pattern").is_some()))
+            .map(|types| {
+                let has_number = types
+                    .iter()
+                    .any(|t| t.get("type").and_then(|ty| ty.as_str()) == Some("number"));
+                let has_patterned_string = types.iter().any(|t| {
+                    t.get("type").and_then(|ty| ty.as_str()) == Some("string")
+                        && t.get("pattern").is_some()
+                });
+                has_number && has_patterned_string
+            })
             .unwrap_or(false);
 
         let json_type = prop
@@ -127,10 +136,9 @@ macro_rules! decode_column {
     }};
 }
 
-/// On Postgres, `sqlx::Any` cannot decode native `uuid` columns. When the model schema marks
-/// UUID fields, expand `SELECT *` into explicit columns with `::text` casts so decoding uses
-/// text (same representation as SQLite).
-fn apply_postgres_uuid_select_columns(
+/// On Postgres, `sqlx::Any` cannot decode some native types we use in tests. Expand `SELECT *`
+/// into explicit columns with `::text` casts so decoding uses the text-first path.
+fn apply_postgres_text_cast_select_columns(
     select: &mut sea_query::SelectStatement,
     table_name: &str,
     schema: &serde_json::Value,
@@ -146,13 +154,20 @@ fn apply_postgres_uuid_select_columns(
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     };
-    if !properties.values().any(property_schema_is_uuid) {
+    if !properties.values().any(|col_info| {
+        property_schema_is_uuid(col_info)
+            || property_schema_format(col_info) == Some("date")
+            || property_schema_format(col_info) == Some("date-time")
+    }) {
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     }
     for (col_name, col_info) in properties {
         let col_iden = Alias::new(col_name.as_str());
-        if property_schema_is_uuid(col_info) {
+        if property_schema_is_uuid(col_info)
+            || property_schema_format(col_info) == Some("date")
+            || property_schema_format(col_info) == Some("date-time")
+        {
             let expr = Expr::cast_as(
                 Expr::col((tbl.clone(), col_iden.clone())),
                 Alias::new("text"),
@@ -186,6 +201,54 @@ fn bind_query<'a>(
         };
     }
     query
+}
+
+fn json_value_to_simple_expr(
+    value: &serde_json::Value,
+    col_info: Option<&serde_json::Value>,
+) -> sea_query::SimpleExpr {
+    if let serde_json::Value::String(s) = value
+        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+    {
+        if col_info.is_some_and(property_schema_is_uuid) && uuid::Uuid::parse_str(s).is_ok() {
+            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as("uuid");
+        }
+        if col_info.and_then(property_schema_format) == Some("date") {
+            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as("date");
+        }
+        if col_info.and_then(property_schema_format) == Some("date-time") {
+            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as("timestamptz");
+        }
+        if col_info.and_then(property_schema_format) == Some("binary") {
+            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as("bytea");
+        }
+        if col_info.is_some_and(property_schema_is_decimal) {
+            return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as("numeric");
+        }
+    }
+
+    let val = match value {
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                sea_query::Value::BigInt(Some(i))
+            } else if let Some(f) = n.as_f64() {
+                sea_query::Value::Double(Some(f))
+            } else {
+                sea_query::Value::String(None)
+            }
+        }
+        serde_json::Value::String(s) => sea_query::Value::String(Some(Box::new(s.clone()))),
+        serde_json::Value::Bool(b) => sea_query::Value::Bool(Some(*b)),
+        serde_json::Value::Null => sea_query::Value::String(None),
+        _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
+    };
+
+    Expr::value(val)
 }
 
 #[pyfunction]
@@ -316,7 +379,7 @@ pub fn fetch_all<'py>(
                 }
             }
             let mut stmt = Query::select();
-            apply_postgres_uuid_select_columns(&mut stmt, &table_name, schema);
+            apply_postgres_text_cast_select_columns(&mut stmt, &table_name, schema);
             let s = sea_query_to_string!(stmt.from(Alias::new(&table_name)));
             (s, pk)
         };
@@ -466,7 +529,7 @@ pub fn fetch_one<'py>(
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let mut stmt = Query::select();
-            apply_postgres_uuid_select_columns(&mut stmt, &table_name, schema);
+            apply_postgres_text_cast_select_columns(&mut stmt, &table_name, schema);
             let (s, values) = sea_query_build!(stmt
                 .from(Alias::new(&table_name))
                 .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_val.clone())));
@@ -585,10 +648,11 @@ pub fn save_record(
         }
 
         let table_name = name.to_lowercase();
-        let (sql, bind_values) = {
+        let (sql, bind_values, should_return_pk, pk_name_for_returning) = {
             let mut columns = Vec::new();
             let mut values = Vec::new();
             let mut pk_provided = false;
+            let properties = schema.get("properties").and_then(|p| p.as_object());
             for (key, value) in &record_obj {
                 let is_pk = if let Some(ref pk) = pk_col {
                     key == pk
@@ -602,24 +666,10 @@ pub fn save_record(
                     pk_provided = true;
                 }
                 columns.push(Alias::new(key));
-                let val = match value {
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            sea_query::Value::BigInt(Some(i))
-                        } else if let Some(f) = n.as_f64() {
-                            sea_query::Value::Double(Some(f))
-                        } else {
-                            sea_query::Value::String(None)
-                        }
-                    }
-                    serde_json::Value::String(s) => {
-                        sea_query::Value::String(Some(Box::new(s.clone())))
-                    }
-                    serde_json::Value::Bool(b) => sea_query::Value::Bool(Some(*b)),
-                    serde_json::Value::Null => sea_query::Value::String(None),
-                    _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
-                };
-                values.push(Expr::value(val));
+                values.push(json_value_to_simple_expr(
+                    value,
+                    properties.and_then(|props| props.get(key)),
+                ));
             }
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -627,13 +677,13 @@ pub fn save_record(
                 .values(values)
                 .unwrap()
                 .to_owned();
-            if let Some(pk) = pk_col
+            if let Some(ref pk) = pk_col
                 && (pk_provided || !pk_is_auto)
             {
-                let mut on_conflict = OnConflict::column(Alias::new(&pk));
+                let mut on_conflict = OnConflict::column(Alias::new(pk));
                 let mut update_cols = Vec::new();
                 for col in &columns {
-                    if col.to_string() != pk {
+                    if col.to_string() != *pk {
                         update_cols.push(col.clone());
                     }
                 }
@@ -642,11 +692,53 @@ pub fn save_record(
                     insert_stmt.on_conflict(on_conflict);
                 }
             }
-            sea_query_build!(insert_stmt)
+            let should_return_pk = crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+                && pk_col.is_some()
+                && pk_is_auto
+                && !pk_provided;
+            let pk_name_for_returning = pk_col.clone();
+            let (mut sql, values) = sea_query_build!(insert_stmt);
+            if should_return_pk
+                && let Some(ref pk_name) = pk_name_for_returning
+            {
+                sql.push_str(&format!(" RETURNING {}", pk_name));
+            }
+            (sql, values, should_return_pk, pk_name_for_returning)
         };
 
         let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        if let Some(conn_arc) = tx_conn {
+        if should_return_pk {
+            let pk_name = pk_name_for_returning.ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Missing primary key for RETURNING")
+            })?;
+            if let Some(conn_arc) = tx_conn {
+                let mut conn = conn_arc.lock().await;
+                let row = query.fetch_one(&mut *conn).await.map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
+                })?;
+                let returned_id: i64 = row.try_get(pk_name.as_str()).or_else(|_| row.try_get(0)).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to decode returned primary key '{}': {}",
+                        pk_name, e
+                    ))
+                })?;
+                Ok(Some(returned_id))
+            } else {
+                let mut conn = pool.acquire().await.map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Pool acquire failed: {}", e))
+                })?;
+                let row = query.fetch_one(&mut *conn).await.map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
+                })?;
+                let returned_id: i64 = row.try_get(pk_name.as_str()).or_else(|_| row.try_get(0)).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to decode returned primary key '{}': {}",
+                        pk_name, e
+                    ))
+                })?;
+                Ok(Some(returned_id))
+            }
+        } else if let Some(conn_arc) = tx_conn {
             let mut conn = conn_arc.lock().await;
             let res = query.execute(&mut *conn).await;
             if res.is_err() {
@@ -763,6 +855,7 @@ pub fn save_bulk_records(
                 .to_owned();
 
             let mut column_names = Vec::new();
+            let properties = schema.get("properties").and_then(|p| p.as_object());
 
             for (i, record) in records.iter().enumerate() {
                 let record_obj = record.as_object().ok_or_else(|| {
@@ -789,24 +882,10 @@ pub fn save_bulk_records(
                     let value = record_obj
                         .get(key.to_string().as_str())
                         .unwrap_or(&serde_json::Value::Null);
-                    let val = match value {
-                        serde_json::Value::Number(n) => {
-                            if let Some(i) = n.as_i64() {
-                                sea_query::Value::BigInt(Some(i))
-                            } else if let Some(f) = n.as_f64() {
-                                sea_query::Value::Double(Some(f))
-                            } else {
-                                sea_query::Value::String(None)
-                            }
-                        }
-                        serde_json::Value::String(s) => {
-                            sea_query::Value::String(Some(Box::new(s.clone())))
-                        }
-                        serde_json::Value::Bool(b) => sea_query::Value::Bool(Some(*b)),
-                        serde_json::Value::Null => sea_query::Value::String(None),
-                        _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
-                    };
-                    row_values.push(Expr::value(val));
+                    row_values.push(json_value_to_simple_expr(
+                        value,
+                        properties.and_then(|props| props.get(key.to_string().as_str())),
+                    ));
                 }
                 insert_stmt.values(row_values).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -889,7 +968,7 @@ pub fn fetch_filtered<'py>(
             }
 
             let mut select = Query::select();
-            apply_postgres_uuid_select_columns(&mut select, &table_name, schema);
+            apply_postgres_text_cast_select_columns(&mut select, &table_name, schema);
             select.from(Alias::new(&table_name));
 
             if let Some(m2m) = &query_def.m2m {
@@ -1262,29 +1341,22 @@ pub fn update_filtered(
         let table_name = name.to_lowercase();
         // ... sql ...
         let (sql, bind_values) = {
+            let registry = MODEL_REGISTRY.read().map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+            })?;
+            let schema = registry.get(&name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+            })?;
+            let properties = schema.get("properties").and_then(|p| p.as_object());
             let mut update = UpdateStatement::new()
                 .table(Alias::new(&table_name))
                 .cond_where(query_def.to_condition())
                 .to_owned();
             for (key, value) in update_map {
-                let val = match value {
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            sea_query::Value::BigInt(Some(i))
-                        } else if let Some(f) = n.as_f64() {
-                            sea_query::Value::Double(Some(f))
-                        } else {
-                            sea_query::Value::String(None)
-                        }
-                    }
-                    serde_json::Value::String(s) => {
-                        sea_query::Value::String(Some(Box::new(s.clone())))
-                    }
-                    serde_json::Value::Bool(b) => sea_query::Value::Bool(Some(b)),
-                    serde_json::Value::Null => sea_query::Value::String(None),
-                    _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
-                };
-                update.value(Alias::new(key), Expr::value(val));
+                update.value(
+                    Alias::new(&key),
+                    json_value_to_simple_expr(&value, properties.and_then(|props| props.get(&key))),
+                );
             }
             sea_query_build!(update)
         };

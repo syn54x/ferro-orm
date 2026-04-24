@@ -110,11 +110,31 @@ impl QueryDef {
         infer_uuid_without_schema: bool,
     ) -> SimpleExpr {
         if let Value::String(s) = val {
-            if sql_dialect() == SqlDialect::Postgres && uuid::Uuid::parse_str(s).is_ok() {
+            if sql_dialect() == SqlDialect::Postgres {
                 let schema_uuid = model_column_is_uuid(&self.model_name, col_name);
-                if schema_uuid || infer_uuid_without_schema {
+                if uuid::Uuid::parse_str(s).is_ok() && (schema_uuid || infer_uuid_without_schema) {
                     return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
                         .cast_as("uuid");
+                }
+                if model_column_format(&self.model_name, col_name).as_deref() == Some("date") {
+                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                        .cast_as("date");
+                }
+                if model_column_format(&self.model_name, col_name).as_deref()
+                    == Some("date-time")
+                {
+                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                        .cast_as("timestamptz");
+                }
+                if model_column_format(&self.model_name, col_name).as_deref()
+                    == Some("binary")
+                {
+                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                        .cast_as("bytea");
+                }
+                if model_column_is_decimal(&self.model_name, col_name) {
+                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                        .cast_as("numeric");
                 }
             }
         }
@@ -160,9 +180,39 @@ fn column_is_uuid_property(schema: &Value, col: &str) -> bool {
     property_schema_is_uuid(col_info)
 }
 
+pub(crate) fn property_schema_format(col_info: &Value) -> Option<&str> {
+    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
+        col_info
+            .get("anyOf")
+            .and_then(|a| a.as_array())
+            .and_then(|types| {
+                types
+                    .iter()
+                    .find_map(|t| t.get("format").and_then(|f| f.as_str()))
+            })
+    })
+}
+
+pub(crate) fn property_schema_is_decimal(col_info: &Value) -> bool {
+    col_info
+        .get("anyOf")
+        .and_then(|a| a.as_array())
+        .map(|types| {
+            let has_number = types
+                .iter()
+                .any(|t| t.get("type").and_then(|ty| ty.as_str()) == Some("number"));
+            let has_patterned_string = types.iter().any(|t| {
+                t.get("type").and_then(|ty| ty.as_str()) == Some("string")
+                    && t.get("pattern").is_some()
+            });
+            has_number && has_patterned_string
+        })
+        .unwrap_or(false)
+}
+
 /// JSON Schema fragment for one model field: `string` + `format: uuid` (incl. optional `anyOf`).
 pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
-    let format = col_info.get("format").and_then(|f| f.as_str());
+    let format = property_schema_format(col_info);
     let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
         col_info
             .get("anyOf")
@@ -175,4 +225,36 @@ pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
             })
     });
     json_type == Some("string") && format == Some("uuid")
+}
+
+fn model_column_format(model_name: &str, col: &str) -> Option<String> {
+    let Ok(registry) = MODEL_REGISTRY.read() else {
+        return None;
+    };
+    let Some(schema) = registry.get(model_name) else {
+        return None;
+    };
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return None;
+    };
+    let Some(col_info) = props.get(col) else {
+        return None;
+    };
+    property_schema_format(col_info).map(str::to_string)
+}
+
+fn model_column_is_decimal(model_name: &str, col: &str) -> bool {
+    let Ok(registry) = MODEL_REGISTRY.read() else {
+        return false;
+    };
+    let Some(schema) = registry.get(model_name) else {
+        return false;
+    };
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return false;
+    };
+    let Some(col_info) = props.get(col) else {
+        return false;
+    };
+    property_schema_is_decimal(col_info)
 }

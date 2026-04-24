@@ -1,19 +1,10 @@
-import os
-import uuid
 from typing import Annotated
 
 import pytest
 
 from ferro import FerroField, Field, Model, connect
 
-
-@pytest.fixture
-def db_url():
-    db_file = f"test_field_wrapper_{uuid.uuid4()}.db"
-    url = f"sqlite:{db_file}?mode=rwc"
-    yield url
-    if os.path.exists(db_file):
-        os.remove(db_file)
+pytestmark = pytest.mark.backend_matrix
 
 
 @pytest.mark.asyncio
@@ -86,6 +77,20 @@ async def test_annotation_field_pattern_persists_like_assignment(db_url):
     user = AnnotatedUser(email="ann@example.com")
     await user.save()
     assert user.id is not None
+
+
+@pytest.mark.asyncio
+async def test_optional_patterned_string_roundtrip(db_url):
+    class WrappedInventory(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        code: str | None = Field(default=None, pattern=r"^SKU-[0-9]+$")
+
+    await connect(db_url, auto_migrate=True)
+    item = await WrappedInventory.create(code="SKU-123")
+    fetched = await WrappedInventory.get(item.id)
+
+    assert fetched is not None
+    assert fetched.code == "SKU-123"
 
 
 def test_annotated_and_wrapped_ferro_field_conflict_raises():

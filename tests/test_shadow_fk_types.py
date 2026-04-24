@@ -16,6 +16,8 @@ from ferro._shadow_fk_types import (
 )
 from ferro.base import ForeignKey as ForeignKeyCls
 
+pytestmark = pytest.mark.backend_matrix
+
 
 def test_pk_python_type_for_model_uuid():
     class UuidPkParent(Model):
@@ -84,7 +86,7 @@ def test_reconcile_upgrades_forward_ref_shadow(_cleanup_registry):
 
 
 @pytest.mark.asyncio
-async def test_uuid_fk_create_get_dump():
+async def test_uuid_fk_create_get_dump(db_url):
     """Regression for GitHub #16: UUID PK through shadow FK without validation/serialization issues."""
     ferro.reset_engine()
     ferro.clear_registry()
@@ -98,7 +100,7 @@ async def test_uuid_fk_create_get_dump():
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         parent: Annotated[UuidIssueParent, ForeignKey(related_name="children")]
 
-    await connect("sqlite::memory:", auto_migrate=True)
+    await connect(db_url, auto_migrate=True)
 
     parent = await UuidIssueParent.create(name="p")
     child = await UuidIssueChild.create(parent=parent)
@@ -123,7 +125,7 @@ async def test_uuid_fk_create_get_dump():
 
 
 @pytest.mark.asyncio
-async def test_uuid_fk_forward_ref_child_declared_first():
+async def test_uuid_fk_forward_ref_child_declared_first(db_url):
     """Circular-import style: child model references parent by string before parent exists."""
     ferro.reset_engine()
     ferro.clear_registry()
@@ -137,7 +139,7 @@ async def test_uuid_fk_forward_ref_child_declared_first():
         name: str
         children: BackRef[list[UuidFrwChild]] = None
 
-    await connect("sqlite::memory:", auto_migrate=True)
+    await connect(db_url, auto_migrate=True)
 
     parent = await UuidFrwParent.create(name="p")
     child = await UuidFrwChild.create(parent=parent)
@@ -189,7 +191,7 @@ def test_nullable_fk_annotation_does_not_crash():
 
 
 @pytest.mark.asyncio
-async def test_uuid_fk_save_after_reparenting():
+async def test_uuid_fk_save_after_reparenting(db_url):
     """Update an existing row: change only the UUID foreign key, then save() and re-fetch."""
     ferro.reset_engine()
     ferro.clear_registry()
@@ -204,7 +206,7 @@ async def test_uuid_fk_save_after_reparenting():
         label: str
         parent: Annotated[UuidMutParent, ForeignKey(related_name="kids")]
 
-    await connect("sqlite::memory:", auto_migrate=True)
+    await connect(db_url, auto_migrate=True)
 
     parent_a = await UuidMutParent.create(name="a")
     parent_b = await UuidMutParent.create(name="b")
@@ -221,7 +223,7 @@ async def test_uuid_fk_save_after_reparenting():
 
 
 @pytest.mark.asyncio
-async def test_uuid_fk_bulk_create():
+async def test_uuid_fk_bulk_create(db_url):
     """bulk_create serializes UUID FK columns via model_dump(mode='json')."""
     ferro.reset_engine()
     ferro.clear_registry()
@@ -236,7 +238,7 @@ async def test_uuid_fk_bulk_create():
         sku: str
         parent: Annotated[UuidBulkParent, ForeignKey(related_name="items")]
 
-    await connect("sqlite::memory:", auto_migrate=True)
+    await connect(db_url, auto_migrate=True)
 
     px = await UuidBulkParent.create(name="x")
     py = await UuidBulkParent.create(name="y")

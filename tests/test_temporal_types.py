@@ -1,19 +1,9 @@
 import pytest
-import uuid
-import os
 from datetime import datetime, date, timezone
 from typing import Annotated
 from ferro import Model, connect, FerroField
 
-
-@pytest.fixture
-def db_url():
-    db_file = f"test_temp_{uuid.uuid4()}.db"
-    url = f"sqlite:{db_file}?mode=rwc"
-    yield url
-    if os.path.exists(db_file):
-        os.remove(db_file)
-
+pytestmark = pytest.mark.backend_matrix
 
 @pytest.mark.asyncio
 async def test_temporal_types_roundtrip(db_url):

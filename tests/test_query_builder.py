@@ -1,19 +1,9 @@
-import os
-import uuid
 import pytest
 from ferro import Model, connect
 from pydantic import Field
 from ferro.query import Query, QueryNode
 
-
-@pytest.fixture
-def db_url():
-    db_file = f"test_{uuid.uuid4()}.db"
-    url = f"sqlite:{db_file}?mode=rwc"
-    yield url
-    if os.path.exists(db_file):
-        os.remove(db_file)
-
+pytestmark = pytest.mark.backend_matrix
 
 def test_field_proxy_operator_overloading():
     """

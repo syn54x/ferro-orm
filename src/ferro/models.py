@@ -186,23 +186,25 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> if user:
             ...     await user.delete()
         """
-        pk_val = None
-        for field_name, metadata in self.__class__.ferro_fields.items():
-            if metadata.primary_key:
-                pk_val = getattr(self, field_name)
-                break
-
-        if pk_val is None:
-            for field_name, field in self.__class__.model_fields.items():
-                if getattr(field, "json_schema_extra", {}).get("primary_key"):
-                    pk_val = getattr(self, field_name)
-                    break
+        pk_field_name = self.__class__._primary_key_field_name()
+        pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
 
         if pk_val is not None:
             name = self.__class__.__name__
-            tx_id = _CURRENT_TRANSACTION.get()
-            await delete_record(name, str(pk_val), tx_id)
+            await self.__class__.where(getattr(self.__class__, pk_field_name) == pk_val).delete()
             evict_instance(name, str(pk_val))
+
+    @classmethod
+    def _primary_key_field_name(cls) -> str | None:
+        for field_name, metadata in cls.ferro_fields.items():
+            if metadata.primary_key:
+                return field_name
+
+        for field_name, field in cls.model_fields.items():
+            if getattr(field, "json_schema_extra", {}).get("primary_key"):
+                return field_name
+
+        return None
 
     @classmethod
     def _fix_types(cls, instance: Self) -> None:
@@ -287,8 +289,11 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> user is None or isinstance(user, User)
             True
         """
-        tx_id = _CURRENT_TRANSACTION.get()
-        instance = await fetch_one(cls, str(pk), tx_id)
+        pk_field_name = cls._primary_key_field_name()
+        if pk_field_name is None:
+            raise RuntimeError(f"Model {cls.__name__} does not define a primary key")
+
+        instance = await cls.where(getattr(cls, pk_field_name) == pk).first()
         if instance:
             cls._fix_types(instance)
         return instance
@@ -307,26 +312,17 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> if user:
             ...     await user.refresh()
         """
-        pk_val = None
-        for field_name, metadata in self.__class__.ferro_fields.items():
-            if metadata.primary_key:
-                pk_val = getattr(self, field_name)
-                break
-
-        if pk_val is None:
-            for field_name, field in self.__class__.model_fields.items():
-                if getattr(field, "json_schema_extra", {}).get("primary_key"):
-                    pk_val = getattr(self, field_name)
-                    break
+        pk_field_name = self.__class__._primary_key_field_name()
+        pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
 
         if pk_val is None:
             raise RuntimeError("Cannot refresh a model without a primary key")
 
         name = self.__class__.__name__
         evict_instance(name, str(pk_val))
-
-        tx_id = _CURRENT_TRANSACTION.get()
-        fresh_instance = await fetch_one(self.__class__, str(pk_val), tx_id)
+        fresh_instance = await self.__class__.where(
+            getattr(self.__class__, pk_field_name) == pk_val
+        ).first()
 
         if fresh_instance is None:
             raise RuntimeError(f"Instance not found in database: {name}({pk_val})")
