@@ -60,6 +60,19 @@ The repository uses three database markers:
 
 If `FERRO_SUPABASE_URL` is not set, `postgres_only` tests are skipped and `backend_matrix` tests run only on SQLite.
 
+### Bridge-Boundary Regressions
+
+When a bug involves values crossing the Python/Rust bridge, preserve the public API shape in the regression test. These issues often depend on whether a value travels as JSON (`Query.all()`, `Query.count()`, `Query.update()`, `Query.delete()`) or as a typed Python value passed directly to Rust (`ManyToManyField.add()`, `.remove()`, `.clear()`).
+
+Use these conventions:
+
+- Put relationship and auto-migration regressions in `tests/test_auto_migrate.py` when they strengthen the backend matrix.
+- Put structural type regressions in `tests/test_structural_types.py` when they involve UUID, Decimal, JSON, enum, binary, date, or datetime behavior.
+- Use `backend_matrix` when the public behavior should work on both SQLite and PostgreSQL.
+- Use `postgres_only` when the assertion depends on native PostgreSQL types, catalogs, or casts.
+- Convert user repro scripts with minimal translation: keep the same model shape and public method sequence, trim incidental setup, and assert the original failure mode is gone.
+- Add a fast serializer or static-contract test when the bug is caused by a Python boundary rule, such as raw `json.dumps(query_def)` bypassing Ferro's query serializer.
+
 ## Basic Setup
 
 ```python

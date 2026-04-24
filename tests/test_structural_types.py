@@ -129,6 +129,76 @@ async def test_uuid_in_filter_serializes_collection_values(db_url):
 
 
 @pytest.mark.asyncio
+async def test_uuid_filter_serializes_for_update_and_delete_queries(db_url):
+    """UUID filters should serialize for mutating query payloads too."""
+
+    class UuidMutationModel(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        run_id: uuid.UUID
+        label: str
+
+    await connect(db_url, auto_migrate=True)
+
+    uid1 = uuid.uuid4()
+    uid2 = uuid.uuid4()
+    await UuidMutationModel.create(run_id=uid1, label="old")
+    await UuidMutationModel.create(run_id=uid2, label="keep")
+
+    updated = await UuidMutationModel.where(
+        UuidMutationModel.run_id == uid1
+    ).update(label="new")
+    assert updated == 1
+
+    fetched = await UuidMutationModel.where(UuidMutationModel.run_id == uid1).first()
+    assert fetched is not None
+    assert fetched.label == "new"
+
+    deleted = await UuidMutationModel.where(UuidMutationModel.run_id == uid1).delete()
+    assert deleted == 1
+    remaining = await UuidMutationModel.all()
+    assert [row.run_id for row in remaining] == [uid2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_postgres_json_and_decimal_updates_keep_typed_hydration(db_url):
+    """Postgres JSON and numeric updates need casts plus text hydration."""
+
+    class PgTypedMutation(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        metadata: Dict[str, str]
+        tags: List[str]
+        balance: Decimal
+
+    await connect(db_url, auto_migrate=True)
+
+    row = await PgTypedMutation.create(
+        metadata={"old": "value"},
+        tags=["a"],
+        balance=Decimal("1.50"),
+    )
+
+    updated = await PgTypedMutation.where(PgTypedMutation.id == row.id).update(
+        metadata={"new": "value"},
+        tags=["b", "c"],
+        balance=Decimal("2.75"),
+    )
+    assert updated == 1
+
+    fetched = await PgTypedMutation.get(row.id)
+    assert fetched is not None
+    assert fetched.metadata == {"new": "value"}
+    assert fetched.tags == ["b", "c"]
+    assert fetched.balance == Decimal("2.75")
+
+    filtered = await PgTypedMutation.where(
+        PgTypedMutation.balance > Decimal("2.00")
+    ).first()
+    assert filtered is not None
+    assert filtered.id == row.id
+
+
+@pytest.mark.asyncio
 @pytest.mark.postgres_only
 async def test_native_postgres_enum_column_decodes_via_text_cast(
     db_url, postgres_base_url, db_schema_name

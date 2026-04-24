@@ -79,6 +79,19 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
     assert len(linked) == 1
     assert linked[0].id == movie.id
     assert linked[0].title == "Matrix"
+    assert await actor.movies.count() == 1
+
+    reverse_linked = await movie.actors.all()
+    assert [row.id for row in reverse_linked] == [actor.id]
+
+    await actor.movies.remove(movie)
+    assert await actor.movies.count() == 0
+
+    movie_2 = await Movie.create(title="Reloaded")
+    await actor.movies.add(movie, movie_2)
+    assert await actor.movies.count() == 2
+    await actor.movies.clear()
+    assert await actor.movies.count() == 0
 
 
 @pytest.mark.asyncio
@@ -125,6 +138,7 @@ async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
     """UUID source PKs in M2M contexts should serialize for all query operations."""
     from ferro import Field as FerroFieldFn
     from ferro import clear_registry, connect, reset_engine
+    from ferro.models import transaction
     from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
     reset_engine()
@@ -154,5 +168,22 @@ async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
     assert [row.id for row in linked] == [tag.id]
     assert await post.tags.count() == 1
 
+    reverse_linked = await tag.posts.all()
+    assert [row.id for row in reverse_linked] == [post.id]
+
     await post.tags.remove(tag)
+    assert await post.tags.count() == 0
+
+    tag_2 = await UuidTag.create(name="orm")
+    await post.tags.add(tag, tag_2)
+    assert await post.tags.count() == 2
+    await post.tags.clear()
+    assert await post.tags.count() == 0
+
+    async with transaction():
+        await post.tags.add(tag)
+        assert await post.tags.count() == 1
+        await post.tags.remove(tag)
+        assert await post.tags.count() == 0
+
     assert await post.tags.count() == 0
