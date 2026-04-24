@@ -296,8 +296,9 @@ fn apply_postgres_text_select_columns(
         let resolved = resolve_ref(schema, col_info);
         matches!(
             property_format(resolved),
-            Some("uuid" | "date-time" | "date")
-        ) || property_is_enum(resolved)
+            Some("uuid" | "date-time" | "date" | "decimal")
+        ) || matches!(property_json_type(resolved), Some("object" | "array"))
+            || property_is_enum(resolved)
     });
     let need_text_from_native_enum = properties
         .keys()
