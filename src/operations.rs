@@ -3,132 +3,241 @@
 //! This module implements high-performance CRUD operations, leveraging
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
+use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue};
 use crate::query::QueryDef;
 use crate::state::{
-    engine_pool, IDENTITY_MAP, MODEL_REGISTRY, RustValue, TRANSACTION_REGISTRY, TransactionHandle,
+    IDENTITY_MAP, MODEL_REGISTRY, RustValue, SqlDialect, TRANSACTION_REGISTRY,
+    TransactionConnection, TransactionHandle, engine_handle,
 };
 use pyo3::prelude::*;
 use sea_query::{
-    Alias, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query,
-    SimpleExpr, SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
+    Alias, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query, SimpleExpr,
+    SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
-use sqlx::{Any, AnyConnection, Column, Pool, Row};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
-macro_rules! get_conn {
-    ($pool:expr, $tx_id:expr) => {{
-        if let Some(tx_id) = $tx_id {
-            if let Some(tx_handle) = TRANSACTION_REGISTRY.get(&tx_id) {
-                let conn = tx_handle.value().conn.clone();
-                Some(conn)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }};
+fn get_transaction_connection(tx_id: Option<String>) -> Option<TransactionConnection> {
+    tx_id.and_then(|id| {
+        TRANSACTION_REGISTRY
+            .get(&id)
+            .map(|tx| tx.value().conn.clone())
+    })
 }
 
-/// Build SQL with the dialect set at `connect()` time (`?` for SQLite, `$n` for Postgres).
-macro_rules! sea_query_build {
-    ($stmt:expr) => {{
-        match crate::state::sql_dialect() {
+fn active_engine() -> PyResult<Arc<EngineHandle>> {
+    let engine = engine_handle()
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized"))?;
+    Ok(engine)
+}
+
+fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
+    values
+        .iter()
+        .map(|val| match val {
+            SeaValue::Bool(Some(b)) => EngineBindValue::Bool(*b),
+            SeaValue::TinyInt(Some(i)) => EngineBindValue::I64(*i as i64),
+            SeaValue::SmallInt(Some(i)) => EngineBindValue::I64(*i as i64),
+            SeaValue::Int(Some(i)) => EngineBindValue::I64(*i as i64),
+            SeaValue::BigInt(Some(i)) => EngineBindValue::I64(*i),
+            SeaValue::BigUnsigned(Some(i)) => EngineBindValue::I64(*i as i64),
+            SeaValue::Float(Some(f)) => EngineBindValue::F64(*f as f64),
+            SeaValue::Double(Some(f)) => EngineBindValue::F64(*f),
+            SeaValue::String(Some(s)) => EngineBindValue::String(s.as_ref().clone()),
+            SeaValue::Char(Some(c)) => EngineBindValue::String(c.to_string()),
+            SeaValue::Bytes(Some(b)) => EngineBindValue::Bytes(b.as_ref().clone()),
+            _ => EngineBindValue::Null,
+        })
+        .collect()
+}
+
+async fn execute_statement_with_optional_tx(
+    engine: &EngineHandle,
+    tx_conn: Option<TransactionConnection>,
+    sql: &str,
+    bind_values: &[SeaValue],
+) -> Result<u64, sqlx::Error> {
+    match tx_conn {
+        Some(conn_arc) => {
+            let engine_bind_values = engine_bind_values_from_sea(bind_values);
+            let mut conn = conn_arc.lock().await;
+            conn.execute_sql_with_binds(sql, &engine_bind_values).await
+        }
+        None => {
+            let engine_bind_values = engine_bind_values_from_sea(bind_values);
+            engine
+                .execute_sql_with_binds(sql, &engine_bind_values)
+                .await
+        }
+    }
+}
+
+async fn execute_transaction_sql(
+    tx_conn: &TransactionConnection,
+    sql: &str,
+) -> Result<u64, sqlx::Error> {
+    let mut conn = tx_conn.lock().await;
+    conn.execute_sql(sql).await
+}
+
+fn engine_value_to_rust_value(
+    value: EngineValue,
+    schema: &serde_json::Value,
+    col_name: &str,
+) -> RustValue {
+    let prop = schema
+        .get("properties")
+        .and_then(|p| p.get(col_name))
+        .map(|col_info| resolve_ref(schema, col_info));
+
+    let format = prop.and_then(property_format);
+    let is_decimal = prop
+        .and_then(|p| p.get("anyOf"))
+        .and_then(|a| a.as_array())
+        .map(|types| {
+            let has_number = types
+                .iter()
+                .any(|t| t.get("type").and_then(|ty| ty.as_str()) == Some("number"));
+            let has_patterned_string = types.iter().any(|t| {
+                t.get("type").and_then(|ty| ty.as_str()) == Some("string")
+                    && t.get("pattern").is_some()
+            });
+            has_number && has_patterned_string
+        })
+        .unwrap_or(false);
+    let json_type = prop.and_then(property_json_type);
+
+    if is_decimal {
+        return match value {
+            EngineValue::F64(v) => RustValue::Decimal(v.to_string()),
+            EngineValue::String(v) => RustValue::Decimal(v),
+            _ => RustValue::None,
+        };
+    }
+
+    if format == Some("binary") {
+        return match value {
+            EngineValue::Bytes(v) => RustValue::Blob(v),
+            EngineValue::String(v) => RustValue::Blob(v.into_bytes()),
+            _ => RustValue::None,
+        };
+    }
+
+    match value {
+        EngineValue::I64(v) if json_type == Some("boolean") => RustValue::Bool(v != 0),
+        EngineValue::I64(v) => RustValue::BigInt(v),
+        EngineValue::F64(v) => RustValue::Double(v),
+        EngineValue::Bytes(v) => RustValue::Blob(v),
+        EngineValue::String(v) => match (json_type, format) {
+            (_, Some("date-time")) => RustValue::DateTime(v),
+            (_, Some("date")) => RustValue::Date(v),
+            (_, Some("uuid")) => RustValue::Uuid(v),
+            (Some("object"), _) | (Some("array"), _) => {
+                if let Ok(json_val) = serde_json::from_str(&v) {
+                    RustValue::Json(json_val)
+                } else {
+                    RustValue::String(v)
+                }
+            }
+            _ => RustValue::String(v),
+        },
+        EngineValue::Bool(v) => RustValue::Bool(v),
+        EngineValue::Null => RustValue::None,
+    }
+}
+
+fn typed_rows_to_parsed_data(
+    rows: Vec<EngineRow>,
+    schema: &serde_json::Value,
+    pk_col: Option<&str>,
+) -> Vec<(Option<String>, Vec<(String, RustValue)>)> {
+    rows.into_iter()
+        .map(|row| {
+            let mut row_pk_val = None;
+            let mut fields = Vec::with_capacity(row.values.len());
+
+            for (col_name, value) in row.values {
+                if pk_col == Some(col_name.as_str()) {
+                    row_pk_val = match &value {
+                        EngineValue::I64(v) => Some(v.to_string()),
+                        EngineValue::String(v) => Some(v.clone()),
+                        _ => None,
+                    };
+                }
+                let value = engine_value_to_rust_value(value, schema, &col_name);
+                fields.push((col_name, value));
+            }
+
+            (row_pk_val, fields)
+        })
+        .collect()
+}
+
+fn engine_row_string(row: &EngineRow, column_name: &str) -> Option<String> {
+    row.values
+        .iter()
+        .find(|(name, _)| name == column_name)
+        .and_then(|(_, value)| match value {
+            EngineValue::String(value) => Some(value.clone()),
+            EngineValue::I64(value) => Some(value.to_string()),
+            _ => None,
+        })
+}
+
+async fn postgres_catalog_rows(
+    engine: &EngineHandle,
+    tx_conn: &Option<TransactionConnection>,
+    sql: &str,
+    table_name: &str,
+    label: &str,
+) -> PyResult<Vec<EngineRow>> {
+    let values = [EngineBindValue::String(table_name.to_string())];
+    let rows = match tx_conn {
+        Some(conn_arc) => {
+            let mut conn = conn_arc.lock().await;
+            conn.fetch_all_sql_with_binds(sql, &values)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to inspect {} for '{}': {}",
+                        label, table_name, e
+                    ))
+                })?
+        }
+        None => engine
+            .fetch_all_sql_with_binds(sql, &values)
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to inspect {} for '{}': {}",
+                    label, table_name, e
+                ))
+            })?,
+    };
+
+    Ok(rows)
+}
+
+macro_rules! sea_query_build_for_backend {
+    ($stmt:expr, $backend:expr) => {{
+        match $backend {
             crate::state::SqlDialect::Sqlite => $stmt.build(SqliteQueryBuilder),
             crate::state::SqlDialect::Postgres => $stmt.build(PostgresQueryBuilder),
         }
     }};
 }
 
-macro_rules! sea_query_to_string {
-    ($stmt:expr) => {{
-        match crate::state::sql_dialect() {
+macro_rules! sea_query_to_string_for_backend {
+    ($stmt:expr, $backend:expr) => {{
+        match $backend {
             crate::state::SqlDialect::Sqlite => $stmt.to_string(SqliteQueryBuilder),
             crate::state::SqlDialect::Postgres => $stmt.to_string(PostgresQueryBuilder),
         }
     }};
 }
 
-macro_rules! decode_column {
-    ($row:expr, $name:expr, $col_name:expr) => {{
-        let registry = MODEL_REGISTRY.read().unwrap();
-        let prop = registry
-            .get($name)
-            .and_then(|s| s.get("properties"))
-            .and_then(|p| p.get($col_name));
-
-        let format = prop.and_then(property_format);
-        let is_decimal = prop
-            .and_then(|p| p.get("anyOf"))
-            .and_then(|a| a.as_array())
-            .map(|types| {
-                let has_number = types
-                    .iter()
-                    .any(|t| t.get("type").and_then(|ty| ty.as_str()) == Some("number"));
-                let has_patterned_string = types.iter().any(|t| {
-                    t.get("type").and_then(|ty| ty.as_str()) == Some("string")
-                        && t.get("pattern").is_some()
-                });
-                has_number && has_patterned_string
-            })
-            .unwrap_or(false);
-
-        let json_type = prop.and_then(property_json_type);
-
-        if is_decimal {
-            if let Ok(v) = $row.try_get::<f64, _>($col_name) {
-                RustValue::Decimal(v.to_string())
-            } else if let Ok(v) = $row.try_get::<String, _>($col_name) {
-                RustValue::Decimal(v)
-            } else {
-                RustValue::None
-            }
-        } else if format == Some("binary") {
-            if let Ok(v) = $row.try_get::<Vec<u8>, _>($col_name) {
-                RustValue::Blob(v)
-            } else if let Ok(v) = $row.try_get::<String, _>($col_name) {
-                RustValue::Blob(v.into_bytes())
-            } else {
-                RustValue::None
-            }
-        } else if let Ok(val) = $row.try_get::<i64, _>($col_name) {
-            let is_bool = json_type == Some("boolean");
-            if is_bool {
-                RustValue::Bool(val != 0)
-            } else {
-                RustValue::BigInt(val)
-            }
-        } else if let Ok(val) = $row.try_get::<f64, _>($col_name) {
-            RustValue::Double(val)
-        } else if let Ok(val) = $row.try_get::<Vec<u8>, _>($col_name) {
-            RustValue::Blob(val)
-        } else if let Ok(val) = $row.try_get::<String, _>($col_name) {
-            match (json_type, format) {
-                (_, Some("date-time")) => RustValue::DateTime(val),
-                (_, Some("date")) => RustValue::Date(val),
-                (_, Some("uuid")) => RustValue::Uuid(val),
-                (Some("object"), _) | (Some("array"), _) => {
-                    if let Ok(json_val) = serde_json::from_str(&val) {
-                        RustValue::Json(json_val)
-                    } else {
-                        RustValue::String(val)
-                    }
-                }
-                _ => RustValue::String(val),
-            }
-        } else if let Ok(val) = $row.try_get::<bool, _>($col_name) {
-            RustValue::Bool(val)
-        } else {
-            RustValue::None
-        }
-    }};
-}
-
-/// On Postgres, `sqlx::Any` cannot decode native `uuid` columns. When the model schema marks
-/// UUID fields, expand `SELECT *` into explicit columns with `::text` casts so decoding uses
-/// text (same representation as SQLite).
+/// On Postgres, cast text-like special columns in SELECT output so Python hydration
+/// sees the same string representation as SQLite.
 fn property_json_type(col_info: &serde_json::Value) -> Option<&str> {
     col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
         col_info
@@ -170,11 +279,12 @@ fn apply_postgres_text_select_columns(
     table_name: &str,
     schema: &serde_json::Value,
     pg_native_enum_columns: &HashSet<String>,
+    backend: SqlDialect,
 ) {
     use sea_query::{Alias, Expr};
 
     let tbl = Alias::new(table_name);
-    if crate::state::sql_dialect() != crate::state::SqlDialect::Postgres {
+    if backend != SqlDialect::Postgres {
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     }
@@ -199,7 +309,10 @@ fn apply_postgres_text_select_columns(
     for (col_name, col_info) in properties {
         let col_iden = Alias::new(col_name.as_str());
         let col_info = resolve_ref(schema, col_info);
-        if matches!(property_format(col_info), Some("uuid" | "date-time" | "date"))
+        if matches!(
+            property_format(col_info),
+            Some("uuid" | "date-time" | "date" | "decimal")
+        ) || matches!(property_json_type(col_info), Some("object" | "array"))
             || property_is_enum(col_info)
             || pg_native_enum_columns.contains(col_name.as_str())
         {
@@ -212,30 +325,6 @@ fn apply_postgres_text_select_columns(
             select.column((tbl.clone(), col_iden));
         }
     }
-}
-
-/// Helper to bind Sea-Query values to a SQLx Any query.
-fn bind_query<'a>(
-    mut query: sqlx::query::Query<'a, sqlx::Any, sqlx::any::AnyArguments<'a>>,
-    values: &'a [SeaValue],
-) -> sqlx::query::Query<'a, sqlx::Any, sqlx::any::AnyArguments<'a>> {
-    for val in values {
-        query = match val {
-            SeaValue::Bool(Some(b)) => query.bind(*b),
-            SeaValue::TinyInt(Some(i)) => query.bind(*i as i64),
-            SeaValue::SmallInt(Some(i)) => query.bind(*i as i64),
-            SeaValue::Int(Some(i)) => query.bind(*i as i64),
-            SeaValue::BigInt(Some(i)) => query.bind(*i),
-            SeaValue::BigUnsigned(Some(i)) => query.bind(*i as i64),
-            SeaValue::Float(Some(f)) => query.bind(*f as f64),
-            SeaValue::Double(Some(f)) => query.bind(*f),
-            SeaValue::String(Some(s)) => query.bind(s.as_ref().clone()),
-            SeaValue::Char(Some(c)) => query.bind(c.to_string()),
-            SeaValue::Bytes(Some(b)) => query.bind(b.as_ref().clone()),
-            _ => query.bind(Option::<String>::None),
-        };
-    }
-    query
 }
 
 fn resolve_ref<'a>(
@@ -254,15 +343,15 @@ fn resolve_ref<'a>(
 /// Maps each table column to its PostgreSQL enum `typname` (``typtype = 'e'``) for the current schema.
 async fn postgres_enum_udt_by_column(
     table_name: &str,
-    pool: &Arc<Pool<Any>>,
-    tx_conn: Option<Arc<Mutex<AnyConnection>>>,
+    engine: &EngineHandle,
+    tx_conn: &Option<TransactionConnection>,
+    backend: SqlDialect,
 ) -> PyResult<HashMap<String, String>> {
-    if crate::state::sql_dialect() != crate::state::SqlDialect::Postgres {
+    if backend != SqlDialect::Postgres {
         return Ok(HashMap::new());
     }
 
-    let query = sqlx::query(
-        r#"
+    let sql = r#"
         SELECT a.attname::text AS column_name, t.typname::text AS udt_name
         FROM pg_attribute a
         JOIN pg_class c ON a.attrelid = c.oid
@@ -273,27 +362,12 @@ async fn postgres_enum_udt_by_column(
           AND t.typtype = 'e'
           AND a.attnum > 0
           AND NOT a.attisdropped
-        "#,
-    )
-    .bind(table_name);
-
-    let rows = if let Some(conn_arc) = tx_conn {
-        let mut conn = conn_arc.lock().await;
-        query.fetch_all(&mut *conn).await
-    } else {
-        query.fetch_all(pool.as_ref()).await
-    }
-    .map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Failed to inspect enum columns for '{}': {}",
-            table_name, e
-        ))
-    })?;
+        "#;
 
     let mut out = HashMap::new();
-    for row in rows {
-        let column_name: String = row.try_get("column_name").unwrap_or_default();
-        let udt_name: String = row.try_get("udt_name").unwrap_or_default();
+    for row in postgres_catalog_rows(engine, tx_conn, sql, table_name, "enum columns").await? {
+        let column_name = engine_row_string(&row, "column_name").unwrap_or_default();
+        let udt_name = engine_row_string(&row, "udt_name").unwrap_or_default();
         if !column_name.is_empty() && !udt_name.is_empty() {
             out.insert(column_name, udt_name);
         }
@@ -305,60 +379,46 @@ async fn postgres_enum_udt_by_column(
 /// Column names on `table_name` in the current schema whose SQL type is `uuid`.
 async fn postgres_uuid_column_names(
     table_name: &str,
-    pool: &Arc<Pool<Any>>,
-    tx_conn: Option<Arc<Mutex<AnyConnection>>>,
+    engine: &EngineHandle,
+    tx_conn: &Option<TransactionConnection>,
+    backend: SqlDialect,
 ) -> PyResult<HashSet<String>> {
-    if crate::state::sql_dialect() != crate::state::SqlDialect::Postgres {
+    if backend != SqlDialect::Postgres {
         return Ok(HashSet::new());
     }
 
-    let query = sqlx::query(
-        r#"
+    let sql = r#"
         SELECT column_name::text
         FROM information_schema.columns
         WHERE table_schema = current_schema()
           AND table_name = $1
           AND (data_type = 'uuid' OR udt_name = 'uuid')
-        "#,
+        "#;
+
+    Ok(
+        postgres_catalog_rows(engine, tx_conn, sql, table_name, "uuid columns")
+            .await?
+            .into_iter()
+            .filter_map(|row| {
+                engine_row_string(&row, "column_name").filter(|name| !name.is_empty())
+            })
+            .collect(),
     )
-    .bind(table_name);
-
-    let rows = if let Some(conn_arc) = tx_conn {
-        let mut conn = conn_arc.lock().await;
-        query.fetch_all(&mut *conn).await
-    } else {
-        query.fetch_all(pool.as_ref()).await
-    }
-    .map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Failed to inspect uuid columns for '{}': {}",
-            table_name, e
-        ))
-    })?;
-
-    Ok(rows
-        .into_iter()
-        .filter_map(|r| {
-            r.try_get::<String, _>("column_name")
-                .ok()
-                .filter(|n| !n.is_empty())
-        })
-        .collect())
 }
 
 /// For each column whose SQL type is a date or timestamp family, the ``CAST ( … AS … )`` target
 /// (``date``, ``timestamp``, ``timestamptz``) so parameters are not sent as untyped text.
 async fn postgres_temporal_cast_by_column(
     table_name: &str,
-    pool: &Arc<Pool<Any>>,
-    tx_conn: Option<Arc<Mutex<AnyConnection>>>,
+    engine: &EngineHandle,
+    tx_conn: &Option<TransactionConnection>,
+    backend: SqlDialect,
 ) -> PyResult<HashMap<String, String>> {
-    if crate::state::sql_dialect() != crate::state::SqlDialect::Postgres {
+    if backend != SqlDialect::Postgres {
         return Ok(HashMap::new());
     }
 
-    let query = sqlx::query(
-        r#"
+    let sql = r#"
         SELECT column_name::text,
                CASE data_type::text
                    WHEN 'timestamp without time zone' THEN 'timestamp'
@@ -374,31 +434,14 @@ async fn postgres_temporal_cast_by_column(
               'timestamp with time zone',
               'date'
           )
-        "#,
-    )
-    .bind(table_name);
-
-    let rows = if let Some(conn_arc) = tx_conn {
-        let mut conn = conn_arc.lock().await;
-        query.fetch_all(&mut *conn).await
-    } else {
-        query.fetch_all(pool.as_ref()).await
-    }
-    .map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Failed to inspect temporal columns for '{}': {}",
-            table_name, e
-        ))
-    })?;
+        "#;
 
     let mut out = HashMap::new();
-    for row in rows {
-        let col: String = row.try_get("column_name").unwrap_or_default();
-        let ct: Option<String> = row.try_get("cast_type").ok();
-        if let (cn, Some(cast)) = (col, ct) {
-            if !cn.is_empty() && !cast.is_empty() {
-                out.insert(cn, cast);
-            }
+    for row in postgres_catalog_rows(engine, tx_conn, sql, table_name, "temporal columns").await? {
+        let column_name = engine_row_string(&row, "column_name").unwrap_or_default();
+        let cast_type = engine_row_string(&row, "cast_type").unwrap_or_default();
+        if !column_name.is_empty() && !cast_type.is_empty() {
+            out.insert(column_name, cast_type);
         }
     }
     Ok(out)
@@ -434,36 +477,34 @@ fn schema_value_expr(
     enum_udt: &HashMap<String, String>,
     uuid_columns: &HashSet<String>,
     ts_cast: &HashMap<String, String>,
+    backend: SqlDialect,
 ) -> SimpleExpr {
     let col_info = schema_property(schema, col_name);
     if let serde_json::Value::String(s) = value
-        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && backend == SqlDialect::Postgres
         && let Some(tn) = postgres_enum_type_name_for_column(col_name, enum_udt, col_info)
     {
         return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
             .cast_as(Alias::new(tn.as_str()));
     }
-    if value.is_null()
-        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
-        && uuid_columns.contains(col_name)
-    {
+    if value.is_null() && backend == SqlDialect::Postgres && uuid_columns.contains(col_name) {
         return Expr::value(sea_query::Value::String(None)).cast_as("uuid");
     }
     if let serde_json::Value::String(s) = value
-        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && backend == SqlDialect::Postgres
         && uuid_columns.contains(col_name)
         && uuid::Uuid::parse_str(s).is_ok()
     {
         return Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid");
     }
     if value.is_null()
-        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && backend == SqlDialect::Postgres
         && let Some(cast) = ts_cast.get(col_name)
     {
         return Expr::value(sea_query::Value::String(None)).cast_as(Alias::new(cast.as_str()));
     }
     if let serde_json::Value::String(s) = value
-        && crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
+        && backend == SqlDialect::Postgres
         && let Some(cast) = ts_cast.get(col_name)
     {
         return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
@@ -478,22 +519,28 @@ fn schema_value_expr(
         .unwrap_or(false);
 
     match value {
+        value
+            if backend == SqlDialect::Postgres && matches!(json_type, Some("object" | "array")) =>
+        {
+            if value.is_null() {
+                Expr::value(sea_query::Value::String(None)).cast_as("json")
+            } else {
+                Expr::value(sea_query::Value::String(Some(Box::new(value.to_string()))))
+                    .cast_as("json")
+            }
+        }
         serde_json::Value::String(s)
-            if crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
-                && format == Some("uuid") =>
+            if backend == SqlDialect::Postgres && format == Some("uuid") =>
         {
             Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid")
         }
         serde_json::Value::String(s)
-            if crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
-                && format == Some("date-time") =>
+            if backend == SqlDialect::Postgres && format == Some("date-time") =>
         {
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                .cast_as("timestamptz")
+            Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("timestamptz")
         }
         serde_json::Value::String(s)
-            if crate::state::sql_dialect() == crate::state::SqlDialect::Postgres
-                && format == Some("date") =>
+            if backend == SqlDialect::Postgres && format == Some("date") =>
         {
             Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("date")
         }
@@ -511,11 +558,9 @@ fn schema_value_expr(
                 Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
             }
         }
-        serde_json::Value::String(s) if format == Some("binary") => {
-            Expr::value(sea_query::Value::Bytes(Some(Box::new(
-                s.as_bytes().to_vec(),
-            ))))
-        }
+        serde_json::Value::String(s) if format == Some("binary") => Expr::value(
+            sea_query::Value::Bytes(Some(Box::new(s.as_bytes().to_vec()))),
+        ),
         serde_json::Value::String(s) if is_decimal => {
             if let Ok(parsed) = s.parse::<f64>() {
                 Expr::value(sea_query::Value::Double(Some(parsed)))
@@ -536,8 +581,7 @@ fn schema_value_expr(
             Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
         }
         serde_json::Value::Bool(b)
-            if json_type == Some("boolean")
-                && crate::state::sql_dialect() == crate::state::SqlDialect::Sqlite =>
+            if json_type == Some("boolean") && backend == SqlDialect::Sqlite =>
         {
             Expr::value(sea_query::Value::BigInt(Some(if *b { 1 } else { 0 })))
         }
@@ -563,9 +607,7 @@ pub fn begin_transaction(
             drop(parent);
 
             let savepoint_name = format!("sp_{}", tx_id.replace('-', "_"));
-            let mut locked_conn = conn.lock().await;
-            sqlx::query(&format!("SAVEPOINT {savepoint_name}"))
-                .execute(&mut *locked_conn)
+            execute_transaction_sql(&conn, &format!("SAVEPOINT {savepoint_name}"))
                 .await
                 .map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -573,32 +615,18 @@ pub fn begin_transaction(
                         e
                     ))
                 })?;
-            drop(locked_conn);
 
             TRANSACTION_REGISTRY.insert(
                 tx_id.clone(),
                 TransactionHandle::nested(conn, savepoint_name),
             );
         } else {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
+            let engine = active_engine()?;
+            let conn = engine.begin_transaction_connection().await.map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
             })?;
 
-            let mut conn = pool.acquire().await.map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to acquire connection: {}",
-                    e
-                ))
-            })?;
-
-            sqlx::query("BEGIN")
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
-                })?;
-
-            TRANSACTION_REGISTRY.insert(tx_id.clone(), TransactionHandle::root(conn.detach()));
+            TRANSACTION_REGISTRY.insert(tx_id.clone(), TransactionHandle::root(conn));
         }
 
         Ok(tx_id)
@@ -613,20 +641,20 @@ pub fn commit_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, P
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?
             .1;
 
-        let mut conn = tx_handle.conn.lock().await;
         if let Some(savepoint_name) = tx_handle.savepoint_name {
-            sqlx::query(&format!("RELEASE SAVEPOINT {savepoint_name}"))
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to RELEASE SAVEPOINT: {}",
-                        e
-                    ))
-                })?;
+            execute_transaction_sql(
+                &tx_handle.conn,
+                &format!("RELEASE SAVEPOINT {savepoint_name}"),
+            )
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to RELEASE SAVEPOINT: {}",
+                    e
+                ))
+            })?;
         } else {
-            sqlx::query("COMMIT")
-                .execute(&mut *conn)
+            execute_transaction_sql(&tx_handle.conn, "COMMIT")
                 .await
                 .map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to COMMIT: {}", e))
@@ -645,35 +673,34 @@ pub fn rollback_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_,
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?
             .1;
 
-        let mut conn = tx_handle.conn.lock().await;
         if let Some(savepoint_name) = tx_handle.savepoint_name {
-            sqlx::query(&format!("ROLLBACK TO SAVEPOINT {savepoint_name}"))
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to ROLLBACK TO SAVEPOINT: {}",
-                        e
-                    ))
-                })?;
-            sqlx::query(&format!("RELEASE SAVEPOINT {savepoint_name}"))
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to RELEASE SAVEPOINT: {}",
-                        e
-                    ))
-                })?;
+            execute_transaction_sql(
+                &tx_handle.conn,
+                &format!("ROLLBACK TO SAVEPOINT {savepoint_name}"),
+            )
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to ROLLBACK TO SAVEPOINT: {}",
+                    e
+                ))
+            })?;
+            execute_transaction_sql(
+                &tx_handle.conn,
+                &format!("RELEASE SAVEPOINT {savepoint_name}"),
+            )
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to RELEASE SAVEPOINT: {}",
+                    e
+                ))
+            })?;
         } else {
-            sqlx::query("ROLLBACK")
-                .execute(&mut *conn)
+            execute_transaction_sql(&tx_handle.conn, "ROLLBACK")
                 .await
                 .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to ROLLBACK: {}",
-                        e
-                    ))
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to ROLLBACK: {}", e))
                 })?;
         }
 
@@ -706,21 +733,20 @@ pub fn fetch_all<'py>(
     let cls_py = cls.unbind();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = get_transaction_connection(tx_id);
+            (engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
-            let m = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
+            let m = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
             m.keys().cloned().collect()
         };
         // ... same sql generation ...
-        let (sql, pk_col) = {
+        let (sql, pk_col, schema_for_decode) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
                 pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
             })?;
@@ -741,38 +767,38 @@ pub fn fetch_all<'py>(
                 }
             }
             let mut stmt = Query::select();
-            apply_postgres_text_select_columns(&mut stmt, &table_name, schema, &pg_native_enum_cols);
-            let s = sea_query_to_string!(stmt.from(Alias::new(&table_name)));
-            (s, pk)
+            apply_postgres_text_select_columns(
+                &mut stmt,
+                &table_name,
+                schema,
+                &pg_native_enum_cols,
+                backend,
+            );
+            let s = sea_query_to_string_for_backend!(stmt.from(Alias::new(&table_name)), backend);
+            (s, pk, schema.clone())
         };
 
-        let rows = if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            sqlx::query(&sql).fetch_all(&mut *conn).await
-        } else {
-            sqlx::query(&sql).fetch_all(pool.as_ref()).await
-        }
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e)))?;
-
-        let mut parsed_data = Vec::with_capacity(rows.len());
-        for row in rows {
-            let mut row_pk_val = None;
-            if let Some(ref pk_name) = pk_col {
-                if let Ok(val) = row.try_get::<i64, _>(pk_name.as_str()) {
-                    row_pk_val = Some(val.to_string());
-                } else if let Ok(val) = row.try_get::<String, _>(pk_name.as_str()) {
-                    row_pk_val = Some(val);
-                }
+        let parsed_data = match tx_conn {
+            Some(conn_arc) => {
+                let mut conn = conn_arc.lock().await;
+                let rows = conn
+                    .fetch_all_sql_with_binds(&sql, &[])
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
+                    })?;
+                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
             }
-
-            let mut fields = Vec::with_capacity(row.columns().len());
-            for col in row.columns() {
-                let col_name = col.name();
-                let val = decode_column!(row, &name, col_name);
-                fields.push((col_name.to_string(), val));
+            None => {
+                let rows = engine
+                    .fetch_all_sql_with_binds(&sql, &[])
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
+                    })?;
+                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
             }
-            parsed_data.push((row_pk_val, fields));
-        }
+        };
 
         Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
@@ -857,21 +883,20 @@ pub fn fetch_one<'py>(
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = get_transaction_connection(tx_id);
+            (engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
-            let m = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
+            let m = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
             m.keys().cloned().collect()
         };
         // ... sql logic ...
-        let (sql, bind_values, _pk_col_name) = {
+        let (sql, bind_values, _pk_col_name, schema_for_decode) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
                 pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
             })?;
@@ -894,7 +919,13 @@ pub fn fetch_one<'py>(
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let mut stmt = Query::select();
-            apply_postgres_text_select_columns(&mut stmt, &table_name, schema, &pg_native_enum_cols);
+            apply_postgres_text_select_columns(
+                &mut stmt,
+                &table_name,
+                schema,
+                &pg_native_enum_cols,
+                backend,
+            );
             let no_enum_udt = HashMap::new();
             let no_uuid = HashSet::new();
             let no_ts: HashMap<String, String> = HashMap::new();
@@ -905,33 +936,44 @@ pub fn fetch_one<'py>(
                 &no_enum_udt,
                 &no_uuid,
                 &no_ts,
+                backend,
             );
-            let (s, values) = sea_query_build!(stmt
-                .from(Alias::new(&table_name))
-                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)));
-            (s, values, pk_name)
+            let (s, values) = sea_query_build_for_backend!(
+                stmt.from(Alias::new(&table_name))
+                    .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)),
+                backend
+            );
+            (s, values, pk_name, schema.clone())
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        let row = if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.fetch_optional(&mut *conn).await
-        } else {
-            query.fetch_optional(pool.as_ref()).await
-        }
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e)))?;
-
-        let parsed_row = match row {
-            Some(row) => {
-                let mut fields = Vec::with_capacity(row.columns().len());
-                for col in row.columns() {
-                    let col_name = col.name();
-                    let val = decode_column!(row, &name, col_name);
-                    fields.push((col_name.to_string(), val));
-                }
-                Some(fields)
+        let parsed_row = match tx_conn {
+            Some(conn_arc) => {
+                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+                let mut conn = conn_arc.lock().await;
+                let rows = conn
+                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
+                    })?;
+                typed_rows_to_parsed_data(rows, &schema_for_decode, None)
+                    .into_iter()
+                    .next()
+                    .map(|(_, fields)| fields)
             }
-            None => None,
+            None => {
+                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+                let rows = engine
+                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
+                    })?;
+                typed_rows_to_parsed_data(rows, &schema_for_decode, None)
+                    .into_iter()
+                    .next()
+                    .map(|(_, fields)| fields)
+            }
         };
 
         match parsed_row {
@@ -977,12 +1019,11 @@ pub fn save_record(
     tx_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = get_transaction_connection(tx_id);
+            (engine, tx_conn, backend)
         };
 
         // ... schema and record logic ...
@@ -1023,9 +1064,11 @@ pub fn save_record(
         }
 
         let table_name = name.to_lowercase();
-        let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
-        let uuid_columns = postgres_uuid_column_names(&table_name, &pool, tx_conn.clone()).await?;
-        let ts_cast = postgres_temporal_cast_by_column(&table_name, &pool, tx_conn.clone()).await?;
+        let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        let uuid_columns =
+            postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
+        let ts_cast =
+            postgres_temporal_cast_by_column(&table_name, &engine, &tx_conn, backend).await?;
         let (sql, bind_values, needs_postgres_returning) = {
             let mut columns = Vec::new();
             let mut values = Vec::new();
@@ -1050,6 +1093,7 @@ pub fn save_record(
                     &enum_udt,
                     &uuid_columns,
                     &ts_cast,
+                    backend,
                 ));
             }
             let mut insert_stmt = InsertStatement::new()
@@ -1073,84 +1117,68 @@ pub fn save_record(
                     insert_stmt.on_conflict(on_conflict);
                 }
             }
-            let needs_postgres_returning = crate::state::sql_dialect()
-                == crate::state::SqlDialect::Postgres
+            let needs_postgres_returning = backend == crate::state::SqlDialect::Postgres
                 && pk_col.is_some()
                 && pk_is_auto
                 && !pk_provided;
-            let (mut sql, values) = sea_query_build!(insert_stmt);
-            if needs_postgres_returning
-                && let Some(pk) = pk_col.as_ref()
-            {
+            let (mut sql, values) = sea_query_build_for_backend!(insert_stmt, backend);
+            if needs_postgres_returning && let Some(pk) = pk_col.as_ref() {
                 sql.push_str(&format!(" RETURNING \"{}\"", pk));
             }
             (sql, values, needs_postgres_returning)
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            if needs_postgres_returning {
-                let row = query.fetch_one(&mut *conn).await.map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
-                })?;
-                let id: i64 = row.try_get(0).unwrap_or(0);
-                Ok((id > 0).then_some(id))
-            } else {
-                let res = query.execute(&mut *conn).await;
-                if res.is_err() {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Save failed: {}",
-                        res.err().unwrap()
-                    )));
-                }
-                let exec_res = res.unwrap();
-                let mut lid = exec_res.last_insert_id();
-                if crate::state::sql_dialect() == crate::state::SqlDialect::Sqlite
-                    && (lid.is_none() || lid == Some(0))
-                    && let Ok(row) = sqlx::query("SELECT last_insert_rowid()")
-                        .fetch_one(&mut *conn)
+        match tx_conn {
+            Some(conn_arc) => {
+                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+                let mut conn = conn_arc.lock().await;
+                if needs_postgres_returning {
+                    let rows = conn
+                        .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                         .await
-                {
-                    let id: i64 = row.try_get(0).unwrap_or(0);
-                    if id > 0 {
-                        lid = Some(id);
-                    }
+                        .map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
+                        })?;
+                    let id = rows
+                        .first()
+                        .and_then(|row| row.values.first())
+                        .and_then(|(_, value)| value.as_i64())
+                        .unwrap_or(0);
+                    Ok((id > 0).then_some(id))
+                } else {
+                    let exec_res = conn
+                        .execute_sql_with_binds_result(&sql, &engine_bind_values)
+                        .await
+                        .map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
+                        })?;
+                    Ok(exec_res.last_insert_id)
                 }
-                Ok(lid)
             }
-        } else {
-            let mut conn = pool.acquire().await.map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Pool acquire failed: {}", e))
-            })?;
-            if needs_postgres_returning {
-                let row = query.fetch_one(&mut *conn).await.map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
-                })?;
-                let id: i64 = row.try_get(0).unwrap_or(0);
-                Ok((id > 0).then_some(id))
-            } else {
-                let res = query.execute(&mut *conn).await;
-                if res.is_err() {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Save failed: {}",
-                        res.err().unwrap()
-                    )));
-                }
-                let exec_res = res.unwrap();
-                let mut lid = exec_res.last_insert_id();
-                if crate::state::sql_dialect() == crate::state::SqlDialect::Sqlite
-                    && (lid.is_none() || lid == Some(0))
-                    && let Ok(row) = sqlx::query("SELECT last_insert_rowid()")
-                        .fetch_one(&mut *conn)
+            None => {
+                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+                if needs_postgres_returning {
+                    let rows = engine
+                        .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                         .await
-                {
-                    let id: i64 = row.try_get(0).unwrap_or(0);
-                    if id > 0 {
-                        lid = Some(id);
-                    }
+                        .map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
+                        })?;
+                    let id = rows
+                        .first()
+                        .and_then(|row| row.values.first())
+                        .and_then(|(_, value)| value.as_i64())
+                        .unwrap_or(0);
+                    Ok((id > 0).then_some(id))
+                } else {
+                    let exec_res = engine
+                        .execute_sql_with_binds_result(&sql, &engine_bind_values)
+                        .await
+                        .map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
+                        })?;
+                    Ok(exec_res.last_insert_id)
                 }
-                Ok(lid)
             }
         }
     })
@@ -1165,14 +1193,11 @@ pub fn save_bulk_records(
     tx_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "Engine not initialized. Call connect() first.",
-                )
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = get_transaction_connection(tx_id);
+            (engine, tx_conn, backend)
         };
 
         let schema = {
@@ -1217,9 +1242,11 @@ pub fn save_bulk_records(
         }
 
         let table_name = name.to_lowercase();
-        let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
-        let uuid_columns = postgres_uuid_column_names(&table_name, &pool, tx_conn.clone()).await?;
-        let ts_cast = postgres_temporal_cast_by_column(&table_name, &pool, tx_conn.clone()).await?;
+        let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        let uuid_columns =
+            postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
+        let ts_cast =
+            postgres_temporal_cast_by_column(&table_name, &engine, &tx_conn, backend).await?;
         let (sql, bind_values) = {
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -1258,6 +1285,7 @@ pub fn save_bulk_records(
                         &enum_udt,
                         &uuid_columns,
                         &ts_cast,
+                        backend,
                     ));
                 }
                 insert_stmt.values(row_values).map_err(|e| {
@@ -1268,25 +1296,21 @@ pub fn save_bulk_records(
                 })?;
             }
 
-            let (s, values) = sea_query_build!(insert_stmt);
+            let (s, values) = sea_query_build_for_backend!(insert_stmt, backend);
             (s, values)
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        let result = if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.execute(&mut *conn).await
-        } else {
-            query.execute(pool.as_ref()).await
-        }
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Bulk save failed for '{}': {}",
-                name, e
-            ))
-        })?;
+        let rows_affected =
+            execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Bulk save failed for '{}': {}",
+                        name, e
+                    ))
+                })?;
 
-        Ok(result.rows_affected())
+        Ok(rows_affected)
     })
 }
 
@@ -1314,21 +1338,20 @@ pub fn fetch_filtered<'py>(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = get_transaction_connection(tx_id);
+            (engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
-            let m = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
+            let m = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
             m.keys().cloned().collect()
         };
         // ...
-        let (sql, bind_values, pk_col) = {
+        let (sql, bind_values, pk_col, schema_for_decode) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
                 pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
             })?;
@@ -1355,6 +1378,7 @@ pub fn fetch_filtered<'py>(
                 &table_name,
                 schema,
                 &pg_native_enum_cols,
+                backend,
             );
             select.from(Alias::new(&table_name));
 
@@ -1371,13 +1395,17 @@ pub fn fetch_filtered<'py>(
                     Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
                         .equals((join_table.clone(), target_col.clone())),
                 );
-                select.and_where(
-                    Expr::col((join_table.clone(), source_col.clone()))
-                        .eq(query_def.value_rhs_simple_expr(&m2m.source_col, &m2m.source_id, true)),
-                );
+                select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
+                    query_def.value_rhs_simple_expr_for_backend(
+                        &m2m.source_col,
+                        &m2m.source_id,
+                        true,
+                        backend,
+                    ),
+                ));
             }
 
-            select.cond_where(query_def.to_condition());
+            select.cond_where(query_def.to_condition_for_backend(backend));
             if let Some(ref orders) = query_def.order_by {
                 for order in orders {
                     let col = Alias::new(&order.column);
@@ -1395,38 +1423,33 @@ pub fn fetch_filtered<'py>(
             if let Some(offset) = query_def.offset {
                 select.offset(offset);
             }
-            let (s, values) = sea_query_build!(select);
-            (s, values, pk)
+            let (s, values) = sea_query_build_for_backend!(select, backend);
+            (s, values, pk, schema.clone())
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        let rows = if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.fetch_all(&mut *conn).await
-        } else {
-            query.fetch_all(pool.as_ref()).await
-        }
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e)))?;
-
-        let mut parsed_data = Vec::with_capacity(rows.len());
-        for row in rows {
-            let mut row_pk_val = None;
-            if let Some(ref pk_name) = pk_col {
-                if let Ok(val) = row.try_get::<i64, _>(pk_name.as_str()) {
-                    row_pk_val = Some(val.to_string());
-                } else if let Ok(val) = row.try_get::<String, _>(pk_name.as_str()) {
-                    row_pk_val = Some(val);
-                }
+        let parsed_data = match tx_conn {
+            Some(conn_arc) => {
+                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+                let mut conn = conn_arc.lock().await;
+                let rows = conn
+                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
+                    })?;
+                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
             }
-
-            let mut fields = Vec::with_capacity(row.columns().len());
-            for col in row.columns() {
-                let col_name = col.name();
-                let val = decode_column!(row, &name, col_name);
-                fields.push((col_name.to_string(), val));
+            None => {
+                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+                let rows = engine
+                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
+                    })?;
+                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
             }
-            parsed_data.push((row_pk_val, fields));
-        }
+        };
 
         Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
@@ -1493,12 +1516,15 @@ pub fn count_filtered(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = tx_id.and_then(|id| {
+                TRANSACTION_REGISTRY
+                    .get(&id)
+                    .map(|tx| tx.value().conn.clone())
+            });
+            (engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
@@ -1541,28 +1567,51 @@ pub fn count_filtered(
                     Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
                         .equals((join_table.clone(), target_col.clone())),
                 );
-                select.and_where(
-                    Expr::col((join_table.clone(), source_col.clone()))
-                        .eq(query_def.value_rhs_simple_expr(&m2m.source_col, &m2m.source_id, true)),
-                );
+                select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
+                    query_def.value_rhs_simple_expr_for_backend(
+                        &m2m.source_col,
+                        &m2m.source_id,
+                        true,
+                        backend,
+                    ),
+                ));
             } else {
                 select.from(Alias::new(&table_name));
             }
 
-            select.cond_where(query_def.to_condition());
-            sea_query_build!(select)
+            select.cond_where(query_def.to_condition_for_backend(backend));
+            sea_query_build_for_backend!(select, backend)
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        let row = if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.fetch_one(&mut *conn).await
-        } else {
-            query.fetch_one(pool.as_ref()).await
-        }
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Count failed: {}", e)))?;
+        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+        let count = match tx_conn {
+            Some(conn_arc) => {
+                let mut conn = conn_arc.lock().await;
+                let rows = conn
+                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("Count failed: {}", e))
+                    })?;
+                rows.first()
+                    .and_then(|row| row.values.first())
+                    .and_then(|(_, value)| value.as_i64())
+                    .unwrap_or(0)
+            }
+            None => {
+                let rows = engine
+                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("Count failed: {}", e))
+                    })?;
+                rows.first()
+                    .and_then(|row| row.values.first())
+                    .and_then(|(_, value)| value.as_i64())
+                    .unwrap_or(0)
+            }
+        };
 
-        let count: i64 = row.try_get(0).unwrap_or(0);
         Ok(count)
     })
 }
@@ -1591,12 +1640,15 @@ pub fn delete_record(
     tx_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = tx_id.and_then(|id| {
+                TRANSACTION_REGISTRY
+                    .get(&id)
+                    .map(|tx| tx.value().conn.clone())
+            });
+            (engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
@@ -1633,21 +1685,22 @@ pub fn delete_record(
                 &no_enum_udt,
                 &no_uuid,
                 &no_ts,
+                backend,
             );
-            let (s, values) = sea_query_build!(Query::delete()
-                .from_table(Alias::new(&table_name))
-                .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)));
+            let (s, values) = sea_query_build_for_backend!(
+                Query::delete()
+                    .from_table(Alias::new(&table_name))
+                    .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)),
+                backend
+            );
             (s, values)
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.execute(&mut *conn).await
-        } else {
-            query.execute(pool.as_ref()).await
-        }
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e)))?;
+        execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e))
+            })?;
 
         Ok(true)
     })
@@ -1667,12 +1720,15 @@ pub fn delete_filtered(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = tx_id.and_then(|id| {
+                TRANSACTION_REGISTRY
+                    .get(&id)
+                    .map(|tx| tx.value().conn.clone())
+            });
+            (engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
@@ -1681,23 +1737,21 @@ pub fn delete_filtered(
             let mut delete = Query::delete();
             delete
                 .from_table(Alias::new(&table_name))
-                .cond_where(query_def.to_condition());
-            sea_query_build!(delete)
+                .cond_where(query_def.to_condition_for_backend(backend));
+            sea_query_build_for_backend!(delete, backend)
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        let result = if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.execute(&mut *conn).await
-        } else {
-            query.execute(pool.as_ref()).await
-        }
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e)))?;
+        let rows_affected =
+            execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e))
+                })?;
 
         // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
         IDENTITY_MAP.retain(|(m_name, _), _| m_name != &name);
 
-        Ok(result.rows_affected())
+        Ok(rows_affected)
     })
 }
 
@@ -1724,18 +1778,19 @@ pub fn update_filtered(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = get_transaction_connection(tx_id);
+            (engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
-        let enum_udt = postgres_enum_udt_by_column(&table_name, &pool, tx_conn.clone()).await?;
-        let uuid_columns = postgres_uuid_column_names(&table_name, &pool, tx_conn.clone()).await?;
-        let ts_cast = postgres_temporal_cast_by_column(&table_name, &pool, tx_conn.clone()).await?;
+        let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        let uuid_columns =
+            postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
+        let ts_cast =
+            postgres_temporal_cast_by_column(&table_name, &engine, &tx_conn, backend).await?;
         // ... sql ...
         let (sql, bind_values) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1746,7 +1801,7 @@ pub fn update_filtered(
             })?;
             let mut update = UpdateStatement::new()
                 .table(Alias::new(&table_name))
-                .cond_where(query_def.to_condition())
+                .cond_where(query_def.to_condition_for_backend(backend))
                 .to_owned();
             for (key, value) in update_map {
                 update.value(
@@ -1758,25 +1813,24 @@ pub fn update_filtered(
                         &enum_udt,
                         &uuid_columns,
                         &ts_cast,
+                        backend,
                     ),
                 );
             }
-            sea_query_build!(update)
+            sea_query_build_for_backend!(update, backend)
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        let result = if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.execute(&mut *conn).await
-        } else {
-            query.execute(pool.as_ref()).await
-        }
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Update failed: {}", e)))?;
+        let rows_affected =
+            execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Update failed: {}", e))
+                })?;
 
         // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
         IDENTITY_MAP.retain(|(m_name, _), _| m_name != &name);
 
-        Ok(result.rows_affected())
+        Ok(rows_affected)
     })
 }
 
@@ -1797,39 +1851,37 @@ pub fn add_m2m_links<'py>(
         .map(|id| python_to_sea_value(id))
         .collect::<PyResult<Vec<_>>>()?;
 
-    let (sql, bind_values) = {
-        let mut insert = InsertStatement::new()
-            .into_table(Alias::new(&join_table))
-            .columns(vec![Alias::new(&source_col), Alias::new(&target_col)])
-            .to_owned();
-
-        for t_id in t_ids {
-            insert
-                .values(vec![Expr::value(s_id.clone()), Expr::value(t_id)])
-                .unwrap();
-        }
-        sea_query_build!(insert)
-    };
-
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = tx_id.and_then(|id| {
+                TRANSACTION_REGISTRY
+                    .get(&id)
+                    .map(|tx| tx.value().conn.clone())
+            });
+            (engine, tx_conn, backend)
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.execute(&mut *conn).await
-        } else {
-            query.execute(pool.as_ref()).await
-        }
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Add M2M links failed: {}", e))
-        })?;
+        let (sql, bind_values) = {
+            let mut insert = InsertStatement::new()
+                .into_table(Alias::new(&join_table))
+                .columns(vec![Alias::new(&source_col), Alias::new(&target_col)])
+                .to_owned();
+
+            for t_id in t_ids {
+                insert
+                    .values(vec![Expr::value(s_id.clone()), Expr::value(t_id)])
+                    .unwrap();
+            }
+            sea_query_build_for_backend!(insert, backend)
+        };
+
+        execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Add M2M links failed: {}", e))
+            })?;
 
         Ok(())
     })
@@ -1852,30 +1904,31 @@ pub fn remove_m2m_links<'py>(
         .map(|id| python_to_sea_value(id))
         .collect::<PyResult<Vec<_>>>()?;
 
-    let (sql, bind_values) = sea_query_build!(Query::delete()
-        .from_table(Alias::new(&join_table))
-        .and_where(Expr::col(Alias::new(&source_col)).eq(s_id))
-        .and_where(Expr::col(Alias::new(&target_col)).is_in(t_ids)));
-
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = tx_id.and_then(|id| {
+                TRANSACTION_REGISTRY
+                    .get(&id)
+                    .map(|tx| tx.value().conn.clone())
+            });
+            (engine, tx_conn, backend)
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.execute(&mut *conn).await
-        } else {
-            query.execute(pool.as_ref()).await
-        }
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Remove M2M links failed: {}", e))
-        })?;
+        let (sql, bind_values) = sea_query_build_for_backend!(
+            Query::delete()
+                .from_table(Alias::new(&join_table))
+                .and_where(Expr::col(Alias::new(&source_col)).eq(s_id))
+                .and_where(Expr::col(Alias::new(&target_col)).is_in(t_ids)),
+            backend
+        );
+
+        execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Remove M2M links failed: {}", e))
+            })?;
 
         Ok(())
     })
@@ -1892,29 +1945,30 @@ pub fn clear_m2m_links<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
 
-    let (sql, bind_values) = sea_query_build!(Query::delete()
-        .from_table(Alias::new(&join_table))
-        .and_where(Expr::col(Alias::new(&source_col)).eq(s_id)));
-
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (pool, tx_conn) = {
-            let pool = engine_pool().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized")
-            })?;
-            let tx_conn = get_conn!(pool, tx_id);
-            (pool, tx_conn)
+        let (engine, tx_conn, backend) = {
+            let engine = active_engine()?;
+            let backend = engine.backend();
+            let tx_conn = tx_id.and_then(|id| {
+                TRANSACTION_REGISTRY
+                    .get(&id)
+                    .map(|tx| tx.value().conn.clone())
+            });
+            (engine, tx_conn, backend)
         };
 
-        let query = bind_query(sqlx::query(&sql), &bind_values.0);
-        if let Some(conn_arc) = tx_conn {
-            let mut conn = conn_arc.lock().await;
-            query.execute(&mut *conn).await
-        } else {
-            query.execute(pool.as_ref()).await
-        }
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Clear M2M links failed: {}", e))
-        })?;
+        let (sql, bind_values) = sea_query_build_for_backend!(
+            Query::delete()
+                .from_table(Alias::new(&join_table))
+                .and_where(Expr::col(Alias::new(&source_col)).eq(s_id)),
+            backend
+        );
+
+        execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Clear M2M links failed: {}", e))
+            })?;
 
         Ok(())
     })

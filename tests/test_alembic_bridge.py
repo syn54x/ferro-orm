@@ -135,6 +135,7 @@ def test_uuid_m2m_join_table_uses_uuid_capable_column_types():
         assert isinstance(col.type, sa.Uuid) or (
             isinstance(col.type, sa.String) and getattr(col.type, "length", None) == 36
         )
+        assert col.nullable is False
 
 
 def test_uuid_foreign_key_shadow_column_type():

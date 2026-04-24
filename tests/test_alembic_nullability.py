@@ -44,6 +44,7 @@ def test_infer_assignment_int_required_with_field_default():
         id: Annotated[int, FerroField(primary_key=True)]
         field_a: int = Field(default=0)
 
+    assert Row.__ferro_schema__["properties"]["field_a"]["ferro_nullable"] is False
     t = get_metadata().tables["row"]
     assert t.c.field_a.nullable is False
 
@@ -53,6 +54,7 @@ def test_infer_assignment_int_optional_union():
         id: Annotated[int, FerroField(primary_key=True)]
         field_a: int | None = None
 
+    assert Row.__ferro_schema__["properties"]["field_a"]["ferro_nullable"] is True
     t = get_metadata().tables["row"]
     assert t.c.field_a.nullable is True
 
@@ -131,6 +133,7 @@ def test_infer_enum_default_not_nullable():
         id: Annotated[int, FerroField(primary_key=True)]
         status: Status = Status.DRAFT
 
+    assert Row.__ferro_schema__["properties"]["status"]["ferro_nullable"] is False
     t = get_metadata().tables["row"]
     assert t.c.status.nullable is False
 
@@ -145,6 +148,7 @@ def test_infer_fk_shadow_required():
         id: Annotated[int, FerroField(primary_key=True)]
         parent: Annotated[Parent, ForeignKey(related_name="children")]
 
+    assert ChildReq.__ferro_schema__["properties"]["parent_id"]["ferro_nullable"] is False
     t = get_metadata().tables["childreq"]
     assert t.c.parent_id.nullable is False
 
@@ -179,6 +183,7 @@ def test_infer_fk_shadow_optional():
         id: Annotated[int, FerroField(primary_key=True)]
         parent: Annotated[Parent | None, ForeignKey(related_name="children")] = None
 
+    assert ChildOpt.__ferro_schema__["properties"]["parent_id"]["ferro_nullable"] is True
     t = get_metadata().tables["childopt"]
     assert t.c.parent_id.nullable is True
 

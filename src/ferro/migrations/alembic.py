@@ -8,8 +8,6 @@ try:
 except ImportError:
     sa = None
 
-from .._annotation_utils import annotation_allows_none
-from ..base import ForeignKey, foreign_key_allows_none
 from ..schema_metadata import build_model_schema
 from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 
@@ -79,7 +77,13 @@ def _resolve_ref(schema: Dict[str, Any], col_info: Dict[str, Any]) -> Dict[str, 
         ref_path = col_info["$ref"]
         if ref_path.startswith("#/$defs/"):
             def_name = ref_path.split("/")[-1]
-            return schema.get("$defs", {}).get(def_name, col_info)
+            resolved = schema.get("$defs", {}).get(def_name, col_info)
+            if resolved is col_info:
+                return col_info
+            return {
+                **resolved,
+                **{k: v for k, v in col_info.items() if k != "$ref"},
+            }
     return col_info
 
 def _strip_optional_union(annotation: Any) -> Any:
@@ -136,10 +140,7 @@ def _infer_nullable_join_table(
 
 
 def _resolve_sa_column_nullable(
-    col_name: str,
-    col_info: Dict[str, Any],
-    model_cls: type[Any] | None,
-    required_fields: list[str],
+    col_name: str, col_info: Dict[str, Any], required_fields: list[str]
 ) -> bool:
     """SQLAlchemy ``Column.nullable`` for one table column."""
     if col_info.get("primary_key"):
@@ -148,25 +149,6 @@ def _resolve_sa_column_nullable(
     override = col_info.get("ferro_nullable")
     if isinstance(override, bool):
         return override
-
-    if model_cls is not None:
-        model_fields = getattr(model_cls, "model_fields", None)
-        fk_info = col_info.get("foreign_key") or {}
-        if model_fields and fk_info and col_name.endswith("_id"):
-            rel_name = col_name[:-3]
-            rels = getattr(model_cls, "ferro_relations", {})
-            meta = rels.get(rel_name)
-            if isinstance(meta, ForeignKey):
-                fk_nullable = foreign_key_allows_none(meta)
-                if fk_nullable is not None:
-                    return fk_nullable
-                rel_field = model_fields.get(rel_name)
-                if rel_field is not None:
-                    return annotation_allows_none(rel_field.annotation)
-        if model_fields:
-            field_info = model_fields.get(col_name)
-            if field_info is not None:
-                return annotation_allows_none(field_info.annotation)
 
     return _infer_nullable_join_table(col_name, col_info, required_fields)
 
@@ -190,9 +172,7 @@ def _build_sa_table(
         python_enum = _field_python_enum(model_cls, col_name)
         sa_type = _map_to_sa_type(schema, col_info, col_name, python_enum)
 
-        is_nullable = _resolve_sa_column_nullable(
-            col_name, col_info, model_cls, required_fields
-        )
+        is_nullable = _resolve_sa_column_nullable(col_name, col_info, required_fields)
 
         fk_info = col_info.get("foreign_key") or {}
         column_unique = bool(col_info.get("unique")) or bool(fk_info.get("unique"))
@@ -261,7 +241,7 @@ def _map_to_sa_type(
             item = _resolve_ref(schema, item)
             if item.get("type") != "null":
                 json_type = item.get("type")
-                format = item.get("format")
+                format = item.get("format") or format
                 enum_values = item.get("enum") or enum_values
                 break
 

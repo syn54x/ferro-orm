@@ -7,7 +7,8 @@ use crate::backend::{BackendKind, EngineHandle};
 use crate::schema::internal_create_tables;
 use crate::state::{ENGINE, IDENTITY_MAP};
 use pyo3::prelude::*;
-use sqlx::any::AnyPoolOptions;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::Arc;
 
 fn split_search_path(url: &str) -> (String, Option<String>) {
@@ -42,6 +43,40 @@ fn is_safe_search_path(search_path: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+async fn connect_engine_handle(
+    connection_url: &str,
+    backend: BackendKind,
+    search_path: Option<String>,
+) -> Result<EngineHandle, sqlx::Error> {
+    match backend {
+        BackendKind::Sqlite => {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(5)
+                .connect(connection_url)
+                .await?;
+            Ok(EngineHandle::new_sqlite(pool))
+        }
+        BackendKind::Postgres => {
+            let mut pool_options = PgPoolOptions::new().max_connections(5);
+            if let Some(search_path) = search_path {
+                let set_search_path_sql = Arc::new(format!("SET search_path TO {}", search_path));
+                pool_options = pool_options.after_connect(move |conn, _meta| {
+                    let set_search_path_sql = set_search_path_sql.clone();
+                    Box::pin(async move {
+                        sqlx::query(set_search_path_sql.as_str())
+                            .execute(conn)
+                            .await?;
+                        Ok(())
+                    })
+                });
+            }
+
+            let pool = pool_options.connect(connection_url).await?;
+            Ok(EngineHandle::new_postgres(pool))
+        }
+    }
+}
+
 /// Initializes the global database connection pool.
 ///
 /// This is an asynchronous function that returns a Python coroutine.
@@ -73,31 +108,16 @@ pub fn connect(py: Python<'_>, url: String, auto_migrate: bool) -> PyResult<Boun
             )));
         }
 
-        let mut pool_options = AnyPoolOptions::new().max_connections(5);
-        if backend == BackendKind::Postgres
-            && let Some(search_path) = search_path
-        {
-            let set_search_path_sql = Arc::new(format!("SET search_path TO {}", search_path));
-            pool_options = pool_options.after_connect(move |conn, _meta| {
-                let set_search_path_sql = set_search_path_sql.clone();
-                Box::pin(async move {
-                    sqlx::query(set_search_path_sql.as_str()).execute(conn).await?;
-                    Ok(())
-                })
-            });
-        }
-
-        let pool = pool_options
-            .connect(&connection_url)
+        let engine_handle = connect_engine_handle(&connection_url, backend, search_path.clone())
             .await
             .map_err(|e| {
                 pyo3::exceptions::PyConnectionError::new_err(format!("DB Connection failed: {}", e))
             })?;
 
-        let engine_handle = Arc::new(EngineHandle::new(backend, pool));
+        let engine_handle = Arc::new(engine_handle);
 
         if auto_migrate {
-            internal_create_tables(engine_handle.pool()).await?;
+            internal_create_tables(engine_handle.clone()).await?;
         }
 
         let mut engine = ENGINE
@@ -125,4 +145,32 @@ pub fn reset_engine() -> PyResult<()> {
     *engine = None;
     IDENTITY_MAP.clear();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connect_engine_handle;
+    use crate::backend::BackendKind;
+
+    #[tokio::test]
+    async fn connect_engine_handle_uses_typed_sqlite_backend() {
+        let engine = connect_engine_handle("sqlite::memory:", BackendKind::Sqlite, None)
+            .await
+            .unwrap();
+
+        assert_eq!(engine.backend(), BackendKind::Sqlite);
+        assert!(engine.sqlite_pool().is_some());
+        assert!(engine.postgres_pool().is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_engine_handle_supports_sqlite_runtime_execution() {
+        let engine = connect_engine_handle("sqlite::memory:", BackendKind::Sqlite, None)
+            .await
+            .unwrap();
+
+        assert_eq!(engine.backend(), BackendKind::Sqlite);
+        assert!(engine.sqlite_pool().is_some());
+        assert_eq!(engine.execute_sql("SELECT 1").await.unwrap(), 0);
+    }
 }
