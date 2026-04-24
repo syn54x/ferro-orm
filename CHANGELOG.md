@@ -1,6 +1,43 @@
 # CHANGELOG
 
 
+## v0.3.2 (2026-04-24)
+
+### Bug Fixes
+
+- Move alembic reqs to optional dependencies
+  ([`87f0e81`](https://github.com/syn54x/ferro-orm/commit/87f0e8157640ac9984da20e0c4c7290dbfcf4bfd))
+
+### Build System
+
+- **sqlx**: Enable rustls TLS for PostgreSQL connections
+  ([`807fa81`](https://github.com/syn54x/ferro-orm/commit/807fa8196a3742a5a50380fe6dbf727045798cc3))
+
+### Chores
+
+- Sync uv.lock with project version 0.3.1
+  ([`c3c9f91`](https://github.com/syn54x/ferro-orm/commit/c3c9f91907a3ece8ce7bc70f08979f1dd269a87c))
+
+### Continuous Integration
+
+- Build preflight wheels earlier to fail faster
+  ([`475c93c`](https://github.com/syn54x/ferro-orm/commit/475c93caa1d51fb07d7eda875205086761d64e8f))
+
+- Fix linux-aarch64 wheel builds for ring/rustls asm
+  ([`5eadddc`](https://github.com/syn54x/ferro-orm/commit/5eadddc922b51448ad4da3841a84fd4931b19814))
+
+- Gate release on preflight wheel builds for all platforms
+  ([`6ec48a2`](https://github.com/syn54x/ferro-orm/commit/6ec48a275b8dc9868612a3f374595ce63fe151ca))
+
+- Restore legacy release workflow
+  ([`d3ee87c`](https://github.com/syn54x/ferro-orm/commit/d3ee87c68995a1163480eb9be8a3111032e94842))
+
+### Documentation
+
+- Add Supabase PostgreSQL connection and TLS guidance
+  ([`b1d61ad`](https://github.com/syn54x/ferro-orm/commit/b1d61ad4395a17c7c2270c1d4776500c436c22d1))
+
+
 ## v0.3.1 (2026-04-23)
 
 ### Bug Fixes
