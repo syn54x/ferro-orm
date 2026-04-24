@@ -3,28 +3,17 @@
 //! This module holds the global connection pool, the model registry,
 //! and the Identity Map used for object tracking.
 
-use crate::backend::{BackendKind, EngineHandle};
+use crate::backend::{BackendKind, EngineConnection, EngineHandle};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
-use sqlx::{Any, AnyConnection, Pool};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
 /// Backward-compatible name for query/DDL builder selection.
 pub type SqlDialect = BackendKind;
-
-/// Returns the dialect selected at [`crate::connection::connect`] time.
-#[inline]
-pub fn sql_dialect() -> SqlDialect {
-    ENGINE
-        .read()
-        .ok()
-        .and_then(|engine| engine.as_ref().map(|engine| engine.backend()))
-        .unwrap_or_default()
-}
 
 /// Global registry mapping model names to their Pydantic-generated JSON schemas.
 pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, serde_json::Value>>> =
@@ -33,30 +22,29 @@ pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, serde_json::Value>>> =
 /// The global runtime engine, initialized via `connect()`.
 pub static ENGINE: Lazy<RwLock<Option<Arc<EngineHandle>>>> = Lazy::new(|| RwLock::new(None));
 
-/// Returns a clone of the active pool when the engine is initialized.
-pub fn engine_pool() -> Option<Arc<Pool<Any>>> {
-    ENGINE
-        .read()
-        .ok()
-        .and_then(|engine| engine.as_ref().map(|engine| engine.pool()))
+/// Returns a clone of the active engine handle when initialized.
+pub fn engine_handle() -> Option<Arc<EngineHandle>> {
+    ENGINE.read().ok().and_then(|engine| engine.clone())
 }
 
 /// Active transaction handle.
 #[derive(Clone)]
 pub struct TransactionHandle {
-    pub conn: Arc<Mutex<AnyConnection>>,
+    pub conn: TransactionConnection,
     pub savepoint_name: Option<String>,
 }
 
+pub type TransactionConnection = Arc<Mutex<EngineConnection>>;
+
 impl TransactionHandle {
-    pub fn root(conn: AnyConnection) -> Self {
+    pub fn root(conn: EngineConnection) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
             savepoint_name: None,
         }
     }
 
-    pub fn nested(conn: Arc<Mutex<AnyConnection>>, savepoint_name: String) -> Self {
+    pub fn nested(conn: TransactionConnection, savepoint_name: String) -> Self {
         Self {
             conn,
             savepoint_name: Some(savepoint_name),
@@ -66,8 +54,7 @@ impl TransactionHandle {
 
 /// Global registry for active transactions.
 /// Maps Transaction ID -> backend connection plus optional savepoint.
-pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> =
-    Lazy::new(DashMap::new);
+pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> = Lazy::new(DashMap::new);
 
 /// Identity Map used for object tracking and deduplication.
 ///

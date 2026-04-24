@@ -47,7 +47,8 @@ def test_complex_type_mapping():
     assert set(table.c.status.type.enums) == {"active", "inactive"}
 
     # Numeric/Decimal
-    assert isinstance(table.c.price.type, (sa.Numeric, sa.Float))
+    assert ComplexModel.__ferro_schema__["properties"]["price"]["format"] == "decimal"
+    assert isinstance(table.c.price.type, sa.Numeric)
 
     # UUID
     assert isinstance(table.c.token.type, (sa.Uuid, sa.String))

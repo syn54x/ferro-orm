@@ -1,4 +1,4 @@
-use crate::state::{sql_dialect, SqlDialect, MODEL_REGISTRY};
+use crate::state::{MODEL_REGISTRY, SqlDialect};
 use sea_query::{Alias, Condition, Expr, SimpleExpr};
 use serde::Deserialize;
 use serde_json::Value;
@@ -41,18 +41,20 @@ pub struct QueryDef {
 }
 
 impl QueryDef {
-    pub fn to_condition(&self) -> Condition {
+    pub fn to_condition_for_backend(&self, backend: SqlDialect) -> Condition {
         let mut condition = Condition::all();
         for node in &self.where_clause {
-            condition = condition.add(self.node_to_condition(node));
+            condition = condition.add(self.node_to_condition_for_backend(node, backend));
         }
         condition
     }
 
-    fn node_to_condition(&self, node: &QueryNode) -> Condition {
+    fn node_to_condition_for_backend(&self, node: &QueryNode, backend: SqlDialect) -> Condition {
         if node.is_compound {
-            let left_cond = self.node_to_condition(node.left.as_ref().unwrap());
-            let right_cond = self.node_to_condition(node.right.as_ref().unwrap());
+            let left_cond =
+                self.node_to_condition_for_backend(node.left.as_ref().unwrap(), backend);
+            let right_cond =
+                self.node_to_condition_for_backend(node.right.as_ref().unwrap(), backend);
 
             match node.operator.as_str() {
                 "OR" => Condition::any().add(left_cond).add(right_cond),
@@ -64,33 +66,46 @@ impl QueryDef {
             let val = node.value.as_ref().unwrap();
             let col = Expr::col(Alias::new(col_name));
 
-            let expr: SimpleExpr = match node.operator.as_str() {
-                "==" => col.eq(self.value_rhs_simple_expr(col_name, val, false)),
-                "!=" => col.ne(self.value_rhs_simple_expr(col_name, val, false)),
-                "<" => col.lt(self.value_rhs_simple_expr(col_name, val, false)),
-                "<=" => col.lte(self.value_rhs_simple_expr(col_name, val, false)),
-                ">" => col.gt(self.value_rhs_simple_expr(col_name, val, false)),
-                ">=" => col.gte(self.value_rhs_simple_expr(col_name, val, false)),
-                "IN" => {
-                    if let Some(vals) = val.as_array() {
-                        let rhs: Vec<SimpleExpr> = vals
-                            .iter()
-                            .map(|v| self.value_rhs_simple_expr(col_name, v, false))
-                            .collect();
-                        col.is_in(rhs)
-                    } else {
-                        col.eq(self.value_rhs_simple_expr(col_name, val, false))
+            let expr: SimpleExpr =
+                match node.operator.as_str() {
+                    "==" => col
+                        .eq(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
+                    "!=" => col
+                        .ne(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
+                    "<" => col
+                        .lt(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
+                    "<=" => col
+                        .lte(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
+                    ">" => col
+                        .gt(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
+                    ">=" => col
+                        .gte(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
+                    "IN" => {
+                        if let Some(vals) = val.as_array() {
+                            let rhs: Vec<SimpleExpr> = vals
+                                .iter()
+                                .map(|v| {
+                                    self.value_rhs_simple_expr_for_backend(
+                                        col_name, v, false, backend,
+                                    )
+                                })
+                                .collect();
+                            col.is_in(rhs)
+                        } else {
+                            col.eq(self
+                                .value_rhs_simple_expr_for_backend(col_name, val, false, backend))
+                        }
                     }
-                }
-                "LIKE" => {
-                    let pattern = match val {
-                        Value::String(s) => s.clone(),
-                        _ => val.to_string(),
-                    };
-                    col.like(pattern)
-                }
-                _ => col.eq(self.value_rhs_simple_expr(col_name, val, false)),
-            };
+                    "LIKE" => {
+                        let pattern = match val {
+                            Value::String(s) => s.clone(),
+                            _ => val.to_string(),
+                        };
+                        col.like(pattern)
+                    }
+                    _ => col
+                        .eq(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
+                };
             Condition::all().add(expr)
         }
     }
@@ -98,19 +113,19 @@ impl QueryDef {
     /// Right-hand side for a filter comparison.
     ///
     /// On Postgres, UUID columns compared to JSON string parameters need an explicit
-    /// `CAST(... AS uuid)` so the bind stays text-typed (compatible with `sqlx::Any`)
-    /// while the comparison is `uuid = uuid`.
+    /// `CAST(... AS uuid)` so the comparison is `uuid = uuid`.
     ///
     /// `infer_uuid_without_schema` is used for M2M join filters where the RHS is a UUID
     /// string but the join column is not described on the queried model's schema.
-    pub fn value_rhs_simple_expr(
+    pub fn value_rhs_simple_expr_for_backend(
         &self,
         col_name: &str,
         val: &Value,
         infer_uuid_without_schema: bool,
+        backend: SqlDialect,
     ) -> SimpleExpr {
         if let Value::String(s) = val {
-            if sql_dialect() == SqlDialect::Postgres {
+            if backend == SqlDialect::Postgres {
                 if uuid::Uuid::parse_str(s).is_ok() {
                     let schema_uuid = model_column_is_uuid(&self.model_name, col_name);
                     if schema_uuid || infer_uuid_without_schema {
@@ -131,15 +146,11 @@ impl QueryDef {
                     return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
                         .cast_as("date");
                 }
-                if model_column_format(&self.model_name, col_name).as_deref()
-                    == Some("date-time")
-                {
+                if model_column_format(&self.model_name, col_name).as_deref() == Some("date-time") {
                     return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
                         .cast_as("timestamptz");
                 }
-                if model_column_format(&self.model_name, col_name).as_deref()
-                    == Some("binary")
-                {
+                if model_column_format(&self.model_name, col_name).as_deref() == Some("binary") {
                     return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
                         .cast_as("bytea");
                 }
@@ -279,4 +290,54 @@ pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
             })
     });
     json_type == Some("string") && format == Some("uuid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueryDef;
+    use crate::backend::BackendKind;
+    use sea_query::{PostgresQueryBuilder, Query, SqliteQueryBuilder};
+    use serde_json::json;
+
+    #[test]
+    fn uuid_rhs_cast_uses_explicit_backend_not_global_default() {
+        let query_def = QueryDef {
+            model_name: "Widget".to_string(),
+            where_clause: Vec::new(),
+            order_by: None,
+            limit: None,
+            offset: None,
+            m2m: None,
+        };
+
+        let postgres_rhs = query_def.value_rhs_simple_expr_for_backend(
+            "widget_id",
+            &json!("3f4c4ca7-a7e7-40d6-8d83-8f4ddf3285e6"),
+            true,
+            BackendKind::Postgres,
+        );
+        let postgres_sql = Query::select()
+            .expr(postgres_rhs)
+            .to_string(PostgresQueryBuilder);
+
+        assert!(
+            postgres_sql.contains("AS uuid"),
+            "unexpected SQL: {postgres_sql}"
+        );
+
+        let sqlite_rhs = query_def.value_rhs_simple_expr_for_backend(
+            "widget_id",
+            &json!("3f4c4ca7-a7e7-40d6-8d83-8f4ddf3285e6"),
+            true,
+            BackendKind::Sqlite,
+        );
+        let sqlite_sql = Query::select()
+            .expr(sqlite_rhs)
+            .to_string(SqliteQueryBuilder);
+
+        assert!(
+            !sqlite_sql.contains("AS uuid"),
+            "unexpected SQL: {sqlite_sql}"
+        );
+    }
 }

@@ -109,6 +109,7 @@ def resolve_relationships():
                 "properties": {
                     source_col: {
                         **source_schema,
+                        "ferro_nullable": False,
                         "foreign_key": {
                             "to_table": model_name.lower(),
                             "on_delete": "CASCADE",
@@ -116,12 +117,14 @@ def resolve_relationships():
                     },
                     target_col: {
                         **target_schema,
+                        "ferro_nullable": False,
                         "foreign_key": {
                             "to_table": target_model.__name__.lower(),
                             "on_delete": "CASCADE",
                         },
                     },
                 },
+                "required": [source_col, target_col],
                 "ferro_composite_uniques": [[source_col, target_col]],
             }
             register_model_schema(join_table, json.dumps(join_schema))

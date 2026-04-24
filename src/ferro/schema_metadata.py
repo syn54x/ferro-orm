@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import types
+from decimal import Decimal
 from enum import Enum
 from typing import (
     Annotated,
@@ -48,6 +49,16 @@ def _enum_subclass_from_annotation(hint: Any) -> type[Enum] | None:
     if isinstance(hint, type) and issubclass(hint, Enum):
         return hint
     return None
+
+
+def _annotation_is_decimal(hint: Any) -> bool:
+    hint = _strip_optional_union(hint)
+    if get_origin(hint) is Annotated:
+        args = get_args(hint)
+        if args:
+            return _annotation_is_decimal(args[0])
+        return False
+    return hint is Decimal
 
 
 def _target_table_name(target: Any) -> str:
@@ -126,7 +137,12 @@ def build_model_schema(
     for field_name, finfo in model_fields.items():
         if field_name not in properties or not isinstance(properties[field_name], dict):
             continue
+        properties[field_name].setdefault(
+            "ferro_nullable", annotation_allows_none(finfo.annotation)
+        )
         ann_hint = resolved_annotations.get(field_name, finfo.annotation)
+        if _annotation_is_decimal(ann_hint):
+            properties[field_name]["format"] = "decimal"
         enum_cls = _enum_subclass_from_annotation(ann_hint)
         if enum_cls is not None:
             properties[field_name]["enum_type_name"] = enum_cls.__name__.lower()

@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import Field
@@ -78,3 +79,42 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
     assert len(linked) == 1
     assert linked[0].id == movie.id
     assert linked[0].title == "Matrix"
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_url):
+    """Runtime join-table DDL should derive FK column metadata from source PKs."""
+    from ferro import clear_registry, connect, reset_engine
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    reset_engine()
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+    class UuidActor(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        name: str
+        movies: Annotated[list["UuidMovie"], ManyToManyField(related_name="actors")] = None
+
+    class UuidMovie(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        title: str
+        actors: BackRef[UuidActor] = None
+
+    await connect(db_url, auto_migrate=True)
+
+    import sqlite3
+
+    db_path = db_url.removeprefix("sqlite:").split("?", 1)[0]
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("PRAGMA table_info(uuidactor_movies)").fetchall()
+    conn.close()
+
+    columns = {row[1]: row for row in rows}
+    assert columns["uuidactor_id"][2].upper() in {"UUID", "UUID_TEXT", "TEXT", "CHAR", "VARCHAR"}
+    assert columns["uuidmovie_id"][2].upper() in {"UUID", "UUID_TEXT", "TEXT", "CHAR", "VARCHAR"}
+    assert columns["uuidactor_id"][3] == 1
+    assert columns["uuidmovie_id"][3] == 1
