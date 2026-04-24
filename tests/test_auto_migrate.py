@@ -10,6 +10,7 @@ from ferro.query import BackRef
 
 pytestmark = pytest.mark.backend_matrix
 
+
 class AutoMigratedUser(Model):
     id: int = Field(json_schema_extra={"primary_key": True})
     username: str

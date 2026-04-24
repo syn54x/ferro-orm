@@ -103,6 +103,7 @@ def _ensure_models_registered():
         _MODEL_REGISTRY_PY[model_cls.__name__] = model_cls
     yield
 
+
 # ============================================================================
 # MODELS & FIELDS TESTS (docs/guide/models-and-fields.md)
 # ============================================================================

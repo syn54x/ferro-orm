@@ -4,6 +4,7 @@ from ferro import Model, connect, FerroField
 
 pytestmark = pytest.mark.backend_matrix
 
+
 @pytest.mark.asyncio
 async def test_count_operation(db_url):
     """Test that .count() correctly returns the number of records."""

@@ -5,6 +5,7 @@ from ferro import Model, connect, FerroField
 
 pytestmark = pytest.mark.backend_matrix
 
+
 @pytest.mark.asyncio
 async def test_autoincrement_id_retrieval(db_url):
     """

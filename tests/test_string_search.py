@@ -4,6 +4,7 @@ from ferro import Model, connect, FerroField
 
 pytestmark = pytest.mark.backend_matrix
 
+
 @pytest.mark.asyncio
 async def test_like_search(db_url):
     """Test string searching with .like()."""
