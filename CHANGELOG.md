@@ -1,6 +1,57 @@
 # CHANGELOG
 
 
+## v0.3.3 (2026-04-24)
+
+### Bug Fixes
+
+- Cast NULL and strings to ::uuid for Postgres using catalog
+  ([`f5cb4f0`](https://github.com/syn54x/ferro-orm/commit/f5cb4f08ceaf0763a29c3b78d4d077ca1119fc1c))
+
+- Catalog casts for date/timestamp columns on Postgres
+  ([`95ef5ca`](https://github.com/syn54x/ferro-orm/commit/95ef5cadc28eb26481c38b51dbca1b370a883d10))
+
+- Clean up rebase conflicts with main
+  ([`716511c`](https://github.com/syn54x/ferro-orm/commit/716511c829021ee6d2390bb85c877e670c1d7631))
+
+- Enum OIDs
+  ([`a9867be`](https://github.com/syn54x/ferro-orm/commit/a9867beac242a9d630aeb7e49b718a4234c541ec))
+
+- Postgres native enums on save and StrEnum schema registration
+  ([`44277e1`](https://github.com/syn54x/ferro-orm/commit/44277e1922182b020c17d9a7a2a9e99dd62061e5))
+
+- Use Postgres SQL dialect when connecting to postgres URLs
+  ([`c627ac8`](https://github.com/syn54x/ferro-orm/commit/c627ac8e4fa84555e0cc7250f73ce6f0858125a3))
+
+- **postgres**: Add dual-db ORM test matrix
+  ([`1fa657f`](https://github.com/syn54x/ferro-orm/commit/1fa657fe4335d41214fcb24b1eac5dcf3138273f))
+
+- **postgres**: Bind boolean writes as booleans
+  ([`346441a`](https://github.com/syn54x/ferro-orm/commit/346441a073a540c857a8aaa67bf4029cb4099535))
+
+- **postgres**: Cast uuid columns to text in SELECT for Any decode
+  ([`df957c0`](https://github.com/syn54x/ferro-orm/commit/df957c0202d32608843d6a24ae4c924ed5b9381d))
+
+- **postgres**: Cast UUID filter params for sqlx Any compatibility
+  ([`889cf8b`](https://github.com/syn54x/ferro-orm/commit/889cf8b61131c2d53e8414a76ca7b2dbc7868c23))
+
+- **postgres**: Decode native enum columns via text cast
+  ([`1270f9d`](https://github.com/syn54x/ferro-orm/commit/1270f9dcd1cc5aa19cf484c3d9c3bb3a82255a05))
+
+### Refactoring
+
+- Expand db matrix coverage and harden postgres paths
+  ([`b82f3ac`](https://github.com/syn54x/ferro-orm/commit/b82f3ac886459861cdfde122b99b880b85c09a61))
+
+- Multi db architecture with true sqlite and postgres support
+  ([`459a0c5`](https://github.com/syn54x/ferro-orm/commit/459a0c5f9c8a95ecacc9ba552137252d34de4824))
+
+### Testing
+
+- Expand schema constraints into db matrix
+  ([`24a7f0a`](https://github.com/syn54x/ferro-orm/commit/24a7f0ad38b90e98a41cf32fe2777d988ff7047f))
+
+
 ## v0.3.2 (2026-04-24)
 
 ### Bug Fixes
