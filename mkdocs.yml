@@ -54,6 +54,7 @@ plugins:
           - guide/queries.md
           - guide/mutations.md
           - guide/transactions.md
+          - guide/backend.md
           - guide/database.md
           - guide/migrations.md
         How-To:
@@ -130,6 +131,7 @@ nav:
       - Queries: guide/queries.md
       - Mutations: guide/mutations.md
       - Transactions: guide/transactions.md
+      - Backend: guide/backend.md
       - Database Setup: guide/database.md
       - Schema Management: guide/migrations.md
 
