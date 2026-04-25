@@ -1,6 +1,40 @@
 # CHANGELOG
 
 
+## v0.3.4 (2026-04-25)
+
+### Bug Fixes
+
+- Serialize UUID M2M query contexts
+  ([`f53b3ca`](https://github.com/syn54x/ferro-orm/commit/f53b3ca4219d3cd21174d1cb2215bda717c0ac3d))
+
+### Chores
+
+- Gitignore .worktrees/ for local worktrees
+  ([`142cd3f`](https://github.com/syn54x/ferro-orm/commit/142cd3fc1240e2e0ce5597b170455e4355ac98b9))
+
+- Update lock file
+  ([`fa1c003`](https://github.com/syn54x/ferro-orm/commit/fa1c003efd3960c4c7a647ddf0f8ba166c731e01))
+
+### Documentation
+
+- Add backend guide
+  ([`78f1e29`](https://github.com/syn54x/ferro-orm/commit/78f1e295052663416e37ce2bef81be06ec602ba0))
+
+### Refactoring
+
+- Replace Any backend with typed engine
+  ([`71628a7`](https://github.com/syn54x/ferro-orm/commit/71628a7281e7f6d8ec6a4640eb2512a7589a634d))
+
+### Testing
+
+- Add local Postgres test provider
+  ([`f8601a5`](https://github.com/syn54x/ferro-orm/commit/f8601a54b414baefd5f1078470c60b3ee85782db))
+
+- Harden bridge-boundary coverage
+  ([`f1a6064`](https://github.com/syn54x/ferro-orm/commit/f1a60647a799a17ad8adf75c86e9635dd192cc55))
+
+
 ## v0.3.3 (2026-04-24)
 
 ### Bug Fixes
