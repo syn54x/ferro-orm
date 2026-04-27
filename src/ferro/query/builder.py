@@ -1,7 +1,7 @@
 """Build fluent query objects that serialize filter definitions for the Rust core"""
 
 import json
-from typing import TYPE_CHECKING, Any, Generic, Type, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Type, TypeVar, overload
 
 from .._core import (
     add_m2m_links,
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from .nodes import QueryNode
 
 T = TypeVar("T")
+E = TypeVar("E")
 
 
 def _query_def_to_json(query_def: dict[str, Any]) -> str:
@@ -403,6 +404,35 @@ class BackRef(Query[T]):
         >>> isinstance(posts, list)
         True
     """
+
+    # NOTE ON TYPING:
+    #
+    # Users commonly annotate reverse collections as BackRef[list[Model]] to encode
+    # cardinality (one-to-many / many-to-many). Since Query.all() is typed as list[T],
+    # that would naively become list[list[Model]] in IDEs.
+    #
+    # We fix hinting by overriding BackRef.{all,first} with overloads that interpret
+    # BackRef[T] as a query whose *rows* are model instances, regardless of whether
+    # T is written as Model or list[Model] in the field annotation.
+    if TYPE_CHECKING:
+
+        @overload
+        async def all(self: "BackRef[list[E]]") -> list[E]: ...
+
+        @overload
+        async def all(self: "BackRef[E]") -> list[E]: ...
+
+        @overload
+        async def first(self: "BackRef[list[E]]") -> E | None: ...
+
+        @overload
+        async def first(self: "BackRef[E]") -> E | None: ...
+
+    async def all(self):  # type: ignore[override]
+        return await super().all()
+
+    async def first(self):  # type: ignore[override]
+        return await super().first()
 
     @classmethod
     def __get_pydantic_core_schema__(cls, _source_type, _handler):
