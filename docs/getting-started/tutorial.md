@@ -26,14 +26,14 @@ Let's create a blog with users, posts, and comments:
 import asyncio
 from datetime import datetime
 from typing import Annotated
-from ferro import Model, Field, ForeignKey, BackRef, connect
+from ferro import Model, Field, ForeignKey, BackRef, Relation, connect
 
 class User(Model):
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(unique=True)
     email: str = Field(unique=True)
-    posts: BackRef[list["Post"]] | None = None
-    comments: BackRef[list["Comment"]] | None = None
+    posts: Relation[list["Post"]] = BackRef()
+    comments: Relation[list["Comment"]] = BackRef()
 
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
@@ -42,7 +42,7 @@ class Post(Model):
     published: bool = False
     created_at: datetime = datetime.now()
     author: Annotated[User, ForeignKey(related_name="posts")]
-    comments: BackRef[list["Comment"]] | None = None
+    comments: Relation[list["Comment"]] = BackRef()
 
 class Comment(Model):
     id: int | None = Field(default=None, primary_key=True)
@@ -305,14 +305,14 @@ Here's the full tutorial code:
 import asyncio
 from datetime import datetime
 from typing import Annotated
-from ferro import Model, Field, ForeignKey, BackRef, connect
+from ferro import Model, Field, ForeignKey, BackRef, Relation, connect
 
 class User(Model):
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(unique=True)
     email: str = Field(unique=True)
-    posts: BackRef[list["Post"]] | None = None
-    comments: BackRef[list["Comment"]] | None = None
+    posts: Relation[list["Post"]] = BackRef()
+    comments: Relation[list["Comment"]] = BackRef()
 
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
@@ -321,7 +321,7 @@ class Post(Model):
     published: bool = False
     created_at: datetime = datetime.now()
     author: Annotated[User, ForeignKey(related_name="posts")]
-    comments: BackRef[list["Comment"]] | None = None
+    comments: Relation[list["Comment"]] = BackRef()
 
 class Comment(Model):
     id: int | None = Field(default=None, primary_key=True)

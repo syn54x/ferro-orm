@@ -165,7 +165,9 @@ class Query(Generic[T]):
         from ..state import _CURRENT_TRANSACTION
 
         tx_id = _CURRENT_TRANSACTION.get()
-        results = await fetch_filtered(self.model_cls, _query_def_to_json(query_def), tx_id)
+        results = await fetch_filtered(
+            self.model_cls, _query_def_to_json(query_def), tx_id
+        )
         for instance in results:
             if hasattr(self.model_cls, "_fix_types"):
                 self.model_cls._fix_types(instance)
@@ -385,14 +387,14 @@ class Query(Generic[T]):
         return f"<Query model={self.model_cls.__name__} where={self.where_clause}>"
 
 
-class BackRef(Query[T]):
-    """Represent reverse relationship queries with Query typing support
+class Relation(Query[T]):
+    """Represent lazy collection relationship queries with typing support
 
     Examples:
         >>> class User(Model):
         ...     id: Annotated[int, FerroField(primary_key=True)]
         ...     name: str
-        ...     posts: BackRef[list["Post"]] | None = None
+        ...     posts: Relation[list["Post"]] = BackRef()
 
         >>> class Post(Model):
         ...     id: Annotated[int, FerroField(primary_key=True)]
@@ -405,28 +407,50 @@ class BackRef(Query[T]):
         True
     """
 
+    def _m2m(
+        self, join_table: str, source_col: str, target_col: str, source_id: Any
+    ) -> "Relation[T]":
+        super()._m2m(join_table, source_col, target_col, source_id)
+        return self
+
+    def where(self, node: "QueryNode") -> "Relation[T]":
+        super().where(node)
+        return self
+
+    def order_by(self, field: Any, direction: str = "asc") -> "Relation[T]":
+        super().order_by(field, direction)
+        return self
+
+    def limit(self, value: int) -> "Relation[T]":
+        super().limit(value)
+        return self
+
+    def offset(self, value: int) -> "Relation[T]":
+        super().offset(value)
+        return self
+
     # NOTE ON TYPING:
     #
-    # Users commonly annotate reverse collections as BackRef[list[Model]] to encode
+    # Users annotate collection relationships as Relation[list[Model]] to encode
     # cardinality (one-to-many / many-to-many). Since Query.all() is typed as list[T],
     # that would naively become list[list[Model]] in IDEs.
     #
-    # We fix hinting by overriding BackRef.{all,first} with overloads that interpret
-    # BackRef[T] as a query whose *rows* are model instances, regardless of whether
+    # We fix hinting by overriding Relation.{all,first} with overloads that interpret
+    # Relation[T] as a query whose *rows* are model instances, regardless of whether
     # T is written as Model or list[Model] in the field annotation.
     if TYPE_CHECKING:
 
         @overload
-        async def all(self: "BackRef[list[E]]") -> list[E]: ...
+        async def all(self: "Relation[list[E]]") -> list[E]: ...
 
         @overload
-        async def all(self: "BackRef[E]") -> list[E]: ...
+        async def all(self: "Relation[E]") -> list[E]: ...
 
         @overload
-        async def first(self: "BackRef[list[E]]") -> E | None: ...
+        async def first(self: "Relation[list[E]]") -> E | None: ...
 
         @overload
-        async def first(self: "BackRef[E]") -> E | None: ...
+        async def first(self: "Relation[E]") -> E | None: ...
 
     async def all(self):  # type: ignore[override]
         return await super().all()

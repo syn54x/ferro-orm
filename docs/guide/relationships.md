@@ -8,12 +8,12 @@ Relationships in Ferro are **lazy** — data is never fetched until you explicit
 
 ### API Styles
 
-Like scalar field constraints ([assignment vs `Annotated[..., Field(...)]`](models-and-fields.md#field-constraints)), relationships can be declared in two equivalent styles:
+Like scalar field constraints ([assignment vs `Annotated[..., Field(...)]`](models-and-fields.md#field-constraints)), relationship metadata can be declared in two equivalent styles:
 
-- **Annotated-style** (`BackRef`): Type-first approach using `typing.Annotated`
-- **Pydantic-style** (`Field(back_ref=True)`): Familiar `Field()` syntax
+- **Helper-style** (`BackRef()`, `ManyToMany(...)`): Recommended relationship helpers
+- **Field-style** (`Field(back_ref=True)`, `Field(many_to_many=True, ...)`): Lower-level `Field()` syntax
 
-Choose one style and use it consistently. Do not mix `BackRef` and `back_ref=True` on the same field.
+Collection relationships are typed with `Relation[list[T]]`, which reflects the lazy query-like object returned at runtime.
 
 ### Lazy Loading Behavior
 
@@ -51,16 +51,16 @@ erDiagram
     }
 ```
 
-### Annotated-style (with `BackRef`)
+### Helper-style (with `BackRef()`)
 
 ```python
 from typing import Annotated
-from ferro import Model, ForeignKey, BackRef
+from ferro import Model, ForeignKey, BackRef, Relation
 
 class Author(Model):
     id: int
     name: str
-    posts: BackRef[list["Post"]] | None = None
+    posts: Relation[list["Post"]] = BackRef()
 
 class Post(Model):
     id: int
@@ -68,15 +68,15 @@ class Post(Model):
     author: Annotated[Author, ForeignKey(related_name="posts")]
 ```
 
-### Pydantic-style (with `Field(back_ref=True)`)
+### Field-style (with `Field(back_ref=True)`)
 
 ```python
-from ferro import Model, ForeignKey, Field
+from ferro import Model, ForeignKey, Field, Relation
 
 class Author(Model):
     id: int
     name: str
-    posts: list["Post"] | None = Field(default=None, back_ref=True)
+    posts: Relation[list["Post"]] = Field(back_ref=True)
 
 class Post(Model):
     id: int
@@ -84,7 +84,7 @@ class Post(Model):
     author: Annotated[Author, ForeignKey(related_name="posts")]
 ```
 
-You can also use `Annotated` with `Field`: `posts: Annotated[list["Post"] | None, Field(back_ref=True)] = None`
+You can also use `Annotated` with `Field`: `posts: Annotated[Relation[list["Post"]], Field(back_ref=True)]`
 
 ### Shadow Fields
 
@@ -152,7 +152,7 @@ from ferro import Model, ForeignKey, BackRef
 class User(Model):
     id: int
     username: str
-    profile: BackRef["Profile"] | None = None  # Note: singular, not list
+    profile: "Profile" = BackRef()  # Note: singular relationships do not use Relation
 
 class Profile(Model):
     id: int
@@ -183,7 +183,7 @@ profile_user = await profile.user  # Returns User instance
 
 ## Many-to-Many
 
-Defined using `ManyToManyField`. Ferro automatically manages the hidden join table required for this relationship.
+Defined using `ManyToMany(...)`. Ferro automatically manages the hidden join table required for this relationship.
 
 ```mermaid
 erDiagram
@@ -198,37 +198,36 @@ erDiagram
     }
 ```
 
-### Annotated-style (with `BackRef`)
+### Helper-style (with `ManyToMany()` / `BackRef()`)
 
 ```python
-from typing import Annotated
-from ferro import Model, ManyToManyField, BackRef
+from ferro import Model, ManyToMany, BackRef, Relation
 
 class Student(Model):
     id: int
     name: str
-    courses: Annotated[list["Course"], ManyToManyField(related_name="students")] = None
+    courses: Relation[list["Course"]] = ManyToMany(related_name="students")
 
 class Course(Model):
     id: int
     title: str
-    students: BackRef[list["Student"]] | None = None
+    students: Relation[list["Student"]] = BackRef()
 ```
 
-### Pydantic-style (with `Field(back_ref=True)`)
+### Field-style (with `Field(...)`)
 
 ```python
-from ferro import Model, ManyToManyField, Field
+from ferro import Model, Field, Relation
 
 class Student(Model):
     id: int
     name: str
-    courses: Annotated[list["Course"], ManyToManyField(related_name="students")] = None
+    courses: Relation[list["Course"]] = Field(many_to_many=True, related_name="students")
 
 class Course(Model):
     id: int
     title: str
-    students: list["Student"] | None = Field(default=None, back_ref=True)
+    students: Relation[list["Student"]] = Field(back_ref=True)
 ```
 
 ### Join Table
@@ -308,7 +307,7 @@ class Employee(Model):
     id: int
     name: str
     manager: Annotated["Employee", ForeignKey(related_name="reports")] | None = None
-    reports: BackRef[list["Employee"]] | None = None
+    reports: Relation[list["Employee"]] = BackRef()
 
 # Usage
 manager = await Employee.create(name="Jane")

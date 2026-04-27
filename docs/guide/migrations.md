@@ -301,7 +301,7 @@ class Post(Model):
 
 ```python
 class Student(Model):
-    courses: Annotated[list["Course"], ManyToManyField(related_name="students")]
+    courses: Relation[list["Course"]] = ManyToMany(related_name="students")
 
 # Automatically generates join table:
 # CREATE TABLE student_courses (

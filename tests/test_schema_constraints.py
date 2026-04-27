@@ -9,6 +9,7 @@ from ferro import (
     FerroField,
     ForeignKey,
     Model,
+    Relation,
     clear_registry,
     connect,
     reset_engine,
@@ -28,6 +29,7 @@ def cleanup():
 @pytest.mark.sqlite_only
 async def test_runtime_create_tables_respects_explicit_nullable_override(db_url):
     """Rust DDL should honor the same explicit nullable override that Alembic sees."""
+
     class NullableOverrideRow(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         field_a: int | None = Field(default=None, nullable=False)
@@ -48,10 +50,11 @@ async def test_runtime_create_tables_respects_explicit_nullable_override(db_url)
 @pytest.mark.sqlite_only
 async def test_foreign_key_constraint_exists(db_url):
     """Verify that Rust generates the actual FOREIGN KEY constraint in SQL."""
+
     class Category(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        products: BackRef[list["Product"]] = None
+        products: Relation[list["Product"]] = BackRef()
 
     class Product(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -91,7 +94,7 @@ async def test_foreign_key_constraint_exists_in_postgres(
     class Category(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        products: BackRef[list["Product"]] = None
+        products: Relation[list["Product"]] = BackRef()
 
     class Product(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None

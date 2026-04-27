@@ -19,8 +19,9 @@ from ferro import (
     BackRef,
     FerroField,
     ForeignKey,
-    ManyToManyField,
+    ManyToMany,
     Model,
+    Relation,
     connect,
     transaction,
 )
@@ -40,7 +41,7 @@ class Category(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str
     # Reverse lookup marker (Zero-Boilerplate)
-    products: BackRef[list["Product"]] = None
+    products: Relation[list["Product"]] = BackRef()
 
 
 class Product(Model):
@@ -59,13 +60,13 @@ class Product(Model):
 class Actor(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str
-    movies: Annotated[list["Movie"], ManyToManyField(related_name="actors")] = None
+    movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
 
 
 class Movie(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str
-    actors: BackRef[list[Actor]] = None
+    actors: Relation[list[Actor]] = BackRef()
 
 
 async def run_demo():

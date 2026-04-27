@@ -17,10 +17,10 @@ from ._core import (
 from ._core import (
     connect as _core_connect,
 )
-from .base import FerroField, FerroNullable, ForeignKey, ManyToManyField
-from .fields import Field
+from .base import FerroField, FerroNullable, ForeignKey
+from .fields import BackRef, Field, ManyToMany
 from .models import Model, transaction
-from .query import BackRef
+from .query import Relation
 
 # Set up the Ferro logger
 _logger = logging.getLogger("ferro")
@@ -58,8 +58,9 @@ __all__ = [
     "FerroNullable",
     "Field",
     "ForeignKey",
-    "ManyToManyField",
     "BackRef",
+    "ManyToMany",
+    "Relation",
     "version",
     "create_tables",
     "reset_engine",

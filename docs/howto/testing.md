@@ -74,7 +74,7 @@ If no external Postgres URL is set and local PostgreSQL server binaries are unav
 
 ### Bridge-Boundary Regressions
 
-When a bug involves values crossing the Python/Rust bridge, preserve the public API shape in the regression test. These issues often depend on whether a value travels as JSON (`Query.all()`, `Query.count()`, `Query.update()`, `Query.delete()`) or as a typed Python value passed directly to Rust (`ManyToManyField.add()`, `.remove()`, `.clear()`).
+When a bug involves values crossing the Python/Rust bridge, preserve the public API shape in the regression test. These issues often depend on whether a value travels as JSON (`Query.all()`, `Query.count()`, `Query.update()`, `Query.delete()`) or as a typed Python value passed directly to Rust (`ManyToMany(...).add()`, `.remove()`, `.clear()`).
 
 Use these conventions:
 

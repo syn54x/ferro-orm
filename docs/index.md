@@ -29,12 +29,12 @@
 ```python
 import asyncio
 from typing import Annotated
-from ferro import Model, Field, ForeignKey, BackRef, connect
+from ferro import Model, Field, ForeignKey, BackRef, Relation, connect
 
 class Author(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
-    posts: BackRef[list["Post"]] | None = None
+    posts: Relation[list["Post"]] = BackRef()
 
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)

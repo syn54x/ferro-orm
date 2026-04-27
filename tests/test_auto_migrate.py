@@ -5,9 +5,8 @@ import pytest
 from pydantic import Field
 
 import ferro
-from ferro import Model
-from ferro.base import FerroField, ManyToManyField
-from ferro.query import BackRef
+from ferro import BackRef, ManyToMany, Model, Relation
+from ferro.base import FerroField
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -62,12 +61,12 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
     class Actor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        movies: Annotated[list["Movie"], ManyToManyField(related_name="actors")] = None
+        movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
 
     class Movie(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        actors: BackRef[Actor] = None
+        actors: Relation[list["Actor"]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
 
@@ -110,12 +109,12 @@ async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_ur
     class UuidActor(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         name: str
-        movies: Annotated[list["UuidMovie"], ManyToManyField(related_name="actors")] = None
+        movies: Relation[list["UuidMovie"]] = ManyToMany(related_name="actors")
 
     class UuidMovie(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         title: str
-        actors: BackRef[UuidActor] = None
+        actors: Relation[list["UuidActor"]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
 
@@ -127,8 +126,20 @@ async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_ur
     conn.close()
 
     columns = {row[1]: row for row in rows}
-    assert columns["uuidactor_id"][2].upper() in {"UUID", "UUID_TEXT", "TEXT", "CHAR", "VARCHAR"}
-    assert columns["uuidmovie_id"][2].upper() in {"UUID", "UUID_TEXT", "TEXT", "CHAR", "VARCHAR"}
+    assert columns["uuidactor_id"][2].upper() in {
+        "UUID",
+        "UUID_TEXT",
+        "TEXT",
+        "CHAR",
+        "VARCHAR",
+    }
+    assert columns["uuidmovie_id"][2].upper() in {
+        "UUID",
+        "UUID_TEXT",
+        "TEXT",
+        "CHAR",
+        "VARCHAR",
+    }
     assert columns["uuidactor_id"][3] == 1
     assert columns["uuidmovie_id"][3] == 1
 
@@ -150,12 +161,12 @@ async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
     class UuidTag(Model):
         id: UUID = FerroFieldFn(default_factory=uuid4, primary_key=True)
         name: str = ""
-        posts: BackRef[list["UuidPost"]] | None = None
+        posts: Relation[list["UuidPost"]] = BackRef()
 
     class UuidPost(Model):
         id: UUID = FerroFieldFn(default_factory=uuid4, primary_key=True)
         title: str = ""
-        tags: Annotated[list[UuidTag], ManyToManyField(related_name="posts")] = None
+        tags: Relation[list[UuidTag]] = ManyToMany(related_name="posts")
 
     await connect(db_url, auto_migrate=True)
 

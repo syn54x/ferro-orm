@@ -7,7 +7,9 @@ from ferro import (
     FerroField,
     Field,
     ForeignKey,
+    ManyToMany,
     Model,
+    Relation,
     clear_registry,
     reset_engine,
 )
@@ -34,7 +36,7 @@ class User(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     username: str
     # Reverse marker
-    posts: BackRef[list["Post"]] = None
+    posts: Relation[list["Post"]] = BackRef()
 
 
 class Post(Model):
@@ -42,6 +44,128 @@ class Post(Model):
     title: str
     # Forward link
     author: Annotated[User, ForeignKey(related_name="posts")]
+
+
+def test_relation_back_ref_helper_declares_reverse_relation():
+    """Relation[list[T]] = BackRef() declares a reverse collection relation."""
+
+    class Role(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        candidates: Relation[list["Candidate"]] = BackRef()
+
+    class Candidate(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        role: Annotated[Role, ForeignKey(related_name="candidates")]
+
+    assert Role.ferro_relations["candidates"] == "BackRef"
+    assert "candidates" not in Role.model_fields
+    role = Role(name="Engineering")
+    assert role.name == "Engineering"
+
+    from ferro.relations import resolve_relationships
+
+    resolve_relationships()
+    assert hasattr(Role, "candidates")
+    assert Role.candidates is not None
+
+
+def test_relation_back_ref_field_equivalent_declares_reverse_relation():
+    """Field(back_ref=True) is the lower-level equivalent of BackRef()."""
+
+    class RoleViaField(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        candidates: Relation[list["CandidateViaField"]] = Field(back_ref=True)
+
+    class CandidateViaField(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        role: Annotated[RoleViaField, ForeignKey(related_name="candidates")]
+
+    assert RoleViaField.ferro_relations["candidates"] == "BackRef"
+    assert "candidates" not in RoleViaField.model_fields
+
+    from ferro.relations import resolve_relationships
+
+    resolve_relationships()
+    assert hasattr(RoleViaField, "candidates")
+
+
+def test_relation_many_to_many_helper_declares_collection_relation():
+    """Relation[list[T]] = ManyToMany(...) declares a many-to-many relation."""
+
+    class Student(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        courses: Relation[list["Course"]] = ManyToMany(related_name="students")
+
+    class Course(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        students: Relation[list["Student"]] = BackRef()
+
+    rel = Student.ferro_relations["courses"]
+    assert rel.related_name == "students"
+    assert rel.through is None
+    assert rel.to == "Course"
+    assert "courses" not in Student.model_fields
+
+    from ferro.relations import resolve_relationships
+
+    resolve_relationships()
+    assert hasattr(Student, "courses")
+    assert hasattr(Course, "students")
+
+
+def test_relation_many_to_many_field_equivalent_declares_collection_relation():
+    """Field(many_to_many=True, ...) is the lower-level equivalent of ManyToMany()."""
+
+    class StudentViaField(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        courses: Relation[list["CourseViaField"]] = Field(
+            many_to_many=True, related_name="students", through="enrollments"
+        )
+
+    class CourseViaField(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        students: Relation[list["StudentViaField"]] = BackRef()
+
+    rel = StudentViaField.ferro_relations["courses"]
+    assert rel.related_name == "students"
+    assert rel.through == "enrollments"
+    assert rel.to == "CourseViaField"
+    assert "courses" not in StudentViaField.model_fields
+
+
+def test_old_backref_type_marker_raises_migration_error():
+    """Old BackRef[...] type-marker syntax fails with actionable guidance."""
+
+    with pytest.raises(TypeError, match="Relation\\[list\\[T\\]\\] = BackRef\\(\\)"):
+
+        class OldRole(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            candidates: BackRef[list[int]] = None
+
+
+def test_backref_plain_list_annotation_raises_migration_error():
+    """BackRef() collection fields must use Relation[list[T]], not list[T]."""
+
+    with pytest.raises(TypeError, match="Relation\\[list\\[T\\]\\] = BackRef\\(\\)"):
+
+        class PlainListRole(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            candidates: list[int] = BackRef()
+
+
+def test_many_to_many_field_import_removed_from_public_api():
+    """ManyToManyField is no longer exported as public API."""
+    import ferro
+
+    assert not hasattr(ferro, "ManyToManyField")
 
 
 def test_metadata_discovery():
@@ -88,7 +212,7 @@ async def test_forward_ref_resolution():
     class Author(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        posts: BackRef[list[Post]] = None
+        posts: Relation[list[Post]] = BackRef()
 
     # Initially it's a string/ForwardRef
     raw_to = Post.ferro_relations["author"].to
@@ -112,7 +236,7 @@ def test_relationship_validation_failure():
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
         # WRONG NAME HERE
-        wrong_name: BackRef[list["Post"]] = None
+        wrong_name: Relation[list["Post"]] = BackRef()
 
     class Post(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -132,7 +256,7 @@ def test_back_ref_via_field_default():
     class UserViaField(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        posts: list["PostViaField"] | None = Field(default=None, back_ref=True)
+        posts: Relation[list["PostViaField"]] = Field(back_ref=True)
 
     class PostViaField(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -154,7 +278,7 @@ def test_back_ref_via_annotated_field():
     class UserAnnotated(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        posts: Annotated[list["PostAnnotated"] | None, Field(back_ref=True)] = None
+        posts: Annotated[Relation[list["PostAnnotated"]], Field(back_ref=True)]
 
     class PostAnnotated(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -170,18 +294,22 @@ def test_back_ref_via_annotated_field():
     assert hasattr(UserAnnotated, "posts")
 
 
-def test_back_ref_and_field_back_ref_raises():
-    """Cannot use both BackRef and Field(back_ref=True) on the same field."""
+def test_back_ref_and_many_to_many_flags_raise():
+    """Cannot mark one relation field as both reverse and many-to-many."""
 
     with pytest.raises(
         TypeError,
-        match="Cannot use both BackRef and Field\\(back_ref=True\\) on the same field 'posts'",
+        match="cannot be both back_ref and many_to_many",
     ):
 
         class UserDouble(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             username: str
-            posts: BackRef[list["PostDouble"]] = Field(default=None, back_ref=True)
+            posts: Relation[list["PostDouble"]] = Field(
+                back_ref=True,
+                many_to_many=True,
+                related_name="users",
+            )
 
         class PostDouble(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None

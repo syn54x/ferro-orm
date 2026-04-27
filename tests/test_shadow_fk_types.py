@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, Field, ForeignKey, Model, connect
+from ferro import BackRef, FerroField, Field, ForeignKey, Model, Relation, connect
 from ferro._shadow_fk_types import (
     is_fallback_shadow_annotation,
     pk_python_type_for_model,
@@ -75,7 +75,7 @@ def test_reconcile_upgrades_forward_ref_shadow(_cleanup_registry):
     class ReconcileParent(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        children: BackRef[list[ReconcileChild]] = None
+        children: Relation[list[ReconcileChild]] = BackRef()
 
     assert is_fallback_shadow_annotation(ReconcileChild.__annotations__["parent_id"])
 
@@ -94,7 +94,7 @@ async def test_uuid_fk_create_get_dump(db_url):
     class UuidIssueParent(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         name: str
-        children: BackRef[list["UuidIssueChild"]] = None
+        children: Relation[list["UuidIssueChild"]] = BackRef()
 
     class UuidIssueChild(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -108,7 +108,9 @@ async def test_uuid_fk_create_get_dump(db_url):
     fetched = await UuidIssueChild.get(child.id)
     assert fetched.parent_id == parent.id
 
-    by_shadow = await UuidIssueChild.where(UuidIssueChild.parent_id == parent.id).first()
+    by_shadow = await UuidIssueChild.where(
+        UuidIssueChild.parent_id == parent.id
+    ).first()
     assert by_shadow is not None
     assert by_shadow.id == child.id
 
@@ -137,7 +139,7 @@ async def test_uuid_fk_forward_ref_child_declared_first(db_url):
     class UuidFrwParent(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         name: str
-        children: BackRef[list[UuidFrwChild]] = None
+        children: Relation[list[UuidFrwChild]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
 
@@ -154,7 +156,7 @@ def test_uuid_child_model_validate_accepts_string_parent_id():
     class VParent(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         name: str
-        children: BackRef[list["VChild"]] = None
+        children: Relation[list["VChild"]] = BackRef()
 
     class VChild(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -178,13 +180,13 @@ def test_nullable_fk_annotation_does_not_crash():
 
     class NullableFkParent(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
-        children: BackRef[list["NullableFkChild"]] = None
+        children: Relation[list["NullableFkChild"]] = BackRef()
 
     class NullableFkChild(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
-        parent: Annotated[NullableFkParent | None, ForeignKey(related_name="children")] = (
-            None
-        )
+        parent: Annotated[
+            NullableFkParent | None, ForeignKey(related_name="children")
+        ] = None
 
     resolve_relationships()
     assert NullableFkChild.ferro_relations["parent"].to is NullableFkParent
@@ -199,7 +201,7 @@ async def test_uuid_fk_save_after_reparenting(db_url):
     class UuidMutParent(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         name: str
-        kids: BackRef[list["UuidMutChild"]] = None
+        kids: Relation[list["UuidMutChild"]] = BackRef()
 
     class UuidMutChild(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
@@ -231,7 +233,7 @@ async def test_uuid_fk_bulk_create(db_url):
     class UuidBulkParent(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         name: str
-        items: BackRef[list["UuidBulkItem"]] = None
+        items: Relation[list["UuidBulkItem"]] = BackRef()
 
     class UuidBulkItem(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)

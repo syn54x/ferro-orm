@@ -140,7 +140,9 @@ class ForeignKey:
         self.unique = unique
         self.nullable = _validate_nullable_option(nullable, "ForeignKey")
         if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
-            raise ValueError("ForeignKey(on_delete='SET NULL') requires nullable=True or 'infer'")
+            raise ValueError(
+                "ForeignKey(on_delete='SET NULL') requires nullable=True or 'infer'"
+            )
         #: First type argument of ``Annotated[..., ForeignKey]``; set by the metaclass
         #: for Alembic nullability inference (forward fields are not in ``model_fields``).
         self.relation_annotation: Any | None = None
@@ -160,8 +162,8 @@ def foreign_key_allows_none(metadata: "ForeignKey") -> bool | None:
     return annotation_allows_none(relation_annotation)
 
 
-class ManyToManyField:
-    """Describe metadata for a many-to-many relationship
+class ManyToManyRelation:
+    """Describe internal metadata for a many-to-many relationship
 
     Attributes:
 
@@ -178,7 +180,7 @@ class ManyToManyField:
         >>>
         >>> class Post(Model):
         ...     id: Annotated[int, FerroField(primary_key=True)]
-        ...     tags: Annotated[list[int], ManyToManyField("posts")]
+        ...     tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
     """
 
     def __init__(self, related_name: str, through: str | None = None):
@@ -196,7 +198,7 @@ class ManyToManyField:
             >>>
             >>> class User(Model):
             ...     id: Annotated[int, FerroField(primary_key=True)]
-            ...     teams: Annotated[list[int], ManyToManyField("members", through="team_members")]
+            ...     teams: Relation[list["Team"]] = ManyToMany(related_name="members", through="team_members")
         """
         self.to = None  # Resolved later
         self.related_name = related_name
