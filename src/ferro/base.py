@@ -183,7 +183,12 @@ class ManyToManyRelation:
         ...     tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
     """
 
-    def __init__(self, related_name: str, through: str | None = None):
+    def __init__(
+        self,
+        related_name: str,
+        through: str | None = None,
+        reverse_index: bool = True,
+    ):
         """Initialize many-to-many relationship metadata
 
         Args:
@@ -191,6 +196,10 @@ class ManyToManyRelation:
             related_name: Name for reverse access from the related model.
             through: Explicit join table name.
                 When omitted, Ferro generates a join table name automatically.
+            reverse_index: When True (default), the synthesized join table
+                gets a non-unique composite index on ``(target_col, source_col)``
+                to optimize back-ref queries. Set to False to opt out (e.g.,
+                write-heavy join tables where the extra index cost is unwanted).
 
         Examples:
             >>> from typing import Annotated
@@ -203,3 +212,4 @@ class ManyToManyRelation:
         self.to = None  # Resolved later
         self.related_name = related_name
         self.through = through
+        self.reverse_index = reverse_index

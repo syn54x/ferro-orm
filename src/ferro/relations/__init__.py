@@ -133,6 +133,8 @@ def resolve_relationships():
                 "required": [source_col, target_col],
                 "ferro_composite_uniques": [[source_col, target_col]],
             }
+            if rel.reverse_index:
+                join_schema["ferro_composite_indexes"] = [[target_col, source_col]]
             register_model_schema(join_table, json.dumps(join_schema))
             _JOIN_TABLE_REGISTRY[join_table] = join_schema
 
