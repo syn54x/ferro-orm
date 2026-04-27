@@ -733,3 +733,75 @@ async def test_autogen_idempotent_after_first_apply(db_url):
 
     relevant = [d for d in diff if "idx_idxstable" in str(d).lower()]
     assert relevant == [], f"unexpected autogen drift on composite indexes: {relevant}"
+
+
+# === Group F: common-use-case smoke tests ===
+
+
+@pytest.mark.asyncio
+async def test_use_case_m2m_reverse_query(db_url):
+    """F1: actually query an M2M reverse direction; reverse index is queryable."""
+
+    class TagF1(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        articles: Relation[list["ArticleF1"]] = ManyToMany(related_name="tags")
+
+    class ArticleF1(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str
+        tags: Relation[list["TagF1"]] = BackRef()
+
+    await connect(db_url, auto_migrate=True)
+
+    python_tag = await TagF1.create(name="python")
+    rust_tag = await TagF1.create(name="rust")
+    article_a = await ArticleF1.create(title="A")
+    article_b = await ArticleF1.create(title="B")
+
+    await python_tag.articles.add(article_a)
+    await python_tag.articles.add(article_b)
+    await rust_tag.articles.add(article_a)
+
+    fetched_a = await ArticleF1.get(article_a.id)
+    a_tags = await fetched_a.tags.all()
+    assert {t.name for t in a_tags} == {"python", "rust"}
+
+    fetched_b = await ArticleF1.get(article_b.id)
+    b_tags = await fetched_b.tags.all()
+    assert {t.name for t in b_tags} == {"python"}
+
+
+@pytest.mark.asyncio
+async def test_use_case_polymorphic_lookup_index(db_url):
+    """F2: composite index on (string, int) mixed-type columns materializes."""
+    import sqlite3
+
+    class CommentF2(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("content_type", "object_id"),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        content_type: str
+        object_id: int
+        body: str
+
+    await connect(db_url, auto_migrate=True)
+
+    metadata = get_metadata()
+    idxs = [i for i in metadata.tables["commentf2"].indexes if not i.unique]
+    composite = [
+        i for i in idxs
+        if [c.key for c in i.columns] == ["content_type", "object_id"]
+    ]
+    assert len(composite) == 1
+
+    if "sqlite" in db_url:
+        db_path = db_url.replace("sqlite:", "").split("?")[0]
+        conn = sqlite3.connect(db_path)
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='commentf2' "
+            "AND name='idx_commentf2_content_type_object_id'"
+        ).fetchone()
+        conn.close()
+        assert sql is not None
