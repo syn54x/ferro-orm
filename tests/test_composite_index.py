@@ -435,3 +435,110 @@ def test_composite_index_name_python_matches_naming_convention():
     )
     assert len(long_idx.name) == 63
     assert long_idx.name.endswith("_idx")
+
+
+# === Group C (subset): SQLite live catalog ===
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_composite_index_exists_in_sqlite(db_url):
+    """C1: after auto_migrate, sqlite_master has the index without UNIQUE."""
+    import sqlite3
+
+    class IdxRow(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("alpha_id", "beta_id"),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        alpha_id: int
+        beta_id: int
+
+    await connect(db_url, auto_migrate=True)
+
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='idxrow' AND sql IS NOT NULL"
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    composite = [
+        r for r in rows
+        if r[1] and "alpha_id" in r[1] and "beta_id" in r[1]
+    ]
+    assert composite, f"expected composite index on idxrow, got: {rows}"
+    name, sql = composite[0]
+    assert name == "idx_idxrow_alpha_id_beta_id"
+    assert "UNIQUE" not in sql.upper()
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_composite_index_column_order_in_sqlite_indexdef(db_url):
+    """C3: SQLite index SQL preserves declared column order."""
+    import sqlite3
+
+    class OrderRow(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("y_id", "x_id"),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        x_id: int
+        y_id: int
+
+    await connect(db_url, auto_migrate=True)
+
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
+    conn = sqlite3.connect(db_path)
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='orderrow' "
+        "AND sql IS NOT NULL"
+    ).fetchone()[0]
+    conn.close()
+
+    pos_y = sql.index("y_id")
+    pos_x = sql.index("x_id")
+    assert pos_y < pos_x, f"expected y_id before x_id in: {sql}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_composite_index_truncated_name_matches_alembic_and_sqlite(db_url):
+    """C5: long composite-index names truncate identically in Alembic and Rust."""
+    import sqlite3
+
+    long_a = "very_long_column_name_alpha_for_idx_truncation_test"
+    long_b = "very_long_column_name_beta_for_idx_truncation_test"
+
+    class VeryLongCompositeIndexModelNameForTruncation(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            (long_a, long_b),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        very_long_column_name_alpha_for_idx_truncation_test: int
+        very_long_column_name_beta_for_idx_truncation_test: int
+
+    table = "verylongcompositeindexmodelnamefortruncation"
+    metadata = get_metadata()
+    idx = next(i for i in metadata.tables[table].indexes if not i.unique)
+    expected = idx.name
+    assert len(expected) == 63
+    assert expected.endswith("_idx")
+
+    await connect(db_url, auto_migrate=True)
+
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? "
+        "AND sql IS NOT NULL",
+        (table,),
+    ).fetchall()
+    conn.close()
+
+    names = [r[0] for r in rows]
+    assert expected in names, f"expected {expected!r} in {names}"
