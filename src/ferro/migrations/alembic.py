@@ -210,6 +210,23 @@ def _build_sa_table(
             uc_name = uc_name[:60] + "_uq"
         table_args.append(sa.UniqueConstraint(*col_ids, name=uc_name))
 
+    composite_idxs = schema.get("ferro_composite_indexes") or []
+    for group in composite_idxs:
+        if not isinstance(group, (list, tuple)) or len(group) < 2:
+            warnings.warn(
+                f"Ignoring invalid ferro_composite_indexes entry for table "
+                f"{table_name!r} (expected a list/tuple of at least two column names): "
+                f"{group!r}",
+                UserWarning,
+                stacklevel=2,
+            )
+            continue
+        col_ids = [str(c) for c in group]
+        idx_name = f"idx_{table_name}_{'_'.join(col_ids)}"
+        if len(idx_name) > 63:
+            idx_name = idx_name[:59] + "_idx"
+        table_args.append(sa.Index(idx_name, *col_ids))
+
     sa.Table(table_name, metadata, *table_args)
 
 
