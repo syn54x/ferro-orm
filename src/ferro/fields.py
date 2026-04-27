@@ -340,6 +340,7 @@ def Field(
     many_to_many: bool | Any = _Unset,
     related_name: str | None | Any = _Unset,
     through: str | None | Any = _Unset,
+    reverse_index: bool | Any = _Unset,
     nullable: FerroNullable | Any = _Unset,
     default_factory: Callable[[], Any]
     | Callable[[dict[str, Any]], Any]
@@ -481,6 +482,8 @@ def Field(
         ferro_kwargs["related_name"] = related_name
     if through is not _Unset:
         ferro_kwargs["through"] = through
+    if reverse_index is not _Unset:
+        ferro_kwargs["reverse_index"] = reverse_index
     if nullable is not _Unset:
         _validate_nullable_option(nullable, "Field")
         ferro_kwargs["nullable"] = nullable
@@ -549,6 +552,11 @@ class BackRef:
     """
 
     def __new__(cls, **kwargs: Any) -> Any:
+        if "reverse_index" in kwargs:
+            raise TypeError(
+                "BackRef() does not accept 'reverse_index'; this kwarg lives on the "
+                "forward ManyToMany(...) declaration. Set reverse_index there instead."
+            )
         return Field(back_ref=True, **kwargs)
 
     @classmethod
@@ -563,14 +571,25 @@ def ManyToMany(
     *,
     related_name: str,
     through: str | None = None,
+    reverse_index: bool = True,
     **kwargs: Any,
 ) -> Any:
-    """Declare a many-to-many relationship field."""
+    """Declare a many-to-many relationship field.
+
+    Args:
+        related_name: Name for reverse access from the related model.
+        through: Optional explicit join table name. When omitted, Ferro
+            generates a join table name automatically.
+        reverse_index: When True (default), the synthesized join table gets
+            a non-unique composite index on ``(target_col, source_col)`` to
+            optimize back-ref queries. Set to False to opt out.
+    """
 
     return Field(
         many_to_many=True,
         related_name=related_name,
         through=through,
+        reverse_index=reverse_index,
         **kwargs,
     )
 

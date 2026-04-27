@@ -370,3 +370,57 @@ def test_single_column_composite_unique_raises_with_guidance():
 
             id: int | None = Field(default=None, primary_key=True)
             only_col: int
+
+
+# === Group D: M2M reverse_index knob ===
+
+
+def test_m2m_reverse_index_default_on():
+    """D1: default ManyToMany(...) -> join table gets non-unique reverse index."""
+
+    class Actor1(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        movies: Relation[list["Movie1"]] = ManyToMany(related_name="actors")
+
+    class Movie1(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str
+        actors: Relation[list["Actor1"]] = BackRef()
+
+    metadata = get_metadata()
+    join = metadata.tables["actor1_movies"]
+    idxs = [i for i in join.indexes if not i.unique]
+    assert any(
+        [c.key for c in i.columns] == ["movie1_id", "actor1_id"]
+        for i in idxs
+    )
+    expected_name = "idx_actor1_movies_movie1_id_actor1_id"
+    assert any(i.name == expected_name for i in idxs)
+
+
+def test_m2m_reverse_index_opt_out():
+    """D2: ManyToMany(reverse_index=False) -> no idx_* on join table."""
+
+    class Actor2(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        movies: Relation[list["Movie2"]] = ManyToMany(
+            related_name="actors", reverse_index=False
+        )
+
+    class Movie2(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str
+        actors: Relation[list["Actor2"]] = BackRef()
+
+    metadata = get_metadata()
+    join = metadata.tables["actor2_movies"]
+    non_unique = [i for i in join.indexes if not i.unique]
+    assert non_unique == []
+
+
+def test_m2m_reverse_index_lives_on_forward_side():
+    """D3: passing reverse_index= to BackRef() is a TypeError."""
+    with pytest.raises(TypeError):
+        BackRef(reverse_index=True)

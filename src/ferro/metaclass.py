@@ -251,6 +251,7 @@ class ModelMetaclass(type(BaseModel)):
                 metadata = ManyToManyRelation(
                     related_name=related_name,
                     through=relationship_payload.get("through"),
+                    reverse_index=relationship_payload.get("reverse_index", True),
                 )
                 metadata.to = target
                 local_relations[field_name] = metadata
