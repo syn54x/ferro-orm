@@ -542,3 +542,104 @@ async def test_composite_index_truncated_name_matches_alembic_and_sqlite(db_url)
 
     names = [r[0] for r in rows]
     assert expected in names, f"expected {expected!r} in {names}"
+
+
+# === Group C (subset): Postgres live catalog ===
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_composite_index_exists_in_postgres(db_url, postgres_base_url, db_schema_name):
+    """C2: after auto_migrate, pg_indexes has the index without UNIQUE."""
+    import psycopg
+
+    class PgIdxRow(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("alpha_id", "beta_id"),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        alpha_id: int
+        beta_id: int
+
+    await connect(db_url, auto_migrate=True)
+
+    expected = "idx_pgidxrow_alpha_id_beta_id"
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        row = conn.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE schemaname = %s AND tablename = %s AND indexname = %s",
+            (db_schema_name, "pgidxrow", expected),
+        ).fetchone()
+    assert row is not None
+    indexdef = row[0]
+    assert "UNIQUE" not in indexdef.upper()
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_composite_index_column_order_in_postgres_indexdef(
+    db_url, postgres_base_url, db_schema_name
+):
+    """C4: pg_indexes indexdef preserves declared column order."""
+    import psycopg
+
+    class PgOrder(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("y_id", "x_id"),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        x_id: int
+        y_id: int
+
+    await connect(db_url, auto_migrate=True)
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        row = conn.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE schemaname = %s AND tablename = %s AND indexname = %s",
+            (db_schema_name, "pgorder", "idx_pgorder_y_id_x_id"),
+        ).fetchone()
+    assert row is not None
+    indexdef = row[0]
+    pos_y = indexdef.index("y_id")
+    pos_x = indexdef.index("x_id")
+    assert pos_y < pos_x
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_composite_index_truncated_name_matches_postgres_catalog(
+    db_url, postgres_base_url, db_schema_name
+):
+    """C6: long composite-index names match between Alembic and Postgres."""
+    import psycopg
+
+    long_a = "very_long_column_name_alpha_for_idx_truncation_test"
+    long_b = "very_long_column_name_beta_for_idx_truncation_test"
+
+    class VeryLongPgCompositeIndexModel(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            (long_a, long_b),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        very_long_column_name_alpha_for_idx_truncation_test: int
+        very_long_column_name_beta_for_idx_truncation_test: int
+
+    table = "verylongpgcompositeindexmodel"
+    metadata = get_metadata()
+    expected = next(i for i in metadata.tables[table].indexes if not i.unique).name
+    assert len(expected) <= 63
+
+    await connect(db_url, auto_migrate=True)
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        row = conn.execute(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE schemaname = %s AND tablename = %s AND indexname = %s",
+            (db_schema_name, table, expected),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == expected
