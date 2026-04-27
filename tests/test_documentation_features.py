@@ -21,8 +21,9 @@ from ferro import (
     FerroField,
     Field,
     ForeignKey,
-    ManyToManyField,
+    ManyToMany,
     Model,
+    Relation,
     connect,
     create_tables,
     transaction,
@@ -46,8 +47,8 @@ class User(Model):
     email: Annotated[str, FerroField(unique=True, index=True)]
     is_active: bool = True
     role: UserRole = UserRole.USER
-    posts: BackRef[list["Post"]] = None
-    comments: BackRef[list["Comment"]] = None
+    posts: Relation[list["Post"]] = BackRef()
+    comments: Relation[list["Comment"]] = BackRef()
 
 
 class Post(Model):
@@ -59,8 +60,8 @@ class Post(Model):
     published: bool = False
     created_at: datetime = Field(default_factory=datetime.now)
     author: Annotated[User, ForeignKey(related_name="posts")]
-    comments: BackRef[list["Comment"]] = None
-    tags: Annotated[list["Tag"], ManyToManyField(related_name="posts")] = None
+    comments: Relation[list["Comment"]] = BackRef()
+    tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
 
 
 class Comment(Model):
@@ -78,7 +79,7 @@ class Tag(Model):
 
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: Annotated[str, FerroField(unique=True)]
-    posts: BackRef[list["Post"]] = None
+    posts: Relation[list["Post"]] = BackRef()
 
 
 class Product(Model):

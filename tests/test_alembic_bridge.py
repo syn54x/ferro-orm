@@ -9,8 +9,9 @@ from ferro import (
     Field,
     FerroField,
     ForeignKey,
-    ManyToManyField,
+    ManyToMany,
     Model,
+    Relation,
     clear_registry,
     reset_engine,
 )
@@ -36,7 +37,7 @@ def test_metadata_translation():
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: Annotated[str, FerroField(unique=True, index=True)]
         is_active: bool = True
-        posts: BackRef["Post"] = None
+        posts: Relation[list["Post"]] = BackRef()
 
     class Post(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -71,7 +72,7 @@ def test_foreign_key_unique_true_propagates_to_shadow_column():
 
     class Parent(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
-        child: BackRef["Child"] = None
+        child: "Child" = BackRef()
 
     class Child(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -91,12 +92,12 @@ def test_m2m_translation():
     class Actor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        movies: Annotated[list["Movie"], ManyToManyField(related_name="actors")] = None
+        movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
 
     class Movie(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        actors: BackRef[Actor] = None
+        actors: Relation[list["Actor"]] = BackRef()
 
     metadata = get_metadata()
 
@@ -120,12 +121,12 @@ def test_uuid_m2m_join_table_uses_uuid_capable_column_types():
     class UuidTeam(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         name: str
-        members: Annotated[list["UuidMember"], ManyToManyField(related_name="teams")] = None
+        members: Relation[list["UuidMember"]] = ManyToMany(related_name="teams")
 
     class UuidMember(Model):
         id: UUID = Field(default_factory=uuid4, primary_key=True)
         email: str
-        teams: BackRef[UuidTeam] = None
+        teams: Relation[list["UuidTeam"]] = BackRef()
 
     metadata = get_metadata()
     join_table = metadata.tables["uuidteam_members"]
@@ -144,7 +145,7 @@ def test_uuid_foreign_key_shadow_column_type():
     class UuidAlembicOrg(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         name: str
-        members: BackRef[list["UuidAlembicMember"]] = None
+        members: Relation[list["UuidAlembicMember"]] = BackRef()
 
     class UuidAlembicMember(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
@@ -164,7 +165,7 @@ def test_on_delete_translation():
     class Category(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        products: BackRef["Product"] = None
+        products: Relation[list["Product"]] = BackRef()
 
     class Product(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None

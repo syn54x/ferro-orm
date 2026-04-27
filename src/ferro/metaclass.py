@@ -16,9 +16,9 @@ from pydantic.fields import FieldInfo
 
 from ._core import register_model_schema
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
-from .base import FerroField, ForeignKey, ManyToManyField
+from .base import FerroField, ForeignKey, ManyToManyRelation
 from .fields import FERRO_FIELD_EXTRA_KEY
-from .query import BackRef, FieldProxy
+from .query import FieldProxy, Relation
 from .relations.descriptors import ForwardDescriptor
 from .schema_metadata import build_model_schema
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
@@ -56,14 +56,15 @@ class ModelMetaclass(type(BaseModel)):
         return cls
 
     @staticmethod
-    def _field_has_back_ref(obj: Any) -> bool:
-        """Return True if obj is a FieldInfo with back_ref=True in its Ferro extra."""
+    def _field_ferro_payload(obj: Any) -> dict[str, Any]:
+        """Return Ferro metadata payload from a wrapped FieldInfo."""
         if not isinstance(obj, FieldInfo):
-            return False
+            return {}
         extra = getattr(obj, "json_schema_extra", None)
         if not isinstance(extra, dict):
-            return False
-        return extra.get(FERRO_FIELD_EXTRA_KEY, {}).get("back_ref") is True
+            return {}
+        payload = extra.get(FERRO_FIELD_EXTRA_KEY, {})
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def _strip_optional_union(hint: Any) -> Any:
@@ -79,8 +80,8 @@ class ModelMetaclass(type(BaseModel)):
             return hint
 
     @staticmethod
-    def _backref_marker_from_annotation(hint: Any) -> Any:
-        """Inner type used to detect ``BackRef`` (unwraps ``Annotated``, ``| None``)."""
+    def _relationship_marker_from_annotation(hint: Any) -> Any:
+        """Inner type used to inspect relationship annotations."""
         if get_origin(hint) is Annotated:
             args = get_args(hint)
             if args:
@@ -89,43 +90,85 @@ class ModelMetaclass(type(BaseModel)):
         return ModelMetaclass._strip_optional_union(hint)
 
     @staticmethod
-    def _is_back_ref_field(
+    def _legacy_back_ref_error(field_name: str) -> TypeError:
+        return TypeError(
+            f"Field '{field_name}' uses deprecated BackRef[...] annotation syntax. "
+            "Use Relation[list[T]] = BackRef() for collection back-references."
+        )
+
+    @staticmethod
+    def _relationship_field_payload(
         field_name: str, hint: Any, namespace: dict
-    ) -> tuple[bool, bool]:
-        """
-        Check if a field is a back-reference.
-
-        Returns:
-            (is_back_type, is_back_field): Booleans indicating type-side and field-side BackRef
-        """
+    ) -> dict[str, Any]:
+        """Return relationship metadata supplied by ferro.Field helpers."""
         origin = get_origin(hint)
-
-        # Type-side back-ref: BackRef[...] in annotation (or inside Annotated), optional ``| None``
-        marker = ModelMetaclass._backref_marker_from_annotation(hint)
-        is_back_type = get_origin(marker) is BackRef
-        if not is_back_type and isinstance(hint, str) and "BackRef" in hint:
-            is_back_type = True
-        if (
-            not is_back_type
-            and isinstance(hint, ForwardRef)
-            and "BackRef" in hint.__forward_arg__
-        ):
-            is_back_type = True
-
-        # Field-side back-ref: Field(back_ref=True) as default or in Annotated
-        is_back_field = False
         default_val = namespace.get(field_name)
-        if ModelMetaclass._field_has_back_ref(default_val):
-            is_back_field = True
-        if not is_back_field and origin is Annotated:
-            for metadata in get_args(hint)[1:]:
-                if isinstance(
-                    metadata, FieldInfo
-                ) and ModelMetaclass._field_has_back_ref(metadata):
-                    is_back_field = True
-                    break
+        payload = ModelMetaclass._field_ferro_payload(default_val)
+        if payload:
+            return payload
 
-        return is_back_type, is_back_field
+        if origin is Annotated:
+            for metadata in get_args(hint)[1:]:
+                payload = ModelMetaclass._field_ferro_payload(metadata)
+                if payload:
+                    return payload
+
+        return {}
+
+    @staticmethod
+    def _relation_target_from_annotation(field_name: str, hint: Any) -> Any:
+        """Extract T from Relation[list[T]] for collection relationships."""
+        marker = ModelMetaclass._relationship_marker_from_annotation(hint)
+        if isinstance(marker, str):
+            return ModelMetaclass._relation_target_from_string(field_name, marker)
+        if get_origin(marker) is not Relation:
+            raise TypeError(
+                f"Field '{field_name}' must be annotated as Relation[list[T]] "
+                "when using BackRef(), ManyToMany(), or relationship Field flags."
+            )
+
+        args = get_args(marker)
+        if not args:
+            raise TypeError(f"Field '{field_name}' must specify Relation[list[T]].")
+
+        relation_arg = ModelMetaclass._strip_optional_union(args[0])
+        if get_origin(relation_arg) is not list:
+            raise TypeError(
+                f"Field '{field_name}' must use Relation[list[T]] for collection relationships."
+            )
+
+        inner_args = get_args(relation_arg)
+        if not inner_args:
+            raise TypeError(f"Field '{field_name}' must specify Relation[list[T]].")
+        return ModelMetaclass._strip_optional_union(inner_args[0])
+
+    @staticmethod
+    def _relation_target_from_string(field_name: str, hint: str) -> str:
+        """Extract T from a string ``Relation[list[T]]`` annotation."""
+        normalized = hint.replace(" ", "")
+        prefix = "Relation[list["
+        if not normalized.startswith(prefix) or not normalized.endswith("]]"):
+            raise TypeError(
+                f"Field '{field_name}' must be annotated as Relation[list[T]] "
+                "when using BackRef(), ManyToMany(), or relationship Field flags."
+            )
+        target = normalized[len(prefix) : -2]
+        return target.strip("\"'")
+
+    @staticmethod
+    def _annotation_is_plain_list(hint: Any) -> bool:
+        marker = ModelMetaclass._relationship_marker_from_annotation(hint)
+        if get_origin(marker) is list:
+            return True
+        return isinstance(marker, str) and marker.replace(" ", "").startswith("list[")
+
+    @staticmethod
+    def _annotation_looks_like_back_ref(hint: Any) -> bool:
+        if isinstance(hint, str) and "BackRef" in hint:
+            return True
+        if isinstance(hint, ForwardRef) and "BackRef" in hint.__forward_arg__:
+            return True
+        return False
 
     @staticmethod
     def _resolve_deferred_annotations(namespace: dict) -> dict[str, Any]:
@@ -141,11 +184,15 @@ class ModelMetaclass(type(BaseModel)):
             try:
                 # Format 1: Value (evaluated)
                 return namespace["__annotate_func__"](1)
-            except Exception:
+            except Exception as value_error:
+                if "BackRef[...]" in str(value_error):
+                    raise value_error
                 try:
                     # Format 2: ForwardRef (non-evaluated objects)
                     return namespace["__annotate_func__"](2)
-                except Exception:
+                except Exception as forward_error:
+                    if "BackRef[...]" in str(forward_error):
+                        raise forward_error
                     pass
 
         return namespace.get("__annotations__", {})
@@ -155,7 +202,7 @@ class ModelMetaclass(type(BaseModel)):
         annotations: dict, namespace: dict, model_name: str
     ) -> tuple[dict, list]:
         """
-        Scan annotations for relationship fields (BackRef, ForeignKey, ManyToManyField).
+        Scan annotations for relationship fields (BackRef, ForeignKey, ManyToMany).
 
         Returns:
             (local_relations, fields_to_remove): Relationship metadata and fields to hide from Pydantic
@@ -164,18 +211,50 @@ class ModelMetaclass(type(BaseModel)):
         fields_to_remove = []
 
         for field_name, hint in list(annotations.items()):
-            is_back_type, is_back_field = ModelMetaclass._is_back_ref_field(
+            if ModelMetaclass._annotation_looks_like_back_ref(hint):
+                raise ModelMetaclass._legacy_back_ref_error(field_name)
+
+            relationship_payload = ModelMetaclass._relationship_field_payload(
                 field_name, hint, namespace
             )
+            is_back_field = relationship_payload.get("back_ref") is True
+            is_m2m_field = relationship_payload.get("many_to_many") is True
 
-            if is_back_type and is_back_field:
+            if is_back_field and is_m2m_field:
                 raise TypeError(
-                    f"Cannot use both BackRef and Field(back_ref=True) on the same "
-                    f"field '{field_name}'."
+                    f"Field '{field_name}' cannot be both back_ref and many_to_many."
                 )
 
-            if is_back_type or is_back_field:
+            if is_back_field:
+                marker = ModelMetaclass._relationship_marker_from_annotation(hint)
+                if get_origin(marker) is Relation:
+                    ModelMetaclass._relation_target_from_annotation(field_name, hint)
+                elif ModelMetaclass._annotation_is_plain_list(hint):
+                    raise TypeError(
+                        f"Field '{field_name}' uses a plain list annotation. Use "
+                        "Relation[list[T]] = BackRef() for collection back-references."
+                    )
                 local_relations[field_name] = "BackRef"
+                fields_to_remove.append(field_name)
+                continue
+
+            if is_m2m_field:
+                target = ModelMetaclass._relation_target_from_annotation(
+                    field_name, hint
+                )
+                related_name = relationship_payload.get("related_name")
+                if not related_name:
+                    raise TypeError(
+                        f"Field '{field_name}' uses many_to_many=True but did not "
+                        "provide related_name."
+                    )
+                metadata = ManyToManyRelation(
+                    related_name=related_name,
+                    through=relationship_payload.get("through"),
+                )
+                metadata.to = target
+                local_relations[field_name] = metadata
+                _PENDING_RELATIONS.append((model_name, field_name, metadata))
                 fields_to_remove.append(field_name)
                 continue
 
@@ -192,20 +271,11 @@ class ModelMetaclass(type(BaseModel)):
                         fields_to_remove.append(field_name)
                         break
 
-                    if isinstance(metadata, ManyToManyField):
-                        origin_inner = get_origin(args[0])
-                        if origin_inner is list:
-                            inner_args = get_args(args[0])
-                            if inner_args:
-                                metadata.to = ModelMetaclass._strip_optional_union(
-                                    inner_args[0]
-                                )
-                        else:
-                            metadata.to = ModelMetaclass._strip_optional_union(args[0])
-                        local_relations[field_name] = metadata
-                        _PENDING_RELATIONS.append((model_name, field_name, metadata))
-                        fields_to_remove.append(field_name)
-                        break
+                    if metadata.__class__.__name__ == "ManyToManyField":
+                        raise TypeError(
+                            "ManyToManyField(...) is no longer supported. Use "
+                            "Relation[list[T]] = ManyToMany(...)."
+                        )
 
         return local_relations, fields_to_remove
 
@@ -290,7 +360,19 @@ class ModelMetaclass(type(BaseModel)):
             if isinstance(extra, dict):
                 wrapped_payload = extra.get(FERRO_FIELD_EXTRA_KEY)
                 if wrapped_payload:
-                    wrapped_metadata = FerroField(**wrapped_payload)
+                    field_payload = {
+                        key: wrapped_payload[key]
+                        for key in (
+                            "primary_key",
+                            "autoincrement",
+                            "unique",
+                            "index",
+                            "nullable",
+                        )
+                        if key in wrapped_payload
+                    }
+                    if field_payload:
+                        wrapped_metadata = FerroField(**field_payload)
 
             if annotated_metadata and wrapped_metadata:
                 raise TypeError(

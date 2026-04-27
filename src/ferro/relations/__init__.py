@@ -2,8 +2,12 @@ import json
 from typing import ForwardRef
 
 from .._core import register_model_schema
-from .._shadow_fk_types import pk_python_type_for_model, reconcile_shadow_fk_types, schema_fragment_for_pk
-from ..base import ForeignKey, ManyToManyField
+from .._shadow_fk_types import (
+    pk_python_type_for_model,
+    reconcile_shadow_fk_types,
+    schema_fragment_for_pk,
+)
+from ..base import ForeignKey, ManyToManyRelation
 from ..schema_metadata import build_model_schema
 from ..state import (  # noqa: F401
     _JOIN_TABLE_REGISTRY,
@@ -39,13 +43,13 @@ def resolve_relationships():
                 )
             rel.to = target_model
 
-        # 2. Cross-validate with BackRef
+        # 2. Cross-validate with declared reverse relation field.
         target_model = rel.to
         if not hasattr(target_model, rel.related_name):
             raise RuntimeError(
                 f"Model '{model_name}' defines a relationship to '{target_model.__name__}' "
                 f"with related_name='{rel.related_name}', but '{target_model.__name__}' "
-                f"does not have that field defined as a BackRef (or back_ref=True)."
+                f"does not have that field defined as BackRef()/Field(back_ref=True)."
             )
 
         # 3. Inject Descriptor into target model
@@ -59,7 +63,7 @@ def resolve_relationships():
                     is_one_to_one=getattr(rel, "unique", False),
                 ),
             )
-        elif isinstance(rel, ManyToManyField):
+        elif isinstance(rel, ManyToManyRelation):
             # Resolve join table
             if not rel.through:
                 # Default join table name: alphabetized model names
@@ -104,7 +108,9 @@ def resolve_relationships():
             source_schema = schema_fragment_for_pk(
                 pk_python_type_for_model(_MODEL_REGISTRY_PY[model_name])
             )
-            target_schema = schema_fragment_for_pk(pk_python_type_for_model(target_model))
+            target_schema = schema_fragment_for_pk(
+                pk_python_type_for_model(target_model)
+            )
             join_schema = {
                 "properties": {
                     source_col: {

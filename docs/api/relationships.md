@@ -9,16 +9,23 @@ Complete reference for relationship types.
       show_source: false
       heading_level: 3
 
-## ManyToManyField
+## Relation
 
-::: ferro.base.ManyToManyField
+::: ferro.query.builder.Relation
     options:
       show_source: false
       heading_level: 3
 
 ## BackRef
 
-::: ferro.query.builder.BackRef
+::: ferro.fields.BackRef
+    options:
+      show_source: false
+      heading_level: 3
+
+## ManyToMany
+
+::: ferro.fields.ManyToMany
     options:
       show_source: false
       heading_level: 3

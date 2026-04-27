@@ -43,9 +43,9 @@ class RelationshipDescriptor(BaseModel):
         pk_val = getattr(instance, pk_field)
 
         if self.is_m2m:
-            from ..query.builder import Query
+            from ..query.builder import Relation
 
-            return Query(self._target_model)._m2m(
+            return Relation(self._target_model)._m2m(
                 self.join_table, self.source_col, self.target_col, pk_val
             )
 
@@ -59,14 +59,16 @@ class RelationshipDescriptor(BaseModel):
 
         pk_val = getattr(instance, pk_field)
 
-        query = self._target_model.where(
+        if self.is_one_to_one:
+            return self._target_model.where(
+                getattr(self._target_model, f"{self.field_name}_id") == pk_val
+            ).first()
+
+        from ..query.builder import Relation
+
+        return Relation(self._target_model).where(
             getattr(self._target_model, f"{self.field_name}_id") == pk_val
         )
-
-        if self.is_one_to_one:
-            return query.first()
-
-        return query
 
 
 class ForwardDescriptor(BaseModel):

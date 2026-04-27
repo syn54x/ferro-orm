@@ -159,7 +159,7 @@ class OrgMembership(Model):
 
 **Wire format:** Declarations use nested tuples in Python; the schema JSON sent to the Rust engine uses nested lists (`ferro_composite_uniques`) because JSON has no tuple type.
 
-**Many-to-many join tables:** When you use `ManyToManyField` without a custom `through` table, Ferro creates a default join table with two foreign-key columns. That table automatically gets a composite unique on those two columns so the same link cannot be stored twice. If you already have duplicate rows in such a table, adding this constraint in a migration may require a data cleanup step first.
+**Many-to-many join tables:** When you use `ManyToMany(...)` without a custom `through` table, Ferro creates a default join table with two foreign-key columns. That table automatically gets a composite unique on those two columns so the same link cannot be stored twice. If you already have duplicate rows in such a table, adding this constraint in a migration may require a data cleanup step first.
 
 See also [Schema management / migrations](migrations.md) for how composite uniques appear in Alembic metadata.
 

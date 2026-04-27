@@ -33,6 +33,9 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    many_to_many: bool = ...,
+    related_name: str | None = ...,
+    through: str | None = ...,
     nullable: FerroNullable = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -81,6 +84,9 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    many_to_many: bool = ...,
+    related_name: str | None = ...,
+    through: str | None = ...,
     nullable: FerroNullable = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -129,6 +135,9 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    many_to_many: bool = ...,
+    related_name: str | None = ...,
+    through: str | None = ...,
     nullable: FerroNullable = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -176,6 +185,9 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    many_to_many: bool = ...,
+    related_name: str | None = ...,
+    through: str | None = ...,
     nullable: FerroNullable = ...,
     default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any],
     alias: str | None = ...,
@@ -224,6 +236,9 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    many_to_many: bool = ...,
+    related_name: str | None = ...,
+    through: str | None = ...,
     nullable: FerroNullable = ...,
     default_factory: Callable[[], _T] | Callable[[dict[str, Any]], _T],
     alias: str | None = ...,
@@ -272,6 +287,9 @@ def Field(
     unique: bool = ...,
     index: bool = ...,
     back_ref: bool = ...,
+    many_to_many: bool = ...,
+    related_name: str | None = ...,
+    through: str | None = ...,
     nullable: FerroNullable = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -319,6 +337,9 @@ def Field(
     unique: bool | Any = _Unset,
     index: bool | Any = _Unset,
     back_ref: bool | Any = _Unset,
+    many_to_many: bool | Any = _Unset,
+    related_name: str | None | Any = _Unset,
+    through: str | None | Any = _Unset,
     nullable: FerroNullable | Any = _Unset,
     default_factory: Callable[[], Any]
     | Callable[[dict[str, Any]], Any]
@@ -369,8 +390,11 @@ def Field(
         unique: Add a **single-column** uniqueness constraint for this column in Ferro.
             Multi-column uniqueness is declared with ``__ferro_composite_uniques__`` on the model.
         index: Request an index for this column in Ferro.
-        back_ref: Mark this field as a reverse relationship (same as BackRef in the type).
-            Do not use together with a BackRef annotation on the same field.
+        back_ref: Mark this field as a reverse relationship. This is the lower-level
+            equivalent of assigning ``BackRef()`` as the field default.
+        many_to_many: Mark this field as a many-to-many relationship.
+        related_name: Reverse relationship field name used by many-to-many relationships.
+        through: Optional join table name used by many-to-many relationships.
         nullable: Alembic ``Column.nullable`` override for :func:`~ferro.migrations.get_metadata`.
             ``\"infer\"`` (default) derives nullability from the field annotation.
         default_factory: A callable to generate the default value. The callable can either take 0 arguments
@@ -451,6 +475,12 @@ def Field(
         ferro_kwargs["index"] = index
     if back_ref is not _Unset:
         ferro_kwargs["back_ref"] = back_ref
+    if many_to_many is not _Unset:
+        ferro_kwargs["many_to_many"] = many_to_many
+    if related_name is not _Unset:
+        ferro_kwargs["related_name"] = related_name
+    if through is not _Unset:
+        ferro_kwargs["through"] = through
     if nullable is not _Unset:
         _validate_nullable_option(nullable, "Field")
         ferro_kwargs["nullable"] = nullable
@@ -512,4 +542,37 @@ def Field(
     )
 
 
-__all__ = ["Field", "FERRO_FIELD_EXTRA_KEY"]
+class BackRef:
+    """Declare a reverse relationship field.
+
+    ``BackRef()`` is a convenience wrapper around ``Field(back_ref=True)``.
+    """
+
+    def __new__(cls, **kwargs: Any) -> Any:
+        return Field(back_ref=True, **kwargs)
+
+    @classmethod
+    def __class_getitem__(cls, _item: Any) -> Any:
+        raise TypeError(
+            "BackRef[...] is no longer a type annotation. Use "
+            "Relation[list[T]] = BackRef() for collection back-references."
+        )
+
+
+def ManyToMany(
+    *,
+    related_name: str,
+    through: str | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Declare a many-to-many relationship field."""
+
+    return Field(
+        many_to_many=True,
+        related_name=related_name,
+        through=through,
+        **kwargs,
+    )
+
+
+__all__ = ["Field", "BackRef", "ManyToMany", "FERRO_FIELD_EXTRA_KEY"]

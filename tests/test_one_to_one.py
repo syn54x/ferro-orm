@@ -32,7 +32,7 @@ async def test_one_to_one_relationship(db_url):
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: BackRef["Profile"] = None
+        profile: "Profile" = BackRef()
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -68,7 +68,7 @@ async def test_one_to_one_unique_index_in_sqlite(db_url):
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: BackRef["Profile"] = None
+        profile: "Profile" = BackRef()
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -98,11 +98,13 @@ async def test_one_to_one_unique_index_in_sqlite(db_url):
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-async def test_one_to_one_unique_index_in_postgres(db_url, postgres_base_url, db_schema_name):
+async def test_one_to_one_unique_index_in_postgres(
+    db_url, postgres_base_url, db_schema_name
+):
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         username: str
-        profile: BackRef["Profile"] = None
+        profile: "Profile" = BackRef()
 
     class Profile(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None

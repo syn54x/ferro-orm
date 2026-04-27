@@ -1,7 +1,7 @@
 """Composite unique constraints and default M2M join-table uniqueness (TDD)."""
 
 import sqlite3
-from typing import Annotated, ClassVar
+from typing import ClassVar
 
 import pytest
 import sqlalchemy as sa
@@ -9,8 +9,9 @@ import sqlalchemy as sa
 from ferro import (
     BackRef,
     Field,
-    ManyToManyField,
+    ManyToMany,
     Model,
+    Relation,
     clear_registry,
     connect,
     reset_engine,
@@ -94,12 +95,12 @@ async def test_m2m_duplicate_link_rejected(db_url):
     class Actor(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        movies: Annotated[list["Movie"], ManyToManyField(related_name="actors")] = None
+        movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
 
     class Movie(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        actors: BackRef[Actor] = None
+        actors: Relation[list["Actor"]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
 
@@ -127,12 +128,12 @@ def test_alembic_metadata_has_unique_constraints():
     class Actor(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
-        movies: Annotated[list["Movie"], ManyToManyField(related_name="actors")] = None
+        movies: Relation[list["Movie"]] = ManyToMany(related_name="actors")
 
     class Movie(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        actors: BackRef[Actor] = None
+        actors: Relation[list["Actor"]] = BackRef()
 
     metadata = get_metadata()
 
@@ -228,10 +229,7 @@ async def test_composite_unique_truncated_name_matches_alembic_and_sqlite(db_url
     composite_rows = [
         r
         for r in rows
-        if r[1]
-        and "UNIQUE" in r[1].upper()
-        and col_a in r[1]
-        and col_b in r[1]
+        if r[1] and "UNIQUE" in r[1].upper() and col_a in r[1] and col_b in r[1]
     ]
     assert composite_rows, f"expected unique composite index on {table}, got: {rows}"
     idx_name = composite_rows[0][0]
@@ -361,7 +359,9 @@ def test_build_sa_table_warns_on_invalid_composite_unique_group():
 def test_single_column_composite_unique_raises_with_guidance():
     """A single-column group must error with guidance toward Field(unique=True)."""
 
-    with pytest.raises(RuntimeError, match="at least two columns|Field\\(unique=True\\)"):
+    with pytest.raises(
+        RuntimeError, match="at least two columns|Field\\(unique=True\\)"
+    ):
 
         class BadSingle(Model):
             __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (

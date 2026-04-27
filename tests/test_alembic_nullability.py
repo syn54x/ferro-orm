@@ -7,10 +7,18 @@ from typing import Annotated, TypeAliasType, Union
 import pytest
 from pydantic import ValidationError
 
-from ferro import FerroField, Field, ForeignKey, Model, clear_registry, reset_engine
+from ferro import (
+    BackRef,
+    FerroField,
+    Field,
+    ForeignKey,
+    Model,
+    Relation,
+    clear_registry,
+    reset_engine,
+)
 from ferro._annotation_utils import annotation_allows_none
 from ferro.migrations import get_metadata
-from ferro.query import BackRef
 
 
 @pytest.fixture(autouse=True)
@@ -142,13 +150,15 @@ def test_infer_fk_shadow_required():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
-        children: BackRef[list["ChildReq"]] = None
+        children: Relation[list["ChildReq"]] = BackRef()
 
     class ChildReq(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         parent: Annotated[Parent, ForeignKey(related_name="children")]
 
-    assert ChildReq.__ferro_schema__["properties"]["parent_id"]["ferro_nullable"] is False
+    assert (
+        ChildReq.__ferro_schema__["properties"]["parent_id"]["ferro_nullable"] is False
+    )
     t = get_metadata().tables["childreq"]
     assert t.c.parent_id.nullable is False
 
@@ -157,7 +167,7 @@ def test_required_fk_shadow_rejects_missing_value():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
-        children: BackRef[list["ChildReqValidation"]] = None
+        children: Relation[list["ChildReqValidation"]] = BackRef()
 
     class ChildReqValidation(Model):
         id: Annotated[int, FerroField(primary_key=True)]
@@ -177,13 +187,15 @@ def test_infer_fk_shadow_optional():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
-        children: BackRef[list["ChildOpt"]] = None
+        children: Relation[list["ChildOpt"]] = BackRef()
 
     class ChildOpt(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         parent: Annotated[Parent | None, ForeignKey(related_name="children")] = None
 
-    assert ChildOpt.__ferro_schema__["properties"]["parent_id"]["ferro_nullable"] is True
+    assert (
+        ChildOpt.__ferro_schema__["properties"]["parent_id"]["ferro_nullable"] is True
+    )
     t = get_metadata().tables["childopt"]
     assert t.c.parent_id.nullable is True
 
@@ -229,7 +241,7 @@ def test_override_foreign_key_nullable_false_optional_relation():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
-        children: BackRef[list["ChildOv"]] = None
+        children: Relation[list["ChildOv"]] = BackRef()
 
     class ChildOv(Model):
         id: Annotated[int, FerroField(primary_key=True)]
@@ -246,7 +258,7 @@ def test_override_foreign_key_nullable_true_required_relation():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
-        children: BackRef[list["ChildFkTrue"]] = None
+        children: Relation[list["ChildFkTrue"]] = BackRef()
 
     class ChildFkTrue(Model):
         id: Annotated[int, FerroField(primary_key=True)]
@@ -263,7 +275,7 @@ def test_on_delete_set_null_infers_nullable_shadow_fk():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
-        children: BackRef[list["ChildSetNull"]] = None
+        children: Relation[list["ChildSetNull"]] = BackRef()
 
     class ChildSetNull(Model):
         id: Annotated[int, FerroField(primary_key=True)]

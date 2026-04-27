@@ -11,136 +11,125 @@ from unittest.mock import Mock
 import pytest
 from pydantic.fields import FieldInfo
 
-from ferro import Model
-from ferro.base import FerroField, ForeignKey, ManyToManyField
+from ferro import BackRef, Model, Relation
+from ferro.base import FerroField, ForeignKey, ManyToManyRelation
 from ferro.fields import FERRO_FIELD_EXTRA_KEY
 from ferro.metaclass import ModelMetaclass
-from ferro.query import BackRef
 
 
-class TestFieldHasBackRef:
-    """Test _field_has_back_ref static method."""
+class TestFieldFerroPayload:
+    """Test _field_ferro_payload static method."""
 
     def test_non_field_info_returns_false(self):
-        """Non-FieldInfo objects should return False."""
-        assert not ModelMetaclass._field_has_back_ref("not a field")
-        assert not ModelMetaclass._field_has_back_ref(123)
-        assert not ModelMetaclass._field_has_back_ref(None)
+        """Non-FieldInfo objects should return an empty payload."""
+        assert ModelMetaclass._field_ferro_payload("not a field") == {}
+        assert ModelMetaclass._field_ferro_payload(123) == {}
+        assert ModelMetaclass._field_ferro_payload(None) == {}
 
     def test_field_info_without_extra_returns_false(self):
-        """FieldInfo without json_schema_extra should return False."""
+        """FieldInfo without json_schema_extra should return an empty payload."""
         field = FieldInfo(annotation=int, default=None)
-        assert not ModelMetaclass._field_has_back_ref(field)
+        assert ModelMetaclass._field_ferro_payload(field) == {}
 
     def test_field_info_with_non_dict_extra_returns_false(self):
-        """FieldInfo with non-dict json_schema_extra should return False."""
+        """FieldInfo with non-dict json_schema_extra should return an empty payload."""
         field = FieldInfo(annotation=int, default=None)
         field.json_schema_extra = "not a dict"
-        assert not ModelMetaclass._field_has_back_ref(field)
+        assert ModelMetaclass._field_ferro_payload(field) == {}
 
-    def test_field_info_with_back_ref_true_returns_true(self):
-        """FieldInfo with back_ref=True in Ferro extra should return True."""
+    def test_field_info_with_back_ref_true_returns_payload(self):
+        """FieldInfo with Ferro extra should return that payload."""
         field = FieldInfo(
             annotation=int,
             default=None,
             json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": True}},
         )
-        assert ModelMetaclass._field_has_back_ref(field)
+        assert ModelMetaclass._field_ferro_payload(field) == {"back_ref": True}
 
-    def test_field_info_with_back_ref_false_returns_false(self):
-        """FieldInfo with back_ref=False should return False."""
+    def test_field_info_with_many_to_many_returns_payload(self):
+        """FieldInfo with many_to_many metadata should return that payload."""
         field = FieldInfo(
             annotation=int,
             default=None,
-            json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": False}},
+            json_schema_extra={
+                FERRO_FIELD_EXTRA_KEY: {
+                    "many_to_many": True,
+                    "related_name": "users",
+                }
+            },
         )
-        assert not ModelMetaclass._field_has_back_ref(field)
+        assert ModelMetaclass._field_ferro_payload(field)["related_name"] == "users"
 
 
-class TestIsBackRefField:
-    """Test _is_back_ref_field static method."""
+class TestRelationshipFieldPayload:
+    """Test relationship Field metadata helpers."""
 
-    def test_backref_type_annotation(self):
-        """BackRef[...] in annotation should be detected."""
-        hint = BackRef[int]
-        namespace = {}
-        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
-        assert is_type is True
-        assert is_field is False
+    def test_backref_type_annotation_raises_migration_error(self):
+        """BackRef[...] in annotation should now raise migration guidance."""
+        with pytest.raises(
+            TypeError, match="Relation\\[list\\[T\\]\\] = BackRef\\(\\)"
+        ):
+            BackRef[int]
 
-    def test_annotated_backref(self):
-        """Annotated[BackRef[...], ...] should be detected."""
-        hint = Annotated[BackRef[int], "metadata"]
-        namespace = {}
-        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
-        assert is_type is True
-        assert is_field is False
-
-    def test_backref_pep604_optional_union(self):
-        """``BackRef[...] | None`` should be detected as a type-side back-reference."""
-        hint = BackRef[int] | None
-        namespace = {"field": None}
-        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
-        assert is_type is True
-        assert is_field is False
-
-    def test_annotated_backref_optional_union(self):
-        """``Annotated[BackRef[...] | None, ...]`` should be detected."""
-        hint = Annotated[BackRef[int] | None, "metadata"]
-        namespace = {"field": None}
-        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
-        assert is_type is True
-        assert is_field is False
-
-    def test_string_with_backref(self):
-        """String annotation containing 'BackRef' should be detected."""
+    def test_string_with_backref_is_legacy(self):
+        """String annotation containing 'BackRef' should be detected as legacy."""
         hint = "BackRef[User]"
-        namespace = {}
-        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
-        assert is_type is True
-        assert is_field is False
+        assert ModelMetaclass._annotation_looks_like_back_ref(hint) is True
 
-    def test_forward_ref_with_backref(self):
-        """ForwardRef containing 'BackRef' should be detected."""
+    def test_forward_ref_with_backref_is_legacy(self):
+        """ForwardRef containing 'BackRef' should be detected as legacy."""
         hint = ForwardRef("BackRef[User]")
-        namespace = {}
-        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
-        assert is_type is True
-        assert is_field is False
+        assert ModelMetaclass._annotation_looks_like_back_ref(hint) is True
 
     def test_field_with_back_ref_true(self):
-        """Field(back_ref=True) in namespace should be detected."""
-        hint = list[int]
+        """Field(back_ref=True) in namespace should be returned as payload."""
+        hint = Relation[list[int]]
         field = FieldInfo(
             annotation=int,
             default=None,
             json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": True}},
         )
         namespace = {"field": field}
-        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
-        assert is_type is False
-        assert is_field is True
+        payload = ModelMetaclass._relationship_field_payload("field", hint, namespace)
+        assert payload == {"back_ref": True}
 
     def test_annotated_with_field_back_ref(self):
-        """Annotated[..., Field(back_ref=True)] should be detected."""
+        """Annotated[..., Field(back_ref=True)] should be returned as payload."""
         field_info = FieldInfo(
             annotation=int,
             default=None,
             json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": True}},
         )
-        hint = Annotated[list[int], field_info]
+        hint = Annotated[Relation[list[int]], field_info]
         namespace = {}
-        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
-        assert is_type is False
-        assert is_field is True
+        payload = ModelMetaclass._relationship_field_payload("field", hint, namespace)
+        assert payload == {"back_ref": True}
 
     def test_neither_type_nor_field(self):
-        """Regular field should return (False, False)."""
+        """Regular field should return no relationship payload."""
         hint = int
         namespace = {}
-        is_type, is_field = ModelMetaclass._is_back_ref_field("field", hint, namespace)
-        assert is_type is False
-        assert is_field is False
+        assert (
+            ModelMetaclass._relationship_field_payload("field", hint, namespace) == {}
+        )
+
+    def test_relation_target_from_annotation(self):
+        """Relation[list[T]] should expose T for relationship metadata."""
+        assert (
+            ModelMetaclass._relation_target_from_annotation(
+                "field", Relation[list[int]]
+            )
+            is int
+        )
+
+    def test_relation_target_from_string_annotation(self):
+        """String Relation[list[T]] annotations should expose T."""
+        assert (
+            ModelMetaclass._relation_target_from_annotation(
+                "field", 'Relation[list["Course"]]'
+            )
+            == "Course"
+        )
 
 
 class TestResolveDeferredAnnotations:
@@ -202,7 +191,7 @@ class TestInjectShadowFields:
         """No ForeignKeys should leave annotations/namespace unchanged."""
         annotations = {"name": str}
         namespace = {}
-        local_relations = {"posts": ManyToManyField(related_name="users")}
+        local_relations = {"posts": ManyToManyRelation(related_name="users")}
 
         ModelMetaclass._inject_shadow_fields(annotations, namespace, local_relations)
 

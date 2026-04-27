@@ -89,11 +89,11 @@ class Post(Base):
 # Ferro
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model
+from ferro import BackRef, Field, ForeignKey, Model, Relation
 
 class User(Model):
     id: int | None = Field(default=None, primary_key=True)
-    posts: BackRef[list["Post"]] | None = None
+    posts: Relation[list["Post"]] = BackRef()
 
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)

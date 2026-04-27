@@ -425,21 +425,21 @@ Document the exception hierarchy and import paths:
 - `docs/guide/relationships.md` (lines 176-289)
 
 **Description:**
-Many-to-many relationships are defined with `ManyToManyField`, but the join tables are not automatically created during `auto_migrate=True`.
+Many-to-many relationships are defined with `ManyToMany(...)`, but the join tables are not automatically created during `auto_migrate=True`.
 
 **Example (Partially Working):**
 ```python
 from typing import Annotated
 
-from ferro import BackRef, Field, ManyToManyField, Model
+from ferro import BackRef, Field, ManyToMany, Model, Relation
 
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
-    tags: Annotated[list["Tag"], ManyToManyField(related_name="posts")] = None
+    tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
 
 class Tag(Model):
     id: int | None = Field(default=None, primary_key=True)
-    posts: BackRef[list["Post"]] | None = None
+    posts: Relation[list["Post"]] = BackRef()
 
 # Models created, but join table 'post_tags' is NOT auto-created
 # This causes errors when trying to use M2M methods:
@@ -467,7 +467,7 @@ Documentation states that one-to-one reverse relations automatically return a si
 ```python
 class User(Model):
     id: int
-    profile: BackRef["Profile"] | None = None
+    profile: "Profile" = BackRef()
 
 class Profile(Model):
     id: int
