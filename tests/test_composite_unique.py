@@ -424,3 +424,165 @@ def test_m2m_reverse_index_lives_on_forward_side():
     """D3: passing reverse_index= to BackRef() is a TypeError."""
     with pytest.raises(TypeError):
         BackRef(reverse_index=True)
+
+
+# === M2M reverse_index live catalog + edge cases ===
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_m2m_reverse_index_in_sqlite_catalog(db_url):
+    """D4: sqlite_master shows the reverse index on the join table."""
+
+    class Actor4(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        movies: Relation[list["Movie4"]] = ManyToMany(related_name="actors")
+
+    class Movie4(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str
+        actors: Relation[list["Actor4"]] = BackRef()
+
+    await connect(db_url, auto_migrate=True)
+
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='actor4_movies' AND sql IS NOT NULL"
+    ).fetchall()
+    conn.close()
+
+    composite = [
+        r for r in rows
+        if r[1] and "UNIQUE" not in r[1].upper()
+        and "movie4_id" in r[1] and "actor4_id" in r[1]
+    ]
+    assert composite, f"expected reverse idx on actor4_movies, got: {rows}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_m2m_reverse_index_in_postgres_catalog(
+    db_url, postgres_base_url, db_schema_name
+):
+    """D5: pg_indexes shows the reverse index on the join table."""
+    import psycopg
+
+    class Actor5(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        movies: Relation[list["Movie5"]] = ManyToMany(related_name="actors")
+
+    class Movie5(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str
+        actors: Relation[list["Actor5"]] = BackRef()
+
+    await connect(db_url, auto_migrate=True)
+
+    expected = "idx_actor5_movies_movie5_id_actor5_id"
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        row = conn.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE schemaname = %s AND tablename = %s AND indexname = %s",
+            (db_schema_name, "actor5_movies", expected),
+        ).fetchone()
+    assert row is not None
+    assert "UNIQUE" not in row[0].upper()
+
+
+def test_m2m_reverse_index_with_custom_through_name():
+    """D6: ManyToMany(through=...) honors reverse_index."""
+
+    class Student(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        courses: Relation[list["Course"]] = ManyToMany(
+            related_name="students", through="enrollments"
+        )
+
+    class Course(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str
+        students: Relation[list["Student"]] = BackRef()
+
+    metadata = get_metadata()
+    join = metadata.tables["enrollments"]
+    idxs = [i for i in join.indexes if not i.unique]
+    assert any(
+        [c.key for c in i.columns] == ["course_id", "student_id"]
+        for i in idxs
+    )
+
+
+def test_m2m_self_referential_reverse_index():
+    """D7: self-referential M2M gets a reverse index on synthesized join table."""
+
+    class UserSelfRef(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        following: Relation[list["UserSelfRef"]] = ManyToMany(related_name="followers")
+        followers: Relation[list["UserSelfRef"]] = BackRef()
+
+    metadata = get_metadata()
+    join_tables = [
+        (name, t) for name, t in metadata.tables.items()
+        if name != "userselfref" and "userselfref" in name
+    ]
+    assert join_tables, f"no join table found for self-ref M2M: {list(metadata.tables)}"
+    _, join = join_tables[0]
+    non_unique = [i for i in join.indexes if not i.unique]
+    assert len(non_unique) == 1
+
+
+def test_m2m_reverse_index_attribute_preserved_on_relation():
+    """D8: reverse_index is stored on ManyToManyRelation and survives re-resolution.
+
+    Verifies the knob isn't lost in any registration code path. Two independent
+    M2M declarations (one with default reverse_index, one opt-out) must keep
+    their respective reverse_index values after resolve_relationships runs.
+    """
+    from ferro.relations import resolve_relationships
+
+    class A8(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        bs_default: Relation[list["B8"]] = ManyToMany(related_name="as_default")
+
+    class B8(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        as_default: Relation[list["A8"]] = BackRef()
+
+    class C8(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        ds_no_idx: Relation[list["D8"]] = ManyToMany(
+            related_name="cs_no_idx", reverse_index=False
+        )
+
+    class D8(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        cs_no_idx: Relation[list["C8"]] = BackRef()
+
+    resolve_relationships()
+
+    metadata = get_metadata()
+    a8_b8_join = metadata.tables["a8_bs_default"]
+    c8_d8_join = metadata.tables["c8_ds_no_idx"]
+
+    assert any(not i.unique for i in a8_b8_join.indexes), (
+        "default reverse_index should produce a non-unique index"
+    )
+    assert all(i.unique for i in c8_d8_join.indexes), (
+        "reverse_index=False should suppress non-unique indexes"
+    )
+
+    resolve_relationships()
+    metadata = get_metadata()
+    assert any(not i.unique for i in metadata.tables["a8_bs_default"].indexes)
+    assert all(i.unique for i in metadata.tables["c8_ds_no_idx"].indexes)
