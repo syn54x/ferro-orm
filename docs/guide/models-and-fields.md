@@ -163,6 +163,47 @@ class OrgMembership(Model):
 
 See also [Schema management / migrations](migrations.md) for how composite uniques appear in Alembic metadata.
 
+### Composite (non-unique) indexes
+
+For multi-column **non-unique** indexes — useful for read-path optimization on common filter combinations like `(tenant_id, role)` or `(user_id, created_at)` — declare a `typing.ClassVar` named `__ferro_composite_indexes__` as a tuple of tuples of column names. Validation rules mirror `__ferro_composite_uniques__`: each inner tuple must contain at least two columns, columns must exist on the model, and order is preserved (it matters for leftmost-prefix optimization). For single-column indexes, use `Field(index=True)`.
+
+```python
+from typing import ClassVar
+from datetime import datetime
+
+from ferro import Field, Model
+
+class Comment(Model):
+    __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("user_id", "created_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int
+    created_at: datetime
+    body: str
+```
+
+**Index naming:** `idx_<table>_<col1>_<col2>...`, capped at 63 characters with an `_idx` suffix on truncation (parallels `_uq` for composite uniques).
+
+**Out of scope:** Partial indexes (`WHERE ...`), expression indexes (e.g., `ON lower(email)`), and included columns (`INCLUDE (...)`) remain hand-edits to generated migrations.
+
+**Overlap with composite uniques:** Declaring the same ordered column tuple in both `__ferro_composite_uniques__` and `__ferro_composite_indexes__` emits a `UserWarning` at class-definition time and drops the redundant index entry (the unique constraint already provides an underlying index). Reordered tuples (`("a","b")` unique + `("b","a")` index) are kept as distinct, since they serve different leftmost-prefix queries.
+
+### Default many-to-many reverse-direction index
+
+By default, `ManyToMany(...)` injects a reverse-direction composite index on its synthesized join table — so queries from either side hit an index. To opt out (e.g., write-heavy join tables where the extra index cost is unwanted), pass `reverse_index=False`:
+
+```python
+class Actor(Model):
+    movies: Relation[list["Movie"]] = ManyToMany(
+        related_name="actors",
+        reverse_index=False,
+    )
+```
+
+The kwarg lives on the **forward** `ManyToMany(...)` declaration; passing it to `BackRef()` raises `TypeError`.
+
 **Indexes:**
 
 ```python

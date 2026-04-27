@@ -68,7 +68,7 @@ graph TB
 - Async runtime integration
 
 **Data formats:**
-- JSON schema (models → Rust), including Ferro-specific table-level keys such as `ferro_composite_uniques` alongside per-column metadata in `properties`
+- JSON schema (models → Rust), including Ferro-specific table-level keys such as `ferro_composite_uniques` and `ferro_composite_indexes` alongside per-column metadata in `properties`
 - Query AST (filters, joins → Rust)
 - Binary rows (Rust → Python)
 
