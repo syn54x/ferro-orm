@@ -216,6 +216,58 @@ fn append_composite_unique_index_sqls(
     }
 }
 
+/// Non-unique index name for `ferro_composite_indexes`; matches Python Alembic `_build_sa_table`.
+fn composite_index_name(table_lower: &str, col_names: &[&str]) -> String {
+    let joined = col_names.join("_");
+    let raw = format!("idx_{}_{}", table_lower, joined);
+    if raw.chars().count() > 63 {
+        return format!("{}_idx", raw.chars().take(59).collect::<String>());
+    }
+    raw
+}
+
+fn append_composite_index_sqls(
+    table_lower: &str,
+    schema: &serde_json::Value,
+    index_sqls: &mut Vec<String>,
+    backend: SqlDialect,
+) {
+    let Some(groups) = schema
+        .get("ferro_composite_indexes")
+        .and_then(|g| g.as_array())
+    else {
+        return;
+    };
+    for group in groups {
+        let cols: Vec<&str> = group
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
+            .unwrap_or_default();
+        if cols.len() < 2 {
+            crate::log_debug(format!(
+                "Skipping invalid ferro_composite_indexes group for table '{}': {}",
+                table_lower,
+                serde_json::to_string(group).unwrap_or_else(|_| "<json>".to_string())
+            ));
+            continue;
+        }
+        let idx_name = composite_index_name(table_lower, &cols);
+        let mut stmt = Index::create()
+            .name(&idx_name)
+            .table(Alias::new(table_lower))
+            .if_not_exists()
+            .to_owned();
+        for c in &cols {
+            stmt.col(Alias::new(*c));
+        }
+        let sql = match backend {
+            SqlDialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
+            SqlDialect::Postgres => stmt.to_string(PostgresQueryBuilder),
+        };
+        index_sqls.push(sql);
+    }
+}
+
 fn build_create_table_sqls(
     name: &str,
     schema: &serde_json::Value,
@@ -329,6 +381,7 @@ fn build_create_table_sqls(
     }
 
     append_composite_unique_index_sqls(&table_lower, schema, &mut index_sqls, backend);
+    append_composite_index_sqls(&table_lower, schema, &mut index_sqls, backend);
 
     let table_sql = match backend {
         SqlDialect::Sqlite => table_stmt.build(SqliteQueryBuilder),
@@ -419,4 +472,105 @@ pub fn create_tables(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
 
         internal_create_tables(engine).await
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_composite_index_name_short() {
+        assert_eq!(
+            composite_index_name("users", &["a", "b"]),
+            "idx_users_a_b"
+        );
+    }
+
+    #[test]
+    fn test_composite_index_name_at_63_chars() {
+        // Build inputs that produce a name of exactly 63 chars (no truncation).
+        // raw = "idx_t_<padding>_y" should be 63 chars.
+        // "idx_t_" is 6 chars; "_y" is 2 chars; need 55 chars of padding.
+        let pad: String = "x".repeat(55);
+        let cols = [pad.as_str(), "y"];
+        let result = composite_index_name("t", &cols);
+        assert_eq!(result.chars().count(), 63);
+        assert!(!result.ends_with("_idx") || result == format!("idx_t_{}_y", pad));
+    }
+
+    #[test]
+    fn test_composite_index_name_truncation_above_63() {
+        let long_a = "very_long_column_name_alpha_for_idx_truncation_test";
+        let long_b = "very_long_column_name_beta_for_idx_truncation_test";
+        let table = "verylongcompositeindexmodelnamefortruncation";
+        let result = composite_index_name(table, &[long_a, long_b]);
+        assert_eq!(result.chars().count(), 63);
+        assert!(result.ends_with("_idx"));
+    }
+
+    #[test]
+    fn test_composite_index_name_unicode_safe() {
+        let table = "tbl_üñîçødé_with_long_table_name_for_truncation_check";
+        let cols = ["α_column_one", "β_column_two_extended_for_overflow"];
+        let result = composite_index_name(table, &cols);
+        assert!(result.chars().count() <= 63);
+    }
+
+    #[test]
+    fn test_append_composite_index_sqls_emits_non_unique() {
+        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            let schema = json!({"ferro_composite_indexes": [["a", "b"]]});
+            let mut sqls = Vec::new();
+            append_composite_index_sqls("t", &schema, &mut sqls, backend);
+            assert_eq!(sqls.len(), 1);
+            let sql_upper = sqls[0].to_uppercase();
+            assert!(sql_upper.contains("CREATE INDEX"));
+            assert!(!sql_upper.contains("CREATE UNIQUE INDEX"));
+        }
+    }
+
+    #[test]
+    fn test_append_composite_index_sqls_skips_invalid_group() {
+        let schema = json!({"ferro_composite_indexes": [["only_one"], ["a", "b"]]});
+        let mut sqls = Vec::new();
+        append_composite_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
+        assert_eq!(sqls.len(), 1);
+        assert!(sqls[0].contains("\"a\""));
+        assert!(sqls[0].contains("\"b\""));
+    }
+
+    #[test]
+    fn test_append_composite_index_sqls_preserves_column_order() {
+        let schema = json!({"ferro_composite_indexes": [["y", "x"]]});
+        let mut sqls = Vec::new();
+        append_composite_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
+        let sql = &sqls[0];
+        let pos_y = sql.find("\"y\"").unwrap();
+        let pos_x = sql.find("\"x\"").unwrap();
+        assert!(pos_y < pos_x);
+    }
+
+    #[test]
+    fn test_append_composite_index_sqls_no_groups_is_noop() {
+        let schema = json!({"properties": {}});
+        let mut sqls = Vec::new();
+        append_composite_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
+        assert!(sqls.is_empty());
+    }
+
+    #[test]
+    fn test_composite_index_and_unique_can_share_table() {
+        let schema = json!({
+            "ferro_composite_uniques": [["u1", "u2"]],
+            "ferro_composite_indexes": [["i1", "i2"]]
+        });
+        let mut sqls = Vec::new();
+        append_composite_unique_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
+        append_composite_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
+        assert_eq!(sqls.len(), 2);
+        let combined = sqls.join("\n").to_uppercase();
+        assert!(combined.contains("CREATE UNIQUE INDEX"));
+        assert!(combined.contains("CREATE INDEX \"IDX_T_I1_I2\""));
+    }
 }
