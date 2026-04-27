@@ -1,6 +1,19 @@
 # CHANGELOG
 
 
+## v0.4.0 (2026-04-27)
+
+### Bug Fixes
+
+- Correct BackRef type hinting for all/first
+  ([`6171923`](https://github.com/syn54x/ferro-orm/commit/617192328d77a8159c671ed6e469dc489c462e42))
+
+### Features
+
+- Redesign relationship declarations
+  ([`911e77d`](https://github.com/syn54x/ferro-orm/commit/911e77d15a63df893543bfe6500c5283e8f066f3))
+
+
 ## v0.3.4 (2026-04-25)
 
 ### Bug Fixes
