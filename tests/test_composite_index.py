@@ -176,3 +176,74 @@ def test_schema_json_uses_lists_not_tuples():
     assert isinstance(payload, list)
     assert all(isinstance(g, list) for g in payload)
     json.loads(json.dumps(schema))
+
+
+# === Group B (subset): overlap handling ===
+
+
+def test_overlap_with_unique_warns_and_drops():
+    """B6: same ordered tuple in both kinds -> UserWarning, only unique materializes."""
+
+    with pytest.warns(UserWarning, match="duplicates an existing __ferro_composite_uniques__"):
+
+        class Dup(Model):
+            __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+                ("a", "b"),
+            )
+            __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+                ("a", "b"),
+            )
+            id: int | None = Field(default=None, primary_key=True)
+            a: int
+            b: int
+
+    schema = Dup.__ferro_schema__
+    assert "ferro_composite_indexes" not in schema
+    assert schema["ferro_composite_uniques"] == [["a", "b"]]
+
+
+def test_overlap_reordered_does_not_warn():
+    """B7: ('a','b') unique + ('b','a') index -> both materialize, no warning."""
+    import warnings as warnings_mod
+
+    with warnings_mod.catch_warnings():
+        warnings_mod.simplefilter("error", UserWarning)
+
+        class Reordered(Model):
+            __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+                ("a", "b"),
+            )
+            __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+                ("b", "a"),
+            )
+            id: int | None = Field(default=None, primary_key=True)
+            a: int
+            b: int
+
+    schema = Reordered.__ferro_schema__
+    assert schema["ferro_composite_uniques"] == [["a", "b"]]
+    assert schema["ferro_composite_indexes"] == [["b", "a"]]
+
+
+def test_overlap_with_unique_partial_match_does_not_warn():
+    """B8: ('a','b','c') unique + ('a','b') index -> no warning (different lengths)."""
+    import warnings as warnings_mod
+
+    with warnings_mod.catch_warnings():
+        warnings_mod.simplefilter("error", UserWarning)
+
+        class Partial(Model):
+            __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+                ("a", "b", "c"),
+            )
+            __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+                ("a", "b"),
+            )
+            id: int | None = Field(default=None, primary_key=True)
+            a: int
+            b: int
+            c: int
+
+    schema = Partial.__ferro_schema__
+    assert schema["ferro_composite_uniques"] == [["a", "b", "c"]]
+    assert schema["ferro_composite_indexes"] == [["a", "b"]]
