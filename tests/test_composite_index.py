@@ -643,3 +643,93 @@ async def test_composite_index_truncated_name_matches_postgres_catalog(
         ).fetchone()
     assert row is not None
     assert row[0] == expected
+
+
+# === Group C (subset): mixed-type columns + autogen idempotence ===
+
+
+@pytest.mark.asyncio
+async def test_composite_index_works_with_uuid_columns(db_url):
+    """C7: composite index over two UUID columns materializes."""
+    import uuid
+
+    class UuidComposite(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("tenant_id", "user_id"),
+        )
+        id: uuid.UUID | None = Field(default=None, primary_key=True)
+        tenant_id: uuid.UUID
+        user_id: uuid.UUID
+
+    await connect(db_url, auto_migrate=True)
+
+    metadata = get_metadata()
+    idxs = [i for i in metadata.tables["uuidcomposite"].indexes if not i.unique]
+    assert any(
+        {c.key for c in i.columns} == {"tenant_id", "user_id"}
+        for i in idxs
+    )
+
+
+@pytest.mark.asyncio
+async def test_composite_index_works_with_enum_column(db_url):
+    """C8: composite index mixing FK and enum column materializes."""
+    import enum
+
+    class Role(str, enum.Enum):
+        admin = "admin"
+        member = "member"
+
+    class EnumComposite(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("user_id", "role"),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        user_id: int
+        role: Role
+
+    await connect(db_url, auto_migrate=True)
+
+    metadata = get_metadata()
+    idxs = [i for i in metadata.tables["enumcomposite"].indexes if not i.unique]
+    assert any(
+        {c.key for c in i.columns} == {"user_id", "role"}
+        for i in idxs
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_autogen_idempotent_after_first_apply(db_url):
+    """C9: re-running autogen comparison after migrate produces no diff for composite indexes.
+
+    Note: composite-uniques (`uq_*`) autogen drift is a pre-existing quirk
+    (UniqueConstraint vs. CREATE UNIQUE INDEX reconciliation on SQLite) that
+    is independent of this feature. We assert only that our new
+    `idx_*` composite indexes do not introduce additional drift.
+    """
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+    from sqlalchemy import create_engine
+
+    class IdxStable(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("c", "d"),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        c: int
+        d: int
+
+    await connect(db_url, auto_migrate=True)
+
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
+    sync_url = f"sqlite:///{db_path}"
+    engine = create_engine(sync_url)
+    metadata = get_metadata()
+
+    with engine.connect() as conn:
+        ctx = MigrationContext.configure(conn)
+        diff = compare_metadata(ctx, metadata)
+
+    relevant = [d for d in diff if "idx_idxstable" in str(d).lower()]
+    assert relevant == [], f"unexpected autogen drift on composite indexes: {relevant}"
