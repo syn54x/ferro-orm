@@ -71,6 +71,16 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     single column only. Default many-to-many join tables get a
     composite unique on their two foreign-key columns automatically.
 
+    **Composite indexes:** declare a ``typing.ClassVar`` named
+    ``__ferro_composite_indexes__`` as a tuple of tuples of column names
+    (for example ``(("user_id", "created_at"),)``) for non-unique multi-column
+    indexes. Validation rules mirror ``__ferro_composite_uniques__``: each
+    inner tuple must contain at least two columns, columns must exist on the
+    model, and order is preserved (matters for leftmost-prefix optimization).
+    For single-column indexes use ``Field(index=True)``. Default many-to-many
+    join tables get a non-unique reverse-direction composite index
+    automatically; opt out with ``ManyToMany(reverse_index=False)``.
+
     Examples:
         >>> class User(Model):
         ...     id: int | None = None
@@ -78,6 +88,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     """
 
     __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = ()
+    __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = ()
 
     @classmethod
     def _reregister_ferro(cls) -> None:

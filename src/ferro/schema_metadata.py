@@ -17,6 +17,10 @@ from typing import (
 
 from ._annotation_utils import annotation_allows_none
 from .base import ForeignKey, foreign_key_allows_none
+from .composite_indexes import (
+    apply_composite_indexes_to_schema,
+    warn_and_drop_overlap_with_uniques,
+)
 from .composite_uniques import apply_composite_uniques_to_schema
 
 
@@ -148,6 +152,8 @@ def build_model_schema(
             properties[field_name]["enum_type_name"] = enum_cls.__name__.lower()
 
     apply_composite_uniques_to_schema(model_cls, schema)
+    apply_composite_indexes_to_schema(model_cls, schema)
+    warn_and_drop_overlap_with_uniques(model_cls, schema)
     return schema
 
 
