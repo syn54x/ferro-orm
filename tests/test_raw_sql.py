@@ -242,3 +242,183 @@ async def test_fetch_inside_tx_sees_uncommitted_writes(db_url):
         await tx.execute(f"INSERT INTO t6d (n) VALUES ({p})", 7)
         rows = await tx.fetch_all("SELECT n FROM t6d")
         assert rows == [{"n": 7}]
+
+
+@pytest.mark.asyncio
+async def test_marshal_uuid(db_url):
+    """T7.1: uuid.UUID binds; on Postgres the SQL casts $N::uuid."""
+    import uuid
+
+    from ferro import execute, fetch_one
+
+    await connect(db_url)
+    if "postgres" in db_url:
+        await execute("CREATE TABLE t7a (id UUID PRIMARY KEY)")
+        await execute("INSERT INTO t7a (id) VALUES ($1::uuid)", uuid.UUID(int=1))
+        row = await fetch_one("SELECT id::text AS id FROM t7a")
+    else:
+        await execute("CREATE TABLE t7a (id TEXT PRIMARY KEY)")
+        await execute("INSERT INTO t7a (id) VALUES (?)", uuid.UUID(int=1))
+        row = await fetch_one("SELECT id FROM t7a")
+    assert row is not None
+    assert row["id"] == "00000000-0000-0000-0000-000000000001"
+
+
+@pytest.mark.asyncio
+async def test_marshal_datetime(db_url):
+    """T7.2: datetime binds via isoformat; Postgres uses ::timestamptz."""
+    import datetime
+
+    from ferro import execute, fetch_one
+
+    await connect(db_url)
+    dt = datetime.datetime(2026, 4, 27, 20, 13, 45, tzinfo=datetime.timezone.utc)
+    if "postgres" in db_url:
+        await execute("CREATE TABLE t7b (id INTEGER PRIMARY KEY, ts TIMESTAMPTZ)")
+        await execute("INSERT INTO t7b (id, ts) VALUES (1, $1::timestamptz)", dt)
+        row = await fetch_one("SELECT ts::text AS ts FROM t7b")
+    else:
+        await execute("CREATE TABLE t7b (id INTEGER PRIMARY KEY, ts TEXT)")
+        await execute("INSERT INTO t7b (id, ts) VALUES (1, ?)", dt)
+        row = await fetch_one("SELECT ts FROM t7b")
+    assert row is not None
+    assert "2026-04-27" in str(row["ts"])
+
+
+@pytest.mark.asyncio
+async def test_marshal_date(db_url):
+    """T7.3: date binds via isoformat."""
+    import datetime
+
+    from ferro import execute, fetch_one
+
+    await connect(db_url)
+    d = datetime.date(2026, 4, 27)
+    if "postgres" in db_url:
+        await execute("CREATE TABLE t7c (id INTEGER PRIMARY KEY, day DATE)")
+        await execute("INSERT INTO t7c (id, day) VALUES (1, $1::date)", d)
+    else:
+        await execute("CREATE TABLE t7c (id INTEGER PRIMARY KEY, day TEXT)")
+        await execute("INSERT INTO t7c (id, day) VALUES (1, ?)", d)
+    row = await fetch_one("SELECT day FROM t7c")
+    assert row is not None
+    assert "2026-04-27" in str(row["day"])
+
+
+@pytest.mark.asyncio
+async def test_marshal_time(db_url):
+    """T7.3b: time binds via isoformat."""
+    import datetime
+
+    from ferro import execute, fetch_one
+
+    await connect(db_url)
+    t = datetime.time(20, 13, 45)
+    if "postgres" in db_url:
+        await execute("CREATE TABLE t7c2 (id INTEGER PRIMARY KEY, t TIME)")
+        await execute("INSERT INTO t7c2 (id, t) VALUES (1, $1::time)", t)
+        row = await fetch_one("SELECT t::text AS t FROM t7c2")
+    else:
+        await execute("CREATE TABLE t7c2 (id INTEGER PRIMARY KEY, t TEXT)")
+        await execute("INSERT INTO t7c2 (id, t) VALUES (1, ?)", t)
+        row = await fetch_one("SELECT t FROM t7c2")
+    assert row is not None
+    assert "20:13:45" in str(row["t"])
+
+
+@pytest.mark.asyncio
+async def test_marshal_decimal(db_url):
+    """T7.4: Decimal binds as string; Postgres uses ::numeric."""
+    import decimal
+
+    from ferro import execute, fetch_one
+
+    await connect(db_url)
+    amt = decimal.Decimal("1234.5678")
+    if "postgres" in db_url:
+        await execute("CREATE TABLE t7d (id INTEGER PRIMARY KEY, amt NUMERIC(10,4))")
+        await execute("INSERT INTO t7d (id, amt) VALUES (1, $1::numeric)", amt)
+        row = await fetch_one("SELECT amt::text AS amt FROM t7d")
+    else:
+        await execute("CREATE TABLE t7d (id INTEGER PRIMARY KEY, amt TEXT)")
+        await execute("INSERT INTO t7d (id, amt) VALUES (1, ?)", amt)
+        row = await fetch_one("SELECT amt FROM t7d")
+    assert row is not None
+    assert "1234.5678" in str(row["amt"])
+
+
+@pytest.mark.asyncio
+async def test_marshal_enum_str(db_url):
+    """T7.5: StrEnum unwraps to .value."""
+    import enum
+
+    from ferro import execute, fetch_one
+
+    class Color(str, enum.Enum):
+        RED = "red"
+        BLUE = "blue"
+
+    await connect(db_url)
+    await execute("CREATE TABLE t7e (id INTEGER PRIMARY KEY, c TEXT)")
+    p = "$1" if "postgres" in db_url else "?"
+    await execute(f"INSERT INTO t7e (id, c) VALUES (1, {p})", Color.RED)
+    row = await fetch_one("SELECT c FROM t7e")
+    assert row is not None and row["c"] == "red"
+
+
+@pytest.mark.asyncio
+async def test_marshal_enum_int(db_url):
+    """T7.6: IntEnum unwraps to .value (int)."""
+    import enum
+
+    from ferro import execute, fetch_one
+
+    class Priority(enum.IntEnum):
+        LOW = 1
+        HIGH = 9
+
+    await connect(db_url)
+    await execute("CREATE TABLE t7f (id INTEGER PRIMARY KEY, p INTEGER)")
+    p_ph = "$1" if "postgres" in db_url else "?"
+    await execute(f"INSERT INTO t7f (id, p) VALUES (1, {p_ph})", Priority.HIGH)
+    row = await fetch_one("SELECT p FROM t7f")
+    assert row is not None and row["p"] == 9
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_marshal_dict_to_jsonb(db_url):
+    """T7.7: dict binds as JSON string with $N::jsonb cast (Postgres-only)."""
+    import json
+
+    from ferro import execute, fetch_one
+
+    await connect(db_url)
+    await execute("CREATE TABLE t7g (id INTEGER PRIMARY KEY, data JSONB)")
+    payload = {"a": 1, "b": [2, 3]}
+    await execute("INSERT INTO t7g (id, data) VALUES (1, $1::jsonb)", payload)
+    row = await fetch_one("SELECT data::text AS data FROM t7g")
+    assert row is not None
+    assert json.loads(row["data"]) == payload
+
+
+@pytest.mark.asyncio
+async def test_marshal_bool_before_int_order(db_url):
+    """T7.8: True/False bind as bool, not 1/0 — guards the marshal-order trap."""
+    from ferro import execute, fetch_all
+
+    await connect(db_url)
+    if "postgres" in db_url:
+        await execute("CREATE TABLE t7h (id INTEGER PRIMARY KEY, b BOOLEAN)")
+        await execute("INSERT INTO t7h (id, b) VALUES (1, $1)", True)
+        await execute("INSERT INTO t7h (id, b) VALUES (2, $1)", False)
+    else:
+        # SQLite stores booleans as integers, but the bind path must still type as bool.
+        await execute("CREATE TABLE t7h (id INTEGER PRIMARY KEY, b INTEGER)")
+        await execute("INSERT INTO t7h (id, b) VALUES (1, ?)", True)
+        await execute("INSERT INTO t7h (id, b) VALUES (2, ?)", False)
+    rows = await fetch_all("SELECT id, b FROM t7h ORDER BY id")
+    assert len(rows) == 2
+    # Truthiness check works on both 1/0 and True/False.
+    assert bool(rows[0]["b"]) is True
+    assert bool(rows[1]["b"]) is False
