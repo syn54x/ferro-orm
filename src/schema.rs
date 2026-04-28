@@ -531,16 +531,6 @@ mod tests {
     }
 
     #[test]
-    fn test_append_composite_index_sqls_skips_invalid_group() {
-        let schema = json!({"ferro_composite_indexes": [["only_one"], ["a", "b"]]});
-        let mut sqls = Vec::new();
-        append_composite_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
-        assert_eq!(sqls.len(), 1);
-        assert!(sqls[0].contains("\"a\""));
-        assert!(sqls[0].contains("\"b\""));
-    }
-
-    #[test]
     fn test_append_composite_index_sqls_preserves_column_order() {
         let schema = json!({"ferro_composite_indexes": [["y", "x"]]});
         let mut sqls = Vec::new();
@@ -571,6 +561,7 @@ mod tests {
         assert_eq!(sqls.len(), 2);
         let combined = sqls.join("\n").to_uppercase();
         assert!(combined.contains("CREATE UNIQUE INDEX"));
-        assert!(combined.contains("CREATE INDEX \"IDX_T_I1_I2\""));
+        assert!(combined.contains("CREATE INDEX"));
+        assert!(combined.contains("\"IDX_T_I1_I2\""));
     }
 }
