@@ -126,11 +126,10 @@ def build_model_schema(
             "to_table": _target_table_name(metadata.to),
             "on_delete": metadata.on_delete,
             "unique": metadata.unique,
+            "index": metadata.index,
         }
-        if metadata.unique:
-            prop["unique"] = True
-        if metadata.index:
-            prop["index"] = True
+        prop["unique"] = metadata.unique
+        prop["index"] = metadata.index
 
         fk_nullable = foreign_key_allows_none(metadata)
         if fk_nullable is not None:
