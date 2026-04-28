@@ -192,14 +192,15 @@ def test_alembic_can_render_enum_for_postgres():
 
 def test_foreign_key_index_emits_single_column_index():
     """ForeignKey(index=True) declares a non-unique index on the shadow *_id column."""
-    from ferro import ForeignKey
+    from ferro import BackRef, ForeignKey, Relation
 
     class Org(Model):
         id: Annotated[int, FerroField(primary_key=True)]
+        projects: Relation[list["Project"]] = BackRef()
 
     class Project(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        org: Annotated[int, ForeignKey(related_name="projects", index=True)]
+        org: Annotated[Org, ForeignKey(related_name="projects", index=True)]
 
     metadata = get_metadata()
     project_table = metadata.tables["project"]

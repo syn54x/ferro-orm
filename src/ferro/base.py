@@ -93,6 +93,7 @@ class ForeignKey:
         related_name: Name of the reverse relationship attribute on the target model.
         on_delete: Referential action applied when the parent row is deleted.
         unique: Treat the relation as one-to-one when True.
+        index: Request a non-unique index on the shadow ``*_id`` column.
         nullable: Alembic nullability for the shadow ``*_id`` column (see
             :class:`FerroField` ``nullable``). When ``'infer'``, uses whether the
             **relation** annotation allows ``None``.
@@ -114,6 +115,7 @@ class ForeignKey:
         related_name: str,
         on_delete: str = "CASCADE",
         unique: bool = False,
+        index: bool = False,
         nullable: FerroNullable = "infer",
     ):
         """Initialize foreign-key relationship metadata
@@ -123,7 +125,13 @@ class ForeignKey:
             related_name: Name for reverse access from the related model.
             on_delete: Referential action for parent deletion.
                 Common values include "CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", and "NO ACTION".
-            unique: Set to True to enforce one-to-one behavior.
+            unique: Set to True to enforce one-to-one behavior. Implies an
+                index, so combining ``unique=True`` with ``index=True`` is
+                redundant; ``index=True`` will be ignored and a ``UserWarning``
+                will be raised.
+            index: Set to True to create a non-unique index on the shadow
+                ``*_id`` column. Useful for tenant FKs queried on every list
+                endpoint where Postgres does not auto-index the FK column.
             nullable: See :class:`ForeignKey` class docstring.
 
         Examples:
@@ -133,11 +141,16 @@ class ForeignKey:
             >>> class User(Model):
             ...     id: Annotated[int, FerroField(primary_key=True)]
             ...     profile_id: Annotated[int, ForeignKey("user", unique=True)]
+            >>>
+            >>> class Project(Model):
+            ...     id: Annotated[int, FerroField(primary_key=True)]
+            ...     org: Annotated[int, ForeignKey("projects", index=True)]
         """
         self.to = None  # Resolved later
         self.related_name = related_name
         self.on_delete = on_delete
         self.unique = unique
+        self.index = index
         self.nullable = _validate_nullable_option(nullable, "ForeignKey")
         if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
             raise ValueError(
