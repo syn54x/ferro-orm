@@ -7,6 +7,23 @@ from ferro import connect
 pytestmark = pytest.mark.backend_matrix
 
 
+def _id_pk(db_url: str) -> str:
+    """Return the auto-incrementing id PK column DDL for the active backend.
+
+    SQLite implicitly auto-increments ``INTEGER PRIMARY KEY`` via rowid.
+    Postgres needs an explicit sequence — we use ``GENERATED ALWAYS AS IDENTITY``
+    which is SQL-standard and cleaner than ``SERIAL``.
+    """
+    if "postgres" in db_url:
+        return "id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
+    return "id INTEGER PRIMARY KEY"
+
+
+def _ph(db_url: str, n: int = 1) -> str:
+    """Return the Nth positional placeholder for the active backend."""
+    return f"${n}" if "postgres" in db_url else "?"
+
+
 @pytest.mark.asyncio
 async def test_raw_execute_ffi_smoke(db_url):
     """Task 2 smoke: ferro._core.raw_execute is callable and creates a table."""
@@ -37,7 +54,7 @@ async def test_top_level_execute_returns_rows_affected(db_url):
     from ferro import execute
 
     await connect(db_url)
-    await execute("CREATE TABLE t3b (id INTEGER PRIMARY KEY, n INTEGER)")
+    await execute(f"CREATE TABLE t3b ({_id_pk(db_url)}, n INTEGER)")
     inserted = await execute("INSERT INTO t3b (n) VALUES (1), (2), (3)")
     assert inserted == 3
 
@@ -48,11 +65,9 @@ async def test_top_level_execute_binds_scalars(db_url):
     from ferro import execute
 
     await connect(db_url)
-    await execute("CREATE TABLE t3c (id INTEGER PRIMARY KEY, name TEXT, n INTEGER)")
-    placeholder_n = "$1" if "postgres" in db_url else "?"
-    placeholder_name = "$2" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t3c ({_id_pk(db_url)}, name TEXT, n INTEGER)")
     inserted = await execute(
-        f"INSERT INTO t3c (n, name) VALUES ({placeholder_n}, {placeholder_name})",
+        f"INSERT INTO t3c (n, name) VALUES ({_ph(db_url, 1)}, {_ph(db_url, 2)})",
         7,
         "alice",
     )
@@ -79,11 +94,10 @@ async def test_unsupported_bind_type_raises_typeerror(db_url):
     from ferro import execute
 
     await connect(db_url)
-    await execute("CREATE TABLE t3d (id INTEGER PRIMARY KEY, p TEXT)")
-    placeholder = "$1" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t3d ({_id_pk(db_url)}, p TEXT)")
     with pytest.raises(TypeError, match="PosixPath|Path"):
         await execute(
-            f"INSERT INTO t3d (p) VALUES ({placeholder})",
+            f"INSERT INTO t3d (p) VALUES ({_ph(db_url)})",
             pathlib.Path("/tmp"),
         )
 
@@ -94,12 +108,11 @@ async def test_top_level_execute_picks_up_active_tx_commit(db_url):
     from ferro import execute, fetch_one, transaction
 
     await connect(db_url)
-    await execute("CREATE TABLE t4 (id INTEGER PRIMARY KEY, n INTEGER)")
-    placeholder = "$1" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t4 ({_id_pk(db_url)}, n INTEGER)")
 
     async with transaction():
-        await execute(f"INSERT INTO t4 (n) VALUES ({placeholder})", 1)
-        await execute(f"INSERT INTO t4 (n) VALUES ({placeholder})", 2)
+        await execute(f"INSERT INTO t4 (n) VALUES ({_ph(db_url)})", 1)
+        await execute(f"INSERT INTO t4 (n) VALUES ({_ph(db_url)})", 2)
 
     row = await fetch_one("SELECT COUNT(*) AS c FROM t4")
     assert row is not None and row["c"] == 2
@@ -111,12 +124,11 @@ async def test_top_level_execute_rolls_back_on_exception(db_url):
     from ferro import execute, fetch_one, transaction
 
     await connect(db_url)
-    await execute("CREATE TABLE t4b (id INTEGER PRIMARY KEY, n INTEGER)")
-    placeholder = "$1" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t4b ({_id_pk(db_url)}, n INTEGER)")
 
     with pytest.raises(RuntimeError, match="boom"):
         async with transaction():
-            await execute(f"INSERT INTO t4b (n) VALUES ({placeholder})", 99)
+            await execute(f"INSERT INTO t4b (n) VALUES ({_ph(db_url)})", 99)
             raise RuntimeError("boom")
 
     row = await fetch_one("SELECT COUNT(*) AS c FROM t4b")
@@ -129,11 +141,10 @@ async def test_tx_execute_runs_on_tx_connection(db_url):
     from ferro import execute, transaction
 
     await connect(db_url)
-    await execute("CREATE TABLE t5 (id INTEGER PRIMARY KEY, n INTEGER)")
-    placeholder = "$1" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t5 ({_id_pk(db_url)}, n INTEGER)")
 
     async with transaction() as tx:
-        await tx.execute(f"INSERT INTO t5 (n) VALUES ({placeholder})", 42)
+        await tx.execute(f"INSERT INTO t5 (n) VALUES ({_ph(db_url)})", 42)
         row = await tx.fetch_one("SELECT n FROM t5 ORDER BY id DESC LIMIT 1")
         assert row is not None and row["n"] == 42
 
@@ -171,11 +182,10 @@ async def test_transaction_without_as_clause_still_works(db_url):
     from ferro import execute, fetch_one, transaction
 
     await connect(db_url)
-    await execute("CREATE TABLE t5d (id INTEGER PRIMARY KEY, n INTEGER)")
-    placeholder = "$1" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t5d ({_id_pk(db_url)}, n INTEGER)")
 
     async with transaction():
-        await execute(f"INSERT INTO t5d (n) VALUES ({placeholder})", 1)
+        await execute(f"INSERT INTO t5d (n) VALUES ({_ph(db_url)})", 1)
 
     row = await fetch_one("SELECT COUNT(*) AS c FROM t5d")
     assert row is not None and row["c"] == 1
@@ -187,11 +197,9 @@ async def test_fetch_all_returns_list_of_dicts(db_url):
     from ferro import execute, fetch_all
 
     await connect(db_url)
-    await execute(
-        "CREATE TABLE t6 (id INTEGER PRIMARY KEY, name TEXT, n INTEGER)"
-    )
-    p1 = "$1" if "postgres" in db_url else "?"
-    p2 = "$2" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t6 ({_id_pk(db_url)}, name TEXT, n INTEGER)")
+    p1 = _ph(db_url, 1)
+    p2 = _ph(db_url, 2)
     await execute(f"INSERT INTO t6 (name, n) VALUES ({p1}, {p2})", "alice", 1)
     await execute(f"INSERT INTO t6 (name, n) VALUES ({p1}, {p2})", "bob", 2)
 
@@ -220,8 +228,8 @@ async def test_fetch_one_returns_first_row_when_multiple(db_url):
     from ferro import execute, fetch_one
 
     await connect(db_url)
-    await execute("CREATE TABLE t6c (id INTEGER PRIMARY KEY, n INTEGER)")
-    p = "$1" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t6c ({_id_pk(db_url)}, n INTEGER)")
+    p = _ph(db_url)
     await execute(f"INSERT INTO t6c (n) VALUES ({p})", 10)
     await execute(f"INSERT INTO t6c (n) VALUES ({p})", 20)
 
@@ -235,11 +243,10 @@ async def test_fetch_inside_tx_sees_uncommitted_writes(db_url):
     from ferro import execute, transaction
 
     await connect(db_url)
-    await execute("CREATE TABLE t6d (id INTEGER PRIMARY KEY, n INTEGER)")
-    p = "$1" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t6d ({_id_pk(db_url)}, n INTEGER)")
 
     async with transaction() as tx:
-        await tx.execute(f"INSERT INTO t6d (n) VALUES ({p})", 7)
+        await tx.execute(f"INSERT INTO t6d (n) VALUES ({_ph(db_url)})", 7)
         rows = await tx.fetch_all("SELECT n FROM t6d")
         assert rows == [{"n": 7}]
 
@@ -297,10 +304,11 @@ async def test_marshal_date(db_url):
     if "postgres" in db_url:
         await execute("CREATE TABLE t7c (id INTEGER PRIMARY KEY, day DATE)")
         await execute("INSERT INTO t7c (id, day) VALUES (1, $1::date)", d)
+        row = await fetch_one("SELECT day::text AS day FROM t7c")
     else:
         await execute("CREATE TABLE t7c (id INTEGER PRIMARY KEY, day TEXT)")
         await execute("INSERT INTO t7c (id, day) VALUES (1, ?)", d)
-    row = await fetch_one("SELECT day FROM t7c")
+        row = await fetch_one("SELECT day FROM t7c")
     assert row is not None
     assert "2026-04-27" in str(row["day"])
 
@@ -440,8 +448,8 @@ async def test_savepoint_rollback_preserves_outer_writes(db_url):
     from ferro import execute, fetch_all, transaction
 
     await connect(db_url)
-    await execute("CREATE TABLE t8 (id INTEGER PRIMARY KEY, n INTEGER)")
-    p = "$1" if "postgres" in db_url else "?"
+    await execute(f"CREATE TABLE t8 ({_id_pk(db_url)}, n INTEGER)")
+    p = _ph(db_url)
 
     async with transaction() as outer:
         await outer.execute(f"INSERT INTO t8 (n) VALUES ({p})", 1)
