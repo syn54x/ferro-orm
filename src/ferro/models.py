@@ -34,20 +34,35 @@ from .state import _CURRENT_TRANSACTION
 
 @asynccontextmanager
 async def transaction():
-    """Run database operations inside a transaction context
+    """Run database operations inside a transaction context.
 
-    Yields control to the caller within an open transaction.
+    Yields a :class:`~ferro.raw.Transaction` handle bound to this transaction's
+    connection. The handle exposes ``execute`` / ``fetch_all`` / ``fetch_one``
+    for raw SQL on the same connection — useful for setting Postgres GUCs,
+    advisory locks, and any one-off statement that doesn't fit a Model.
 
     Examples:
+        >>> async with transaction() as tx:
+        ...     user = await User.create(name="Taylor")
+        ...     await tx.execute(
+        ...         "select set_config('request.jwt.claims', $1, true)",
+        ...         claims_json,
+        ...     )
+
+    Existing callers that don't bind the yielded value continue to work; the
+    handle is simply discarded::
+
         >>> async with transaction():
         ...     user = await User.create(name="Taylor")
         ...     await user.save()
     """
+    from .raw import Transaction
+
     parent_tx_id = _CURRENT_TRANSACTION.get()
     tx_id = await begin_transaction(parent_tx_id)
     token = _CURRENT_TRANSACTION.set(tx_id)
     try:
-        yield
+        yield Transaction(tx_id)
         await commit_transaction(tx_id)
     except Exception:
         await rollback_transaction(tx_id)
