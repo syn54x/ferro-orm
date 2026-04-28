@@ -12,9 +12,12 @@ crate-type = ["cdylib"]
 # extension-module is on by default so `maturin develop` and release builds
 # produce a Python extension module (skips linking against libpython.so).
 # Disable it for `cargo test` so the test binary can link libpython:
-#   cargo test --no-default-features
+#   cargo test --no-default-features --features testing
+# The `testing` feature pulls in pyo3/auto-initialize so unit tests that call
+# `Python::attach(...)` start the interpreter automatically.
 default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
+testing = ["pyo3/auto-initialize"]
 
 [dependencies]
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
