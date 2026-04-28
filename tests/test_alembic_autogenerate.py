@@ -188,3 +188,21 @@ def test_alembic_can_render_enum_for_postgres():
         raise
     # Postgres references the named enum type on the column (values live in CREATE TYPE elsewhere).
     assert "status" in sql.lower()
+
+
+def test_foreign_key_index_emits_single_column_index():
+    """ForeignKey(index=True) declares a non-unique index on the shadow *_id column."""
+    from ferro import ForeignKey
+
+    class Org(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+
+    class Project(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        org: Annotated[int, ForeignKey(related_name="projects", index=True)]
+
+    metadata = get_metadata()
+    project_table = metadata.tables["project"]
+
+    assert project_table.c.org_id.index is True
+    assert project_table.c.org_id.unique is False
