@@ -86,3 +86,38 @@ async def test_unsupported_bind_type_raises_typeerror(db_url):
             f"INSERT INTO t3d (p) VALUES ({placeholder})",
             pathlib.Path("/tmp"),
         )
+
+
+@pytest.mark.asyncio
+async def test_top_level_execute_picks_up_active_tx_commit(db_url):
+    """T4.1: top-level execute inside transaction() honors the ContextVar."""
+    from ferro import execute, fetch_one, transaction
+
+    await connect(db_url)
+    await execute("CREATE TABLE t4 (id INTEGER PRIMARY KEY, n INTEGER)")
+    placeholder = "$1" if "postgres" in db_url else "?"
+
+    async with transaction():
+        await execute(f"INSERT INTO t4 (n) VALUES ({placeholder})", 1)
+        await execute(f"INSERT INTO t4 (n) VALUES ({placeholder})", 2)
+
+    row = await fetch_one("SELECT COUNT(*) AS c FROM t4")
+    assert row is not None and row["c"] == 2
+
+
+@pytest.mark.asyncio
+async def test_top_level_execute_rolls_back_on_exception(db_url):
+    """T4.2: top-level execute writes are rolled back if transaction() raises."""
+    from ferro import execute, fetch_one, transaction
+
+    await connect(db_url)
+    await execute("CREATE TABLE t4b (id INTEGER PRIMARY KEY, n INTEGER)")
+    placeholder = "$1" if "postgres" in db_url else "?"
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with transaction():
+            await execute(f"INSERT INTO t4b (n) VALUES ({placeholder})", 99)
+            raise RuntimeError("boom")
+
+    row = await fetch_one("SELECT COUNT(*) AS c FROM t4b")
+    assert row is not None and row["c"] == 0
