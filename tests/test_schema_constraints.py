@@ -177,3 +177,54 @@ async def test_foreign_key_index_runtime_ddl_parity(db_url):
     assert "org_id" in (matching[0][2] or ""), (
         f"Index DDL should reference org_id column: {matching[0][2]!r}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_foreign_key_index_runtime_ddl_parity_postgres(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Rust runtime DDL emits CREATE INDEX for ForeignKey(index=True) on Postgres.
+
+    Postgres does not auto-index foreign-key columns (unlike the implicit index
+    created by a UNIQUE constraint), so this test is a real-world correctness
+    check for the issue-32 surface: tenant-scoped tables that filter by FK.
+    """
+
+    class Org(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        projects: Relation[list["Project"]] = BackRef()
+
+    class Project(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        org: Annotated[
+            Org,
+            ForeignKey(related_name="projects", index=True),
+        ]
+
+    await connect(db_url, auto_migrate=True)
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        rows = conn.execute(
+            """
+            SELECT indexname, indexdef
+            FROM pg_indexes
+            WHERE schemaname = %s
+              AND tablename = 'project'
+            """,
+            (db_schema_name,),
+        ).fetchall()
+
+    matching = [r for r in rows if r[0] == "idx_project_org_id"]
+    assert matching, (
+        f"Expected idx_project_org_id on table 'project' in schema "
+        f"{db_schema_name!r}; got: {rows!r}"
+    )
+    assert "org_id" in matching[0][1], (
+        f"Index DDL should reference org_id column: {matching[0][1]!r}"
+    )

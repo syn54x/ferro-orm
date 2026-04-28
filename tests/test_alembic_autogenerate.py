@@ -7,7 +7,15 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
-from ferro import FerroField, Model, clear_registry, reset_engine
+from ferro import (
+    BackRef,
+    FerroField,
+    ForeignKey,
+    Model,
+    Relation,
+    clear_registry,
+    reset_engine,
+)
 from ferro.migrations import get_metadata
 
 
@@ -192,8 +200,6 @@ def test_alembic_can_render_enum_for_postgres():
 
 def test_foreign_key_index_emits_single_column_index():
     """ForeignKey(index=True) declares a non-unique index on the shadow *_id column."""
-    from ferro import BackRef, ForeignKey, Relation
-
     class Org(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         projects: Relation[list["Project"]] = BackRef()
@@ -211,8 +217,6 @@ def test_foreign_key_index_emits_single_column_index():
 
 def test_foreign_key_unique_implies_index_warns():
     """ForeignKey(unique=True, index=True) warns and emits only the unique constraint."""
-    from ferro import BackRef, ForeignKey, Relation
-
     class User(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         profile: Relation[list["Profile"]] = BackRef()
@@ -235,8 +239,6 @@ def test_foreign_key_unique_implies_index_warns():
 
 def test_foreign_key_index_default_false():
     """ForeignKey() without index=True keeps the shadow column unindexed."""
-    from ferro import BackRef, ForeignKey, Relation
-
     class Org(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         projects: Relation[list["Project"]] = BackRef()
@@ -253,8 +255,6 @@ def test_foreign_key_index_default_false():
 
 def test_foreign_key_index_with_nullable_fk():
     """ForeignKey(index=True, on_delete='SET NULL') indexes the nullable shadow column."""
-    from ferro import BackRef, ForeignKey, Relation
-
     class Org(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         projects: Relation[list["Project"]] = BackRef()
@@ -284,8 +284,6 @@ def test_index_name_matches_rust_runtime_convention_for_fk():
     runtime DDL, any future emitter) must produce identical index names so that
     autogen runs against an auto_migrate'd database are idempotent.
     """
-    from ferro import BackRef, ForeignKey, Relation
-
     class Org(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         projects: Relation[list["Project"]] = BackRef()

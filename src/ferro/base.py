@@ -137,21 +137,27 @@ class ForeignKey:
 
         Examples:
             >>> from typing import Annotated
+            >>> from ferro import BackRef, ForeignKey, Relation
             >>> from ferro.models import Model
             >>>
-            >>> class User(Model):
+            >>> class Org(Model):
             ...     id: Annotated[int, FerroField(primary_key=True)]
-            ...     profile_id: Annotated[int, ForeignKey("user", unique=True)]
+            ...     projects: Relation[list["Project"]] = BackRef()
             >>>
             >>> class Project(Model):
             ...     id: Annotated[int, FerroField(primary_key=True)]
-            ...     org: Annotated[int, ForeignKey("projects", index=True)]
+            ...     org: Annotated[Org, ForeignKey("projects", index=True)]
         """
         self.to = None  # Resolved later
         self.related_name = related_name
         self.on_delete = on_delete
         self.unique = unique
         self.index = index
+        self.nullable = _validate_nullable_option(nullable, "ForeignKey")
+        if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
+            raise ValueError(
+                "ForeignKey(on_delete='SET NULL') requires nullable=True or 'infer'"
+            )
         if unique and index:
             warnings.warn(
                 "ForeignKey(unique=True, index=True) is redundant; unique=True "
@@ -160,11 +166,6 @@ class ForeignKey:
                 stacklevel=2,
             )
             self.index = False
-        self.nullable = _validate_nullable_option(nullable, "ForeignKey")
-        if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
-            raise ValueError(
-                "ForeignKey(on_delete='SET NULL') requires nullable=True or 'infer'"
-            )
         #: First type argument of ``Annotated[..., ForeignKey]``; set by the metaclass
         #: for Alembic nullability inference (forward fields are not in ``model_fields``).
         self.relation_annotation: Any | None = None
