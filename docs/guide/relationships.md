@@ -333,6 +333,32 @@ author: Annotated[Author, ForeignKey(related_name="posts", on_delete="SET NULL")
 author: Annotated[Author, ForeignKey(related_name="posts", on_delete="RESTRICT")]
 ```
 
+### Indexing FK columns
+
+Postgres does not auto-index foreign-key columns, so tenant-scoped tables that
+filter by a FK on every read should declare the index on the model:
+
+```python
+from typing import Annotated
+from ferro import Model, ForeignKey, FerroField
+
+class Org(Model):
+    id: Annotated[int, FerroField(primary_key=True)]
+
+class Project(Model):
+    id: Annotated[int, FerroField(primary_key=True)]
+    org: Annotated[Org, ForeignKey(related_name="projects", index=True)]
+```
+
+`index=True` requests a non-unique index on the shadow `*_id` column. Alembic
+autogen will emit a `CREATE INDEX` named `ix_project_org_id` (SQLAlchemy's
+default convention); the Rust runtime DDL emits the matching
+`idx_project_org_id`.
+
+`unique=True` already creates an implicit unique index, so combining
+`unique=True` with `index=True` is redundant: `index=True` is silently dropped
+and a `UserWarning` is raised at class-definition time.
+
 ## See Also
 
 - [Models & Fields](models-and-fields.md) - Defining models and field types
