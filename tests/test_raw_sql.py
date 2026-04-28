@@ -456,3 +456,30 @@ async def test_savepoint_rollback_preserves_outer_writes(db_url):
 
     final = await fetch_all("SELECT n FROM t8 ORDER BY n")
     assert final == [{"n": 1}]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_set_config_then_current_setting_inside_tx(db_url):
+    """T9.1: motivating Blueberry/RLS use case from the issue verbatim.
+
+    set_config(..., true) sets a session-local GUC; current_setting reads it back.
+    Connection affinity inside transaction() is what makes this work — without
+    it, set_config and current_setting would run on different pool connections
+    and the value would be invisible.
+    """
+    from ferro import transaction
+
+    await connect(db_url)
+    claims = '{"sub": "user-123", "role": "tenant_admin"}'
+
+    async with transaction() as tx:
+        await tx.execute(
+            "select set_config('request.jwt.claims', $1, true)",
+            claims,
+        )
+        row = await tx.fetch_one(
+            "select current_setting('request.jwt.claims', true) as v"
+        )
+        assert row is not None
+        assert row["v"] == claims
