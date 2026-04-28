@@ -1,0 +1,44 @@
+{
+  "reviewer": "kieran-python",
+  "findings": [
+    {
+      "id": "kieran-python-1",
+      "title": "Docstring example for ForeignKey(index=True) is not runnable / inconsistent with the public guide",
+      "file": "src/ferro/base.py",
+      "lines": "138-148",
+      "severity": "P1",
+      "category": "maintainability",
+      "confidence": 75,
+      "summary": "The new __init__ docstring example uses Annotated[int, ForeignKey(\"projects\", index=True)] and never defines an Org/Project pair, so a reader cannot copy-paste it into a working module. The user-facing relationships guide (and your own internal pattern) uses Annotated[<TargetModel>, ForeignKey(related_name=\"projects\", index=True)] with the model class as the first type argument; that's how the ForeignKey resolves its `to` target. The doctest also reuses the same int-typed shape that the existing profile_id example uses, perpetuating an example pattern that doesn't reflect real usage. Either define a tiny Org model in the example and use `org: Annotated[Org, ForeignKey(related_name=\"projects\", index=True)]`, or drop the new example block entirely and let the class-level docstring carry one canonical example. The new example is the most likely thing a reader hits via IDE hover, so it should be the most correct, not the most stylized.",
+      "fix_suggestion": "Replace the appended example with a runnable one: `>>> class Org(Model):\\n...     id: Annotated[int, FerroField(primary_key=True)]\\n>>>\\n>>> class Project(Model):\\n...     id: Annotated[int, FerroField(primary_key=True)]\\n...     org: Annotated[Org, ForeignKey(related_name=\"projects\", index=True)]` — matching docs/guide/relationships.md."
+    },
+    {
+      "id": "kieran-python-2",
+      "title": "Four new tests duplicate `from ferro import BackRef, ForeignKey, Relation` inline instead of using the module-level import block",
+      "file": "tests/test_alembic_autogenerate.py",
+      "lines": "195, 214, 238, 256",
+      "severity": "P1",
+      "category": "maintainability",
+      "confidence": 75,
+      "summary": "The file already imports public ferro symbols at module top (`from ferro import FerroField, Model, clear_registry, reset_engine`). The only inline imports prior to this PR are inside the cleanup fixture and pull `ferro.state` *internals* — a deliberate exception. The four new tests instead import public API (`BackRef, ForeignKey, Relation`) inside each function body, four copies of the same line, with no scoping reason. This breaks the existing convention, hides the test file's real surface area when scanning the top of the file, and adds noise to every new test. Hoist the import to the top once.",
+      "fix_suggestion": "Change line 10 to `from ferro import BackRef, FerroField, ForeignKey, Model, Relation, clear_registry, reset_engine` and delete the four inline `from ferro import BackRef, ForeignKey, Relation` lines."
+    },
+    {
+      "id": "kieran-python-3",
+      "title": "Redundancy UserWarning fires before `nullable` is validated, so an invalid `nullable` argument produces both a warning and a TypeError",
+      "file": "src/ferro/base.py",
+      "lines": "150-167",
+      "severity": "P2",
+      "category": "reliability",
+      "confidence": 50,
+      "summary": "`__init__` currently runs in this order: assign attributes -> warn if `unique and index` -> `_validate_nullable_option(nullable, \"ForeignKey\")` -> SET NULL+nullable=False guard. If a caller passes `ForeignKey(..., unique=True, index=True, nullable=\"bogus\")` they get a UserWarning about a redundant flag *and then* a TypeError about nullable. The warning is also issued for an object that fails to construct, polluting filters and pytest.warns scopes. Validate inputs first (nullable, then SET-NULL/nullable interaction), then surface the redundancy warning once we know the FK config is otherwise legal. This also keeps the fast-fail TypeError path uncluttered by warnings noise.",
+      "fix_suggestion": "Reorder to: `_validate_nullable_option` -> SET NULL guard -> redundancy warning + `self.index = False`. Drop the assignment-then-overwrite of `self.index` and assign the final value once."
+    }
+  ],
+  "residual_risks": [
+    "Runtime DDL parity for ForeignKey(index=True) is exercised end-to-end only on SQLite (`@pytest.mark.sqlite_only` in test_foreign_key_index_runtime_ddl_parity). The Rust unit test in src/schema.rs does cover both Sqlite and Postgres dialects, so this is mitigated, but there is no Python-level Postgres integration test confirming the Rust runtime emits `idx_project_org_id` against a real Postgres database; rely on the Rust unit test until a Postgres integration fixture exists."
+  ],
+  "testing_gaps": [
+    "No test asserts the warning text content beyond `match=\"redundant\"`. If the wording is part of the user-facing contract (CHANGELOG and docstring both quote it), consider asserting on the full sentence or at minimum on `\"unique=True\"` + `\"index=True\"` + `\"redundant\"` to lock it in."
+  ]
+}

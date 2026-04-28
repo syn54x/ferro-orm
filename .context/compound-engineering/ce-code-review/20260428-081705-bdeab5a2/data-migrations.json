@@ -1,0 +1,72 @@
+{
+  "reviewer": "data-migrations",
+  "findings": [
+    {
+      "id": "fk-index-docs-missing-concurrently-warning",
+      "severity": "medium",
+      "confidence": 70,
+      "title": "Docs steer users toward index=True on hot tenant tables but never warn that Alembic autogen emits a blocking CREATE INDEX",
+      "where": "docs/guide/relationships.md \"Indexing FK columns\" section (added in this PR)",
+      "summary": "The new docs explicitly position ForeignKey(index=True) for the exact workload where naive autogen output is most dangerous: \"tenant-scoped tables that filter by a FK on every read\". With index=True set on a model, Alembic autogen against a populated production DB will emit op.create_index(...) which compiles to plain CREATE INDEX on Postgres. CREATE INDEX (without CONCURRENTLY) takes ACCESS EXCLUSIVE on the table for the duration of the build, which on a hot tenant table means writes are blocked for seconds-to-minutes. There is no mention of postgresql_concurrently=True, no mention of editing the autogen output before applying, and no mention that the wrapping transaction must be disabled when using CONCURRENTLY (Alembic op.execute('COMMIT') / transaction_per_migration / autocommit_block).",
+      "evidence": [
+        "docs/guide/relationships.md adds: \"Postgres does not auto-index foreign-key columns, so tenant-scoped tables that filter by a FK on every read should declare the index on the model\" and shows a Project(org=ForeignKey(..., index=True)) example.",
+        "src/ferro/migrations/alembic.py:182-187 passes index=col_info.get('index', False) into sa.Column kwargs. Autogen will diff against the live DB and emit op.create_index(...). There is no override of the rendered op and no naming-convention-driven hint about CONCURRENTLY.",
+        "CHANGELOG.md entry markets the feature without operational caveats."
+      ],
+      "impact": "First user to add index=True to a populated production tenant table (the documented use case) and run alembic upgrade head will block writes on that table for the duration of the index build. Recoverable but classic Postgres outage pattern.",
+      "remediation": "Add an admonition to docs/guide/relationships.md (Indexing FK columns) that says, on Postgres, populated tables should hand-edit the generated migration to use op.create_index(..., postgresql_concurrently=True) inside an autocommit_block (and remove the index= kwarg from op.create_table flows / use op.create_index separately), and that this cannot run inside a wrapping transaction. Optionally add the same caveat to the CHANGELOG entry."
+    }
+  ],
+  "residual_risks": [
+    {
+      "id": "fk-index-name-divergence-double-create",
+      "severity": "medium",
+      "confidence": 65,
+      "title": "Alembic 'ix_<table>_<col>_id' vs Rust runtime 'idx_<table>_<col>_id' will create two indexes on the same column for users who run both auto_migrate and Alembic",
+      "where": "src/ferro/migrations/alembic.py:44 (sa.MetaData() created with no naming_convention) and the Rust idx_* prefix exercised in the new tests",
+      "summary": "ferro.migrations builds sa.MetaData() with no naming_convention, so sa.Column('org_id', ..., index=True) inherits SQLAlchemy's default 'ix_<table>_<col>' index name (i.e. ix_project_org_id). The Rust runtime DDL emits idx_project_org_id (verified by the new tests/test_schema_constraints.py::test_foreign_key_index_runtime_ddl_parity and the new src/schema.rs unit test). For a user who first calls connect(auto_migrate=True) (creating idx_project_org_id) and later runs alembic revision --autogenerate, Alembic's reflection sees an index named idx_project_org_id but the model-side metadata wants ix_project_org_id; autogen will emit a CreateIndex(ix_project_org_id) op, leaving the database with two physically-identical indexes on the same column under different names. The reverse order (Alembic first, auto_migrate second) is also problematic: the Rust path will attempt to create idx_* on top of the existing ix_*. As the PR description acknowledges, this is the same divergence already present for FerroField(index=True); this PR widens the surface from 'user-declared singleton indexes' to 'every FK column the user opts into', which is a much more common case in real apps.",
+      "evidence": [
+        "src/ferro/migrations/alembic.py:44 — metadata = sa.MetaData()  (no naming_convention dict).",
+        "src/ferro/migrations/alembic.py:186 — kwargs['index'] = col_info.get('index', False) → SA emits ix_<table>_<col>.",
+        "tests/test_schema_constraints.py::test_foreign_key_index_runtime_ddl_parity asserts 'idx_project_org_id' in sqlite_master.",
+        "src/schema.rs new unit test asserts joined.contains(\"IDX_PROJECT_ORG_ID\")."
+      ],
+      "impact": "Silent duplicate indexes on tenant FK columns: 2x write amplification on every INSERT/UPDATE of the table, 2x storage. Does not cause data loss or query incorrectness; degrades the exact workload (hot tenant tables) the feature is sold for.",
+      "remediation": "Out of scope for this PR if the team has already accepted the existing FerroField(index=True) divergence, but worth tracking as a follow-up: align both paths on a single naming scheme by setting a naming_convention={'ix': 'idx_%(table_name)s_%(column_0_label)s'} on sa.MetaData() in src/ferro/migrations/alembic.py so SA emits idx_* names matching the Rust runtime."
+    },
+    {
+      "id": "fk-index-redundant-with-composite-leftmost-prefix",
+      "severity": "low",
+      "confidence": 55,
+      "title": "ForeignKey(index=True) does not detect / dedupe against a composite index whose leftmost column is the same FK shadow column",
+      "where": "src/ferro/schema_metadata.py build_model_schema and src/ferro/composite_indexes.py warn_and_drop_overlap_with_uniques",
+      "summary": "warn_and_drop_overlap_with_uniques only deduplicates ferro_composite_indexes against ferro_composite_uniques. There is no equivalent check for the new per-column FK index against ferro_composite_indexes that already cover the same column as their leftmost prefix. A user who declares __ferro_composite_indexes__ = ((\"org_id\", \"created_at\"),) and also adds ForeignKey(\"orgs\", index=True) will get two indexes — idx_<t>_org_id_created_at AND ix_<t>_org_id (Alembic) / idx_<t>_org_id (Rust) — where the first already serves all WHERE org_id = ? queries via Postgres's leftmost-prefix optimization.",
+      "evidence": [
+        "src/ferro/schema_metadata.py:130-133 unconditionally sets prop['index'] = True when metadata.index is True; no cross-check against schema['ferro_composite_indexes'].",
+        "src/ferro/composite_indexes.py warn_and_drop_overlap_with_uniques only handles composite-vs-composite-unique, not single-column-vs-composite-leftmost."
+      ],
+      "impact": "Wasted storage and write amplification on tables that are precisely the high-write tenant tables this feature targets. Not a correctness or migration-safety issue.",
+      "remediation": "Out of scope for this PR. Optional follow-up: extend warn_and_drop_overlap_with_uniques to a generic warn_and_drop_overlap routine that also drops a column-level FK index when an existing composite index has that column as its leftmost prefix, with a UserWarning pointing the user at the composite."
+    }
+  ],
+  "testing_gaps": [
+    {
+      "id": "no-autogen-roundtrip-test",
+      "severity": "low",
+      "confidence": 70,
+      "title": "No test exercises the actual Alembic autogen path (compare_metadata) for ForeignKey(index=True) — only the static MetaData object is asserted",
+      "where": "tests/test_alembic_autogenerate.py (new tests)",
+      "summary": "The four new tests in test_alembic_autogenerate.py inspect get_metadata().tables['project'].c.org_id.index but never run alembic.autogenerate.compare_metadata against a live (or in-memory) DB to verify that the diff actually emits a CreateIndexOp with the expected name and that the same MetaData against an already-indexed DB emits no diff (idempotency). This is the test that would catch the ix_ vs idx_ name divergence regressing into a 'phantom CreateIndex on every autogen run' bug.",
+      "remediation": "Add one test that sets up an empty SQLite DB, runs compare_metadata(MigrationContext, get_metadata()), and asserts an op with type 'add_index' and column 'org_id' appears. Add a second test that pre-creates the index under SA's expected ix_ name and asserts compare_metadata yields no diff."
+    },
+    {
+      "id": "no-pg-runtime-parity-test",
+      "severity": "low",
+      "confidence": 60,
+      "title": "Runtime DDL parity test for ForeignKey(index=True) is sqlite_only; Postgres path is only covered by a Rust unit test",
+      "where": "tests/test_schema_constraints.py::test_foreign_key_index_runtime_ddl_parity",
+      "summary": "The new integration test is marked @pytest.mark.sqlite_only. The Rust unit test in src/schema.rs loops over [SqlDialect::Sqlite, SqlDialect::Postgres] and asserts CREATE INDEX text, but no end-to-end Postgres test verifies the index actually exists in pg_indexes after connect(auto_migrate=True). Given that the documented use case is Postgres tenant tables, a Postgres-side runtime parity test is the highest-value missing coverage.",
+      "remediation": "Mirror the sqlite test as a @pytest.mark.postgres_only test that queries pg_indexes WHERE tablename = 'project' AND indexname = 'idx_project_org_id'."
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "reviewer": "api-contract",
+  "findings": [
+    {
+      "id": "api-contract-1",
+      "title": "New `index` parameter inserted positionally before `nullable` silently rebinds 4th positional arg",
+      "severity": "high",
+      "confidence": 75,
+      "file": "src/ferro/base.py",
+      "lines": "114-120",
+      "category": "breaking-change",
+      "description": "`ForeignKey.__init__` is a public, exported API (re-exported from `ferro/__init__.py`). The new `index: bool = False` is inserted between `unique` and `nullable` as a regular positional-or-keyword parameter; none of the existing parameters are keyword-only (no `*` separator). Any external caller passing arguments positionally past `unique` silently rebinds. Concrete breakage examples for callers upgrading without source changes:\n\n- `ForeignKey(\"posts\", \"CASCADE\", False, True)` previously meant `nullable=True`; now means `index=True` and `nullable` falls back to `'infer'`. The shadow `*_id` column's NOT NULL behavior can flip from forced-NULL to inferred-from-annotation, and an unintended index is emitted.\n- `ForeignKey(\"posts\", \"CASCADE\", False, \"infer\")` previously a no-op nullable hint; now sets `self.index = 'infer'` (a non-bool truthy string). `metadata.index` is then truthy in `schema_metadata.py`, producing `prop['index'] = True` and an unintended `CREATE INDEX`. Type contract for `index: bool` is also violated without validation.\n- `ForeignKey(\"posts\", \"CASCADE\", True, True)` previously meant `unique=True, nullable=True`; now means `unique=True, index=True` -> the new redundancy warning fires (`UserWarning`) and `nullable` silently changes to `'infer'`.\n\nAll in-tree call sites use keyword arguments (verified across `src/`, `tests/`, `docs/`, `scripts/`), so the project itself is unaffected — but `ForeignKey` is part of the documented public API and the contract on positional ordering changed.",
+      "evidence": "diff src/ferro/base.py:\n    def __init__(\n        self,\n        related_name: str,\n        on_delete: str = \"CASCADE\",\n        unique: bool = False,\n        index: bool = False,        # <-- inserted between unique and nullable\n        nullable: FerroNullable = \"infer\",\n    ):\nNo `*,` separator, so positional binding order changes. `self.index` is also assigned the raw value with no type validation (contrast `_validate_nullable_option`).",
+      "suggested_fix": "Make `index` (and ideally `unique` and `nullable`, since they are clearly intended as kwargs) keyword-only by adding `*,` before `unique` (least disruptive) or at minimum before `index`:\n\n```python\ndef __init__(\n    self,\n    related_name: str,\n    on_delete: str = \"CASCADE\",\n    *,\n    unique: bool = False,\n    index: bool = False,\n    nullable: FerroNullable = \"infer\",\n):\n```\n\nThis preserves the only realistic positional call shape (`ForeignKey(\"posts\", \"CASCADE\")`) and makes the contract robust to future insertions. It also matches how every example in the codebase already calls it. If a softer landing is preferred for v0.x, at minimum insert `*,` immediately before `index` so additions never reorder existing positional semantics again, and add an `isinstance(index, bool)` guard to reject the non-bool truthy case."
+    },
+    {
+      "id": "api-contract-2",
+      "title": "Serialized model schema gains a new optional `index` key on FK columns — additive but worth documenting",
+      "severity": "low",
+      "confidence": 50,
+      "file": "src/ferro/schema_metadata.py",
+      "lines": "131-134",
+      "category": "schema-contract",
+      "description": "`build_model_schema` now writes `prop['index'] = True` on FK column entries when `metadata.index` is truthy, conditionally (matching the existing pattern for `prop['unique']`). This JSON schema is consumed by the Rust core (`register_model_schema`) and is part of the cross-language contract. The change is additive: the key is absent when `index=False` and consumers using `dict.get('index', False)` are safe. Two consumer expectations to confirm before declaring this fully safe:\n\n1. The Rust `schema.rs` parsing path tolerates an unknown-to-old-binaries `index` key on FK column dicts — the in-PR Rust test confirms it does, so OK.\n2. Any out-of-tree tooling that snapshots/diffs the serialized schema (autogen baselines, golden files) will see a new key on FK columns whenever a user opts into `index=True`. Not breaking, but PRs touching schema serialization should call this out in CHANGELOG so external integrators know to refresh fixtures. CHANGELOG already mentions the feature; could note the schema-key addition explicitly.\n\nThe `foreign_key` sub-dict shape is unchanged (`to_table`, `on_delete`, `unique`), which is the right call — keeping `index` as a column-level flag rather than nesting it under `foreign_key` matches how `FerroField(index=True)` already serializes.",
+      "evidence": "src/ferro/schema_metadata.py:\n    if metadata.unique:\n        prop[\"unique\"] = True\n    if metadata.index:\n        prop[\"index\"] = True\nRust test in src/schema.rs asserts `idx_<table>_<col>` is emitted when `index: true` is set on an FK column — Rust side handles it.",
+      "suggested_fix": "No code change required. Optionally add a one-line note in the Unreleased CHANGELOG entry that the JSON schema now carries an optional `index` boolean on FK column properties, so downstream tooling that pins or snapshots the schema is aware."
+    }
+  ],
+  "residual_risks": [
+    "`_core.pyi` does not declare `ForeignKey` or `build_model_schema` (only Rust-extension async functions), so no .pyi update is required. Confirmed via Grep — no false-positive 'missing stub' risk.",
+    "Public `ForeignKey` instances now carry a new `.index` attribute. This is purely additive for introspection consumers (`hasattr(fk, 'index')` flips from False to True). Anyone iterating `vars(fk)` for serialization will see the new key. Not a contract break, but worth noting if any external Alembic env.py or migration helper enumerates FK attributes.",
+    "The `unique=True, index=True` UserWarning + silent drop is a defensible behavior choice, but it is a *new* runtime warning surface. Strict warning filters (`warnings.simplefilter('error')`) in user test suites would now raise on this combination. Since `index` is a new parameter, no pre-existing code can hit this path on upgrade — risk is forward-only and only for users who explicitly opt into both flags.",
+    "Type contract on the `index` parameter is unenforced — `self.index` accepts any truthy value (including the `'infer'` literal that's valid for `nullable`). Combined with the positional-rebinding risk in finding api-contract-1, a misplaced positional argument can poison the schema with a non-bool. An `isinstance(index, bool)` validator (or relying on the keyword-only fix) would close this."
+  ],
+  "testing_gaps": [
+    "No test exercises the positional-argument call shape (e.g., `ForeignKey('posts', 'CASCADE', False, True)`) to lock in the *intended* binding for `index` vs `nullable`. Adding either (a) a test that asserts the keyword-only nature of `index` (e.g., `with pytest.raises(TypeError): ForeignKey('x', 'CASCADE', False, True, 'infer')` after the fix) or (b) a regression test pinning the current positional contract would prevent silent reordering in future PRs.",
+    "No test asserts that passing a non-bool to `index` is rejected or coerced. With the current code, `ForeignKey('x', index='infer')` silently assigns the string and produces `prop['index'] = True` downstream. A small input-validation test (alongside the existing `_validate_nullable_option` pattern) would harden the contract.",
+    "No test covers the JSON schema shape for the FK-with-index case at the Python boundary (the existing tests assert SQLAlchemy `Column.index` is True and the Rust DDL contains `idx_*`, but not that `build_model_schema(...)['properties']['org_id']` contains exactly `{'foreign_key': {...}, 'index': True, ...}` and crucially does NOT contain `'index': False` when off). This locks the wire-format contract to Rust."
+  ]
+}
