@@ -129,6 +129,8 @@ def build_model_schema(
         }
         if metadata.unique:
             prop["unique"] = True
+        if metadata.index:
+            prop["index"] = True
 
         fk_nullable = foreign_key_allows_none(metadata)
         if fk_nullable is not None:
