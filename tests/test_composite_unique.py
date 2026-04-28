@@ -391,10 +391,7 @@ def test_m2m_reverse_index_default_on():
     metadata = get_metadata()
     join = metadata.tables["actor1_movies"]
     idxs = [i for i in join.indexes if not i.unique]
-    assert any(
-        [c.key for c in i.columns] == ["movie1_id", "actor1_id"]
-        for i in idxs
-    )
+    assert any([c.key for c in i.columns] == ["movie1_id", "actor1_id"] for i in idxs)
     expected_name = "idx_actor1_movies_movie1_id_actor1_id"
     assert any(i.name == expected_name for i in idxs)
 
@@ -455,9 +452,12 @@ async def test_m2m_reverse_index_in_sqlite_catalog(db_url):
     conn.close()
 
     composite = [
-        r for r in rows
-        if r[1] and "UNIQUE" not in r[1].upper()
-        and "movie4_id" in r[1] and "actor4_id" in r[1]
+        r
+        for r in rows
+        if r[1]
+        and "UNIQUE" not in r[1].upper()
+        and "movie4_id" in r[1]
+        and "actor4_id" in r[1]
     ]
     assert composite, f"expected reverse idx on actor4_movies, got: {rows}"
 
@@ -512,10 +512,7 @@ def test_m2m_reverse_index_with_custom_through_name():
     metadata = get_metadata()
     join = metadata.tables["enrollments"]
     idxs = [i for i in join.indexes if not i.unique]
-    assert any(
-        [c.key for c in i.columns] == ["course_id", "student_id"]
-        for i in idxs
-    )
+    assert any([c.key for c in i.columns] == ["course_id", "student_id"] for i in idxs)
 
 
 def test_m2m_self_referential_reverse_index():
@@ -529,7 +526,8 @@ def test_m2m_self_referential_reverse_index():
 
     metadata = get_metadata()
     join_tables = [
-        (name, t) for name, t in metadata.tables.items()
+        (name, t)
+        for name, t in metadata.tables.items()
         if name != "userselfref" and "userselfref" in name
     ]
     assert join_tables, f"no join table found for self-ref M2M: {list(metadata.tables)}"

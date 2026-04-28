@@ -75,9 +75,7 @@ def test_empty_inner_tuple_raises():
     with pytest.raises(RuntimeError, match="at least two columns"):
 
         class BadEmpty(Model):
-            __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
-                (),
-            )
+            __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = ((),)
             id: int | None = Field(default=None, primary_key=True)
             a: int
             b: int
@@ -184,7 +182,9 @@ def test_schema_json_uses_lists_not_tuples():
 def test_overlap_with_unique_warns_and_drops():
     """B6: same ordered tuple in both kinds -> UserWarning, only unique materializes."""
 
-    with pytest.warns(UserWarning, match="duplicates an existing __ferro_composite_uniques__"):
+    with pytest.warns(
+        UserWarning, match="duplicates an existing __ferro_composite_uniques__"
+    ):
 
         class Dup(Model):
             __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
@@ -284,7 +284,8 @@ def test_alembic_metadata_index_column_order_matches_declaration():
 
     metadata = get_metadata()
     idx = next(
-        i for i in metadata.tables["orderedidx"].indexes
+        i
+        for i in metadata.tables["orderedidx"].indexes
         if {c.key for c in i.columns} == {"x", "y"}
     )
     assert [c.key for c in idx.columns] == ["y", "x"]
@@ -327,7 +328,8 @@ def test_composite_index_order_matters_two_separate_indexes():
 
     metadata = get_metadata()
     indexes = [
-        i for i in metadata.tables["ordermatters"].indexes
+        i
+        for i in metadata.tables["ordermatters"].indexes
         if not i.unique and {c.key for c in i.columns} == {"x", "y"}
     ]
     assert len(indexes) == 2
@@ -372,13 +374,9 @@ def test_coexists_with_single_column_field_index():
 
     metadata = get_metadata()
     table = metadata.tables["withsingle"]
-    column_idxs = [
-        i for i in table.indexes
-        if {c.key for c in i.columns} == {"col_a"}
-    ]
+    column_idxs = [i for i in table.indexes if {c.key for c in i.columns} == {"col_a"}]
     composite_idxs = [
-        i for i in table.indexes
-        if {c.key for c in i.columns} == {"col_a", "col_b"}
+        i for i in table.indexes if {c.key for c in i.columns} == {"col_a", "col_b"}
     ]
     assert len(column_idxs) >= 1
     assert len(composite_idxs) == 1
@@ -430,9 +428,7 @@ def test_composite_index_name_python_matches_naming_convention():
 
     table_lower = "verylongcompositeindexmodelnamefortruncation"
     metadata = get_metadata()
-    long_idx = next(
-        i for i in metadata.tables[table_lower].indexes if not i.unique
-    )
+    long_idx = next(i for i in metadata.tables[table_lower].indexes if not i.unique)
     assert len(long_idx.name) == 63
     assert long_idx.name.endswith("_idx")
 
@@ -466,10 +462,7 @@ async def test_composite_index_exists_in_sqlite(db_url):
     rows = cur.fetchall()
     conn.close()
 
-    composite = [
-        r for r in rows
-        if r[1] and "alpha_id" in r[1] and "beta_id" in r[1]
-    ]
+    composite = [r for r in rows if r[1] and "alpha_id" in r[1] and "beta_id" in r[1]]
     assert composite, f"expected composite index on idxrow, got: {rows}"
     name, sql = composite[0]
     assert name == "idx_idxrow_alpha_id_beta_id"
@@ -549,7 +542,9 @@ async def test_composite_index_truncated_name_matches_alembic_and_sqlite(db_url)
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-async def test_composite_index_exists_in_postgres(db_url, postgres_base_url, db_schema_name):
+async def test_composite_index_exists_in_postgres(
+    db_url, postgres_base_url, db_schema_name
+):
     """C2: after auto_migrate, pg_indexes has the index without UNIQUE."""
     import psycopg
 
@@ -665,10 +660,7 @@ async def test_composite_index_works_with_uuid_columns(db_url):
 
     metadata = get_metadata()
     idxs = [i for i in metadata.tables["uuidcomposite"].indexes if not i.unique]
-    assert any(
-        {c.key for c in i.columns} == {"tenant_id", "user_id"}
-        for i in idxs
-    )
+    assert any({c.key for c in i.columns} == {"tenant_id", "user_id"} for i in idxs)
 
 
 @pytest.mark.asyncio
@@ -692,10 +684,7 @@ async def test_composite_index_works_with_enum_column(db_url):
 
     metadata = get_metadata()
     idxs = [i for i in metadata.tables["enumcomposite"].indexes if not i.unique]
-    assert any(
-        {c.key for c in i.columns} == {"user_id", "role"}
-        for i in idxs
-    )
+    assert any({c.key for c in i.columns} == {"user_id", "role"} for i in idxs)
 
 
 @pytest.mark.asyncio
@@ -791,8 +780,7 @@ async def test_use_case_polymorphic_lookup_index(db_url):
     metadata = get_metadata()
     idxs = [i for i in metadata.tables["commentf2"].indexes if not i.unique]
     composite = [
-        i for i in idxs
-        if [c.key for c in i.columns] == ["content_type", "object_id"]
+        i for i in idxs if [c.key for c in i.columns] == ["content_type", "object_id"]
     ]
     assert len(composite) == 1
 

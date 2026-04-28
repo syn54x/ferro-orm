@@ -203,7 +203,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         if pk_val is not None:
             name = self.__class__.__name__
-            await self.__class__.where(getattr(self.__class__, pk_field_name) == pk_val).delete()
+            await self.__class__.where(
+                getattr(self.__class__, pk_field_name) == pk_val
+            ).delete()
             evict_instance(name, str(pk_val))
 
     @classmethod
