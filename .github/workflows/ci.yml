@@ -87,7 +87,9 @@ jobs:
         run: |
           # extension-module skips libpython linking; disable it for tests so the
           # cargo test binary can resolve Python symbols against the installed runtime.
-          cargo test --no-default-features
+          # The `testing` feature pulls in pyo3/auto-initialize so unit tests that
+          # call Python::attach start the interpreter automatically.
+          cargo test --no-default-features --features testing
 
   test-python-pr:
     name: Python tests (PR / 3.13)

@@ -2042,3 +2042,138 @@ fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
         Ok(sea_query::Value::String(Some(Box::new(val.to_string()))))
     }
 }
+
+/// Convert a Python primitive into an [`EngineBindValue`] for raw SQL bind parameters.
+///
+/// The Python wrapper (`src/ferro/raw.py:_marshal`) is responsible for richer
+/// types (UUID, datetime, Decimal, Enum, dict, list); this helper accepts only the
+/// primitive set and raises `TypeError` for anything else as a defensive guard.
+///
+/// Order matters: in Python, `bool` is a subtype of `int`, so we must check `bool`
+/// before `i64` or `True`/`False` would round-trip as `1`/`0`.
+fn python_to_engine_bind_value(val: &Bound<'_, PyAny>) -> PyResult<crate::backend::EngineBindValue> {
+    use crate::backend::EngineBindValue;
+
+    if val.is_none() {
+        return Ok(EngineBindValue::Null);
+    }
+    if let Ok(b) = val.extract::<bool>() {
+        return Ok(EngineBindValue::Bool(b));
+    }
+    if let Ok(i) = val.extract::<i64>() {
+        return Ok(EngineBindValue::I64(i));
+    }
+    if let Ok(f) = val.extract::<f64>() {
+        return Ok(EngineBindValue::F64(f));
+    }
+    if let Ok(s) = val.extract::<String>() {
+        return Ok(EngineBindValue::String(s));
+    }
+    if let Ok(b) = val.extract::<Vec<u8>>() {
+        return Ok(EngineBindValue::Bytes(b));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "Unsupported raw SQL bind value: {}",
+        val.repr()?.to_string()
+    )))
+}
+
+#[cfg(test)]
+mod raw_sql_tests {
+    use super::python_to_engine_bind_value;
+    use crate::backend::EngineBindValue;
+    use pyo3::IntoPyObjectExt;
+    use pyo3::prelude::*;
+    use pyo3::types::{PyBool, PyBytes, PyFloat, PyString};
+
+    #[test]
+    fn extracts_none_as_null() {
+        Python::attach(|py| {
+            let val = py.None().into_bound(py);
+            assert_eq!(
+                python_to_engine_bind_value(&val).unwrap(),
+                EngineBindValue::Null
+            );
+        });
+    }
+
+    #[test]
+    fn extracts_true_as_bool_not_int() {
+        Python::attach(|py| {
+            let val = PyBool::new(py, true).to_owned().into_any();
+            assert_eq!(
+                python_to_engine_bind_value(&val).unwrap(),
+                EngineBindValue::Bool(true)
+            );
+        });
+    }
+
+    #[test]
+    fn extracts_false_as_bool_not_int() {
+        Python::attach(|py| {
+            let val = PyBool::new(py, false).to_owned().into_any();
+            assert_eq!(
+                python_to_engine_bind_value(&val).unwrap(),
+                EngineBindValue::Bool(false)
+            );
+        });
+    }
+
+    #[test]
+    fn extracts_int() {
+        Python::attach(|py| {
+            let val = 42i64.into_py_any(py).unwrap().into_bound(py);
+            assert_eq!(
+                python_to_engine_bind_value(&val).unwrap(),
+                EngineBindValue::I64(42)
+            );
+        });
+    }
+
+    #[test]
+    fn extracts_float() {
+        Python::attach(|py| {
+            let val = PyFloat::new(py, 3.14).into_any();
+            assert_eq!(
+                python_to_engine_bind_value(&val).unwrap(),
+                EngineBindValue::F64(3.14)
+            );
+        });
+    }
+
+    #[test]
+    fn extracts_string() {
+        Python::attach(|py| {
+            let val = PyString::new(py, "ferro").into_any();
+            assert_eq!(
+                python_to_engine_bind_value(&val).unwrap(),
+                EngineBindValue::String("ferro".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn extracts_bytes() {
+        Python::attach(|py| {
+            let val = PyBytes::new(py, &[1u8, 2, 3]).into_any();
+            assert_eq!(
+                python_to_engine_bind_value(&val).unwrap(),
+                EngineBindValue::Bytes(vec![1, 2, 3])
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_unsupported_type() {
+        Python::attach(|py| {
+            let dict = pyo3::types::PyDict::new(py).into_any();
+            let err = python_to_engine_bind_value(&dict).unwrap_err();
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Unsupported raw SQL bind value"),
+                "unexpected error message: {msg}"
+            );
+        });
+    }
+}
