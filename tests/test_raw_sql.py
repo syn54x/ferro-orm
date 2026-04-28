@@ -422,3 +422,37 @@ async def test_marshal_bool_before_int_order(db_url):
     # Truthiness check works on both 1/0 and True/False.
     assert bool(rows[0]["b"]) is True
     assert bool(rows[1]["b"]) is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_sql_raises_runtimeerror_with_db_message(db_url):
+    """T8.1: driver error text appears in the surfaced exception."""
+    from ferro import execute
+
+    await connect(db_url)
+    with pytest.raises(RuntimeError, match="Raw SQL execute failed"):
+        await execute("THIS IS NOT VALID SQL")
+
+
+@pytest.mark.asyncio
+async def test_savepoint_rollback_preserves_outer_writes(db_url):
+    """T8.2: nested transaction() rolls back only the inner savepoint."""
+    from ferro import execute, fetch_all, transaction
+
+    await connect(db_url)
+    await execute("CREATE TABLE t8 (id INTEGER PRIMARY KEY, n INTEGER)")
+    p = "$1" if "postgres" in db_url else "?"
+
+    async with transaction() as outer:
+        await outer.execute(f"INSERT INTO t8 (n) VALUES ({p})", 1)
+        try:
+            async with transaction() as inner:
+                await inner.execute(f"INSERT INTO t8 (n) VALUES ({p})", 2)
+                raise RuntimeError("inner-fail")
+        except RuntimeError:
+            pass
+        rows = await outer.fetch_all("SELECT n FROM t8 ORDER BY n")
+        assert rows == [{"n": 1}]
+
+    final = await fetch_all("SELECT n FROM t8 ORDER BY n")
+    assert final == [{"n": 1}]
