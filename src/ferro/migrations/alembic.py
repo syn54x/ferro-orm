@@ -86,6 +86,7 @@ def _resolve_ref(schema: Dict[str, Any], col_info: Dict[str, Any]) -> Dict[str, 
             }
     return col_info
 
+
 def _strip_optional_union(annotation: Any) -> Any:
     """Unwrap ``T | None`` / ``Optional[T]`` to ``T``."""
     hint = annotation
@@ -113,7 +114,9 @@ def _annotation_as_enum_subclass(annotation: Any) -> type[enum.Enum] | None:
     return None
 
 
-def _field_python_enum(model_cls: type[Any] | None, field_name: str) -> type[enum.Enum] | None:
+def _field_python_enum(
+    model_cls: type[Any] | None, field_name: str
+) -> type[enum.Enum] | None:
     """Return the ``Enum`` class for a model field, if any."""
     if model_cls is None:
         return None
