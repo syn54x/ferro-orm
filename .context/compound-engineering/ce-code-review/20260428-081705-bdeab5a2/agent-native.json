@@ -1,0 +1,87 @@
+{
+  "reviewer": "agent-native",
+  "summary": "ferro is a programmatic Python ORM; the library itself IS the agent-native surface (no UI, no MCP/agent-tool layer in this PR). The ForeignKey(index=True) addition is well-documented for AI agents generating ferro models: the new `index` parameter is exposed via __init__ kwarg, listed in the class Attributes block, covered by Args with a runnable doctest example, propagated into the JSON schema for downstream introspection (Alembic + Rust runtime both consume it), and noted in CHANGELOG + docs/guide/relationships.md. Action parity, context parity, and shared-workspace checks are not applicable to a library API of this shape. Two concrete agent-discoverability nits in the JSON schema serialization layer, plus a residual operational risk (Alembic vs Rust runtime index name divergence) worth surfacing.",
+  "capability_map": [
+    {
+      "capability": "Declare non-unique index on FK shadow column",
+      "human_path": "ForeignKey(index=True) kwarg, documented in docstring + relationships.md",
+      "agent_path": "Same kwarg; signature, defaults, and warning behavior are introspectable via inspect.signature() and the class docstring",
+      "in_prompt_or_docstring": true,
+      "priority": "must_have",
+      "status": "parity"
+    },
+    {
+      "capability": "Detect that a FK column is indexed via schema metadata",
+      "human_path": "model_json_schema() returns prop['index']=True for indexed FK columns",
+      "agent_path": "Asymmetric: non-FK FerroField columns always carry an explicit `index` key (True or False); FK columns only carry `index` when True. Also, the `foreign_key` sub-dict embeds `unique` but not `index`",
+      "in_prompt_or_docstring": false,
+      "priority": "should_have",
+      "status": "minor_gap"
+    },
+    {
+      "capability": "Discover effective index name across migration backends",
+      "human_path": "docs/guide/relationships.md explicitly states Alembic emits ix_<t>_<c> while Rust runtime emits idx_<t>_<c>",
+      "agent_path": "Docstring on ForeignKey.index does not surface this divergence; an agent that only reads the docstring would not learn the dual-naming convention",
+      "in_prompt_or_docstring": false,
+      "priority": "low",
+      "status": "observation"
+    }
+  ],
+  "findings": [
+    {
+      "title": "FK index flag asymmetric in JSON schema vs FerroField",
+      "severity": "P3",
+      "file": "src/ferro/schema_metadata.py",
+      "line": 132,
+      "why_it_matters": "Downstream agents and tools that inspect ferro's JSON schema to reason about FK indexes have to special-case absence-as-false for FK columns while non-FK columns always carry an explicit `index` boolean. An agent computing 'which FK columns lack indexes?' from the schema cannot rely on key presence -- it must default-coerce -- and the inconsistency invites bugs in autogen tooling that round-trips schemas. Minor agent-introspection contract drift.",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "suggested_fix": "Replace `if metadata.index: prop['index'] = True` with `prop['index'] = metadata.index` so FK columns always carry an explicit index boolean, matching the FerroField branch on line 107.",
+      "confidence": 75,
+      "evidence": [
+        "src/ferro/schema_metadata.py:107 — `prop['index'] = metadata.index` (unconditional for FerroField)",
+        "src/ferro/schema_metadata.py:132-133 — `if metadata.index: prop['index'] = True` (conditional for ForeignKey, only set when truthy)"
+      ],
+      "pre_existing": false
+    },
+    {
+      "title": "foreign_key descriptor dict omits index flag",
+      "severity": "P3",
+      "file": "src/ferro/schema_metadata.py",
+      "line": 125,
+      "why_it_matters": "The `prop['foreign_key']` sub-dict is the natural place for an agent to look up everything FK-related on a column (to_table, on_delete, unique are all there). The new `index` flag is set on the peer property instead, so any agent or external tool that reads `prop['foreign_key']` to enumerate FK-specific config will silently miss the index flag and have to know to also peek at the sibling. This makes the FK descriptor a lossy view of FK metadata.",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "suggested_fix": "Add `\"index\": metadata.index` to the `prop['foreign_key']` dict alongside `unique`, in addition to (or instead of) the peer `prop['index']` write. Keeps FK metadata co-located for agent introspection.",
+      "confidence": 75,
+      "evidence": [
+        "src/ferro/schema_metadata.py:125-129 — foreign_key dict includes to_table/on_delete/unique but not index",
+        "src/ferro/schema_metadata.py:132-133 — index is set as a peer property only"
+      ],
+      "pre_existing": false
+    }
+  ],
+  "residual_risks": [
+    "Alembic vs Rust runtime DDL emit different index names for the same FK column (ix_<table>_<col> vs idx_<table>_<col>). An agent that runs `connect(..., auto_migrate=True)` once and later switches to Alembic-driven migrations could end up with two real indexes on the same column (Alembic autogen sees no ix_* and creates one). Documented in docs/guide/relationships.md but not in the ForeignKey.index docstring; agents generating ferro models from the docstring alone would not learn this.",
+    "ForeignKey(unique=True, index=True) silently mutates self.index to False after issuing a UserWarning. An agent that constructs the ForeignKey programmatically and later introspects `fk.index` sees the effective post-init state, not the originally-passed value. The warning makes the override visible in interactive runs but not in non-interactive agent flows that may filter or suppress warnings.",
+    "FerroField.unique does not state that it implies an index, while ForeignKey.unique now does. Pre-existing inconsistency in agent-facing documentation; out of scope for this PR but worth surfacing for a future docstring sweep."
+  ],
+  "testing_gaps": [
+    "No test asserts the JSON schema shape for FK index — i.e., that prop['index'] (or prop['foreign_key']['index']) is present on the schema dict produced by build_model_schema. Current tests only assert the SQLAlchemy metadata side (project_table.c.org_id.index) and the Rust DDL output. If the asymmetry above is fixed, a schema-shape regression test would prevent it recurring.",
+    "No test exercises ForeignKey(unique=True, index=True) at the schema-metadata layer -- only at the Python-class layer. A test asserting that the resulting prop carries unique=True and index=False (effective config) would lock in the documented warning behavior end-to-end."
+  ],
+  "score": {
+    "high_priority_capabilities_with_agent_parity": "1/1",
+    "verdict": "PASS"
+  },
+  "whats_working_well": [
+    "ForeignKey.index is fully discoverable via standard Python introspection: kwarg in __init__ signature, listed in class-level Attributes, covered in Args with a runnable doctest, and reflected on the instance as self.index.",
+    "The docstring explicitly documents the unique+index redundancy and the resulting UserWarning, so an agent generating models will not be surprised by silent normalization.",
+    "stacklevel=2 on the warnings.warn call points at the user's call site, not ferro internals -- correct for agent log triage.",
+    "Schema metadata propagates the flag to both Alembic and the Rust DDL path, keeping the two code-generation backends in sync from a single declarative source.",
+    "CHANGELOG entry references the issue (#32) and explicitly calls out the warning behavior, giving agents a single canonical pointer to the new flag's contract.",
+    "src/ferro/_core.pyi correctly does not need updating -- ForeignKey is a pure-Python class; type checkers pick up the signature directly from base.py."
+  ]
+}

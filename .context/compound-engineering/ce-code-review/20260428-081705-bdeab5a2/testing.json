@@ -1,0 +1,108 @@
+{
+  "reviewer": "testing",
+  "findings": [
+    {
+      "id": "testing-001-autogen-idempotency-gap",
+      "title": "No autogen-idempotency test for FK index; ix_* vs idx_* naming asymmetry will silently produce drift",
+      "severity": "P1",
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "files": [
+        "tests/test_alembic_autogenerate.py",
+        "tests/test_schema_constraints.py"
+      ],
+      "evidence": {
+        "diff_signal": "docs/guide/relationships.md (lines 357-360) explicitly documents the naming asymmetry: Alembic emits 'ix_project_org_id' (SQLAlchemy convention) while Rust runtime DDL emits 'idx_project_org_id'. The PR adds zero tests that run alembic.autogenerate.compare_metadata after auto_migrate to confirm this asymmetry does not produce phantom diffs.",
+        "precedent": "tests/test_composite_index.py::test_autogen_idempotent_after_first_apply (lines 690-724) establishes the team's pattern for catching exactly this class of bug for composite indexes. The new FK index feature has no equivalent guard.",
+        "regression_path": "After auto_migrate creates idx_project_org_id in the DB, compare_metadata(ctx, get_metadata()) sees: (a) an unexpected DB index 'idx_project_org_id' Alembic wants to drop, and (b) a missing index 'ix_project_org_id' Alembic wants to create. Every subsequent autogen run produces a non-empty diff. A naive `alembic revision --autogenerate` followed by `upgrade` will drop the Rust-created index and replace it with the Alembic-named one, silently mutating the deployed schema."
+      },
+      "recommended_fix": "Add an asyncio + sqlite_only test that calls connect(auto_migrate=True) for a model with ForeignKey(index=True), then runs compare_metadata on a sync engine and asserts the resulting diff contains no entries that match 'project' or 'org_id'. Mirror the structure of test_autogen_idempotent_after_first_apply. If the diff is non-empty (which it likely will be due to ix_/idx_ asymmetry), the implementation needs reconciliation (e.g., emit an Index() with name='idx_*' on the SA Column instead of relying on the bare index=True default convention).",
+      "rationale": "This is the question the user asked in the prompt verbatim: 'autogenerate diff-detection between two model versions'. Coverage gap is provable from the diff and from the docs that flag the asymmetry."
+    },
+    {
+      "id": "testing-002-no-postgres-end-to-end-runtime-ddl",
+      "title": "FK runtime-DDL parity test is SQLite-only; no Postgres analog queries pg_indexes",
+      "severity": "P2",
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "files": ["tests/test_schema_constraints.py"],
+      "evidence": {
+        "diff_signal": "tests/test_schema_constraints.py adds test_foreign_key_index_runtime_ddl_parity gated by @pytest.mark.sqlite_only. The Rust unit test in src/schema.rs iterates both SqlDialect::Sqlite and SqlDialect::Postgres but only asserts substring presence on the rendered SQL string -- it does not execute that SQL against a live Postgres engine.",
+        "precedent": "tests/test_schema_constraints.py::test_foreign_key_constraint_exists_in_postgres (lines 88-140) demonstrates the team's pattern for verifying FK behavior end-to-end on Postgres via information_schema queries. The new feature breaks this pattern.",
+        "regression_path": "Identifier quoting differences, search_path interactions, schema-qualified naming, or IF NOT EXISTS semantics on Postgres < 9.5 (sea_query emits the keyword unconditionally per src/schema.rs:342) could fail at runtime. The Rust string-level unit test will not catch a real connection failure or a partial-DDL situation where the table is created but the index step rolls back."
+      },
+      "recommended_fix": "Add @pytest.mark.postgres_only async test that runs auto_migrate with ForeignKey(index=True), then queries SELECT indexname FROM pg_indexes WHERE schemaname=%s AND tablename='project' and asserts 'idx_project_org_id' is present and is non-unique (verify via pg_index.indisunique = false). Reuse the postgres_base_url / db_schema_name fixtures already used by test_foreign_key_constraint_exists_in_postgres."
+    },
+    {
+      "id": "testing-003-nullable-fk-index-not-verified-at-ddl-level",
+      "title": "Nullable FK + index combination only verified at SA-metadata level, not at runtime DDL",
+      "severity": "P2",
+      "confidence": 50,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "files": ["tests/test_alembic_autogenerate.py"],
+      "evidence": {
+        "diff_signal": "test_foreign_key_index_with_nullable_fk only checks project_table.c.org_id.index is True / nullable is True (SA metadata flags). The runtime-DDL parity test uses the default non-null CASCADE case. The Rust unit test in schema.rs uses ferro_nullable: false.",
+        "regression_path": "A future change that conditionally suppresses the CREATE INDEX emission for nullable FK columns (e.g., to switch to a partial index 'WHERE org_id IS NOT NULL' for storage savings) would pass test_foreign_key_index_with_nullable_fk and the Rust unit test, but would silently regress the documented contract that the index is created for nullable FKs."
+      },
+      "recommended_fix": "Either (a) add ferro_nullable: true variant to the existing Rust unit test in src/schema.rs, OR (b) add 'org: Org | None' with on_delete='SET NULL' + index=True to test_foreign_key_index_runtime_ddl_parity and assert idx_project_org_id is still emitted in sqlite_master."
+    },
+    {
+      "id": "testing-004-warning-negative-path-uncovered",
+      "title": "No assertion that UserWarning is silent for index=True alone or unique=True alone",
+      "severity": "P3",
+      "confidence": 50,
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "files": ["tests/test_alembic_autogenerate.py"],
+      "evidence": {
+        "diff_signal": "test_foreign_key_unique_implies_index_warns asserts the warning fires for unique=True+index=True. test_foreign_key_index_emits_single_column_index uses index=True alone but does not wrap the class definition in pytest.warns / pytest.warns(None) / a recwarn fixture to confirm no UserWarning is emitted. Same for test_foreign_key_index_default_false.",
+        "regression_path": "A future change that broadens the redundancy condition (e.g., warning whenever index=True regardless of unique) would not fail any current test. The warning-on path is tested; the warning-off path is implied but unverified."
+      },
+      "recommended_fix": "Wrap one of the existing index=True tests in 'with warnings.catch_warnings(record=True) as ws: warnings.simplefilter(\"always\")' and assert no UserWarning matching 'redundant' was captured. Cheap to add."
+    },
+    {
+      "id": "testing-005-default-false-omits-json-key-not-verified",
+      "title": "test_foreign_key_index_default_false asserts SA metadata only; doesn't verify schema-JSON behavior is bit-for-bit identical to pre-PR",
+      "severity": "P3",
+      "confidence": 50,
+      "autofix_class": "advisory",
+      "owner": "review-fixer",
+      "files": ["tests/test_alembic_autogenerate.py", "src/ferro/schema_metadata.py"],
+      "evidence": {
+        "diff_signal": "src/ferro/schema_metadata.py:132-133 uses 'if metadata.index: prop[\"index\"] = True' for FK columns (conditional set), unlike line 107 for ferro_fields which unconditionally sets prop['index'] = metadata.index. The new test asserts SA Column.index is False but does not assert the underlying JSON schema property for org_id either lacks the 'index' key entirely or has it set to False.",
+        "intent_in_pr_description": "The PR explicitly states 'Existing index=False behavior must remain bit-for-bit identical.' The current test verifies the SA-level outcome, which is downstream of both the JSON shape AND the alembic.py renderer's get('index', False) fallback. A regression that flipped the schema_metadata.py line to 'prop[\"index\"] = metadata.index' (unconditional) would change the JSON shape (key now present with value False) without changing observable SA metadata, slipping past tests but potentially affecting CDC consumers or external schema-JSON consumers."
+      },
+      "recommended_fix": "Add a one-liner assertion in test_foreign_key_index_default_false that calls build_model_schema(Project) and asserts 'index' not in schema['properties']['org_id']. Or relax the requirement and document that 'bit-for-bit identical' applies to SA metadata only."
+    }
+  ],
+  "residual_risks": [
+    "Alembic autogen drift between Rust-emitted 'idx_*' indexes and SQLAlchemy-default 'ix_*' indexes is the highest-risk silent failure mode for this feature. Any team running 'alembic revision --autogenerate' after an auto_migrate may unwittingly produce a migration that drops the Rust index and recreates it under a different name -- and no test in this PR will surface that.",
+    "Postgres-specific behaviors (search_path, schema qualification under multi-tenant schemas, IF NOT EXISTS on legacy Postgres) are not exercised end-to-end. The project has multi-tenant schema fixtures (db_schema_name) used elsewhere; the new feature does not opt in.",
+    "The pytest.warns(UserWarning, match='redundant') assertion is intentionally loose on wording (good for refactor resilience) but will not detect a future change that emits the warning at the wrong stacklevel, causing it to surface as if from the ForeignKey internal frame rather than the user's class definition."
+  ],
+  "testing_gaps": [
+    {
+      "area": "composite_indexes + FK shadow column interaction",
+      "description": "A model declaring both __ferro_composite_indexes__ = ((\"org_id\", \"name\"),) and ForeignKey(index=True) on the relation would request two distinct indexes on overlapping columns (a single-column ix on org_id and a composite on org_id+name). No test exercises this; the warn_and_drop_overlap_with_uniques() helper handles only composite-vs-unique overlaps, not single-column FK-index vs composite. Likely fine (additive) but unverified.",
+      "confidence": 50
+    },
+    {
+      "area": "unique=True alone without index=True",
+      "description": "Pre-existing behavior; this PR doesn't regress it. But the new assertions on profile_table.c.user_id.unique is True / index is False rely on the implementation in schema_metadata.py:130-133 being bypassed correctly for the unique-only case. No targeted test for a model with unique=True alone in the new test additions; the assertion piggybacks on the redundancy-warning test only.",
+      "confidence": 50
+    },
+    {
+      "area": "Warning stacklevel and emission location",
+      "description": "src/ferro/base.py:158 sets stacklevel=2. No test asserts the warning surfaces from the user's class-definition frame. A refactor that wraps __init__ in another helper would silently break the user-facing warning location.",
+      "confidence": 25
+    },
+    {
+      "area": "Idempotency of repeated auto_migrate calls",
+      "description": "Rust DDL uses .if_not_exists() (src/schema.rs:342) on the index creation, but no test calls connect(auto_migrate=True) twice and asserts the second call succeeds without error. The composite_indexes test suite has equivalent coverage; FK index does not.",
+      "confidence": 50
+    }
+  ]
+}

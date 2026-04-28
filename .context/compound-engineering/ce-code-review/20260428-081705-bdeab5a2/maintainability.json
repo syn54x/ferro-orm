@@ -1,0 +1,79 @@
+{
+  "reviewer": "maintainability",
+  "scope": {
+    "branch": "feat/foreign-key-index-32",
+    "pr": 36,
+    "files": [
+      "src/ferro/base.py",
+      "src/ferro/schema_metadata.py",
+      "src/schema.rs",
+      "tests/test_alembic_autogenerate.py",
+      "tests/test_schema_constraints.py",
+      "docs/guide/relationships.md",
+      "CHANGELOG.md"
+    ]
+  },
+  "findings": [
+    {
+      "id": "fk-index-silent-mutation",
+      "title": "ForeignKey.__init__ silently mutates the user-passed `index` attribute on redundancy",
+      "file": "src/ferro/base.py",
+      "lines": "150-162",
+      "category": "naming-clarity / least-surprise",
+      "severity": "low",
+      "confidence": 55,
+      "description": "After `unique=True, index=True`, __init__ emits a UserWarning and resets `self.index = False`. The instance attribute then disagrees with the kwarg the caller passed. Anyone introspecting `fk.index` later (debugging, custom tooling, third-party schema diffing, a future Ferro feature that conditionally branches on `metadata.index`) sees False even though the source code says True. The warning fires once at class-definition time and is then lost; the lie on the attribute persists for the life of the process. This also makes the new test `assert profile_table.c.user_id.index is False` correct only because of the silent mutation -- a future maintainer reading just `ForeignKey(unique=True, index=True)` would reasonably expect `index=True` to round-trip.",
+      "suggestion": "Treat `index` as the literal user intent and compute the *effective* index decision at the single consumer (schema_metadata.py): `if metadata.index and not metadata.unique: prop[\"index\"] = True`. Keep the UserWarning where it is. This (a) preserves the user's input on the metadata object, (b) keeps the redundancy logic in one place, and (c) makes the intent explicit at the consumer site rather than hidden in a constructor side effect. If you do keep the mutation, add an inline comment near `self.index = False` explaining that the public attribute is normalized post-warning, so the next maintainer doesn't read it as a bug.",
+      "user_flagged": true
+    },
+    {
+      "id": "fk-vs-ferrofield-redundancy-asymmetry",
+      "title": "Parallel-but-divergent handling of `unique=True, index=True` between FerroField and ForeignKey",
+      "file": "src/ferro/base.py",
+      "lines": "54-85, 114-167",
+      "category": "api-symmetry / coupling",
+      "severity": "low",
+      "confidence": 60,
+      "description": "ForeignKey now warns + drops `index` when combined with `unique`. FerroField has had `unique` and `index` for longer and silently accepts both; downstream in schema_metadata.py the FerroField path unconditionally writes `prop[\"unique\"] = metadata.unique` AND `prop[\"index\"] = metadata.index` (lines 106-107), so a user who writes `FerroField(unique=True, index=True)` likely gets *both* a unique constraint AND a redundant non-unique index emitted, with no warning. Two near-identical APIs now have opposite UX for the identical mistake. Whichever behavior is correct, the divergence itself is the maintainability cost: the next reader has to remember which constructor warns and which doesn't, and the rationale (`unique implies index`) applies equally to both.",
+      "suggestion": "Pick one rule and apply it to both constructors. Either (a) extract a shared `_normalize_unique_index(unique, index, owner) -> tuple[bool, bool]` helper that warns + drops in both classes, or (b) push the redundancy check entirely into the schema layer where both code paths converge, removing the logic from `__init__` for ForeignKey. Option (a) keeps validation close to the user; option (b) eliminates the silent-mutation problem from finding #1 simultaneously. Either way, do not ship the asymmetry.",
+      "user_flagged": true
+    },
+    {
+      "id": "fk-schema-property-contract-divergence",
+      "title": "Schema property keys for `index`/`unique` are written conditionally on the FK path and unconditionally on the FerroField path",
+      "file": "src/ferro/schema_metadata.py",
+      "lines": "106-107, 130-133",
+      "category": "coupling / contract-clarity",
+      "severity": "low",
+      "confidence": 45,
+      "description": "FerroField path: `prop[\"unique\"] = metadata.unique; prop[\"index\"] = metadata.index` (always present, bool). ForeignKey path: `if metadata.unique: prop[\"unique\"] = True; if metadata.index: prop[\"index\"] = True` (key absent when False). Downstream Rust DDL consumers and any other reader of this schema dict now have to handle two shapes for the same logical property -- 'False' vs 'absent'. This is the kind of subtle inconsistency that bites later when someone adds a third consumer and assumes the keys are always present.",
+      "suggestion": "Match the FerroField shape on the ForeignKey path: write `prop[\"index\"] = metadata.index` and `prop[\"unique\"] = metadata.unique` unconditionally. The Rust side already treats absence and `false` as equivalent in the new test, so this is a no-op behavior change today, but it locks in a single contract."
+    }
+  ],
+  "residual_risks": [
+    {
+      "id": "fk-index-naming-divergence",
+      "description": "Docs explicitly call out that Alembic autogen produces `ix_project_org_id` while the Rust runtime DDL produces `idx_project_org_id`. This is honest but it is a real foot-gun: a user comparing migration output against a database created via `auto_migrate=True` will see two indexes with different names for the same logical thing, or a 'phantom' index drop/create on the first autogen run after switching paths. Out of scope for this PR but worth tracking as a follow-up.",
+      "file": "docs/guide/relationships.md",
+      "confidence": 70
+    },
+    {
+      "id": "test-boilerplate-mild-duplication",
+      "description": "Four new tests in test_alembic_autogenerate.py each redeclare an `Org` model with `id` + `projects: Relation[list[\"Project\"]] = BackRef()` and a `Project` model that varies only in the ForeignKey kwargs. A pytest.parametrize over (fk_kwargs, expected_index, expected_unique) would shrink ~80 lines to ~30 and put the test cases in a single grid. Not blocking -- the duplication is local and readable -- but the next FK-feature test will copy this shape again and the cost compounds.",
+      "file": "tests/test_alembic_autogenerate.py",
+      "confidence": 40
+    }
+  ],
+  "testing_gaps": [
+    {
+      "id": "unique-implies-index-unverified-premise",
+      "description": "The redundancy warning's premise is 'unique=True already creates an implicit unique index'. The new tests verify that `unique=True, index=True` produces `index=False` on the SQLAlchemy column, but no test in this diff asserts that `ForeignKey(unique=True)` alone results in an actual unique index on the FK column at the DDL level (Alembic) or at the Rust runtime level. If that premise ever drifts -- e.g., a backend that enforces uniqueness via a constraint without a usable index -- the warning becomes misleading. Add a parity test analogous to `test_foreign_key_index_runtime_ddl_parity` for `unique=True` to lock in the assumption.",
+      "file": "tests/test_schema_constraints.py"
+    },
+    {
+      "id": "fk-index-postgres-runtime-parity-untested",
+      "description": "`test_foreign_key_index_runtime_ddl_parity` is `@pytest.mark.sqlite_only`. The Rust schema test in src/schema.rs covers Postgres at the SQL-string level, but there is no end-to-end test that the Postgres runtime path actually creates the index and that its name (`idx_project_org_id`) matches what the Postgres-specific code emits. Given the docs explicitly mention Postgres FKs as the motivating use case, a Postgres parity test is worth adding before relying on this in production."
+    }
+  ],
+  "summary": "Three low-severity maintainability findings, all on the same axis: the new `unique+index` redundancy logic was added asymmetrically. Concretely (1) it silently mutates `self.index` so the public attribute disagrees with the constructor argument, (2) it diverges from FerroField which has the same redundancy but no warning, and (3) it writes the schema property dict in a different shape than the FerroField path. The cleanest fix collapses all three: extract a shared normalize helper used by both constructors *or* push the redundancy decision into schema_metadata.py and stop mutating the metadata object. Tests are correct and well-placed but contain mild boilerplate duplication and leave the 'unique implies index' premise itself unverified."
+}

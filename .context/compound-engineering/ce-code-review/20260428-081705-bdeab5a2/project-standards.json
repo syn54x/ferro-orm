@@ -1,0 +1,45 @@
+{
+  "reviewer": "project-standards",
+  "scope": {
+    "branch": "feat/foreign-key-index-32",
+    "pr": 36,
+    "standards_file": ".cursorrules"
+  },
+  "audit_summary": {
+    "tdd_workflow": {
+      "compliant": true,
+      "evidence": "Commit 02d8184 'test: red test for ForeignKey(index=True) shadow column index' is the first commit on the branch and precedes all feat commits (9c3f9cf, b6a41b4, 8e4423c). Matches .cursorrules \u00a74 Step 1: 'Write the Integration Test First'."
+    },
+    "rust_unit_tests_present": {
+      "compliant": true,
+      "evidence": "src/schema.rs adds test_foreign_key_column_with_index_flag_emits_create_index covering both Sqlite and Postgres dialects, asserting CREATE INDEX, the idx_project_org_id name, and absence of CREATE UNIQUE INDEX. Satisfies .cursorrules \u00a75.1."
+    },
+    "python_integration_tests_present": {
+      "compliant": true,
+      "evidence": "tests/test_alembic_autogenerate.py adds 4 cases (index emission, unique+index warning, default false, nullable FK) and tests/test_schema_constraints.py adds test_foreign_key_index_runtime_ddl_parity exercising the compiled Rust runtime DDL. Satisfies .cursorrules \u00a75.2."
+    },
+    "no_unwrap_introduced": {
+      "compliant": true,
+      "evidence": "Diff contains zero occurrences of unwrap(). The new Rust test uses safe destructuring of build_create_table_sqls and Vec::join. Satisfies .cursorrules \u00a74 Step 3 'Never use unwrap()'."
+    },
+    "pyo3_bound_apis": {
+      "compliant": true,
+      "evidence": "PyO3 layer is not touched by this change (only src/schema.rs test module, plus pure-Python files). The Bound<'_, PyModule> requirement is out of scope."
+    },
+    "changelog_unreleased_entry": {
+      "compliant": true,
+      "evidence": "CHANGELOG.md adds a bullet under '## Unreleased' \u2192 '### Features' linking issue #32: 'Add `ForeignKey(index=True)` to emit a non-unique index on the shadow `*_id` column...'"
+    },
+    "bridge_thinness_parse_json_in_rust": {
+      "compliant": true,
+      "evidence": "src/ferro/schema_metadata.py only sets `prop[\"index\"] = True` on the JSON schema dict (lightweight serialization). All semantic interpretation (index DDL emission, naming) happens in Rust (src/schema.rs). Matches .cursorrules \u00a76 'FFI Efficiency: Pass JSON or primitives; parse in Rust.'"
+    },
+    "frequent_conventional_commits": {
+      "compliant": true,
+      "evidence": "8 commits on branch, all conventional with scope: 02d8184 test:, 9c3f9cf feat(fk):, b6a41b4 feat(fk):, 8e4423c feat(fk):, 260976c test(fk):, a0e84d6 test(fk):, b58c126 test(rust):, 3ccef38 docs(fk):. Each commit isolates a single concern (red test \u2192 minimal kwarg \u2192 propagation \u2192 warn \u2192 regression guards \u2192 runtime parity \u2192 rust unit \u2192 docs+changelog)."
+    }
+  },
+  "findings": [],
+  "residual_risks": [],
+  "testing_gaps": []
+}
