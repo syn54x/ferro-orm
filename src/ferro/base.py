@@ -3,6 +3,7 @@
 This module provides lightweight configuration objects used by model annotations to describe column constraints and inter-model relationships.
 """
 
+import warnings
 from typing import (
     Any,
     Literal,
@@ -151,6 +152,14 @@ class ForeignKey:
         self.on_delete = on_delete
         self.unique = unique
         self.index = index
+        if unique and index:
+            warnings.warn(
+                "ForeignKey(unique=True, index=True) is redundant; unique=True "
+                "already implies an index. Ignoring index=True.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self.index = False
         self.nullable = _validate_nullable_option(nullable, "ForeignKey")
         if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
             raise ValueError(

@@ -207,3 +207,27 @@ def test_foreign_key_index_emits_single_column_index():
 
     assert project_table.c.org_id.index is True
     assert project_table.c.org_id.unique is False
+
+
+def test_foreign_key_unique_implies_index_warns():
+    """ForeignKey(unique=True, index=True) warns and emits only the unique constraint."""
+    from ferro import BackRef, ForeignKey, Relation
+
+    class User(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        profile: Relation[list["Profile"]] = BackRef()
+
+    with pytest.warns(UserWarning, match="redundant"):
+
+        class Profile(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            user: Annotated[
+                User,
+                ForeignKey(related_name="profile", unique=True, index=True),
+            ]
+
+    metadata = get_metadata()
+    profile_table = metadata.tables["profile"]
+
+    assert profile_table.c.user_id.unique is True
+    assert profile_table.c.user_id.index is False
