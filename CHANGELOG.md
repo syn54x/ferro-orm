@@ -1,20 +1,150 @@
 # CHANGELOG
 
 
-## Unreleased
+## v0.5.0 (2026-04-28)
+
+### Bug Fixes
+
+- **ci**: Make cargo test link against libpython by gating extension-module
+  ([`e3b013e`](https://github.com/syn54x/ferro-orm/commit/e3b013eeaa6ee96b676ecb0777539eb080c62238))
+
+- **fk**: Address P2/P3 review findings ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`0ea6e02`](https://github.com/syn54x/ferro-orm/commit/0ea6e02588b319315ff354cf7facc04ab9e9eec9))
+
+- **raw**: Make raw SQL tests pass on Postgres backend matrix
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`7b3c5e6`](https://github.com/syn54x/ferro-orm/commit/7b3c5e62dd7a055121a64abd30f140635d04a78e))
+
+- **schema**: Align Alembic single-column index names with Rust DDL
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`5e3211f`](https://github.com/syn54x/ferro-orm/commit/5e3211f30ba49d616f3428c1716cc26cfadf66ef))
+
+### Chores
+
+- Refresh uv.lock and persist code-review artifacts
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`54e2cad`](https://github.com/syn54x/ferro-orm/commit/54e2cade22278dda31454c7406b75c8b35ae27a4))
+
+### Code Style
+
+- Ruff format touched files
+  ([`bbfda46`](https://github.com/syn54x/ferro-orm/commit/bbfda465c6cb51f103fe7407645284612172f132))
+
+### Documentation
+
+- Add AGENTS.md invariants and seed docs/solutions/
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`8b0af7f`](https://github.com/syn54x/ferro-orm/commit/8b0af7f85594397b7f53906fc4d49a4839fe6de9))
+
+- **fk**: Document ForeignKey(index=True) and add CHANGELOG entry
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`625a3f2`](https://github.com/syn54x/ferro-orm/commit/625a3f2564fb7429085af0bf71ec441c2c571da9))
+
+- **orm**: Document __ferro_composite_indexes__ and reverse_index
+  ([`5ce3abe`](https://github.com/syn54x/ferro-orm/commit/5ce3abe00c767cb8fc3fa7bdb8b367cc3dec1a57))
+
+- **raw**: Add raw SQL API page, guide section, CHANGELOG entry
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`4b4699f`](https://github.com/syn54x/ferro-orm/commit/4b4699f618ef47f5b1add42b91e464a633ab0be8))
 
 ### Features
 
-- Add `Transaction.execute / fetch_all / fetch_one` and top-level `ferro.execute / fetch_all / fetch_one` for raw SQL inside or outside a transaction. `transaction()` now yields a `Transaction` handle. ([#31](https://github.com/syn54x/ferro-orm/issues/31))
-- Add `ForeignKey(index=True)` to emit a non-unique index on the shadow `*_id` column. Combining with `unique=True` is redundant and raises a `UserWarning`. ([#32](https://github.com/syn54x/ferro-orm/issues/32))
+- **alembic**: Emit sa.Index for ferro_composite_indexes groups
+  ([`a0c8176`](https://github.com/syn54x/ferro-orm/commit/a0c81761382bdd7ba537a8abc9198199e6b624ee))
 
-### Behavior Changes
+- **fk**: Accept index kwarg on ForeignKey ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`ec39efe`](https://github.com/syn54x/ferro-orm/commit/ec39efec5ae135a8178bf216e1ea40ed16edd79c))
 
-- Alembic autogenerate now emits single-column index names as `idx_<table>_<col>` (was `ix_<table>_<col>`) so that schemas generated through Alembic match the Rust runtime DDL emitter byte-for-byte. This eliminates phantom drop+create diffs when running `alembic revision --autogenerate` against a database bootstrapped by `connect(auto_migrate=True)`. **Existing `FerroField(index=True)` users will see a one-time rename diff on their next autogen run** — review it once, accept the rename, and subsequent autogens will be clean. The new cross-emitter DDL parity invariant is documented in `AGENTS.md`. ([#32](https://github.com/syn54x/ferro-orm/issues/32))
+- **fk**: Propagate ForeignKey.index onto shadow column property
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`6d0f1f6`](https://github.com/syn54x/ferro-orm/commit/6d0f1f62e0bedc1f466db2ab9df6b8464551bd92))
 
-### Internal
+- **fk**: Warn on redundant ForeignKey(unique=True, index=True)
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`3b311d7`](https://github.com/syn54x/ferro-orm/commit/3b311d70e35ffd3c589b877b57d3bfa7924cbb72))
 
-- Add a schema-drift sentinel (`tests/test_cross_emitter_parity.py`) that bootstraps a fresh database via Rust runtime DDL and asserts `alembic.autogenerate.compare_metadata` returns an empty diff. This is the canonical guard on the cross-emitter parity invariant: any new emitter or schema feature must keep this test green. Two pre-existing divergences (PK column nullability representation and single-column unique constraint shape) are filtered with surgical, well-commented exceptions and tracked in `docs/solutions/issues/`. ([#32](https://github.com/syn54x/ferro-orm/issues/32))
+- **orm**: Add __ferro_composite_indexes__ validation and schema injection
+  ([`18f3b37`](https://github.com/syn54x/ferro-orm/commit/18f3b379b8e8fd08d57e47cb3c4e673feea84d7a))
+
+- **raw**: Add ferro.execute/fetch_all/fetch_one with _marshal
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`944df61`](https://github.com/syn54x/ferro-orm/commit/944df6142662949fcce3870ffaf84e0554b10514))
+
+- **raw**: Add python_to_engine_bind_value helper for raw SQL binds
+  ([`70bbbd3`](https://github.com/syn54x/ferro-orm/commit/70bbbd3cb7dc567dd4c7ea8bb754d883e9494cee))
+
+- **raw**: Transaction() yields Transaction handle for tx-bound raw SQL
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`226b575`](https://github.com/syn54x/ferro-orm/commit/226b5759676f56df46b9ef95e9f3491cbdce5c67))
+
+- **raw**: Wire raw_execute/raw_fetch_all/raw_fetch_one through PyO3
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`d31b580`](https://github.com/syn54x/ferro-orm/commit/d31b580002fb207379aa56fd80557939076f6032))
+
+- **relations**: Add reverse_index opt-out for default M2M join tables
+  ([`f1491df`](https://github.com/syn54x/ferro-orm/commit/f1491dfa9a583490da5563496cfc947dc34781ce))
+
+- **rust**: Emit non-unique CREATE INDEX for ferro_composite_indexes
+  ([`e8b2d06`](https://github.com/syn54x/ferro-orm/commit/e8b2d062ae050390274fb043fe84b1ebf4aed654))
+
+### Testing
+
+- Add cross-emitter DDL parity sentinel ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`e0ccc1a`](https://github.com/syn54x/ferro-orm/commit/e0ccc1a3be15a21ff80b06fe6b8dac6446882279))
+
+- Red test for ForeignKey(index=True) shadow column index
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`2bbedc5`](https://github.com/syn54x/ferro-orm/commit/2bbedc5f8ff5a2ee8d615d3b3332fee40fe4560d))
+
+- **fk**: Regression guards for FK index default and nullable interaction
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`8f6a48d`](https://github.com/syn54x/ferro-orm/commit/8f6a48d8877788ac36f6648e1bcd59dbf2a2c1ae))
+
+- **fk**: Runtime DDL parity for ForeignKey(index=True)
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`99d39f3`](https://github.com/syn54x/ferro-orm/commit/99d39f33b2aa39715f3a9bda93694a211dda6992))
+
+- **orm**: Cover common composite-index use cases
+  ([`b53643f`](https://github.com/syn54x/ferro-orm/commit/b53643f48ce99b4587351272f94ac0ee17a46b94))
+
+- **orm**: Cover composite indexes on Postgres catalog
+  ([`13bc21f`](https://github.com/syn54x/ferro-orm/commit/13bc21fe05756eb5a05b9e5040b56692c0b6ceb3))
+
+- **orm**: Cover composite indexes with UUID/enum columns and autogen idempotence
+  ([`a2ec4a5`](https://github.com/syn54x/ferro-orm/commit/a2ec4a5bba322f2c3564797879dc7bbb795717f5))
+
+- **orm**: Cover composite-index overlap with composite-uniques
+  ([`24b7481`](https://github.com/syn54x/ferro-orm/commit/24b7481f64e9ee9d1b7f2dda9818b40925228a4d))
+
+- **raw**: Cover active-tx ContextVar pickup for top-level execute
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`3f7a2e4`](https://github.com/syn54x/ferro-orm/commit/3f7a2e44879b7a0baf55baebd1271fe03f79b767))
+
+- **raw**: Cover fetch_all/fetch_one shape and read-your-writes
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`8b4058c`](https://github.com/syn54x/ferro-orm/commit/8b4058c78baaad008c207570d4b71a8d9b8a0495))
+
+- **raw**: Cover invalid-SQL surface and savepoint rollback
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`a03a398`](https://github.com/syn54x/ferro-orm/commit/a03a3983a5dba298b4f4a64788152dd7dc552638))
+
+- **raw**: Cover Postgres RLS set_config/current_setting use case
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`4243123`](https://github.com/syn54x/ferro-orm/commit/424312380f0b56550ba538612060936cbc932d8f))
+
+- **raw**: Cover UUID/datetime/Decimal/Enum/dict bind types
+  ([#31](https://github.com/syn54x/ferro-orm/pull/31),
+  [`217d8b4`](https://github.com/syn54x/ferro-orm/commit/217d8b4053a2cc254629e1e4867c24c9b24a2245))
+
+- **relations**: Cover M2M reverse_index live catalog and edge cases
+  ([`9aa9740`](https://github.com/syn54x/ferro-orm/commit/9aa97400a9885b876e86a0442ad4e3fe141f5d30))
+
+- **rust**: Fix composite-index unit-test assertions for sea-query output
+  ([`5c1ada1`](https://github.com/syn54x/ferro-orm/commit/5c1ada1ca975f07523c675c31933c643b0aa2cb5))
+
+- **rust**: FK column with index flag still emits CREATE INDEX
+  ([#32](https://github.com/syn54x/ferro-orm/pull/32),
+  [`1eca573`](https://github.com/syn54x/ferro-orm/commit/1eca573af9066072e768a1854f119fecc785c102))
 
 
 ## v0.4.0 (2026-04-27)
