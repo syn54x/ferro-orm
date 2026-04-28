@@ -184,6 +184,33 @@ fn engine_row_string(row: &EngineRow, column_name: &str) -> Option<String> {
         })
 }
 
+/// Convert an [`EngineRow`] into a Python `dict[str, Any]` of wire-close primitives.
+///
+/// Used by the raw-SQL `fetch_all` / `fetch_one` paths. UUIDs, datetimes, JSON,
+/// and decimals come out as **strings** — there is no schema-driven decoding here.
+/// If callers want typed rows, they should use the ORM.
+fn engine_row_to_pydict<'py>(
+    py: Python<'py>,
+    row: EngineRow,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use pyo3::IntoPyObjectExt;
+    use pyo3::types::{PyBytes, PyDict};
+
+    let dict = PyDict::new(py);
+    for (col_name, value) in row.values {
+        let py_val: Bound<'py, PyAny> = match value {
+            EngineValue::Null => py.None().into_bound(py),
+            EngineValue::Bool(b) => b.into_py_any(py)?.into_bound(py),
+            EngineValue::I64(i) => i.into_py_any(py)?.into_bound(py),
+            EngineValue::F64(f) => f.into_py_any(py)?.into_bound(py),
+            EngineValue::String(s) => s.into_py_any(py)?.into_bound(py),
+            EngineValue::Bytes(b) => PyBytes::new(py, &b).into_any(),
+        };
+        dict.set_item(col_name, py_val)?;
+    }
+    Ok(dict)
+}
+
 async fn postgres_catalog_rows(
     engine: &EngineHandle,
     tx_conn: &Option<TransactionConnection>,
@@ -2076,6 +2103,145 @@ fn python_to_engine_bind_value(val: &Bound<'_, PyAny>) -> PyResult<crate::backen
         "Unsupported raw SQL bind value: {}",
         val.repr()?.to_string()
     )))
+}
+
+/// Look up a transaction connection by id, returning a sharper error than the
+/// CRUD path's "Transaction not found" — this surface is reachable by users
+/// who hold a `Transaction` handle past the end of `async with transaction():`.
+fn get_raw_tx_conn(tx_id: Option<String>) -> PyResult<Option<TransactionConnection>> {
+    match tx_id {
+        Some(id) => {
+            let conn = TRANSACTION_REGISTRY
+                .get(&id)
+                .map(|tx| tx.value().conn.clone())
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "Transaction has already been closed or never existed",
+                    )
+                })?;
+            Ok(Some(conn))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Run a raw SQL statement and return rows_affected as an int.
+///
+/// Honors `tx_id` (looked up in [`TRANSACTION_REGISTRY`]); falls back to a
+/// one-off pool connection when `tx_id` is `None`.
+///
+/// # Errors
+/// - [`PyRuntimeError`](pyo3::exceptions::PyRuntimeError) on engine/transaction
+///   lookup failure or DB error.
+/// - [`PyTypeError`](pyo3::exceptions::PyTypeError) if any element of `args` is
+///   not a supported primitive (the Python `_marshal` wrapper guarantees this
+///   never trips in normal use).
+#[pyfunction]
+#[pyo3(signature = (sql, args, tx_id=None))]
+pub fn raw_execute<'py>(
+    py: Python<'py>,
+    sql: String,
+    args: Vec<Bound<'py, PyAny>>,
+    tx_id: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let bind_values: Vec<EngineBindValue> = args
+        .iter()
+        .map(python_to_engine_bind_value)
+        .collect::<PyResult<_>>()?;
+    let tx_conn = get_raw_tx_conn(tx_id)?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = active_engine()?;
+        let rows_affected = match tx_conn {
+            Some(conn_arc) => {
+                let mut conn = conn_arc.lock().await;
+                conn.execute_sql_with_binds(&sql, &bind_values).await
+            }
+            None => engine.execute_sql_with_binds(&sql, &bind_values).await,
+        }
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL execute failed: {e}"))
+        })?;
+
+        Ok(rows_affected as i64)
+    })
+}
+
+/// Run a raw SQL query and return all rows as a list of dicts.
+///
+/// Values are wire-close primitives (`str | int | float | bool | bytes | None`).
+/// UUID/datetime/JSON columns come back as strings — Ferro does not decode them
+/// for raw SQL. If you want typed rows, use the ORM.
+#[pyfunction]
+#[pyo3(signature = (sql, args, tx_id=None))]
+pub fn raw_fetch_all<'py>(
+    py: Python<'py>,
+    sql: String,
+    args: Vec<Bound<'py, PyAny>>,
+    tx_id: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let bind_values: Vec<EngineBindValue> = args
+        .iter()
+        .map(python_to_engine_bind_value)
+        .collect::<PyResult<_>>()?;
+    let tx_conn = get_raw_tx_conn(tx_id)?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = active_engine()?;
+        let rows = match tx_conn {
+            Some(conn_arc) => {
+                let mut conn = conn_arc.lock().await;
+                conn.fetch_all_sql_with_binds(&sql, &bind_values).await
+            }
+            None => engine.fetch_all_sql_with_binds(&sql, &bind_values).await,
+        }
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL fetch_all failed: {e}"))
+        })?;
+
+        Python::attach(|py| {
+            let out = pyo3::types::PyList::empty(py);
+            for row in rows {
+                out.append(engine_row_to_pydict(py, row)?)?;
+            }
+            Ok(out.into_any().unbind())
+        })
+    })
+}
+
+/// Run a raw SQL query and return the first row as a dict, or `None`.
+#[pyfunction]
+#[pyo3(signature = (sql, args, tx_id=None))]
+pub fn raw_fetch_one<'py>(
+    py: Python<'py>,
+    sql: String,
+    args: Vec<Bound<'py, PyAny>>,
+    tx_id: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let bind_values: Vec<EngineBindValue> = args
+        .iter()
+        .map(python_to_engine_bind_value)
+        .collect::<PyResult<_>>()?;
+    let tx_conn = get_raw_tx_conn(tx_id)?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = active_engine()?;
+        let rows = match tx_conn {
+            Some(conn_arc) => {
+                let mut conn = conn_arc.lock().await;
+                conn.fetch_all_sql_with_binds(&sql, &bind_values).await
+            }
+            None => engine.fetch_all_sql_with_binds(&sql, &bind_values).await,
+        }
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL fetch_one failed: {e}"))
+        })?;
+
+        Python::attach(|py| match rows.into_iter().next() {
+            Some(row) => Ok(engine_row_to_pydict(py, row)?.into_any().unbind()),
+            None => Ok(py.None()),
+        })
+    })
 }
 
 #[cfg(test)]
