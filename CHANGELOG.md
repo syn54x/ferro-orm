@@ -8,6 +8,10 @@
 - Add `Transaction.execute / fetch_all / fetch_one` and top-level `ferro.execute / fetch_all / fetch_one` for raw SQL inside or outside a transaction. `transaction()` now yields a `Transaction` handle. ([#31](https://github.com/syn54x/ferro-orm/issues/31))
 - Add `ForeignKey(index=True)` to emit a non-unique index on the shadow `*_id` column. Combining with `unique=True` is redundant and raises a `UserWarning`. ([#32](https://github.com/syn54x/ferro-orm/issues/32))
 
+### Behavior Changes
+
+- Alembic autogenerate now emits single-column index names as `idx_<table>_<col>` (was `ix_<table>_<col>`) so that schemas generated through Alembic match the Rust runtime DDL emitter byte-for-byte. This eliminates phantom drop+create diffs when running `alembic revision --autogenerate` against a database bootstrapped by `connect(auto_migrate=True)`. **Existing `FerroField(index=True)` users will see a one-time rename diff on their next autogen run** — review it once, accept the rename, and subsequent autogens will be clean. The new cross-emitter DDL parity invariant is documented in `AGENTS.md`. ([#32](https://github.com/syn54x/ferro-orm/issues/32))
+
 
 ## v0.4.0 (2026-04-27)
 

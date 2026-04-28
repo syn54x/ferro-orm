@@ -11,6 +11,15 @@ except ImportError:
 from ..schema_metadata import build_model_schema
 from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 
+#: SQLAlchemy ``naming_convention`` keeping Alembic autogen output identical to
+#: the Rust runtime DDL emitter (``src/schema.rs``). Single-column indexes use
+#: ``idx_<table>_<col>`` in both paths, matching the existing
+#: ``ferro_composite_indexes`` convention. See the cross-emitter DDL parity
+#: invariant in ``AGENTS.md``.
+_FERRO_NAMING_CONVENTION = {
+    "ix": "idx_%(table_name)s_%(column_0_name)s",
+}
+
 
 def get_metadata() -> "sa.MetaData":
     """
@@ -41,7 +50,7 @@ def get_metadata() -> "sa.MetaData":
             "Install it via 'pip install ferro-orm[alembic]'."
         )
 
-    metadata = sa.MetaData()
+    metadata = sa.MetaData(naming_convention=_FERRO_NAMING_CONVENTION)
 
     # 1. First, ensure all relationships are resolved
     from ..relations import resolve_relationships

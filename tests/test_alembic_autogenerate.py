@@ -275,3 +275,63 @@ def test_foreign_key_index_with_nullable_fk():
 
     assert project_table.c.org_id.index is True
     assert project_table.c.org_id.nullable is True
+
+
+def test_index_name_matches_rust_runtime_convention_for_fk():
+    """Alembic-rendered single-column FK index must use the same name as the Rust runtime emits.
+
+    Cross-emitter DDL parity invariant: every emission path (Alembic autogen, Rust
+    runtime DDL, any future emitter) must produce identical index names so that
+    autogen runs against an auto_migrate'd database are idempotent.
+    """
+    from ferro import BackRef, ForeignKey, Relation
+
+    class Org(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        projects: Relation[list["Project"]] = BackRef()
+
+    class Project(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        org: Annotated[Org, ForeignKey(related_name="projects", index=True)]
+
+    metadata = get_metadata()
+    project_table = metadata.tables["project"]
+
+    fk_indexes = [
+        idx
+        for idx in project_table.indexes
+        if [c.name for c in idx.columns] == ["org_id"]
+    ]
+    assert len(fk_indexes) == 1, (
+        f"Expected exactly one index on org_id, got {len(fk_indexes)}: "
+        f"{[i.name for i in project_table.indexes]}"
+    )
+    assert fk_indexes[0].name == "idx_project_org_id", (
+        f"Alembic must emit idx_project_org_id to match Rust runtime DDL; got "
+        f"{fk_indexes[0].name!r}"
+    )
+
+
+def test_index_name_matches_rust_runtime_convention_for_ferro_field():
+    """FerroField(index=True) on a plain column must also use the cross-emitter idx_* name."""
+
+    class Settings(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        key: Annotated[str, FerroField(index=True)]
+
+    metadata = get_metadata()
+    settings_table = metadata.tables["settings"]
+
+    indexes = [
+        idx
+        for idx in settings_table.indexes
+        if [c.name for c in idx.columns] == ["key"]
+    ]
+    assert len(indexes) == 1, (
+        f"Expected exactly one index on key, got {len(indexes)}: "
+        f"{[i.name for i in settings_table.indexes]}"
+    )
+    assert indexes[0].name == "idx_settings_key", (
+        f"Alembic must emit idx_settings_key to match Rust runtime DDL; got "
+        f"{indexes[0].name!r}"
+    )
