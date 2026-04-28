@@ -138,3 +138,42 @@ async def test_foreign_key_constraint_exists_in_postgres(
     assert row[1] == "category_id"
     assert row[2] == "id"
     assert row[3] == "CASCADE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_foreign_key_index_runtime_ddl_parity(db_url):
+    """Rust runtime DDL emits CREATE INDEX for ForeignKey(index=True)."""
+
+    class Org(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        projects: Relation[list["Project"]] = BackRef()
+
+    class Project(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        org: Annotated[
+            Org,
+            ForeignKey(related_name="projects", index=True),
+        ]
+
+    await connect(db_url, auto_migrate=True)
+
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT name, tbl_name, sql FROM sqlite_master "
+        "WHERE type = 'index' AND tbl_name = 'project'"
+    )
+    indexes = cursor.fetchall()
+    conn.close()
+
+    matching = [row for row in indexes if row[0] == "idx_project_org_id"]
+    assert matching, (
+        f"Expected idx_project_org_id on table 'project', got: {indexes!r}"
+    )
+    assert "org_id" in (matching[0][2] or ""), (
+        f"Index DDL should reference org_id column: {matching[0][2]!r}"
+    )
