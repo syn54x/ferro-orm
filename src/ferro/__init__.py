@@ -21,6 +21,7 @@ from .base import FerroField, FerroNullable, ForeignKey
 from .fields import BackRef, Field, ManyToMany
 from .models import Model, transaction
 from .query import Relation
+from .raw import Transaction, execute, fetch_all, fetch_one
 
 # Set up the Ferro logger
 _logger = logging.getLogger("ferro")
@@ -67,4 +68,8 @@ __all__ = [
     "clear_registry",
     "evict_instance",
     "transaction",
+    "execute",
+    "fetch_all",
+    "fetch_one",
+    "Transaction",
 ]
