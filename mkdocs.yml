@@ -8,6 +8,9 @@ watch:
   - src
   - docs
 
+exclude_docs: |
+  superpowers/
+
 extra_css:
   - stylesheets/extra.css
 
@@ -154,6 +157,7 @@ nav:
       - Fields: api/fields.md
       - Relationships: api/relationships.md
       - Transactions: api/transactions.md
+      - Raw SQL: api/raw-sql.md
       - Utilities: api/utilities.md
 
   - Community:

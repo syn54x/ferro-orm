@@ -1,6 +1,13 @@
 # CHANGELOG
 
 
+## Unreleased
+
+### Features
+
+- Add `Transaction.execute / fetch_all / fetch_one` and top-level `ferro.execute / fetch_all / fetch_one` for raw SQL inside or outside a transaction. `transaction()` now yields a `Transaction` handle. ([#31](https://github.com/syn54x/ferro-orm/issues/31))
+
+
 ## v0.4.0 (2026-04-27)
 
 ### Bug Fixes

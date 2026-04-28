@@ -349,8 +349,31 @@ async def import_users(user_data_list):
     # If any validation fails, no users are created
 ```
 
+## Running raw SQL inside a transaction
+
+For statements that don't fit a `Model` — Postgres GUCs, advisory locks,
+`LISTEN/NOTIFY` — `transaction()` yields a handle with `execute`,
+`fetch_all`, and `fetch_one` methods that run on the transaction's
+connection:
+
+```python
+from ferro import transaction
+
+async with transaction() as tx:
+    await tx.execute(
+        "select set_config('request.jwt.claims', $1, true)",
+        claims_json,
+    )
+    # All subsequent ORM and raw calls in this block see the GUC.
+    user = await User.create(name="Taylor")
+```
+
+See the [raw SQL API page](../api/raw-sql.md) for the full bind type table
+and Postgres cast cheat-sheet.
+
 ## See Also
 
+- [Raw SQL](../api/raw-sql.md) - The escape hatch for one-off statements
 - [Mutations](mutations.md) - Creating, updating, and deleting records
 - [Queries](queries.md) - Fetching data
 - [How-To: Testing](../howto/testing.md) - Test isolation with transactions
