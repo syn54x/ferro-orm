@@ -2078,7 +2078,9 @@ fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
 ///
 /// Order matters: in Python, `bool` is a subtype of `int`, so we must check `bool`
 /// before `i64` or `True`/`False` would round-trip as `1`/`0`.
-fn python_to_engine_bind_value(val: &Bound<'_, PyAny>) -> PyResult<crate::backend::EngineBindValue> {
+fn python_to_engine_bind_value(
+    val: &Bound<'_, PyAny>,
+) -> PyResult<crate::backend::EngineBindValue> {
     use crate::backend::EngineBindValue;
 
     if val.is_none() {

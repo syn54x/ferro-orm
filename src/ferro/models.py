@@ -17,10 +17,8 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from ._core import (
     begin_transaction,
     commit_transaction,
-    delete_record,
     evict_instance,
     fetch_all,
-    fetch_one,
     register_instance,
     rollback_transaction,
     save_bulk_records,
