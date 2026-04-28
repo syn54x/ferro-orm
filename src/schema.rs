@@ -564,4 +564,50 @@ mod tests {
         assert!(combined.contains("CREATE INDEX"));
         assert!(combined.contains("\"IDX_T_I1_I2\""));
     }
+
+    #[test]
+    fn test_foreign_key_column_with_index_flag_emits_create_index() {
+        let schema = json!({
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "primary_key": true,
+                    "autoincrement": true
+                },
+                "org_id": {
+                    "type": "integer",
+                    "ferro_nullable": false,
+                    "index": true,
+                    "foreign_key": {
+                        "to_table": "org",
+                        "on_delete": "CASCADE",
+                        "unique": false
+                    }
+                }
+            }
+        });
+
+        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            let (_table_sql, index_sqls) =
+                build_create_table_sqls("project", &schema, backend);
+            let joined = index_sqls.join("\n").to_uppercase();
+            assert!(
+                joined.contains("CREATE INDEX"),
+                "expected CREATE INDEX for FK column with index=true, got {:?} ({:?})",
+                index_sqls,
+                backend
+            );
+            assert!(
+                joined.contains("IDX_PROJECT_ORG_ID"),
+                "expected idx_project_org_id index name, got {:?} ({:?})",
+                index_sqls,
+                backend
+            );
+            assert!(
+                !joined.contains("CREATE UNIQUE INDEX"),
+                "FK column with index=true (not unique=true) must not emit a unique index; got {:?}",
+                index_sqls
+            );
+        }
+    }
 }
