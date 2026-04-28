@@ -179,3 +179,66 @@ async def test_transaction_without_as_clause_still_works(db_url):
 
     row = await fetch_one("SELECT COUNT(*) AS c FROM t5d")
     assert row is not None and row["c"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_returns_list_of_dicts(db_url):
+    """T6.1: column names become dict keys; values are primitives."""
+    from ferro import execute, fetch_all
+
+    await connect(db_url)
+    await execute(
+        "CREATE TABLE t6 (id INTEGER PRIMARY KEY, name TEXT, n INTEGER)"
+    )
+    p1 = "$1" if "postgres" in db_url else "?"
+    p2 = "$2" if "postgres" in db_url else "?"
+    await execute(f"INSERT INTO t6 (name, n) VALUES ({p1}, {p2})", "alice", 1)
+    await execute(f"INSERT INTO t6 (name, n) VALUES ({p1}, {p2})", "bob", 2)
+
+    rows = await fetch_all("SELECT name, n FROM t6 ORDER BY n")
+    assert isinstance(rows, list)
+    assert len(rows) == 2
+    assert rows[0] == {"name": "alice", "n": 1}
+    assert rows[1] == {"name": "bob", "n": 2}
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_returns_none_when_empty(db_url):
+    """T6.2: fetch_one on no-match query returns None."""
+    from ferro import execute, fetch_one
+
+    await connect(db_url)
+    await execute("CREATE TABLE t6b (id INTEGER PRIMARY KEY)")
+
+    row = await fetch_one("SELECT id FROM t6b WHERE id = -1")
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_returns_first_row_when_multiple(db_url):
+    """T6.3: fetch_one returns the first row when multiple match."""
+    from ferro import execute, fetch_one
+
+    await connect(db_url)
+    await execute("CREATE TABLE t6c (id INTEGER PRIMARY KEY, n INTEGER)")
+    p = "$1" if "postgres" in db_url else "?"
+    await execute(f"INSERT INTO t6c (n) VALUES ({p})", 10)
+    await execute(f"INSERT INTO t6c (n) VALUES ({p})", 20)
+
+    row = await fetch_one("SELECT n FROM t6c ORDER BY n")
+    assert row == {"n": 10}
+
+
+@pytest.mark.asyncio
+async def test_fetch_inside_tx_sees_uncommitted_writes(db_url):
+    """T6.4: read-your-writes within a single transaction."""
+    from ferro import execute, transaction
+
+    await connect(db_url)
+    await execute("CREATE TABLE t6d (id INTEGER PRIMARY KEY, n INTEGER)")
+    p = "$1" if "postgres" in db_url else "?"
+
+    async with transaction() as tx:
+        await tx.execute(f"INSERT INTO t6d (n) VALUES ({p})", 7)
+        rows = await tx.fetch_all("SELECT n FROM t6d")
+        assert rows == [{"n": 7}]
