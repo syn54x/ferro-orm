@@ -70,15 +70,24 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1
+          prefix-key: v2
           cache-on-failure: true
 
       - name: Run Rust tests
+        env:
+          PYO3_PYTHON: ${{ env.pythonLocation }}/bin/python
         run: |
-          cargo test --all-features
+          # extension-module skips libpython linking; disable it for tests so the
+          # cargo test binary can resolve Python symbols against the installed runtime.
+          cargo test --no-default-features
 
   test-python-pr:
     name: Python tests (PR / 3.13)

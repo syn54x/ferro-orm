@@ -8,10 +8,17 @@ name = "_core"
 # "cdylib" is necessary to produce a shared library for Python to import from.
 crate-type = ["cdylib"]
 
+[features]
+# extension-module is on by default so `maturin develop` and release builds
+# produce a Python extension module (skips linking against libpython.so).
+# Disable it for `cargo test` so the test binary can link libpython:
+#   cargo test --no-default-features
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-# "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
-pyo3 = { version = "0.27.1", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.27.1", features = ["abi3-py39"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 once_cell = "1.21"
