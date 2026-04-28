@@ -12,6 +12,10 @@
 
 - Alembic autogenerate now emits single-column index names as `idx_<table>_<col>` (was `ix_<table>_<col>`) so that schemas generated through Alembic match the Rust runtime DDL emitter byte-for-byte. This eliminates phantom drop+create diffs when running `alembic revision --autogenerate` against a database bootstrapped by `connect(auto_migrate=True)`. **Existing `FerroField(index=True)` users will see a one-time rename diff on their next autogen run** — review it once, accept the rename, and subsequent autogens will be clean. The new cross-emitter DDL parity invariant is documented in `AGENTS.md`. ([#32](https://github.com/syn54x/ferro-orm/issues/32))
 
+### Internal
+
+- Add a schema-drift sentinel (`tests/test_cross_emitter_parity.py`) that bootstraps a fresh database via Rust runtime DDL and asserts `alembic.autogenerate.compare_metadata` returns an empty diff. This is the canonical guard on the cross-emitter parity invariant: any new emitter or schema feature must keep this test green. Two pre-existing divergences (PK column nullability representation and single-column unique constraint shape) are filtered with surgical, well-commented exceptions and tracked in `docs/solutions/issues/`. ([#32](https://github.com/syn54x/ferro-orm/issues/32))
+
 
 ## v0.4.0 (2026-04-27)
 
