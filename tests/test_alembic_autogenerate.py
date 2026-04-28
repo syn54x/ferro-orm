@@ -231,3 +231,47 @@ def test_foreign_key_unique_implies_index_warns():
 
     assert profile_table.c.user_id.unique is True
     assert profile_table.c.user_id.index is False
+
+
+def test_foreign_key_index_default_false():
+    """ForeignKey() without index=True keeps the shadow column unindexed."""
+    from ferro import BackRef, ForeignKey, Relation
+
+    class Org(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        projects: Relation[list["Project"]] = BackRef()
+
+    class Project(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        org: Annotated[Org, ForeignKey(related_name="projects")]
+
+    metadata = get_metadata()
+    project_table = metadata.tables["project"]
+
+    assert project_table.c.org_id.index is False
+
+
+def test_foreign_key_index_with_nullable_fk():
+    """ForeignKey(index=True, on_delete='SET NULL') indexes the nullable shadow column."""
+    from ferro import BackRef, ForeignKey, Relation
+
+    class Org(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        projects: Relation[list["Project"]] = BackRef()
+
+    class Project(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        org: Annotated[
+            Org | None,
+            ForeignKey(
+                related_name="projects",
+                on_delete="SET NULL",
+                index=True,
+            ),
+        ] = None
+
+    metadata = get_metadata()
+    project_table = metadata.tables["project"]
+
+    assert project_table.c.org_id.index is True
+    assert project_table.c.org_id.nullable is True
