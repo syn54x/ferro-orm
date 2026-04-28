@@ -121,3 +121,61 @@ async def test_top_level_execute_rolls_back_on_exception(db_url):
 
     row = await fetch_one("SELECT COUNT(*) AS c FROM t4b")
     assert row is not None and row["c"] == 0
+
+
+@pytest.mark.asyncio
+async def test_tx_execute_runs_on_tx_connection(db_url):
+    """T5.1: tx.execute writes are visible to tx.fetch_one before commit."""
+    from ferro import execute, transaction
+
+    await connect(db_url)
+    await execute("CREATE TABLE t5 (id INTEGER PRIMARY KEY, n INTEGER)")
+    placeholder = "$1" if "postgres" in db_url else "?"
+
+    async with transaction() as tx:
+        await tx.execute(f"INSERT INTO t5 (n) VALUES ({placeholder})", 42)
+        row = await tx.fetch_one("SELECT n FROM t5 ORDER BY id DESC LIMIT 1")
+        assert row is not None and row["n"] == 42
+
+
+@pytest.mark.asyncio
+async def test_tx_handle_after_exit_raises(db_url):
+    """T5.2: keeping the tx reference past async-with raises RuntimeError."""
+    from ferro import execute, transaction
+
+    await connect(db_url)
+    await execute("CREATE TABLE t5b (id INTEGER PRIMARY KEY)")
+
+    captured = None
+    async with transaction() as tx:
+        captured = tx
+
+    assert captured is not None
+    with pytest.raises(RuntimeError, match="closed"):
+        await captured.execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_transaction_yields_transaction_handle(db_url):
+    """T5.3: transaction() yields a Transaction instance."""
+    from ferro import Transaction, transaction
+
+    await connect(db_url)
+    async with transaction() as tx:
+        assert isinstance(tx, Transaction)
+
+
+@pytest.mark.asyncio
+async def test_transaction_without_as_clause_still_works(db_url):
+    """T5.4: backwards-compatible — bare async-with still works."""
+    from ferro import execute, fetch_one, transaction
+
+    await connect(db_url)
+    await execute("CREATE TABLE t5d (id INTEGER PRIMARY KEY, n INTEGER)")
+    placeholder = "$1" if "postgres" in db_url else "?"
+
+    async with transaction():
+        await execute(f"INSERT INTO t5d (n) VALUES ({placeholder})", 1)
+
+    row = await fetch_one("SELECT COUNT(*) AS c FROM t5d")
+    assert row is not None and row["c"] == 1
