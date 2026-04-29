@@ -366,7 +366,7 @@ emitters:
 
 ## Implementation Units
 
-- [ ] U1. **Cargo features for typed UUID binds**
+- [x] U1. **Cargo features for typed UUID binds**
 
 **Goal:** Enable `sqlx/uuid` and `sea-query/with-uuid` so typed UUID binds
 compile and SeaQuery's `Value::Uuid` variant is available.
@@ -397,7 +397,7 @@ compile and SeaQuery's `Value::Uuid` variant is available.
 
 ---
 
-- [ ] U2. **`EngineBindValue::Null(NullKind)` shape**
+- [x] U2. **`EngineBindValue::Null(NullKind)` shape**
 
 **Goal:** Replace the untyped `EngineBindValue::Null` variant with
 `Null(NullKind)` carrying a tag for the bind type. Define the `NullKind`
@@ -445,7 +445,7 @@ changing the enum definition.
 
 ---
 
-- [ ] U3. **Bind layer: `engine_bind_values_from_sea` + `bind_engine_value`**
+- [x] U3. **Bind layer: `engine_bind_values_from_sea` + `bind_engine_value`**
 
 **Goal:** Map each SeaQuery typed `None` variant to its matching `NullKind`
 and bind each `NullKind` as `Option::<T>::None` to SQLx. Add an explicit
@@ -501,7 +501,7 @@ through the build step before wiring `engine_bind_values_from_sea`.
 
 ---
 
-- [ ] U4. **Raw-SQL boundary preservation**
+- [x] U4. **Raw-SQL boundary preservation**
 
 **Goal:** Update `python_to_engine_bind_value` to emit
 `Null(NullKind::Untyped)` for Python `None`, and update its companion test
@@ -540,7 +540,7 @@ assertion before changing the function so it fails first.
 
 ---
 
-- [ ] U5. **INSERT emitter (`schema_value_expr`) + UUID parse-failure handling**
+- [x] U5. **INSERT emitter (`schema_value_expr`) + UUID parse-failure handling**
 
 **Goal:** Replace the JSON-`null` catch-all in `schema_value_expr` with a
 typed-null pick based on column JSON type / format. Retire the UUID
@@ -592,7 +592,7 @@ U9 first, then implement until it passes.
 
 ---
 
-- [ ] U6. **UPDATE / UPSERT emitter (`value_rhs_simple_expr_for_backend`)**
+- [x] U6. **UPDATE / UPSERT emitter (`value_rhs_simple_expr_for_backend`)**
 
 **Goal:** Same shape as U5 for UPDATE and UPSERT paths. Remove the
 `cast_as("uuid"|"bytea"|"numeric")` branches; rely on typed binds.
@@ -635,7 +635,7 @@ U9 first, then implement until it passes.
 
 ---
 
-- [ ] U7. **Query-filter emitter (`json_to_sea_value`)**
+- [x] U7. **Query-filter emitter (`json_to_sea_value`)**
 
 **Goal:** Update query-filter NULL emission to use typed null based on
 column JSON type. Confirm `WHERE col = ?` with `?=None` binds typed null,
@@ -675,7 +675,7 @@ not text.
 
 ---
 
-- [ ] U8. **M2M target-id emitters (`python_to_sea_value`, `backend_column_value_expr`)**
+- [x] U8. **M2M target-id emitters (`python_to_sea_value`, `backend_column_value_expr`)**
 
 **Goal:** Update M2M target-id paths to use typed binds. Reject `None` M2M
 target IDs at the Python API layer with `TypeError`. Remove
@@ -724,7 +724,7 @@ target IDs at the Python API layer with `TypeError`. Remove
 
 ---
 
-- [ ] U9. **Python integration matrix (`tests/test_typed_null_binds.py`)**
+- [x] U9. **Python integration matrix (`tests/test_typed_null_binds.py`)**
 
 **Goal:** New test file covering Type matrix × Path matrix per R5. Covers
 INSERT, UPDATE, query-filter, M2M for every in-scope type, on both SQLite
@@ -780,7 +780,7 @@ the single integration surface for the refactor.
 
 ---
 
-- [ ] U10. **Documentation deliverables**
+- [x] U10. **Documentation deliverables**
 
 **Goal:** Ship the user-facing and institutional-memory documentation in
 the same PR.
