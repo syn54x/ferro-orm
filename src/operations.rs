@@ -3,7 +3,7 @@
 //! This module implements high-performance CRUD operations, leveraging
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
-use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue};
+use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind};
 use crate::query::QueryDef;
 use crate::state::{
     IDENTITY_MAP, MODEL_REGISTRY, RustValue, SqlDialect, TRANSACTION_REGISTRY,
@@ -46,7 +46,7 @@ fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
             SeaValue::String(Some(s)) => EngineBindValue::String(s.as_ref().clone()),
             SeaValue::Char(Some(c)) => EngineBindValue::String(c.to_string()),
             SeaValue::Bytes(Some(b)) => EngineBindValue::Bytes(b.as_ref().clone()),
-            _ => EngineBindValue::Null,
+            _ => EngineBindValue::Null(NullKind::Untyped),
         })
         .collect()
 }
@@ -2084,7 +2084,7 @@ fn python_to_engine_bind_value(
     use crate::backend::EngineBindValue;
 
     if val.is_none() {
-        return Ok(EngineBindValue::Null);
+        return Ok(EngineBindValue::Null(crate::backend::NullKind::Untyped));
     }
     if let Ok(b) = val.extract::<bool>() {
         return Ok(EngineBindValue::Bool(b));
@@ -2260,7 +2260,7 @@ mod raw_sql_tests {
             let val = py.None().into_bound(py);
             assert_eq!(
                 python_to_engine_bind_value(&val).unwrap(),
-                EngineBindValue::Null
+                EngineBindValue::Null(crate::backend::NullKind::Untyped)
             );
         });
     }
