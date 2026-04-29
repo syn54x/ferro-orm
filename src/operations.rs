@@ -520,46 +520,28 @@ fn schema_property<'a>(
         .map(|prop| resolve_ref(schema, prop))
 }
 
+/// Build a SeaQuery expression for a column value, preserving type information
+/// across NULL and primitive binds so the SQLx layer can emit a parameter with
+/// the correct OID on strict-typing backends (notably PostgreSQL).
+///
+/// `table_name` is used only for error diagnostics (e.g. UUID parse failures).
+///
+/// Schema-driven null handling: the JSON-`null` arm picks a typed SeaQuery
+/// `None` variant from column metadata (JSON type / format /
+/// `uuid_columns` / `ts_cast`). Non-null UUID values on Postgres are parsed
+/// to `uuid::Uuid` and emitted as `Value::Uuid(Some(...))` -- no
+/// `cast_as("uuid")` wrapping. See `docs/solutions/patterns/typed-null-binds.md`.
 fn schema_value_expr(
     schema: &serde_json::Value,
+    table_name: &str,
     col_name: &str,
     value: &serde_json::Value,
     enum_udt: &HashMap<String, String>,
     uuid_columns: &HashSet<String>,
     ts_cast: &HashMap<String, String>,
     backend: SqlDialect,
-) -> SimpleExpr {
+) -> PyResult<SimpleExpr> {
     let col_info = schema_property(schema, col_name);
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && let Some(tn) = postgres_enum_type_name_for_column(col_name, enum_udt, col_info)
-    {
-        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            .cast_as(Alias::new(tn.as_str()));
-    }
-    if value.is_null() && backend == SqlDialect::Postgres && uuid_columns.contains(col_name) {
-        return Expr::value(sea_query::Value::String(None)).cast_as("uuid");
-    }
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && uuid_columns.contains(col_name)
-        && uuid::Uuid::parse_str(s).is_ok()
-    {
-        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid");
-    }
-    if value.is_null()
-        && backend == SqlDialect::Postgres
-        && let Some(cast) = ts_cast.get(col_name)
-    {
-        return Expr::value(sea_query::Value::String(None)).cast_as(Alias::new(cast.as_str()));
-    }
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && let Some(cast) = ts_cast.get(col_name)
-    {
-        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            .cast_as(Alias::new(cast.as_str()));
-    }
     let format = col_info.and_then(property_format);
     let json_type = col_info.and_then(property_json_type);
     let is_decimal = col_info
@@ -567,22 +549,69 @@ fn schema_value_expr(
         .and_then(|a| a.as_array())
         .map(|items| items.iter().any(|item| item.get("pattern").is_some()))
         .unwrap_or(false);
+    // UUID columns are detected either via DB introspection (uuid_columns
+    // populated by postgres_uuid_column_names) or via Pydantic format hint.
+    let is_uuid_pg = backend == SqlDialect::Postgres
+        && (uuid_columns.contains(col_name) || format == Some("uuid"));
 
-    match value {
+    if let serde_json::Value::String(s) = value
+        && backend == SqlDialect::Postgres
+        && let Some(tn) = postgres_enum_type_name_for_column(col_name, enum_udt, col_info)
+    {
+        return Ok(
+            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as(Alias::new(tn.as_str())),
+        );
+    }
+
+    if is_uuid_pg {
+        return match value {
+            serde_json::Value::Null => Ok(Expr::value(sea_query::Value::Uuid(None))),
+            serde_json::Value::String(s) => {
+                let parsed = uuid::Uuid::parse_str(s).map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Invalid UUID for {table_name}.{col_name}: {s}"
+                    ))
+                })?;
+                Ok(Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed)))))
+            }
+            // Anything else (number, bool, etc.) for a UUID column is a
+            // user-side bug; let the existing fallthrough surface it.
+            _ => Ok(Expr::value(sea_query::Value::String(Some(Box::new(
+                value.to_string(),
+            ))))),
+        };
+    }
+
+    // Temporal types (date, date-time, time) are deferred to issue #40 pending
+    // the chrono-vs-time crate decision. For now they keep cast_as wrappers.
+    if value.is_null()
+        && backend == SqlDialect::Postgres
+        && let Some(cast) = ts_cast.get(col_name)
+    {
+        return Ok(Expr::value(sea_query::Value::String(None)).cast_as(Alias::new(cast.as_str())));
+    }
+    if let serde_json::Value::String(s) = value
+        && backend == SqlDialect::Postgres
+        && let Some(cast) = ts_cast.get(col_name)
+    {
+        return Ok(
+            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as(Alias::new(cast.as_str())),
+        );
+    }
+
+    let expr = match value {
         value
             if backend == SqlDialect::Postgres && matches!(json_type, Some("object" | "array")) =>
         {
+            // JSON/JSONB binding is out of scope for the typed-null refactor.
             if value.is_null() {
                 Expr::value(sea_query::Value::String(None)).cast_as("json")
             } else {
                 Expr::value(sea_query::Value::String(Some(Box::new(value.to_string()))))
                     .cast_as("json")
             }
-        }
-        serde_json::Value::String(s)
-            if backend == SqlDialect::Postgres && format == Some("uuid") =>
-        {
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid")
         }
         serde_json::Value::String(s)
             if backend == SqlDialect::Postgres && format == Some("date-time") =>
@@ -636,9 +665,31 @@ fn schema_value_expr(
             Expr::value(sea_query::Value::BigInt(Some(if *b { 1 } else { 0 })))
         }
         serde_json::Value::Bool(b) => Expr::value(sea_query::Value::Bool(Some(*b))),
-        serde_json::Value::Null => Expr::value(sea_query::Value::String(None)),
+        serde_json::Value::Null => {
+            // Typed-null pick from column metadata. UUID is handled above;
+            // JSON/temporal are handled above. This arm covers primitives,
+            // bytes, and decimal. Unknown shapes fall through to text-typed
+            // null (the bind layer logs this as NullKind::String / Untyped).
+            let v = if format == Some("binary") {
+                sea_query::Value::Bytes(None)
+            } else if is_decimal {
+                // Decimal binds as float8-typed null today; native numeric
+                // typed null is deferred (see plan §3 Scope Boundaries).
+                sea_query::Value::Double(None)
+            } else {
+                match json_type {
+                    Some("integer") => sea_query::Value::BigInt(None),
+                    Some("number") => sea_query::Value::Double(None),
+                    Some("boolean") => sea_query::Value::Bool(None),
+                    Some("string") => sea_query::Value::String(None),
+                    _ => sea_query::Value::String(None),
+                }
+            };
+            Expr::value(v)
+        }
         _ => Expr::value(sea_query::Value::String(Some(Box::new(value.to_string())))),
-    }
+    };
+    Ok(expr)
 }
 
 fn backend_column_value_expr(
@@ -995,13 +1046,14 @@ pub fn fetch_one<'py>(
             let no_ts: HashMap<String, String> = HashMap::new();
             let pk_expr = schema_value_expr(
                 schema,
+                &table_name,
                 &pk_name,
                 &serde_json::Value::String(pk_val.clone()),
                 &no_enum_udt,
                 &no_uuid,
                 &no_ts,
                 backend,
-            );
+            )?;
             let (s, values) = sea_query_build_for_backend!(
                 stmt.from(Alias::new(&table_name))
                     .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)),
@@ -1152,13 +1204,14 @@ pub fn save_record(
                 columns.push(Alias::new(key));
                 values.push(schema_value_expr(
                     &schema,
+                    &table_name,
                     key,
                     value,
                     &enum_udt,
                     &uuid_columns,
                     &ts_cast,
                     backend,
-                ));
+                )?);
             }
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -1344,13 +1397,14 @@ pub fn save_bulk_records(
                         .unwrap_or(&serde_json::Value::Null);
                     row_values.push(schema_value_expr(
                         &schema,
+                        &table_name,
                         key.to_string().as_str(),
                         value,
                         &enum_udt,
                         &uuid_columns,
                         &ts_cast,
                         backend,
-                    ));
+                    )?);
                 }
                 insert_stmt.values(row_values).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -1744,13 +1798,14 @@ pub fn delete_record(
             let no_ts: HashMap<String, String> = HashMap::new();
             let pk_expr = schema_value_expr(
                 &schema,
+                &table_name,
                 &pk_name,
                 &serde_json::Value::String(pk_val),
                 &no_enum_udt,
                 &no_uuid,
                 &no_ts,
                 backend,
-            );
+            )?;
             let (s, values) = sea_query_build_for_backend!(
                 Query::delete()
                     .from_table(Alias::new(&table_name))
@@ -1872,13 +1927,14 @@ pub fn update_filtered(
                     Alias::new(&key),
                     schema_value_expr(
                         &schema,
+                        &table_name,
                         &key,
                         &value,
                         &enum_udt,
                         &uuid_columns,
                         &ts_cast,
                         backend,
-                    ),
+                    )?,
                 );
             }
             sea_query_build_for_backend!(update, backend)
@@ -2276,6 +2332,331 @@ pub fn raw_fetch_one<'py>(
             None => Ok(py.None()),
         })
     })
+}
+
+#[cfg(test)]
+mod schema_value_expr_tests {
+    use super::schema_value_expr;
+    use crate::state::SqlDialect;
+    use sea_query::{Alias, PostgresQueryBuilder, Query, Value as SeaValue};
+    use std::collections::{HashMap, HashSet};
+
+    fn schema_for(col: &str, prop: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "properties": { col: prop }
+        })
+    }
+
+    fn build_pg_value(
+        schema: &serde_json::Value,
+        table: &str,
+        col: &str,
+        value: &serde_json::Value,
+        uuid_columns: HashSet<String>,
+    ) -> pyo3::PyResult<(String, sea_query::Values)> {
+        let enum_udt = HashMap::new();
+        let ts_cast = HashMap::new();
+        let expr = schema_value_expr(
+            schema,
+            table,
+            col,
+            value,
+            &enum_udt,
+            &uuid_columns,
+            &ts_cast,
+            SqlDialect::Postgres,
+        )?;
+        let (sql, values) = Query::insert()
+            .into_table(Alias::new(table))
+            .columns([Alias::new(col)])
+            .values_panic([expr])
+            .build(PostgresQueryBuilder);
+        Ok((sql, values))
+    }
+
+    fn nullable(inner: serde_json::Value) -> serde_json::Value {
+        let mut anyof = inner;
+        if let serde_json::Value::Object(_) = &anyof {
+            anyof = serde_json::json!({"anyOf": [anyof, {"type": "null"}]});
+        }
+        anyof
+    }
+
+    #[test]
+    fn emits_typed_null_for_int_column() {
+        let schema = schema_for("n", nullable(serde_json::json!({"type": "integer"})));
+        let (sql, values) = build_pg_value(
+            &schema,
+            "thing",
+            "n",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::BigInt(None)]));
+        assert!(!sql.contains("CAST"));
+    }
+
+    #[test]
+    fn emits_typed_null_for_bool_column() {
+        let schema = schema_for("flag", nullable(serde_json::json!({"type": "boolean"})));
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "flag",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::Bool(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_float_column() {
+        let schema = schema_for("ratio", nullable(serde_json::json!({"type": "number"})));
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "ratio",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::Double(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_str_column() {
+        let schema = schema_for("name", nullable(serde_json::json!({"type": "string"})));
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "name",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::String(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_bytes_column() {
+        let schema = schema_for(
+            "blob",
+            nullable(serde_json::json!({"type": "string", "format": "binary"})),
+        );
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "blob",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::Bytes(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_decimal_column() {
+        let schema = serde_json::json!({
+            "properties": {
+                "amount": {
+                    "anyOf": [
+                        {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"},
+                        {"type": "null"}
+                    ]
+                }
+            }
+        });
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "amount",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        // Decimal binds as float8-typed null; native numeric is deferred.
+        assert!(matches!(values.0.as_slice(), [SeaValue::Double(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_uuid_column_via_format() {
+        let schema = schema_for(
+            "id",
+            nullable(serde_json::json!({"type": "string", "format": "uuid"})),
+        );
+        let (sql, values) = build_pg_value(
+            &schema,
+            "thing",
+            "id",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(values.0.as_slice(), [SeaValue::Uuid(None)]),
+            "expected Uuid(None), got {:?}",
+            values.0
+        );
+        assert!(
+            !sql.contains("CAST"),
+            "UUID null should no longer rely on CAST: {sql}"
+        );
+    }
+
+    #[test]
+    fn emits_typed_null_for_uuid_column_via_introspection_set() {
+        let schema = schema_for("id", serde_json::json!({"type": "string"}));
+        let mut uuid_cols = HashSet::new();
+        uuid_cols.insert("id".to_string());
+
+        let (sql, values) =
+            build_pg_value(&schema, "thing", "id", &serde_json::Value::Null, uuid_cols).unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::Uuid(None)]));
+        assert!(!sql.contains("CAST"), "UUID null should not CAST: {sql}");
+    }
+
+    #[test]
+    fn emits_typed_uuid_value_via_format() {
+        let schema = schema_for(
+            "id",
+            nullable(serde_json::json!({"type": "string", "format": "uuid"})),
+        );
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let (sql, values) = build_pg_value(
+            &schema,
+            "thing",
+            "id",
+            &serde_json::Value::String(uuid_str.to_string()),
+            HashSet::new(),
+        )
+        .unwrap();
+
+        match values.0.as_slice() {
+            [SeaValue::Uuid(Some(u))] => {
+                assert_eq!(u.to_string(), uuid_str);
+            }
+            other => panic!("expected Uuid(Some(_)), got {other:?}"),
+        }
+        assert!(
+            !sql.contains("CAST"),
+            "UUID value should no longer rely on CAST: {sql}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_uuid_with_pyvalueerror() {
+        pyo3::Python::attach(|py| {
+            let schema = schema_for(
+                "id",
+                nullable(serde_json::json!({"type": "string", "format": "uuid"})),
+            );
+            let _ = py;
+
+            let err = schema_value_expr(
+                &schema,
+                "thing",
+                "id",
+                &serde_json::Value::String("not-a-uuid".to_string()),
+                &HashMap::new(),
+                &HashSet::new(),
+                &HashMap::new(),
+                SqlDialect::Postgres,
+            )
+            .expect_err("invalid UUID should error");
+
+            let msg = err.to_string();
+            assert!(
+                msg.contains("thing"),
+                "error message should name model: {msg}"
+            );
+            assert!(
+                msg.contains("id"),
+                "error message should name column: {msg}"
+            );
+            assert!(
+                msg.contains("not-a-uuid"),
+                "error message should include offending value: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn temporal_null_keeps_cast_for_now() {
+        // Temporal types are deferred to issue #40 (chrono vs time decision).
+        // For now, date-time / date null still relies on cast_as("timestamptz")
+        // / cast_as("date") to prevent regression.
+        let schema = schema_for(
+            "created_at",
+            nullable(serde_json::json!({"type": "string", "format": "date-time"})),
+        );
+        let mut ts_cast = HashMap::new();
+        ts_cast.insert("created_at".to_string(), "timestamptz".to_string());
+
+        let expr = schema_value_expr(
+            &schema,
+            "thing",
+            "created_at",
+            &serde_json::Value::Null,
+            &HashMap::new(),
+            &HashSet::new(),
+            &ts_cast,
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let (sql, _) = Query::insert()
+            .into_table(Alias::new("thing"))
+            .columns([Alias::new("created_at")])
+            .values_panic([expr])
+            .build(PostgresQueryBuilder);
+
+        assert!(
+            sql.contains("CAST"),
+            "temporal null should still CAST until #40: {sql}"
+        );
+    }
+
+    #[test]
+    fn sqlite_uuid_passthrough_unchanged() {
+        let schema = schema_for(
+            "id",
+            nullable(serde_json::json!({"type": "string", "format": "uuid"})),
+        );
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+
+        let expr = schema_value_expr(
+            &schema,
+            "thing",
+            "id",
+            &serde_json::Value::String(uuid_str.to_string()),
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        let (_, values) = Query::insert()
+            .into_table(Alias::new("thing"))
+            .columns([Alias::new("id")])
+            .values_panic([expr])
+            .build(sea_query::SqliteQueryBuilder);
+
+        // SQLite preserves text-based UUID handling; typed Uuid path is
+        // Postgres-only (R2 was about Postgres OID enforcement).
+        match values.0.as_slice() {
+            [SeaValue::String(Some(s))] => assert_eq!(**s, *uuid_str),
+            other => panic!("expected SQLite UUID to remain text, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
