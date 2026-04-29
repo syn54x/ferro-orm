@@ -1,6 +1,47 @@
 # CHANGELOG
 
 
+## Unreleased
+
+### Bug Fixes
+
+- **insert/update/filter/m2m**: Send typed nulls and typed UUIDs to the
+  database wire ([#38](https://github.com/syn54x/ferro-orm/issues/38)).
+  Schema-driven NULL emission paths now pick a typed
+  `sea_query::Value::T(None)` variant from column metadata and bind
+  `Option::<T>::None` at the SQLx layer, so PostgreSQL receives the correct
+  parameter OID for nullable `integer` / `bigint` / `bool` / `numeric` /
+  `bytea` / `uuid` columns. Eliminates `column "..." is of type ...
+  but expression is of type text` for nullable primitives. UUID columns no
+  longer rely on `cast_as("uuid")` SQL-text wrappers.
+
+  - INSERT path: `schema_value_expr` (U5).
+  - UPDATE path: `schema_value_expr` and `value_rhs_simple_expr_for_backend`
+    (U5, U6).
+  - Query-filter path: `value_rhs_simple_expr_for_backend` and the new
+    `typed_null_for_column` helper (U6 + U7).
+  - M2M target IDs: `backend_column_value_expr` and `python_to_sea_value`
+    (U8). M2M IDs of `None` are now rejected up front with a `PyValueError`
+    instead of silently producing a no-op insert.
+  - Invalid UUID strings on the INSERT path raise a clean `PyValueError`
+    naming the model, column, and offending value (U5).
+
+  Out of scope (deferred):
+
+  - Temporal types (`date`, `date-time`) keep `cast_as` wrappers pending
+    [#40](https://github.com/syn54x/ferro-orm/issues/40) (chrono vs time
+    crate decision).
+  - Decimal columns bind as `float8`-typed null; native `numeric` typed
+    binds are a follow-up.
+
+### Documentation
+
+- **typed-null-binds**: New pattern doc at
+  `docs/solutions/patterns/typed-null-binds.md` documents the schema-driven
+  vs raw-SQL boundary, the type-mapping table, and recipes for adding new
+  emitters or in-scope types.
+
+
 ## v0.5.0 (2026-04-28)
 
 ### Bug Fixes
