@@ -2100,6 +2100,16 @@ fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
 ///
 /// Order matters: in Python, `bool` is a subtype of `int`, so we must check `bool`
 /// before `i64` or `True`/`False` would round-trip as `1`/`0`.
+///
+/// **Raw-SQL boundary.** This is the documented exception to Ferro's typed-null
+/// architectural rule (R3). The raw-SQL bind path has no schema or column-type
+/// context -- the user supplies pre-built SQL text and bare Python values --
+/// so Python `None` becomes [`NullKind::Untyped`]. Schema-driven emitters
+/// (INSERT/UPDATE values, query-filter predicates, M2M target IDs) infer the
+/// kind from column metadata and emit a typed null. See
+/// `docs/solutions/patterns/typed-null-binds.md`.
+///
+/// [`NullKind::Untyped`]: crate::backend::NullKind::Untyped
 fn python_to_engine_bind_value(
     val: &Bound<'_, PyAny>,
 ) -> PyResult<crate::backend::EngineBindValue> {
