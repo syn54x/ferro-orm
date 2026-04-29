@@ -7,16 +7,16 @@ and never reproduced #38; many of the round-trip assertions here are
 ``postgres_only`` because that's where the failure shape lives.
 
 Two known pre-existing bugs that are *out of scope* for this refactor and
-limit what we can assert on SQLite:
+limit what we can assert on SQLite. When either is fixed, drop the
+``postgres_only`` marker on the corresponding test below so SQLite gets the
+full round-trip assertion.
 
-1. ``Model.where(Model.col == None)`` panics in the Rust query builder
+1. `#41 <https://github.com/syn54x/ferro-orm/issues/41>`_ --
+   ``Model.where(Model.col == None)`` panics in the Rust query builder
    (``query.rs::node_to_condition_for_backend`` unwraps ``node.value``).
-   Filter-by-None coverage is Postgres-only; SQLite filter coverage uses raw
-   SQL.
-2. ``UPDATE col = NULL`` on SQLite reads back as ``0`` (or the type's zero
-   value) due to a hydration issue in ``materialize_engine_row``. Postgres
-   doesn't have this issue. UPDATE-to-None coverage is Postgres-only;
-   SQLite UPDATE coverage asserts the SQL executes without error.
+2. `#42 <https://github.com/syn54x/ferro-orm/issues/42>`_ --
+   ``UPDATE col = NULL`` on SQLite reads back as ``0`` (or the type's zero
+   value) due to a hydration issue in ``materialize_engine_row``.
 
 See ``docs/plans/2026-04-29-001-typed-null-binds-plan.md`` for context.
 """
@@ -168,8 +168,8 @@ async def test_update_to_none_succeeds_on_postgres(db_url):
     in U6 (`value_rhs_simple_expr_for_backend`) plus the bind layer (U3).
 
     SQLite has a separate, pre-existing hydration bug for ``UPDATE col =
-    NULL`` that's out of scope for this refactor, so this assertion is
-    Postgres-only.
+    NULL`` (see #42) that's out of scope for this refactor, so this
+    assertion is Postgres-only.
     """
 
     class Mixed(Model):
@@ -223,8 +223,8 @@ async def test_filter_by_none_does_not_reproduce_38(db_url):
 
     Postgres-only because (a) this is where the OID failure mode lives and
     (b) SQLite has a pre-existing panic at ``query.rs::node_to_condition_
-    for_backend`` when ``col == None`` is passed -- a separate bug whose
-    fix is out of scope for this refactor."""
+    for_backend`` when ``col == None`` is passed (see #41) -- a separate
+    bug whose fix is out of scope for this refactor."""
 
     class Filterable(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
