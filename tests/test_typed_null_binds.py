@@ -8,14 +8,16 @@ and never reproduced #38; many of the round-trip assertions here are
 
 Two known pre-existing bugs are *out of scope* for this refactor and limit
 what the matrix can assert. When either is fixed, drop the corresponding
-``skip``/``postgres_only`` marker on the test below.
+``xfail``/``postgres_only`` marker on the test below.
 
 1. `#41 <https://github.com/syn54x/ferro-orm/issues/41>`_ --
    ``Model.where(Model.col == None)`` panics in the Rust query builder
    (``query.rs::node_to_condition_for_backend`` unwraps ``node.value``).
    Backend-agnostic: surfaces on both SQLite and Postgres before any SQL
    is generated, so ``test_filter_by_none_does_not_reproduce_38`` is
-   ``skip``-ped entirely until #41 closes.
+   ``xfail(strict=True)`` until #41 closes -- the strict marker means the
+   test will XPASS-as-failure the moment #41 is fixed, prompting us to
+   drop the marker.
 2. `#42 <https://github.com/syn54x/ferro-orm/issues/42>`_ --
    ``UPDATE col = NULL`` on SQLite reads back as ``0`` (or the type's zero
    value) due to a hydration issue in ``materialize_engine_row``. SQLite-
@@ -219,14 +221,14 @@ async def test_update_to_none_executes_without_error(db_url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(
+@pytest.mark.xfail(
+    strict=True,
     reason=(
         "Blocked by #41: filter `col == None` panics in "
-        "node_to_condition_for_backend before any SQL reaches the backend, "
-        "so the #38 assertion on the filter-by-None path can't run on "
-        "either backend until #41 is fixed. Drop this skip and run on the "
-        "full matrix once #41 closes."
-    )
+        "node_to_condition_for_backend (Option::unwrap on node.value) "
+        "before any SQL reaches the backend. Strict so we get an XPASS "
+        "signal the moment #41 is fixed, then drop this marker."
+    ),
 )
 async def test_filter_by_none_does_not_reproduce_38(db_url):
     """Query filter ``WHERE col == None`` on a nullable integer column must
