@@ -31,6 +31,14 @@ fn active_engine() -> PyResult<Arc<EngineHandle>> {
     Ok(engine)
 }
 
+/// Map SeaQuery `Value` variants to `EngineBindValue`.
+///
+/// Typed `None` variants are preserved as `Null(NullKind::T)` so the bind
+/// layer can emit a parameter with the correct OID on backends that perform
+/// strict type validation (notably PostgreSQL). Any unmapped variant -- new
+/// SeaQuery variants, feature-gated types we don't yet handle -- falls
+/// through to `Null(NullKind::Untyped)`. The fallback is locked in by
+/// `engine_bind_tests::falls_back_to_untyped_for_unmapped_variant`.
 fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
     values
         .iter()
@@ -46,6 +54,20 @@ fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
             SeaValue::String(Some(s)) => EngineBindValue::String(s.as_ref().clone()),
             SeaValue::Char(Some(c)) => EngineBindValue::String(c.to_string()),
             SeaValue::Bytes(Some(b)) => EngineBindValue::Bytes(b.as_ref().clone()),
+            SeaValue::Bool(None) => EngineBindValue::Null(NullKind::Bool),
+            SeaValue::TinyInt(None)
+            | SeaValue::SmallInt(None)
+            | SeaValue::Int(None)
+            | SeaValue::BigInt(None)
+            | SeaValue::BigUnsigned(None) => EngineBindValue::Null(NullKind::I64),
+            SeaValue::Float(None) | SeaValue::Double(None) => {
+                EngineBindValue::Null(NullKind::F64)
+            }
+            SeaValue::String(None) | SeaValue::Char(None) => {
+                EngineBindValue::Null(NullKind::String)
+            }
+            SeaValue::Bytes(None) => EngineBindValue::Null(NullKind::Bytes),
+            SeaValue::Uuid(None) => EngineBindValue::Null(NullKind::Uuid),
             _ => EngineBindValue::Null(NullKind::Untyped),
         })
         .collect()
@@ -2244,6 +2266,73 @@ pub fn raw_fetch_one<'py>(
             None => Ok(py.None()),
         })
     })
+}
+
+#[cfg(test)]
+mod engine_bind_tests {
+    use super::engine_bind_values_from_sea;
+    use crate::backend::{EngineBindValue, NullKind};
+    use sea_query::Value as SeaValue;
+
+    #[test]
+    fn maps_typed_none_to_matching_null_kind() {
+        let inputs = vec![
+            SeaValue::Bool(None),
+            SeaValue::Int(None),
+            SeaValue::BigInt(None),
+            SeaValue::Double(None),
+            SeaValue::Float(None),
+            SeaValue::String(None),
+            SeaValue::Bytes(None),
+            SeaValue::Uuid(None),
+        ];
+
+        let mapped = engine_bind_values_from_sea(&inputs);
+
+        assert_eq!(
+            mapped,
+            vec![
+                EngineBindValue::Null(NullKind::Bool),
+                EngineBindValue::Null(NullKind::I64),
+                EngineBindValue::Null(NullKind::I64),
+                EngineBindValue::Null(NullKind::F64),
+                EngineBindValue::Null(NullKind::F64),
+                EngineBindValue::Null(NullKind::String),
+                EngineBindValue::Null(NullKind::Bytes),
+                EngineBindValue::Null(NullKind::Uuid),
+            ]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_untyped_for_unmapped_variant() {
+        // TinyUnsigned has no Some arm and no None arm in
+        // engine_bind_values_from_sea, so the catch-all fires. This locks
+        // in the documented Untyped fallback for any future SeaQuery variant
+        // we have not explicitly mapped.
+        let inputs = vec![SeaValue::TinyUnsigned(None)];
+
+        assert_eq!(
+            engine_bind_values_from_sea(&inputs),
+            vec![EngineBindValue::Null(NullKind::Untyped)]
+        );
+    }
+
+    #[test]
+    fn sea_query_preserves_typed_none_through_build() {
+        use sea_query::{Alias, Expr, PostgresQueryBuilder, Query};
+
+        let (_, values) = Query::insert()
+            .into_table(Alias::new("t"))
+            .columns([Alias::new("n")])
+            .values_panic([Expr::value(SeaValue::Int(None))])
+            .build(PostgresQueryBuilder);
+
+        // Confirm SeaQuery itself preserves the typed None through .build(),
+        // so the mapping in engine_bind_values_from_sea is operating on
+        // accurate input rather than a coerced text-typed null.
+        assert!(matches!(values.0.as_slice(), [SeaValue::Int(None)]));
+    }
 }
 
 #[cfg(test)]

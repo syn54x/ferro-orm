@@ -372,7 +372,13 @@ where
     f64: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
     String: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
     Vec<u8>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    sqlx::types::Uuid: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<bool>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<i64>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<f64>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
     Option<String>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<Vec<u8>>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<sqlx::types::Uuid>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
 {
     match value {
         EngineBindValue::Bool(v) => query.bind(*v),
@@ -380,7 +386,15 @@ where
         EngineBindValue::F64(v) => query.bind(*v),
         EngineBindValue::String(v) => query.bind(v.clone()),
         EngineBindValue::Bytes(v) => query.bind(v.clone()),
-        EngineBindValue::Null(_) => query.bind(Option::<String>::None),
+        EngineBindValue::Null(NullKind::Bool) => query.bind(Option::<bool>::None),
+        EngineBindValue::Null(NullKind::I64) => query.bind(Option::<i64>::None),
+        EngineBindValue::Null(NullKind::F64) => query.bind(Option::<f64>::None),
+        EngineBindValue::Null(NullKind::String) => query.bind(Option::<String>::None),
+        EngineBindValue::Null(NullKind::Bytes) => query.bind(Option::<Vec<u8>>::None),
+        EngineBindValue::Null(NullKind::Uuid) => query.bind(Option::<sqlx::types::Uuid>::None),
+        // Raw-SQL path has no schema context; legacy text-typed null preserves
+        // pre-refactor behavior. Schema-driven paths never construct this.
+        EngineBindValue::Null(NullKind::Untyped) => query.bind(Option::<String>::None),
     }
 }
 
