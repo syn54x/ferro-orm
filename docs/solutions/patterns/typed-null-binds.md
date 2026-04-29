@@ -106,7 +106,7 @@ Ferro itself.
 
 - A user reports `column "..." is of type integer but expression is of type
   text` (or `bigint`, `boolean`, `numeric`, `bytea`, `uuid`) on a Postgres
-  INSERT / UPDATE / filter.
+  INSERT / UPDATE / filter -- **for either NULL or non-NULL values**.
 - A new schema-driven emitter quietly routes JSON `null` to
   `sea_query::Value::String(None)` instead of picking from column metadata.
 - A grep for `cast_as("uuid")` or `cast_as("bytea")` finds new uses outside
@@ -114,6 +114,12 @@ Ferro itself.
 - `EngineBindValue::Null(NullKind::Untyped)` appears outside
   `python_to_engine_bind_value` and the documented SeaQuery fallback in
   `engine_bind_values_from_sea`.
+- A schema-driven emitter starts emitting a new `SeaValue::T(Some(_))`
+  variant **without** a corresponding `Some` arm in
+  `engine_bind_values_from_sea`. The catch-all silently rewrites the value
+  to `Null(Untyped)` -- non-null data goes out as a text-typed null, and
+  Postgres reports `expression is of type text` rather than the actual
+  type mismatch. Always pair `Some` and `None` arms when adding a type.
 
 ## Recipe: adding a new schema-driven emitter
 
@@ -134,14 +140,24 @@ Ferro itself.
 
 ## Recipe: adding a new in-scope type
 
-1. Add the variant to `NullKind` in `src/backend.rs`.
-2. Add the matching match arm to `bind_engine_value` (`Option::<T>::None`).
-3. Add the SeaQuery typed-`None` arm to `engine_bind_values_from_sea`.
+1. Add the variant to `NullKind` in `src/backend.rs`. If the type also needs
+   a typed non-null bind (e.g. `Uuid`), add it to `EngineBindValue` too.
+2. Add the matching null arm to `bind_engine_value` (`Option::<T>::None`).
+   If a non-null `EngineBindValue` variant exists, add its bind arm as well.
+3. **Add both arms in `engine_bind_values_from_sea`**:
+   - `SeaValue::T(None) => EngineBindValue::Null(NullKind::T)`
+   - `SeaValue::T(Some(v)) => EngineBindValue::T(...)` (or whichever shape
+     the bind layer uses for non-null values).
+   The catch-all silently rewrites unmapped `Some` variants to
+   `Null(Untyped)`, which sends non-null data out as a text-typed null --
+   pair the arms or the bug surfaces only at runtime against PG.
 4. Update the schema-driven emitter null switches
    (`schema_value_expr`, `typed_null_for_column`, `backend_column_value_expr`)
    to recognize the type.
-5. Update the table in this doc and add tests covering the new variant on
-   both backends where applicable.
+5. Update the table in this doc and add **integration** tests covering the
+   new variant on both backends. SeaQuery `SimpleExpr` shape assertions are
+   not enough -- they don't traverse the `engine_bind_values_from_sea`
+   translation, so a missing `Some` arm slips past Rust unit tests.
 
 ## Related
 

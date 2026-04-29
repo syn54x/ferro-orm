@@ -54,6 +54,11 @@ fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
             SeaValue::String(Some(s)) => EngineBindValue::String(s.as_ref().clone()),
             SeaValue::Char(Some(c)) => EngineBindValue::String(c.to_string()),
             SeaValue::Bytes(Some(b)) => EngineBindValue::Bytes(b.as_ref().clone()),
+            // Critical: without this arm, `Value::Uuid(Some(_))` falls through
+            // to the `_ => Null(Untyped)` catch-all and silently becomes a
+            // text-typed null bind on the wire. PG then rejects with
+            // "column ... is of type uuid but expression is of type text".
+            SeaValue::Uuid(Some(u)) => EngineBindValue::Uuid(**u),
             SeaValue::Bool(None) => EngineBindValue::Null(NullKind::Bool),
             SeaValue::TinyInt(None)
             | SeaValue::SmallInt(None)
@@ -2831,6 +2836,22 @@ mod engine_bind_tests {
                 EngineBindValue::Null(NullKind::Bytes),
                 EngineBindValue::Null(NullKind::Uuid),
             ]
+        );
+    }
+
+    #[test]
+    fn maps_typed_uuid_some_to_engine_uuid() {
+        // Regression for the user-reported `column "id" is of type uuid but
+        // expression is of type text` failure: prior to this arm, a non-null
+        // SeaValue::Uuid fell through to the catch-all and was bound as a
+        // text-typed null, silently corrupting every UUID INSERT/UPDATE/WHERE.
+        let u = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")
+            .expect("static UUID parses");
+        let inputs = vec![SeaValue::Uuid(Some(Box::new(u)))];
+
+        assert_eq!(
+            engine_bind_values_from_sea(&inputs),
+            vec![EngineBindValue::Uuid(u)]
         );
     }
 

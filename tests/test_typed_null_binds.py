@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Annotated
 
 import pytest
+from pydantic import Field
 
 from ferro import FerroField, Model, connect
 
@@ -116,6 +117,68 @@ async def test_insert_with_none_for_uuid(db_url):
     fetched_set = await WithUuid.get(set_row.id)
     assert fetched_set is not None
     assert fetched_set.run_id == u
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_uuid_pk_round_trips_through_bind_layer(db_url):
+    """Non-null UUID PK round-trips on Postgres without `text` coercion.
+
+    Regression for the bind-translation gap surfaced by a user testing
+    refactor/typed-null-binds: U2/U3 added an ``EngineBindValue::Null``
+    arm for ``SeaValue::Uuid(None)`` but no corresponding arm for
+    ``SeaValue::Uuid(Some(_))``, so non-null UUIDs fell through the
+    catch-all and were bound as text-typed nulls. PG rejected the INSERT
+    with ``column "id" is of type uuid but expression is of type text``.
+
+    Postgres-only because SQLite is type-permissive and never reproduced
+    the failure shape; the assertion here is "PG accepts the INSERT and
+    the PK round-trips", which is the directly-affected user behavior."""
+
+    class UuidPk(Model):
+        id: Annotated[uuid.UUID, FerroField(primary_key=True)] = Field(
+            default_factory=uuid.uuid4
+        )
+
+    await connect(db_url, auto_migrate=True)
+
+    target = uuid.uuid4()
+    created = await UuidPk.create(id=target)
+    assert created.id == target
+
+    fetched = await UuidPk.get(target)
+    assert fetched is not None
+    assert fetched.id == target
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_uuid_pk_filter_by_string_does_not_send_text(db_url):
+    """`Profile.where(Profile.id == str(uuid))` on a UUID PK does not
+    fail with ``operator does not exist: uuid = text``.
+
+    Same root cause as ``test_uuid_pk_round_trips_through_bind_layer``,
+    but exercises the WHERE path through ``value_rhs_simple_expr_for_
+    backend`` instead of the INSERT path through ``schema_value_expr``."""
+
+    class UuidProfile(Model):
+        id: Annotated[uuid.UUID, FerroField(primary_key=True)] = Field(
+            default_factory=uuid.uuid4
+        )
+        name: str | None = None
+
+    await connect(db_url, auto_migrate=True)
+
+    target = uuid.uuid4()
+    await UuidProfile.create(id=target, name="alice")
+
+    matched_str = await UuidProfile.where(UuidProfile.id == str(target)).first()
+    assert matched_str is not None
+    assert matched_str.name == "alice"
+
+    matched_uuid = await UuidProfile.where(UuidProfile.id == target).first()
+    assert matched_uuid is not None
+    assert matched_uuid.name == "alice"
 
 
 @pytest.mark.asyncio

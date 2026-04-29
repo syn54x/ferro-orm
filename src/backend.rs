@@ -72,6 +72,10 @@ pub enum EngineBindValue {
     F64(f64),
     String(String),
     Bytes(Vec<u8>),
+    /// Typed UUID bind. Required so non-null UUIDs reach Postgres with the
+    /// correct OID instead of being coerced to `text` (which fails since PG
+    /// has no implicit `text -> uuid` cast). See `engine_bind_values_from_sea`.
+    Uuid(sqlx::types::Uuid),
     /// A `NULL` bind tagged with its intended SQL type. See [`NullKind`].
     Null(NullKind),
 }
@@ -386,6 +390,7 @@ where
         EngineBindValue::F64(v) => query.bind(*v),
         EngineBindValue::String(v) => query.bind(v.clone()),
         EngineBindValue::Bytes(v) => query.bind(v.clone()),
+        EngineBindValue::Uuid(v) => query.bind(*v),
         EngineBindValue::Null(NullKind::Bool) => query.bind(Option::<bool>::None),
         EngineBindValue::Null(NullKind::I64) => query.bind(Option::<i64>::None),
         EngineBindValue::Null(NullKind::F64) => query.bind(Option::<f64>::None),

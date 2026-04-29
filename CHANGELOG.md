@@ -25,6 +25,13 @@
     instead of silently producing a no-op insert.
   - Invalid UUID strings on the INSERT path raise a clean `PyValueError`
     naming the model, column, and offending value (U5).
+  - Bind-layer translation: `engine_bind_values_from_sea` now maps
+    `SeaValue::Uuid(Some(_))` to a typed `EngineBindValue::Uuid(_)` (and a
+    matching `bind_engine_value` arm sends `sqlx::types::Uuid` to the
+    wire). Without this arm, the schema emitters' typed UUIDs from U5/U6
+    fell through the catch-all and were silently rewritten to a text-
+    typed null, producing `column "id" is of type uuid but expression is
+    of type text` for non-null UUID INSERT/UPDATE/WHERE on Postgres.
 
   Out of scope (deferred):
 
