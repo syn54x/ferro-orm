@@ -692,18 +692,28 @@ fn schema_value_expr(
     Ok(expr)
 }
 
+/// Wrap an M2M target/source ID in a SeaQuery expression for a join table.
+///
+/// On Postgres, UUID join columns receive a typed `Value::Uuid(Some(_))` bind
+/// rather than the legacy `cast_as("uuid")` workaround. Non-string values for
+/// UUID columns (e.g. an int passed to a UUID FK) and unparseable UUID strings
+/// fall through to a text-cast for backward compatibility -- Postgres still
+/// surfaces an `invalid input syntax for type uuid` error in those cases.
 fn backend_column_value_expr(
     col_name: &str,
     value: sea_query::Value,
     uuid_columns: &HashSet<String>,
     backend: SqlDialect,
 ) -> SimpleExpr {
-    let expr = Expr::value(value);
     if backend == SqlDialect::Postgres && uuid_columns.contains(col_name) {
-        expr.cast_as("uuid")
-    } else {
-        expr
+        if let sea_query::Value::String(Some(s)) = &value
+            && let Ok(parsed) = uuid::Uuid::parse_str(s)
+        {
+            return Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed))));
+        }
+        return Expr::value(value).cast_as("uuid");
     }
+    Expr::value(value)
 }
 
 #[pyfunction]
@@ -2131,15 +2141,30 @@ pub fn clear_m2m_links<'py>(
     })
 }
 
+/// Convert a Python value into a SeaQuery `Value` for M2M source / target IDs.
+///
+/// M2M IDs cannot be `None`: a NULL target id has no meaningful join semantics
+/// and was previously routed to `String(None)`, which (a) reproduces the #38
+/// text-typed-null bug for non-UUID FKs on Postgres and (b) silently no-ops
+/// on insert. Reject up front with a `PyValueError`.
+///
+/// UUID-string detection happens downstream in `backend_column_value_expr`,
+/// which has the column-context (`uuid_columns`) needed to convert to a typed
+/// `Value::Uuid(Some(_))` for UUID FK columns.
 fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
     if val.is_none() {
-        Ok(sea_query::Value::String(None))
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "M2M source/target ID cannot be None",
+        ));
+    }
+    // Order matters: in Python, `bool` is a subtype of `int`. Check bool
+    // before i64 or True/False round-trip as 1/0.
+    if let Ok(b) = val.extract::<bool>() {
+        Ok(sea_query::Value::Bool(Some(b)))
     } else if let Ok(i) = val.extract::<i64>() {
         Ok(sea_query::Value::BigInt(Some(i)))
     } else if let Ok(f) = val.extract::<f64>() {
         Ok(sea_query::Value::Double(Some(f)))
-    } else if let Ok(b) = val.extract::<bool>() {
-        Ok(sea_query::Value::Bool(Some(b)))
     } else if let Ok(s) = val.extract::<String>() {
         Ok(sea_query::Value::String(Some(Box::new(s))))
     } else {
@@ -2332,6 +2357,120 @@ pub fn raw_fetch_one<'py>(
             None => Ok(py.None()),
         })
     })
+}
+
+#[cfg(test)]
+mod m2m_value_tests {
+    use super::{backend_column_value_expr, python_to_sea_value};
+    use crate::state::SqlDialect;
+    use pyo3::Python;
+    use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
+    use std::collections::HashSet;
+
+    fn extract_pg_value(expr: sea_query::SimpleExpr) -> SeaValue {
+        let (_, values) = Query::insert()
+            .into_table(Alias::new("t"))
+            .columns([Alias::new("c")])
+            .values_panic([expr])
+            .build(PostgresQueryBuilder);
+        values.0.into_iter().next().expect("one value")
+    }
+
+    #[test]
+    fn python_to_sea_value_rejects_none() {
+        Python::attach(|py| {
+            let none = py.None().into_bound(py);
+            let err = python_to_sea_value(none).expect_err("None must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("M2M") && msg.contains("None"),
+                "unexpected error message: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn python_to_sea_value_routes_bool_before_int() {
+        // Regression guard: in Python bool is subtype of int. We must extract
+        // bool first or True/False round-trip as 1/0.
+        Python::attach(|py| {
+            use pyo3::types::PyBool;
+
+            let py_true = PyBool::new(py, true).to_owned().into_any();
+            let v = python_to_sea_value(py_true).unwrap();
+            assert!(matches!(v, SeaValue::Bool(Some(true))));
+        });
+    }
+
+    #[test]
+    fn backend_column_value_expr_emits_typed_uuid_on_postgres_no_cast() {
+        let mut uuid_cols = HashSet::new();
+        uuid_cols.insert("user_id".to_string());
+
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
+        let expr =
+            backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
+
+        let sql = Query::select()
+            .expr(expr.clone())
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            !sql.contains("AS uuid"),
+            "M2M typed UUID bind should not CAST: {sql}"
+        );
+        match extract_pg_value(expr) {
+            SeaValue::Uuid(Some(u)) => assert_eq!(u.to_string(), uuid_str),
+            other => panic!("expected typed Uuid bind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backend_column_value_expr_passthrough_for_non_uuid_column() {
+        let uuid_cols = HashSet::new();
+        let expr = backend_column_value_expr(
+            "team_id",
+            SeaValue::BigInt(Some(42)),
+            &uuid_cols,
+            SqlDialect::Postgres,
+        );
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        // No CAST for plain integer FK
+        assert!(!sql.contains("CAST"), "non-UUID FK should not CAST: {sql}");
+    }
+
+    #[test]
+    fn backend_column_value_expr_passthrough_on_sqlite() {
+        let mut uuid_cols = HashSet::new();
+        uuid_cols.insert("user_id".to_string());
+
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
+        let expr =
+            backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Sqlite);
+
+        let sql = Query::select().expr(expr).to_string(SqliteQueryBuilder);
+        assert!(!sql.contains("AS uuid"), "SQLite must not CAST: {sql}");
+    }
+
+    #[test]
+    fn backend_column_value_expr_falls_back_to_text_cast_on_unparseable_uuid() {
+        // Defensive path: if a non-UUID-shaped string lands on a UUID FK
+        // column, surface the error from Postgres rather than silently
+        // emitting a typed Uuid bind that would fail with a less obvious
+        // diagnostic.
+        let mut uuid_cols = HashSet::new();
+        uuid_cols.insert("user_id".to_string());
+
+        let value = SeaValue::String(Some(Box::new("not-a-uuid".to_string())));
+        let expr =
+            backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("AS uuid"),
+            "fallback CAST expected for unparseable UUID: {sql}"
+        );
+    }
 }
 
 #[cfg(test)]
