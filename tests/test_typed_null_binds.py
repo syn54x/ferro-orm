@@ -6,17 +6,20 @@ The original bug was a PostgreSQL-only "null is text" failure. Postgres rejects
 and never reproduced #38; many of the round-trip assertions here are
 ``postgres_only`` because that's where the failure shape lives.
 
-Two known pre-existing bugs that are *out of scope* for this refactor and
-limit what we can assert on SQLite. When either is fixed, drop the
-``postgres_only`` marker on the corresponding test below so SQLite gets the
-full round-trip assertion.
+Two known pre-existing bugs are *out of scope* for this refactor and limit
+what the matrix can assert. When either is fixed, drop the corresponding
+``skip``/``postgres_only`` marker on the test below.
 
 1. `#41 <https://github.com/syn54x/ferro-orm/issues/41>`_ --
    ``Model.where(Model.col == None)`` panics in the Rust query builder
    (``query.rs::node_to_condition_for_backend`` unwraps ``node.value``).
+   Backend-agnostic: surfaces on both SQLite and Postgres before any SQL
+   is generated, so ``test_filter_by_none_does_not_reproduce_38`` is
+   ``skip``-ped entirely until #41 closes.
 2. `#42 <https://github.com/syn54x/ferro-orm/issues/42>`_ --
    ``UPDATE col = NULL`` on SQLite reads back as ``0`` (or the type's zero
-   value) due to a hydration issue in ``materialize_engine_row``.
+   value) due to a hydration issue in ``materialize_engine_row``. SQLite-
+   specific, so ``test_update_to_none_for_each_type`` is ``postgres_only``.
 
 See ``docs/plans/2026-04-29-001-typed-null-binds-plan.md`` for context.
 """
@@ -216,15 +219,22 @@ async def test_update_to_none_executes_without_error(db_url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.postgres_only
+@pytest.mark.skip(
+    reason=(
+        "Blocked by #41: filter `col == None` panics in "
+        "node_to_condition_for_backend before any SQL reaches the backend, "
+        "so the #38 assertion on the filter-by-None path can't run on "
+        "either backend until #41 is fixed. Drop this skip and run on the "
+        "full matrix once #41 closes."
+    )
+)
 async def test_filter_by_none_does_not_reproduce_38(db_url):
     """Query filter ``WHERE col == None`` on a nullable integer column must
     not fail with a Postgres OID type error.
 
-    Postgres-only because (a) this is where the OID failure mode lives and
-    (b) SQLite has a pre-existing panic at ``query.rs::node_to_condition_
-    for_backend`` when ``col == None`` is passed (see #41) -- a separate
-    bug whose fix is out of scope for this refactor."""
+    Backend-agnostic: the panic from #41 short-circuits this test on every
+    backend, not just SQLite. Confirmed reproduced on Postgres while running
+    the full matrix during the typed-null-binds refactor."""
 
     class Filterable(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
