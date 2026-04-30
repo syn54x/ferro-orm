@@ -55,10 +55,12 @@ class Query(Generic[T]):
         self._m2m_context: dict[str, Any] | None = None
 
     def _transaction_or_using(self) -> tuple[str | None, str | None]:
-        from ..state import _CURRENT_TRANSACTION
+        from ..state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
 
         tx_id = _CURRENT_TRANSACTION.get()
         if tx_id is not None and self._using is not None:
+            if self._using == _CURRENT_TRANSACTION_CONNECTION.get():
+                return tx_id, None
             raise ValueError(
                 "ORM queries inside a transaction inherit the transaction connection"
             )

@@ -23,6 +23,7 @@ from ._core import (
     rollback_transaction,
     save_bulk_records,
     save_record,
+    transaction_connection_name,
 )
 from .base import ForeignKey, foreign_key_allows_none
 from .metaclass import ModelMetaclass
@@ -36,6 +37,9 @@ _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
 def _transaction_or_using(using: str | None) -> tuple[str | None, str | None]:
     tx_id = _CURRENT_TRANSACTION.get()
     if tx_id is not None and using is not None:
+        tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
+        if using == tx_connection:
+            return tx_id, None
         raise ValueError("ORM operations inside a transaction inherit the transaction connection")
     return tx_id, using
 
@@ -51,6 +55,8 @@ def _instance_transaction_route(
     if tx_id is not None:
         tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
         if using is not None:
+            if using == tx_connection:
+                return tx_id, None, origin or tx_connection
             raise ValueError("ORM operations inside a transaction inherit the transaction connection")
         return tx_id, None, origin or tx_connection
 
@@ -96,10 +102,9 @@ async def transaction(using: str | None = None):
 
     parent_tx_id = _CURRENT_TRANSACTION.get()
     tx_id = await begin_transaction(parent_tx_id, using)
+    connection_name = transaction_connection_name(tx_id)
     token = _CURRENT_TRANSACTION.set(tx_id)
-    connection_token = _CURRENT_TRANSACTION_CONNECTION.set(
-        _CURRENT_TRANSACTION_CONNECTION.get() if parent_tx_id is not None else using
-    )
+    connection_token = _CURRENT_TRANSACTION_CONNECTION.set(connection_name)
     try:
         yield Transaction(tx_id)
         await commit_transaction(tx_id)

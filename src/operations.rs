@@ -832,6 +832,14 @@ pub fn commit_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, P
 }
 
 #[pyfunction]
+pub fn transaction_connection_name(tx_id: String) -> PyResult<String> {
+    TRANSACTION_REGISTRY
+        .get(&tx_id)
+        .map(|tx| tx.value().connection_name.clone())
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))
+}
+
+#[pyfunction]
 pub fn rollback_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let tx_handle = TRANSACTION_REGISTRY

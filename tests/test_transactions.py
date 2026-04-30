@@ -187,6 +187,49 @@ async def test_instance_methods_loaded_inside_named_transaction_keep_identity_sc
 
 
 @pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_matching_explicit_using_inside_named_transaction_is_allowed(tmp_path):
+    """Explicit using is a no-op when it matches the active transaction route."""
+
+    class TxMatchingUsingUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    app_db = tmp_path / "app.db"
+    service_db = tmp_path / "service.db"
+
+    await connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await connect(f"sqlite:{service_db}?mode=rwc", name="service")
+    from ferro import create_tables
+
+    await create_tables()
+    await create_tables(using="service")
+    await TxMatchingUsingUser.create(id=1, username="app")
+    await TxMatchingUsingUser.using("service").create(id=1, username="service")
+    evict_instance("TxMatchingUsingUser", "1")
+    evict_instance("TxMatchingUsingUser", "1", using="service")
+
+    async with transaction(using="service"):
+        service_row = await TxMatchingUsingUser.using("service").get(1)
+        assert service_row is not None
+        assert service_row.username == "service"
+
+        service_row.username = "updated-service"
+        await service_row.save(using="service")
+
+        with pytest.raises(ValueError, match="inherit the transaction connection"):
+            await TxMatchingUsingUser.using("app").get(1)
+
+    app_row = await TxMatchingUsingUser.get(1)
+    service_row = await TxMatchingUsingUser.using("service").get(1)
+
+    assert app_row is not None
+    assert service_row is not None
+    assert app_row.username == "app"
+    assert service_row.username == "updated-service"
+
+
+@pytest.mark.asyncio
 async def test_transaction_commit(db_url):
     """Test that operations inside a transaction are committed on success."""
 

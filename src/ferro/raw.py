@@ -31,7 +31,7 @@ from typing import Any
 from ._core import raw_execute as _raw_execute
 from ._core import raw_fetch_all as _raw_fetch_all
 from ._core import raw_fetch_one as _raw_fetch_one
-from .state import _CURRENT_TRANSACTION
+from .state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
 
 __all__ = ["execute", "fetch_all", "fetch_one", "Transaction"]
 
@@ -71,6 +71,8 @@ def _check_sql(sql: str) -> None:
 def _transaction_or_using(using: str | None) -> tuple[str | None, str | None]:
     tx_id = _CURRENT_TRANSACTION.get()
     if tx_id is not None and using is not None:
+        if using == _CURRENT_TRANSACTION_CONNECTION.get():
+            return tx_id, None
         raise ValueError("Raw SQL inside a transaction inherits the transaction connection")
     return tx_id, using
 
