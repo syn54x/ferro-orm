@@ -3,7 +3,18 @@ import uuid
 import sqlite3
 from contextlib import closing
 from typing import Annotated
-from ferro import Model, connect, FerroField, execute, transaction
+from ferro import (
+    BackRef,
+    FerroField,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    connect,
+    evict_instance,
+    execute,
+    transaction,
+)
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -32,6 +43,66 @@ async def test_transaction_using_routes_unqualified_raw_sql(tmp_path):
 
     assert app_tables == []
     assert service_tables == [("marker",)]
+
+
+@pytest.mark.asyncio
+async def test_relationships_loaded_inside_transaction_inherit_transaction(db_url):
+    """Relations on transaction-loaded instances should use the active transaction."""
+
+    class TxRelationParent(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        children: Relation[list["TxRelationChild"]] = BackRef()
+
+    class TxRelationChild(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        parent: Annotated[TxRelationParent, ForeignKey(related_name="children")]
+
+    class TxRelationCourse(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        students: Relation[list["TxRelationStudent"]] = BackRef()
+
+    class TxRelationStudent(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        courses: Relation[list[TxRelationCourse]] = ManyToMany(related_name="students")
+
+    await connect(db_url, auto_migrate=True)
+
+    parent = await TxRelationParent.create(id=1, label="parent")
+    await TxRelationChild.create(id=1, label="child", parent=parent)
+    student = await TxRelationStudent.create(id=1, label="student")
+    course_a = await TxRelationCourse.create(id=1, label="course-a")
+    course_b = await TxRelationCourse.create(id=2, label="course-b")
+    await student.courses.add(course_a)
+
+    evict_instance("TxRelationParent", "1")
+    evict_instance("TxRelationChild", "1")
+    evict_instance("TxRelationStudent", "1")
+
+    async with transaction():
+        loaded_parent = await TxRelationParent.get(1)
+        assert loaded_parent is not None
+        children = await loaded_parent.children.all()
+        assert [child.label for child in children] == ["child"]
+
+        loaded_child = await TxRelationChild.get(1)
+        assert loaded_child is not None
+        loaded_child_parent = await loaded_child.parent
+        assert loaded_child_parent.label == "parent"
+
+        loaded_student = await TxRelationStudent.get(1)
+        assert loaded_student is not None
+        courses = await loaded_student.courses.all()
+        assert [course.label for course in courses] == ["course-a"]
+        await loaded_student.courses.add(course_b)
+
+    reloaded_student = await TxRelationStudent.get(1)
+    assert reloaded_student is not None
+    courses = await reloaded_student.courses.order_by(TxRelationCourse.id).all()
+    assert [course.label for course in courses] == ["course-a", "course-b"]
 
 
 @pytest.mark.asyncio
