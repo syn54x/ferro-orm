@@ -44,6 +44,27 @@ pub enum EngineConnection {
     Postgres(PoolConnection<Postgres>),
 }
 
+/// Type tag carried by `EngineBindValue::Null` so the bind layer can emit a
+/// type-correct `NULL` parameter on backends that perform strict OID
+/// validation (notably PostgreSQL).
+///
+/// Schema-driven emission paths (INSERT/UPDATE values, query-filter
+/// predicates, M2M target IDs) infer the kind from column metadata and emit
+/// the matching variant. The raw-SQL bind path has no schema context and
+/// emits `Untyped` — see `docs/solutions/patterns/typed-null-binds.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NullKind {
+    Bool,
+    I64,
+    F64,
+    String,
+    Bytes,
+    Uuid,
+    /// Used by the raw-SQL bind path and as the documented fallback for any
+    /// SeaQuery `Value` variant not yet mapped in `engine_bind_values_from_sea`.
+    Untyped,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineBindValue {
     Bool(bool),
@@ -51,7 +72,12 @@ pub enum EngineBindValue {
     F64(f64),
     String(String),
     Bytes(Vec<u8>),
-    Null,
+    /// Typed UUID bind. Required so non-null UUIDs reach Postgres with the
+    /// correct OID instead of being coerced to `text` (which fails since PG
+    /// has no implicit `text -> uuid` cast). See `engine_bind_values_from_sea`.
+    Uuid(sqlx::types::Uuid),
+    /// A `NULL` bind tagged with its intended SQL type. See [`NullKind`].
+    Null(NullKind),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -350,7 +376,13 @@ where
     f64: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
     String: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
     Vec<u8>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    sqlx::types::Uuid: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<bool>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<i64>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<f64>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
     Option<String>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<Vec<u8>>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<sqlx::types::Uuid>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
 {
     match value {
         EngineBindValue::Bool(v) => query.bind(*v),
@@ -358,7 +390,16 @@ where
         EngineBindValue::F64(v) => query.bind(*v),
         EngineBindValue::String(v) => query.bind(v.clone()),
         EngineBindValue::Bytes(v) => query.bind(v.clone()),
-        EngineBindValue::Null => query.bind(Option::<String>::None),
+        EngineBindValue::Uuid(v) => query.bind(*v),
+        EngineBindValue::Null(NullKind::Bool) => query.bind(Option::<bool>::None),
+        EngineBindValue::Null(NullKind::I64) => query.bind(Option::<i64>::None),
+        EngineBindValue::Null(NullKind::F64) => query.bind(Option::<f64>::None),
+        EngineBindValue::Null(NullKind::String) => query.bind(Option::<String>::None),
+        EngineBindValue::Null(NullKind::Bytes) => query.bind(Option::<Vec<u8>>::None),
+        EngineBindValue::Null(NullKind::Uuid) => query.bind(Option::<sqlx::types::Uuid>::None),
+        // Raw-SQL path has no schema context; legacy text-typed null preserves
+        // pre-refactor behavior. Schema-driven paths never construct this.
+        EngineBindValue::Null(NullKind::Untyped) => query.bind(Option::<String>::None),
     }
 }
 
@@ -646,5 +687,61 @@ mod tests {
         assert_eq!(EngineValue::I64(42).as_i64(), Some(42));
         assert_eq!(EngineValue::String("42".to_string()).as_i64(), Some(42));
         assert_eq!(EngineValue::Null.as_i64(), None);
+    }
+
+    #[test]
+    fn null_kind_variants_are_distinct() {
+        use super::NullKind;
+
+        assert_ne!(NullKind::I64, NullKind::Bool);
+        assert_ne!(NullKind::I64, NullKind::F64);
+        assert_ne!(NullKind::I64, NullKind::String);
+        assert_ne!(NullKind::I64, NullKind::Bytes);
+        assert_ne!(NullKind::I64, NullKind::Uuid);
+        assert_ne!(NullKind::I64, NullKind::Untyped);
+        assert_ne!(NullKind::Untyped, NullKind::Bool);
+        assert_ne!(NullKind::Untyped, NullKind::Uuid);
+    }
+
+    #[test]
+    fn null_kind_equality_is_reflexive() {
+        use super::NullKind;
+
+        assert_eq!(NullKind::I64, NullKind::I64);
+        assert_eq!(NullKind::Bool, NullKind::Bool);
+        assert_eq!(NullKind::F64, NullKind::F64);
+        assert_eq!(NullKind::String, NullKind::String);
+        assert_eq!(NullKind::Bytes, NullKind::Bytes);
+        assert_eq!(NullKind::Uuid, NullKind::Uuid);
+        assert_eq!(NullKind::Untyped, NullKind::Untyped);
+    }
+
+    #[test]
+    fn engine_bind_value_carries_null_kind() {
+        use super::NullKind;
+
+        let typed = EngineBindValue::Null(NullKind::I64);
+        let untyped = EngineBindValue::Null(NullKind::Untyped);
+
+        assert_eq!(typed, EngineBindValue::Null(NullKind::I64));
+        assert_ne!(typed, untyped);
+        assert_ne!(typed, EngineBindValue::Null(NullKind::Bool));
+    }
+
+    #[test]
+    fn engine_bind_value_null_debug_output_includes_kind() {
+        use super::NullKind;
+
+        let typed = EngineBindValue::Null(NullKind::I64);
+        let debug_repr = format!("{typed:?}");
+
+        assert!(
+            debug_repr.contains("Null"),
+            "Debug should mention Null variant: {debug_repr}"
+        );
+        assert!(
+            debug_repr.contains("I64"),
+            "Debug should mention NullKind::I64: {debug_repr}"
+        );
     }
 }

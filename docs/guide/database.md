@@ -85,6 +85,46 @@ If you assemble the URI yourself, percent-encode reserved characters in the pass
 
 ## Connection Options
 
+### Named Connections
+
+Ferro can keep multiple active pools in one process. Unnamed `connect()` calls register and select the `"default"` connection. Named connections are explicit and only become the default when `default=True` is passed.
+
+```python
+import os
+import ferro
+
+await ferro.connect(
+    os.environ["APP_DATABASE_URL"],
+    name="app",
+    default=True,
+    pool=ferro.PoolConfig(max_connections=10, min_connections=1),
+)
+await ferro.connect(
+    os.environ["SERVICE_DATABASE_URL"],
+    name="service",
+    pool=ferro.PoolConfig(max_connections=3),
+)
+
+# Default app role
+users = await User.all()
+
+# Explicit service role
+job = await Job.using("service").create(kind="backfill")
+await ferro.execute("select run_internal_job(?)", job.id, using="service")
+```
+
+Use constants or trusted server-side code to choose `using` values. Do not bind connection names directly from request parameters, headers, GraphQL arguments, or other untrusted input.
+
+### Transaction Inheritance
+
+Transactions are bound to one connection. Operations inside the block inherit that connection; trying to switch to another connection inside the transaction raises.
+
+```python
+async with ferro.transaction(using="service"):
+    await Job.create(kind="backfill")  # runs on service
+    await ferro.execute("select set_config('role_context', ?, true)", "pipeline")
+```
+
 ### Auto-Migration (Development)
 
 During development, automatically align the database schema with your models:
@@ -110,14 +150,31 @@ async def main():
     # Import models to register them
     from myapp.models import User, Post, Comment
 
-    # Create all tables
+    # Create all tables on the default connection
     await ferro.create_tables()
 ```
 
 ## Multiple Databases
 
-!!! warning "Feature Not Implemented"
-    Multi-database support is not yet available. Ferro currently supports only a single database connection per application. See [Coming Soon](../coming-soon.md#multiple-database-support) and [How-To: Multiple Databases](../howto/multiple-databases.md) for planned features.
+Use named connections for multiple databases, roles, or pools:
+
+```python
+await ferro.connect(os.environ["APP_DATABASE_URL"], name="app", default=True)
+await ferro.connect(os.environ["SERVICE_DATABASE_URL"], name="service")
+
+await ferro.create_tables(using="service")
+service_users = await User.using("service").all()
+```
+
+Ferro does not provide automatic router policies, read/write splitting, distributed transactions, or cross-connection joins in v1. Route each operation explicitly when it should not use the default connection.
+
+### Supabase Role Guidance
+
+For Supabase/Postgres deployments, keep elevated service credentials server-side. Prefer least-privileged custom roles where possible, and avoid making a service-role connection the default in user-facing runtimes.
+
+Named connections isolate pools and roles, not per-request RLS/JWT/session context inside one shared pool. If you set Postgres session state, prefer transaction-local settings and keep the work inside `transaction(using=...)`.
+
+Service-origin objects can contain data unavailable to the app role. Treat them as elevated data and filter them deliberately before returning user-facing responses.
 
 ## Health Checks
 
@@ -196,16 +253,12 @@ async def on_shutdown():
 !!! note "disconnect() Not Available"
     The `disconnect()` function is not yet implemented. Connection cleanup happens automatically on process exit. See [Coming Soon](../coming-soon.md#disconnect) for more information.
 
-### Use One Long-Lived Connection
+### Use Long-Lived Pools
 
-!!! note
-    Advanced pool configuration such as `max_connections`, `min_connections`, and `connect_timeout` is not exposed by Ferro's current Python API. See [Coming Soon](../coming-soon.md#connection-pool-configuration).
-
-For web applications, connect once at startup and reuse that engine:
+For web applications, connect once at startup and reuse those pools:
 
 ```python
-# Basic connection for production
-await ferro.connect("postgresql://localhost/proddb")
+await ferro.connect("postgresql://localhost/proddb", name="app", default=True)
 ```
 
 ### Separate Dev/Prod Configs

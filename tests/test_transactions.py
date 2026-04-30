@@ -1,9 +1,232 @@
 import pytest
 import uuid
+import sqlite3
+from contextlib import closing
 from typing import Annotated
-from ferro import Model, connect, FerroField, transaction
+from ferro import (
+    BackRef,
+    FerroField,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    connect,
+    evict_instance,
+    execute,
+    transaction,
+)
 
 pytestmark = pytest.mark.backend_matrix
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_transaction_using_routes_unqualified_raw_sql(tmp_path):
+    """A transaction opened with using=... should pin unqualified work to that connection."""
+    app_db = tmp_path / "app.db"
+    service_db = tmp_path / "service.db"
+
+    await connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await connect(f"sqlite:{service_db}?mode=rwc", name="service")
+
+    async with transaction(using="service"):
+        await execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
+
+    with closing(sqlite3.connect(app_db)) as app_conn:
+        app_tables = app_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'marker'"
+        ).fetchall()
+    with closing(sqlite3.connect(service_db)) as service_conn:
+        service_tables = service_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'marker'"
+        ).fetchall()
+
+    assert app_tables == []
+    assert service_tables == [("marker",)]
+
+
+@pytest.mark.asyncio
+async def test_relationships_loaded_inside_transaction_inherit_transaction(db_url):
+    """Relations on transaction-loaded instances should use the active transaction."""
+
+    class TxRelationParent(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        children: Relation[list["TxRelationChild"]] = BackRef()
+
+    class TxRelationChild(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        parent: Annotated[TxRelationParent, ForeignKey(related_name="children")]
+
+    class TxRelationCourse(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        students: Relation[list["TxRelationStudent"]] = BackRef()
+
+    class TxRelationStudent(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        courses: Relation[list[TxRelationCourse]] = ManyToMany(related_name="students")
+
+    await connect(db_url, auto_migrate=True)
+
+    parent = await TxRelationParent.create(id=1, label="parent")
+    await TxRelationChild.create(id=1, label="child", parent=parent)
+    student = await TxRelationStudent.create(id=1, label="student")
+    course_a = await TxRelationCourse.create(id=1, label="course-a")
+    course_b = await TxRelationCourse.create(id=2, label="course-b")
+    await student.courses.add(course_a)
+
+    evict_instance("TxRelationParent", "1")
+    evict_instance("TxRelationChild", "1")
+    evict_instance("TxRelationStudent", "1")
+
+    async with transaction():
+        loaded_parent = await TxRelationParent.get(1)
+        assert loaded_parent is not None
+        children = await loaded_parent.children.all()
+        assert [child.label for child in children] == ["child"]
+
+        loaded_child = await TxRelationChild.get(1)
+        assert loaded_child is not None
+        loaded_child_parent = await loaded_child.parent
+        assert loaded_child_parent.label == "parent"
+
+        loaded_student = await TxRelationStudent.get(1)
+        assert loaded_student is not None
+        courses = await loaded_student.courses.all()
+        assert [course.label for course in courses] == ["course-a"]
+        await loaded_student.courses.add(course_b)
+
+    reloaded_student = await TxRelationStudent.get(1)
+    assert reloaded_student is not None
+    courses = await reloaded_student.courses.order_by(TxRelationCourse.id).all()
+    assert [course.label for course in courses] == ["course-a", "course-b"]
+
+
+@pytest.mark.asyncio
+async def test_instance_methods_loaded_inside_transaction_inherit_transaction(db_url):
+    """Transaction-loaded instances should save, refresh, and delete in the transaction."""
+
+    class TxInstanceMethodUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    await connect(db_url, auto_migrate=True)
+    created = await TxInstanceMethodUser.create(id=1, username="before")
+    evict_instance("TxInstanceMethodUser", str(created.id))
+
+    async with transaction():
+        loaded = await TxInstanceMethodUser.get(1)
+        assert loaded is not None
+
+        loaded.username = "saved"
+        await loaded.save()
+
+        placeholder_sql = (
+            "UPDATE txinstancemethoduser SET username = $1 WHERE id = $2"
+            if db_url.startswith(("postgres://", "postgresql://"))
+            else "UPDATE txinstancemethoduser SET username = ? WHERE id = ?"
+        )
+        await execute(placeholder_sql, "refreshed", 1)
+        await loaded.refresh()
+        assert loaded.username == "refreshed"
+
+        await loaded.delete()
+
+    assert await TxInstanceMethodUser.get(1) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_instance_methods_loaded_inside_named_transaction_keep_identity_scope(tmp_path):
+    """Service transaction instance methods should not evict or register app objects."""
+
+    class TxNamedInstanceMethodUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    app_db = tmp_path / "app.db"
+    service_db = tmp_path / "service.db"
+
+    await connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await connect(f"sqlite:{service_db}?mode=rwc", name="service")
+    from ferro import create_tables
+
+    await create_tables()
+    await create_tables(using="service")
+
+    await TxNamedInstanceMethodUser.create(id=1, username="app")
+    await TxNamedInstanceMethodUser.using("service").create(id=1, username="service")
+    evict_instance("TxNamedInstanceMethodUser", "1")
+    evict_instance("TxNamedInstanceMethodUser", "1", using="service")
+
+    async with transaction(using="service"):
+        loaded = await TxNamedInstanceMethodUser.get(1)
+        assert loaded is not None
+        loaded.username = "service-saved"
+        await loaded.save()
+
+        await execute(
+            "UPDATE txnamedinstancemethoduser SET username = ? WHERE id = ?",
+            "service-refreshed",
+            1,
+        )
+        await loaded.refresh()
+        assert loaded.username == "service-refreshed"
+
+    app_row = await TxNamedInstanceMethodUser.get(1)
+    service_row = await TxNamedInstanceMethodUser.using("service").get(1)
+
+    assert app_row is not None
+    assert service_row is not None
+    assert app_row.username == "app"
+    assert service_row.username == "service-refreshed"
+    assert app_row is not service_row
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_matching_explicit_using_inside_named_transaction_is_allowed(tmp_path):
+    """Explicit using is a no-op when it matches the active transaction route."""
+
+    class TxMatchingUsingUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    app_db = tmp_path / "app.db"
+    service_db = tmp_path / "service.db"
+
+    await connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await connect(f"sqlite:{service_db}?mode=rwc", name="service")
+    from ferro import create_tables
+
+    await create_tables()
+    await create_tables(using="service")
+    await TxMatchingUsingUser.create(id=1, username="app")
+    await TxMatchingUsingUser.using("service").create(id=1, username="service")
+    evict_instance("TxMatchingUsingUser", "1")
+    evict_instance("TxMatchingUsingUser", "1", using="service")
+
+    async with transaction(using="service"):
+        service_row = await TxMatchingUsingUser.using("service").get(1)
+        assert service_row is not None
+        assert service_row.username == "service"
+
+        service_row.username = "updated-service"
+        await service_row.save(using="service")
+
+        with pytest.raises(ValueError, match="inherit the transaction connection"):
+            await TxMatchingUsingUser.using("app").get(1)
+
+    app_row = await TxMatchingUsingUser.get(1)
+    service_row = await TxMatchingUsingUser.using("service").get(1)
+
+    assert app_row is not None
+    assert service_row is not None
+    assert app_row.username == "app"
+    assert service_row.username == "updated-service"
 
 
 @pytest.mark.asyncio

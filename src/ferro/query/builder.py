@@ -35,7 +35,7 @@ class Query(Generic[T]):
         order_by_clause: Sort definitions sent to the Rust core.
     """
 
-    def __init__(self, model_cls: Type[T]):
+    def __init__(self, model_cls: Type[T], using: str | None = None):
         """Initialize a query for a model class.
 
         Args:
@@ -47,11 +47,24 @@ class Query(Generic[T]):
             True
         """
         self.model_cls = model_cls
+        self._using = using
         self.where_clause: list["QueryNode"] = []
         self.order_by_clause: list[dict[str, str]] = []
         self._limit: int | None = None
         self._offset: int | None = None
         self._m2m_context: dict[str, Any] | None = None
+
+    def _transaction_or_using(self) -> tuple[str | None, str | None]:
+        from ..state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
+
+        tx_id = _CURRENT_TRANSACTION.get()
+        if tx_id is not None and self._using is not None:
+            if self._using == _CURRENT_TRANSACTION_CONNECTION.get():
+                return tx_id, None
+            raise ValueError(
+                "ORM queries inside a transaction inherit the transaction connection"
+            )
+        return tx_id, self._using
 
     def _m2m(
         self, join_table: str, source_col: str, target_col: str, source_id: Any
@@ -162,11 +175,9 @@ class Query(Generic[T]):
             "offset": self._offset,
             "m2m": self._m2m_context,
         }
-        from ..state import _CURRENT_TRANSACTION
-
-        tx_id = _CURRENT_TRANSACTION.get()
+        tx_id, using = self._transaction_or_using()
         results = await fetch_filtered(
-            self.model_cls, _query_def_to_json(query_def), tx_id
+            self.model_cls, _query_def_to_json(query_def), tx_id, using
         )
         for instance in results:
             if hasattr(self.model_cls, "_fix_types"):
@@ -189,11 +200,9 @@ class Query(Generic[T]):
             "where_clause": [node.to_dict() for node in self.where_clause],
             "m2m": self._m2m_context,
         }
-        from ..state import _CURRENT_TRANSACTION
-
-        tx_id = _CURRENT_TRANSACTION.get()
+        tx_id, using = self._transaction_or_using()
         return await count_filtered(
-            self.model_cls.__name__, _query_def_to_json(query_def), tx_id
+            self.model_cls.__name__, _query_def_to_json(query_def), tx_id, using
         )
 
     async def update(self, **fields) -> int:
@@ -218,15 +227,14 @@ class Query(Generic[T]):
         }
         from pydantic_core import to_json
 
-        from ..state import _CURRENT_TRANSACTION
-
-        tx_id = _CURRENT_TRANSACTION.get()
+        tx_id, using = self._transaction_or_using()
         # Use pydantic_core.to_json to handle Decimals, UUIDs, etc. in kwargs
         return await update_filtered(
             self.model_cls.__name__,
             _query_def_to_json(query_def),
             to_json(fields).decode(),
             tx_id,
+            using,
         )
 
     async def first(self) -> T | None:
@@ -265,11 +273,9 @@ class Query(Generic[T]):
             "limit": self._limit,
             "offset": self._offset,
         }
-        from ..state import _CURRENT_TRANSACTION
-
-        tx_id = _CURRENT_TRANSACTION.get()
+        tx_id, using = self._transaction_or_using()
         return await delete_filtered(
-            self.model_cls.__name__, _query_def_to_json(query_def), tx_id
+            self.model_cls.__name__, _query_def_to_json(query_def), tx_id, using
         )
 
     async def exists(self) -> bool:
@@ -312,7 +318,7 @@ class Query(Generic[T]):
 
         from ..state import _CURRENT_TRANSACTION
 
-        tx_id = _CURRENT_TRANSACTION.get()
+        tx_id, using = self._transaction_or_using()
         await add_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
@@ -320,6 +326,7 @@ class Query(Generic[T]):
             self._m2m_context["source_id"],
             ids,
             tx_id,
+            using,
         )
 
     async def remove(self, *instances: Any) -> None:
@@ -347,7 +354,7 @@ class Query(Generic[T]):
 
         from ..state import _CURRENT_TRANSACTION
 
-        tx_id = _CURRENT_TRANSACTION.get()
+        tx_id, using = self._transaction_or_using()
         await remove_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
@@ -355,6 +362,7 @@ class Query(Generic[T]):
             self._m2m_context["source_id"],
             ids,
             tx_id,
+            using,
         )
 
     async def clear(self) -> None:
@@ -374,12 +382,13 @@ class Query(Generic[T]):
 
         from ..state import _CURRENT_TRANSACTION
 
-        tx_id = _CURRENT_TRANSACTION.get()
+        tx_id, using = self._transaction_or_using()
         await clear_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
             self._m2m_context["source_id"],
             tx_id,
+            using,
         )
 
     def __repr__(self):

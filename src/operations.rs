@@ -3,11 +3,13 @@
 //! This module implements high-performance CRUD operations, leveraging
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
-use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue};
+use crate::backend::{
+    BackendKind, EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind,
+};
 use crate::query::QueryDef;
 use crate::state::{
     IDENTITY_MAP, MODEL_REGISTRY, RustValue, SqlDialect, TRANSACTION_REGISTRY,
-    TransactionConnection, TransactionHandle, engine_handle,
+    TransactionConnection, TransactionHandle, connection_for_route, engine_for_connection,
 };
 use pyo3::prelude::*;
 use sea_query::{
@@ -25,12 +27,48 @@ fn get_transaction_connection(tx_id: Option<String>) -> Option<TransactionConnec
     })
 }
 
-fn active_engine() -> PyResult<Arc<EngineHandle>> {
-    let engine = engine_handle()
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized"))?;
-    Ok(engine)
+fn get_transaction_route(tx_id: Option<String>) -> Option<(String, TransactionConnection)> {
+    tx_id.and_then(|id| {
+        TRANSACTION_REGISTRY.get(&id).map(|tx| {
+            (
+                tx.value().connection_name.clone(),
+                tx.value().conn.clone(),
+            )
+        })
+    })
 }
 
+fn active_engine_for_connection(using: Option<String>) -> PyResult<Arc<EngineHandle>> {
+    engine_for_connection(using)
+}
+
+fn active_route_for_operation(
+    tx_id: Option<String>,
+    using: Option<String>,
+) -> PyResult<(String, Arc<EngineHandle>, Option<TransactionConnection>, BackendKind)> {
+    let tx_route = get_transaction_route(tx_id);
+    let route_using = tx_route
+        .as_ref()
+        .map(|(connection_name, _)| connection_name.clone())
+        .or(using);
+    let (connection_name, engine) = active_connection_for_route(route_using)?;
+    let backend = engine.backend();
+    let tx_conn = tx_route.map(|(_, conn)| conn);
+    Ok((connection_name, engine, tx_conn, backend))
+}
+
+fn active_connection_for_route(using: Option<String>) -> PyResult<(String, Arc<EngineHandle>)> {
+    connection_for_route(using)
+}
+
+/// Map SeaQuery `Value` variants to `EngineBindValue`.
+///
+/// Typed `None` variants are preserved as `Null(NullKind::T)` so the bind
+/// layer can emit a parameter with the correct OID on backends that perform
+/// strict type validation (notably PostgreSQL). Any unmapped variant -- new
+/// SeaQuery variants, feature-gated types we don't yet handle -- falls
+/// through to `Null(NullKind::Untyped)`. The fallback is locked in by
+/// `engine_bind_tests::falls_back_to_untyped_for_unmapped_variant`.
 fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
     values
         .iter()
@@ -46,7 +84,24 @@ fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
             SeaValue::String(Some(s)) => EngineBindValue::String(s.as_ref().clone()),
             SeaValue::Char(Some(c)) => EngineBindValue::String(c.to_string()),
             SeaValue::Bytes(Some(b)) => EngineBindValue::Bytes(b.as_ref().clone()),
-            _ => EngineBindValue::Null,
+            // Critical: without this arm, `Value::Uuid(Some(_))` falls through
+            // to the `_ => Null(Untyped)` catch-all and silently becomes a
+            // text-typed null bind on the wire. PG then rejects with
+            // "column ... is of type uuid but expression is of type text".
+            SeaValue::Uuid(Some(u)) => EngineBindValue::Uuid(**u),
+            SeaValue::Bool(None) => EngineBindValue::Null(NullKind::Bool),
+            SeaValue::TinyInt(None)
+            | SeaValue::SmallInt(None)
+            | SeaValue::Int(None)
+            | SeaValue::BigInt(None)
+            | SeaValue::BigUnsigned(None) => EngineBindValue::Null(NullKind::I64),
+            SeaValue::Float(None) | SeaValue::Double(None) => EngineBindValue::Null(NullKind::F64),
+            SeaValue::String(None) | SeaValue::Char(None) => {
+                EngineBindValue::Null(NullKind::String)
+            }
+            SeaValue::Bytes(None) => EngineBindValue::Null(NullKind::Bytes),
+            SeaValue::Uuid(None) => EngineBindValue::Null(NullKind::Uuid),
+            _ => EngineBindValue::Null(NullKind::Untyped),
         })
         .collect()
 }
@@ -498,46 +553,28 @@ fn schema_property<'a>(
         .map(|prop| resolve_ref(schema, prop))
 }
 
+/// Build a SeaQuery expression for a column value, preserving type information
+/// across NULL and primitive binds so the SQLx layer can emit a parameter with
+/// the correct OID on strict-typing backends (notably PostgreSQL).
+///
+/// `table_name` is used only for error diagnostics (e.g. UUID parse failures).
+///
+/// Schema-driven null handling: the JSON-`null` arm picks a typed SeaQuery
+/// `None` variant from column metadata (JSON type / format /
+/// `uuid_columns` / `ts_cast`). Non-null UUID values on Postgres are parsed
+/// to `uuid::Uuid` and emitted as `Value::Uuid(Some(...))` -- no
+/// `cast_as("uuid")` wrapping. See `docs/solutions/patterns/typed-null-binds.md`.
 fn schema_value_expr(
     schema: &serde_json::Value,
+    table_name: &str,
     col_name: &str,
     value: &serde_json::Value,
     enum_udt: &HashMap<String, String>,
     uuid_columns: &HashSet<String>,
     ts_cast: &HashMap<String, String>,
     backend: SqlDialect,
-) -> SimpleExpr {
+) -> PyResult<SimpleExpr> {
     let col_info = schema_property(schema, col_name);
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && let Some(tn) = postgres_enum_type_name_for_column(col_name, enum_udt, col_info)
-    {
-        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            .cast_as(Alias::new(tn.as_str()));
-    }
-    if value.is_null() && backend == SqlDialect::Postgres && uuid_columns.contains(col_name) {
-        return Expr::value(sea_query::Value::String(None)).cast_as("uuid");
-    }
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && uuid_columns.contains(col_name)
-        && uuid::Uuid::parse_str(s).is_ok()
-    {
-        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid");
-    }
-    if value.is_null()
-        && backend == SqlDialect::Postgres
-        && let Some(cast) = ts_cast.get(col_name)
-    {
-        return Expr::value(sea_query::Value::String(None)).cast_as(Alias::new(cast.as_str()));
-    }
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && let Some(cast) = ts_cast.get(col_name)
-    {
-        return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            .cast_as(Alias::new(cast.as_str()));
-    }
     let format = col_info.and_then(property_format);
     let json_type = col_info.and_then(property_json_type);
     let is_decimal = col_info
@@ -545,22 +582,69 @@ fn schema_value_expr(
         .and_then(|a| a.as_array())
         .map(|items| items.iter().any(|item| item.get("pattern").is_some()))
         .unwrap_or(false);
+    // UUID columns are detected either via DB introspection (uuid_columns
+    // populated by postgres_uuid_column_names) or via Pydantic format hint.
+    let is_uuid_pg = backend == SqlDialect::Postgres
+        && (uuid_columns.contains(col_name) || format == Some("uuid"));
 
-    match value {
+    if let serde_json::Value::String(s) = value
+        && backend == SqlDialect::Postgres
+        && let Some(tn) = postgres_enum_type_name_for_column(col_name, enum_udt, col_info)
+    {
+        return Ok(
+            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as(Alias::new(tn.as_str())),
+        );
+    }
+
+    if is_uuid_pg {
+        return match value {
+            serde_json::Value::Null => Ok(Expr::value(sea_query::Value::Uuid(None))),
+            serde_json::Value::String(s) => {
+                let parsed = uuid::Uuid::parse_str(s).map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Invalid UUID for {table_name}.{col_name}: {s}"
+                    ))
+                })?;
+                Ok(Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed)))))
+            }
+            // Anything else (number, bool, etc.) for a UUID column is a
+            // user-side bug; let the existing fallthrough surface it.
+            _ => Ok(Expr::value(sea_query::Value::String(Some(Box::new(
+                value.to_string(),
+            ))))),
+        };
+    }
+
+    // Temporal types (date, date-time, time) are deferred to issue #40 pending
+    // the chrono-vs-time crate decision. For now they keep cast_as wrappers.
+    if value.is_null()
+        && backend == SqlDialect::Postgres
+        && let Some(cast) = ts_cast.get(col_name)
+    {
+        return Ok(Expr::value(sea_query::Value::String(None)).cast_as(Alias::new(cast.as_str())));
+    }
+    if let serde_json::Value::String(s) = value
+        && backend == SqlDialect::Postgres
+        && let Some(cast) = ts_cast.get(col_name)
+    {
+        return Ok(
+            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
+                .cast_as(Alias::new(cast.as_str())),
+        );
+    }
+
+    let expr = match value {
         value
             if backend == SqlDialect::Postgres && matches!(json_type, Some("object" | "array")) =>
         {
+            // JSON/JSONB binding is out of scope for the typed-null refactor.
             if value.is_null() {
                 Expr::value(sea_query::Value::String(None)).cast_as("json")
             } else {
                 Expr::value(sea_query::Value::String(Some(Box::new(value.to_string()))))
                     .cast_as("json")
             }
-        }
-        serde_json::Value::String(s)
-            if backend == SqlDialect::Postgres && format == Some("uuid") =>
-        {
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("uuid")
         }
         serde_json::Value::String(s)
             if backend == SqlDialect::Postgres && format == Some("date-time") =>
@@ -614,38 +698,78 @@ fn schema_value_expr(
             Expr::value(sea_query::Value::BigInt(Some(if *b { 1 } else { 0 })))
         }
         serde_json::Value::Bool(b) => Expr::value(sea_query::Value::Bool(Some(*b))),
-        serde_json::Value::Null => Expr::value(sea_query::Value::String(None)),
+        serde_json::Value::Null => {
+            // Typed-null pick from column metadata. UUID is handled above;
+            // JSON/temporal are handled above. This arm covers primitives,
+            // bytes, and decimal. Unknown shapes fall through to text-typed
+            // null (the bind layer logs this as NullKind::String / Untyped).
+            let v = if format == Some("binary") {
+                sea_query::Value::Bytes(None)
+            } else if is_decimal {
+                // Decimal binds as float8-typed null today; native numeric
+                // typed null is deferred (see plan §3 Scope Boundaries).
+                sea_query::Value::Double(None)
+            } else {
+                match json_type {
+                    Some("integer") => sea_query::Value::BigInt(None),
+                    Some("number") => sea_query::Value::Double(None),
+                    Some("boolean") => sea_query::Value::Bool(None),
+                    Some("string") => sea_query::Value::String(None),
+                    _ => sea_query::Value::String(None),
+                }
+            };
+            Expr::value(v)
+        }
         _ => Expr::value(sea_query::Value::String(Some(Box::new(value.to_string())))),
-    }
+    };
+    Ok(expr)
 }
 
+/// Wrap an M2M target/source ID in a SeaQuery expression for a join table.
+///
+/// On Postgres, UUID join columns receive a typed `Value::Uuid(Some(_))` bind
+/// rather than the legacy `cast_as("uuid")` workaround. Non-string values for
+/// UUID columns (e.g. an int passed to a UUID FK) and unparseable UUID strings
+/// fall through to a text-cast for backward compatibility -- Postgres still
+/// surfaces an `invalid input syntax for type uuid` error in those cases.
 fn backend_column_value_expr(
     col_name: &str,
     value: sea_query::Value,
     uuid_columns: &HashSet<String>,
     backend: SqlDialect,
 ) -> SimpleExpr {
-    let expr = Expr::value(value);
     if backend == SqlDialect::Postgres && uuid_columns.contains(col_name) {
-        expr.cast_as("uuid")
-    } else {
-        expr
+        if let sea_query::Value::String(Some(s)) = &value
+            && let Ok(parsed) = uuid::Uuid::parse_str(s)
+        {
+            return Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed))));
+        }
+        return Expr::value(value).cast_as("uuid");
     }
+    Expr::value(value)
 }
 
 #[pyfunction]
-#[pyo3(signature = (parent_tx_id=None))]
+#[pyo3(signature = (parent_tx_id=None, using=None))]
 pub fn begin_transaction(
     py: Python<'_>,
     parent_tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let tx_id = uuid::Uuid::new_v4().to_string();
         if let Some(parent_tx_id) = parent_tx_id {
+            if using.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Nested transactions inherit the parent connection",
+                ));
+            }
+
             let parent = TRANSACTION_REGISTRY.get(&parent_tx_id).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Parent transaction not found")
             })?;
             let conn = parent.conn.clone();
+            let connection_name = parent.connection_name.clone();
             drop(parent);
 
             let savepoint_name = format!("sp_{}", tx_id.replace('-', "_"));
@@ -660,15 +784,15 @@ pub fn begin_transaction(
 
             TRANSACTION_REGISTRY.insert(
                 tx_id.clone(),
-                TransactionHandle::nested(conn, savepoint_name),
+                TransactionHandle::nested(conn, savepoint_name, connection_name),
             );
         } else {
-            let engine = active_engine()?;
+            let (connection_name, engine) = active_connection_for_route(using)?;
             let conn = engine.begin_transaction_connection().await.map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
             })?;
 
-            TRANSACTION_REGISTRY.insert(tx_id.clone(), TransactionHandle::root(conn));
+            TRANSACTION_REGISTRY.insert(tx_id.clone(), TransactionHandle::root(conn, connection_name));
         }
 
         Ok(tx_id)
@@ -705,6 +829,14 @@ pub fn commit_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, P
 
         Ok(())
     })
+}
+
+#[pyfunction]
+pub fn transaction_connection_name(tx_id: String) -> PyResult<String> {
+    TRANSACTION_REGISTRY
+        .get(&tx_id)
+        .map(|tx| tx.value().connection_name.clone())
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))
 }
 
 #[pyfunction]
@@ -765,22 +897,19 @@ pub fn rollback_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_,
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if the query fails.
 #[pyfunction]
-#[pyo3(signature = (cls, tx_id=None))]
+#[pyo3(signature = (cls, tx_id=None, using=None))]
 pub fn fetch_all<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
@@ -859,10 +988,12 @@ pub fn fetch_all<'py>(
             let dict_str = pyo3::intern!(py, "__dict__");
             let pydantic_fields_set_str = pyo3::intern!(py, "__pydantic_fields_set__");
             let new_str = pyo3::intern!(py, "__new__");
+            let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
 
             for (row_pk_val, fields) in parsed_data {
                 if let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone()))
+                    && let Some(existing_obj) =
+                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
                 {
                     results.append(existing_obj.value().clone_ref(py))?;
                     continue;
@@ -871,6 +1002,7 @@ pub fn fetch_all<'py>(
                 let instance = cls.call_method1(new_str, (cls,))?;
                 let dict_attr = instance.getattr(dict_str)?;
                 let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+                dict.set_item(connection_attr_str, &connection_name)?;
                 let fields_set = pyo3::types::PySet::empty(py)?;
 
                 for (col_name, val) in fields {
@@ -883,7 +1015,10 @@ pub fn fetch_all<'py>(
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
 
                 if let Some(pk_val) = row_pk_val {
-                    IDENTITY_MAP.insert((name.clone(), pk_val), instance.clone().unbind());
+                    IDENTITY_MAP.insert(
+                        (connection_name.clone(), name.clone(), pk_val),
+                        instance.clone().unbind(),
+                    );
                 }
 
                 results.append(instance)?;
@@ -908,29 +1043,29 @@ pub fn fetch_all<'py>(
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if the query fails.
 #[pyfunction]
-#[pyo3(signature = (cls, pk_val, tx_id=None))]
+#[pyo3(signature = (cls, pk_val, tx_id=None, using=None))]
 pub fn fetch_one<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     pk_val: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
+    let (connection_name, _) = active_connection_for_route(using.clone())?;
 
     // Check Identity Map first (if no transaction, or even with transaction, IM is usually safe)
-    if let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone())) {
+    if let Some(existing_obj) =
+        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
+    {
         let obj = existing_obj.value().clone_ref(py);
         return pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) });
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
@@ -973,13 +1108,14 @@ pub fn fetch_one<'py>(
             let no_ts: HashMap<String, String> = HashMap::new();
             let pk_expr = schema_value_expr(
                 schema,
+                &table_name,
                 &pk_name,
                 &serde_json::Value::String(pk_val.clone()),
                 &no_enum_udt,
                 &no_uuid,
                 &no_ts,
                 backend,
-            );
+            )?;
             let (s, values) = sea_query_build_for_backend!(
                 stmt.from(Alias::new(&table_name))
                     .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)),
@@ -1024,6 +1160,10 @@ pub fn fetch_one<'py>(
                 let instance = cls.call_method1("__new__", (cls,))?;
                 let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
                 let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+                dict.set_item(
+                    pyo3::intern!(py, "__ferro_connection_name"),
+                    &connection_name,
+                )?;
                 let fields_set = pyo3::types::PySet::empty(py)?;
 
                 for (col_name, val) in fields {
@@ -1034,7 +1174,10 @@ pub fn fetch_one<'py>(
                 }
 
                 let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
-                IDENTITY_MAP.insert((name.clone(), pk_val), instance.clone().unbind());
+                IDENTITY_MAP.insert(
+                    (connection_name.clone(), name.clone(), pk_val),
+                    instance.clone().unbind(),
+                );
                 Ok(instance.into_any().unbind())
             }),
             None => Python::attach(|py| Ok(py.None())),
@@ -1053,20 +1196,17 @@ pub fn fetch_one<'py>(
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if the save fails.
 #[pyfunction]
-#[pyo3(signature = (name, data, tx_id=None))]
+#[pyo3(signature = (name, data, tx_id=None, using=None))]
 pub fn save_record(
     py: Python<'_>,
     name: String,
     data: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (_connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         // ... schema and record logic ...
         let (schema, record_obj) = {
@@ -1130,13 +1270,14 @@ pub fn save_record(
                 columns.push(Alias::new(key));
                 values.push(schema_value_expr(
                     &schema,
+                    &table_name,
                     key,
                     value,
                     &enum_udt,
                     &uuid_columns,
                     &ts_cast,
                     backend,
-                ));
+                )?);
             }
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -1228,19 +1369,17 @@ pub fn save_record(
 
 /// Persists multiple model instances in a single batch operation.
 #[pyfunction]
+#[pyo3(signature = (name, data_list_json, tx_id=None, using=None))]
 pub fn save_bulk_records(
     py: Python<'_>,
     name: String,
     data_list_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (_connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         let schema = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1322,13 +1461,14 @@ pub fn save_bulk_records(
                         .unwrap_or(&serde_json::Value::Null);
                     row_values.push(schema_value_expr(
                         &schema,
+                        &table_name,
                         key.to_string().as_str(),
                         value,
                         &enum_udt,
                         &uuid_columns,
                         &ts_cast,
                         backend,
-                    ));
+                    )?);
                 }
                 insert_stmt.values(row_values).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -1365,12 +1505,13 @@ pub fn save_bulk_records(
 /// Returns:
 ///     list[PyAny]: A list of hydrated model instances.
 #[pyfunction]
-#[pyo3(signature = (cls, query_json, tx_id=None))]
+#[pyo3(signature = (cls, query_json, tx_id=None, using=None))]
 pub fn fetch_filtered<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     query_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
@@ -1380,12 +1521,8 @@ pub fn fetch_filtered<'py>(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
@@ -1510,10 +1647,12 @@ pub fn fetch_filtered<'py>(
             let dict_str = pyo3::intern!(py, "__dict__");
             let pydantic_fields_set_str = pyo3::intern!(py, "__pydantic_fields_set__");
             let new_str = pyo3::intern!(py, "__new__");
+            let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
 
             for (row_pk_val, fields) in parsed_data {
                 if let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone()))
+                    && let Some(existing_obj) =
+                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
                 {
                     results.append(existing_obj.value().clone_ref(py))?;
                     continue;
@@ -1522,6 +1661,7 @@ pub fn fetch_filtered<'py>(
                 let instance = cls.call_method1(new_str, (cls,))?;
                 let dict_attr = instance.getattr(dict_str)?;
                 let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+                dict.set_item(connection_attr_str, &connection_name)?;
                 let fields_set = pyo3::types::PySet::empty(py)?;
 
                 for (col_name, val) in fields {
@@ -1534,7 +1674,10 @@ pub fn fetch_filtered<'py>(
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
 
                 if let Some(pk_val) = row_pk_val {
-                    IDENTITY_MAP.insert((name.clone(), pk_val), instance.clone().unbind());
+                    IDENTITY_MAP.insert(
+                        (connection_name.clone(), name.clone(), pk_val),
+                        instance.clone().unbind(),
+                    );
                 }
 
                 results.append(instance)?;
@@ -1546,28 +1689,20 @@ pub fn fetch_filtered<'py>(
 
 /// Returns the number of records matching a filtered query.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, tx_id=None))]
+#[pyo3(signature = (name, query_json, tx_id=None, using=None))]
 pub fn count_filtered(
     py: Python<'_>,
     name: String,
     query_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         // ... sql ...
@@ -1660,38 +1795,39 @@ pub fn count_filtered(
 
 /// Registers a live Python object in the global Identity Map.
 #[pyfunction]
-pub fn register_instance(name: String, pk: String, obj: Py<PyAny>) -> PyResult<()> {
-    IDENTITY_MAP.insert((name, pk), obj);
+#[pyo3(signature = (name, pk, obj, using=None))]
+pub fn register_instance(
+    name: String,
+    pk: String,
+    obj: Py<PyAny>,
+    using: Option<String>,
+) -> PyResult<()> {
+    let (connection_name, _) = active_connection_for_route(using)?;
+    IDENTITY_MAP.insert((connection_name, name, pk), obj);
     Ok(())
 }
 
 /// Evicts a specific model instance from the global Identity Map.
 #[pyfunction]
-pub fn evict_instance(name: String, pk: String) -> PyResult<()> {
-    IDENTITY_MAP.remove(&(name, pk));
+#[pyo3(signature = (name, pk, using=None))]
+pub fn evict_instance(name: String, pk: String, using: Option<String>) -> PyResult<()> {
+    let (connection_name, _) = active_connection_for_route(using)?;
+    IDENTITY_MAP.remove(&(connection_name, name, pk));
     Ok(())
 }
 
 /// Deletes a record by its primary key.
 #[pyfunction]
-#[pyo3(signature = (name, pk_val, tx_id=None))]
+#[pyo3(signature = (name, pk_val, tx_id=None, using=None))]
 pub fn delete_record(
     py: Python<'_>,
     name: String,
     pk_val: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         // ... sql ...
@@ -1722,13 +1858,14 @@ pub fn delete_record(
             let no_ts: HashMap<String, String> = HashMap::new();
             let pk_expr = schema_value_expr(
                 &schema,
+                &table_name,
                 &pk_name,
                 &serde_json::Value::String(pk_val),
                 &no_enum_udt,
                 &no_uuid,
                 &no_ts,
                 backend,
-            );
+            )?;
             let (s, values) = sea_query_build_for_backend!(
                 Query::delete()
                     .from_table(Alias::new(&table_name))
@@ -1750,28 +1887,20 @@ pub fn delete_record(
 
 /// Deletes records matching a filtered query.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, tx_id=None))]
+#[pyo3(signature = (name, query_json, tx_id=None, using=None))]
 pub fn delete_filtered(
     py: Python<'_>,
     name: String,
     query_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         // ... sql ...
@@ -1791,7 +1920,7 @@ pub fn delete_filtered(
                 })?;
 
         // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
-        IDENTITY_MAP.retain(|(m_name, _), _| m_name != &name);
+        IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
 
         Ok(rows_affected)
     })
@@ -1799,13 +1928,14 @@ pub fn delete_filtered(
 
 /// Updates records matching a filtered query with provided values.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, update_json, tx_id=None))]
+#[pyo3(signature = (name, query_json, update_json, tx_id=None, using=None))]
 pub fn update_filtered(
     py: Python<'_>,
     name: String,
     query_json: String,
     update_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
@@ -1820,12 +1950,7 @@ pub fn update_filtered(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
@@ -1850,13 +1975,14 @@ pub fn update_filtered(
                     Alias::new(&key),
                     schema_value_expr(
                         &schema,
+                        &table_name,
                         &key,
                         &value,
                         &enum_udt,
                         &uuid_columns,
                         &ts_cast,
                         backend,
-                    ),
+                    )?,
                 );
             }
             sea_query_build_for_backend!(update, backend)
@@ -1870,14 +1996,14 @@ pub fn update_filtered(
                 })?;
 
         // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
-        IDENTITY_MAP.retain(|(m_name, _), _| m_name != &name);
+        IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
 
         Ok(rows_affected)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None))]
+#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None))]
 pub fn add_m2m_links<'py>(
     py: Python<'py>,
     join_table: String,
@@ -1886,6 +2012,7 @@ pub fn add_m2m_links<'py>(
     source_id: Bound<'py, PyAny>,
     target_ids: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
     let t_ids: Vec<sea_query::Value> = target_ids
@@ -1894,16 +2021,7 @@ pub fn add_m2m_links<'py>(
         .collect::<PyResult<Vec<_>>>()?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
         let uuid_columns =
             postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
 
@@ -1940,7 +2058,7 @@ pub fn add_m2m_links<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None))]
+#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None))]
 pub fn remove_m2m_links<'py>(
     py: Python<'py>,
     join_table: String,
@@ -1949,6 +2067,7 @@ pub fn remove_m2m_links<'py>(
     source_id: Bound<'py, PyAny>,
     target_ids: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
     let t_ids: Vec<sea_query::Value> = target_ids
@@ -1957,16 +2076,7 @@ pub fn remove_m2m_links<'py>(
         .collect::<PyResult<Vec<_>>>()?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
-            let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
         let uuid_columns =
             postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
 
@@ -2005,25 +2115,22 @@ pub fn remove_m2m_links<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (join_table, source_col, source_id, tx_id=None))]
+#[pyo3(signature = (join_table, source_col, source_id, tx_id=None, using=None))]
 pub fn clear_m2m_links<'py>(
     py: Python<'py>,
     join_table: String,
     source_col: String,
     source_id: Bound<'py, PyAny>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+            let engine = active_engine_for_connection(using)?;
             let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
+            let tx_conn = get_transaction_connection(tx_id);
             (engine, tx_conn, backend)
         };
         let uuid_columns =
@@ -2053,15 +2160,30 @@ pub fn clear_m2m_links<'py>(
     })
 }
 
+/// Convert a Python value into a SeaQuery `Value` for M2M source / target IDs.
+///
+/// M2M IDs cannot be `None`: a NULL target id has no meaningful join semantics
+/// and was previously routed to `String(None)`, which (a) reproduces the #38
+/// text-typed-null bug for non-UUID FKs on Postgres and (b) silently no-ops
+/// on insert. Reject up front with a `PyValueError`.
+///
+/// UUID-string detection happens downstream in `backend_column_value_expr`,
+/// which has the column-context (`uuid_columns`) needed to convert to a typed
+/// `Value::Uuid(Some(_))` for UUID FK columns.
 fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
     if val.is_none() {
-        Ok(sea_query::Value::String(None))
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "M2M source/target ID cannot be None",
+        ));
+    }
+    // Order matters: in Python, `bool` is a subtype of `int`. Check bool
+    // before i64 or True/False round-trip as 1/0.
+    if let Ok(b) = val.extract::<bool>() {
+        Ok(sea_query::Value::Bool(Some(b)))
     } else if let Ok(i) = val.extract::<i64>() {
         Ok(sea_query::Value::BigInt(Some(i)))
     } else if let Ok(f) = val.extract::<f64>() {
         Ok(sea_query::Value::Double(Some(f)))
-    } else if let Ok(b) = val.extract::<bool>() {
-        Ok(sea_query::Value::Bool(Some(b)))
     } else if let Ok(s) = val.extract::<String>() {
         Ok(sea_query::Value::String(Some(Box::new(s))))
     } else {
@@ -2078,13 +2200,23 @@ fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
 ///
 /// Order matters: in Python, `bool` is a subtype of `int`, so we must check `bool`
 /// before `i64` or `True`/`False` would round-trip as `1`/`0`.
+///
+/// **Raw-SQL boundary.** This is the documented exception to Ferro's typed-null
+/// architectural rule (R3). The raw-SQL bind path has no schema or column-type
+/// context -- the user supplies pre-built SQL text and bare Python values --
+/// so Python `None` becomes [`NullKind::Untyped`]. Schema-driven emitters
+/// (INSERT/UPDATE values, query-filter predicates, M2M target IDs) infer the
+/// kind from column metadata and emit a typed null. See
+/// `docs/solutions/patterns/typed-null-binds.md`.
+///
+/// [`NullKind::Untyped`]: crate::backend::NullKind::Untyped
 fn python_to_engine_bind_value(
     val: &Bound<'_, PyAny>,
 ) -> PyResult<crate::backend::EngineBindValue> {
     use crate::backend::EngineBindValue;
 
     if val.is_none() {
-        return Ok(EngineBindValue::Null);
+        return Ok(EngineBindValue::Null(crate::backend::NullKind::Untyped));
     }
     if let Ok(b) = val.extract::<bool>() {
         return Ok(EngineBindValue::Bool(b));
@@ -2139,12 +2271,13 @@ fn get_raw_tx_conn(tx_id: Option<String>) -> PyResult<Option<TransactionConnecti
 ///   not a supported primitive (the Python `_marshal` wrapper guarantees this
 ///   never trips in normal use).
 #[pyfunction]
-#[pyo3(signature = (sql, args, tx_id=None))]
+#[pyo3(signature = (sql, args, tx_id=None, using=None))]
 pub fn raw_execute<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -2153,13 +2286,15 @@ pub fn raw_execute<'py>(
     let tx_conn = get_raw_tx_conn(tx_id)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = active_engine()?;
         let rows_affected = match tx_conn {
             Some(conn_arc) => {
                 let mut conn = conn_arc.lock().await;
                 conn.execute_sql_with_binds(&sql, &bind_values).await
             }
-            None => engine.execute_sql_with_binds(&sql, &bind_values).await,
+            None => {
+                let engine = active_engine_for_connection(using)?;
+                engine.execute_sql_with_binds(&sql, &bind_values).await
+            }
         }
         .map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL execute failed: {e}"))
@@ -2175,12 +2310,13 @@ pub fn raw_execute<'py>(
 /// UUID/datetime/JSON columns come back as strings — Ferro does not decode them
 /// for raw SQL. If you want typed rows, use the ORM.
 #[pyfunction]
-#[pyo3(signature = (sql, args, tx_id=None))]
+#[pyo3(signature = (sql, args, tx_id=None, using=None))]
 pub fn raw_fetch_all<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -2189,13 +2325,15 @@ pub fn raw_fetch_all<'py>(
     let tx_conn = get_raw_tx_conn(tx_id)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = active_engine()?;
         let rows = match tx_conn {
             Some(conn_arc) => {
                 let mut conn = conn_arc.lock().await;
                 conn.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
-            None => engine.fetch_all_sql_with_binds(&sql, &bind_values).await,
+            None => {
+                let engine = active_engine_for_connection(using)?;
+                engine.fetch_all_sql_with_binds(&sql, &bind_values).await
+            }
         }
         .map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL fetch_all failed: {e}"))
@@ -2213,12 +2351,13 @@ pub fn raw_fetch_all<'py>(
 
 /// Run a raw SQL query and return the first row as a dict, or `None`.
 #[pyfunction]
-#[pyo3(signature = (sql, args, tx_id=None))]
+#[pyo3(signature = (sql, args, tx_id=None, using=None))]
 pub fn raw_fetch_one<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -2227,13 +2366,15 @@ pub fn raw_fetch_one<'py>(
     let tx_conn = get_raw_tx_conn(tx_id)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = active_engine()?;
         let rows = match tx_conn {
             Some(conn_arc) => {
                 let mut conn = conn_arc.lock().await;
                 conn.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
-            None => engine.fetch_all_sql_with_binds(&sql, &bind_values).await,
+            None => {
+                let engine = active_engine_for_connection(using)?;
+                engine.fetch_all_sql_with_binds(&sql, &bind_values).await
+            }
         }
         .map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL fetch_one failed: {e}"))
@@ -2244,6 +2385,525 @@ pub fn raw_fetch_one<'py>(
             None => Ok(py.None()),
         })
     })
+}
+
+#[cfg(test)]
+mod m2m_value_tests {
+    use super::{backend_column_value_expr, python_to_sea_value};
+    use crate::state::SqlDialect;
+    use pyo3::Python;
+    use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
+    use std::collections::HashSet;
+
+    fn extract_pg_value(expr: sea_query::SimpleExpr) -> SeaValue {
+        let (_, values) = Query::insert()
+            .into_table(Alias::new("t"))
+            .columns([Alias::new("c")])
+            .values_panic([expr])
+            .build(PostgresQueryBuilder);
+        values.0.into_iter().next().expect("one value")
+    }
+
+    #[test]
+    fn python_to_sea_value_rejects_none() {
+        Python::attach(|py| {
+            let none = py.None().into_bound(py);
+            let err = python_to_sea_value(none).expect_err("None must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("M2M") && msg.contains("None"),
+                "unexpected error message: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn python_to_sea_value_routes_bool_before_int() {
+        // Regression guard: in Python bool is subtype of int. We must extract
+        // bool first or True/False round-trip as 1/0.
+        Python::attach(|py| {
+            use pyo3::types::PyBool;
+
+            let py_true = PyBool::new(py, true).to_owned().into_any();
+            let v = python_to_sea_value(py_true).unwrap();
+            assert!(matches!(v, SeaValue::Bool(Some(true))));
+        });
+    }
+
+    #[test]
+    fn backend_column_value_expr_emits_typed_uuid_on_postgres_no_cast() {
+        let mut uuid_cols = HashSet::new();
+        uuid_cols.insert("user_id".to_string());
+
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
+        let expr = backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
+
+        let sql = Query::select()
+            .expr(expr.clone())
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            !sql.contains("AS uuid"),
+            "M2M typed UUID bind should not CAST: {sql}"
+        );
+        match extract_pg_value(expr) {
+            SeaValue::Uuid(Some(u)) => assert_eq!(u.to_string(), uuid_str),
+            other => panic!("expected typed Uuid bind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backend_column_value_expr_passthrough_for_non_uuid_column() {
+        let uuid_cols = HashSet::new();
+        let expr = backend_column_value_expr(
+            "team_id",
+            SeaValue::BigInt(Some(42)),
+            &uuid_cols,
+            SqlDialect::Postgres,
+        );
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        // No CAST for plain integer FK
+        assert!(!sql.contains("CAST"), "non-UUID FK should not CAST: {sql}");
+    }
+
+    #[test]
+    fn backend_column_value_expr_passthrough_on_sqlite() {
+        let mut uuid_cols = HashSet::new();
+        uuid_cols.insert("user_id".to_string());
+
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
+        let expr = backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Sqlite);
+
+        let sql = Query::select().expr(expr).to_string(SqliteQueryBuilder);
+        assert!(!sql.contains("AS uuid"), "SQLite must not CAST: {sql}");
+    }
+
+    #[test]
+    fn backend_column_value_expr_falls_back_to_text_cast_on_unparseable_uuid() {
+        // Defensive path: if a non-UUID-shaped string lands on a UUID FK
+        // column, surface the error from Postgres rather than silently
+        // emitting a typed Uuid bind that would fail with a less obvious
+        // diagnostic.
+        let mut uuid_cols = HashSet::new();
+        uuid_cols.insert("user_id".to_string());
+
+        let value = SeaValue::String(Some(Box::new("not-a-uuid".to_string())));
+        let expr = backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("AS uuid"),
+            "fallback CAST expected for unparseable UUID: {sql}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod schema_value_expr_tests {
+    use super::schema_value_expr;
+    use crate::state::SqlDialect;
+    use sea_query::{Alias, PostgresQueryBuilder, Query, Value as SeaValue};
+    use std::collections::{HashMap, HashSet};
+
+    fn schema_for(col: &str, prop: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "properties": { col: prop }
+        })
+    }
+
+    fn build_pg_value(
+        schema: &serde_json::Value,
+        table: &str,
+        col: &str,
+        value: &serde_json::Value,
+        uuid_columns: HashSet<String>,
+    ) -> pyo3::PyResult<(String, sea_query::Values)> {
+        let enum_udt = HashMap::new();
+        let ts_cast = HashMap::new();
+        let expr = schema_value_expr(
+            schema,
+            table,
+            col,
+            value,
+            &enum_udt,
+            &uuid_columns,
+            &ts_cast,
+            SqlDialect::Postgres,
+        )?;
+        let (sql, values) = Query::insert()
+            .into_table(Alias::new(table))
+            .columns([Alias::new(col)])
+            .values_panic([expr])
+            .build(PostgresQueryBuilder);
+        Ok((sql, values))
+    }
+
+    fn nullable(inner: serde_json::Value) -> serde_json::Value {
+        let mut anyof = inner;
+        if let serde_json::Value::Object(_) = &anyof {
+            anyof = serde_json::json!({"anyOf": [anyof, {"type": "null"}]});
+        }
+        anyof
+    }
+
+    #[test]
+    fn emits_typed_null_for_int_column() {
+        let schema = schema_for("n", nullable(serde_json::json!({"type": "integer"})));
+        let (sql, values) = build_pg_value(
+            &schema,
+            "thing",
+            "n",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::BigInt(None)]));
+        assert!(!sql.contains("CAST"));
+    }
+
+    #[test]
+    fn emits_typed_null_for_bool_column() {
+        let schema = schema_for("flag", nullable(serde_json::json!({"type": "boolean"})));
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "flag",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::Bool(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_float_column() {
+        let schema = schema_for("ratio", nullable(serde_json::json!({"type": "number"})));
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "ratio",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::Double(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_str_column() {
+        let schema = schema_for("name", nullable(serde_json::json!({"type": "string"})));
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "name",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::String(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_bytes_column() {
+        let schema = schema_for(
+            "blob",
+            nullable(serde_json::json!({"type": "string", "format": "binary"})),
+        );
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "blob",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::Bytes(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_decimal_column() {
+        let schema = serde_json::json!({
+            "properties": {
+                "amount": {
+                    "anyOf": [
+                        {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"},
+                        {"type": "null"}
+                    ]
+                }
+            }
+        });
+        let (_, values) = build_pg_value(
+            &schema,
+            "thing",
+            "amount",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        // Decimal binds as float8-typed null; native numeric is deferred.
+        assert!(matches!(values.0.as_slice(), [SeaValue::Double(None)]));
+    }
+
+    #[test]
+    fn emits_typed_null_for_uuid_column_via_format() {
+        let schema = schema_for(
+            "id",
+            nullable(serde_json::json!({"type": "string", "format": "uuid"})),
+        );
+        let (sql, values) = build_pg_value(
+            &schema,
+            "thing",
+            "id",
+            &serde_json::Value::Null,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(values.0.as_slice(), [SeaValue::Uuid(None)]),
+            "expected Uuid(None), got {:?}",
+            values.0
+        );
+        assert!(
+            !sql.contains("CAST"),
+            "UUID null should no longer rely on CAST: {sql}"
+        );
+    }
+
+    #[test]
+    fn emits_typed_null_for_uuid_column_via_introspection_set() {
+        let schema = schema_for("id", serde_json::json!({"type": "string"}));
+        let mut uuid_cols = HashSet::new();
+        uuid_cols.insert("id".to_string());
+
+        let (sql, values) =
+            build_pg_value(&schema, "thing", "id", &serde_json::Value::Null, uuid_cols).unwrap();
+
+        assert!(matches!(values.0.as_slice(), [SeaValue::Uuid(None)]));
+        assert!(!sql.contains("CAST"), "UUID null should not CAST: {sql}");
+    }
+
+    #[test]
+    fn emits_typed_uuid_value_via_format() {
+        let schema = schema_for(
+            "id",
+            nullable(serde_json::json!({"type": "string", "format": "uuid"})),
+        );
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let (sql, values) = build_pg_value(
+            &schema,
+            "thing",
+            "id",
+            &serde_json::Value::String(uuid_str.to_string()),
+            HashSet::new(),
+        )
+        .unwrap();
+
+        match values.0.as_slice() {
+            [SeaValue::Uuid(Some(u))] => {
+                assert_eq!(u.to_string(), uuid_str);
+            }
+            other => panic!("expected Uuid(Some(_)), got {other:?}"),
+        }
+        assert!(
+            !sql.contains("CAST"),
+            "UUID value should no longer rely on CAST: {sql}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_uuid_with_pyvalueerror() {
+        pyo3::Python::attach(|py| {
+            let schema = schema_for(
+                "id",
+                nullable(serde_json::json!({"type": "string", "format": "uuid"})),
+            );
+            let _ = py;
+
+            let err = schema_value_expr(
+                &schema,
+                "thing",
+                "id",
+                &serde_json::Value::String("not-a-uuid".to_string()),
+                &HashMap::new(),
+                &HashSet::new(),
+                &HashMap::new(),
+                SqlDialect::Postgres,
+            )
+            .expect_err("invalid UUID should error");
+
+            let msg = err.to_string();
+            assert!(
+                msg.contains("thing"),
+                "error message should name model: {msg}"
+            );
+            assert!(
+                msg.contains("id"),
+                "error message should name column: {msg}"
+            );
+            assert!(
+                msg.contains("not-a-uuid"),
+                "error message should include offending value: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn temporal_null_keeps_cast_for_now() {
+        // Temporal types are deferred to issue #40 (chrono vs time decision).
+        // For now, date-time / date null still relies on cast_as("timestamptz")
+        // / cast_as("date") to prevent regression.
+        let schema = schema_for(
+            "created_at",
+            nullable(serde_json::json!({"type": "string", "format": "date-time"})),
+        );
+        let mut ts_cast = HashMap::new();
+        ts_cast.insert("created_at".to_string(), "timestamptz".to_string());
+
+        let expr = schema_value_expr(
+            &schema,
+            "thing",
+            "created_at",
+            &serde_json::Value::Null,
+            &HashMap::new(),
+            &HashSet::new(),
+            &ts_cast,
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let (sql, _) = Query::insert()
+            .into_table(Alias::new("thing"))
+            .columns([Alias::new("created_at")])
+            .values_panic([expr])
+            .build(PostgresQueryBuilder);
+
+        assert!(
+            sql.contains("CAST"),
+            "temporal null should still CAST until #40: {sql}"
+        );
+    }
+
+    #[test]
+    fn sqlite_uuid_passthrough_unchanged() {
+        let schema = schema_for(
+            "id",
+            nullable(serde_json::json!({"type": "string", "format": "uuid"})),
+        );
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+
+        let expr = schema_value_expr(
+            &schema,
+            "thing",
+            "id",
+            &serde_json::Value::String(uuid_str.to_string()),
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        let (_, values) = Query::insert()
+            .into_table(Alias::new("thing"))
+            .columns([Alias::new("id")])
+            .values_panic([expr])
+            .build(sea_query::SqliteQueryBuilder);
+
+        // SQLite preserves text-based UUID handling; typed Uuid path is
+        // Postgres-only (R2 was about Postgres OID enforcement).
+        match values.0.as_slice() {
+            [SeaValue::String(Some(s))] => assert_eq!(**s, *uuid_str),
+            other => panic!("expected SQLite UUID to remain text, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod engine_bind_tests {
+    use super::engine_bind_values_from_sea;
+    use crate::backend::{EngineBindValue, NullKind};
+    use sea_query::Value as SeaValue;
+
+    #[test]
+    fn maps_typed_none_to_matching_null_kind() {
+        let inputs = vec![
+            SeaValue::Bool(None),
+            SeaValue::Int(None),
+            SeaValue::BigInt(None),
+            SeaValue::Double(None),
+            SeaValue::Float(None),
+            SeaValue::String(None),
+            SeaValue::Bytes(None),
+            SeaValue::Uuid(None),
+        ];
+
+        let mapped = engine_bind_values_from_sea(&inputs);
+
+        assert_eq!(
+            mapped,
+            vec![
+                EngineBindValue::Null(NullKind::Bool),
+                EngineBindValue::Null(NullKind::I64),
+                EngineBindValue::Null(NullKind::I64),
+                EngineBindValue::Null(NullKind::F64),
+                EngineBindValue::Null(NullKind::F64),
+                EngineBindValue::Null(NullKind::String),
+                EngineBindValue::Null(NullKind::Bytes),
+                EngineBindValue::Null(NullKind::Uuid),
+            ]
+        );
+    }
+
+    #[test]
+    fn maps_typed_uuid_some_to_engine_uuid() {
+        // Regression for the user-reported `column "id" is of type uuid but
+        // expression is of type text` failure: prior to this arm, a non-null
+        // SeaValue::Uuid fell through to the catch-all and was bound as a
+        // text-typed null, silently corrupting every UUID INSERT/UPDATE/WHERE.
+        let u = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")
+            .expect("static UUID parses");
+        let inputs = vec![SeaValue::Uuid(Some(Box::new(u)))];
+
+        assert_eq!(
+            engine_bind_values_from_sea(&inputs),
+            vec![EngineBindValue::Uuid(u)]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_untyped_for_unmapped_variant() {
+        // TinyUnsigned has no Some arm and no None arm in
+        // engine_bind_values_from_sea, so the catch-all fires. This locks
+        // in the documented Untyped fallback for any future SeaQuery variant
+        // we have not explicitly mapped.
+        let inputs = vec![SeaValue::TinyUnsigned(None)];
+
+        assert_eq!(
+            engine_bind_values_from_sea(&inputs),
+            vec![EngineBindValue::Null(NullKind::Untyped)]
+        );
+    }
+
+    #[test]
+    fn sea_query_preserves_typed_none_through_build() {
+        use sea_query::{Alias, Expr, PostgresQueryBuilder, Query};
+
+        let (_, values) = Query::insert()
+            .into_table(Alias::new("t"))
+            .columns([Alias::new("n")])
+            .values_panic([Expr::value(SeaValue::Int(None))])
+            .build(PostgresQueryBuilder);
+
+        // Confirm SeaQuery itself preserves the typed None through .build(),
+        // so the mapping in engine_bind_values_from_sea is operating on
+        // accurate input rather than a coerced text-typed null.
+        assert!(matches!(values.0.as_slice(), [SeaValue::Int(None)]));
+    }
 }
 
 #[cfg(test)]
@@ -2260,7 +2920,7 @@ mod raw_sql_tests {
             let val = py.None().into_bound(py);
             assert_eq!(
                 python_to_engine_bind_value(&val).unwrap(),
-                EngineBindValue::Null
+                EngineBindValue::Null(crate::backend::NullKind::Untyped)
             );
         });
     }

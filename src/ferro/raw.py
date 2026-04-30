@@ -31,7 +31,7 @@ from typing import Any
 from ._core import raw_execute as _raw_execute
 from ._core import raw_fetch_all as _raw_fetch_all
 from ._core import raw_fetch_one as _raw_fetch_one
-from .state import _CURRENT_TRANSACTION
+from .state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
 
 __all__ = ["execute", "fetch_all", "fetch_one", "Transaction"]
 
@@ -68,7 +68,16 @@ def _check_sql(sql: str) -> None:
         raise ValueError("sql must be a non-empty statement")
 
 
-async def execute(sql: str, *args: Any) -> int:
+def _transaction_or_using(using: str | None) -> tuple[str | None, str | None]:
+    tx_id = _CURRENT_TRANSACTION.get()
+    if tx_id is not None and using is not None:
+        if using == _CURRENT_TRANSACTION_CONNECTION.get():
+            return tx_id, None
+        raise ValueError("Raw SQL inside a transaction inherits the transaction connection")
+    return tx_id, using
+
+
+async def execute(sql: str, *args: Any, using: str | None = None) -> int:
     """Run a raw SQL statement, returning rows affected.
 
     Honors the active ``transaction()`` block via the ``_CURRENT_TRANSACTION``
@@ -79,10 +88,13 @@ async def execute(sql: str, *args: Any) -> int:
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
-    return await _raw_execute(sql, marshalled, _CURRENT_TRANSACTION.get())
+    tx_id, using = _transaction_or_using(using)
+    return await _raw_execute(sql, marshalled, tx_id, using)
 
 
-async def fetch_all(sql: str, *args: Any) -> list[dict[str, Any]]:
+async def fetch_all(
+    sql: str, *args: Any, using: str | None = None
+) -> list[dict[str, Any]]:
     """Run a raw SQL query and return all rows as a list of dicts.
 
     Values are wire-close primitives. UUID/datetime/JSON columns come back as
@@ -90,17 +102,21 @@ async def fetch_all(sql: str, *args: Any) -> list[dict[str, Any]]:
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
-    return await _raw_fetch_all(sql, marshalled, _CURRENT_TRANSACTION.get())
+    tx_id, using = _transaction_or_using(using)
+    return await _raw_fetch_all(sql, marshalled, tx_id, using)
 
 
-async def fetch_one(sql: str, *args: Any) -> dict[str, Any] | None:
+async def fetch_one(
+    sql: str, *args: Any, using: str | None = None
+) -> dict[str, Any] | None:
     """Run a raw SQL query and return the first row as a dict, or ``None``.
 
     Callers should ``LIMIT 1`` if the query may return more than one row.
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
-    return await _raw_fetch_one(sql, marshalled, _CURRENT_TRANSACTION.get())
+    tx_id, using = _transaction_or_using(using)
+    return await _raw_fetch_one(sql, marshalled, tx_id, using)
 
 
 class Transaction:

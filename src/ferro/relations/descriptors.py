@@ -10,6 +10,15 @@ if TYPE_CHECKING:
 from ..state import _MODEL_REGISTRY_PY
 
 
+def _instance_origin_outside_transaction(instance: object) -> str | None:
+    from ..models import _instance_origin
+    from ..state import _CURRENT_TRANSACTION
+
+    if _CURRENT_TRANSACTION.get() is not None:
+        return None
+    return _instance_origin(instance)
+
+
 class RelationshipDescriptor(BaseModel):
     """Descriptor that returns either a Query object or a single object (for 1:1)."""
 
@@ -45,9 +54,10 @@ class RelationshipDescriptor(BaseModel):
         if self.is_m2m:
             from ..query.builder import Relation
 
-            return Relation(self._target_model)._m2m(
-                self.join_table, self.source_col, self.target_col, pk_val
-            )
+            return Relation(
+                self._target_model,
+                using=_instance_origin_outside_transaction(instance),
+            )._m2m(self.join_table, self.source_col, self.target_col, pk_val)
 
         # Find the primary key value of the current instance
         pk_field = "id"
@@ -66,7 +76,10 @@ class RelationshipDescriptor(BaseModel):
 
         from ..query.builder import Relation
 
-        return Relation(self._target_model).where(
+        return Relation(
+            self._target_model,
+            using=_instance_origin_outside_transaction(instance),
+        ).where(
             getattr(self._target_model, f"{self.field_name}_id") == pk_val
         )
 
@@ -93,6 +106,10 @@ class ForwardDescriptor(BaseModel):
             id_val = getattr(instance, f"{self.field_name}_id")
             if id_val is None:
                 return None
+
+            origin = _instance_origin_outside_transaction(instance)
+            if origin is not None:
+                return await self._target_model.using(origin).get(id_val)
             return await self._target_model.get(id_val)
 
         return _fetch()

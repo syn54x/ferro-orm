@@ -56,28 +56,27 @@ banned_users = await User.where(
 
 ### Raw SQL Queries
 
-**Status:** Not Implemented
+**Status:** Implemented for `execute`, `fetch_all`, and `fetch_one`
 
 **Documentation References:**
 - `docs/guide/queries.md` (lines 252-266)
 
 **Description:**
-Direct raw SQL query execution with parameterization.
+Direct raw SQL execution with parameterization is available. Raw rows are plain dictionaries of wire-close primitive values; typed model hydration still belongs to the ORM.
 
-**Example (Not Working):**
+**Example:**
 ```python
-# This does not work yet
-from ferro import raw_query
+from ferro import execute, fetch_all
 
-results = await raw_query(
+results = await fetch_all(
     "SELECT * FROM users WHERE age > $1 AND status = $2",
     18,
-    "active"
+    "active",
+    using="app",
 )
 ```
 
-**Workaround:**
-Use the query builder API for all queries.
+Additional raw helpers beyond these functions remain out of scope.
 
 ---
 
@@ -264,47 +263,39 @@ Use `transaction()` context manager for scoped database operations.
 - `docs/guide/database.md` (lines 76-104)
 
 **Description:**
-Advanced connection pool parameters like `max_connections`, `min_connections`, and `connect_timeout`.
+`PoolConfig(max_connections=..., min_connections=...)` is implemented per connection. Additional pool options like acquire timeout, idle timeout, max lifetime, and health-check toggles are still future work.
 
 **Example (Partially Working):**
 ```python
-# Support for these parameters is not confirmed
 await ferro.connect(
     "postgresql://user:password@localhost/dbname",
-    max_connections=20,      # May not work
-    min_connections=5,       # May not work
-    connect_timeout=30       # May not work
+    pool=ferro.PoolConfig(max_connections=20, min_connections=5),
 )
 ```
 
-**Workaround:**
-Use basic connection string without advanced pool parameters.
+For unsupported advanced pool options, use backend defaults.
 
 ---
 
 ### Multiple Database Support
 
-**Status:** Not Implemented
+**Status:** Implemented for explicit named connections
 
 **Documentation References:**
 - `docs/guide/database.md` (lines 123-149)
 - `docs/howto/multiple-databases.md` (entire file)
 
 **Description:**
-Connecting to and querying multiple databases with named connections.
+Connecting to and querying multiple databases or roles with explicit named connections is supported. Automatic router policies, read/write splitting, and distributed transactions remain out of scope.
 
-**Example (Not Working):**
+**Example:**
 ```python
-# This does not work yet
-await ferro.connect("postgresql://localhost/main_db", name="primary")
+await ferro.connect("postgresql://localhost/main_db", name="primary", default=True)
 await ferro.connect("postgresql://localhost/replica_db", name="replica")
 
 # Query specific database
 users = await User.using("replica").all()
 ```
-
-**Workaround:**
-Ferro currently supports only a single database connection per application.
 
 ---
 
@@ -489,7 +480,7 @@ profile = await user.profile
 ### Definitely Not Implemented
 1. `ilike()` - case-insensitive LIKE
 2. `not_in_()` - NOT IN operator
-3. Raw SQL queries (`raw_query`)
+3. Additional raw SQL helper APIs beyond `execute` / `fetch_all` / `fetch_one`
 4. Eager loading (`prefetch_related`)
 5. Select specific fields (partial model loading)
 6. Aggregation functions (sum, avg, min, max)
@@ -497,8 +488,8 @@ profile = await user.profile
 8. `disconnect()` function
 9. `check_connection()` function
 10. `connection_context()` context manager
-11. Connection pool advanced parameters
-12. Multiple database support (`.using()`)
+11. Additional connection pool parameters
+12. Automatic routing policies for multiple databases
 13. Nested transactions / savepoints
 
 ### Needs Verification

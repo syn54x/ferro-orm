@@ -97,11 +97,21 @@ class Product(Model):
 # registries even if another test's fixture cleared them (e.g. alembic/schema).
 @pytest.fixture(autouse=True)
 def _ensure_models_registered():
-    from ferro.state import _MODEL_REGISTRY_PY
+    from ferro.base import ForeignKey, ManyToManyRelation
+    from ferro.relations import resolve_relationships
+    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
     for model_cls in (User, Post, Comment, Tag, Product):
-        model_cls._reregister_ferro()
         _MODEL_REGISTRY_PY[model_cls.__name__] = model_cls
+
+    # Some tests clear private relationship state to model fresh imports. These
+    # module-level models must restore both schemas and descriptors afterward.
+    for model_cls in (User, Post, Comment, Tag, Product):
+        for field_name, relation in model_cls.ferro_relations.items():
+            if isinstance(relation, (ForeignKey, ManyToManyRelation)):
+                _PENDING_RELATIONS.append((model_cls.__name__, field_name, relation))
+
+    resolve_relationships()
     yield
 
 
