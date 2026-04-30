@@ -73,6 +73,7 @@ dev = [
     "pytest-examples>=0.0.18",
     "psycopg[binary]>=3.3.3",
     "pytest-postgresql>=8.0.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.pytest.ini_options]

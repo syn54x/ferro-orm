@@ -6,3 +6,6 @@ prerelease:
 
 docs:
     gh workflow run publish-docs.yml
+
+test *ARGS:
+    uv run pytest --db-backends=sqlite,postgres {{ARGS}}

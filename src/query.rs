@@ -214,20 +214,17 @@ fn typed_null_for_column(model_name: &str, col_name: &str) -> Option<sea_query::
 
     // Walk anyOf to find the non-null type variant -- this is how Pydantic
     // shapes `T | None` schemas.
-    let json_type = col_info
-        .get("type")
-        .and_then(|t| t.as_str())
-        .or_else(|| {
-            col_info
-                .get("anyOf")
-                .and_then(|a| a.as_array())
-                .and_then(|types| {
-                    types.iter().find_map(|t| {
-                        let s = t.get("type")?.as_str()?;
-                        if s != "null" { Some(s) } else { None }
-                    })
+    let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
+        col_info
+            .get("anyOf")
+            .and_then(|a| a.as_array())
+            .and_then(|types| {
+                types.iter().find_map(|t| {
+                    let s = t.get("type")?.as_str()?;
+                    if s != "null" { Some(s) } else { None }
                 })
-        });
+            })
+    });
 
     match json_type {
         Some("integer") => Some(sea_query::Value::BigInt(None)),
@@ -365,9 +362,7 @@ pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
 mod tests {
     use super::QueryDef;
     use crate::backend::BackendKind;
-    use sea_query::{
-        Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue,
-    };
+    use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
     use serde_json::json;
 
     fn empty_query_def(model_name: &str) -> QueryDef {

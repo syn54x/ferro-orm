@@ -1,39 +1,26 @@
 # How-To: Multiple Databases
 
-!!! warning "Feature Not Implemented"
-    **Multi-database support is not currently available in Ferro.** This documentation describes planned features. See [Coming Soon](../coming-soon.md#multiple-database-support) for more information.
+Use named connections when one process needs more than one database, role, or pool. The common case still works with `await ferro.connect(url)`, which registers and selects `"default"`. Named connections are explicit.
 
-    Ferro currently supports only a single active database connection per application process. The examples below show the planned API, not something you can call today.
-
----
-
-Connect to and query multiple databases in Ferro (planned feature).
-
-## Basic Configuration (Planned)
-
-The following shows the planned API for multi-database support:
+## Basic Configuration
 
 ```python
 import ferro
 
 async def setup():
-    # Primary database
     await ferro.connect(
         "postgresql://localhost/main_db",
-        name="primary"
+        name="primary",
+        default=True,
     )
-
-    # Read replica
     await ferro.connect(
         "postgresql://localhost/replica_db",
         name="replica",
-        read_only=True
     )
-
-    # Analytics database
     await ferro.connect(
         "postgresql://localhost/analytics_db",
-        name="analytics"
+        name="analytics",
+        pool=ferro.PoolConfig(max_connections=3),
     )
 ```
 
@@ -48,26 +35,35 @@ replica_users = await User.using("replica").all()
 analytics_data = await Metric.using("analytics").all()
 ```
 
-## Read/Write Splitting
+## Transactions
 
 ```python
-class User(Model):
-    username: str
-
-    @classmethod
-    def read_query(cls):
-        """Use replica for reads."""
-        return cls.using("replica")
-
-    @classmethod
-    async def write(cls, **kwargs):
-        """Use primary for writes."""
-        return await cls.using("primary").create(**kwargs)
-
-# Usage
-users = await User.read_query().all()  # From replica
-new_user = await User.write(username="alice")  # To primary
+async with ferro.transaction(using="analytics"):
+    await Metric.create(name="daily-active-users")
+    await ferro.execute("select refresh_metric(?)", "daily-active-users")
 ```
+
+The transaction pins work to one named connection. Nested transactions inherit that same connection. Ferro does not support distributed transactions across named connections.
+
+## Schema Setup
+
+Schema creation targets one connection:
+
+```python
+await ferro.create_tables(using="primary")
+```
+
+Do not run schema creation concurrently through multiple roles that point at the same physical database. Prefer one migration-capable connection and Alembic for production migrations.
+
+## Security Notes
+
+- Keep elevated service credentials server-side and out of source control.
+- Do not choose `using` directly from untrusted request input.
+- Do not make a service-role connection the default in user-facing runtimes.
+- Named connections isolate pools and roles, not per-request RLS/JWT context inside one shared pool.
+- Objects loaded through an elevated connection can contain elevated data; filter them before returning user-facing responses.
+
+Automatic routing policies, read/write splitting, cross-connection joins, and two-phase transactions are not part of v1. Use explicit `using` calls where routing matters.
 
 ## See Also
 

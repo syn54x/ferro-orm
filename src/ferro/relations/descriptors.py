@@ -44,8 +44,9 @@ class RelationshipDescriptor(BaseModel):
 
         if self.is_m2m:
             from ..query.builder import Relation
+            from ..models import _instance_origin
 
-            return Relation(self._target_model)._m2m(
+            return Relation(self._target_model, using=_instance_origin(instance))._m2m(
                 self.join_table, self.source_col, self.target_col, pk_val
             )
 
@@ -65,8 +66,9 @@ class RelationshipDescriptor(BaseModel):
             ).first()
 
         from ..query.builder import Relation
+        from ..models import _instance_origin
 
-        return Relation(self._target_model).where(
+        return Relation(self._target_model, using=_instance_origin(instance)).where(
             getattr(self._target_model, f"{self.field_name}_id") == pk_val
         )
 
@@ -93,6 +95,11 @@ class ForwardDescriptor(BaseModel):
             id_val = getattr(instance, f"{self.field_name}_id")
             if id_val is None:
                 return None
+            from ..models import _instance_origin
+
+            origin = _instance_origin(instance)
+            if origin is not None:
+                return await self._target_model.using(origin).get(id_val)
             return await self._target_model.get(id_val)
 
         return _fetch()

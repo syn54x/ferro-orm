@@ -7,7 +7,7 @@ use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue, Null
 use crate::query::QueryDef;
 use crate::state::{
     IDENTITY_MAP, MODEL_REGISTRY, RustValue, SqlDialect, TRANSACTION_REGISTRY,
-    TransactionConnection, TransactionHandle, engine_handle,
+    TransactionConnection, TransactionHandle, connection_for_route, engine_for_connection,
 };
 use pyo3::prelude::*;
 use sea_query::{
@@ -25,10 +25,12 @@ fn get_transaction_connection(tx_id: Option<String>) -> Option<TransactionConnec
     })
 }
 
-fn active_engine() -> PyResult<Arc<EngineHandle>> {
-    let engine = engine_handle()
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Engine not initialized"))?;
-    Ok(engine)
+fn active_engine_for_connection(using: Option<String>) -> PyResult<Arc<EngineHandle>> {
+    engine_for_connection(using)
+}
+
+fn active_connection_for_route(using: Option<String>) -> PyResult<(String, Arc<EngineHandle>)> {
+    connection_for_route(using)
 }
 
 /// Map SeaQuery `Value` variants to `EngineBindValue`.
@@ -65,9 +67,7 @@ fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
             | SeaValue::Int(None)
             | SeaValue::BigInt(None)
             | SeaValue::BigUnsigned(None) => EngineBindValue::Null(NullKind::I64),
-            SeaValue::Float(None) | SeaValue::Double(None) => {
-                EngineBindValue::Null(NullKind::F64)
-            }
+            SeaValue::Float(None) | SeaValue::Double(None) => EngineBindValue::Null(NullKind::F64),
             SeaValue::String(None) | SeaValue::Char(None) => {
                 EngineBindValue::Null(NullKind::String)
             }
@@ -722,14 +722,21 @@ fn backend_column_value_expr(
 }
 
 #[pyfunction]
-#[pyo3(signature = (parent_tx_id=None))]
+#[pyo3(signature = (parent_tx_id=None, using=None))]
 pub fn begin_transaction(
     py: Python<'_>,
     parent_tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let tx_id = uuid::Uuid::new_v4().to_string();
         if let Some(parent_tx_id) = parent_tx_id {
+            if using.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Nested transactions inherit the parent connection",
+                ));
+            }
+
             let parent = TRANSACTION_REGISTRY.get(&parent_tx_id).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("Parent transaction not found")
             })?;
@@ -751,7 +758,7 @@ pub fn begin_transaction(
                 TransactionHandle::nested(conn, savepoint_name),
             );
         } else {
-            let engine = active_engine()?;
+            let engine = active_engine_for_connection(using)?;
             let conn = engine.begin_transaction_connection().await.map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
             })?;
@@ -853,21 +860,22 @@ pub fn rollback_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_,
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if the query fails.
 #[pyfunction]
-#[pyo3(signature = (cls, tx_id=None))]
+#[pyo3(signature = (cls, tx_id=None, using=None))]
 pub fn fetch_all<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+        let (connection_name, engine, tx_conn, backend) = {
+            let (connection_name, engine) = active_connection_for_route(using)?;
             let backend = engine.backend();
             let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
+            (connection_name, engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
@@ -947,10 +955,12 @@ pub fn fetch_all<'py>(
             let dict_str = pyo3::intern!(py, "__dict__");
             let pydantic_fields_set_str = pyo3::intern!(py, "__pydantic_fields_set__");
             let new_str = pyo3::intern!(py, "__new__");
+            let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
 
             for (row_pk_val, fields) in parsed_data {
                 if let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone()))
+                    && let Some(existing_obj) =
+                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
                 {
                     results.append(existing_obj.value().clone_ref(py))?;
                     continue;
@@ -959,6 +969,7 @@ pub fn fetch_all<'py>(
                 let instance = cls.call_method1(new_str, (cls,))?;
                 let dict_attr = instance.getattr(dict_str)?;
                 let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+                dict.set_item(connection_attr_str, &connection_name)?;
                 let fields_set = pyo3::types::PySet::empty(py)?;
 
                 for (col_name, val) in fields {
@@ -971,7 +982,10 @@ pub fn fetch_all<'py>(
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
 
                 if let Some(pk_val) = row_pk_val {
-                    IDENTITY_MAP.insert((name.clone(), pk_val), instance.clone().unbind());
+                    IDENTITY_MAP.insert(
+                        (connection_name.clone(), name.clone(), pk_val),
+                        instance.clone().unbind(),
+                    );
                 }
 
                 results.append(instance)?;
@@ -996,28 +1010,32 @@ pub fn fetch_all<'py>(
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if the query fails.
 #[pyfunction]
-#[pyo3(signature = (cls, pk_val, tx_id=None))]
+#[pyo3(signature = (cls, pk_val, tx_id=None, using=None))]
 pub fn fetch_one<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     pk_val: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
+    let (connection_name, _) = active_connection_for_route(using.clone())?;
 
     // Check Identity Map first (if no transaction, or even with transaction, IM is usually safe)
-    if let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone())) {
+    if let Some(existing_obj) =
+        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
+    {
         let obj = existing_obj.value().clone_ref(py);
         return pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) });
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+        let (connection_name, engine, tx_conn, backend) = {
+            let (connection_name, engine) = active_connection_for_route(using)?;
             let backend = engine.backend();
             let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
+            (connection_name, engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
@@ -1113,6 +1131,10 @@ pub fn fetch_one<'py>(
                 let instance = cls.call_method1("__new__", (cls,))?;
                 let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
                 let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+                dict.set_item(
+                    pyo3::intern!(py, "__ferro_connection_name"),
+                    &connection_name,
+                )?;
                 let fields_set = pyo3::types::PySet::empty(py)?;
 
                 for (col_name, val) in fields {
@@ -1123,7 +1145,10 @@ pub fn fetch_one<'py>(
                 }
 
                 let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
-                IDENTITY_MAP.insert((name.clone(), pk_val), instance.clone().unbind());
+                IDENTITY_MAP.insert(
+                    (connection_name.clone(), name.clone(), pk_val),
+                    instance.clone().unbind(),
+                );
                 Ok(instance.into_any().unbind())
             }),
             None => Python::attach(|py| Ok(py.None())),
@@ -1142,19 +1167,20 @@ pub fn fetch_one<'py>(
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if the save fails.
 #[pyfunction]
-#[pyo3(signature = (name, data, tx_id=None))]
+#[pyo3(signature = (name, data, tx_id=None, using=None))]
 pub fn save_record(
     py: Python<'_>,
     name: String,
     data: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+        let (_connection_name, engine, tx_conn, backend) = {
+            let (connection_name, engine) = active_connection_for_route(using)?;
             let backend = engine.backend();
             let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
+            (connection_name, engine, tx_conn, backend)
         };
 
         // ... schema and record logic ...
@@ -1318,18 +1344,20 @@ pub fn save_record(
 
 /// Persists multiple model instances in a single batch operation.
 #[pyfunction]
+#[pyo3(signature = (name, data_list_json, tx_id=None, using=None))]
 pub fn save_bulk_records(
     py: Python<'_>,
     name: String,
     data_list_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+        let (_connection_name, engine, tx_conn, backend) = {
+            let (connection_name, engine) = active_connection_for_route(using)?;
             let backend = engine.backend();
             let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
+            (connection_name, engine, tx_conn, backend)
         };
 
         let schema = {
@@ -1456,12 +1484,13 @@ pub fn save_bulk_records(
 /// Returns:
 ///     list[PyAny]: A list of hydrated model instances.
 #[pyfunction]
-#[pyo3(signature = (cls, query_json, tx_id=None))]
+#[pyo3(signature = (cls, query_json, tx_id=None, using=None))]
 pub fn fetch_filtered<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     query_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
@@ -1471,11 +1500,11 @@ pub fn fetch_filtered<'py>(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+        let (connection_name, engine, tx_conn, backend) = {
+            let (connection_name, engine) = active_connection_for_route(using)?;
             let backend = engine.backend();
             let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
+            (connection_name, engine, tx_conn, backend)
         };
 
         let table_name = name.to_lowercase();
@@ -1601,10 +1630,12 @@ pub fn fetch_filtered<'py>(
             let dict_str = pyo3::intern!(py, "__dict__");
             let pydantic_fields_set_str = pyo3::intern!(py, "__pydantic_fields_set__");
             let new_str = pyo3::intern!(py, "__new__");
+            let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
 
             for (row_pk_val, fields) in parsed_data {
                 if let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) = IDENTITY_MAP.get(&(name.clone(), pk_val.clone()))
+                    && let Some(existing_obj) =
+                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
                 {
                     results.append(existing_obj.value().clone_ref(py))?;
                     continue;
@@ -1613,6 +1644,7 @@ pub fn fetch_filtered<'py>(
                 let instance = cls.call_method1(new_str, (cls,))?;
                 let dict_attr = instance.getattr(dict_str)?;
                 let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+                dict.set_item(connection_attr_str, &connection_name)?;
                 let fields_set = pyo3::types::PySet::empty(py)?;
 
                 for (col_name, val) in fields {
@@ -1625,7 +1657,10 @@ pub fn fetch_filtered<'py>(
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
 
                 if let Some(pk_val) = row_pk_val {
-                    IDENTITY_MAP.insert((name.clone(), pk_val), instance.clone().unbind());
+                    IDENTITY_MAP.insert(
+                        (connection_name.clone(), name.clone(), pk_val),
+                        instance.clone().unbind(),
+                    );
                 }
 
                 results.append(instance)?;
@@ -1637,12 +1672,13 @@ pub fn fetch_filtered<'py>(
 
 /// Returns the number of records matching a filtered query.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, tx_id=None))]
+#[pyo3(signature = (name, query_json, tx_id=None, using=None))]
 pub fn count_filtered(
     py: Python<'_>,
     name: String,
     query_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
@@ -1650,13 +1686,9 @@ pub fn count_filtered(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+            let engine = active_engine_for_connection(using)?;
             let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
+            let tx_conn = get_transaction_connection(tx_id);
             (engine, tx_conn, backend)
         };
 
@@ -1751,36 +1783,42 @@ pub fn count_filtered(
 
 /// Registers a live Python object in the global Identity Map.
 #[pyfunction]
-pub fn register_instance(name: String, pk: String, obj: Py<PyAny>) -> PyResult<()> {
-    IDENTITY_MAP.insert((name, pk), obj);
+#[pyo3(signature = (name, pk, obj, using=None))]
+pub fn register_instance(
+    name: String,
+    pk: String,
+    obj: Py<PyAny>,
+    using: Option<String>,
+) -> PyResult<()> {
+    let (connection_name, _) = active_connection_for_route(using)?;
+    IDENTITY_MAP.insert((connection_name, name, pk), obj);
     Ok(())
 }
 
 /// Evicts a specific model instance from the global Identity Map.
 #[pyfunction]
-pub fn evict_instance(name: String, pk: String) -> PyResult<()> {
-    IDENTITY_MAP.remove(&(name, pk));
+#[pyo3(signature = (name, pk, using=None))]
+pub fn evict_instance(name: String, pk: String, using: Option<String>) -> PyResult<()> {
+    let (connection_name, _) = active_connection_for_route(using)?;
+    IDENTITY_MAP.remove(&(connection_name, name, pk));
     Ok(())
 }
 
 /// Deletes a record by its primary key.
 #[pyfunction]
-#[pyo3(signature = (name, pk_val, tx_id=None))]
+#[pyo3(signature = (name, pk_val, tx_id=None, using=None))]
 pub fn delete_record(
     py: Python<'_>,
     name: String,
     pk_val: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+            let engine = active_engine_for_connection(using)?;
             let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
+            let tx_conn = get_transaction_connection(tx_id);
             (engine, tx_conn, backend)
         };
 
@@ -1842,12 +1880,13 @@ pub fn delete_record(
 
 /// Deletes records matching a filtered query.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, tx_id=None))]
+#[pyo3(signature = (name, query_json, tx_id=None, using=None))]
 pub fn delete_filtered(
     py: Python<'_>,
     name: String,
     query_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
@@ -1855,13 +1894,9 @@ pub fn delete_filtered(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+            let engine = active_engine_for_connection(using)?;
             let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
+            let tx_conn = get_transaction_connection(tx_id);
             (engine, tx_conn, backend)
         };
 
@@ -1883,7 +1918,7 @@ pub fn delete_filtered(
                 })?;
 
         // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
-        IDENTITY_MAP.retain(|(m_name, _), _| m_name != &name);
+        IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
 
         Ok(rows_affected)
     })
@@ -1891,13 +1926,14 @@ pub fn delete_filtered(
 
 /// Updates records matching a filtered query with provided values.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, update_json, tx_id=None))]
+#[pyo3(signature = (name, query_json, update_json, tx_id=None, using=None))]
 pub fn update_filtered(
     py: Python<'_>,
     name: String,
     query_json: String,
     update_json: String,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
@@ -1913,7 +1949,7 @@ pub fn update_filtered(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+            let engine = active_engine_for_connection(using)?;
             let backend = engine.backend();
             let tx_conn = get_transaction_connection(tx_id);
             (engine, tx_conn, backend)
@@ -1963,14 +1999,14 @@ pub fn update_filtered(
                 })?;
 
         // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
-        IDENTITY_MAP.retain(|(m_name, _), _| m_name != &name);
+        IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
 
         Ok(rows_affected)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None))]
+#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None))]
 pub fn add_m2m_links<'py>(
     py: Python<'py>,
     join_table: String,
@@ -1979,6 +2015,7 @@ pub fn add_m2m_links<'py>(
     source_id: Bound<'py, PyAny>,
     target_ids: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
     let t_ids: Vec<sea_query::Value> = target_ids
@@ -1988,13 +2025,9 @@ pub fn add_m2m_links<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+            let engine = active_engine_for_connection(using)?;
             let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
+            let tx_conn = get_transaction_connection(tx_id);
             (engine, tx_conn, backend)
         };
         let uuid_columns =
@@ -2033,7 +2066,7 @@ pub fn add_m2m_links<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None))]
+#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None))]
 pub fn remove_m2m_links<'py>(
     py: Python<'py>,
     join_table: String,
@@ -2042,6 +2075,7 @@ pub fn remove_m2m_links<'py>(
     source_id: Bound<'py, PyAny>,
     target_ids: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
     let t_ids: Vec<sea_query::Value> = target_ids
@@ -2051,13 +2085,9 @@ pub fn remove_m2m_links<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+            let engine = active_engine_for_connection(using)?;
             let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
+            let tx_conn = get_transaction_connection(tx_id);
             (engine, tx_conn, backend)
         };
         let uuid_columns =
@@ -2098,25 +2128,22 @@ pub fn remove_m2m_links<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (join_table, source_col, source_id, tx_id=None))]
+#[pyo3(signature = (join_table, source_col, source_id, tx_id=None, using=None))]
 pub fn clear_m2m_links<'py>(
     py: Python<'py>,
     join_table: String,
     source_col: String,
     source_id: Bound<'py, PyAny>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (engine, tx_conn, backend) = {
-            let engine = active_engine()?;
+            let engine = active_engine_for_connection(using)?;
             let backend = engine.backend();
-            let tx_conn = tx_id.and_then(|id| {
-                TRANSACTION_REGISTRY
-                    .get(&id)
-                    .map(|tx| tx.value().conn.clone())
-            });
+            let tx_conn = get_transaction_connection(tx_id);
             (engine, tx_conn, backend)
         };
         let uuid_columns =
@@ -2257,12 +2284,13 @@ fn get_raw_tx_conn(tx_id: Option<String>) -> PyResult<Option<TransactionConnecti
 ///   not a supported primitive (the Python `_marshal` wrapper guarantees this
 ///   never trips in normal use).
 #[pyfunction]
-#[pyo3(signature = (sql, args, tx_id=None))]
+#[pyo3(signature = (sql, args, tx_id=None, using=None))]
 pub fn raw_execute<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -2271,13 +2299,15 @@ pub fn raw_execute<'py>(
     let tx_conn = get_raw_tx_conn(tx_id)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = active_engine()?;
         let rows_affected = match tx_conn {
             Some(conn_arc) => {
                 let mut conn = conn_arc.lock().await;
                 conn.execute_sql_with_binds(&sql, &bind_values).await
             }
-            None => engine.execute_sql_with_binds(&sql, &bind_values).await,
+            None => {
+                let engine = active_engine_for_connection(using)?;
+                engine.execute_sql_with_binds(&sql, &bind_values).await
+            }
         }
         .map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL execute failed: {e}"))
@@ -2293,12 +2323,13 @@ pub fn raw_execute<'py>(
 /// UUID/datetime/JSON columns come back as strings — Ferro does not decode them
 /// for raw SQL. If you want typed rows, use the ORM.
 #[pyfunction]
-#[pyo3(signature = (sql, args, tx_id=None))]
+#[pyo3(signature = (sql, args, tx_id=None, using=None))]
 pub fn raw_fetch_all<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -2307,13 +2338,15 @@ pub fn raw_fetch_all<'py>(
     let tx_conn = get_raw_tx_conn(tx_id)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = active_engine()?;
         let rows = match tx_conn {
             Some(conn_arc) => {
                 let mut conn = conn_arc.lock().await;
                 conn.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
-            None => engine.fetch_all_sql_with_binds(&sql, &bind_values).await,
+            None => {
+                let engine = active_engine_for_connection(using)?;
+                engine.fetch_all_sql_with_binds(&sql, &bind_values).await
+            }
         }
         .map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL fetch_all failed: {e}"))
@@ -2331,12 +2364,13 @@ pub fn raw_fetch_all<'py>(
 
 /// Run a raw SQL query and return the first row as a dict, or `None`.
 #[pyfunction]
-#[pyo3(signature = (sql, args, tx_id=None))]
+#[pyo3(signature = (sql, args, tx_id=None, using=None))]
 pub fn raw_fetch_one<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
+    using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -2345,13 +2379,15 @@ pub fn raw_fetch_one<'py>(
     let tx_conn = get_raw_tx_conn(tx_id)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = active_engine()?;
         let rows = match tx_conn {
             Some(conn_arc) => {
                 let mut conn = conn_arc.lock().await;
                 conn.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
-            None => engine.fetch_all_sql_with_binds(&sql, &bind_values).await,
+            None => {
+                let engine = active_engine_for_connection(using)?;
+                engine.fetch_all_sql_with_binds(&sql, &bind_values).await
+            }
         }
         .map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL fetch_one failed: {e}"))
@@ -2414,8 +2450,7 @@ mod m2m_value_tests {
 
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
         let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
-        let expr =
-            backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
+        let expr = backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
 
         let sql = Query::select()
             .expr(expr.clone())
@@ -2451,8 +2486,7 @@ mod m2m_value_tests {
 
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
         let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
-        let expr =
-            backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Sqlite);
+        let expr = backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Sqlite);
 
         let sql = Query::select().expr(expr).to_string(SqliteQueryBuilder);
         assert!(!sql.contains("AS uuid"), "SQLite must not CAST: {sql}");
@@ -2468,8 +2502,7 @@ mod m2m_value_tests {
         uuid_cols.insert("user_id".to_string());
 
         let value = SeaValue::String(Some(Box::new("not-a-uuid".to_string())));
-        let expr =
-            backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
+        let expr = backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("AS uuid"),

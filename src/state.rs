@@ -22,9 +22,94 @@ pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, serde_json::Value>>> =
 /// The global runtime engine, initialized via `connect()`.
 pub static ENGINE: Lazy<RwLock<Option<Arc<EngineHandle>>>> = Lazy::new(|| RwLock::new(None));
 
-/// Returns a clone of the active engine handle when initialized.
-pub fn engine_handle() -> Option<Arc<EngineHandle>> {
-    ENGINE.read().ok().and_then(|engine| engine.clone())
+/// Registered runtime engines keyed by user-facing connection name.
+pub static CONNECTION_REGISTRY: Lazy<RwLock<HashMap<String, Arc<EngineHandle>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Name of the default connection used by legacy unqualified operations.
+pub static DEFAULT_CONNECTION_NAME: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
+
+/// Resolve a connection name and engine by explicit connection name, or by the selected default.
+pub fn connection_for_route(using: Option<String>) -> PyResult<(String, Arc<EngineHandle>)> {
+    let Some(connection_name) = using else {
+        let default_name = DEFAULT_CONNECTION_NAME
+            .read()
+            .map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Default Connection")
+            })?
+            .clone();
+
+        if let Some(connection_name) = default_name {
+            let engine = CONNECTION_REGISTRY
+                .read()
+                .map_err(|_| {
+                    pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Connection Registry")
+                })?
+                .get(&connection_name)
+                .cloned()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Default connection '{}' is not registered",
+                        connection_name
+                    ))
+                })?;
+            return Ok((connection_name, engine));
+        }
+
+        let has_connections = !CONNECTION_REGISTRY
+            .read()
+            .map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Connection Registry")
+            })?
+            .is_empty();
+        let has_default = DEFAULT_CONNECTION_NAME
+            .read()
+            .map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Default Connection")
+            })?
+            .is_some();
+
+        if has_connections && !has_default {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "No default connection selected",
+            ));
+        }
+
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "Engine not initialized",
+        ));
+    };
+
+    if connection_name.is_empty()
+        || !connection_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Invalid connection name '{}'",
+            connection_name
+        )));
+    }
+
+    CONNECTION_REGISTRY
+        .read()
+        .map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Connection Registry")
+        })?
+        .get(&connection_name)
+        .cloned()
+        .map(|engine| (connection_name.clone(), engine))
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Connection '{}' is not registered",
+                connection_name
+            ))
+        })
+}
+
+/// Resolve an engine by explicit connection name, or by the selected default.
+pub fn engine_for_connection(using: Option<String>) -> PyResult<Arc<EngineHandle>> {
+    connection_for_route(using).map(|(_, engine)| engine)
 }
 
 /// Active transaction handle.
@@ -58,8 +143,9 @@ pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> = Lazy
 
 /// Identity Map used for object tracking and deduplication.
 ///
-/// Maps `(ModelName, PrimaryKeyValue)` to a live Python object.
-pub static IDENTITY_MAP: Lazy<DashMap<(String, String), Py<PyAny>>> = Lazy::new(DashMap::new);
+/// Maps `(ConnectionName, ModelName, PrimaryKeyValue)` to a live Python object.
+pub static IDENTITY_MAP: Lazy<DashMap<(String, String, String), Py<PyAny>>> =
+    Lazy::new(DashMap::new);
 
 /// A Rust-native representation of database values.
 ///

@@ -45,9 +45,17 @@ pytestmark = pytest.mark.backend_matrix
 
 @pytest.fixture(autouse=True)
 def cleanup():
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
     reset_engine()
     clear_registry()
     yield
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
 
 
 def _build_fixture_models() -> None:

@@ -1,9 +1,37 @@
 import pytest
 import uuid
+import sqlite3
+from contextlib import closing
 from typing import Annotated
-from ferro import Model, connect, FerroField, transaction
+from ferro import Model, connect, FerroField, execute, transaction
 
 pytestmark = pytest.mark.backend_matrix
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_transaction_using_routes_unqualified_raw_sql(tmp_path):
+    """A transaction opened with using=... should pin unqualified work to that connection."""
+    app_db = tmp_path / "app.db"
+    service_db = tmp_path / "service.db"
+
+    await connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await connect(f"sqlite:{service_db}?mode=rwc", name="service")
+
+    async with transaction(using="service"):
+        await execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
+
+    with closing(sqlite3.connect(app_db)) as app_conn:
+        app_tables = app_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'marker'"
+        ).fetchall()
+    with closing(sqlite3.connect(service_db)) as service_conn:
+        service_tables = service_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'marker'"
+        ).fetchall()
+
+    assert app_tables == []
+    assert service_tables == [("marker",)]
 
 
 @pytest.mark.asyncio

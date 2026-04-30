@@ -4,7 +4,7 @@
 //! table definitions and managing the model registry.
 
 use crate::backend::EngineHandle;
-use crate::state::{MODEL_REGISTRY, SqlDialect, engine_handle};
+use crate::state::{MODEL_REGISTRY, SqlDialect, engine_for_connection};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, ColumnDef, ForeignKey, ForeignKeyAction, Index, PostgresQueryBuilder,
@@ -462,14 +462,10 @@ pub fn register_model_schema(name: String, schema: String) -> PyResult<()> {
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if SQL execution fails.
 #[pyfunction]
-pub fn create_tables(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+#[pyo3(signature = (using=None))]
+pub fn create_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = engine_handle().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "Engine not initialized. Call connect() first.",
-            )
-        })?;
-
+        let engine = engine_for_connection(using)?;
         internal_create_tables(engine).await
     })
 }
@@ -481,10 +477,7 @@ mod tests {
 
     #[test]
     fn test_composite_index_name_short() {
-        assert_eq!(
-            composite_index_name("users", &["a", "b"]),
-            "idx_users_a_b"
-        );
+        assert_eq!(composite_index_name("users", &["a", "b"]), "idx_users_a_b");
     }
 
     #[test]
@@ -588,8 +581,7 @@ mod tests {
         });
 
         for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
-            let (_table_sql, index_sqls) =
-                build_create_table_sqls("project", &schema, backend);
+            let (_table_sql, index_sqls) = build_create_table_sqls("project", &schema, backend);
             let joined = index_sqls.join("\n").to_uppercase();
             assert!(
                 joined.contains("CREATE INDEX"),

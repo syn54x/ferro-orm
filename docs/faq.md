@@ -137,7 +137,17 @@ Check your Ferro version's API for raw SQL support. Most versions provide an esc
 
 ### Does Ferro support multiple databases?
 
-Not yet. Ferro currently supports a single active database connection per application process.
+Yes. Register each pool with a name and route explicitly with `using`:
+
+```python
+await ferro.connect(APP_DATABASE_URL, name="app", default=True)
+await ferro.connect(SERVICE_DATABASE_URL, name="service")
+
+users = await User.all()  # app/default
+jobs = await Job.using("service").all()
+```
+
+Ferro does not provide automatic routers, cross-database joins, or distributed transactions in v1.
 
 See [How-To: Multiple Databases](howto/multiple-databases.md).
 

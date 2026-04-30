@@ -86,6 +86,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(operations::raw_fetch_all, m)?)?;
     m.add_function(wrap_pyfunction!(operations::raw_fetch_one, m)?)?;
     m.add_function(wrap_pyfunction!(connection::reset_engine, m)?)?;
+    m.add_function(wrap_pyfunction!(connection::set_default_connection, m)?)?;
     m.add_function(wrap_pyfunction!(clear_registry, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(schema::create_tables, m)?)?;

@@ -15,7 +15,7 @@ The backend is the runtime database engine behind Ferro's Python API. It owns:
 - backend-specific SQL generation choices
 - value binding and hydration rules
 
-The backend does not introduce a new public routing API. Ferro still uses one active engine per process. Named databases, replicas, and `using("name")`-style routing are intentionally deferred.
+The backend supports a registry of named connections. The common case still uses one default engine per process, while advanced applications can register multiple pools and route ORM, raw SQL, transaction, and schema operations with `using="name"`.
 
 ## Supported Backends
 
@@ -44,18 +44,21 @@ The important implementation detail is that URL detection happens once during `c
 1. Splits Ferro-only query parameters from the database URL.
 2. Classifies the backend from the URL scheme.
 3. Creates a typed SQLx pool for that backend.
-4. Stores an `Arc<EngineHandle>` in global engine state.
+4. Registers an `Arc<EngineHandle>` under a connection name and optionally selects it as the default.
 
-SQLite uses `SqlitePoolOptions` and PostgreSQL uses `PgPoolOptions`. Both currently use a fixed pool size of 5 connections.
+SQLite uses `SqlitePoolOptions` and PostgreSQL uses `PgPoolOptions`. `PoolConfig(max_connections=..., min_connections=...)` is applied per named connection, so app-role and service-role pools can have different sizes.
 
 ```text
-connect(url, auto_migrate)
+connect(url, name, default, auto_migrate, pool)
   -> split ferro_search_path
   -> BackendKind::from_url(url)
   -> connect typed pool
   -> optionally create tables
-  -> store EngineHandle globally
+  -> store EngineHandle in the named registry
+  -> optionally update the default connection
 ```
+
+Connection resolution is centralized. Explicit `using` wins outside a transaction; active transactions pin all work to their selected connection; instance methods prefer the instance's origin connection; unqualified calls then fall back to the selected default connection.
 
 ### PostgreSQL Search Paths
 

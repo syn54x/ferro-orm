@@ -36,19 +36,25 @@ The `tx` handle owns the transaction's connection. You cannot misuse it —
 calling `tx.execute(...)` after the `async with` block exits raises
 `RuntimeError`.
 
-### Top-level (auto-picks active tx)
+### Top-level (`using` or active transaction)
 
 ```python
 from ferro import execute, fetch_all, fetch_one
 
-# Outside any tx — runs on a one-off pool connection.
+# Outside any tx — runs on the default connection.
 await execute("select pg_advisory_unlock_all()")
 
+# Route explicitly to a named connection.
+await execute("select run_pipeline_job($1)", job_id, using="service")
+
 # Inside a tx — auto-picked up via the same ContextVar that Model.create() uses.
-async with transaction():
+async with transaction(using="service"):
     await execute("select set_config('request.jwt.claims', $1, true)", claims_json)
     rows = await fetch_all("select * from foo where org_id = $1", org_id)
 ```
+
+Passing `using=...` inside an active transaction raises. A transaction is pinned to
+one connection, and unqualified raw SQL inherits that connection.
 
 ## Placeholders are native to the backend
 
@@ -96,9 +102,10 @@ the `sql` argument — use placeholders and pass values as positional args.
 ## Connection affinity
 
 Outside a `transaction()` block, each top-level `execute` / `fetch_all` /
-`fetch_one` call may use a different pool connection. Wrap in
-`transaction()` for connection-affinity-sensitive operations like
-`SET LOCAL`, advisory locks, or `LISTEN/NOTIFY`.
+`fetch_one` call runs on the selected named pool (`using=...`) or the default
+pool. Consecutive calls may use different physical connections from that pool.
+Wrap in `transaction(using=...)` for connection-affinity-sensitive operations
+like `SET LOCAL`, advisory locks, or `LISTEN/NOTIFY`.
 
 ## What raw SQL doesn't do
 

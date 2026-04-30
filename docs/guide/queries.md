@@ -251,8 +251,16 @@ smith_users = await User.where(User.name.like("%Smith%")).all()
 
 ## Raw SQL
 
-!!! warning "Feature Not Implemented"
-    Raw SQL query execution is not yet available. Use the query builder API for all queries. See [Coming Soon](../coming-soon.md#raw-sql-queries) for more information.
+Ferro exposes `execute`, `fetch_all`, and `fetch_one` for raw SQL escape hatches. Raw SQL uses backend-native placeholders and can route to named connections:
+
+```python
+from ferro import execute, fetch_all
+
+await execute("select run_pipeline_job($1)", job_id, using="service")
+rows = await fetch_all("select id, name from users where org_id = $1", org_id)
+```
+
+Inside `transaction(using="service")`, raw SQL inherits the transaction connection. See [Raw SQL](../api/raw-sql.md) for bind-type details and caveats.
 
 ## Performance Tips
 

@@ -30,8 +30,28 @@ from .query import Query, QueryNode
 from .state import _CURRENT_TRANSACTION
 
 
+_FERRO_CONNECTION_ATTR = "__ferro_connection_name"
+
+
+def _transaction_or_using(using: str | None) -> tuple[str | None, str | None]:
+    tx_id = _CURRENT_TRANSACTION.get()
+    if tx_id is not None and using is not None:
+        raise ValueError("ORM operations inside a transaction inherit the transaction connection")
+    return tx_id, using
+
+
+def _instance_origin(instance: object) -> str | None:
+    origin = getattr(instance, _FERRO_CONNECTION_ATTR, None)
+    return origin if isinstance(origin, str) else None
+
+
+def _set_instance_origin(instance: object, using: str | None) -> None:
+    if using is not None:
+        object.__setattr__(instance, _FERRO_CONNECTION_ATTR, using)
+
+
 @asynccontextmanager
-async def transaction():
+async def transaction(using: str | None = None):
     """Run database operations inside a transaction context.
 
     Yields a :class:`~ferro.raw.Transaction` handle bound to this transaction's
@@ -57,7 +77,7 @@ async def transaction():
     from .raw import Transaction
 
     parent_tx_id = _CURRENT_TRANSACTION.get()
-    tx_id = await begin_transaction(parent_tx_id)
+    tx_id = await begin_transaction(parent_tx_id, using)
     token = _CURRENT_TRANSACTION.set(tx_id)
     try:
         yield Transaction(tx_id)
@@ -161,7 +181,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     raise ValueError(f"{field_name} is required")
         return self
 
-    async def save(self) -> None:
+    async def save(self, *, using: str | None = None) -> None:
         """Persist the current model instance
 
         Returns:
@@ -171,9 +191,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> user = User(name="Taylor")
             >>> await user.save()
         """
-        tx_id = _CURRENT_TRANSACTION.get()
+        origin = _instance_origin(self)
+        if using is not None and origin is not None and using != origin:
+            raise ValueError("Instance is already bound to a different connection")
+        effective_using = using or origin
+
+        tx_id, effective_using = _transaction_or_using(effective_using)
         new_id = await save_record(
-            self.__class__.__name__, self.model_dump_json(), tx_id
+            self.__class__.__name__, self.model_dump_json(), tx_id, effective_using
         )
 
         pk_val = None
@@ -198,9 +223,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     break
 
         if pk_val is not None:
-            register_instance(self.__class__.__name__, str(pk_val), self)
+            register_instance(self.__class__.__name__, str(pk_val), self, effective_using)
+            _set_instance_origin(self, effective_using)
 
-    async def delete(self) -> None:
+    async def delete(self, *, using: str | None = None) -> None:
         """Delete the current model instance from storage
 
         Returns:
@@ -213,13 +239,22 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         pk_field_name = self.__class__._primary_key_field_name()
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
+        origin = _instance_origin(self)
+        if using is not None and origin is not None and using != origin:
+            raise ValueError("Instance is already bound to a different connection")
+        effective_using = using or origin
 
         if pk_val is not None:
             name = self.__class__.__name__
-            await self.__class__.where(
+            query = self.__class__.where(
                 getattr(self.__class__, pk_field_name) == pk_val
-            ).delete()
-            evict_instance(name, str(pk_val))
+            )
+            if effective_using is not None:
+                query = Query(self.__class__, using=effective_using).where(
+                    getattr(self.__class__, pk_field_name) == pk_val
+                )
+            await query.delete()
+            evict_instance(name, str(pk_val), effective_using)
 
     @classmethod
     def _primary_key_field_name(cls) -> str | None:
@@ -284,7 +319,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     pass
 
     @classmethod
-    async def all(cls) -> list[Self]:
+    async def all(cls, *, using: str | None = None) -> list[Self]:
         """Fetch all records for this model class
 
         Returns:
@@ -295,8 +330,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> isinstance(users, list)
             True
         """
-        tx_id = _CURRENT_TRANSACTION.get()
-        results = await fetch_all(cls, tx_id)
+        tx_id, using = _transaction_or_using(using)
+        results = await fetch_all(cls, tx_id, using)
         for instance in results:
             cls._fix_types(instance)
         return results
@@ -325,7 +360,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             cls._fix_types(instance)
         return instance
 
-    async def refresh(self) -> None:
+    async def refresh(self, *, using: str | None = None) -> None:
         """Reload this instance from storage using its primary key
 
         Returns:
@@ -346,16 +381,25 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise RuntimeError("Cannot refresh a model without a primary key")
 
         name = self.__class__.__name__
-        evict_instance(name, str(pk_val))
-        fresh_instance = await self.__class__.where(
-            getattr(self.__class__, pk_field_name) == pk_val
-        ).first()
+        origin = _instance_origin(self)
+        if using is not None and origin is not None and using != origin:
+            raise ValueError("Instance is already bound to a different connection")
+        effective_using = using or origin
+
+        evict_instance(name, str(pk_val), effective_using)
+        query = self.__class__.where(getattr(self.__class__, pk_field_name) == pk_val)
+        if effective_using is not None:
+            query = Query(self.__class__, using=effective_using).where(
+                getattr(self.__class__, pk_field_name) == pk_val
+            )
+        fresh_instance = await query.first()
 
         if fresh_instance is None:
             raise RuntimeError(f"Instance not found in database: {name}({pk_val})")
 
         self.__dict__.update(fresh_instance.__dict__)
-        register_instance(name, str(pk_val), self)
+        register_instance(name, str(pk_val), self, effective_using)
+        _set_instance_origin(self, effective_using)
         self.__class__._fix_types(self)
 
     @classmethod
@@ -390,6 +434,11 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return Query(cls)
 
     @classmethod
+    def using(cls, name: str) -> "ModelConnection[Self]":
+        """Bind ORM operations for this model to a named connection."""
+        return ModelConnection(cls, name)
+
+    @classmethod
     async def create(cls, **fields) -> Self:
         """Create and persist a new model instance
 
@@ -409,7 +458,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return instance
 
     @classmethod
-    async def bulk_create(cls, instances: list[Self]) -> int:
+    async def bulk_create(
+        cls, instances: list[Self], *, using: str | None = None
+    ) -> int:
         """Persist multiple instances in a single bulk operation
 
         Args:
@@ -427,8 +478,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             return 0
         # Use mode="json" to ensure Decimals, UUIDs, etc. are serialized correctly
         data = [i.model_dump(mode="json") for i in instances]
-        tx_id = _CURRENT_TRANSACTION.get()
-        return await save_bulk_records(cls.__name__, json.dumps(data), tx_id)
+        tx_id, using = _transaction_or_using(using)
+        return await save_bulk_records(cls.__name__, json.dumps(data), tx_id, using)
 
     @classmethod
     async def get_or_create(
@@ -471,14 +522,6 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         Returns:
             A tuple of ``(instance, created)`` where ``created`` is True for new records.
-
-        Examples:
-            >>> user, created = await User.update_or_create(
-            ...     email="a@b.com",
-            ...     defaults={"name": "Taylor"},
-            ... )
-            >>> isinstance(created, bool)
-            True
         """
         query = Query(cls)
         for key, val in fields.items():
@@ -493,3 +536,68 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         params = {**fields, **(defaults or {})}
         return await cls.create(**params), True
+
+
+class ModelConnection:
+    """Connection-bound ORM entrypoint returned by ``Model.using(name)``."""
+
+    def __init__(self, model_cls: type[Model], using: str) -> None:
+        self.model_cls = model_cls
+        self.using = using
+
+    async def create(self, **fields: Any) -> Model:
+        instance = self.model_cls(**fields)
+        await instance.save(using=self.using)
+        return instance
+
+    async def all(self) -> list[Model]:
+        return await self.model_cls.all(using=self.using)
+
+    def select(self) -> Query[Model]:
+        return Query(self.model_cls, using=self.using)
+
+    def where(self, node: QueryNode) -> Query[Model]:
+        return self.select().where(node)
+
+    async def get(self, pk: Any) -> Model | None:
+        pk_field_name = self.model_cls._primary_key_field_name()
+        if pk_field_name is None:
+            raise RuntimeError(
+                f"Model {self.model_cls.__name__} does not define a primary key"
+            )
+
+        return await self.where(getattr(self.model_cls, pk_field_name) == pk).first()
+
+    async def bulk_create(self, instances: list[Model]) -> int:
+        return await self.model_cls.bulk_create(instances, using=self.using)
+
+    async def get_or_create(
+        self, defaults: dict[str, Any] | None = None, **fields: Any
+    ) -> tuple[Model, bool]:
+        query = Query(self.model_cls, using=self.using)
+        for key, val in fields.items():
+            query = query.where(getattr(self.model_cls, key) == val)
+
+        instance = await query.first()
+        if instance:
+            return instance, False
+
+        params = {**fields, **(defaults or {})}
+        return await self.create(**params), True
+
+    async def update_or_create(
+        self, defaults: dict[str, Any] | None = None, **fields: Any
+    ) -> tuple[Model, bool]:
+        query = Query(self.model_cls, using=self.using)
+        for key, val in fields.items():
+            query = query.where(getattr(self.model_cls, key) == val)
+
+        instance = await query.first()
+        if instance:
+            for key, val in (defaults or {}).items():
+                setattr(instance, key, val)
+            await instance.save(using=self.using)
+            return instance, False
+
+        params = {**fields, **(defaults or {})}
+        return await self.create(**params), True
