@@ -5,6 +5,10 @@ _CURRENT_TRANSACTION: ContextVar[str | None] = ContextVar(
     "current_transaction", default=None
 )
 
+_CURRENT_TRANSACTION_CONNECTION: ContextVar[str | None] = ContextVar(
+    "current_transaction_connection", default=None
+)
+
 # Global registry for models (Python side)
 _MODEL_REGISTRY_PY = {}
 

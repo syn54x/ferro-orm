@@ -106,6 +106,87 @@ async def test_relationships_loaded_inside_transaction_inherit_transaction(db_ur
 
 
 @pytest.mark.asyncio
+async def test_instance_methods_loaded_inside_transaction_inherit_transaction(db_url):
+    """Transaction-loaded instances should save, refresh, and delete in the transaction."""
+
+    class TxInstanceMethodUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    await connect(db_url, auto_migrate=True)
+    created = await TxInstanceMethodUser.create(id=1, username="before")
+    evict_instance("TxInstanceMethodUser", str(created.id))
+
+    async with transaction():
+        loaded = await TxInstanceMethodUser.get(1)
+        assert loaded is not None
+
+        loaded.username = "saved"
+        await loaded.save()
+
+        placeholder_sql = (
+            "UPDATE txinstancemethoduser SET username = $1 WHERE id = $2"
+            if db_url.startswith(("postgres://", "postgresql://"))
+            else "UPDATE txinstancemethoduser SET username = ? WHERE id = ?"
+        )
+        await execute(placeholder_sql, "refreshed", 1)
+        await loaded.refresh()
+        assert loaded.username == "refreshed"
+
+        await loaded.delete()
+
+    assert await TxInstanceMethodUser.get(1) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_instance_methods_loaded_inside_named_transaction_keep_identity_scope(tmp_path):
+    """Service transaction instance methods should not evict or register app objects."""
+
+    class TxNamedInstanceMethodUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    app_db = tmp_path / "app.db"
+    service_db = tmp_path / "service.db"
+
+    await connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await connect(f"sqlite:{service_db}?mode=rwc", name="service")
+    from ferro import create_tables
+
+    await create_tables()
+    await create_tables(using="service")
+
+    await TxNamedInstanceMethodUser.create(id=1, username="app")
+    await TxNamedInstanceMethodUser.using("service").create(id=1, username="service")
+    evict_instance("TxNamedInstanceMethodUser", "1")
+    evict_instance("TxNamedInstanceMethodUser", "1", using="service")
+
+    async with transaction(using="service"):
+        loaded = await TxNamedInstanceMethodUser.get(1)
+        assert loaded is not None
+        loaded.username = "service-saved"
+        await loaded.save()
+
+        await execute(
+            "UPDATE txnamedinstancemethoduser SET username = ? WHERE id = ?",
+            "service-refreshed",
+            1,
+        )
+        await loaded.refresh()
+        assert loaded.username == "service-refreshed"
+
+    app_row = await TxNamedInstanceMethodUser.get(1)
+    service_row = await TxNamedInstanceMethodUser.using("service").get(1)
+
+    assert app_row is not None
+    assert service_row is not None
+    assert app_row.username == "app"
+    assert service_row.username == "service-refreshed"
+    assert app_row is not service_row
+
+
+@pytest.mark.asyncio
 async def test_transaction_commit(db_url):
     """Test that operations inside a transaction are committed on success."""
 

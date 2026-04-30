@@ -27,7 +27,7 @@ from ._core import (
 from .base import ForeignKey, foreign_key_allows_none
 from .metaclass import ModelMetaclass
 from .query import Query, QueryNode
-from .state import _CURRENT_TRANSACTION
+from .state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
 
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
@@ -38,6 +38,24 @@ def _transaction_or_using(using: str | None) -> tuple[str | None, str | None]:
     if tx_id is not None and using is not None:
         raise ValueError("ORM operations inside a transaction inherit the transaction connection")
     return tx_id, using
+
+
+def _instance_transaction_route(
+    instance: object, using: str | None
+) -> tuple[str | None, str | None, str | None]:
+    origin = _instance_origin(instance)
+    if using is not None and origin is not None and using != origin:
+        raise ValueError("Instance is already bound to a different connection")
+
+    tx_id = _CURRENT_TRANSACTION.get()
+    if tx_id is not None:
+        tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
+        if using is not None:
+            raise ValueError("ORM operations inside a transaction inherit the transaction connection")
+        return tx_id, None, origin or tx_connection
+
+    effective_using = using or origin
+    return None, effective_using, effective_using
 
 
 def _instance_origin(instance: object) -> str | None:
@@ -79,6 +97,9 @@ async def transaction(using: str | None = None):
     parent_tx_id = _CURRENT_TRANSACTION.get()
     tx_id = await begin_transaction(parent_tx_id, using)
     token = _CURRENT_TRANSACTION.set(tx_id)
+    connection_token = _CURRENT_TRANSACTION_CONNECTION.set(
+        _CURRENT_TRANSACTION_CONNECTION.get() if parent_tx_id is not None else using
+    )
     try:
         yield Transaction(tx_id)
         await commit_transaction(tx_id)
@@ -87,6 +108,7 @@ async def transaction(using: str | None = None):
         raise
     finally:
         _CURRENT_TRANSACTION.reset(token)
+        _CURRENT_TRANSACTION_CONNECTION.reset(connection_token)
 
 
 class Model(BaseModel, metaclass=ModelMetaclass):
@@ -191,14 +213,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> user = User(name="Taylor")
             >>> await user.save()
         """
-        origin = _instance_origin(self)
-        if using is not None and origin is not None and using != origin:
-            raise ValueError("Instance is already bound to a different connection")
-        effective_using = using or origin
-
-        tx_id, effective_using = _transaction_or_using(effective_using)
+        tx_id, operation_using, identity_using = _instance_transaction_route(self, using)
         new_id = await save_record(
-            self.__class__.__name__, self.model_dump_json(), tx_id, effective_using
+            self.__class__.__name__, self.model_dump_json(), tx_id, operation_using
         )
 
         pk_val = None
@@ -223,8 +240,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     break
 
         if pk_val is not None:
-            register_instance(self.__class__.__name__, str(pk_val), self, effective_using)
-            _set_instance_origin(self, effective_using)
+            register_instance(self.__class__.__name__, str(pk_val), self, identity_using)
+            _set_instance_origin(self, identity_using)
 
     async def delete(self, *, using: str | None = None) -> None:
         """Delete the current model instance from storage
@@ -239,22 +256,19 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         pk_field_name = self.__class__._primary_key_field_name()
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
-        origin = _instance_origin(self)
-        if using is not None and origin is not None and using != origin:
-            raise ValueError("Instance is already bound to a different connection")
-        effective_using = using or origin
+        _tx_id, operation_using, identity_using = _instance_transaction_route(self, using)
 
         if pk_val is not None:
             name = self.__class__.__name__
             query = self.__class__.where(
                 getattr(self.__class__, pk_field_name) == pk_val
             )
-            if effective_using is not None:
-                query = Query(self.__class__, using=effective_using).where(
+            if operation_using is not None:
+                query = Query(self.__class__, using=operation_using).where(
                     getattr(self.__class__, pk_field_name) == pk_val
                 )
             await query.delete()
-            evict_instance(name, str(pk_val), effective_using)
+            evict_instance(name, str(pk_val), identity_using)
 
     @classmethod
     def _primary_key_field_name(cls) -> str | None:
@@ -381,15 +395,12 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise RuntimeError("Cannot refresh a model without a primary key")
 
         name = self.__class__.__name__
-        origin = _instance_origin(self)
-        if using is not None and origin is not None and using != origin:
-            raise ValueError("Instance is already bound to a different connection")
-        effective_using = using or origin
+        _tx_id, operation_using, identity_using = _instance_transaction_route(self, using)
 
-        evict_instance(name, str(pk_val), effective_using)
+        evict_instance(name, str(pk_val), identity_using)
         query = self.__class__.where(getattr(self.__class__, pk_field_name) == pk_val)
-        if effective_using is not None:
-            query = Query(self.__class__, using=effective_using).where(
+        if operation_using is not None:
+            query = Query(self.__class__, using=operation_using).where(
                 getattr(self.__class__, pk_field_name) == pk_val
             )
         fresh_instance = await query.first()
@@ -398,8 +409,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise RuntimeError(f"Instance not found in database: {name}({pk_val})")
 
         self.__dict__.update(fresh_instance.__dict__)
-        register_instance(name, str(pk_val), self, effective_using)
-        _set_instance_origin(self, effective_using)
+        register_instance(name, str(pk_val), self, identity_using)
+        _set_instance_origin(self, identity_using)
         self.__class__._fix_types(self)
 
     @classmethod

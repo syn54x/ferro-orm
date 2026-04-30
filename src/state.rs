@@ -117,22 +117,29 @@ pub fn engine_for_connection(using: Option<String>) -> PyResult<Arc<EngineHandle
 pub struct TransactionHandle {
     pub conn: TransactionConnection,
     pub savepoint_name: Option<String>,
+    pub connection_name: String,
 }
 
 pub type TransactionConnection = Arc<Mutex<EngineConnection>>;
 
 impl TransactionHandle {
-    pub fn root(conn: EngineConnection) -> Self {
+    pub fn root(conn: EngineConnection, connection_name: String) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
             savepoint_name: None,
+            connection_name,
         }
     }
 
-    pub fn nested(conn: TransactionConnection, savepoint_name: String) -> Self {
+    pub fn nested(
+        conn: TransactionConnection,
+        savepoint_name: String,
+        connection_name: String,
+    ) -> Self {
         Self {
             conn,
             savepoint_name: Some(savepoint_name),
+            connection_name,
         }
     }
 }

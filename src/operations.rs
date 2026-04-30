@@ -3,7 +3,9 @@
 //! This module implements high-performance CRUD operations, leveraging
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
-use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind};
+use crate::backend::{
+    BackendKind, EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind,
+};
 use crate::query::QueryDef;
 use crate::state::{
     IDENTITY_MAP, MODEL_REGISTRY, RustValue, SqlDialect, TRANSACTION_REGISTRY,
@@ -25,8 +27,34 @@ fn get_transaction_connection(tx_id: Option<String>) -> Option<TransactionConnec
     })
 }
 
+fn get_transaction_route(tx_id: Option<String>) -> Option<(String, TransactionConnection)> {
+    tx_id.and_then(|id| {
+        TRANSACTION_REGISTRY.get(&id).map(|tx| {
+            (
+                tx.value().connection_name.clone(),
+                tx.value().conn.clone(),
+            )
+        })
+    })
+}
+
 fn active_engine_for_connection(using: Option<String>) -> PyResult<Arc<EngineHandle>> {
     engine_for_connection(using)
+}
+
+fn active_route_for_operation(
+    tx_id: Option<String>,
+    using: Option<String>,
+) -> PyResult<(String, Arc<EngineHandle>, Option<TransactionConnection>, BackendKind)> {
+    let tx_route = get_transaction_route(tx_id);
+    let route_using = tx_route
+        .as_ref()
+        .map(|(connection_name, _)| connection_name.clone())
+        .or(using);
+    let (connection_name, engine) = active_connection_for_route(route_using)?;
+    let backend = engine.backend();
+    let tx_conn = tx_route.map(|(_, conn)| conn);
+    Ok((connection_name, engine, tx_conn, backend))
 }
 
 fn active_connection_for_route(using: Option<String>) -> PyResult<(String, Arc<EngineHandle>)> {
@@ -741,6 +769,7 @@ pub fn begin_transaction(
                 pyo3::exceptions::PyRuntimeError::new_err("Parent transaction not found")
             })?;
             let conn = parent.conn.clone();
+            let connection_name = parent.connection_name.clone();
             drop(parent);
 
             let savepoint_name = format!("sp_{}", tx_id.replace('-', "_"));
@@ -755,15 +784,15 @@ pub fn begin_transaction(
 
             TRANSACTION_REGISTRY.insert(
                 tx_id.clone(),
-                TransactionHandle::nested(conn, savepoint_name),
+                TransactionHandle::nested(conn, savepoint_name, connection_name),
             );
         } else {
-            let engine = active_engine_for_connection(using)?;
+            let (connection_name, engine) = active_connection_for_route(using)?;
             let conn = engine.begin_transaction_connection().await.map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
             })?;
 
-            TRANSACTION_REGISTRY.insert(tx_id.clone(), TransactionHandle::root(conn));
+            TRANSACTION_REGISTRY.insert(tx_id.clone(), TransactionHandle::root(conn, connection_name));
         }
 
         Ok(tx_id)
@@ -871,12 +900,8 @@ pub fn fetch_all<'py>(
     let cls_py = cls.unbind();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (connection_name, engine, tx_conn, backend) = {
-            let (connection_name, engine) = active_connection_for_route(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (connection_name, engine, tx_conn, backend)
-        };
+        let (connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
@@ -1031,12 +1056,8 @@ pub fn fetch_one<'py>(
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (connection_name, engine, tx_conn, backend) = {
-            let (connection_name, engine) = active_connection_for_route(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (connection_name, engine, tx_conn, backend)
-        };
+        let (connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
@@ -1176,12 +1197,8 @@ pub fn save_record(
     using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (_connection_name, engine, tx_conn, backend) = {
-            let (connection_name, engine) = active_connection_for_route(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (connection_name, engine, tx_conn, backend)
-        };
+        let (_connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         // ... schema and record logic ...
         let (schema, record_obj) = {
@@ -1353,12 +1370,8 @@ pub fn save_bulk_records(
     using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (_connection_name, engine, tx_conn, backend) = {
-            let (connection_name, engine) = active_connection_for_route(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (connection_name, engine, tx_conn, backend)
-        };
+        let (_connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         let schema = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1500,12 +1513,8 @@ pub fn fetch_filtered<'py>(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (connection_name, engine, tx_conn, backend) = {
-            let (connection_name, engine) = active_connection_for_route(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (connection_name, engine, tx_conn, backend)
-        };
+        let (connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
@@ -1685,12 +1694,7 @@ pub fn count_filtered(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine_for_connection(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         // ... sql ...
@@ -1815,12 +1819,7 @@ pub fn delete_record(
     using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine_for_connection(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         // ... sql ...
@@ -1893,12 +1892,7 @@ pub fn delete_filtered(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine_for_connection(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         // ... sql ...
@@ -1948,12 +1942,7 @@ pub fn update_filtered(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine_for_connection(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
@@ -2024,12 +2013,7 @@ pub fn add_m2m_links<'py>(
         .collect::<PyResult<Vec<_>>>()?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine_for_connection(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
         let uuid_columns =
             postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
 
@@ -2084,12 +2068,7 @@ pub fn remove_m2m_links<'py>(
         .collect::<PyResult<Vec<_>>>()?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (engine, tx_conn, backend) = {
-            let engine = active_engine_for_connection(using)?;
-            let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
-            (engine, tx_conn, backend)
-        };
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
         let uuid_columns =
             postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
 
