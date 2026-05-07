@@ -910,6 +910,7 @@ pub fn fetch_all<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (connection_name, engine, tx_conn, backend) =
             active_route_for_operation(tx_id, using)?;
+        let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
@@ -991,12 +992,17 @@ pub fn fetch_all<'py>(
             let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
 
             for (row_pk_val, fields) in parsed_data {
-                if let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) =
-                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
-                {
-                    results.append(existing_obj.value().clone_ref(py))?;
-                    continue;
+                if use_identity_map {
+                    if let Some(ref pk_val) = row_pk_val
+                        && let Some(existing_obj) = IDENTITY_MAP.get(&(
+                            connection_name.clone(),
+                            name.clone(),
+                            pk_val.clone(),
+                        ))
+                    {
+                        results.append(existing_obj.value().clone_ref(py))?;
+                        continue;
+                    }
                 }
 
                 let instance = cls.call_method1(new_str, (cls,))?;
@@ -1014,11 +1020,13 @@ pub fn fetch_all<'py>(
 
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
 
-                if let Some(pk_val) = row_pk_val {
-                    IDENTITY_MAP.insert(
-                        (connection_name.clone(), name.clone(), pk_val),
-                        instance.clone().unbind(),
-                    );
+                if use_identity_map {
+                    if let Some(pk_val) = row_pk_val {
+                        IDENTITY_MAP.insert(
+                            (connection_name.clone(), name.clone(), pk_val),
+                            instance.clone().unbind(),
+                        );
+                    }
                 }
 
                 results.append(instance)?;
@@ -1053,19 +1061,22 @@ pub fn fetch_one<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
-    let (connection_name, _) = active_connection_for_route(using.clone())?;
+    let (connection_name, engine) = active_connection_for_route(using.clone())?;
 
     // Check Identity Map first (if no transaction, or even with transaction, IM is usually safe)
-    if let Some(existing_obj) =
-        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
-    {
-        let obj = existing_obj.value().clone_ref(py);
-        return pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) });
+    if engine.is_identity_map_enabled() {
+        if let Some(existing_obj) =
+            IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
+        {
+            let obj = existing_obj.value().clone_ref(py);
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) });
+        }
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (connection_name, engine, tx_conn, backend) =
             active_route_for_operation(tx_id, using)?;
+        let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
@@ -1174,10 +1185,12 @@ pub fn fetch_one<'py>(
                 }
 
                 let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
-                IDENTITY_MAP.insert(
-                    (connection_name.clone(), name.clone(), pk_val),
-                    instance.clone().unbind(),
-                );
+                if use_identity_map {
+                    IDENTITY_MAP.insert(
+                        (connection_name.clone(), name.clone(), pk_val),
+                        instance.clone().unbind(),
+                    );
+                }
                 Ok(instance.into_any().unbind())
             }),
             None => Python::attach(|py| Ok(py.None())),
@@ -1523,6 +1536,7 @@ pub fn fetch_filtered<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (connection_name, engine, tx_conn, backend) =
             active_route_for_operation(tx_id, using)?;
+        let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
         let pg_native_enum_cols: HashSet<String> = {
@@ -1650,12 +1664,17 @@ pub fn fetch_filtered<'py>(
             let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
 
             for (row_pk_val, fields) in parsed_data {
-                if let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) =
-                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
-                {
-                    results.append(existing_obj.value().clone_ref(py))?;
-                    continue;
+                if use_identity_map {
+                    if let Some(ref pk_val) = row_pk_val
+                        && let Some(existing_obj) = IDENTITY_MAP.get(&(
+                            connection_name.clone(),
+                            name.clone(),
+                            pk_val.clone(),
+                        ))
+                    {
+                        results.append(existing_obj.value().clone_ref(py))?;
+                        continue;
+                    }
                 }
 
                 let instance = cls.call_method1(new_str, (cls,))?;
@@ -1673,11 +1692,13 @@ pub fn fetch_filtered<'py>(
 
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
 
-                if let Some(pk_val) = row_pk_val {
-                    IDENTITY_MAP.insert(
-                        (connection_name.clone(), name.clone(), pk_val),
-                        instance.clone().unbind(),
-                    );
+                if use_identity_map {
+                    if let Some(pk_val) = row_pk_val {
+                        IDENTITY_MAP.insert(
+                            (connection_name.clone(), name.clone(), pk_val),
+                            instance.clone().unbind(),
+                        );
+                    }
                 }
 
                 results.append(instance)?;
@@ -1802,8 +1823,10 @@ pub fn register_instance(
     obj: Py<PyAny>,
     using: Option<String>,
 ) -> PyResult<()> {
-    let (connection_name, _) = active_connection_for_route(using)?;
-    IDENTITY_MAP.insert((connection_name, name, pk), obj);
+    let (connection_name, engine) = active_connection_for_route(using)?;
+    if engine.is_identity_map_enabled() {
+        IDENTITY_MAP.insert((connection_name, name, pk), obj);
+    }
     Ok(())
 }
 
@@ -1811,8 +1834,10 @@ pub fn register_instance(
 #[pyfunction]
 #[pyo3(signature = (name, pk, using=None))]
 pub fn evict_instance(name: String, pk: String, using: Option<String>) -> PyResult<()> {
-    let (connection_name, _) = active_connection_for_route(using)?;
-    IDENTITY_MAP.remove(&(connection_name, name, pk));
+    let (connection_name, engine) = active_connection_for_route(using)?;
+    if engine.is_identity_map_enabled() {
+        IDENTITY_MAP.remove(&(connection_name, name, pk));
+    }
     Ok(())
 }
 
@@ -1920,7 +1945,9 @@ pub fn delete_filtered(
                 })?;
 
         // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
-        IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
+        if engine.is_identity_map_enabled() {
+            IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
+        }
 
         Ok(rows_affected)
     })
@@ -1996,7 +2023,9 @@ pub fn update_filtered(
                 })?;
 
         // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
-        IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
+        if engine.is_identity_map_enabled() {
+            IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
+        }
 
         Ok(rows_affected)
     })

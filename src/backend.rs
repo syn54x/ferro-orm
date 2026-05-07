@@ -30,6 +30,8 @@ impl BackendKind {
 pub struct EngineHandle {
     backend: BackendKind,
     pool: BackendPool,
+    /// When false, Ferro skips the identity map for this connection (no lookup/register on load).
+    identity_map_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +118,7 @@ impl EngineHandle {
         Self {
             backend: BackendKind::Sqlite,
             pool: BackendPool::Sqlite(Arc::new(pool)),
+            identity_map_enabled: true,
         }
     }
 
@@ -123,7 +126,21 @@ impl EngineHandle {
         Self {
             backend: BackendKind::Postgres,
             pool: BackendPool::Postgres(Arc::new(pool)),
+            identity_map_enabled: true,
         }
+    }
+
+    /// Returns whether this connection uses the identity map (singleton instances per PK).
+    #[must_use]
+    pub fn is_identity_map_enabled(&self) -> bool {
+        self.identity_map_enabled
+    }
+
+    /// Sets identity-map behavior for this handle (used by `connect(identity_map=...)`).
+    #[must_use]
+    pub fn with_identity_map_enabled(mut self, enabled: bool) -> Self {
+        self.identity_map_enabled = enabled;
+        self
     }
 
     pub fn backend(&self) -> BackendKind {

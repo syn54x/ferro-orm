@@ -8,6 +8,8 @@ async def connect(
     default: bool = False,
     max_connections: int = 5,
     min_connections: int = 0,
+    *,
+    identity_map: bool = True,
 ) -> None: ...
 async def create_tables(using: Optional[str] = None) -> None: ...
 async def fetch_all(

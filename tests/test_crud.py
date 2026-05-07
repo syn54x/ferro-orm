@@ -102,6 +102,27 @@ async def test_identity_map_consistency(db_url):
 
 
 @pytest.mark.asyncio
+async def test_identity_map_disabled_returns_distinct_instances(db_url):
+    """With identity_map=False, repeated loads are distinct objects (same field values)."""
+
+    class CrudUser(Model):
+        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        username: str
+        email: str
+
+    await ferro.connect(db_url, auto_migrate=True, identity_map=False)
+    u1 = CrudUser(id=200, username="nomap", email="nomap@test.com")
+    await u1.save()
+    results_1 = await CrudUser.all()
+    results_2 = await CrudUser.all()
+    user_a = results_1[0]
+    user_b = results_2[0]
+    assert user_a is not user_b
+    assert user_a.id == user_b.id == 200
+    assert user_a.username == user_b.username
+
+
+@pytest.mark.asyncio
 async def test_model_get_operation(db_url):
     """Test fetching a single record by primary key."""
 
