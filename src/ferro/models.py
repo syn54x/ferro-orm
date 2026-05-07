@@ -554,28 +554,33 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return await cls.create(**params), True
 
 
-class ModelConnection:
-    """Connection-bound ORM entrypoint returned by ``Model.using(name)``."""
+class ModelConnection[M: Model]:
+    """Connection-bound ORM entrypoint returned by ``Model.using(name)``.
 
-    def __init__(self, model_cls: type[Model], using: str) -> None:
-        self.model_cls = model_cls
-        self.using = using
+    Generic over the concrete model class so that every accessor preserves
+    the bound type — e.g. ``Transcript.using("service").get(pk)`` resolves
+    to ``Transcript | None`` rather than ``Model | None``.
+    """
 
-    async def create(self, **fields: Any) -> Model:
+    def __init__(self, model_cls: type[M], connection_name: str) -> None:
+        self.model_cls: type[M] = model_cls
+        self._connection_name: str = connection_name
+
+    async def create(self, **fields: Any) -> M:
         instance = self.model_cls(**fields)
-        await instance.save(using=self.using)
+        await instance.save(using=self._connection_name)
         return instance
 
-    async def all(self) -> list[Model]:
-        return await self.model_cls.all(using=self.using)
+    async def all(self) -> list[M]:
+        return await self.model_cls.all(using=self._connection_name)
 
-    def select(self) -> Query[Model]:
-        return Query(self.model_cls, using=self.using)
+    def select(self) -> Query[M]:
+        return Query(self.model_cls, using=self._connection_name)
 
-    def where(self, node: QueryNode) -> Query[Model]:
+    def where(self, node: QueryNode) -> Query[M]:
         return self.select().where(node)
 
-    async def get(self, pk: Any) -> Model | None:
+    async def get(self, pk: Any) -> M | None:
         pk_field_name = self.model_cls._primary_key_field_name()
         if pk_field_name is None:
             raise RuntimeError(
@@ -584,13 +589,13 @@ class ModelConnection:
 
         return await self.where(getattr(self.model_cls, pk_field_name) == pk).first()
 
-    async def bulk_create(self, instances: list[Model]) -> int:
-        return await self.model_cls.bulk_create(instances, using=self.using)
+    async def bulk_create(self, instances: list[M]) -> int:
+        return await self.model_cls.bulk_create(instances, using=self._connection_name)
 
     async def get_or_create(
         self, defaults: dict[str, Any] | None = None, **fields: Any
-    ) -> tuple[Model, bool]:
-        query = Query(self.model_cls, using=self.using)
+    ) -> tuple[M, bool]:
+        query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
             query = query.where(getattr(self.model_cls, key) == val)
 
@@ -603,8 +608,8 @@ class ModelConnection:
 
     async def update_or_create(
         self, defaults: dict[str, Any] | None = None, **fields: Any
-    ) -> tuple[Model, bool]:
-        query = Query(self.model_cls, using=self.using)
+    ) -> tuple[M, bool]:
+        query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
             query = query.where(getattr(self.model_cls, key) == val)
 
@@ -612,7 +617,7 @@ class ModelConnection:
         if instance:
             for key, val in (defaults or {}).items():
                 setattr(instance, key, val)
-            await instance.save(using=self.using)
+            await instance.save(using=self._connection_name)
             return instance, False
 
         params = {**fields, **(defaults or {})}
