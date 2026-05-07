@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.6.1 (2026-05-07)
+
+### Refactoring
+
+- Make ModelConnection generic to preserve model typing through .using()
+  ([#46](https://github.com/syn54x/ferro-orm/pull/46),
+  [`50d6b68`](https://github.com/syn54x/ferro-orm/commit/50d6b683059ce1d2b00942efd7267836db00eefd))
+
+
 ## v0.6.0 (2026-04-30)
 
 ### Features
