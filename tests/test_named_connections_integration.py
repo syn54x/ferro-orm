@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, assert_type
 
 import pytest
 
@@ -8,6 +8,43 @@ import ferro
 class NamedSmokeMarker(ferro.Model):
     id: Annotated[int | None, ferro.FerroField(primary_key=True)] = None
     label: str
+
+
+if TYPE_CHECKING:
+    from ferro.models import ModelConnection
+    from ferro.query import Query
+
+    async def _typing_assertions_for_using_interface() -> None:
+        """Static type-checking regression tests for `Model.using(...)`.
+
+        This function is never executed; it exists purely so Pyright/Pylance
+        can verify that every method on the `ModelConnection` returned by
+        `Model.using(...)` preserves the concrete model type. If any of these
+        `assert_type` calls fails under a type checker, the typing contract
+        documented on `ModelConnection` has regressed.
+
+        See `docs/plans/2026-05-07-001-refactor-generic-model-connection-plan.md`.
+        """
+        bound: ModelConnection[NamedSmokeMarker] = NamedSmokeMarker.using("service")
+        assert_type(bound, "ModelConnection[NamedSmokeMarker]")
+
+        assert_type(await bound.create(label="x"), NamedSmokeMarker)
+        assert_type(await bound.all(), list[NamedSmokeMarker])
+        assert_type(bound.select(), "Query[NamedSmokeMarker]")
+        assert_type(
+            bound.where(NamedSmokeMarker.id == 1),  # type: ignore[arg-type]
+            "Query[NamedSmokeMarker]",
+        )
+        assert_type(await bound.get(1), NamedSmokeMarker | None)
+        assert_type(await bound.bulk_create([]), int)
+        assert_type(
+            await bound.get_or_create(label="x"),
+            tuple[NamedSmokeMarker, bool],
+        )
+        assert_type(
+            await bound.update_or_create(defaults={"label": "y"}, label="x"),
+            tuple[NamedSmokeMarker, bool],
+        )
 
 
 @pytest.fixture(autouse=True)
