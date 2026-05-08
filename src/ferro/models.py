@@ -4,13 +4,18 @@ import json
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import (
+    TYPE_CHECKING,
     Any,
     ClassVar,
     Self,
     get_args,
     get_origin,
     get_type_hints,
+    overload,
 )
+
+if TYPE_CHECKING:
+    from .query import Predicate
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -418,19 +423,34 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         _set_instance_origin(self, identity_using)
         self.__class__._fix_types(self)
 
+    @overload
     @classmethod
-    def where(cls, node: QueryNode) -> Query[Self]:
-        """Start a fluent query with an initial condition
+    def where(cls, node: QueryNode) -> Query[Self]: ...
+
+    @overload
+    @classmethod
+    def where(cls, node: "Predicate[Self]") -> Query[Self]: ...
+
+    @classmethod
+    def where(cls, node: "QueryNode | Predicate[Self]") -> Query[Self]:
+        """Start a fluent query with an initial condition.
+
+        Accepts either a :class:`QueryNode` (built with operator syntax or
+        with :func:`ferro.query.col`) or a lambda predicate of shape
+        ``Callable[[QueryProxy[Self]], QueryNode]``. See
+        ``docs/concepts/query-typing.md`` for the trade-offs between the
+        three styles.
 
         Args:
-            node: Query predicate node to apply first.
+            node: A ``QueryNode`` or a predicate callable.
 
         Returns:
             A query object scoped to this model class.
 
         Examples:
-            >>> query = User.where(User.id == 1)
-            >>> isinstance(query, Query)
+            >>> q1 = User.where(User.id == 1)
+            >>> q2 = User.where(lambda t: t.archived == False)  # noqa: E712
+            >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """
         return Query(cls).where(node)

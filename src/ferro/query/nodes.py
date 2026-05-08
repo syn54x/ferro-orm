@@ -1,8 +1,12 @@
 """Define query AST nodes and field proxies for fluent filtering"""
 
 import uuid
+from collections.abc import Callable
 from decimal import Decimal
-from typing import Any
+from typing import Any, Generic, TypeAlias, TypeVar
+
+TField = TypeVar("TField")
+TModel = TypeVar("TModel")
 
 
 class QueryNode:
@@ -134,8 +138,12 @@ def _serialize_query_value(value: Any) -> Any:
     return value
 
 
-class FieldProxy:
+class FieldProxy(Generic[TField]):
     """Capture field comparisons and build query nodes
+
+    ``FieldProxy`` is generic over the column's Python type so that operator
+    overloads carry that type into static analysis. At runtime the type
+    parameter is erased and the proxy works identically for any column type.
 
     Attributes:
         column: Database column name associated with the model field.
@@ -154,31 +162,37 @@ class FieldProxy:
         """
         self.column = column
 
-    def __eq__(self, other: Any) -> QueryNode:
+    def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        self, other: "TField | FieldProxy[TField]"
+    ) -> QueryNode:
         """Build an equality comparison node"""
         return QueryNode(self.column, "==", other)
 
-    def __ne__(self, other: Any) -> QueryNode:
+    def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        self, other: "TField | FieldProxy[TField]"
+    ) -> QueryNode:
         """Build an inequality comparison node"""
         return QueryNode(self.column, "!=", other)
 
-    def __lt__(self, other: Any) -> QueryNode:
+    def __lt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than comparison node"""
         return QueryNode(self.column, "<", other)
 
-    def __le__(self, other: Any) -> QueryNode:
+    def __le__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than-or-equal comparison node"""
         return QueryNode(self.column, "<=", other)
 
-    def __gt__(self, other: Any) -> QueryNode:
+    def __gt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than comparison node"""
         return QueryNode(self.column, ">", other)
 
-    def __ge__(self, other: Any) -> QueryNode:
+    def __ge__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than-or-equal comparison node"""
         return QueryNode(self.column, ">=", other)
 
-    def in_(self, other: Any) -> QueryNode:
+    def in_(
+        self, other: "list[TField] | tuple[TField, ...] | set[TField]"
+    ) -> QueryNode:
         """Build an ``IN`` comparison node from an iterable
 
         Args:
@@ -201,8 +215,12 @@ class FieldProxy:
             )
         return QueryNode(self.column, "IN", list(other))
 
-    def like(self, pattern: str) -> QueryNode:
+    def like(self: "FieldProxy[str]", pattern: str) -> QueryNode:
         """Build a ``LIKE`` comparison node
+
+        The ``self: FieldProxy[str]`` annotation prevents type checkers from
+        accepting ``.like(...)`` on non-string columns; at runtime the method
+        is available on any ``FieldProxy``.
 
         Args:
             pattern: SQL LIKE pattern such as ``"%@example.com"``.
@@ -217,7 +235,9 @@ class FieldProxy:
         """
         return QueryNode(self.column, "LIKE", pattern)
 
-    def __lshift__(self, other: Any) -> QueryNode:
+    def __lshift__(
+        self, other: "list[TField] | tuple[TField, ...] | set[TField]"
+    ) -> QueryNode:
         """Use ``<<`` as shorthand syntax for ``IN`` comparisons
 
         Args:
@@ -236,3 +256,71 @@ class FieldProxy:
     def __repr__(self):
         """Return a developer-friendly representation of the field proxy"""
         return f"FieldProxy(column={self.column!r})"
+
+
+def col(value: TField) -> "FieldProxy[TField]":
+    """Treat a model class attribute as a typed query column.
+
+    At runtime Ferro's metaclass replaces ``Model.field`` with a
+    :class:`FieldProxy`, so ``Model.field`` is already a ``FieldProxy`` when
+    accessed on the class. Static type checkers, however, see the field's
+    Pydantic-annotated type (``bool``, ``int``, ...). That makes expressions
+    like ``Model.archived == False`` resolve to ``bool`` statically, even
+    though the runtime value is a ``QueryNode``.
+
+    ``col()`` is runtime-identity for ``FieldProxy`` inputs and statically
+    narrows the return type to ``FieldProxy[T]``, so ``col(Model.archived) ==
+    False`` type-checks as ``QueryNode``. Use it when a single attribute
+    trips your type checker; for new code, prefer the lambda predicate API
+    on :meth:`Query.where`.
+
+    Args:
+        value: A model class attribute (already a ``FieldProxy`` at runtime).
+
+    Returns:
+        The same object, statically typed as ``FieldProxy[T]``.
+
+    Raises:
+        TypeError: If ``value`` is not a ``FieldProxy``. This guards against
+            calling ``col()`` on a literal (e.g., ``col(False)``), which is
+            almost certainly a bug.
+
+    Examples:
+        >>> rows = await User.where(col(User.archived) == False).all()  # noqa: E712
+    """
+    if not isinstance(value, FieldProxy):
+        raise TypeError(
+            f"col() expects a model column reference (FieldProxy), got {type(value).__name__}"
+        )
+    return value  # type: ignore[return-value]
+
+
+class QueryProxy(Generic[TModel]):
+    """Lazy attribute proxy used by lambda predicates passed to ``Query.where``.
+
+    A fresh ``QueryProxy`` is constructed each time a lambda predicate is
+    evaluated. Any attribute access returns a :class:`FieldProxy` for the
+    accessed name, so ``lambda t: t.archived == False`` builds a
+    :class:`QueryNode` without ever asking the model class what type
+    ``archived`` is. The ``TModel`` type parameter exists so user-supplied
+    lambdas can narrow ``t`` to a specific model in static analysis; the
+    proxy itself ignores the parameter at runtime.
+
+    The proxy attribute return type is intentionally ``FieldProxy[Any]`` for
+    now — wiring per-field types through a lambda parameter requires
+    ``@dataclass_transform`` plumbing on the metaclass, which is outside this
+    feature's scope.
+
+    Examples:
+        >>> rows = await User.where(lambda t: t.archived == False).all()  # noqa: E712
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str) -> "FieldProxy[Any]":
+        """Return a fresh ``FieldProxy`` for any attribute name."""
+        return FieldProxy(name)
+
+
+Predicate: TypeAlias = Callable[[QueryProxy[TModel]], QueryNode]
+"""Type alias for lambda predicates accepted by :meth:`Query.where`."""
