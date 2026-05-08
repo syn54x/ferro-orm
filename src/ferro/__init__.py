@@ -60,6 +60,8 @@ async def connect(
     name: str | None = None,
     default: bool = False,
     pool: PoolConfig | None = None,
+    *,
+    identity_map: bool = True,
 ) -> None:
     """
     Establish a connection to the database.
@@ -70,6 +72,9 @@ async def connect(
         name: Optional connection name. Omitted connections register as "default".
         default: If True, make this named connection the default for unqualified operations.
         pool: Optional per-connection pool configuration.
+        identity_map: If True (default), keep a per-connection identity map so the same primary
+            key maps to a single Python instance. If False, each load returns fresh instances and
+            the map is not consulted (lower memory use; no ``a is b`` guarantees across loads).
     """
     from .relations import resolve_relationships
 
@@ -83,6 +88,7 @@ async def connect(
         default=default,
         max_connections=pool_config.max_connections,
         min_connections=pool_config.min_connections,
+        identity_map=identity_map,
     )
 
 

@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 import sqlalchemy as sa
+from pydantic import BaseModel, Field
 
 from ferro import FerroField, Model, clear_registry, reset_engine
 from ferro.migrations import get_metadata
@@ -56,6 +57,26 @@ def test_complex_type_mapping():
     # JSON (Dict and List)
     assert isinstance(table.c.metadata.type, sa.JSON)
     assert isinstance(table.c.tags.type, sa.JSON)
+
+
+def test_list_of_nested_pydantic_models_maps_to_json_column():
+    """list[BaseModel] should emit an array JSON Schema and map to sa.JSON like other JSON columns."""
+
+    class JsonListPart(BaseModel):
+        name: str
+        count: int
+
+    class ModelWithNestedListJson(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        parts: list[JsonListPart] = Field(default_factory=list)
+
+    meta = get_metadata()
+    table = meta.tables["modelwithnestedlistjson"]
+    assert isinstance(table.c.parts.type, sa.JSON)
+
+    props = ModelWithNestedListJson.__ferro_schema__["properties"]["parts"]
+    assert props.get("type") == "array"
+    assert props.get("items", {}).get("$ref") == "#/$defs/JsonListPart"
 
 
 def test_optional_complex_types():

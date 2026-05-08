@@ -3,6 +3,9 @@ import uuid
 from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Dict, List
+
+from pydantic import BaseModel, Field
+
 from ferro import Model, connect, FerroField
 
 pytestmark = pytest.mark.backend_matrix
@@ -76,6 +79,45 @@ async def test_structural_types_roundtrip(db_url):
 
     assert isinstance(fetched.balance, Decimal)
     assert fetched.balance == balance
+
+
+@pytest.mark.asyncio
+async def test_json_column_list_of_nested_pydantic_models_roundtrip(db_url):
+    """list[BaseModel] stores as JSON; accepts models on write; reload yields dicts."""
+
+    class JsonListItem(BaseModel):
+        field_a: str
+        field_b: int
+
+    class JsonListParent(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        items: list[JsonListItem] = Field(default_factory=list)
+
+    await connect(db_url, auto_migrate=True)
+
+    empty = await JsonListParent.create(items=[])
+    from ferro import evict_instance
+
+    evict_instance("JsonListParent", str(empty.id))
+    fetched_empty = await JsonListParent.get(empty.id)
+    assert fetched_empty is not None
+    assert fetched_empty.items == []
+
+    payload = [
+        JsonListItem(field_a="x", field_b=1),
+        JsonListItem(field_a="y", field_b=2),
+    ]
+    row = await JsonListParent.create(items=payload)
+    assert all(isinstance(it, JsonListItem) for it in row.items)
+    evict_instance("JsonListParent", str(row.id))
+    fetched = await JsonListParent.get(row.id)
+    assert fetched is not None
+    assert isinstance(fetched.items, list)
+    assert len(fetched.items) == 2
+    assert all(isinstance(it, dict) for it in fetched.items)
+    assert fetched.items == [p.model_dump() for p in payload]
+    revived = [JsonListItem.model_validate(it) for it in fetched.items]
+    assert revived == payload
 
 
 @pytest.mark.asyncio

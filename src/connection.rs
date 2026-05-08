@@ -187,7 +187,7 @@ async fn connect_engine_handle(
 /// # Errors
 /// Returns a `PyErr` if the connection fails or if auto-migration fails.
 #[pyfunction]
-#[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0))]
+#[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0, identity_map=true))]
 pub fn connect(
     py: Python<'_>,
     url: String,
@@ -196,6 +196,7 @@ pub fn connect(
     default: bool,
     max_connections: u32,
     min_connections: u32,
+    identity_map: bool,
 ) -> PyResult<Bound<'_, PyAny>> {
     let (connection_url, search_path) = split_search_path(&url);
     let redacted_url = redact_connection_url(&connection_url);
@@ -247,7 +248,8 @@ pub fn connect(
                 "DB Connection failed for {}: {}",
                 redacted_url, e
             ))
-        })?;
+        })?
+        .with_identity_map_enabled(identity_map);
 
         let engine_handle = Arc::new(engine_handle);
 
