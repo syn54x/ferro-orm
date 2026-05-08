@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.7.0 (2026-05-08)
+
+### Features
+
+- Per-connection identity_map on connect ([#47](https://github.com/syn54x/ferro-orm/pull/47),
+  [`0a1d629`](https://github.com/syn54x/ferro-orm/commit/0a1d62926538cde14fdd4f4deece21a59a1ede69))
+
+
 ## v0.6.1 (2026-05-07)
 
 ### Refactoring
