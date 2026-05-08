@@ -70,6 +70,7 @@ plugins:
           - concepts/architecture.md
           - concepts/identity-map.md
           - concepts/type-safety.md
+          - concepts/query-typing.md
           - concepts/performance.md
         API Reference:
           - api/*.md
@@ -149,6 +150,7 @@ nav:
       - Architecture: concepts/architecture.md
       - Identity Map: concepts/identity-map.md
       - Type Safety: concepts/type-safety.md
+      - Typed Query Predicates: concepts/query-typing.md
       - Performance: concepts/performance.md
 
   - API Reference:

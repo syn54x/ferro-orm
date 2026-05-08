@@ -1,6 +1,6 @@
-# Typed query predicates
+# Typed Query Predicates
 
-Ferro's query DSL accepts three predicate styles on `Query.where` and `Relation.where`. They are interchangeable, run on the same code path, and can be mixed freely in the same chain. Pick the one that reads best for the call site you're writing.
+Ferro's query DSL accepts three predicate styles on `Model.where`, `Query.where`, and `Relation.where`. They are interchangeable, run on the same code path, and can be mixed freely in the same chain. Pick the one that reads best for the call site you're writing.
 
 ## Why this exists
 
@@ -95,3 +95,11 @@ If `t.archived` resolving as `FieldProxy[Any]` ever bites you statically, drop b
 - `ferro.query.QueryProxy` — attribute proxy passed to lambda predicates.
 - `ferro.query.Predicate` — `Callable[[QueryProxy[TModel]], QueryNode]`, the type of any lambda predicate.
 - `ferro.query.FieldProxy` — generic over the column's Python type (`FieldProxy[T]`).
+
+See the [Query API reference](../api/query.md) for full signatures.
+
+## See Also
+
+- [Queries Guide](../guide/queries.md)
+- [Type Safety](type-safety.md)
+- [Query API](../api/query.md)

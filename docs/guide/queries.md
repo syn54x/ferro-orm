@@ -31,6 +31,32 @@ alice_users = await User.where(User.name.like("Alice%")).all()
 | `.like()` | `LIKE` | `User.email.like("%@example.com")` |
 | `.in_()` | `IN` | `User.status.in_(["active", "pending"])` |
 
+## Predicate Styles
+
+`where()` accepts three interchangeable predicate styles. They share one runtime path and one dispatcher, and you can mix them on a single chain.
+
+```python
+from ferro.query import col
+
+# 1. Operator (the original)
+await User.where(User.id == 1).all()
+
+# 2. col() wrapper — runtime identity, statically narrows to FieldProxy[T]
+await User.where(col(User.archived) == False).all()
+
+# 3. Lambda predicate — receives a QueryProxy with FieldProxy attributes
+await User.where(lambda t: t.archived == False).all()
+```
+
+The operator style works at runtime for every column type, but static type checkers (Pyright, `ty`) flag boolean and other value-type comparisons because they see your Pydantic annotations rather than the runtime `FieldProxy`. Reach for `col()` when one attribute trips the checker, or write new code with the lambda style to sidestep the issue entirely.
+
+!!! tip "When to use which"
+    - **Operator** — existing code that already type-checks; quick filters where the column type isn't `bool`.
+    - **`col()`** — one attribute on an existing chain trips your type checker and you want minimal diff.
+    - **Lambda** — new code, especially boolean comparisons or compound predicates. Recommended idiom going forward.
+
+See [Typed Query Predicates](../concepts/query-typing.md) for the full treatment, including combined-style chains and the deliberate scope boundaries.
+
 ## Logical Operators
 
 Combine conditions with `&` (AND) and `|` (OR). **Always use parentheses** around each condition:
@@ -49,6 +75,14 @@ query = User.where(
 
 # NOT with !=
 inactive_users = await User.where(User.is_active != True).all()
+```
+
+The same compound expressions work inside lambda predicates — useful when you want the whole expression to type-check without `col()`:
+
+```python
+admins = await User.where(
+    lambda t: (t.role == "admin") & (t.active == True)
+).all()
 ```
 
 ## Chaining
@@ -201,8 +235,9 @@ author = await User.where(User.username == "alice").first()
 # Get all posts by author
 author_posts = await author.posts.all()
 
-# Filter reverse relation
+# Filter reverse relation (any of the three predicate styles works)
 published_posts = await author.posts.where(Post.published == True).all()
+published_posts = await author.posts.where(lambda t: t.published == True).all()
 
 # Count reverse relation
 post_count = await author.posts.count()

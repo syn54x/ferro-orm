@@ -316,6 +316,6 @@ where(other)       ─► TypeError
 
 ## Sources & References
 
-- **Origin document:** [docs/brainstorms/2026-05-08-typed-query-predicates-requirements.md](docs/brainstorms/2026-05-08-typed-query-predicates-requirements.md)
+- **Origin document:** [docs/brainstorms/2026-05-08-typed-query-predicates-requirements.md](../brainstorms/2026-05-08-typed-query-predicates-requirements.md)
 - Related code: `src/ferro/query/nodes.py`, `src/ferro/query/builder.py`, `src/ferro/query/__init__.py`, `src/ferro/metaclass.py`
 - Related work: prior identity-map config PR on the same branch family.
