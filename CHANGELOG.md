@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.8.0 (2026-05-09)
+
+### Features
+
+- **query**: Typed query predicates via col() and lambda
+  ([#48](https://github.com/syn54x/ferro-orm/pull/48),
+  [`e34e3ca`](https://github.com/syn54x/ferro-orm/commit/e34e3ca43adfc851d757d8232d5736fb453db55e))
+
+
 ## v0.7.0 (2026-05-08)
 
 ### Features
