@@ -1,6 +1,25 @@
 # CHANGELOG
 
 
+## v0.9.0 (2026-05-09)
+
+### Chores
+
+- Gitignore .context and untrack committed artifacts
+  ([#49](https://github.com/syn54x/ferro-orm/pull/49),
+  [`cac6330`](https://github.com/syn54x/ferro-orm/commit/cac63304bbcf6bb3fad22037c33e6e60dcb8946e))
+
+### Features
+
+- Add get_or_none method
+  ([`0c81e9f`](https://github.com/syn54x/ferro-orm/commit/0c81e9f414074c9a3631eb94f3a8077d16671e41))
+
+### Testing
+
+- Add tests for explicit shadow fields
+  ([`78a3471`](https://github.com/syn54x/ferro-orm/commit/78a3471d55afec3b9b7da9f44e497ec521f7d1c0))
+
+
 ## v0.8.0 (2026-05-09)
 
 ### Features
