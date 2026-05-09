@@ -85,6 +85,27 @@ User.where(
 )
 ```
 
+## Query Predicates and the Type Checker
+
+Static checkers see your Pydantic annotations, not the `FieldProxy` instances Ferro's metaclass installs at class-creation time. That means `User.archived == False` is statically a `bool` even though it is a `QueryNode` at runtime, and Pyright or `ty` will flag it where `Query.where` expects a `QueryNode`.
+
+Ferro ships three predicate styles to address this without any model-annotation changes or type-checker plugins:
+
+```python
+from ferro.query import col
+
+# Operator (unchanged)
+await User.where(User.id == 1).all()
+
+# col() — runtime identity, statically narrows back to FieldProxy[T]
+await User.where(col(User.archived) == False).all()
+
+# Lambda — receives a QueryProxy whose attributes return FieldProxy
+await User.where(lambda t: t.archived == False).all()
+```
+
+See [Typed Query Predicates](query-typing.md) for the full discussion, including when to reach for each style and how they compose.
+
 ## Field Type Validation
 
 Ferro validates field types match database types:

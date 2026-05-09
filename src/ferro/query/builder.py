@@ -12,10 +12,10 @@ from .._core import (
     remove_m2m_links,
     update_filtered,
 )
-from .nodes import _serialize_query_value
+from .nodes import QueryNode, QueryProxy, _serialize_query_value
 
 if TYPE_CHECKING:
-    from .nodes import QueryNode
+    from .nodes import Predicate
 
 T = TypeVar("T")
 E = TypeVar("E")
@@ -24,6 +24,29 @@ E = TypeVar("E")
 def _query_def_to_json(query_def: dict[str, Any]) -> str:
     """Serialize query definitions while preserving typed values in live Query state."""
     return json.dumps(_serialize_query_value(query_def))
+
+
+def _resolve_where_node(node: Any) -> QueryNode:
+    """Normalize a ``where`` argument into a ``QueryNode``.
+
+    Accepts an existing ``QueryNode`` directly (the operator and ``col()``
+    paths) or a predicate callable that takes a ``QueryProxy`` and returns
+    a ``QueryNode`` (the lambda path).
+    """
+    if isinstance(node, QueryNode):
+        return node
+    if callable(node):
+        result = node(QueryProxy())
+        if not isinstance(result, QueryNode):
+            raise TypeError(
+                "where() predicate callable must return QueryNode, "
+                f"got {type(result).__name__}"
+            )
+        return result
+    raise TypeError(
+        "where() expected QueryNode or predicate callable, "
+        f"got {type(node).__name__}"
+    )
 
 
 class Query(Generic[T]):
@@ -78,21 +101,39 @@ class Query(Generic[T]):
         }
         return self
 
-    def where(self, node: "QueryNode") -> "Query[T]":
-        """Add a filter condition to the query
+    @overload
+    def where(self, node: "QueryNode") -> "Query[T]": ...
+
+    @overload
+    def where(self, node: "Predicate[T]") -> "Query[T]": ...
+
+    def where(self, node: "QueryNode | Predicate[T]") -> "Query[T]":
+        """Add a filter condition to the query.
+
+        Accepts either a :class:`QueryNode` (built directly with operator
+        syntax or with :func:`ferro.query.col`) or a lambda predicate of
+        shape ``Callable[[QueryProxy[T]], QueryNode]``. The lambda receives
+        a fresh :class:`QueryProxy` whose attributes return
+        :class:`FieldProxy` instances, so ``lambda t: t.archived == False``
+        builds a comparison without static-typing friction.
 
         Args:
-            node: A QueryNode representing the condition (e.g., User.id == 1).
+            node: A ``QueryNode`` or a predicate callable.
 
         Returns:
             The current Query instance for chaining.
 
+        Raises:
+            TypeError: If ``node`` is neither a ``QueryNode`` nor a callable,
+                or if the callable does not return a ``QueryNode``.
+
         Examples:
-            >>> query = User.where(User.id == 1)
-            >>> isinstance(query, Query)
+            >>> q1 = User.where(User.id == 1)
+            >>> q2 = User.where(lambda t: t.archived == False)  # noqa: E712
+            >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """
-        self.where_clause.append(node)
+        self.where_clause.append(_resolve_where_node(node))
         return self
 
     def order_by(self, field: Any, direction: str = "asc") -> "Query[T]":
@@ -422,8 +463,14 @@ class Relation(Query[T]):
         super()._m2m(join_table, source_col, target_col, source_id)
         return self
 
-    def where(self, node: "QueryNode") -> "Relation[T]":
-        super().where(node)
+    @overload
+    def where(self, node: "QueryNode") -> "Relation[T]": ...
+
+    @overload
+    def where(self, node: "Predicate[T]") -> "Relation[T]": ...
+
+    def where(self, node: "QueryNode | Predicate[T]") -> "Relation[T]":
+        super().where(node)  # type: ignore[arg-type]
         return self
 
     def order_by(self, field: Any, direction: str = "asc") -> "Relation[T]":
