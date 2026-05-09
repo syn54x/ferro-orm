@@ -155,6 +155,7 @@ nav:
 
   - API Reference:
       - Model: api/model.md
+      - Exceptions: api/exceptions.md
       - Query: api/query.md
       - Fields: api/fields.md
       - Relationships: api/relationships.md

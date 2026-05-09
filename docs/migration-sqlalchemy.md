@@ -69,6 +69,26 @@ users = result.scalars().all()
 users = await User.where(User.age >= 18).all()
 ```
 
+### Get by primary key
+
+SQLAlchemy’s `session.get(User, pk)` returns `None` when the row is missing. Ferro’s `await User.get(pk)` returns `User` and raises `ModelDoesNotExist` when absent. Use `await User.get_or_none(pk)` for the optional pattern.
+
+```python
+# SQLAlchemy
+user = await session.get(User, 1)
+
+# Ferro — raises if missing
+from ferro import ModelDoesNotExist
+
+try:
+    user = await User.get(1)
+except ModelDoesNotExist:
+    user = None
+
+# Ferro — optional (like session.get when no row)
+user = await User.get_or_none(1)
+```
+
 ## Relationships
 
 ### One-to-Many

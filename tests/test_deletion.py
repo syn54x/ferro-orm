@@ -27,7 +27,7 @@ async def test_instance_delete(db_url):
     await user.delete()
 
     # Verify it's gone from DB
-    assert await DeletableUser.get(user_id) is None
+    assert await DeletableUser.get_or_none(user_id) is None
 
     # Verify it's gone from Identity Map (fetching again should return None)
     # Note: the 'user' object still exists in Python memory, but it's disconnected from the DB.
@@ -84,4 +84,4 @@ async def test_delete_evicts_identity_map(db_url):
     await DeletableUser.where(DeletableUser.id == user_id).delete()
 
     # A fresh 'get' should NOT return the old 'user' object (it should be None)
-    assert await DeletableUser.get(user_id) is None
+    assert await DeletableUser.get_or_none(user_id) is None

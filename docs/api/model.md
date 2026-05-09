@@ -8,6 +8,7 @@ Complete reference for the `Model` base class and related methods.
         - create
         - bulk_create
         - get
+        - get_or_none
         - where
         - select
         - all
@@ -25,5 +26,6 @@ Complete reference for the `Model` base class and related methods.
 ## See Also
 
 - [Models & Fields Guide](../guide/models-and-fields.md)
-- [Queries Guide](../guide/queries.md)
+- [Queries Guide](../guide/queries.md) — fetch by primary key (`get` / `get_or_none`)
+- [Exceptions](exceptions.md) — `ModelDoesNotExist`
 - [Mutations Guide](../guide/mutations.md)

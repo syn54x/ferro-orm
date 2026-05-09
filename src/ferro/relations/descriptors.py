@@ -109,7 +109,7 @@ class ForwardDescriptor(BaseModel):
 
             origin = _instance_origin_outside_transaction(instance)
             if origin is not None:
-                return await self._target_model.using(origin).get(id_val)
-            return await self._target_model.get(id_val)
+                return await self._target_model.using(origin).get_or_none(id_val)
+            return await self._target_model.get_or_none(id_val)
 
         return _fetch()

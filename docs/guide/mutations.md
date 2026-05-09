@@ -381,6 +381,23 @@ await User.bulk_create(users)
 !!! note "Exception Types"
     The documentation references exception types like `IntegrityError` and `ValidationError`. These exceptions come from the underlying database driver or Pydantic. Import paths may vary. Catch general `Exception` or check your specific database driver's exceptions.
 
+### Primary key lookup (`Model.get`)
+
+`Model.get(pk)` and `Model.using(...).get(pk)` raise [`ModelDoesNotExist`](../api/exceptions.md) when no row exists. Import it from `ferro`. For “maybe there is a row” flows (for example verifying a delete), use `get_or_none` instead of catching the exception.
+
+```python
+from ferro import ModelDoesNotExist
+
+try:
+    user = await User.get(user_id)
+except ModelDoesNotExist:
+    # e.model, e.pk
+    ...
+
+# Or, when None is the natural result:
+user = await User.get_or_none(user_id)
+```
+
 ### Unique Constraint Violations
 
 ```python

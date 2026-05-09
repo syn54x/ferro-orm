@@ -57,9 +57,11 @@ from ferro import evict_instance
 # Evict user with ID=1
 evict_instance("User", 1)
 
-# Next fetch will hit database
+# Next fetch will hit database (raises ModelDoesNotExist if row was removed)
 user = await User.get(1)
 ```
+
+If the row may no longer exist, use `User.get_or_none(1)` or handle [`ModelDoesNotExist`](exceptions.md).
 
 See [Identity Map Concept](../concepts/identity-map.md) for when and why to evict instances.
 
@@ -67,4 +69,5 @@ See [Identity Map Concept](../concepts/identity-map.md) for when and why to evic
 
 - [Database Setup Guide](../guide/database.md) - Connection configuration
 - [Identity Map Concept](../concepts/identity-map.md) - Instance caching details
+- [Exceptions](exceptions.md) - `ModelDoesNotExist` and related types
 - [Schema Management](../guide/migrations.md) - Production migrations

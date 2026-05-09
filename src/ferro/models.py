@@ -31,6 +31,7 @@ from ._core import (
     transaction_connection_name,
 )
 from .base import ForeignKey, foreign_key_allows_none
+from .exceptions import ModelDoesNotExist
 from .metaclass import ModelMetaclass
 from .query import Query, QueryNode
 from .state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
@@ -260,7 +261,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             None
 
         Examples:
-            >>> user = await User.get(1)
+            >>> user = await User.get_or_none(1)
             >>> if user:
             ...     await user.delete()
         """
@@ -361,19 +362,38 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return results
 
     @classmethod
-    async def get(cls, pk: Any) -> Self | None:
-        """Fetch one record by primary key value
+    async def get(cls, pk: Any) -> Self:
+        """Fetch one record by primary key value.
+
+        Args:
+            pk: Primary key value to fetch a single record.
+
+        Returns:
+            The matching model instance.
+
+        Raises:
+            ModelDoesNotExist: When no row exists for this primary key. Use
+                :meth:`get_or_none` if you need optional lookup without raising.
+
+        Examples:
+            >>> user = await User.get(1)
+            >>> isinstance(user, User)
+            True
+        """
+        instance = await cls.get_or_none(pk)
+        if instance is None:
+            raise ModelDoesNotExist(cls, pk)
+        return instance
+
+    @classmethod
+    async def get_or_none(cls, pk: Any) -> Self | None:
+        """Fetch one record by primary key, or return None if no row exists.
 
         Args:
             pk: Primary key value to fetch a single record.
 
         Returns:
             The matching model instance, or None when no record exists.
-
-        Examples:
-            >>> user = await User.get(1)
-            >>> user is None or isinstance(user, User)
-            True
         """
         pk_field_name = cls._primary_key_field_name()
         if pk_field_name is None:
@@ -395,8 +415,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         Examples:
             >>> user = await User.get(1)
-            >>> if user:
-            ...     await user.refresh()
+            >>> await user.refresh()
         """
         pk_field_name = self.__class__._primary_key_field_name()
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
@@ -579,7 +598,7 @@ class ModelConnection[M: Model]:
 
     Generic over the concrete model class so that every accessor preserves
     the bound type — e.g. ``Transcript.using("service").get(pk)`` resolves
-    to ``Transcript | None`` rather than ``Model | None``.
+    to ``Transcript`` rather than ``Model``.
     """
 
     def __init__(self, model_cls: type[M], connection_name: str) -> None:
@@ -600,14 +619,25 @@ class ModelConnection[M: Model]:
     def where(self, node: QueryNode) -> Query[M]:
         return self.select().where(node)
 
-    async def get(self, pk: Any) -> M | None:
+    async def get(self, pk: Any) -> M:
+        instance = await self.get_or_none(pk)
+        if instance is None:
+            raise ModelDoesNotExist(self.model_cls, pk)
+        return instance
+
+    async def get_or_none(self, pk: Any) -> M | None:
         pk_field_name = self.model_cls._primary_key_field_name()
         if pk_field_name is None:
             raise RuntimeError(
                 f"Model {self.model_cls.__name__} does not define a primary key"
             )
 
-        return await self.where(getattr(self.model_cls, pk_field_name) == pk).first()
+        instance = await self.where(
+            getattr(self.model_cls, pk_field_name) == pk
+        ).first()
+        if instance:
+            self.model_cls._fix_types(instance)
+        return instance
 
     async def bulk_create(self, instances: list[M]) -> int:
         return await self.model_cls.bulk_create(instances, using=self._connection_name)

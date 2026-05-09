@@ -35,7 +35,8 @@ if TYPE_CHECKING:
             bound.where(NamedSmokeMarker.id == 1),  # type: ignore[arg-type]
             "Query[NamedSmokeMarker]",
         )
-        assert_type(await bound.get(1), NamedSmokeMarker | None)
+        assert_type(await bound.get(1), NamedSmokeMarker)
+        assert_type(await bound.get_or_none(1), NamedSmokeMarker | None)
         assert_type(await bound.bulk_create([]), int)
         assert_type(
             await bound.get_or_create(label="x"),
@@ -96,7 +97,7 @@ async def test_named_connections_smoke_matrix_sqlite(tmp_path):
 
     assert await delete_record("NamedSmokeMarker", "1", using="service") is True
     assert await NamedSmokeMarker.get(1) is app_row
-    assert await NamedSmokeMarker.using("service").get(1) is None
+    assert await NamedSmokeMarker.using("service").get_or_none(1) is None
 
 
 @pytest.mark.asyncio

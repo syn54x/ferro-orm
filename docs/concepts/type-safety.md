@@ -57,8 +57,11 @@ class User(Model):
     username: str
     age: int
 
-# Type checker knows return type
+# Fetch by PK: definite model instance (raises ModelDoesNotExist if missing)
 user: User = await User.get(1)
+
+# Optional PK lookup
+maybe_user: User | None = await User.get_or_none(999)
 
 # Autocomplete works
 user.username  # ✓ Known attribute
@@ -66,7 +69,7 @@ user.invalid   # ✗ Type error
 
 # Query results are typed
 users: list[User] = await User.all()
-first: User | None = await User.first()
+first: User | None = await User.where(User.username == "alice").first()
 ```
 
 ## IDE Autocomplete

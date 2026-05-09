@@ -1,7 +1,7 @@
 import pytest
 from pydantic import Field
 import ferro
-from ferro import Model
+from ferro import Model, ModelDoesNotExist
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -158,7 +158,7 @@ async def test_model_get_invalid_usage(db_url):
 
 @pytest.mark.asyncio
 async def test_model_get_not_found(db_url):
-    """Test that get() returns None if the record does not exist."""
+    """Test that get() raises when the record does not exist."""
 
     class CrudUser(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
@@ -166,5 +166,8 @@ async def test_model_get_not_found(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    user = await CrudUser.get(9999)
-    assert user is None
+    with pytest.raises(ModelDoesNotExist) as exc_info:
+        await CrudUser.get(9999)
+    assert exc_info.value.model is CrudUser
+    assert exc_info.value.pk == 9999
+    assert await CrudUser.get_or_none(9999) is None

@@ -289,7 +289,7 @@ async def test_service_loaded_instance_delete_uses_origin_connection(tmp_path):
     await service_row.delete()
 
     assert await ConnectionRouteMarker.get(1) is not None
-    assert await ConnectionRouteMarker.using("service").get(1) is None
+    assert await ConnectionRouteMarker.using("service").get_or_none(1) is None
 
 
 @pytest.mark.asyncio

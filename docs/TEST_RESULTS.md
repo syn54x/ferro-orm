@@ -36,7 +36,7 @@ All field types and constraints work as documented:
 All documented CRUD operations work correctly:
 
 - `Model.create()` ✅
-- `Model.get()` ✅
+- `Model.get()` / `Model.get_or_none()` ✅
 - `Model.all()` ✅
 - `instance.save()` ✅
 - `instance.delete()` ✅

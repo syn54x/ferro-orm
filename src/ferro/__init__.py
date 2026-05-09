@@ -22,6 +22,7 @@ from ._core import (
     connect as _core_connect,
 )
 from .base import FerroField, FerroNullable, ForeignKey
+from .exceptions import ModelDoesNotExist
 from .fields import BackRef, Field, ManyToMany
 from .models import Model, transaction
 from .query import Relation
@@ -96,6 +97,7 @@ __all__ = [
     "connect",
     "PoolConfig",
     "Model",
+    "ModelDoesNotExist",
     "FerroField",
     "FerroNullable",
     "Field",

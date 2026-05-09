@@ -135,7 +135,7 @@ async def test_instance_methods_loaded_inside_transaction_inherit_transaction(db
 
         await loaded.delete()
 
-    assert await TxInstanceMethodUser.get(1) is None
+    assert await TxInstanceMethodUser.get_or_none(1) is None
 
 
 @pytest.mark.asyncio

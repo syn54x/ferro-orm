@@ -33,6 +33,10 @@ users = await User.all()
 # Specific database
 replica_users = await User.using("replica").all()
 analytics_data = await Metric.using("analytics").all()
+
+# Primary-key fetch on a named connection (same semantics as Model.get / get_or_none)
+user = await User.using("replica").get(1)  # raises ModelDoesNotExist if missing
+maybe = await User.using("replica").get_or_none(unknown_id)
 ```
 
 ## Transactions

@@ -254,8 +254,7 @@ async def test_delete_method(db_url):
 
     await user.delete()
 
-    fetched = await User.get(user_id)
-    assert fetched is None
+    assert await User.get_or_none(user_id) is None
 
 
 @pytest.mark.asyncio

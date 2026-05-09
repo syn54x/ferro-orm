@@ -2,6 +2,29 @@
 
 Ferro provides a fluent, type-safe API for constructing and executing database queries. All queries are constructed in Python and executed by the high-performance Rust engine.
 
+## Fetch by primary key
+
+`Model.get(pk)` loads exactly one row by primary key and returns **your model type** (not `YourModel | None`). If no row exists, Ferro raises [`ModelDoesNotExist`](../api/exceptions.md), a subclass of `LookupError` with `.model` and `.pk` set—useful for HTTP 404s or structured logging.
+
+When a missing row is a normal outcome, use `Model.get_or_none(pk)`, which returns `YourModel | None` and never raises for “not found”. The same pair exists on [`Model.using("name")`](../howto/multiple-databases.md) for named connections.
+
+```python
+from ferro import ModelDoesNotExist
+
+user = await User.get(42)
+
+try:
+    user = await User.get(client_supplied_id)
+except ModelDoesNotExist:
+    ...  # e.g. return 404 from your HTTP layer
+
+draft = await User.get_or_none(999)  # None if no such row
+
+replica_view = await User.using("replica").get_or_none(1)
+```
+
+Lazy forward relations (e.g. `await post.author`) use optional fetch internally so a broken or missing FK still resolves to `None` instead of raising.
+
 ## Basic Filtering
 
 Use standard Python comparison operators on model fields to create filter conditions:

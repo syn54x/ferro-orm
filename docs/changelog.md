@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `Model.get` and `Model.using(...).get` now return the concrete model type and raise `ModelDoesNotExist` when no row exists (previously they returned `T | None`). Use the new `get_or_none` for the old optional behavior.
+
 ### Added
+
+- `Model.get_or_none` and `Model.using(...).get_or_none` for primary-key lookup without raising.
+- `ModelDoesNotExist` (`LookupError` subclass with `.model` and `.pk`), exported from `ferro`. Documented under [Exceptions](api/exceptions.md).
 - Typed query predicates: `col()` wrapper and lambda predicate API on `Query.where`, `Relation.where`, and `Model.where` for static-typing-clean predicates without model annotation changes ([#48](https://github.com/syn54x/ferro-orm/pull/48)). See [Typed Query Predicates](concepts/query-typing.md).
 - `FieldProxy` is now generic (`FieldProxy[T]`); operator overloads are typed `T | FieldProxy[T] -> QueryNode`, `.like()` is gated to `FieldProxy[str]`.
 - New public symbols re-exported from `ferro.query`: `col`, `QueryProxy`, `Predicate`.
