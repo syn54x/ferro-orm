@@ -242,6 +242,7 @@ __marimo__/
 ferro_test.db
 .cursorrules
 .cursor
+.context/
 playground.ipynb
 IMPLEMENTATION.md
 Cargo.lock
