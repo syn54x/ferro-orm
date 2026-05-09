@@ -16,6 +16,7 @@ from ferro import (
     reset_engine,
 )
 from ferro.migrations import get_metadata
+from ferro.schema_metadata import build_model_schema
 
 
 @pytest.fixture(autouse=True)
@@ -179,3 +180,76 @@ def test_on_delete_translation():
     fk = list(product_table.c.category_id.foreign_keys)[0]
     assert fk.ondelete == "SET NULL"
     assert product_table.c.category_id.nullable is True
+
+
+def test_explicit_foreign_key_shadow_id_no_duplicate_alembic_columns():
+    """Declaring ``{relation}_id`` for static checkers must not duplicate DDL columns.
+
+    Ferro injects a shadow ``*_id`` for every :class:`~ferro.base.ForeignKey`. Some
+    type checkers (for example Ty) do not see metaclass-injected fields, so users may
+    duplicate the declaration in the class body. That must still produce exactly one
+    JSON-schema property and one SQLAlchemy column for Alembic autogenerate.
+    """
+
+    class TyShadowFkJobRole(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        scorecards: Relation[list["TyShadowFkScorecard"]] = BackRef()
+
+    class TyShadowFkScorecard(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        job_role: Annotated[TyShadowFkJobRole, ForeignKey(related_name="scorecards")]
+        job_role_id: int | None = None
+
+    assert list(TyShadowFkScorecard.model_fields).count("job_role_id") == 1
+
+    schema = build_model_schema(TyShadowFkScorecard)
+    props = schema["properties"]
+    assert "job_role_id" in props
+    assert sum(1 for k in props if k == "job_role_id") == 1
+    fk_meta = props["job_role_id"].get("foreign_key") or {}
+    assert fk_meta.get("to_table") == "tyshadowfkjobrole"
+
+    metadata = get_metadata()
+    tbl = metadata.tables["tyshadowfkscorecard"]
+    assert list(tbl.columns.keys()).count("job_role_id") == 1
+    col = tbl.c.job_role_id
+    fks = list(col.foreign_keys)
+    assert len(fks) == 1
+    assert fks[0].target_fullname == "tyshadowfkjobrole.id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
+    """Runtime migrate + ORM must treat explicit ``*_id`` as the single FK column."""
+
+    from ferro import connect
+
+    class TyRoundJobRole(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        scorecards: Relation[list["TyRoundScorecard"]] = BackRef()
+
+    class TyRoundScorecard(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        job_role: Annotated[TyRoundJobRole, ForeignKey(related_name="scorecards")]
+        job_role_id: int | None = None
+
+    await connect(db_url, auto_migrate=True)
+
+    role = await TyRoundJobRole.create(name="ic")
+    card = await TyRoundScorecard.create(title="card-a", job_role=role)
+    assert card.job_role_id == role.id
+
+    by_attr = await TyRoundScorecard.where(
+        TyRoundScorecard.job_role_id == role.id
+    ).first()
+    assert by_attr is not None and by_attr.id == card.id
+
+    by_lambda = await TyRoundScorecard.where(
+        lambda s: s.job_role_id == role.id
+    ).first()
+    assert by_lambda is not None and by_lambda.id == card.id
