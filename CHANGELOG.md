@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.9.1 (2026-05-11)
+
+### Bug Fixes
+
+- ModelConnection annotations
+  ([`337b983`](https://github.com/syn54x/ferro-orm/commit/337b9838c18835b6e00bc20487b9c24fc76bfaeb))
+
+
 ## v0.9.0 (2026-05-09)
 
 ### Chores
