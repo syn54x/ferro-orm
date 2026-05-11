@@ -35,6 +35,10 @@ if TYPE_CHECKING:
             bound.where(NamedSmokeMarker.id == 1),  # type: ignore[arg-type]
             "Query[NamedSmokeMarker]",
         )
+        assert_type(
+            bound.where(lambda t: t.id == 1),  # type: ignore[arg-type]
+            "Query[NamedSmokeMarker]",
+        )
         assert_type(await bound.get(1), NamedSmokeMarker)
         assert_type(await bound.get_or_none(1), NamedSmokeMarker | None)
         assert_type(await bound.bulk_create([]), int)

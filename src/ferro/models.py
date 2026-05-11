@@ -616,7 +616,13 @@ class ModelConnection[M: Model]:
     def select(self) -> Query[M]:
         return Query(self.model_cls, using=self._connection_name)
 
-    def where(self, node: QueryNode) -> Query[M]:
+    @overload
+    def where(self, node: QueryNode) -> Query[M]: ...
+
+    @overload
+    def where(self, node: "Predicate[M]") -> Query[M]: ...
+
+    def where(self, node: "QueryNode | Predicate[M]") -> Query[M]:
         return self.select().where(node)
 
     async def get(self, pk: Any) -> M:
