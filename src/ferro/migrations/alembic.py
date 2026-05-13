@@ -8,6 +8,7 @@ try:
 except ImportError:
     sa = None
 
+from .._annotation_utils import _VARCHAR_RE
 from ..schema_metadata import build_model_schema
 from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 
@@ -18,7 +19,16 @@ from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 #: invariant in ``AGENTS.md``.
 _FERRO_NAMING_CONVENTION = {
     "ix": "idx_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(column_0_name)s",
 }
+
+
+def _ck_constraint_name(table_name: str, col_name: str) -> str:
+    """Canonical ``ck_<table>_<col>`` name with the 63-char Postgres guard."""
+    name = f"ck_{table_name}_{col_name}"
+    if len(name) > 63:
+        name = name[:60] + "_ck"
+    return name
 
 
 def get_metadata() -> "sa.MetaData":
@@ -177,6 +187,8 @@ def _build_sa_table(
     properties = schema.get("properties", {})
     required_fields = schema.get("required", [])
 
+    db_check_columns: list[tuple[str, type[enum.Enum] | None, list[Any]]] = []
+
     for col_name, col_info in properties.items():
         # Resolve $ref if present
         col_info = _resolve_ref(schema, col_info)
@@ -204,7 +216,24 @@ def _build_sa_table(
 
         columns.append(sa.Column(*args, **kwargs))
 
+        if col_info.get("db_check"):
+            enum_values_for_check = col_info.get("enum") or []
+            db_check_columns.append((col_name, python_enum, list(enum_values_for_check)))
+
     table_args: list[Any] = list(columns)
+
+    for col_name, python_enum, enum_values in db_check_columns:
+        values = (
+            [m.value for m in python_enum] if python_enum is not None else enum_values
+        )
+        if not values:
+            continue
+        rendered = ", ".join(
+            (str(v) if isinstance(v, (int, float)) else f"'{str(v)}'") for v in values
+        )
+        sqltext = f"{col_name} IN ({rendered})"
+        ck_name = _ck_constraint_name(table_name, col_name)
+        table_args.append(sa.CheckConstraint(sqltext, name=ck_name))
     composites = schema.get("ferro_composite_uniques") or []
     for group in composites:
         if not isinstance(group, (list, tuple)) or len(group) < 2:
@@ -242,6 +271,41 @@ def _build_sa_table(
     sa.Table(table_name, metadata, *table_args)
 
 
+#: Canonical ``db_type`` token -> SA type. Duplicated on the Rust side in
+#: ``src/schema.rs`` and pinned by the parity test (see U5). When adding a new
+#: token, update both emitters in the same change. See AGENTS.md § I-1.
+def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
+    """Return the SA type for a canonical ``db_type`` token, or ``None`` if
+    unrecognized. Validation at class-definition time (see metaclass) means an
+    unrecognized token reaching here is a programming error."""
+    if sa is None:
+        return None
+
+    if token == "text":
+        return sa.Text()
+    if token == "smallint":
+        return sa.SmallInteger()
+    if token == "int":
+        return sa.Integer()
+    if token == "bigint":
+        return sa.BigInteger()
+    if token == "uuid":
+        return sa.Uuid() if hasattr(sa, "Uuid") else sa.String(36)
+    if token == "timestamp":
+        return sa.DateTime(timezone=False)
+    if token == "timestamptz":
+        return sa.DateTime(timezone=True)
+    if token == "date":
+        return sa.Date()
+    if token == "time":
+        return sa.Time()
+
+    match = _VARCHAR_RE.match(token)
+    if match is not None:
+        return sa.String(length=int(match.group(1)))
+    return None
+
+
 def _map_to_sa_type(
     schema: Dict[str, Any],
     col_info: Dict[str, Any],
@@ -255,9 +319,19 @@ def _map_to_sa_type(
     built only from JSON schema). When ``python_enum`` is set, the type name is
     ``python_enum.__name__.lower()`` and member *values* are used as enum labels
     so string and integer Python enums map consistently.
+
+    A ``db_type`` override on the JSON schema property takes precedence over
+    every other branch -- it is the canonical user-facing storage knob and is
+    validated at class-definition time (see ``metaclass._validate_db_type_options``).
     """
     # Resolve $ref if present
     col_info = _resolve_ref(schema, col_info)
+
+    db_type = col_info.get("db_type")
+    if isinstance(db_type, str):
+        mapped = _db_type_to_sa_type(db_type)
+        if mapped is not None:
+            return mapped
 
     json_type = col_info.get("type")
     format = col_info.get("format")
