@@ -369,6 +369,8 @@ class ModelMetaclass(type(BaseModel)):
                             "unique",
                             "index",
                             "nullable",
+                            "db_type",
+                            "db_check",
                         )
                         if key in wrapped_payload
                     }

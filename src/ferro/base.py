@@ -41,6 +41,18 @@ class FerroField:
             ``'infer'`` (default) uses whether the annotation allows ``None``.
             ``False`` / ``True`` force NOT NULL / NULL regardless of the type (for
             advanced cases such as ``int | None`` used only for static typing).
+        db_type: Optional canonical SQL-type override for this column. When set,
+            both the Alembic bridge and the Rust runtime emitter use this token
+            instead of the default mapping inferred from the Python annotation.
+            Canonical tokens (Phase 1): ``"text"``, ``"varchar(N)"``, ``"smallint"``,
+            ``"int"``, ``"bigint"``, ``"uuid"``, ``"timestamp"``, ``"timestamptz"``,
+            ``"date"``, ``"time"``. Strict validation against the Python annotation
+            runs at class-definition time (see U2 of the configurable-column-storage
+            plan). Default ``None`` preserves today's behavior.
+        db_check: When ``True``, emit a DB-side ``CHECK`` constraint enforcing the
+            allowed values for closed-domain types (``enum.Enum`` subclasses).
+            Only valid in combination with ``db_type``; combining with default
+            native-enum storage is rejected as redundant. Default ``False``.
 
     Examples:
         >>> from typing import Annotated
@@ -58,6 +70,8 @@ class FerroField:
         unique: bool = False,
         index: bool = False,
         nullable: FerroNullable = "infer",
+        db_type: str | None = None,
+        db_check: bool = False,
     ):
         """Initialize field metadata options
 
@@ -83,6 +97,8 @@ class FerroField:
         self.unique = unique
         self.index = index
         self.nullable = _validate_nullable_option(nullable, "FerroField")
+        self.db_type = db_type
+        self.db_check = db_check
 
 
 class ForeignKey:

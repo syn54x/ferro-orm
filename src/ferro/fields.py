@@ -342,6 +342,8 @@ def Field(
     through: str | None | Any = _Unset,
     reverse_index: bool | Any = _Unset,
     nullable: FerroNullable | Any = _Unset,
+    db_type: str | None | Any = _Unset,
+    db_check: bool | Any = _Unset,
     default_factory: Callable[[], Any]
     | Callable[[dict[str, Any]], Any]
     | None = _Unset,
@@ -487,6 +489,10 @@ def Field(
     if nullable is not _Unset:
         _validate_nullable_option(nullable, "Field")
         ferro_kwargs["nullable"] = nullable
+    if db_type is not _Unset:
+        ferro_kwargs["db_type"] = db_type
+    if db_check is not _Unset:
+        ferro_kwargs["db_check"] = db_check
 
     schema_extra = json_schema_extra
     if ferro_kwargs:

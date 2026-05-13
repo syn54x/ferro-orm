@@ -106,6 +106,12 @@ def build_model_schema(
         prop["unique"] = metadata.unique
         prop["index"] = metadata.index
 
+        db_type = getattr(metadata, "db_type", None)
+        if db_type is not None:
+            prop["db_type"] = db_type
+        if getattr(metadata, "db_check", False):
+            prop["db_check"] = True
+
         field_info = model_fields.get(field_name)
         if field_info is not None:
             if isinstance(getattr(metadata, "nullable", "infer"), bool):
