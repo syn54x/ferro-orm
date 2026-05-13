@@ -226,6 +226,129 @@ fn composite_index_name(table_lower: &str, col_names: &[&str]) -> String {
     raw
 }
 
+/// Check-constraint name for a single-column `db_check`; matches the Python
+/// Alembic helper `_ck_constraint_name` in `src/ferro/migrations/alembic.py`.
+/// See AGENTS.md § I-1 (cross-emitter DDL parity).
+fn db_check_constraint_name(table_lower: &str, col_name: &str) -> String {
+    let raw = format!("ck_{}_{}", table_lower, col_name);
+    if raw.chars().count() > 63 {
+        return format!("{}_ck", raw.chars().take(60).collect::<String>());
+    }
+    raw
+}
+
+fn parse_varchar_token(token: &str) -> Option<u32> {
+    let body = token.strip_prefix("varchar(")?.strip_suffix(')')?;
+    let n: u32 = body.parse().ok()?;
+    if n == 0 { None } else { Some(n) }
+}
+
+/// Dispatch a canonical `db_type` token onto a `ColumnDef`. Returns `true` when
+/// the token was recognized. Strict per-class-definition validation runs in
+/// `metaclass._validate_db_type_options`; unknown tokens reaching here are a
+/// programming error and the caller surfaces them as a `PyErr`.
+///
+/// Duplicated on the Python side in `src/ferro/migrations/alembic.py
+/// ::_db_type_to_sa_type`. Add new tokens to both emitters in the same change
+/// and update the parity test. See AGENTS.md § I-1.
+fn apply_db_type_to_column_def(col_def: &mut ColumnDef, token: &str, backend: SqlDialect) -> bool {
+    match token {
+        "text" => {
+            col_def.text();
+            true
+        }
+        "smallint" => {
+            match backend {
+                // SQLite has no fixed-width integer types; INTEGER covers
+                // smallint/int/bigint via type affinity. R7 in the plan.
+                SqlDialect::Sqlite => col_def.integer(),
+                SqlDialect::Postgres => col_def.small_integer(),
+            };
+            true
+        }
+        "int" => {
+            col_def.integer();
+            true
+        }
+        "bigint" => {
+            match backend {
+                SqlDialect::Sqlite => col_def.integer(),
+                SqlDialect::Postgres => col_def.big_integer(),
+            };
+            true
+        }
+        "uuid" => {
+            col_def.uuid();
+            true
+        }
+        "timestamp" => {
+            col_def.timestamp();
+            true
+        }
+        "timestamptz" => {
+            col_def.timestamp_with_time_zone();
+            true
+        }
+        "date" => {
+            col_def.date();
+            true
+        }
+        "time" => {
+            col_def.time();
+            true
+        }
+        other => {
+            if let Some(n) = parse_varchar_token(other) {
+                col_def.string_len(n);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn render_check_values(col_info: &serde_json::Value) -> Option<String> {
+    let values = col_info.get("enum").and_then(|v| v.as_array())?;
+    if values.is_empty() {
+        return None;
+    }
+    let rendered: Vec<String> = values
+        .iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            other => format!("'{}'", other.to_string().replace('\'', "''")),
+        })
+        .collect();
+    Some(rendered.join(", "))
+}
+
+fn build_check_constraint_sql(
+    table_lower: &str,
+    col_name: &str,
+    col_info: &serde_json::Value,
+    backend: SqlDialect,
+) -> Option<String> {
+    // SQLite cannot ALTER TABLE ADD CONSTRAINT and adding a named CHECK
+    // requires CREATE TABLE rebuild. db_check is a Postgres-first feature in
+    // Phase 1; SQLite users opting in just see the constraint elided at
+    // runtime. The parity test (U5) compares Postgres-side rendering.
+    if backend != SqlDialect::Postgres {
+        return None;
+    }
+    let values = render_check_values(col_info)?;
+    let ck_name = db_check_constraint_name(table_lower, col_name);
+    Some(format!(
+        "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK (\"{col}\" IN ({values}))",
+        table = table_lower,
+        name = ck_name,
+        col = col_name,
+        values = values,
+    ))
+}
+
 fn append_composite_index_sqls(
     table_lower: &str,
     schema: &serde_json::Value,
@@ -286,29 +409,44 @@ fn build_create_table_sqls(
             let mut col_def = ColumnDef::new(Alias::new(col_name));
             let col_info = resolve_ref(schema, raw_col_info);
 
-            let (json_type, format) = property_json_type_and_format(col_info);
+            // `db_type` is the canonical user-facing storage knob. When set it
+            // overrides every other column-type branch. Validation runs at
+            // class-definition time (see metaclass._validate_db_type_options).
+            let db_type_token = raw_col_info
+                .get("db_type")
+                .or_else(|| col_info.get("db_type"))
+                .and_then(|v| v.as_str());
 
-            if let Some(t) = json_type {
-                match (t, format) {
-                    ("string", Some("date-time")) => {
-                        col_def.timestamp_with_time_zone();
+            let db_type_handled = match db_type_token {
+                Some(token) => apply_db_type_to_column_def(&mut col_def, token, backend),
+                None => false,
+            };
+
+            if !db_type_handled {
+                let (json_type, format) = property_json_type_and_format(col_info);
+
+                if let Some(t) = json_type {
+                    match (t, format) {
+                        ("string", Some("date-time")) => {
+                            col_def.timestamp_with_time_zone();
+                        }
+                        ("string", Some("date")) => {
+                            col_def.date();
+                        }
+                        ("string", Some("uuid")) => {
+                            col_def.uuid();
+                        }
+                        (_, Some("decimal")) => {
+                            col_def.decimal();
+                        }
+                        ("string", Some("binary")) => {
+                            col_def.blob();
+                        }
+                        _ => json_type_to_sea_query_for_backend(&mut col_def, t, backend),
                     }
-                    ("string", Some("date")) => {
-                        col_def.date();
-                    }
-                    ("string", Some("uuid")) => {
-                        col_def.uuid();
-                    }
-                    (_, Some("decimal")) => {
-                        col_def.decimal();
-                    }
-                    ("string", Some("binary")) => {
-                        col_def.blob();
-                    }
-                    _ => json_type_to_sea_query_for_backend(&mut col_def, t, backend),
+                } else {
+                    col_def.string();
                 }
-            } else {
-                col_def.string();
             }
 
             // Check for primary key and autoincrement from our custom metadata
@@ -349,6 +487,20 @@ fn build_create_table_sqls(
             }
 
             table_stmt.col(&mut col_def);
+
+            // db_check=True -> single-column CHECK constraint named
+            // ck_<table>_<col>. Emitted as a post-create ALTER TABLE so the
+            // name flows through identically on both backends. SQLite cannot
+            // execute ADD CONSTRAINT; users opting in to db_check are
+            // expected to be on Postgres for Phase 1.
+            let db_check = column_bool_metadata(raw_col_info, col_info, "db_check")
+                .unwrap_or(false);
+            if db_check
+                && let Some(ck_sql) =
+                    build_check_constraint_sql(&table_lower, col_name, col_info, backend)
+            {
+                index_sqls.push(ck_sql);
+            }
 
             // Check for Foreign Key from metadata
             if let Some(fk_info) = column_object_metadata(raw_col_info, col_info, "foreign_key") {
@@ -556,6 +708,216 @@ mod tests {
         assert!(combined.contains("CREATE UNIQUE INDEX"));
         assert!(combined.contains("CREATE INDEX"));
         assert!(combined.contains("\"IDX_T_I1_I2\""));
+    }
+
+    // ------------------------------------------------------------------
+    // U4: db_type / db_check dispatch
+    // ------------------------------------------------------------------
+
+    fn col_sql(token: &str, json_type: &str, backend: SqlDialect) -> String {
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
+                "x": {"type": json_type, "db_type": token, "ferro_nullable": false},
+            }
+        });
+        let (sql, _) = build_create_table_sqls("t", &schema, backend);
+        sql.to_uppercase()
+    }
+
+    #[test]
+    fn test_db_type_text_emits_text_column() {
+        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            let sql = col_sql("text", "string", backend);
+            assert!(sql.contains("TEXT"), "missing TEXT for {:?}: {}", backend, sql);
+        }
+    }
+
+    #[test]
+    fn test_db_type_bigint_postgres_emits_bigint() {
+        let sql = col_sql("bigint", "integer", SqlDialect::Postgres);
+        assert!(sql.contains("BIGINT"), "missing BIGINT: {}", sql);
+    }
+
+    #[test]
+    fn test_db_type_bigint_sqlite_collapses_to_integer() {
+        // R7: SQLite has no fixed-width int types; smallint/int/bigint all
+        // collapse to INTEGER and the parity test pins this.
+        let sql = col_sql("bigint", "integer", SqlDialect::Sqlite);
+        assert!(sql.contains("INTEGER"), "missing INTEGER: {}", sql);
+        assert!(!sql.contains("BIGINT"), "leaked BIGINT into SQLite: {}", sql);
+    }
+
+    #[test]
+    fn test_db_type_smallint_postgres_emits_smallint() {
+        let sql = col_sql("smallint", "integer", SqlDialect::Postgres);
+        assert!(sql.contains("SMALLINT"), "missing SMALLINT: {}", sql);
+    }
+
+    #[test]
+    fn test_db_type_smallint_sqlite_collapses_to_integer() {
+        let sql = col_sql("smallint", "integer", SqlDialect::Sqlite);
+        assert!(sql.contains("INTEGER"));
+        assert!(!sql.contains("SMALLINT"));
+    }
+
+    #[test]
+    fn test_db_type_timestamptz_emits_with_time_zone() {
+        let sql = col_sql("timestamptz", "string", SqlDialect::Postgres);
+        assert!(
+            sql.contains("TIMESTAMP WITH TIME ZONE") || sql.contains("TIMESTAMPTZ"),
+            "missing tz timestamp: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_db_type_timestamp_emits_plain_timestamp() {
+        let sql = col_sql("timestamp", "string", SqlDialect::Postgres);
+        assert!(sql.contains("TIMESTAMP"), "missing TIMESTAMP: {}", sql);
+        assert!(
+            !sql.contains("WITH TIME ZONE") && !sql.contains("TIMESTAMPTZ"),
+            "leaked tz: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_db_type_varchar_n_emits_varchar_with_length() {
+        let sql = col_sql("varchar(255)", "string", SqlDialect::Postgres);
+        // sea-query Postgres builder renders VARCHAR(N) for string_len(N).
+        assert!(
+            sql.contains("VARCHAR(255)") || sql.contains("CHARACTER VARYING(255)"),
+            "missing varchar(255): {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_db_type_overrides_json_format_branch() {
+        // string + format=date-time would normally emit timestamptz; with
+        // db_type='text' it must render TEXT instead.
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
+                "x": {"type": "string", "format": "date-time", "db_type": "text"},
+            }
+        });
+        let (sql, _) = build_create_table_sqls("t", &schema, SqlDialect::Postgres);
+        let upper = sql.to_uppercase();
+        assert!(upper.contains("TEXT"), "missing TEXT override: {}", sql);
+        assert!(
+            !upper.contains("TIMESTAMP"),
+            "default cascade leaked through: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_db_check_emits_named_constraint() {
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
+                "format": {
+                    "type": "string",
+                    "db_type": "text",
+                    "db_check": true,
+                    "enum": ["pdf", "json"]
+                }
+            }
+        });
+        let (_table_sql, post_sqls) = build_create_table_sqls("doc", &schema, SqlDialect::Postgres);
+        let joined = post_sqls.join("\n");
+        assert!(joined.contains("ck_doc_format"), "missing constraint name: {}", joined);
+        assert!(joined.to_uppercase().contains("CHECK"), "missing CHECK: {}", joined);
+        assert!(joined.contains("'pdf'") && joined.contains("'json'"), "missing values: {}", joined);
+    }
+
+    #[test]
+    fn test_db_check_with_int_values_unquoted() {
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
+                "priority": {
+                    "type": "integer",
+                    "db_type": "smallint",
+                    "db_check": true,
+                    "enum": [1, 2]
+                }
+            }
+        });
+        let (_table_sql, post_sqls) = build_create_table_sqls("task", &schema, SqlDialect::Postgres);
+        let joined = post_sqls.join("\n");
+        assert!(joined.contains("(1, 2)"), "ints should be unquoted: {}", joined);
+        assert!(!joined.contains("'1'"), "ints should not be quoted: {}", joined);
+    }
+
+    #[test]
+    fn test_db_check_off_emits_no_constraint() {
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
+                "format": {"type": "string", "db_type": "text", "enum": ["pdf"]}
+            }
+        });
+        let (_table_sql, post_sqls) = build_create_table_sqls("doc", &schema, SqlDialect::Postgres);
+        assert!(
+            post_sqls.iter().all(|s| !s.contains("CHECK")),
+            "unexpected CHECK: {:?}",
+            post_sqls
+        );
+    }
+
+    #[test]
+    fn test_db_check_skipped_on_sqlite() {
+        // SQLite cannot ALTER TABLE ADD CONSTRAINT; db_check is Postgres-only
+        // in Phase 1 and the emitter elides it on SQLite rather than emitting
+        // SQL that would fail at execution time.
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
+                "format": {
+                    "type": "string",
+                    "db_type": "text",
+                    "db_check": true,
+                    "enum": ["pdf", "json"]
+                }
+            }
+        });
+        let (_table_sql, post_sqls) = build_create_table_sqls("doc", &schema, SqlDialect::Sqlite);
+        assert!(
+            post_sqls.iter().all(|s| !s.to_uppercase().contains("CONSTRAINT")),
+            "SQLite must not emit ADD CONSTRAINT: {:?}",
+            post_sqls
+        );
+    }
+
+    #[test]
+    fn test_db_check_constraint_name_short() {
+        assert_eq!(db_check_constraint_name("doc", "format"), "ck_doc_format");
+    }
+
+    #[test]
+    fn test_db_check_constraint_name_truncates_above_63() {
+        let long_col = "a".repeat(70);
+        let result = db_check_constraint_name("verylongtable", &long_col);
+        assert_eq!(result.chars().count(), 63);
+        assert!(result.ends_with("_ck"));
+    }
+
+    #[test]
+    fn test_apply_db_type_unknown_token_returns_false() {
+        let mut col_def = ColumnDef::new(Alias::new("c"));
+        let ok = apply_db_type_to_column_def(&mut col_def, "banana", SqlDialect::Postgres);
+        assert!(!ok);
+    }
+
+    #[test]
+    fn test_parse_varchar_token_rejects_zero_and_garbage() {
+        assert_eq!(parse_varchar_token("varchar(0)"), None);
+        assert_eq!(parse_varchar_token("varchar(abc)"), None);
+        assert_eq!(parse_varchar_token("varchar()"), None);
+        assert_eq!(parse_varchar_token("varchar(10)"), Some(10));
     }
 
     #[test]

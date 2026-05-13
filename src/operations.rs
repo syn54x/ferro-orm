@@ -535,6 +535,17 @@ fn postgres_enum_type_name_for_column(
     enum_udt: &HashMap<String, String>,
     col_info: Option<&serde_json::Value>,
 ) -> Option<String> {
+    // db_type takes precedence over the JSON-schema enum_type_name: when the
+    // user has asked for `text` / `varchar(N)` / etc. storage, the column is
+    // no longer a native Postgres enum UDT and we must not CAST values to a
+    // non-existent type. This mirrors the Alembic-side _map_to_sa_type
+    // override. See AGENTS.md § I-1.
+    if let Some(info) = col_info
+        && info.get("db_type").and_then(|v| v.as_str()).is_some()
+    {
+        return None;
+    }
+
     enum_udt.get(col_name).cloned().or_else(|| {
         col_info?
             .get("enum_type_name")?
