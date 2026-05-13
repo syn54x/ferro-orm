@@ -91,6 +91,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clear_registry, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(schema::create_tables, m)?)?;
+    m.add_function(wrap_pyfunction!(schema::_render_create_table_sql_for_test, m)?)?;
 
     Ok(())
 }

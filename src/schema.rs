@@ -252,18 +252,17 @@ fn parse_varchar_token(token: &str) -> Option<u32> {
 /// ::_db_type_to_sa_type`. Add new tokens to both emitters in the same change
 /// and update the parity test. See AGENTS.md § I-1.
 fn apply_db_type_to_column_def(col_def: &mut ColumnDef, token: &str, backend: SqlDialect) -> bool {
+    // Per-dialect rendering is chosen to byte-match SA's compilation in the
+    // Alembic bridge. SQLite emits the typed keyword (BIGINT, SMALLINT,
+    // CHAR(32), DATETIME) and lets SQLite type affinity normalize at
+    // runtime; the parity test (U5) pins both sides token-for-token.
     match token {
         "text" => {
             col_def.text();
             true
         }
         "smallint" => {
-            match backend {
-                // SQLite has no fixed-width integer types; INTEGER covers
-                // smallint/int/bigint via type affinity. R7 in the plan.
-                SqlDialect::Sqlite => col_def.integer(),
-                SqlDialect::Postgres => col_def.small_integer(),
-            };
+            col_def.small_integer();
             true
         }
         "int" => {
@@ -271,22 +270,28 @@ fn apply_db_type_to_column_def(col_def: &mut ColumnDef, token: &str, backend: Sq
             true
         }
         "bigint" => {
-            match backend {
-                SqlDialect::Sqlite => col_def.integer(),
-                SqlDialect::Postgres => col_def.big_integer(),
-            };
+            col_def.big_integer();
             true
         }
         "uuid" => {
-            col_def.uuid();
+            match backend {
+                SqlDialect::Sqlite => col_def.char_len(32),
+                SqlDialect::Postgres => col_def.uuid(),
+            };
             true
         }
         "timestamp" => {
-            col_def.timestamp();
+            match backend {
+                SqlDialect::Sqlite => col_def.date_time(),
+                SqlDialect::Postgres => col_def.timestamp(),
+            };
             true
         }
         "timestamptz" => {
-            col_def.timestamp_with_time_zone();
+            match backend {
+                SqlDialect::Sqlite => col_def.date_time(),
+                SqlDialect::Postgres => col_def.timestamp_with_time_zone(),
+            };
             true
         }
         "date" => {
@@ -622,6 +627,42 @@ pub fn create_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_
     })
 }
 
+/// Test-only helper: render the Rust emitter's CREATE TABLE SQL plus any
+/// post-create SQL fragments (CHECK constraints, composite indexes) without
+/// requiring a live database. Used by the cross-emitter parity test (U5 of
+/// the configurable-column-storage plan) to assert that the Rust and Alembic
+/// emitters agree on every `(canonical_token, dialect)` pair.
+///
+/// `dialect` must be `"postgres"` or `"sqlite"`. Anything else raises
+/// `ValueError`. `schema_json` is a JSON string in the same shape that
+/// `register_model_schema` consumes.
+///
+/// # Errors
+/// Returns a `PyErr` when the JSON cannot be parsed or the dialect is
+/// unrecognized.
+#[pyfunction]
+#[pyo3(name = "_render_create_table_sql_for_test")]
+pub fn _render_create_table_sql_for_test(
+    name: String,
+    schema_json: String,
+    dialect: String,
+) -> PyResult<(String, Vec<String>)> {
+    let backend = match dialect.as_str() {
+        "postgres" => SqlDialect::Postgres,
+        "sqlite" => SqlDialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
+                other
+            )));
+        }
+    };
+    let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
+    })?;
+    Ok(build_create_table_sqls(&name, &schema, backend))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,12 +781,11 @@ mod tests {
     }
 
     #[test]
-    fn test_db_type_bigint_sqlite_collapses_to_integer() {
-        // R7: SQLite has no fixed-width int types; smallint/int/bigint all
-        // collapse to INTEGER and the parity test pins this.
+    fn test_db_type_bigint_sqlite_emits_bigint_keyword() {
+        // SQLite still gets the BIGINT keyword; type affinity normalizes at
+        // runtime. Parity with the Alembic bridge (SA emits the same keyword).
         let sql = col_sql("bigint", "integer", SqlDialect::Sqlite);
-        assert!(sql.contains("INTEGER"), "missing INTEGER: {}", sql);
-        assert!(!sql.contains("BIGINT"), "leaked BIGINT into SQLite: {}", sql);
+        assert!(sql.contains("BIGINT"), "missing BIGINT keyword: {}", sql);
     }
 
     #[test]
@@ -755,10 +795,9 @@ mod tests {
     }
 
     #[test]
-    fn test_db_type_smallint_sqlite_collapses_to_integer() {
+    fn test_db_type_smallint_sqlite_emits_smallint_keyword() {
         let sql = col_sql("smallint", "integer", SqlDialect::Sqlite);
-        assert!(sql.contains("INTEGER"));
-        assert!(!sql.contains("SMALLINT"));
+        assert!(sql.contains("SMALLINT"), "missing SMALLINT keyword: {}", sql);
     }
 
     #[test]
