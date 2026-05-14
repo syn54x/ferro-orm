@@ -48,12 +48,20 @@ The current canonical conventions:
 | Composite index             | `idx_<table>_<col1>_<col2>...`             |
 | Single-column unique        | `uq_<table>_<col>`                         |
 | Composite unique            | `uq_<table>_<col1>_<col2>...`              |
+| Single-column `db_check`    | `ck_<table>_<col>`                         |
 | Foreign key (when named)    | `fk_<table>_<col>_<reftable>` *(planned)*  |
 | Primary key (when named)    | `pk_<table>` *(planned)*                   |
 
+Canonical column-type vocabulary (`db_type` tokens) is also load-bearing: both
+emitters dispatch on the same set of tokens (`text`, `varchar(N)`, `smallint`,
+`int`, `bigint`, `uuid`, `timestamp`, `timestamptz`, `date`, `time`). See
+`configurable-column-storage-types.md` for the recipe.
+
 This invariant is enforced by paired tests in
-`tests/test_alembic_autogenerate.py::test_index_name_matches_rust_runtime_convention_*`
-and `tests/test_schema_constraints.py::test_foreign_key_index_runtime_ddl_parity`.
+`tests/test_alembic_autogenerate.py::test_index_name_matches_rust_runtime_convention_*`,
+`tests/test_schema_constraints.py::test_foreign_key_index_runtime_ddl_parity`,
+and `tests/test_db_type_cross_emitter_parity.py` (every canonical `db_type`
+token × dialect plus `ck_<table>_<col>` parity).
 
 ## Recipe: adding a new artifact
 

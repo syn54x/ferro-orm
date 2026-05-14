@@ -1,10 +1,21 @@
 ---
 title: "feat: Configurable column storage types (db_type / db_check)"
 type: feat
-status: active
+status: shipped-phase-1
 date: 2026-05-13
 origin: docs/brainstorms/2026-05-13-configurable-column-storage-types-requirements.md
 ---
+
+> **Status (2026-05-14):** U1–U5 and a trimmed U7 are shipped on
+> `feat/configurable-column-storage-types`. U6 (Alembic autogenerate support
+> for `ALTER COLUMN` + `USING`, deferred `DROP TYPE`, `ADD/DROP CONSTRAINT`,
+> R12 data-loss warning) is **deferred to a follow-up plan**. The DDL-emission
+> half of the feature is fully functional; users who switch `db_type` between
+> revisions will see correct `op.alter_column` ops from standard Alembic
+> autogenerate but must hand-edit `USING` clauses and orphaned `CREATE TYPE`
+> cleanup. See `docs/solutions/patterns/configurable-column-storage-types.md`
+> § "Autogenerate support (deferred)" for the workaround and the scope of the
+> follow-up plan.
 
 # feat: Configurable column storage types (db_type / db_check)
 
@@ -294,7 +305,7 @@ Ferro currently forces every `Enum`-typed field into a named DB enum type, which
 
 ---
 
-- U6. **Alembic autogenerate: `ALTER COLUMN`, deferred `DROP TYPE`, `ADD/DROP CONSTRAINT`**
+- U6. **Alembic autogenerate: `ALTER COLUMN`, deferred `DROP TYPE`, `ADD/DROP CONSTRAINT`** *(deferred to follow-up plan)*
 
 **Goal:** Running `alembic revision --autogenerate` against a database whose schema diverges in `db_type` or `db_check` produces a correct, dialect-aware migration.
 
@@ -333,7 +344,7 @@ Ferro currently forces every `Enum`-typed field into a named DB enum type, which
 
 ---
 
-- U7. **Docs and institutional memory**
+- U7. **Docs and institutional memory** *(trimmed: scoped to what Phase 1 ships)*
 
 **Goal:** AGENTS.md and `docs/solutions/` reflect the new artifact and the new pattern.
 
