@@ -61,6 +61,35 @@ fn active_connection_for_route(using: Option<String>) -> PyResult<(String, Arc<E
     connection_for_route(using)
 }
 
+/// Initialize Pydantic v2 slots that `BaseModel.__init__` normally sets, after zero-copy
+/// hydration (`__new__` + `__dict__` population).
+///
+/// These attributes live in `__slots__`; if never assigned, reads raise `AttributeError`,
+/// which breaks `dict(model)`, iteration, `model_copy`, and libraries that recurse results
+/// (for example Prefect's `visit_collection`).
+///
+/// When `model_config["extra"] == "allow"`, `__pydantic_extra__` starts as an empty dict;
+/// otherwise it is `None`. `__pydantic_private__` is always `None` for ORM-hydrated rows.
+fn set_pydantic_hydration_slots<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    instance: &Bound<'py, PyAny>,
+) -> PyResult<()> {
+    let model_config = cls.getattr(pyo3::intern!(py, "model_config"))?;
+    let extra_policy = model_config.call_method1(
+        pyo3::intern!(py, "get"),
+        (pyo3::intern!(py, "extra"), pyo3::intern!(py, "ignore")),
+    )?;
+    let extra_slot = if extra_policy.eq(pyo3::intern!(py, "allow"))? {
+        pyo3::types::PyDict::new(py).into_any().unbind()
+    } else {
+        py.None()
+    };
+    instance.setattr(pyo3::intern!(py, "__pydantic_extra__"), extra_slot)?;
+    instance.setattr(pyo3::intern!(py, "__pydantic_private__"), py.None())?;
+    Ok(())
+}
+
 /// Map SeaQuery `Value` variants to `EngineBindValue`.
 ///
 /// Typed `None` variants are preserved as `Null(NullKind::T)` so the bind
@@ -1019,6 +1048,7 @@ pub fn fetch_all<'py>(
                 }
 
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
+                set_pydantic_hydration_slots(py, &cls, &instance)?;
 
                 if use_identity_map {
                     if let Some(pk_val) = row_pk_val {
@@ -1185,6 +1215,7 @@ pub fn fetch_one<'py>(
                 }
 
                 let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
+                set_pydantic_hydration_slots(py, &cls, &instance)?;
                 if use_identity_map {
                     IDENTITY_MAP.insert(
                         (connection_name.clone(), name.clone(), pk_val),
@@ -1691,6 +1722,7 @@ pub fn fetch_filtered<'py>(
                 }
 
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
+                set_pydantic_hydration_slots(py, &cls, &instance)?;
 
                 if use_identity_map {
                     if let Some(pk_val) = row_pk_val {

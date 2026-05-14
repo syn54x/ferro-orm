@@ -93,6 +93,14 @@ If you add a new schema feature (e.g. partial indexes, exclusion constraints):
 Python ORMs. The Rust core must populate model dicts directly via the bridge
 documented in `src/lib.rs` rather than calling `Model(**row)` from Rust.
 
+Hydrated instances must still be **observationally equivalent** to instances
+constructed through `BaseModel.__init__` for Pydantic’s own slot attributes:
+anything in `BaseModel.__slots__` that `__init__` assigns (notably
+`__pydantic_extra__` and `__pydantic_private__`, in addition to
+`__pydantic_fields_set__`) must be initialized on the Rust hydration path as
+well. Leaving a slot unset raises `AttributeError` on access (unlike a normal
+instance attribute defaulting to `None`).
+
 If you find yourself wanting to call `__init__` from Rust to "make this easier",
 stop and read `.cursorrules` §3.B and the design notes under
 `docs/solutions/patterns/`.

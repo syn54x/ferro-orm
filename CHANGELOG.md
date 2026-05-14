@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## Unreleased
+
+### Bug Fixes
+
+- Initialize Pydantic `__pydantic_extra__` / `__pydantic_private__` on Rust-hydrated
+  model instances so `dict(model)`, iteration, and `model_copy` match normal
+  construction.
 
 ## v0.9.1 (2026-05-11)
 
