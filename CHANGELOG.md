@@ -1,12 +1,14 @@
 # CHANGELOG
 
-## Unreleased
+
+## v0.9.2 (2026-05-14)
 
 ### Bug Fixes
 
-- Initialize Pydantic `__pydantic_extra__` / `__pydantic_private__` on Rust-hydrated
-  model instances so `dict(model)`, iteration, and `model_copy` match normal
-  construction.
+- **hydration**: Initialize Pydantic slots on Rust-hydrated models
+  ([#51](https://github.com/syn54x/ferro-orm/pull/51),
+  [`7609886`](https://github.com/syn54x/ferro-orm/commit/760988649bbfb41d1e46934cdea589efffdfa1b1))
+
 
 ## v0.9.1 (2026-05-11)
 
