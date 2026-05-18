@@ -9,7 +9,7 @@ from pydantic.fields import Field as PydanticField
 from pydantic.fields import _EmptyKwargs, _Unset
 from pydantic_core import PydanticUndefined
 
-from .base import FerroNullable, _validate_nullable_option
+from .base import DbType, FerroNullable, _validate_nullable_option
 
 if TYPE_CHECKING:
     import re
@@ -37,6 +37,8 @@ def Field(
     related_name: str | None = ...,
     through: str | None = ...,
     nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -88,6 +90,8 @@ def Field(
     related_name: str | None = ...,
     through: str | None = ...,
     nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -139,6 +143,8 @@ def Field(
     related_name: str | None = ...,
     through: str | None = ...,
     nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -189,6 +195,8 @@ def Field(
     related_name: str | None = ...,
     through: str | None = ...,
     nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
     default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -240,6 +248,8 @@ def Field(
     related_name: str | None = ...,
     through: str | None = ...,
     nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
     default_factory: Callable[[], _T] | Callable[[dict[str, Any]], _T],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -291,6 +301,8 @@ def Field(
     related_name: str | None = ...,
     through: str | None = ...,
     nullable: FerroNullable = ...,
+    db_type: DbType | None = ...,
+    db_check: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -342,6 +354,8 @@ def Field(
     through: str | None | Any = _Unset,
     reverse_index: bool | Any = _Unset,
     nullable: FerroNullable | Any = _Unset,
+    db_type: DbType | None | Any = _Unset,
+    db_check: bool | Any = _Unset,
     default_factory: Callable[[], Any]
     | Callable[[dict[str, Any]], Any]
     | None = _Unset,
@@ -487,6 +501,10 @@ def Field(
     if nullable is not _Unset:
         _validate_nullable_option(nullable, "Field")
         ferro_kwargs["nullable"] = nullable
+    if db_type is not _Unset:
+        ferro_kwargs["db_type"] = db_type
+    if db_check is not _Unset:
+        ferro_kwargs["db_check"] = db_check
 
     schema_extra = json_schema_extra
     if ferro_kwargs:

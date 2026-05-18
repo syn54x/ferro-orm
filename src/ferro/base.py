@@ -17,6 +17,38 @@ T = TypeVar("T")
 FerroNullable = Literal["infer"] | bool
 """Alembic column nullability: ``'infer'`` from the field type, or forced bool."""
 
+DbTypeToken = Literal[
+    "text",
+    "smallint",
+    "int",
+    "bigint",
+    "uuid",
+    "timestamp",
+    "timestamptz",
+    "date",
+    "time",
+]
+"""Fixed canonical SQL storage tokens accepted by :func:`~ferro.Field` ``db_type=``."""
+
+DbType = DbTypeToken | str
+"""Canonical ``db_type`` value: a :data:`DbTypeToken` or ``varchar(N)`` (see :func:`varchar`)."""
+
+
+def varchar(length: int) -> str:
+    """Build the canonical ``varchar(N)`` token for :func:`~ferro.Field` ``db_type=``.
+
+    Prefer this over a raw string so IDEs and type checkers see a deliberate
+    Ferro vocabulary choice. Runtime validation still applies at model
+    definition time.
+
+    Examples:
+        >>> varchar(255)
+        'varchar(255)'
+    """
+    if length <= 0:
+        raise ValueError(f"varchar length must be positive, got {length}")
+    return f"varchar({length})"
+
 
 def _validate_nullable_option(nullable: FerroNullable, owner: str) -> FerroNullable:
     """Validate the public ``nullable`` tri-state option."""
@@ -41,6 +73,14 @@ class FerroField:
             ``'infer'`` (default) uses whether the annotation allows ``None``.
             ``False`` / ``True`` force NOT NULL / NULL regardless of the type (for
             advanced cases such as ``int | None`` used only for static typing).
+        db_type: Optional canonical SQL-type override (:data:`DbType`). Use a
+            :data:`DbTypeToken` literal or :func:`varchar` for ``varchar(N)``.
+            Strict validation against the Python annotation runs at class-definition
+            time. Default ``None`` preserves today's behavior.
+        db_check: When ``True``, emit a DB-side ``CHECK`` constraint enforcing the
+            allowed values for closed-domain types (``enum.Enum`` subclasses).
+            Only valid in combination with ``db_type``; combining with default
+            native-enum storage is rejected as redundant. Default ``False``.
 
     Examples:
         >>> from typing import Annotated
@@ -58,6 +98,8 @@ class FerroField:
         unique: bool = False,
         index: bool = False,
         nullable: FerroNullable = "infer",
+        db_type: DbType | None = None,
+        db_check: bool = False,
     ):
         """Initialize field metadata options
 
@@ -83,6 +125,8 @@ class FerroField:
         self.unique = unique
         self.index = index
         self.nullable = _validate_nullable_option(nullable, "FerroField")
+        self.db_type = db_type
+        self.db_check = db_check
 
 
 class ForeignKey:

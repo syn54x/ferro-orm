@@ -21,7 +21,7 @@ from ._core import (
 from ._core import (
     connect as _core_connect,
 )
-from .base import FerroField, FerroNullable, ForeignKey
+from .base import DbType, DbTypeToken, FerroField, FerroNullable, ForeignKey, varchar
 from .exceptions import ModelDoesNotExist
 from .fields import BackRef, Field, ManyToMany
 from .models import Model, transaction
@@ -98,8 +98,11 @@ __all__ = [
     "PoolConfig",
     "Model",
     "ModelDoesNotExist",
+    "DbType",
+    "DbTypeToken",
     "FerroField",
     "FerroNullable",
+    "varchar",
     "Field",
     "ForeignKey",
     "BackRef",

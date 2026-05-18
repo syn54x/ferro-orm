@@ -8,12 +8,18 @@ from typing import (
     Union,
     get_args,
     get_origin,
+    get_type_hints,
 )
 
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
 from pydantic.fields import FieldInfo
 
+from ._annotation_utils import (
+    db_type_is_compatible,
+    is_closed_domain_annotation,
+    is_valid_db_type_token,
+)
 from ._core import register_model_schema
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyRelation
@@ -50,6 +56,7 @@ class ModelMetaclass(type(BaseModel)):
         mcs._register_model_and_proxies(cls, name, local_relations)
         ferro_fields = mcs._parse_ferro_field_metadata(cls)
         cls.ferro_fields = ferro_fields
+        mcs._validate_db_type_options(cls, ferro_fields)
         mcs._inject_relation_descriptors(cls, local_relations)
         mcs._generate_and_register_schema(cls, name, ferro_fields, local_relations)
 
@@ -369,6 +376,8 @@ class ModelMetaclass(type(BaseModel)):
                             "unique",
                             "index",
                             "nullable",
+                            "db_type",
+                            "db_check",
                         )
                         if key in wrapped_payload
                     }
@@ -387,6 +396,72 @@ class ModelMetaclass(type(BaseModel)):
                 ferro_fields[f_name] = wrapped_metadata
 
         return ferro_fields
+
+    @staticmethod
+    def _validate_db_type_options(cls, ferro_fields: dict) -> None:
+        """Strict validation of ``Field(db_type=..., db_check=...)`` combinations.
+
+        Runs at class-definition time (Phase 3) so incoherent combinations
+        surface as ``TypeError`` on import, never as a silent miscoercion at
+        query or migration time. See U2 of the configurable-column-storage
+        plan.
+        """
+        try:
+            resolved = get_type_hints(cls, include_extras=True)
+        except Exception:
+            resolved = {}
+
+        model_fields = getattr(cls, "model_fields", {})
+
+        for field_name, metadata in ferro_fields.items():
+            db_type = getattr(metadata, "db_type", None)
+            db_check = getattr(metadata, "db_check", False)
+            if db_type is None and not db_check:
+                continue
+
+            annotation = resolved.get(field_name)
+            if annotation is None:
+                field_info = model_fields.get(field_name)
+                if field_info is not None:
+                    annotation = field_info.annotation
+
+            if db_type is not None:
+                if not isinstance(db_type, str):
+                    raise TypeError(
+                        f"Field '{field_name}' db_type must be a string token, "
+                        f"got {type(db_type).__name__}."
+                    )
+                if not is_valid_db_type_token(db_type):
+                    raise TypeError(
+                        f"Field '{field_name}' db_type={db_type!r} is not in the "
+                        f"canonical vocabulary. Valid tokens: text, varchar(N), "
+                        f"smallint, int, bigint, uuid, timestamp, timestamptz, "
+                        f"date, time."
+                    )
+                if annotation is not None and not db_type_is_compatible(
+                    db_type, annotation
+                ):
+                    raise TypeError(
+                        f"Field '{field_name}' db_type={db_type!r} is incompatible "
+                        f"with annotation {annotation!r}. See the canonical "
+                        f"compatibility matrix in src/ferro/_annotation_utils.py."
+                    )
+
+            if db_check:
+                if db_type is None:
+                    raise TypeError(
+                        f"Field '{field_name}' db_check=True requires db_type to be "
+                        f"set. db_check on default (native enum) storage is redundant "
+                        f"because the native enum type already enforces values."
+                    )
+                if annotation is not None and not is_closed_domain_annotation(
+                    annotation
+                ):
+                    raise TypeError(
+                        f"Field '{field_name}' db_check=True is only valid for "
+                        f"closed-domain types (enum.Enum subclasses). "
+                        f"Annotation {annotation!r} is not closed-domain."
+                    )
 
     @staticmethod
     def _inject_relation_descriptors(cls, local_relations: dict) -> None:

@@ -12,6 +12,15 @@ async def connect(
     identity_map: bool = True,
 ) -> None: ...
 async def create_tables(using: Optional[str] = None) -> None: ...
+def _render_create_table_sql_for_test(
+    name: str, schema_json: str, dialect: str
+) -> tuple[str, list[str]]:
+    """Test-only: render CREATE TABLE SQL + post-create fragments without executing.
+
+    Used by the cross-emitter parity test (U5). ``dialect`` is ``"postgres"`` or
+    ``"sqlite"``.
+    """
+    ...
 async def fetch_all(
     cls: object, tx_id: Optional[str] = None, using: Optional[str] = None
 ) -> list[Any]: ...
