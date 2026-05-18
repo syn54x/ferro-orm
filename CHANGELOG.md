@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.10.0 (2026-05-18)
+
+### Features
+
+- Configurable column storage types (db_type / db_check)
+  ([#53](https://github.com/syn54x/ferro-orm/pull/53),
+  [`bd5feee`](https://github.com/syn54x/ferro-orm/commit/bd5feee970eda6031eca742ff18ab3a863d7abe4))
+
+
 ## v0.9.2 (2026-05-14)
 
 ### Bug Fixes

@@ -1,6 +1,6 @@
 [project]
 name = "ferro-orm"
-version = "0.9.2"
+version = "0.10.0"
 description = "A high-performance, Rust-backed ORM for Python."
 readme = "README.md"
 authors = [
