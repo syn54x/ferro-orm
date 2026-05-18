@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from ferro import Field, Model, clear_registry, connect, reset_engine, varchar
+from ferro.state import _MODEL_REGISTRY_PY
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -25,11 +26,21 @@ class _FileFormat(StrEnum):
 
 @pytest.fixture(autouse=True)
 def cleanup():
+    """Drop inline models from the Python registry after each test.
+
+    ``clear_registry()`` only clears the Rust side; ``connect()`` calls
+    ``resolve_relationships()`` which re-registers every entry in
+    ``_MODEL_REGISTRY_PY``. Without removing test-local models, later tests
+    see duplicate CHECK/index DDL (e.g. ``ck_checkeddoc_format``).
+    """
+    registered_before = set(_MODEL_REGISTRY_PY)
     reset_engine()
     clear_registry()
     yield
     reset_engine()
     clear_registry()
+    for name in set(_MODEL_REGISTRY_PY) - registered_before:
+        del _MODEL_REGISTRY_PY[name]
 
 
 def _sqlite_column_type(db_url: str, table: str, column: str) -> str:
