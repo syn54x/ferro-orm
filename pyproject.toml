@@ -43,6 +43,8 @@ ci-test = [
     "pytest-cov>=7.0.0",
     "pytest-examples>=0.0.18",
     "pytest-postgresql>=8.0.0",
+    "aiosqlite>=0.22.1",
+    "greenlet>=3.3.1",
 ]
 docs = [
     "mkdocs-material>=9.5.0",
@@ -74,6 +76,8 @@ dev = [
     "psycopg[binary]>=3.3.3",
     "pytest-postgresql>=8.0.0",
     "pytest-xdist>=3.8.0",
+    "aiosqlite>=0.22.1",
+    "greenlet>=3.3.1",
 ]
 
 [tool.pytest.ini_options]
