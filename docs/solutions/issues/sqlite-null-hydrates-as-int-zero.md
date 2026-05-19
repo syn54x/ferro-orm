@@ -89,4 +89,5 @@ by treating `0` as missing.
 - GitHub issue: https://github.com/syn54x/ferro-orm/issues/56
 - PR: https://github.com/syn54x/ferro-orm/pull/57
 - `docs/solutions/patterns/typed-null-binds.md` — NULL on the **write** path
+- `docs/solutions/issues/sqlite-integer-decimal-hydrates-as-none.md` — non-null INTEGER Decimal → `None` (#58)
 - `docs/solutions/issues/pydantic-slots-missing-after-ferro-hydration.md` — other hydration footguns
