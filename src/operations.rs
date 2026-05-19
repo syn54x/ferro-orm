@@ -193,6 +193,7 @@ fn engine_value_to_rust_value(
 
     if is_decimal {
         return match value {
+            EngineValue::I64(v) => RustValue::Decimal(v.to_string()),
             EngineValue::F64(v) => RustValue::Decimal(v.to_string()),
             EngineValue::String(v) => RustValue::Decimal(v),
             _ => RustValue::None,
@@ -3075,5 +3076,44 @@ mod raw_sql_tests {
                 "unexpected error message: {msg}"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod engine_value_to_rust_value_tests {
+    use super::engine_value_to_rust_value;
+    use crate::backend::EngineValue;
+    use crate::state::RustValue;
+
+    fn decimal_schema() -> serde_json::Value {
+        serde_json::json!({
+            "properties": {
+                "hours": {
+                    "format": "decimal",
+                    "anyOf": [
+                        {"type": "number"},
+                        {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"}
+                    ]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn decimal_column_maps_sqlite_integer_affinity_to_decimal() {
+        let schema = decimal_schema();
+        let out = engine_value_to_rust_value(EngineValue::I64(3), &schema, "hours");
+        assert!(matches!(out, RustValue::Decimal(ref s) if s == "3"));
+    }
+
+    #[test]
+    fn decimal_column_maps_real_and_text() {
+        let schema = decimal_schema();
+        let from_real =
+            engine_value_to_rust_value(EngineValue::F64(1.5), &schema, "hours");
+        assert!(matches!(from_real, RustValue::Decimal(ref s) if s == "1.5"));
+        let from_text =
+            engine_value_to_rust_value(EngineValue::String("2.25".into()), &schema, "hours");
+        assert!(matches!(from_text, RustValue::Decimal(ref s) if s == "2.25"));
     }
 }
