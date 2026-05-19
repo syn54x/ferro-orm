@@ -5,7 +5,9 @@ tags: [convention, schema, relationships, pydantic]
 related_files:
   - src/ferro/base.py
   - src/ferro/schema_metadata.py
-  - src/ferro/relations.py
+  - src/ferro/metaclass.py
+  - src/ferro/_shadow_fk_types.py
+  - src/ferro/relations/__init__.py
 related_issues: [32]
 related_prs: [36]
 captured: 2026-04-28

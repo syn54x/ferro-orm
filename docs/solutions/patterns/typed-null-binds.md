@@ -1,13 +1,14 @@
 ---
 title: Typed-null binds at the SQLx boundary
 type: pattern
-tags: [convention, invariant, bridge, ffi, rust, sea-query, sqlx, postgres]
+tags: [convention, invariant, bridge, ffi, rust, sea-query, sqlx, postgres, sqlite]
 related_files:
   - src/backend.rs
   - src/operations.rs
   - src/query.rs
   - tests/test_typed_null_binds.py
-related_issues: [38, 40]
+  - tests/test_sqlite_null_hydration.py
+related_issues: [38, 40, 56]
 related_prs: []
 captured: 2026-04-29
 ---
@@ -92,6 +93,27 @@ are deferred (see plan §3 Scope Boundaries).
 \*\* Temporal types continue to use `cast_as` until issue [#40] picks a
    datetime crate (`chrono` vs `time`).
 
+## Fetch-time row materialization (read path)
+
+Typed binds fix **outbound** NULL parameters. A separate failure mode is
+**inbound** row decoding in `materialize_engine_row` (`src/backend.rs`).
+
+On SQLite, `row.try_get::<i64>` on SQL `NULL` often returns `Ok(0)` for
+INTEGER/NUMERIC-affinity columns (including Alembic `DateTime()` → `DATETIME`)
+if you decode before checking nullness. Ferro then hydrates Python `int(0)`
+instead of `None` — see issue [#56].
+
+**Rule:** call `row.try_get_raw(ordinal)` and test `raw.is_null()` before any
+typed `try_get`. Non-null integer `0` is unchanged; only SQL `NULL` is affected.
+
+| Layer            | Function / path              | NULL concern                          |
+|------------------|------------------------------|---------------------------------------|
+| Bind (write)     | `bind_engine_value`          | `NullKind` → `Option::<T>::None`      |
+| Fetch (read)     | `materialize_engine_row`     | `is_null()` before `decode_non_null_*`|
+
+Rust regression: `engine_handle_fetches_sqlite_null_columns_as_null_not_zero`.
+Integration: `tests/test_sqlite_null_hydration.py` (Alembic schema + reconnect).
+
 ## Raw-SQL boundary (explicit exception)
 
 The raw-SQL bind path (`src/operations.rs::python_to_engine_bind_value`,
@@ -120,6 +142,9 @@ Ferro itself.
   to `Null(Untyped)` -- non-null data goes out as a text-typed null, and
   Postgres reports `expression is of type text` rather than the actual
   type mismatch. Always pair `Some` and `None` arms when adding a type.
+- On SQLite, optional fields are `NULL` in the DB but Python sees `int(0)`
+  after reconnect — check `materialize_engine_row`, not bind typing alone
+  ([#56]).
 
 ## Recipe: adding a new schema-driven emitter
 
@@ -164,8 +189,11 @@ Ferro itself.
 - AGENTS.md I-3: no `unwrap()` across the FFI boundary.
 - `docs/plans/2026-04-29-001-typed-null-binds-plan.md`: the implementation
   plan with the unit-by-unit breakdown.
+- `docs/solutions/issues/sqlite-null-hydrates-as-int-zero.md`: fetch-time
+  NULL → `int(0)` on SQLite (issue [#56]).
 - Issue [#38]: the original bug report.
 - Issue [#40]: temporal typed binds (deferred follow-up).
 
 [#38]: https://github.com/syn54x/ferro-orm/issues/38
 [#40]: https://github.com/syn54x/ferro-orm/issues/40
+[#56]: https://github.com/syn54x/ferro-orm/issues/56

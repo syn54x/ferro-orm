@@ -1,6 +1,6 @@
 use sqlx::ColumnIndex;
 use sqlx::pool::PoolConnection;
-use sqlx::{Column, PgPool, Postgres, Row, Sqlite, SqlitePool};
+use sqlx::{Column, PgPool, Postgres, Row, Sqlite, SqlitePool, ValueRef};
 use std::fmt;
 use std::sync::Arc;
 
@@ -360,26 +360,47 @@ where
         .iter()
         .map(|column| {
             let name = column.name().to_string();
-            let value = if let Ok(value) = row.try_get::<i64, _>(column.ordinal()) {
-                EngineValue::I64(value)
-            } else if let Ok(value) = row.try_get::<i32, _>(column.ordinal()) {
-                EngineValue::I64(i64::from(value))
-            } else if let Ok(value) = row.try_get::<f64, _>(column.ordinal()) {
-                EngineValue::F64(value)
-            } else if let Ok(value) = row.try_get::<String, _>(column.ordinal()) {
-                EngineValue::String(value)
-            } else if let Ok(value) = row.try_get::<Vec<u8>, _>(column.ordinal()) {
-                EngineValue::Bytes(value)
-            } else if let Ok(value) = row.try_get::<bool, _>(column.ordinal()) {
-                EngineValue::Bool(value)
-            } else {
-                EngineValue::Null
+            let ordinal = column.ordinal();
+            // SQLite (and some drivers) let `try_get::<i64>` succeed with 0 on SQL
+            // NULL when the column has INTEGER/NUMERIC affinity (including Alembic
+            // `DATETIME`). Always consult the raw value before typed decode.
+            let value = match row.try_get_raw(ordinal) {
+                Ok(raw) if raw.is_null() => EngineValue::Null,
+                Ok(_) | Err(_) => decode_non_null_engine_value(row, ordinal),
             };
             (name, value)
         })
         .collect();
 
     EngineRow { values }
+}
+
+fn decode_non_null_engine_value<R>(row: &R, ordinal: usize) -> EngineValue
+where
+    R: Row,
+    for<'r> i32: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    for<'r> i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    for<'r> f64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    for<'r> Vec<u8>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    for<'r> String: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    for<'r> bool: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    usize: ColumnIndex<R>,
+{
+    if let Ok(value) = row.try_get::<i64, _>(ordinal) {
+        EngineValue::I64(value)
+    } else if let Ok(value) = row.try_get::<i32, _>(ordinal) {
+        EngineValue::I64(i64::from(value))
+    } else if let Ok(value) = row.try_get::<f64, _>(ordinal) {
+        EngineValue::F64(value)
+    } else if let Ok(value) = row.try_get::<String, _>(ordinal) {
+        EngineValue::String(value)
+    } else if let Ok(value) = row.try_get::<Vec<u8>, _>(ordinal) {
+        EngineValue::Bytes(value)
+    } else if let Ok(value) = row.try_get::<bool, _>(ordinal) {
+        EngineValue::Bool(value)
+    } else {
+        EngineValue::Null
+    }
 }
 
 fn bind_engine_value<'q, DB>(
@@ -566,6 +587,64 @@ mod tests {
             .unwrap();
 
         assert_eq!(inserted, 1);
+    }
+
+    #[tokio::test]
+    async fn engine_handle_fetches_sqlite_null_columns_as_null_not_zero() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let engine = EngineHandle::new_sqlite(pool);
+
+        for (table, ddl) in [
+            ("null_int", "CREATE TABLE null_int (v INTEGER)"),
+            ("null_real", "CREATE TABLE null_real (v REAL)"),
+            ("null_text", "CREATE TABLE null_text (v TEXT)"),
+            ("null_datetime", "CREATE TABLE null_datetime (v DATETIME)"),
+        ] {
+            engine.execute_sql(ddl).await.unwrap();
+            engine
+                .execute_sql(&format!("INSERT INTO {table} DEFAULT VALUES"))
+                .await
+                .unwrap();
+            let rows = engine
+                .fetch_all_sql_with_binds(&format!("SELECT v FROM {table}"), &[])
+                .await
+                .unwrap();
+            assert_eq!(
+                rows[0].values[0].1,
+                EngineValue::Null,
+                "SQL NULL in {table} must not decode as integer zero"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_handle_fetches_sqlite_non_null_zero_integer() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let engine = EngineHandle::new_sqlite(pool);
+
+        engine
+            .execute_sql("CREATE TABLE zero_int (v INTEGER NOT NULL)")
+            .await
+            .unwrap();
+        engine
+            .execute_sql("INSERT INTO zero_int (v) VALUES (0)")
+            .await
+            .unwrap();
+
+        let rows = engine
+            .fetch_all_sql_with_binds("SELECT v FROM zero_int", &[])
+            .await
+            .unwrap();
+
+        assert_eq!(rows[0].values[0].1, EngineValue::I64(0));
     }
 
     #[tokio::test]
