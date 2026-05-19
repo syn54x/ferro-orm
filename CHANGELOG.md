@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.10.2 (2026-05-19)
+
+### Bug Fixes
+
+- Hydrate SQLite INTEGER-backed Decimal columns on reconnect
+  ([#59](https://github.com/syn54x/ferro-orm/pull/59),
+  [`6f13906`](https://github.com/syn54x/ferro-orm/commit/6f13906850300bc9e85c1274763c49bc5b318b5d))
+
+
 ## v0.10.1 (2026-05-19)
 
 ### Bug Fixes
