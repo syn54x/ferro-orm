@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import ferro
 import pytest
-from ferro import Field, Model
+from ferro import Field, Model, clear_registry, reset_engine
 from ferro.migrations.alembic import get_metadata
 from sqlalchemy import pool
 from sqlalchemy.engine.url import URL
@@ -20,10 +20,16 @@ pytest.importorskip("aiosqlite")
 pytest.importorskip("greenlet")
 
 
-class Client(Model):
-    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
-    name: str
-    archived_at: datetime | None = None
+@pytest.fixture(autouse=True)
+def cleanup():
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+    reset_engine()
+    clear_registry()
+    yield
 
 
 def _sqlite_url(path: Path) -> str:
@@ -36,6 +42,12 @@ def _sqlite_url(path: Path) -> str:
 @pytest.mark.asyncio
 async def test_sqlite_null_optional_datetime_hydrates_as_none_after_reconnect() -> None:
     """Alembic-created DATETIME NULL must not become int(0) on a fresh connection."""
+
+    class Client(Model):
+        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        name: str
+        archived_at: datetime | None = None
+
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "app.db"
         uri = f"sqlite:{db_path}?mode=rwc"
