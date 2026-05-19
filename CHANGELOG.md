@@ -1,6 +1,21 @@
 # CHANGELOG
 
 
+## v0.10.1 (2026-05-19)
+
+### Bug Fixes
+
+- **sqlite**: Hydrate SQL NULL as None instead of int 0
+  ([#57](https://github.com/syn54x/ferro-orm/pull/57),
+  [`249c81f`](https://github.com/syn54x/ferro-orm/commit/249c81f4b37f117c3ca80f44a9682511154ab9ec))
+
+### Testing
+
+- **schema**: Integration coverage for db_type / db_check
+  ([#55](https://github.com/syn54x/ferro-orm/pull/55),
+  [`b97d596`](https://github.com/syn54x/ferro-orm/commit/b97d59667d520c026d8a6fbb73ad1de7f71593b4))
+
+
 ## v0.10.0 (2026-05-18)
 
 ### Features
