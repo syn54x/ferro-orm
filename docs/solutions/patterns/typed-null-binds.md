@@ -7,7 +7,7 @@ related_files:
   - src/operations.rs
   - src/query.rs
   - tests/test_typed_null_binds.py
-  - tests/test_sqlite_null_hydration.py
+  - tests/test_sqlite_alembic_reconnect_hydration.py
 related_issues: [38, 40, 56]
 related_prs: []
 captured: 2026-04-29
@@ -112,7 +112,7 @@ typed `try_get`. Non-null integer `0` is unchanged; only SQL `NULL` is affected.
 | Fetch (read)     | `materialize_engine_row`     | `is_null()` before `decode_non_null_*`|
 
 Rust regression: `engine_handle_fetches_sqlite_null_columns_as_null_not_zero`.
-Integration: `tests/test_sqlite_null_hydration.py` (Alembic schema + reconnect).
+Integration: `tests/test_sqlite_alembic_reconnect_hydration.py` (Alembic schema + reconnect).
 
 ## Raw-SQL boundary (explicit exception)
 

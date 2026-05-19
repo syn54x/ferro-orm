@@ -5,7 +5,7 @@ tags: [gotcha, sqlite, hydration, bridge, rust, sqlalchemy, alembic, datetime, f
 related_files:
   - src/backend.rs
   - src/operations.rs
-  - tests/test_sqlite_null_hydration.py
+  - tests/test_sqlite_alembic_reconnect_hydration.py
 related_issues: [56]
 related_prs: [57]
 captured: 2026-05-18
@@ -62,7 +62,7 @@ by treating `0` as missing.
 
 - Rust: `engine_handle_fetches_sqlite_null_columns_as_null_not_zero`,
   `engine_handle_fetches_sqlite_non_null_zero_integer` in `src/backend.rs`.
-- Python: `tests/test_sqlite_null_hydration.py` (Alembic `create_all` + reconnect).
+- Python: `tests/test_sqlite_alembic_reconnect_hydration.py` (Alembic `create_all` + reconnect).
   Requires `aiosqlite` and `greenlet` in `ci-test` / `dev` so CI does not skip.
 
 ## How to recognize

@@ -193,6 +193,7 @@ fn engine_value_to_rust_value(
 
     if is_decimal {
         return match value {
+            EngineValue::I64(v) => RustValue::Decimal(v.to_string()),
             EngineValue::F64(v) => RustValue::Decimal(v.to_string()),
             EngineValue::String(v) => RustValue::Decimal(v),
             _ => RustValue::None,
@@ -3076,4 +3077,126 @@ mod raw_sql_tests {
             );
         });
     }
+}
+
+#[cfg(test)]
+mod engine_value_to_rust_value_tests {
+    use super::engine_value_to_rust_value;
+    use crate::backend::EngineValue;
+    use crate::state::RustValue;
+
+    fn decimal_schema() -> serde_json::Value {
+        serde_json::json!({
+            "properties": {
+                "hours": {
+                    "format": "decimal",
+                    "anyOf": [
+                        {"type": "number"},
+                        {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"}
+                    ]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn decimal_column_maps_sqlite_integer_affinity_to_decimal() {
+        let schema = decimal_schema();
+        let out = engine_value_to_rust_value(EngineValue::I64(3), &schema, "hours");
+        assert!(matches!(out, RustValue::Decimal(ref s) if s == "3"));
+    }
+
+    #[test]
+    fn decimal_column_maps_real_and_text() {
+        let schema = decimal_schema();
+        let from_real =
+            engine_value_to_rust_value(EngineValue::F64(1.5), &schema, "hours");
+        assert!(matches!(from_real, RustValue::Decimal(ref s) if s == "1.5"));
+        let from_text =
+            engine_value_to_rust_value(EngineValue::String("2.25".into()), &schema, "hours");
+        assert!(matches!(from_text, RustValue::Decimal(ref s) if s == "2.25"));
+    }
+
+    fn datetime_schema() -> serde_json::Value {
+        serde_json::json!({
+            "properties": {
+                "happened_at": {"type": "string", "format": "date-time"}
+            }
+        })
+    }
+
+    fn binary_schema() -> serde_json::Value {
+        serde_json::json!({
+            "properties": {
+                "data": {"type": "string", "format": "binary"}
+            }
+        })
+    }
+
+    fn bool_schema() -> serde_json::Value {
+        serde_json::json!({
+            "properties": {
+                "is_active": {"type": "boolean"}
+            }
+        })
+    }
+
+    fn json_schema() -> serde_json::Value {
+        serde_json::json!({
+            "properties": {
+                "payload": {"type": "object"}
+            }
+        })
+    }
+
+    #[test]
+    fn datetime_column_only_accepts_string_engine_values() {
+        let schema = datetime_schema();
+        let ok = engine_value_to_rust_value(
+            EngineValue::String("2026-04-24T18:30:00+00:00".into()),
+            &schema,
+            "happened_at",
+        );
+        assert!(matches!(ok, RustValue::DateTime(_)));
+        let from_int = engine_value_to_rust_value(EngineValue::I64(1713984600), &schema, "happened_at");
+        assert!(matches!(from_int, RustValue::BigInt(1713984600)));
+    }
+
+    #[test]
+    fn binary_column_maps_bytes_and_text() {
+        let schema = binary_schema();
+        let from_bytes =
+            engine_value_to_rust_value(EngineValue::Bytes(vec![1, 2, 3]), &schema, "data");
+        assert!(matches!(from_bytes, RustValue::Blob(v) if v == vec![1, 2, 3]));
+        let from_text =
+            engine_value_to_rust_value(EngineValue::String("abc".into()), &schema, "data");
+        assert!(matches!(from_text, RustValue::Blob(v) if v == b"abc".to_vec()));
+        let from_int = engine_value_to_rust_value(EngineValue::I64(1), &schema, "data");
+        assert!(matches!(from_int, RustValue::None));
+    }
+
+    #[test]
+    fn bool_column_maps_integer_and_bool() {
+        let schema = bool_schema();
+        assert!(matches!(
+            engine_value_to_rust_value(EngineValue::I64(1), &schema, "is_active"),
+            RustValue::Bool(true)
+        ));
+        assert!(matches!(
+            engine_value_to_rust_value(EngineValue::Bool(false), &schema, "is_active"),
+            RustValue::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn json_column_parses_string_payload() {
+        let schema = json_schema();
+        let out = engine_value_to_rust_value(
+            EngineValue::String(r#"{"k":"v"}"#.into()),
+            &schema,
+            "payload",
+        );
+        assert!(matches!(out, RustValue::Json(v) if v.get("k").and_then(|x| x.as_str()) == Some("v")));
+    }
+
 }
