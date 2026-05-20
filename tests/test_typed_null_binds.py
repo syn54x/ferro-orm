@@ -6,22 +6,14 @@ The original bug was a PostgreSQL-only "null is text" failure. Postgres rejects
 and never reproduced #38; many of the round-trip assertions here are
 ``postgres_only`` because that's where the failure shape lives.
 
-Two known pre-existing bugs are *out of scope* for this refactor and limit
-what the matrix can assert. When either is fixed, drop the corresponding
-``xfail``/``postgres_only`` marker on the test below.
+One known pre-existing bug is *out of scope* for this refactor and limits
+what the matrix can assert. When it is fixed, drop the corresponding
+``postgres_only`` marker on the test below.
 
-1. `#41 <https://github.com/syn54x/ferro-orm/issues/41>`_ --
-   ``Model.where(Model.col == None)`` panics in the Rust query builder
-   (``query.rs::node_to_condition_for_backend`` unwraps ``node.value``).
-   Backend-agnostic: surfaces on both SQLite and Postgres before any SQL
-   is generated, so ``test_filter_by_none_does_not_reproduce_38`` is
-   ``xfail(strict=True)`` until #41 closes -- the strict marker means the
-   test will XPASS-as-failure the moment #41 is fixed, prompting us to
-   drop the marker.
-2. `#42 <https://github.com/syn54x/ferro-orm/issues/42>`_ --
-   ``UPDATE col = NULL`` on SQLite reads back as ``0`` (or the type's zero
-   value) due to a hydration issue in ``materialize_engine_row``. SQLite-
-   specific, so ``test_update_to_none_for_each_type`` is ``postgres_only``.
+- `#42 <https://github.com/syn54x/ferro-orm/issues/42>`_ --
+  ``UPDATE col = NULL`` on SQLite reads back as ``0`` (or the type's zero
+  value) due to a hydration issue in ``materialize_engine_row``. SQLite-
+  specific, so ``test_update_to_none_for_each_type`` is ``postgres_only``.
 
 See ``docs/plans/2026-04-29-001-typed-null-binds-plan.md`` for context.
 """
@@ -284,22 +276,12 @@ async def test_update_to_none_executes_without_error(db_url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Blocked by #41: filter `col == None` panics in "
-        "node_to_condition_for_backend (Option::unwrap on node.value) "
-        "before any SQL reaches the backend. Strict so we get an XPASS "
-        "signal the moment #41 is fixed, then drop this marker."
-    ),
-)
+@pytest.mark.backend_matrix
 async def test_filter_by_none_does_not_reproduce_38(db_url):
-    """Query filter ``WHERE col == None`` on a nullable integer column must
-    not fail with a Postgres OID type error.
+    """Query filter ``col == None`` compiles to ``IS NULL`` and matches rows.
 
-    Backend-agnostic: the panic from #41 short-circuits this test on every
-    backend, not just SQLite. Confirmed reproduced on Postgres while running
-    the full matrix during the typed-null-binds refactor."""
+    Regression for #41 (Rust panic on JSON null RHS). Also ensures the
+    typed-null bind path does not regress #38 on Postgres."""
 
     class Filterable(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -307,12 +289,16 @@ async def test_filter_by_none_does_not_reproduce_38(db_url):
 
     await connect(db_url, auto_migrate=True)
 
-    await Filterable.create(count=1)
-    await Filterable.create()  # count = None
+    with_value = await Filterable.create(count=1)
+    null_row = await Filterable.create()  # count = None
 
-    # The assertion is "no Postgres OID error", not match counts.
-    matched = await Filterable.where(Filterable.count == None).all()  # noqa: E711
-    assert isinstance(matched, list)
+    matched_null = await Filterable.where(Filterable.count == None).all()  # noqa: E711
+    assert len(matched_null) == 1
+    assert matched_null[0].id == null_row.id
+
+    matched_non_null = await Filterable.where(Filterable.count != None).all()  # noqa: E711
+    assert len(matched_non_null) == 1
+    assert matched_non_null[0].id == with_value.id
 
 
 @pytest.mark.asyncio

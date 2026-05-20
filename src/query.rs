@@ -63,10 +63,75 @@ impl QueryDef {
             }
         } else {
             let col_name = node.column.as_ref().unwrap();
-            let val = node.value.as_ref().unwrap();
             let col = Expr::col(Alias::new(col_name));
 
-            let expr: SimpleExpr =
+            // Python `None` becomes JSON `null`, which serde deserializes as
+            // `Option<serde_json::Value>::None` (not `Some(Null)`). SQL `col = NULL`
+            // is never true — use `IS NULL` / `IS NOT NULL` for `== None` / `!= None`.
+            let rhs_is_json_null = node.value.as_ref().map_or(true, serde_json::Value::is_null);
+
+            let expr: SimpleExpr = if rhs_is_json_null {
+                match node.operator.as_str() {
+                    "==" => col.is_null(),
+                    "!=" => col.is_not_null(),
+                    "<" => col.lt(self.value_rhs_simple_expr_for_backend(
+                        col_name,
+                        &Value::Null,
+                        false,
+                        backend,
+                    )),
+                    "<=" => col.lte(self.value_rhs_simple_expr_for_backend(
+                        col_name,
+                        &Value::Null,
+                        false,
+                        backend,
+                    )),
+                    ">" => col.gt(self.value_rhs_simple_expr_for_backend(
+                        col_name,
+                        &Value::Null,
+                        false,
+                        backend,
+                    )),
+                    ">=" => col.gte(self.value_rhs_simple_expr_for_backend(
+                        col_name,
+                        &Value::Null,
+                        false,
+                        backend,
+                    )),
+                    "IN" => {
+                        let val = node.value.as_ref().unwrap_or(&Value::Null);
+                        if let Some(vals) = val.as_array() {
+                            let rhs: Vec<SimpleExpr> = vals
+                                .iter()
+                                .map(|v| {
+                                    self.value_rhs_simple_expr_for_backend(
+                                        col_name, v, false, backend,
+                                    )
+                                })
+                                .collect();
+                            col.is_in(rhs)
+                        } else {
+                            col.eq(self
+                                .value_rhs_simple_expr_for_backend(col_name, val, false, backend))
+                        }
+                    }
+                    "LIKE" => {
+                        let val = node.value.as_ref().unwrap_or(&Value::Null);
+                        let pattern = match val {
+                            Value::String(s) => s.clone(),
+                            _ => val.to_string(),
+                        };
+                        col.like(pattern)
+                    }
+                    _ => col.eq(self.value_rhs_simple_expr_for_backend(
+                        col_name,
+                        &Value::Null,
+                        false,
+                        backend,
+                    )),
+                }
+            } else {
+                let val = node.value.as_ref().unwrap();
                 match node.operator.as_str() {
                     "==" => col
                         .eq(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
@@ -105,7 +170,8 @@ impl QueryDef {
                     }
                     _ => col
                         .eq(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
-                };
+                }
+            };
             Condition::all().add(expr)
         }
     }
@@ -360,7 +426,7 @@ pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::QueryDef;
+    use super::{QueryDef, QueryNode};
     use crate::backend::BackendKind;
     use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
     use serde_json::json;
@@ -383,6 +449,75 @@ mod tests {
             .values_panic([rhs])
             .build(PostgresQueryBuilder);
         values.0.into_iter().next().expect("one value")
+    }
+
+    #[test]
+    fn json_null_deserializes_to_option_none_for_query_node_value() {
+        let node: QueryNode = serde_json::from_value(json!({
+            "is_compound": false,
+            "column": "count",
+            "operator": "==",
+            "value": null
+        }))
+        .unwrap();
+        assert!(node.value.is_none());
+    }
+
+    #[test]
+    fn where_rhs_none_emits_is_null_for_eq_sqlite() {
+        let node: QueryNode = serde_json::from_value(json!({
+            "is_compound": false,
+            "column": "attached_at",
+            "operator": "==",
+            "value": null
+        }))
+        .unwrap();
+        let q = QueryDef {
+            model_name: "Pending".to_string(),
+            where_clause: vec![node],
+            order_by: None,
+            limit: None,
+            offset: None,
+            m2m: None,
+        };
+        let mut select = Query::select();
+        select
+            .from(Alias::new("pending"))
+            .cond_where(q.to_condition_for_backend(BackendKind::Sqlite));
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(sql.contains("is null"), "expected IS NULL, got {sql}");
+        assert!(
+            !sql.contains("= null"),
+            "must not emit `= NULL` (always unknown in SQL): {sql}"
+        );
+    }
+
+    #[test]
+    fn where_rhs_none_emits_is_not_null_for_ne_sqlite() {
+        let node: QueryNode = serde_json::from_value(json!({
+            "is_compound": false,
+            "column": "payload",
+            "operator": "!=",
+            "value": null
+        }))
+        .unwrap();
+        let q = QueryDef {
+            model_name: "Pending".to_string(),
+            where_clause: vec![node],
+            order_by: None,
+            limit: None,
+            offset: None,
+            m2m: None,
+        };
+        let mut select = Query::select();
+        select
+            .from(Alias::new("pending"))
+            .cond_where(q.to_condition_for_backend(BackendKind::Sqlite));
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(
+            sql.contains("is not null"),
+            "expected IS NOT NULL, got {sql}"
+        );
     }
 
     #[test]

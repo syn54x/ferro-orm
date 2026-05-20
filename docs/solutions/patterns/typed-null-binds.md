@@ -8,7 +8,7 @@ related_files:
   - src/query.rs
   - tests/test_typed_null_binds.py
   - tests/test_sqlite_alembic_reconnect_hydration.py
-related_issues: [38, 40, 56]
+related_issues: [38, 40, 41, 56]
 related_prs: []
 captured: 2026-04-29
 ---
@@ -71,6 +71,11 @@ digraph typed_null_flow {
 | Filter / UPDATE  | `value_rhs_simple_expr_for_backend`                      | `src/query.rs`     |
 | Filter null pick | `typed_null_for_column` (called by ^)                    | `src/query.rs`     |
 | M2M target IDs   | `backend_column_value_expr`                              | `src/operations.rs`|
+
+**`IS NULL` for typed `== None`:** JSON `null` on `QueryNode::value` deserializes
+as `Option<serde_json::Value>::None` (serde), not `Some(Value::Null)`.
+`node_to_condition_for_backend` maps `==` / `!=` with a null RHS to
+`IS NULL` / `IS NOT NULL` — never `= NULL`, which is never true in SQL.
 
 These functions inspect column metadata (JSON type, format, `uuid_columns`
 introspection, `ts_cast` metadata) and emit one of the typed SeaQuery `None`
