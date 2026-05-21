@@ -9,8 +9,9 @@ related_files:
   - tests/test_typed_null_binds.py
   - tests/test_sqlite_alembic_reconnect_hydration.py
 related_issues: [38, 40, 41, 56]
-related_prs: []
+related_prs: [62]
 captured: 2026-04-29
+last_updated: 2026-05-20
 ---
 
 ## Problem
@@ -198,7 +199,12 @@ Ferro itself.
   NULL → `int(0)` on SQLite (issue [#56]).
 - Issue [#38]: the original bug report.
 - Issue [#40]: temporal typed binds (deferred follow-up).
+- Issue [#41]: filter `== None` panic / `IS NULL` compile path — debugging story in
+  `docs/solutions/issues/typed-where-null-panics-is-null.md`.
+- PR [#62]: `fix(query): typed predicates col == None → IS NULL / IS NOT NULL`.
 
 [#38]: https://github.com/syn54x/ferro-orm/issues/38
 [#40]: https://github.com/syn54x/ferro-orm/issues/40
+[#41]: https://github.com/syn54x/ferro-orm/issues/41
 [#56]: https://github.com/syn54x/ferro-orm/issues/56
+[#62]: https://github.com/syn54x/ferro-orm/pull/62
