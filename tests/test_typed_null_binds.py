@@ -19,8 +19,9 @@ See ``docs/plans/2026-04-29-001-typed-null-binds-plan.md`` for context.
 """
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
 from pydantic import Field
@@ -299,6 +300,47 @@ async def test_filter_by_none_does_not_reproduce_38(db_url):
     matched_non_null = await Filterable.where(Filterable.count != None).all()  # noqa: E711
     assert len(matched_non_null) == 1
     assert matched_non_null[0].id == with_value.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_lambda_predicate_null_filter_datetime_and_json(db_url):
+    """Lambda ``where`` with ``== None`` / ``!= None`` on nullable datetime and JSON.
+
+    Regression for #41 using the API shape from the bug report (``QueryProxy``
+    + JSON ``null`` RHS), not only ``FieldProxy`` comparisons."""
+
+    class Pending(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        attached_at: datetime | None = None
+        payload: list[Any] | None = None
+
+    await connect(db_url, auto_migrate=True)
+
+    null_dt = await Pending.create(name="null-dt", attached_at=None, payload=[{"x": 1}])
+    null_json = await Pending.create(name="null-json", attached_at=datetime.now(UTC))
+    with_values = await Pending.create(
+        name="set",
+        attached_at=datetime.now(UTC),
+        payload=[{"x": 2}],
+    )
+
+    matched_dt_null = await Pending.where(lambda t: t.attached_at == None).all()  # noqa: E711
+    assert len(matched_dt_null) == 1
+    assert matched_dt_null[0].id == null_dt.id
+
+    matched_json_null = await Pending.where(lambda t: t.payload == None).all()  # noqa: E711
+    assert len(matched_json_null) == 1
+    assert matched_json_null[0].id == null_json.id
+
+    matched_dt_set = await Pending.where(lambda t: t.attached_at != None).all()  # noqa: E711
+    assert len(matched_dt_set) == 2
+    assert {r.id for r in matched_dt_set} == {null_json.id, with_values.id}
+
+    matched_json_set = await Pending.where(lambda t: t.payload != None).all()  # noqa: E711
+    assert len(matched_json_set) == 2
+    assert {r.id for r in matched_json_set} == {null_dt.id, with_values.id}
 
 
 @pytest.mark.asyncio
