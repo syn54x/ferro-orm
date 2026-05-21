@@ -8,9 +8,10 @@ related_files:
   - src/query.rs
   - tests/test_typed_null_binds.py
   - tests/test_sqlite_alembic_reconnect_hydration.py
-related_issues: [38, 40, 56]
-related_prs: []
+related_issues: [38, 40, 41, 56]
+related_prs: [62]
 captured: 2026-04-29
+last_updated: 2026-05-20
 ---
 
 ## Problem
@@ -71,6 +72,11 @@ digraph typed_null_flow {
 | Filter / UPDATE  | `value_rhs_simple_expr_for_backend`                      | `src/query.rs`     |
 | Filter null pick | `typed_null_for_column` (called by ^)                    | `src/query.rs`     |
 | M2M target IDs   | `backend_column_value_expr`                              | `src/operations.rs`|
+
+**`IS NULL` for typed `== None`:** JSON `null` on `QueryNode::value` deserializes
+as `Option<serde_json::Value>::None` (serde), not `Some(Value::Null)`.
+`node_to_condition_for_backend` maps `==` / `!=` with a null RHS to
+`IS NULL` / `IS NOT NULL` — never `= NULL`, which is never true in SQL.
 
 These functions inspect column metadata (JSON type, format, `uuid_columns`
 introspection, `ts_cast` metadata) and emit one of the typed SeaQuery `None`
@@ -205,8 +211,13 @@ Ferro itself.
   NUMERIC Decimal → `None` on reconnect (issue [#58]).
 - Issue [#38]: the original bug report.
 - Issue [#40]: temporal typed binds (deferred follow-up).
+- Issue [#41]: filter `== None` panic / `IS NULL` compile path — debugging story in
+  `docs/solutions/issues/typed-where-null-panics-is-null.md`.
+- PR [#62]: `fix(query): typed predicates col == None → IS NULL / IS NOT NULL`.
 
 [#38]: https://github.com/syn54x/ferro-orm/issues/38
 [#40]: https://github.com/syn54x/ferro-orm/issues/40
+[#41]: https://github.com/syn54x/ferro-orm/issues/41
 [#56]: https://github.com/syn54x/ferro-orm/issues/56
 [#58]: https://github.com/syn54x/ferro-orm/issues/58
+[#62]: https://github.com/syn54x/ferro-orm/pull/62
