@@ -5,6 +5,9 @@
 
 ### Bug Fixes
 
+- **query**: Typed predicates ``Model.col == None`` / ``!= None`` compile to
+  ``IS NULL`` / ``IS NOT NULL`` instead of panicking in the Rust query builder
+  (JSON null deserialized as ``Option::None`` on the wire).
 - Hydrate SQLite INTEGER-backed Decimal columns on reconnect
   ([#59](https://github.com/syn54x/ferro-orm/pull/59),
   [`6f13906`](https://github.com/syn54x/ferro-orm/commit/6f13906850300bc9e85c1274763c49bc5b318b5d))
