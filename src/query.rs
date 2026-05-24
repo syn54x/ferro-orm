@@ -441,6 +441,7 @@ mod tests {
     use crate::backend::BackendKind;
     use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
     use serde_json::json;
+    use std::collections::HashMap;
 
     fn empty_query_def(model_name: &str) -> QueryDef {
         QueryDef {
