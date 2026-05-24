@@ -1546,7 +1546,7 @@ pub fn fetch_filtered<'py>(
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
 
-    let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
+    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
     })?;
 
@@ -1556,10 +1556,10 @@ pub fn fetch_filtered<'py>(
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
-        let pg_native_enum_cols: HashSet<String> = {
-            let m = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
-            m.keys().cloned().collect()
-        };
+        let postgres_enum_udt =
+            postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        query_def.postgres_enum_udt = postgres_enum_udt.clone();
+        let pg_native_enum_cols: HashSet<String> = postgres_enum_udt.keys().cloned().collect();
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1736,7 +1736,7 @@ pub fn count_filtered(
     tx_id: Option<String>,
     using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
+    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
     })?;
 
@@ -1744,6 +1744,8 @@ pub fn count_filtered(
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
+        query_def.postgres_enum_udt =
+            postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
         // ... sql ...
         let (sql, bind_values) = {
             let mut select = Query::select();
@@ -1938,7 +1940,7 @@ pub fn delete_filtered(
     tx_id: Option<String>,
     using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
+    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
     })?;
 
@@ -1946,6 +1948,8 @@ pub fn delete_filtered(
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
 
         let table_name = name.to_lowercase();
+        query_def.postgres_enum_udt =
+            postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
         // ... sql ...
         let (sql, bind_values) = {
             let mut delete = Query::delete();
@@ -1982,7 +1986,7 @@ pub fn update_filtered(
     tx_id: Option<String>,
     using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
+    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
     })?;
 
@@ -1999,6 +2003,7 @@ pub fn update_filtered(
 
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        query_def.postgres_enum_udt = enum_udt.clone();
         let uuid_columns =
             postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
         let ts_cast =

@@ -2,6 +2,7 @@ use crate::state::{MODEL_REGISTRY, SqlDialect};
 use sea_query::{Alias, Condition, Expr, SimpleExpr};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct QueryNode {
@@ -38,6 +39,10 @@ pub struct QueryDef {
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     pub m2m: Option<M2mContext>,
+    /// Populated from `pg_catalog` before building filter SQL. Not part of the
+    /// Python query JSON payload.
+    #[serde(skip)]
+    pub postgres_enum_udt: HashMap<String, String>,
 }
 
 impl QueryDef {
@@ -202,19 +207,10 @@ impl QueryDef {
     ) -> SimpleExpr {
         if let Value::String(s) = val {
             if backend == SqlDialect::Postgres {
-                if let Ok(registry) = MODEL_REGISTRY.read()
-                    && let Some(schema) = registry.get(&self.model_name)
-                    && let Some(col_info) = schema
-                        .get("properties")
-                        .and_then(|p| p.as_object())
-                        .and_then(|props| props.get(col_name))
-                    && let Some(tn) = crate::schema_bind::postgres_enum_type_name_for_column(
-                        col_name,
-                        &std::collections::HashMap::new(),
-                        Some(col_info),
-                    )
+                if let Some(tn) =
+                    crate::schema_bind::native_postgres_enum_udt_name(col_name, &self.postgres_enum_udt)
                 {
-                    return crate::schema_bind::postgres_enum_string_rhs_expr(s, &tn);
+                    return crate::schema_bind::postgres_enum_string_rhs_expr(s, tn);
                 }
 
                 if let Ok(parsed) = uuid::Uuid::parse_str(s) {
@@ -454,6 +450,7 @@ mod tests {
             limit: None,
             offset: None,
             m2m: None,
+            postgres_enum_udt: HashMap::new(),
         }
     }
 
@@ -494,6 +491,7 @@ mod tests {
             limit: None,
             offset: None,
             m2m: None,
+            postgres_enum_udt: HashMap::new(),
         };
         let mut select = Query::select();
         select
@@ -523,6 +521,7 @@ mod tests {
             limit: None,
             offset: None,
             m2m: None,
+            postgres_enum_udt: HashMap::new(),
         };
         let mut select = Query::select();
         select
@@ -692,15 +691,10 @@ mod tests {
 
     #[test]
     fn enum_rhs_emits_cast_to_schema_enum_type_on_postgres() {
-        crate::state::MODEL_REGISTRY.write().unwrap().insert(
-            "WidgetColor".to_string(),
-            json!({
-                "properties": {
-                    "color": {"enum_type_name": "color"}
-                }
-            }),
-        );
-        let query_def = empty_query_def("WidgetColor");
+        let mut query_def = empty_query_def("WidgetColor");
+        query_def
+            .postgres_enum_udt
+            .insert("color".to_string(), "color".to_string());
 
         let rhs = query_def.value_rhs_simple_expr_for_backend(
             "color",
@@ -717,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_rhs_skips_cast_when_db_type_overrides_storage() {
+    fn enum_rhs_skips_cast_without_native_enum_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetTextColor".to_string(),
             json!({
@@ -738,7 +732,7 @@ mod tests {
 
         assert!(
             !sql.to_lowercase().contains("as \"color\"") && !sql.to_lowercase().contains("as color"),
-            "db_type=text must not cast to native enum UDT: {sql}"
+            "auto-migrate TEXT enum columns must not cast without catalog UDT: {sql}"
         );
     }
 

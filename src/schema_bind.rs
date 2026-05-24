@@ -3,6 +3,19 @@
 use sea_query::{Alias, Expr, SimpleExpr};
 use std::collections::HashMap;
 
+/// Native Postgres enum UDT for `col_name`, from catalog introspection only.
+///
+/// Query-filter predicates use this path so auto-migrate TEXT columns (which
+/// carry `enum_type_name` in schema but are not `typtype = 'e'`) keep plain
+/// text binds. INSERT/UPDATE may still fall back to schema metadata via
+/// [`postgres_enum_type_name_for_column`].
+pub(crate) fn native_postgres_enum_udt_name<'a>(
+    col_name: &str,
+    enum_udt: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    enum_udt.get(col_name).map(|s| s.as_str())
+}
+
 /// Resolve the Postgres enum UDT name for a column when binding a string RHS.
 ///
 /// `enum_udt` comes from catalog introspection (INSERT/UPDATE). `col_info` is
