@@ -278,6 +278,45 @@ async def test_native_postgres_enum_column_decodes_via_text_cast(
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
+async def test_native_postgres_enum_where_lambda_count(db_url, postgres_base_url, db_schema_name):
+    """Regression for #63: filter predicates must cast enum RHS to the PG UDT."""
+
+    class Color(str, Enum):
+        RED = "red"
+        BLUE = "blue"
+
+    class Widget(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        color: Color
+
+    import psycopg
+
+    with psycopg.connect(postgres_base_url) as conn:
+        conn.execute(f'SET search_path TO "{db_schema_name}"')
+        conn.execute("CREATE TYPE color AS ENUM ('red', 'blue')")
+        conn.execute(
+            """
+            CREATE TABLE widget (
+                id integer PRIMARY KEY,
+                color color NOT NULL
+            )
+            """
+        )
+        conn.execute("INSERT INTO widget (id, color) VALUES (1, 'red'), (2, 'blue')")
+        conn.commit()
+
+    await connect(db_url, auto_migrate=False)
+
+    count = await Widget.where(lambda w, c=Color.RED: w.color == c).count()
+    assert count == 1
+
+    rows = await Widget.where(lambda w: w.color != Color.BLUE).all()
+    assert len(rows) == 1
+    assert rows[0].color == Color.RED
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
 async def test_native_postgres_enum_plain_str_column(
     db_url, postgres_base_url, db_schema_name
 ):

@@ -202,6 +202,21 @@ impl QueryDef {
     ) -> SimpleExpr {
         if let Value::String(s) = val {
             if backend == SqlDialect::Postgres {
+                if let Ok(registry) = MODEL_REGISTRY.read()
+                    && let Some(schema) = registry.get(&self.model_name)
+                    && let Some(col_info) = schema
+                        .get("properties")
+                        .and_then(|p| p.as_object())
+                        .and_then(|props| props.get(col_name))
+                    && let Some(tn) = crate::schema_bind::postgres_enum_type_name_for_column(
+                        col_name,
+                        &std::collections::HashMap::new(),
+                        Some(col_info),
+                    )
+                {
+                    return crate::schema_bind::postgres_enum_string_rhs_expr(s, &tn);
+                }
+
                 if let Ok(parsed) = uuid::Uuid::parse_str(s) {
                     let schema_uuid = model_column_is_uuid(&self.model_name, col_name);
                     if schema_uuid || infer_uuid_without_schema {
@@ -673,6 +688,58 @@ mod tests {
             SeaValue::Bytes(Some(b)) => assert_eq!(*b, b"some-bytes".to_vec()),
             other => panic!("expected typed Bytes bind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn enum_rhs_emits_cast_to_schema_enum_type_on_postgres() {
+        crate::state::MODEL_REGISTRY.write().unwrap().insert(
+            "WidgetColor".to_string(),
+            json!({
+                "properties": {
+                    "color": {"enum_type_name": "color"}
+                }
+            }),
+        );
+        let query_def = empty_query_def("WidgetColor");
+
+        let rhs = query_def.value_rhs_simple_expr_for_backend(
+            "color",
+            &json!("red"),
+            false,
+            BackendKind::Postgres,
+        );
+        let sql = Query::select().expr(rhs).to_string(PostgresQueryBuilder);
+
+        assert!(
+            sql.to_lowercase().contains("as \"color\"") || sql.to_lowercase().contains("as color"),
+            "enum filter rhs should CAST to the UDT name, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn enum_rhs_skips_cast_when_db_type_overrides_storage() {
+        crate::state::MODEL_REGISTRY.write().unwrap().insert(
+            "WidgetTextColor".to_string(),
+            json!({
+                "properties": {
+                    "color": {"enum_type_name": "color", "db_type": "text"}
+                }
+            }),
+        );
+        let query_def = empty_query_def("WidgetTextColor");
+
+        let rhs = query_def.value_rhs_simple_expr_for_backend(
+            "color",
+            &json!("red"),
+            false,
+            BackendKind::Postgres,
+        );
+        let sql = Query::select().expr(rhs).to_string(PostgresQueryBuilder);
+
+        assert!(
+            !sql.to_lowercase().contains("as \"color\"") && !sql.to_lowercase().contains("as color"),
+            "db_type=text must not cast to native enum UDT: {sql}"
+        );
     }
 
     #[test]
