@@ -9,6 +9,7 @@ mod connection;
 mod operations;
 mod query;
 mod schema;
+mod schema_bind;
 mod state;
 
 use crate::state::MODEL_REGISTRY;
