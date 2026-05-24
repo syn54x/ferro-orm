@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.10.4 (2026-05-24)
+
+### Bug Fixes
+
+- **query**: Cast native Postgres enum RHS in `.where()` filters
+  ([#64](https://github.com/syn54x/ferro-orm/pull/64),
+  [`7fea893`](https://github.com/syn54x/ferro-orm/commit/7fea89320fd2216a956ae32e8ae6f4829dd8fcf7))
+
+
 ## v0.10.3 (2026-05-21)
 
 ### Bug Fixes
