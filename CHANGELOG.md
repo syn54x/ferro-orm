@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.10.5 (2026-05-25)
+
+### Bug Fixes
+
+- Coerce Annotated StrEnum fields on cold hydration
+  ([#66](https://github.com/syn54x/ferro-orm/pull/66),
+  [`c17c13b`](https://github.com/syn54x/ferro-orm/commit/c17c13b56e100028a42fa431ca59c9729a22daeb))
+
+
 ## v0.10.4 (2026-05-24)
 
 ### Bug Fixes
