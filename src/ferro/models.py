@@ -8,9 +8,6 @@ from typing import (
     Any,
     ClassVar,
     Self,
-    get_args,
-    get_origin,
-    get_type_hints,
     overload,
 )
 
@@ -155,6 +152,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = ()
     __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = ()
+    _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
 
     @classmethod
     def _reregister_ferro(cls) -> None:
@@ -303,38 +301,6 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         Returns:
             None
         """
-        if not hasattr(cls, "_enum_fields"):
-            cls._enum_fields = {}
-            try:
-                hints = get_type_hints(cls, globalns=globals(), localns=locals())
-                for field_name, hint in hints.items():
-                    actual_type = hint
-                    origin = get_origin(hint)
-                    from typing import Union as TypingUnion
-
-                    if origin is TypingUnion:
-                        args = get_args(hint)
-                        for arg in args:
-                            try:
-                                if isinstance(arg, type) and issubclass(arg, Enum):
-                                    actual_type = arg
-                                    break
-                            except TypeError:
-                                pass
-
-                    try:
-                        if isinstance(actual_type, type) and issubclass(
-                            actual_type, Enum
-                        ):
-                            cls._enum_fields[field_name] = actual_type
-                    except TypeError:
-                        pass
-            except Exception:
-                for field_name, hint in getattr(cls, "__annotations__", {}).items():
-                    if field_name not in cls._enum_fields:
-                        if isinstance(hint, type) and issubclass(hint, Enum):
-                            cls._enum_fields[field_name] = hint
-
         for field_name, enum_cls in cls._enum_fields.items():
             val = getattr(instance, field_name)
             if val is not None and not isinstance(val, enum_cls):

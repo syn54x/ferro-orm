@@ -1,5 +1,6 @@
 import json
 import types
+from enum import Enum
 from typing import (
     Annotated,
     Any,
@@ -26,7 +27,7 @@ from .base import FerroField, ForeignKey, ManyToManyRelation
 from .fields import FERRO_FIELD_EXTRA_KEY
 from .query import FieldProxy, Relation
 from .relations.descriptors import ForwardDescriptor
-from .schema_metadata import build_model_schema
+from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
 
@@ -57,6 +58,7 @@ class ModelMetaclass(type(BaseModel)):
         ferro_fields = mcs._parse_ferro_field_metadata(cls)
         cls.ferro_fields = ferro_fields
         mcs._validate_db_type_options(cls, ferro_fields)
+        mcs._register_enum_fields(cls)
         mcs._inject_relation_descriptors(cls, local_relations)
         mcs._generate_and_register_schema(cls, name, ferro_fields, local_relations)
 
@@ -396,6 +398,23 @@ class ModelMetaclass(type(BaseModel)):
                 ferro_fields[f_name] = wrapped_metadata
 
         return ferro_fields
+
+    @staticmethod
+    def _register_enum_fields(cls) -> None:
+        """Populate ``cls._enum_fields`` from resolved Pydantic field annotations."""
+        enum_fields: dict[str, type[Enum]] = {}
+        try:
+            resolved = get_type_hints(cls, include_extras=True)
+        except Exception:
+            resolved = {}
+        for field_name, finfo in getattr(cls, "model_fields", {}).items():
+            annotation = finfo.annotation
+            if isinstance(annotation, str):
+                annotation = resolved.get(field_name, annotation)
+            enum_cls = _enum_subclass_from_annotation(annotation)
+            if enum_cls is not None:
+                enum_fields[field_name] = enum_cls
+        cls._enum_fields = enum_fields
 
     @staticmethod
     def _validate_db_type_options(cls, ferro_fields: dict) -> None:
