@@ -27,6 +27,8 @@ class BillingRow(Model):
 @pytest.fixture(autouse=True)
 def cleanup():
     registered_before = set(_MODEL_REGISTRY_PY)
+    # Other tests (e.g. test_sqlite_alembic_reconnect_hydration) clear the Python registry.
+    _MODEL_REGISTRY_PY.setdefault(BillingRow.__name__, BillingRow)
     reset_engine()
     clear_registry()
     yield
