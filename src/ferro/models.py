@@ -8,9 +8,6 @@ from typing import (
     Any,
     ClassVar,
     Self,
-    get_args,
-    get_origin,
-    get_type_hints,
     overload,
 )
 
@@ -46,7 +43,9 @@ def _transaction_or_using(using: str | None) -> tuple[str | None, str | None]:
         tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
         if using == tx_connection:
             return tx_id, None
-        raise ValueError("ORM operations inside a transaction inherit the transaction connection")
+        raise ValueError(
+            "ORM operations inside a transaction inherit the transaction connection"
+        )
     return tx_id, using
 
 
@@ -63,7 +62,9 @@ def _instance_transaction_route(
         if using is not None:
             if using == tx_connection:
                 return tx_id, None, origin or tx_connection
-            raise ValueError("ORM operations inside a transaction inherit the transaction connection")
+            raise ValueError(
+                "ORM operations inside a transaction inherit the transaction connection"
+            )
         return tx_id, None, origin or tx_connection
 
     effective_using = using or origin
@@ -155,6 +156,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = ()
     __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = ()
+    _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
 
     @classmethod
     def _reregister_ferro(cls) -> None:
@@ -224,7 +226,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> user = User(name="Taylor")
             >>> await user.save()
         """
-        tx_id, operation_using, identity_using = _instance_transaction_route(self, using)
+        tx_id, operation_using, identity_using = _instance_transaction_route(
+            self, using
+        )
         new_id = await save_record(
             self.__class__.__name__, self.model_dump_json(), tx_id, operation_using
         )
@@ -251,7 +255,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     break
 
         if pk_val is not None:
-            register_instance(self.__class__.__name__, str(pk_val), self, identity_using)
+            register_instance(
+                self.__class__.__name__, str(pk_val), self, identity_using
+            )
             _set_instance_origin(self, identity_using)
 
     async def delete(self, *, using: str | None = None) -> None:
@@ -267,7 +273,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         pk_field_name = self.__class__._primary_key_field_name()
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
-        _tx_id, operation_using, identity_using = _instance_transaction_route(self, using)
+        _tx_id, operation_using, identity_using = _instance_transaction_route(
+            self, using
+        )
 
         if pk_val is not None:
             name = self.__class__.__name__
@@ -303,38 +311,6 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         Returns:
             None
         """
-        if not hasattr(cls, "_enum_fields"):
-            cls._enum_fields = {}
-            try:
-                hints = get_type_hints(cls, globalns=globals(), localns=locals())
-                for field_name, hint in hints.items():
-                    actual_type = hint
-                    origin = get_origin(hint)
-                    from typing import Union as TypingUnion
-
-                    if origin is TypingUnion:
-                        args = get_args(hint)
-                        for arg in args:
-                            try:
-                                if isinstance(arg, type) and issubclass(arg, Enum):
-                                    actual_type = arg
-                                    break
-                            except TypeError:
-                                pass
-
-                    try:
-                        if isinstance(actual_type, type) and issubclass(
-                            actual_type, Enum
-                        ):
-                            cls._enum_fields[field_name] = actual_type
-                    except TypeError:
-                        pass
-            except Exception:
-                for field_name, hint in getattr(cls, "__annotations__", {}).items():
-                    if field_name not in cls._enum_fields:
-                        if isinstance(hint, type) and issubclass(hint, Enum):
-                            cls._enum_fields[field_name] = hint
-
         for field_name, enum_cls in cls._enum_fields.items():
             val = getattr(instance, field_name)
             if val is not None and not isinstance(val, enum_cls):
@@ -424,7 +400,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise RuntimeError("Cannot refresh a model without a primary key")
 
         name = self.__class__.__name__
-        _tx_id, operation_using, identity_using = _instance_transaction_route(self, using)
+        _tx_id, operation_using, identity_using = _instance_transaction_route(
+            self, using
+        )
 
         evict_instance(name, str(pk_val), identity_using)
         query = self.__class__.where(getattr(self.__class__, pk_field_name) == pk_val)
