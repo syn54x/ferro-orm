@@ -43,7 +43,9 @@ def _transaction_or_using(using: str | None) -> tuple[str | None, str | None]:
         tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
         if using == tx_connection:
             return tx_id, None
-        raise ValueError("ORM operations inside a transaction inherit the transaction connection")
+        raise ValueError(
+            "ORM operations inside a transaction inherit the transaction connection"
+        )
     return tx_id, using
 
 
@@ -60,7 +62,9 @@ def _instance_transaction_route(
         if using is not None:
             if using == tx_connection:
                 return tx_id, None, origin or tx_connection
-            raise ValueError("ORM operations inside a transaction inherit the transaction connection")
+            raise ValueError(
+                "ORM operations inside a transaction inherit the transaction connection"
+            )
         return tx_id, None, origin or tx_connection
 
     effective_using = using or origin
@@ -222,7 +226,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> user = User(name="Taylor")
             >>> await user.save()
         """
-        tx_id, operation_using, identity_using = _instance_transaction_route(self, using)
+        tx_id, operation_using, identity_using = _instance_transaction_route(
+            self, using
+        )
         new_id = await save_record(
             self.__class__.__name__, self.model_dump_json(), tx_id, operation_using
         )
@@ -249,7 +255,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     break
 
         if pk_val is not None:
-            register_instance(self.__class__.__name__, str(pk_val), self, identity_using)
+            register_instance(
+                self.__class__.__name__, str(pk_val), self, identity_using
+            )
             _set_instance_origin(self, identity_using)
 
     async def delete(self, *, using: str | None = None) -> None:
@@ -265,7 +273,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         pk_field_name = self.__class__._primary_key_field_name()
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
-        _tx_id, operation_using, identity_using = _instance_transaction_route(self, using)
+        _tx_id, operation_using, identity_using = _instance_transaction_route(
+            self, using
+        )
 
         if pk_val is not None:
             name = self.__class__.__name__
@@ -390,7 +400,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise RuntimeError("Cannot refresh a model without a primary key")
 
         name = self.__class__.__name__
-        _tx_id, operation_using, identity_using = _instance_transaction_route(self, using)
+        _tx_id, operation_using, identity_using = _instance_transaction_route(
+            self, using
+        )
 
         evict_instance(name, str(pk_val), identity_using)
         query = self.__class__.where(getattr(self.__class__, pk_field_name) == pk_val)

@@ -48,16 +48,16 @@ Equality with the raw string (`instance.mode == "hourly"`) still works; the fail
 
 ## Acceptance Examples
 
-- **AE1 — Cold fetch with deferred annotations**  
-  Covers: R5, R6, R8  
+- **AE1 — Cold fetch with deferred annotations**
+  Covers: R5, R6, R8
   Given `from __future__ import annotations` and `billing_mode: Annotated[Mode, FerroField(db_type="text")]`, when a row is created with `Mode.HOURLY`, then `reset_engine()` and reconnect, then `Row.all()[0]`, then `type(row.billing_mode)` is `Mode` and `row.billing_mode.value == "hourly"`.
 
-- **AE2 — Schema parity unchanged**  
-  Covers: R2, R7  
+- **AE2 — Schema parity unchanged**
+  Covers: R2, R7
   Given the same model class, `__ferro_schema__["properties"]["billing_mode"]["enum_type_name"]` remains `"mode"` (lowercased class name) before and after the fix.
 
-- **AE3 — Invalid DB value tolerance**  
-  Covers: R5  
+- **AE3 — Invalid DB value tolerance**
+  Covers: R5
   Given a text column containing a string that is not a valid enum member, when fetched, the instance field remains a non-enum value (or coercion fails silently as today) without raising during `_fix_types` — no change to defensive behavior unless separately specified.
 
 ---

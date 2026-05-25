@@ -63,8 +63,8 @@ billing_mode type: str
 Row._enum_fields: {}
 ```
 
-`get_type_hints(Row, globalns=ferro.models.__dict__)` → `NameError: name 'Annotated' is not defined`.  
-`get_type_hints(Row, include_extras=True)` (default module) → resolves `Mode`.  
+`get_type_hints(Row, globalns=ferro.models.__dict__)` → `NameError: name 'Annotated' is not defined`.
+`get_type_hints(Row, include_extras=True)` (default module) → resolves `Mode`.
 `Row.model_fields['billing_mode'].annotation` → `<enum 'Mode'>` even when `__annotations__` is a string.
 
 ### Call sites that invoke `_fix_types` (must remain covered)
