@@ -120,6 +120,13 @@ typed `try_get`. Non-null integer `0` is unchanged; only SQL `NULL` is affected.
 Rust regression: `engine_handle_fetches_sqlite_null_columns_as_null_not_zero`.
 Integration: `tests/test_sqlite_alembic_reconnect_hydration.py` (Alembic schema + reconnect).
 
+After `materialize_engine_row` produces `EngineValue::I64`, schema-aware mapping in
+`engine_value_to_rust_value` (`src/operations.rs`) must accept that variant for
+each logical type. Decimal columns previously matched only `F64` and `String`,
+so INTEGER-backed NUMERIC values hydrated as Python `None` after reconnect —
+see issue [#58] and `docs/solutions/issues/sqlite-integer-decimal-hydrates-as-none.md`.
+
+
 ## Raw-SQL boundary (explicit exception)
 
 The raw-SQL bind path (`src/operations.rs::python_to_engine_bind_value`,
@@ -151,6 +158,9 @@ Ferro itself.
 - On SQLite, optional fields are `NULL` in the DB but Python sees `int(0)`
   after reconnect — check `materialize_engine_row`, not bind typing alone
   ([#56]).
+- On SQLite, non-null `Decimal` fields are `NULL` in Python after reconnect while
+  raw SQL shows a value — check the decimal branch in `engine_value_to_rust_value`
+  ([#58]).
 
 ## Recipe: adding a new schema-driven emitter
 
@@ -197,6 +207,8 @@ Ferro itself.
   plan with the unit-by-unit breakdown.
 - `docs/solutions/issues/sqlite-null-hydrates-as-int-zero.md`: fetch-time
   NULL → `int(0)` on SQLite (issue [#56]).
+- `docs/solutions/issues/sqlite-integer-decimal-hydrates-as-none.md`: INTEGER
+  NUMERIC Decimal → `None` on reconnect (issue [#58]).
 - Issue [#38]: the original bug report.
 - Issue [#40]: temporal typed binds (deferred follow-up).
 - Issue [#41]: filter `== None` panic / `IS NULL` compile path — debugging story in
@@ -207,4 +219,5 @@ Ferro itself.
 [#40]: https://github.com/syn54x/ferro-orm/issues/40
 [#41]: https://github.com/syn54x/ferro-orm/issues/41
 [#56]: https://github.com/syn54x/ferro-orm/issues/56
+[#58]: https://github.com/syn54x/ferro-orm/issues/58
 [#62]: https://github.com/syn54x/ferro-orm/pull/62
