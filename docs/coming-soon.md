@@ -410,37 +410,12 @@ Document the exception hierarchy and import paths:
 
 ### Many-to-Many Join Table Creation
 
-**Status:** Partially Implemented
+**Status:** Implemented
 
-**Documentation References:**
-- `docs/guide/relationships.md` (lines 176-289)
-
-**Description:**
-Many-to-many relationships are defined with `ManyToMany(...)`, but the join tables are not automatically created during `auto_migrate=True`.
-
-**Example (Partially Working):**
-```python
-from typing import Annotated
-
-from ferro import BackRef, Field, ManyToMany, Model, Relation
-
-class Post(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
-
-class Tag(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    posts: Relation[list["Post"]] = BackRef()
-
-# Models created, but join table 'post_tags' is NOT auto-created
-# This causes errors when trying to use M2M methods:
-await post.tags.add(tag)  # RuntimeError: no such table: post_tags
-```
-
-**Workaround:**
-Manual join table creation may be required, or use Alembic migrations. Further investigation needed.
-
-**Test Status:** 4 tests skipped in `tests/test_documentation_features.py`
+Many-to-many join tables are registered alongside their models and created by
+`auto_migrate=True` / `create_tables()` like any other table (they also
+participate in `migrate_updates` diffing). Covered by
+`tests/test_auto_migrate.py::test_m2m_join_table_created_during_auto_migrate`.
 
 ---
 

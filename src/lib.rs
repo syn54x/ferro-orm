@@ -6,6 +6,8 @@
 
 mod backend;
 mod connection;
+mod introspect;
+mod migrate;
 mod operations;
 mod query;
 mod schema;
@@ -35,6 +37,26 @@ pub fn log_debug(message: String) {
             // If logging fails, silently continue (don't break the application)
             // In production, we might want to log this to stderr, but for now we'll be silent
         }
+    });
+}
+
+/// Emits a Python `UserWarning` through the `warnings` module.
+///
+/// Used by auto-migrate for conditions that are not errors but that the user
+/// must see (e.g. SQLite type drift it cannot reconcile). Safe to call from
+/// async contexts; failures to warn are swallowed so a logging problem can
+/// never break a migration.
+pub fn emit_user_warning(message: &str) {
+    let message = format!("ferro auto-migrate: {}", message);
+    Python::attach(|py| {
+        let _ = (|| -> PyResult<()> {
+            let warnings = py.import("warnings")?;
+            warnings.call_method1(
+                "warn",
+                (message, py.get_type::<pyo3::exceptions::PyUserWarning>()),
+            )?;
+            Ok(())
+        })();
     });
 }
 
@@ -82,7 +104,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(operations::clear_m2m_links, m)?)?;
     m.add_function(wrap_pyfunction!(operations::begin_transaction, m)?)?;
     m.add_function(wrap_pyfunction!(operations::commit_transaction, m)?)?;
-    m.add_function(wrap_pyfunction!(operations::transaction_connection_name, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        operations::transaction_connection_name,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(operations::rollback_transaction, m)?)?;
     m.add_function(wrap_pyfunction!(operations::raw_execute, m)?)?;
     m.add_function(wrap_pyfunction!(operations::raw_fetch_all, m)?)?;
@@ -92,7 +117,15 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clear_registry, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(schema::create_tables, m)?)?;
-    m.add_function(wrap_pyfunction!(schema::_render_create_table_sql_for_test, m)?)?;
+    m.add_function(wrap_pyfunction!(migrate::migrate, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        schema::_render_create_table_sql_for_test,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        migrate::_render_migration_sql_for_test,
+        m
+    )?)?;
 
     Ok(())
 }

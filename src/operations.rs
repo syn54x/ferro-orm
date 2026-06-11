@@ -29,12 +29,9 @@ fn get_transaction_connection(tx_id: Option<String>) -> Option<TransactionConnec
 
 fn get_transaction_route(tx_id: Option<String>) -> Option<(String, TransactionConnection)> {
     tx_id.and_then(|id| {
-        TRANSACTION_REGISTRY.get(&id).map(|tx| {
-            (
-                tx.value().connection_name.clone(),
-                tx.value().conn.clone(),
-            )
-        })
+        TRANSACTION_REGISTRY
+            .get(&id)
+            .map(|tx| (tx.value().connection_name.clone(), tx.value().conn.clone()))
     })
 }
 
@@ -45,7 +42,12 @@ fn active_engine_for_connection(using: Option<String>) -> PyResult<Arc<EngineHan
 fn active_route_for_operation(
     tx_id: Option<String>,
     using: Option<String>,
-) -> PyResult<(String, Arc<EngineHandle>, Option<TransactionConnection>, BackendKind)> {
+) -> PyResult<(
+    String,
+    Arc<EngineHandle>,
+    Option<TransactionConnection>,
+    BackendKind,
+)> {
     let tx_route = get_transaction_route(tx_id);
     let route_using = tx_route
         .as_ref()
@@ -231,11 +233,14 @@ fn engine_value_to_rust_value(
     }
 }
 
+/// One parsed row: the primary-key value (when present) plus all column values.
+type ParsedRow = (Option<String>, Vec<(String, RustValue)>);
+
 fn typed_rows_to_parsed_data(
     rows: Vec<EngineRow>,
     schema: &serde_json::Value,
     pk_col: Option<&str>,
-) -> Vec<(Option<String>, Vec<(String, RustValue)>)> {
+) -> Vec<ParsedRow> {
     rows.into_iter()
         .map(|row| {
             let mut row_pk_val = None;
@@ -581,6 +586,7 @@ fn schema_property<'a>(
 /// `uuid_columns` / `ts_cast`). Non-null UUID values on Postgres are parsed
 /// to `uuid::Uuid` and emitted as `Value::Uuid(Some(...))` -- no
 /// `cast_as("uuid")` wrapping. See `docs/solutions/patterns/typed-null-binds.md`.
+#[allow(clippy::too_many_arguments)]
 fn schema_value_expr(
     schema: &serde_json::Value,
     table_name: &str,
@@ -807,7 +813,10 @@ pub fn begin_transaction(
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
             })?;
 
-            TRANSACTION_REGISTRY.insert(tx_id.clone(), TransactionHandle::root(conn, connection_name));
+            TRANSACTION_REGISTRY.insert(
+                tx_id.clone(),
+                TransactionHandle::root(conn, connection_name),
+            );
         }
 
         Ok(tx_id)
@@ -923,8 +932,7 @@ pub fn fetch_all<'py>(
     let cls_py = cls.unbind();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (connection_name, engine, tx_conn, backend) =
-            active_route_for_operation(tx_id, using)?;
+        let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
@@ -1007,17 +1015,13 @@ pub fn fetch_all<'py>(
             let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
 
             for (row_pk_val, fields) in parsed_data {
-                if use_identity_map {
-                    if let Some(ref pk_val) = row_pk_val
-                        && let Some(existing_obj) = IDENTITY_MAP.get(&(
-                            connection_name.clone(),
-                            name.clone(),
-                            pk_val.clone(),
-                        ))
-                    {
-                        results.append(existing_obj.value().clone_ref(py))?;
-                        continue;
-                    }
+                if use_identity_map
+                    && let Some(ref pk_val) = row_pk_val
+                    && let Some(existing_obj) =
+                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
+                {
+                    results.append(existing_obj.value().clone_ref(py))?;
+                    continue;
                 }
 
                 let instance = cls.call_method1(new_str, (cls,))?;
@@ -1034,15 +1038,13 @@ pub fn fetch_all<'py>(
                 }
 
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
-                set_pydantic_hydration_slots(py, &cls, &instance)?;
+                set_pydantic_hydration_slots(py, cls, &instance)?;
 
-                if use_identity_map {
-                    if let Some(pk_val) = row_pk_val {
-                        IDENTITY_MAP.insert(
-                            (connection_name.clone(), name.clone(), pk_val),
-                            instance.clone().unbind(),
-                        );
-                    }
+                if use_identity_map && let Some(pk_val) = row_pk_val {
+                    IDENTITY_MAP.insert(
+                        (connection_name.clone(), name.clone(), pk_val),
+                        instance.clone().unbind(),
+                    );
                 }
 
                 results.append(instance)?;
@@ -1080,18 +1082,16 @@ pub fn fetch_one<'py>(
     let (connection_name, engine) = active_connection_for_route(using.clone())?;
 
     // Check Identity Map first (if no transaction, or even with transaction, IM is usually safe)
-    if engine.is_identity_map_enabled() {
-        if let Some(existing_obj) =
+    if engine.is_identity_map_enabled()
+        && let Some(existing_obj) =
             IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
-        {
-            let obj = existing_obj.value().clone_ref(py);
-            return pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) });
-        }
+    {
+        let obj = existing_obj.value().clone_ref(py);
+        return pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) });
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (connection_name, engine, tx_conn, backend) =
-            active_route_for_operation(tx_id, using)?;
+        let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
@@ -1201,7 +1201,7 @@ pub fn fetch_one<'py>(
                 }
 
                 let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
-                set_pydantic_hydration_slots(py, &cls, &instance)?;
+                set_pydantic_hydration_slots(py, cls, &instance)?;
                 if use_identity_map {
                     IDENTITY_MAP.insert(
                         (connection_name.clone(), name.clone(), pk_val),
@@ -1551,8 +1551,7 @@ pub fn fetch_filtered<'py>(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (connection_name, engine, tx_conn, backend) =
-            active_route_for_operation(tx_id, using)?;
+        let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
@@ -1681,17 +1680,13 @@ pub fn fetch_filtered<'py>(
             let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
 
             for (row_pk_val, fields) in parsed_data {
-                if use_identity_map {
-                    if let Some(ref pk_val) = row_pk_val
-                        && let Some(existing_obj) = IDENTITY_MAP.get(&(
-                            connection_name.clone(),
-                            name.clone(),
-                            pk_val.clone(),
-                        ))
-                    {
-                        results.append(existing_obj.value().clone_ref(py))?;
-                        continue;
-                    }
+                if use_identity_map
+                    && let Some(ref pk_val) = row_pk_val
+                    && let Some(existing_obj) =
+                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
+                {
+                    results.append(existing_obj.value().clone_ref(py))?;
+                    continue;
                 }
 
                 let instance = cls.call_method1(new_str, (cls,))?;
@@ -1708,15 +1703,13 @@ pub fn fetch_filtered<'py>(
                 }
 
                 let _ = instance.setattr(pydantic_fields_set_str, fields_set);
-                set_pydantic_hydration_slots(py, &cls, &instance)?;
+                set_pydantic_hydration_slots(py, cls, &instance)?;
 
-                if use_identity_map {
-                    if let Some(pk_val) = row_pk_val {
-                        IDENTITY_MAP.insert(
-                            (connection_name.clone(), name.clone(), pk_val),
-                            instance.clone().unbind(),
-                        );
-                    }
+                if use_identity_map && let Some(pk_val) = row_pk_val {
+                    IDENTITY_MAP.insert(
+                        (connection_name.clone(), name.clone(), pk_val),
+                        instance.clone().unbind(),
+                    );
                 }
 
                 results.append(instance)?;
@@ -1902,7 +1895,7 @@ pub fn delete_record(
             let no_uuid = HashSet::new();
             let no_ts: HashMap<String, String> = HashMap::new();
             let pk_expr = schema_value_expr(
-                &schema,
+                schema,
                 &table_name,
                 &pk_name,
                 &serde_json::Value::String(pk_val),
@@ -2024,7 +2017,7 @@ pub fn update_filtered(
                 update.value(
                     Alias::new(&key),
                     schema_value_expr(
-                        &schema,
+                        schema,
                         &table_name,
                         &key,
                         &value,
@@ -2056,6 +2049,7 @@ pub fn update_filtered(
 
 #[pyfunction]
 #[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn add_m2m_links<'py>(
     py: Python<'py>,
     join_table: String,
@@ -2111,6 +2105,7 @@ pub fn add_m2m_links<'py>(
 
 #[pyfunction]
 #[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn remove_m2m_links<'py>(
     py: Python<'py>,
     join_table: String,
@@ -2287,7 +2282,7 @@ fn python_to_engine_bind_value(
     }
     Err(pyo3::exceptions::PyTypeError::new_err(format!(
         "Unsupported raw SQL bind value: {}",
-        val.repr()?.to_string()
+        val.repr()?
     )))
 }
 
@@ -3088,8 +3083,7 @@ mod engine_value_to_rust_value_tests {
     #[test]
     fn decimal_column_maps_real_and_text() {
         let schema = decimal_schema();
-        let from_real =
-            engine_value_to_rust_value(EngineValue::F64(1.5), &schema, "hours");
+        let from_real = engine_value_to_rust_value(EngineValue::F64(1.5), &schema, "hours");
         assert!(matches!(from_real, RustValue::Decimal(ref s) if s == "1.5"));
         let from_text =
             engine_value_to_rust_value(EngineValue::String("2.25".into()), &schema, "hours");
@@ -3137,7 +3131,8 @@ mod engine_value_to_rust_value_tests {
             "happened_at",
         );
         assert!(matches!(ok, RustValue::DateTime(_)));
-        let from_int = engine_value_to_rust_value(EngineValue::I64(1713984600), &schema, "happened_at");
+        let from_int =
+            engine_value_to_rust_value(EngineValue::I64(1713984600), &schema, "happened_at");
         assert!(matches!(from_int, RustValue::BigInt(1713984600)));
     }
 
@@ -3175,7 +3170,8 @@ mod engine_value_to_rust_value_tests {
             &schema,
             "payload",
         );
-        assert!(matches!(out, RustValue::Json(v) if v.get("k").and_then(|x| x.as_str()) == Some("v")));
+        assert!(
+            matches!(out, RustValue::Json(v) if v.get("k").and_then(|x| x.as_str()) == Some("v"))
+        );
     }
-
 }

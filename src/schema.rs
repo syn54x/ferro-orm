@@ -88,7 +88,7 @@ fn schema_dependencies(schema: &serde_json::Value) -> Vec<String> {
     deps
 }
 
-fn order_schemas_for_creation(
+pub(crate) fn order_schemas_for_creation(
     schemas: std::collections::HashMap<String, serde_json::Value>,
 ) -> Vec<(String, serde_json::Value)> {
     let mut remaining: Vec<(String, serde_json::Value)> = schemas.into_iter().collect();
@@ -128,38 +128,105 @@ fn order_schemas_for_creation(
     ordered
 }
 
-fn json_type_to_sea_query_for_backend(
-    col_def: &mut ColumnDef,
-    json_type: &str,
-    backend: SqlDialect,
-) {
-    match json_type {
-        "integer" => {
+/// Canonical, backend-resolved column type shared by every Rust DDL path —
+/// CREATE TABLE, ALTER TABLE ADD COLUMN, and schema diffing. The pair
+/// `canonical_column_type` → `apply_canonical_type` is the single source of
+/// truth for "what SQL type does this model field get"; any path that needs a
+/// column type must go through it so emitters cannot drift. See AGENTS.md § I-1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CanonicalType {
+    Integer,
+    SmallInt,
+    BigInt,
+    Double,
+    Decimal,
+    Boolean,
+    Json,
+    Text,
+    /// `varchar` with optional length (`.string()` / `.string_len(n)`).
+    Varchar(Option<u32>),
+    Char(u32),
+    Uuid,
+    /// SQLite rendering of the `timestamp`/`timestamptz` tokens (`.date_time()`).
+    DateTime,
+    Timestamp,
+    TimestampTz,
+    Date,
+    Time,
+    Blob,
+}
+
+pub(crate) fn apply_canonical_type(col_def: &mut ColumnDef, canonical: CanonicalType) {
+    match canonical {
+        CanonicalType::Integer => {
             col_def.integer();
         }
-        "string" => {
-            col_def.string();
+        CanonicalType::SmallInt => {
+            col_def.small_integer();
         }
-        "number" => {
+        CanonicalType::BigInt => {
+            col_def.big_integer();
+        }
+        CanonicalType::Double => {
             col_def.double();
         }
-        "boolean" => {
-            match backend {
-                SqlDialect::Sqlite => {
-                    // SQLite stores booleans as integers.
-                    col_def.integer();
-                }
-                SqlDialect::Postgres => {
-                    col_def.boolean();
-                }
-            }
+        CanonicalType::Decimal => {
+            col_def.decimal();
         }
-        "object" | "array" => {
+        CanonicalType::Boolean => {
+            col_def.boolean();
+        }
+        CanonicalType::Json => {
             col_def.json();
         }
-        _ => {
+        CanonicalType::Text => {
+            col_def.text();
+        }
+        CanonicalType::Varchar(None) => {
             col_def.string();
         }
+        CanonicalType::Varchar(Some(n)) => {
+            col_def.string_len(n);
+        }
+        CanonicalType::Char(n) => {
+            col_def.char_len(n);
+        }
+        CanonicalType::Uuid => {
+            col_def.uuid();
+        }
+        CanonicalType::DateTime => {
+            col_def.date_time();
+        }
+        CanonicalType::Timestamp => {
+            col_def.timestamp();
+        }
+        CanonicalType::TimestampTz => {
+            col_def.timestamp_with_time_zone();
+        }
+        CanonicalType::Date => {
+            col_def.date();
+        }
+        CanonicalType::Time => {
+            col_def.time();
+        }
+        CanonicalType::Blob => {
+            col_def.blob();
+        }
+    }
+}
+
+fn json_type_to_canonical(json_type: &str, backend: SqlDialect) -> CanonicalType {
+    match json_type {
+        "integer" => CanonicalType::Integer,
+        "string" => CanonicalType::Varchar(None),
+        "number" => CanonicalType::Double,
+        "boolean" => match backend {
+            // SQLite stores booleans as integers.
+            SqlDialect::Sqlite => CanonicalType::Integer,
+            SqlDialect::Postgres => CanonicalType::Boolean,
+        },
+        "object" | "array" => CanonicalType::Json,
+        _ => CanonicalType::Varchar(None),
     }
 }
 
@@ -243,73 +310,71 @@ fn parse_varchar_token(token: &str) -> Option<u32> {
     if n == 0 { None } else { Some(n) }
 }
 
-/// Dispatch a canonical `db_type` token onto a `ColumnDef`. Returns `true` when
-/// the token was recognized. Strict per-class-definition validation runs in
-/// `metaclass._validate_db_type_options`; unknown tokens reaching here are a
-/// programming error and the caller surfaces them as a `PyErr`.
+/// Map a canonical `db_type` token to a [`CanonicalType`]. Returns `None` when
+/// the token is unrecognized (the caller falls back to the JSON-type cascade).
+/// Strict per-class-definition validation runs in
+/// `metaclass._validate_db_type_options`.
 ///
 /// Duplicated on the Python side in `src/ferro/migrations/alembic.py
 /// ::_db_type_to_sa_type`. Add new tokens to both emitters in the same change
 /// and update the parity test. See AGENTS.md § I-1.
-fn apply_db_type_to_column_def(col_def: &mut ColumnDef, token: &str, backend: SqlDialect) -> bool {
-    // Per-dialect rendering is chosen to byte-match SA's compilation in the
+fn db_type_token_to_canonical(token: &str, backend: SqlDialect) -> Option<CanonicalType> {
+    // Per-dialect resolution is chosen to byte-match SA's compilation in the
     // Alembic bridge. SQLite emits the typed keyword (BIGINT, SMALLINT,
     // CHAR(32), DATETIME) and lets SQLite type affinity normalize at
     // runtime; the parity test (U5) pins both sides token-for-token.
     match token {
-        "text" => {
-            col_def.text();
-            true
-        }
-        "smallint" => {
-            col_def.small_integer();
-            true
-        }
-        "int" => {
-            col_def.integer();
-            true
-        }
-        "bigint" => {
-            col_def.big_integer();
-            true
-        }
-        "uuid" => {
-            match backend {
-                SqlDialect::Sqlite => col_def.char_len(32),
-                SqlDialect::Postgres => col_def.uuid(),
-            };
-            true
-        }
-        "timestamp" => {
-            match backend {
-                SqlDialect::Sqlite => col_def.date_time(),
-                SqlDialect::Postgres => col_def.timestamp(),
-            };
-            true
-        }
-        "timestamptz" => {
-            match backend {
-                SqlDialect::Sqlite => col_def.date_time(),
-                SqlDialect::Postgres => col_def.timestamp_with_time_zone(),
-            };
-            true
-        }
-        "date" => {
-            col_def.date();
-            true
-        }
-        "time" => {
-            col_def.time();
-            true
-        }
-        other => {
-            if let Some(n) = parse_varchar_token(other) {
-                col_def.string_len(n);
-                true
-            } else {
-                false
-            }
-        }
+        "text" => Some(CanonicalType::Text),
+        "smallint" => Some(CanonicalType::SmallInt),
+        "int" => Some(CanonicalType::Integer),
+        "bigint" => Some(CanonicalType::BigInt),
+        "uuid" => Some(match backend {
+            SqlDialect::Sqlite => CanonicalType::Char(32),
+            SqlDialect::Postgres => CanonicalType::Uuid,
+        }),
+        "timestamp" => Some(match backend {
+            SqlDialect::Sqlite => CanonicalType::DateTime,
+            SqlDialect::Postgres => CanonicalType::Timestamp,
+        }),
+        "timestamptz" => Some(match backend {
+            SqlDialect::Sqlite => CanonicalType::DateTime,
+            SqlDialect::Postgres => CanonicalType::TimestampTz,
+        }),
+        "date" => Some(CanonicalType::Date),
+        "time" => Some(CanonicalType::Time),
+        other => parse_varchar_token(other).map(|n| CanonicalType::Varchar(Some(n))),
+    }
+}
+
+/// Resolve a model property to its backend-specific [`CanonicalType`].
+///
+/// `db_type` is the canonical user-facing storage knob: when present and
+/// recognized it overrides every other column-type branch. Otherwise the
+/// Pydantic JSON type/format cascade decides.
+pub(crate) fn canonical_column_type(
+    raw_col_info: &serde_json::Value,
+    resolved_col_info: &serde_json::Value,
+    backend: SqlDialect,
+) -> CanonicalType {
+    let db_type_token = raw_col_info
+        .get("db_type")
+        .or_else(|| resolved_col_info.get("db_type"))
+        .and_then(|v| v.as_str());
+    if let Some(token) = db_type_token
+        && let Some(canonical) = db_type_token_to_canonical(token, backend)
+    {
+        return canonical;
+    }
+
+    let (json_type, format) = property_json_type_and_format(resolved_col_info);
+    match (json_type, format) {
+        (Some("string"), Some("date-time")) => CanonicalType::TimestampTz,
+        (Some("string"), Some("date")) => CanonicalType::Date,
+        (Some("string"), Some("uuid")) => CanonicalType::Uuid,
+        (Some(_), Some("decimal")) => CanonicalType::Decimal,
+        (Some("string"), Some("binary")) => CanonicalType::Blob,
+        (Some(t), _) => json_type_to_canonical(t, backend),
+        (None, _) => CanonicalType::Varchar(None),
     }
 }
 
@@ -396,6 +461,134 @@ fn append_composite_index_sqls(
     }
 }
 
+/// Foreign-key metadata for a column, resolved from the model schema.
+#[derive(Clone, Debug)]
+pub(crate) struct FkSpec {
+    pub to_table: String,
+    pub on_delete: ForeignKeyAction,
+}
+
+/// Everything any DDL path needs to know about one model column, built once
+/// so CREATE TABLE and ALTER TABLE ADD COLUMN emit byte-identical column
+/// definitions (AGENTS.md § I-1).
+pub(crate) struct ColumnPlan {
+    /// CREATE-ready column definition: type, then PK/auto-increment, then
+    /// NOT NULL, then UNIQUE — applied in the exact order the CREATE TABLE
+    /// emitter has always used (spec order is part of the rendered SQL).
+    pub col_def: ColumnDef,
+    pub canonical: CanonicalType,
+    pub is_primary_key: bool,
+    pub is_nullable: bool,
+    pub is_unique: bool,
+    /// Post-create SQL owned by this column, in emission order:
+    /// single-column index, then `db_check` CHECK constraint.
+    pub index_sqls: Vec<String>,
+    pub fk: Option<FkSpec>,
+    /// Literal default from the JSON schema (the Pydantic field default).
+    /// CREATE TABLE never emits server defaults; the ALTER path uses this to
+    /// backfill NOT NULL column adds on populated tables.
+    pub literal_default: Option<serde_json::Value>,
+}
+
+pub(crate) fn build_column_plan(
+    table_lower: &str,
+    col_name: &str,
+    raw_col_info: &serde_json::Value,
+    schema: &serde_json::Value,
+    backend: SqlDialect,
+) -> ColumnPlan {
+    let col_info = resolve_ref(schema, raw_col_info);
+    let canonical = canonical_column_type(raw_col_info, col_info, backend);
+
+    let mut col_def = ColumnDef::new(Alias::new(col_name));
+    apply_canonical_type(&mut col_def, canonical);
+
+    let is_primary_key =
+        column_bool_metadata(raw_col_info, col_info, "primary_key").unwrap_or(false);
+    let is_auto = column_bool_metadata(raw_col_info, col_info, "autoincrement").unwrap_or(true);
+    if is_primary_key {
+        col_def.primary_key();
+        if is_auto {
+            col_def.auto_increment();
+        }
+    }
+
+    let is_nullable = column_bool_metadata(raw_col_info, col_info, "ferro_nullable") != Some(false);
+    if !is_nullable {
+        col_def.not_null();
+    }
+
+    let is_unique = column_bool_metadata(raw_col_info, col_info, "unique").unwrap_or(false);
+    if is_unique {
+        col_def.unique_key();
+    }
+
+    let mut index_sqls = Vec::new();
+    if column_bool_metadata(raw_col_info, col_info, "index").unwrap_or(false) {
+        let index_name = format!("idx_{}_{}", table_lower, col_name);
+        let index_stmt = Index::create()
+            .name(&index_name)
+            .table(Alias::new(table_lower))
+            .col(Alias::new(col_name))
+            .if_not_exists()
+            .to_owned();
+        let index_sql = match backend {
+            SqlDialect::Sqlite => index_stmt.to_string(SqliteQueryBuilder),
+            SqlDialect::Postgres => index_stmt.to_string(PostgresQueryBuilder),
+        };
+        index_sqls.push(index_sql);
+    }
+
+    // db_check=True -> single-column CHECK constraint named ck_<table>_<col>.
+    // Emitted as a post-create ALTER TABLE so the name flows through
+    // identically on both backends. SQLite cannot execute ADD CONSTRAINT;
+    // users opting in to db_check are expected to be on Postgres for Phase 1.
+    let db_check = column_bool_metadata(raw_col_info, col_info, "db_check").unwrap_or(false);
+    if db_check
+        && let Some(ck_sql) = build_check_constraint_sql(table_lower, col_name, col_info, backend)
+    {
+        index_sqls.push(ck_sql);
+    }
+
+    let fk = column_object_metadata(raw_col_info, col_info, "foreign_key").map(|fk_info| {
+        let to_table = fk_info
+            .get("to_table")
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        let on_delete_str = fk_info
+            .get("on_delete")
+            .and_then(|o| o.as_str())
+            .unwrap_or("CASCADE");
+        let on_delete = match on_delete_str.to_uppercase().as_str() {
+            "RESTRICT" => ForeignKeyAction::Restrict,
+            "SET NULL" => ForeignKeyAction::SetNull,
+            "SET DEFAULT" => ForeignKeyAction::SetDefault,
+            "NO ACTION" => ForeignKeyAction::NoAction,
+            _ => ForeignKeyAction::Cascade, // Default
+        };
+        FkSpec {
+            to_table: to_table.to_string(),
+            on_delete,
+        }
+    });
+
+    let literal_default = raw_col_info
+        .get("default")
+        .or_else(|| col_info.get("default"))
+        .cloned();
+
+    ColumnPlan {
+        col_def,
+        canonical,
+        is_primary_key,
+        is_nullable,
+        is_unique,
+        index_sqls,
+        fk,
+        literal_default,
+    }
+}
+
 fn build_create_table_sqls(
     name: &str,
     schema: &serde_json::Value,
@@ -411,126 +604,17 @@ fn build_create_table_sqls(
 
     if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
         for (col_name, raw_col_info) in properties {
-            let mut col_def = ColumnDef::new(Alias::new(col_name));
-            let col_info = resolve_ref(schema, raw_col_info);
+            let mut plan = build_column_plan(&table_lower, col_name, raw_col_info, schema, backend);
 
-            // `db_type` is the canonical user-facing storage knob. When set it
-            // overrides every other column-type branch. Validation runs at
-            // class-definition time (see metaclass._validate_db_type_options).
-            let db_type_token = raw_col_info
-                .get("db_type")
-                .or_else(|| col_info.get("db_type"))
-                .and_then(|v| v.as_str());
+            table_stmt.col(&mut plan.col_def);
+            index_sqls.append(&mut plan.index_sqls);
 
-            let db_type_handled = match db_type_token {
-                Some(token) => apply_db_type_to_column_def(&mut col_def, token, backend),
-                None => false,
-            };
-
-            if !db_type_handled {
-                let (json_type, format) = property_json_type_and_format(col_info);
-
-                if let Some(t) = json_type {
-                    match (t, format) {
-                        ("string", Some("date-time")) => {
-                            col_def.timestamp_with_time_zone();
-                        }
-                        ("string", Some("date")) => {
-                            col_def.date();
-                        }
-                        ("string", Some("uuid")) => {
-                            col_def.uuid();
-                        }
-                        (_, Some("decimal")) => {
-                            col_def.decimal();
-                        }
-                        ("string", Some("binary")) => {
-                            col_def.blob();
-                        }
-                        _ => json_type_to_sea_query_for_backend(&mut col_def, t, backend),
-                    }
-                } else {
-                    col_def.string();
-                }
-            }
-
-            // Check for primary key and autoincrement from our custom metadata
-            let is_pk =
-                column_bool_metadata(raw_col_info, col_info, "primary_key").unwrap_or(false);
-
-            let is_auto =
-                column_bool_metadata(raw_col_info, col_info, "autoincrement").unwrap_or(true);
-
-            if is_pk {
-                col_def.primary_key();
-                if is_auto {
-                    col_def.auto_increment();
-                }
-            }
-
-            if column_bool_metadata(raw_col_info, col_info, "ferro_nullable") == Some(false) {
-                col_def.not_null();
-            }
-
-            if column_bool_metadata(raw_col_info, col_info, "unique").unwrap_or(false) {
-                col_def.unique_key();
-            }
-
-            if column_bool_metadata(raw_col_info, col_info, "index").unwrap_or(false) {
-                let index_name = format!("idx_{}_{}", table_lower, col_name);
-                let index_stmt = Index::create()
-                    .name(&index_name)
-                    .table(Alias::new(&table_lower))
-                    .col(Alias::new(col_name))
-                    .if_not_exists()
-                    .to_owned();
-                let index_sql = match backend {
-                    SqlDialect::Sqlite => index_stmt.to_string(SqliteQueryBuilder),
-                    SqlDialect::Postgres => index_stmt.to_string(PostgresQueryBuilder),
-                };
-                index_sqls.push(index_sql);
-            }
-
-            table_stmt.col(&mut col_def);
-
-            // db_check=True -> single-column CHECK constraint named
-            // ck_<table>_<col>. Emitted as a post-create ALTER TABLE so the
-            // name flows through identically on both backends. SQLite cannot
-            // execute ADD CONSTRAINT; users opting in to db_check are
-            // expected to be on Postgres for Phase 1.
-            let db_check = column_bool_metadata(raw_col_info, col_info, "db_check")
-                .unwrap_or(false);
-            if db_check
-                && let Some(ck_sql) =
-                    build_check_constraint_sql(&table_lower, col_name, col_info, backend)
-            {
-                index_sqls.push(ck_sql);
-            }
-
-            // Check for Foreign Key from metadata
-            if let Some(fk_info) = column_object_metadata(raw_col_info, col_info, "foreign_key") {
-                let to_table = fk_info
-                    .get("to_table")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                let on_delete_str = fk_info
-                    .get("on_delete")
-                    .and_then(|o| o.as_str())
-                    .unwrap_or("CASCADE");
-
-                let action = match on_delete_str.to_uppercase().as_str() {
-                    "RESTRICT" => ForeignKeyAction::Restrict,
-                    "SET NULL" => ForeignKeyAction::SetNull,
-                    "SET DEFAULT" => ForeignKeyAction::SetDefault,
-                    "NO ACTION" => ForeignKeyAction::NoAction,
-                    _ => ForeignKeyAction::Cascade, // Default
-                };
-
+            if let Some(fk) = &plan.fk {
                 let mut fk_stmt = ForeignKey::create();
                 fk_stmt
                     .from(Alias::new(&table_lower), Alias::new(col_name))
-                    .to(Alias::new(to_table), Alias::new("id")) // CX Choice: Assume target PK is 'id' for now
-                    .on_delete(action);
+                    .to(Alias::new(&fk.to_table), Alias::new("id")) // CX Choice: Assume target PK is 'id' for now
+                    .on_delete(fk.on_delete);
 
                 table_stmt.foreign_key(&mut fk_stmt);
             }
@@ -770,7 +854,12 @@ mod tests {
     fn test_db_type_text_emits_text_column() {
         for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
             let sql = col_sql("text", "string", backend);
-            assert!(sql.contains("TEXT"), "missing TEXT for {:?}: {}", backend, sql);
+            assert!(
+                sql.contains("TEXT"),
+                "missing TEXT for {:?}: {}",
+                backend,
+                sql
+            );
         }
     }
 
@@ -797,7 +886,11 @@ mod tests {
     #[test]
     fn test_db_type_smallint_sqlite_emits_smallint_keyword() {
         let sql = col_sql("smallint", "integer", SqlDialect::Sqlite);
-        assert!(sql.contains("SMALLINT"), "missing SMALLINT keyword: {}", sql);
+        assert!(
+            sql.contains("SMALLINT"),
+            "missing SMALLINT keyword: {}",
+            sql
+        );
     }
 
     #[test]
@@ -867,9 +960,21 @@ mod tests {
         });
         let (_table_sql, post_sqls) = build_create_table_sqls("doc", &schema, SqlDialect::Postgres);
         let joined = post_sqls.join("\n");
-        assert!(joined.contains("ck_doc_format"), "missing constraint name: {}", joined);
-        assert!(joined.to_uppercase().contains("CHECK"), "missing CHECK: {}", joined);
-        assert!(joined.contains("'pdf'") && joined.contains("'json'"), "missing values: {}", joined);
+        assert!(
+            joined.contains("ck_doc_format"),
+            "missing constraint name: {}",
+            joined
+        );
+        assert!(
+            joined.to_uppercase().contains("CHECK"),
+            "missing CHECK: {}",
+            joined
+        );
+        assert!(
+            joined.contains("'pdf'") && joined.contains("'json'"),
+            "missing values: {}",
+            joined
+        );
     }
 
     #[test]
@@ -885,10 +990,19 @@ mod tests {
                 }
             }
         });
-        let (_table_sql, post_sqls) = build_create_table_sqls("task", &schema, SqlDialect::Postgres);
+        let (_table_sql, post_sqls) =
+            build_create_table_sqls("task", &schema, SqlDialect::Postgres);
         let joined = post_sqls.join("\n");
-        assert!(joined.contains("(1, 2)"), "ints should be unquoted: {}", joined);
-        assert!(!joined.contains("'1'"), "ints should not be quoted: {}", joined);
+        assert!(
+            joined.contains("(1, 2)"),
+            "ints should be unquoted: {}",
+            joined
+        );
+        assert!(
+            !joined.contains("'1'"),
+            "ints should not be quoted: {}",
+            joined
+        );
     }
 
     #[test]
@@ -925,7 +1039,9 @@ mod tests {
         });
         let (_table_sql, post_sqls) = build_create_table_sqls("doc", &schema, SqlDialect::Sqlite);
         assert!(
-            post_sqls.iter().all(|s| !s.to_uppercase().contains("CONSTRAINT")),
+            post_sqls
+                .iter()
+                .all(|s| !s.to_uppercase().contains("CONSTRAINT")),
             "SQLite must not emit ADD CONSTRAINT: {:?}",
             post_sqls
         );
@@ -945,10 +1061,22 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_db_type_unknown_token_returns_false() {
-        let mut col_def = ColumnDef::new(Alias::new("c"));
-        let ok = apply_db_type_to_column_def(&mut col_def, "banana", SqlDialect::Postgres);
-        assert!(!ok);
+    fn test_db_type_unknown_token_maps_to_none() {
+        assert_eq!(
+            db_type_token_to_canonical("banana", SqlDialect::Postgres),
+            None
+        );
+    }
+
+    #[test]
+    fn test_unknown_db_type_token_falls_back_to_json_cascade() {
+        // An unrecognized token must not change behavior: the JSON-type
+        // cascade decides, exactly as before the CanonicalType refactor.
+        let raw = json!({"type": "integer", "db_type": "banana"});
+        assert_eq!(
+            canonical_column_type(&raw, &raw, SqlDialect::Postgres),
+            CanonicalType::Integer
+        );
     }
 
     #[test]

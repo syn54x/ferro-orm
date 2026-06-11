@@ -3,12 +3,10 @@
 //! This module handles database connections, pool initialization,
 //! and engine resets.
 
-use crate::backend::{BackendKind, EngineHandle};
-use crate::schema::internal_create_tables;
+use crate::backend::{BackendKind, EngineHandle, PoolSpec};
+use crate::migrate::{MigrateOptions, internal_migrate};
 use crate::state::{CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, ENGINE, IDENTITY_MAP};
 use pyo3::prelude::*;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::Arc;
 
 fn split_search_path(url: &str) -> (String, Option<String>) {
@@ -143,36 +141,14 @@ async fn connect_engine_handle(
     max_connections: u32,
     min_connections: u32,
 ) -> Result<EngineHandle, sqlx::Error> {
-    match backend {
-        BackendKind::Sqlite => {
-            let pool = SqlitePoolOptions::new()
-                .max_connections(max_connections)
-                .min_connections(min_connections)
-                .connect(connection_url)
-                .await?;
-            Ok(EngineHandle::new_sqlite(pool))
-        }
-        BackendKind::Postgres => {
-            let mut pool_options = PgPoolOptions::new()
-                .max_connections(max_connections)
-                .min_connections(min_connections);
-            if let Some(search_path) = search_path {
-                let set_search_path_sql = Arc::new(format!("SET search_path TO {}", search_path));
-                pool_options = pool_options.after_connect(move |conn, _meta| {
-                    let set_search_path_sql = set_search_path_sql.clone();
-                    Box::pin(async move {
-                        sqlx::query(set_search_path_sql.as_str())
-                            .execute(conn)
-                            .await?;
-                        Ok(())
-                    })
-                });
-            }
-
-            let pool = pool_options.connect(connection_url).await?;
-            Ok(EngineHandle::new_postgres(pool))
-        }
-    }
+    EngineHandle::connect(PoolSpec {
+        backend,
+        url: connection_url.to_string(),
+        search_path,
+        max_connections,
+        min_connections,
+    })
+    .await
 }
 
 /// Initializes the global database connection pool.
@@ -183,11 +159,17 @@ async fn connect_engine_handle(
 ///     url (str): The database connection URL (e.g., "sqlite:test.db").
 ///     auto_migrate (bool): If True, automatically creates tables for all
 ///         registered models on connection. Defaults to False.
+///     migrate_updates (bool): If True, also adds missing model columns to
+///         existing tables (and reconciles type/nullability drift on
+///         Postgres). Implies `auto_migrate`.
+///     migrate_destructive (bool): If True, also drops live columns that no
+///         longer exist on the model. Implies `migrate_updates`.
 ///
 /// # Errors
 /// Returns a `PyErr` if the connection fails or if auto-migration fails.
 #[pyfunction]
-#[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0, identity_map=true))]
+#[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0, identity_map=true, migrate_updates=false, migrate_destructive=false))]
+#[allow(clippy::too_many_arguments)]
 pub fn connect(
     py: Python<'_>,
     url: String,
@@ -197,6 +179,8 @@ pub fn connect(
     max_connections: u32,
     min_connections: u32,
     identity_map: bool,
+    migrate_updates: bool,
+    migrate_destructive: bool,
 ) -> PyResult<Bound<'_, PyAny>> {
     let (connection_url, search_path) = split_search_path(&url);
     let redacted_url = redact_connection_url(&connection_url);
@@ -253,8 +237,13 @@ pub fn connect(
 
         let engine_handle = Arc::new(engine_handle);
 
-        if auto_migrate {
-            internal_create_tables(engine_handle.clone()).await?;
+        // Flag ladder: migrate_destructive ⇒ migrate_updates ⇒ auto_migrate.
+        // There is no coherent "alter existing tables but don't create missing
+        // ones" mode — the diff baseline relies on CREATE TABLE IF NOT EXISTS
+        // having run first.
+        let opts = MigrateOptions::laddered(migrate_updates, migrate_destructive);
+        if auto_migrate || opts.updates {
+            internal_migrate(engine_handle.clone(), opts).await?;
         }
 
         let mut registry = CONNECTION_REGISTRY.write().map_err(|_| {

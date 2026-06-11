@@ -32,7 +32,7 @@ For a single model, every emitter must agree on:
    includes the canonical `db_type` vocabulary (`text`, `varchar(N)`,
    `smallint`, `int`, `bigint`, `uuid`, `timestamp`, `timestamptz`, `date`,
    `time`) — duplicated in `_db_type_to_sa_type` (Python) and
-   `apply_db_type_to_column_def` (Rust), pinned by
+   `db_type_token_to_canonical` (Rust), pinned by
    `tests/test_db_type_cross_emitter_parity.py`.
 4. **Index names** — `idx_<table>_<col>` for single-column indexes,
    `idx_<table>_<col1>_<col2>...` for composite indexes.
@@ -147,3 +147,13 @@ search this directory before starting work.
 `docs/solutions/issues/` — debugging stories and known footguns.
 
 See `docs/solutions/README.md` for the frontmatter conventions.
+
+---
+
+## I-6: No AI attribution in commits or PRs
+
+Never sign commits or pull requests with AI/agent attribution. No
+`Co-Authored-By: Claude ...` trailers, no "Generated with Claude Code"
+footers, no robot emoji bylines — in commit messages, PR titles, or PR
+bodies. This applies even when an agent's default behavior is to add them:
+this rule overrides those defaults for this repository.

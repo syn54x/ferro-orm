@@ -109,8 +109,9 @@ Two emitters, two dispatch tables, one parity test:
 
 - **Python:** `_db_type_to_sa_type(token)` in
   `src/ferro/migrations/alembic.py` returns an SA type.
-- **Rust:** `apply_db_type_to_column_def(col_def, token, backend)` in
-  `src/schema.rs` mutates a `ColumnDef`.
+- **Rust:** `db_type_token_to_canonical(token, backend)` in
+  `src/schema.rs` resolves a `CanonicalType`, which `apply_canonical_type`
+  applies to a `ColumnDef`.
 - **Parity test:**
   `tests/test_db_type_cross_emitter_parity.py::test_column_type_parity_across_emitters`
   walks every `(token × dialect)` pair, renders both emitters via
@@ -132,10 +133,11 @@ truncation guard.
    `src/ferro/_annotation_utils.py`, plus its compatibility predicate.
 2. Add an arm in `_db_type_to_sa_type` (Python, `migrations/alembic.py`)
    returning the appropriate `sa.types.TypeEngine`.
-3. Add an arm in `apply_db_type_to_column_def` (Rust, `src/schema.rs`)
-   calling the matching `ColumnDef::*` method, with per-backend rendering
-   chosen to byte-match the Python side's `CreateTable.compile(dialect)`
-   output.
+3. Add an arm in `db_type_token_to_canonical` (Rust, `src/schema.rs`)
+   returning the matching `CanonicalType` variant (add one if needed, with
+   its `ColumnDef::*` mapping in `apply_canonical_type`), with per-backend
+   resolution chosen to byte-match the Python side's
+   `CreateTable.compile(dialect)` output.
 4. Extend `_TOKEN_CASES` in `tests/test_db_type_cross_emitter_parity.py`
    with the new token and expected keywords for both `postgres` and `sqlite`.
 5. Add a positive validation test and at least one negative

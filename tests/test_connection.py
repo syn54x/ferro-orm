@@ -206,7 +206,10 @@ async def test_model_using_routes_helper_writes_to_named_connection(tmp_path):
     assert created_row.label == "created"
     assert updated_created is False
     assert updated_row.label == "updated"
-    assert [(row.id, row.label) for row in await service_model.select().order_by(ConnectionRouteMarker.id).all()] == [
+    assert [
+        (row.id, row.label)
+        for row in await service_model.select().order_by(ConnectionRouteMarker.id).all()
+    ] == [
         (10, "updated"),
         (11, "created"),
     ]
@@ -374,9 +377,7 @@ async def test_forward_fk_load_inherits_source_instance_origin(tmp_path):
     class RouteForwardChild(ferro.Model):
         id: Annotated[int | None, ferro.FerroField(primary_key=True)] = None
         label: str
-        parent: Annotated[
-            RouteForwardParent, ferro.ForeignKey(related_name="children")
-        ]
+        parent: Annotated[RouteForwardParent, ferro.ForeignKey(related_name="children")]
 
     app_db = tmp_path / "app.db"
     service_db = tmp_path / "service.db"
@@ -480,6 +481,8 @@ async def test_connect_passes_pool_config_to_core(monkeypatch):
                 "max_connections": 3,
                 "min_connections": 1,
                 "identity_map": True,
+                "migrate_updates": False,
+                "migrate_destructive": False,
             },
         )
     ]

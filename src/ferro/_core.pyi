@@ -10,8 +10,25 @@ async def connect(
     min_connections: int = 0,
     *,
     identity_map: bool = True,
+    migrate_updates: bool = False,
+    migrate_destructive: bool = False,
 ) -> None: ...
 async def create_tables(using: Optional[str] = None) -> None: ...
+async def migrate(
+    using: Optional[str] = None,
+    updates: bool = True,
+    destructive: bool = False,
+) -> None:
+    """Run the auto-migrate pass against a connected engine.
+
+    Creates missing tables, then (with ``updates``, the default) adds missing
+    model columns to existing tables and reconciles type/nullability drift on
+    Postgres; with ``destructive`` it also drops live columns no longer on the
+    model. ``destructive`` implies ``updates``. The pool is refreshed after any
+    DDL so no cached statement observes the pre-migration schema.
+    """
+    ...
+
 def _render_create_table_sql_for_test(
     name: str, schema_json: str, dialect: str
 ) -> tuple[str, list[str]]:
@@ -21,6 +38,23 @@ def _render_create_table_sql_for_test(
     ``"sqlite"``.
     """
     ...
+
+def _render_migration_sql_for_test(
+    name: str,
+    schema_json: str,
+    live_columns_json: str,
+    dialect: str,
+    updates: bool = True,
+    destructive: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Test-only: render the auto-migrate diff for one table without a database.
+
+    ``live_columns_json`` is a JSON array of objects with the LiveColumn shape
+    (``name``, ``declared_type``, ``is_nullable``, ``is_primary_key``,
+    ``char_max_len``, ``is_enum_udt``). Returns ``(statements, warnings)``.
+    """
+    ...
+
 async def fetch_all(
     cls: object, tx_id: Optional[str] = None, using: Optional[str] = None
 ) -> list[Any]: ...
