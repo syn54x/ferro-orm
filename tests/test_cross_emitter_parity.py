@@ -103,9 +103,15 @@ def _is_pk_nullable_relaxation(op_tuple, metadata: sa.MetaData) -> bool:
     """
     if op_tuple[0] != "modify_nullable":
         return False
-    _, _schema, table_name, column_name, _info, new_nullable, existing_nullable = (
-        op_tuple
-    )
+    (
+        _,
+        _schema,
+        table_name,
+        column_name,
+        _info,
+        new_nullable,
+        existing_nullable,
+    ) = op_tuple
     if not (new_nullable is True and existing_nullable is False):
         return False
     table = metadata.tables.get(table_name)
@@ -213,5 +219,95 @@ async def test_alembic_autogen_against_rust_migrated_db_is_idempotent(db_url):
         "a Rust-migrated database returned a non-empty diff. The two emitters "
         "disagree about the schema; running `alembic revision --autogenerate` "
         "against an auto_migrate'd database would produce phantom diffs.\n\n"
+        f"Diff:\n{significant}"
+    )
+
+
+def _build_migration_v1_models() -> None:
+    """The 'old release' shape of the migration-sentinel models."""
+
+    class MigOrg(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        slug: Annotated[str, FerroField(unique=True)]
+        members: Relation[list["MigMember"]] = BackRef()
+
+    class MigMember(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        email: Annotated[str, FerroField(unique=True)]
+        org: Annotated[MigOrg, ForeignKey(related_name="members", index=True)]
+
+    return MigOrg, MigMember
+
+
+def _build_migration_v2_models() -> None:
+    """The 'new release' shape: MigOrg gained two columns since v1."""
+
+    class MigOrg(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        slug: Annotated[str, FerroField(unique=True)]
+        name: Annotated[str | None, FerroField(index=True)] = None
+        motto: str | None = None
+        members: Relation[list["MigMember"]] = BackRef()
+
+    class MigMember(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        email: Annotated[str, FerroField(unique=True)]
+        org: Annotated[MigOrg, ForeignKey(related_name="members", index=True)]
+
+    return MigOrg, MigMember
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_alembic_autogen_after_migrate_updates_is_idempotent(db_url):
+    """Migration-path parity sentinel: a database bootstrapped on an old model
+    shape and brought forward via ``connect(migrate_updates=True)`` must be
+    indistinguishable to Alembic from one created fresh.
+
+    This pins that ``ALTER TABLE ... ADD COLUMN`` reuses the exact column DDL
+    of the CREATE TABLE emitter — including single-column index names — so the
+    auto-migrate path cannot drift from the Alembic bridge (I-1 in AGENTS.md).
+
+    Scope note: the v1→v2 delta covers a plain nullable column and an indexed
+    nullable column, where byte parity is achievable on SQLite. Unique and
+    foreign-key column adds are deliberately not part of this sentinel on
+    SQLite: the engine cannot add inline UNIQUE/FK constraints to existing
+    tables, so auto-migrate emits the documented equivalent (an explicit
+    ``uq_`` index / a constraint-less column) plus a ``UserWarning`` — visible
+    divergence by design, covered in ``test_auto_migrate.py``.
+    """
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    _build_migration_v1_models()
+    await connect(db_url, auto_migrate=True)
+
+    reset_engine()
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+    _build_migration_v2_models()
+    await connect(db_url, migrate_updates=True)
+
+    metadata = get_metadata()
+
+    db_path = db_url.replace("sqlite:", "", 1).split("?")[0]
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as conn:
+            ctx = MigrationContext.configure(
+                conn,
+                opts={"compare_type": True, "compare_server_default": True},
+            )
+            diff = compare_metadata(ctx, metadata)
+    finally:
+        engine.dispose()
+
+    significant = _ignore_unreliable_alembic_diffs(diff, metadata)
+    assert significant == [], (
+        "Cross-emitter DDL parity violation on the migrate_updates path: a "
+        "database migrated forward from an older model shape differs from "
+        "what Alembic expects of the current models.\n\n"
         f"Diff:\n{significant}"
     )

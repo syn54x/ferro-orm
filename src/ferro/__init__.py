@@ -14,6 +14,7 @@ from ._core import (
     clear_registry,
     create_tables,
     evict_instance,
+    migrate,
     reset_engine,
     set_default_connection,
     version,
@@ -63,6 +64,8 @@ async def connect(
     pool: PoolConfig | None = None,
     *,
     identity_map: bool = True,
+    migrate_updates: bool = False,
+    migrate_destructive: bool = False,
 ) -> None:
     """
     Establish a connection to the database.
@@ -70,12 +73,41 @@ async def connect(
     Args:
         url: The database connection string (e.g., "sqlite:example.db?mode=rwc").
         auto_migrate: If True, automatically create tables for all registered models.
+            Existing tables are left untouched unless ``migrate_updates`` /
+            ``migrate_destructive`` are also set.
         name: Optional connection name. Omitted connections register as "default".
         default: If True, make this named connection the default for unqualified operations.
         pool: Optional per-connection pool configuration.
         identity_map: If True (default), keep a per-connection identity map so the same primary
             key maps to a single Python instance. If False, each load returns fresh instances and
             the map is not consulted (lower memory use; no ``a is b`` guarantees across loads).
+        migrate_updates: If True, additionally update existing tables to match the
+            registered models. Implies ``auto_migrate``. What this covers is
+            capability-relative per backend:
+
+            - **Both backends**: ``ALTER TABLE ... ADD COLUMN`` for model fields
+              missing from the live table, using the same column DDL ``CREATE TABLE``
+              would emit (including single-column indexes and, on Postgres, CHECK
+              constraints and foreign keys). NOT NULL fields need a literal default
+              to backfill existing rows — connecting fails with a clear error
+              otherwise.
+            - **Postgres only**: column type changes
+              (``ALTER COLUMN ... TYPE ... USING`` cast) and nullability changes
+              (``SET/DROP NOT NULL``) when the live column disagrees with the model.
+            - **SQLite**: type/nullability drift cannot be changed in place; ferro
+              emits a ``UserWarning`` naming the column and pointing at Alembic.
+              (SQLite's type affinity makes declared-type drift mostly cosmetic.)
+
+            After any schema change, the connection pool is refreshed so no cached
+            statement can observe the pre-migration schema.
+        migrate_destructive: If True, additionally **drop** live columns that no
+            longer exist on the model (never whole tables). Implies
+            ``migrate_updates``. Dropping is dependency-aware: explicit indexes
+            covering the column are dropped first; columns that are primary keys or
+            enforced by table constraints fail with a clear error instead.
+
+    For schema changes beyond these (renames, primary-key changes, complex
+    transforms), use the Alembic bridge — see ``docs/guide/migrations.md``.
     """
     from .relations import resolve_relationships
 
@@ -90,6 +122,8 @@ async def connect(
         max_connections=pool_config.max_connections,
         min_connections=pool_config.min_connections,
         identity_map=identity_map,
+        migrate_updates=migrate_updates,
+        migrate_destructive=migrate_destructive,
     )
 
 
@@ -110,6 +144,7 @@ __all__ = [
     "Relation",
     "version",
     "create_tables",
+    "migrate",
     "reset_engine",
     "set_default_connection",
     "clear_registry",

@@ -546,7 +546,7 @@ wheels = [
 
 [[package]]
 name = "ferro-orm"
-version = "0.10.0"
+version = "0.10.5"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },

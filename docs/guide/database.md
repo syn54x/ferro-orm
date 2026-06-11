@@ -133,8 +133,53 @@ During development, automatically align the database schema with your models:
 await ferro.connect("sqlite:dev.db?mode=rwc", auto_migrate=True)
 ```
 
+`auto_migrate=True` creates missing tables (including many-to-many join tables) and never touches existing ones. Two opt-in flags extend it:
+
+```python
+await ferro.connect(
+    "sqlite:dev.db?mode=rwc",
+    auto_migrate=True,
+    migrate_updates=True,      # update existing tables to match the models
+    migrate_destructive=True,  # also drop columns removed from the models
+)
+```
+
+The flags form a ladder — `migrate_destructive` implies `migrate_updates`, which implies `auto_migrate` — so passing just the strongest flag you want is enough.
+
+#### Schema updates with `migrate_updates`
+
+When a model gains fields between releases, `migrate_updates=True` reconciles the live table on connect. What it can do is capability-relative per backend:
+
+| Change | SQLite | Postgres |
+|---|---|---|
+| Add missing column | ✅ `ADD COLUMN` | ✅ `ADD COLUMN` |
+| Add missing column's index (`index=True`) | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
+| Add unique column (`unique=True`) | ✅ via explicit `uq_` unique index + warning | ✅ inline `UNIQUE` |
+| Add foreign-key column | ✅ column only, no FK constraint + warning | ✅ column + FK constraint |
+| Change column type | ⚠️ warning, no DDL (type affinity makes drift mostly cosmetic) | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
+| Change nullability | ⚠️ warning, no DDL | ✅ `SET NOT NULL` / `DROP NOT NULL` |
+| Drop removed column (`migrate_destructive`) | ✅ dependency-aware | ✅ |
+| Rename column/table, change primary key, drop table | ❌ never — [Alembic](migrations.md) territory | ❌ never |
+
+Rules to know:
+
+- **NOT NULL additions need a literal default.** Existing rows must be backfilled, so a new required field without a literal default fails the connect with a clear error. Make the field nullable, give it a default, or use Alembic. On Postgres the backfill default is dropped immediately after the add (a fresh `CREATE TABLE` carries no server default); SQLite cannot drop a column default, so it remains — harmless, and invisible to Alembic autogenerate's defaults.
+- **Added columns reuse the exact `CREATE TABLE` DDL.** A database brought forward by `migrate_updates` is byte-identical to one created fresh, so `alembic revision --autogenerate` stays clean (this is pinned by the cross-emitter parity tests).
+- **Destructive drops are dependency-aware and fail loudly.** Explicit indexes covering a dropped column are dropped first (they are orphaned anyway). Columns that are primary keys, enforced by UNIQUE/CHECK constraints, or referenced by other tables' foreign keys abort the migration with an error pointing at Alembic — nothing is skipped silently. Tables are never dropped.
+- **Postgres native enum columns are left alone.** They only exist via Alembic, which remains their owner.
+- **Postgres type changes take an exclusive lock** and fail the connect if existing data does not cast cleanly — acceptable for a development flag, but worth knowing.
+- **The pool refreshes after any schema change.** No connection can serve a statement prepared against the pre-migration schema (on SQLite stale statements panic the sqlx worker and silently return zero rows; on Postgres they raise `cached plan must not change result type`), and identity-mapped instances hydrated before the migration are evicted so loads return fresh, complete objects.
+
+The same pass can be run explicitly on a live connection instead of at connect time:
+
+```python
+await ferro.migrate()                    # create + update (default)
+await ferro.migrate(destructive=True)    # also drop removed columns
+await ferro.migrate(using="service")     # against a named connection
+```
+
 !!! danger "Production Warning"
-    `auto_migrate=True` is intended for development only. For production, use [Alembic migrations](migrations.md).
+    `auto_migrate=True` and its extension flags are intended for development and local-first apps whose schema is still moving. For production, use [Alembic migrations](migrations.md) — renames, primary-key changes, and data transforms are deliberately out of auto-migrate's scope.
 
 ## Manual Table Creation
 
