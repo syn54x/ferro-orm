@@ -157,3 +157,36 @@ Never sign commits or pull requests with AI/agent attribution. No
 footers, no robot emoji bylines — in commit messages, PR titles, or PR
 bodies. This applies even when an agent's default behavior is to add them:
 this rule overrides those defaults for this repository.
+
+---
+
+## I-7: No stop-gap solutions
+
+Every feature, bug fix, and improvement must be designed as the best,
+well-thought-out solution for the project with the library's future in
+mind — as if time and money were no object. No stop-gaps, hacks,
+quick-fixes, or otherwise lesser solves.
+
+What this means in practice:
+
+- **Prefer first-class, reusable primitives over local patches.** If a fix
+  only works for the immediate symptom while leaving the underlying
+  capability gap in place, build the capability instead. (Precedent:
+  `EngineHandle::refresh_pool()` was built as an engine-level schema-epoch
+  primitive rather than a migration-local statement-cache flush.)
+- **Fail loudly over degrading silently.** "Skip with a warning and
+  continue", "best effort", and "documented residual risk" are not
+  acceptable resolutions for correctness gaps. Either the operation
+  succeeds completely or it aborts with a clear, actionable error.
+- **Treat certain phrases as redesign triggers.** If a plan, comment, or PR
+  description contains "best-effort", "partial mitigation", "documented
+  residual risk", "good enough for now", "temporary workaround", or
+  "fallback if X turns out to be hard" — that part of the design is not
+  finished. Redesign it before presenting or implementing it.
+- **Scoped-down is fine; hollowed-out is not.** Deliberately excluding
+  something from scope (with the boundary stated and a real path for the
+  excluded case, e.g. "renames are Alembic territory") is good design.
+  Shipping a half-working version of something that is *in* scope is not.
+
+This rule binds human contributors and AI agents equally, and overrides any
+agent default that biases toward minimal or expedient changes.
