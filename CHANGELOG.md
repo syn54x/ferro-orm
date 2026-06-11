@@ -1,6 +1,26 @@
 # CHANGELOG
 
 
+## v0.11.0 (2026-06-11)
+
+### Chores
+
+- Solution quality requirements
+  ([`c62770b`](https://github.com/syn54x/ferro-orm/commit/c62770b6d3073e8d596c30f29895bccddc2a4d7f))
+
+### Documentation
+
+- Compound SQLite hydration learnings (#56, #58)
+  ([#60](https://github.com/syn54x/ferro-orm/pull/60),
+  [`b609e72`](https://github.com/syn54x/ferro-orm/commit/b609e7274e1886cc5d8564c7adb52fc3c79ffc8d))
+
+### Features
+
+- Extend auto_migrate with column updates and destructive drops
+  ([#69](https://github.com/syn54x/ferro-orm/pull/69),
+  [`a76cb0f`](https://github.com/syn54x/ferro-orm/commit/a76cb0f2451dab79303353f2c77d74ca3e1ad4a5))
+
+
 ## v0.10.5 (2026-05-25)
 
 ### Bug Fixes
