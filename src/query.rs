@@ -73,7 +73,7 @@ impl QueryDef {
             // Python `None` becomes JSON `null`, which serde deserializes as
             // `Option<serde_json::Value>::None` (not `Some(Null)`). SQL `col = NULL`
             // is never true — use `IS NULL` / `IS NOT NULL` for `== None` / `!= None`.
-            let rhs_is_json_null = node.value.as_ref().map_or(true, serde_json::Value::is_null);
+            let rhs_is_json_null = node.value.as_ref().is_none_or(serde_json::Value::is_null);
 
             let expr: SimpleExpr = if rhs_is_json_null {
                 match node.operator.as_str() {
@@ -207,9 +207,10 @@ impl QueryDef {
     ) -> SimpleExpr {
         if let Value::String(s) = val {
             if backend == SqlDialect::Postgres {
-                if let Some(tn) =
-                    crate::schema_bind::native_postgres_enum_udt_name(col_name, &self.postgres_enum_udt)
-                {
+                if let Some(tn) = crate::schema_bind::native_postgres_enum_udt_name(
+                    col_name,
+                    &self.postgres_enum_udt,
+                ) {
                     return crate::schema_bind::postgres_enum_string_rhs_expr(s, tn);
                 }
 
@@ -228,7 +229,7 @@ impl QueryDef {
                     return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
                         .cast_as("date");
                 }
-                if model_column_format(&self.model_name, col_name).as_deref() == Some("binary") {
+                if model_column_format(&self.model_name, col_name) == Some("binary") {
                     return Expr::value(sea_query::Value::Bytes(Some(Box::new(
                         s.as_bytes().to_vec(),
                     ))));
@@ -360,15 +361,9 @@ fn model_column_format(model_name: &str, col: &str) -> Option<&'static str> {
     let Ok(registry) = MODEL_REGISTRY.read() else {
         return None;
     };
-    let Some(schema) = registry.get(model_name) else {
-        return None;
-    };
-    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
-        return None;
-    };
-    let Some(col_info) = props.get(col) else {
-        return None;
-    };
+    let schema = registry.get(model_name)?;
+    let props = schema.get("properties").and_then(|p| p.as_object())?;
+    let col_info = props.get(col)?;
     match property_schema_format(col_info) {
         Some("uuid") => Some("uuid"),
         Some("date-time") => Some("date-time"),
@@ -732,7 +727,8 @@ mod tests {
         let sql = Query::select().expr(rhs).to_string(PostgresQueryBuilder);
 
         assert!(
-            !sql.to_lowercase().contains("as \"color\"") && !sql.to_lowercase().contains("as color"),
+            !sql.to_lowercase().contains("as \"color\"")
+                && !sql.to_lowercase().contains("as color"),
             "auto-migrate TEXT enum columns must not cast without catalog UDT: {sql}"
         );
     }
