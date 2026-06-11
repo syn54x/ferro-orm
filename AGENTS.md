@@ -147,3 +147,13 @@ search this directory before starting work.
 `docs/solutions/issues/` — debugging stories and known footguns.
 
 See `docs/solutions/README.md` for the frontmatter conventions.
+
+---
+
+## I-6: No AI attribution in commits or PRs
+
+Never sign commits or pull requests with AI/agent attribution. No
+`Co-Authored-By: Claude ...` trailers, no "Generated with Claude Code"
+footers, no robot emoji bylines — in commit messages, PR titles, or PR
+bodies. This applies even when an agent's default behavior is to add them:
+this rule overrides those defaults for this repository.
