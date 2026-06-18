@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from pytest_examples import CodeExample, EvalExample, find_examples
 
-DOCS_ROOT = Path(__file__).resolve().parents[1] / "docs"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DOCS_PAGES = REPO_ROOT / "docs" / "pages"
+DOCS_EXAMPLES = REPO_ROOT / "docs" / "examples"
 
 
-@pytest.skip(
-    reason="Issue parsing architecture.md for some reason.", allow_module_level=True
-)
-@pytest.mark.parametrize("example", find_examples(str(DOCS_ROOT)), ids=str)
+def _inline_examples() -> list[CodeExample]:
+    # Snippet directives (--8<--) are expanded by the docs build, not by
+    # pytest-examples, so blocks containing them are not valid Python here.
+    return [
+        example
+        for example in find_examples(str(DOCS_PAGES))
+        if "--8<--" not in example.source
+    ]
+
+
+@pytest.mark.parametrize("example", _inline_examples(), ids=str)
 def test_docs_examples(example: CodeExample, eval_example: EvalExample) -> None:
     """Validate docs snippets, with opt-in linting/execution."""
     # Baseline for all snippets: parse + compile as valid Python syntax.
@@ -45,3 +56,26 @@ def test_docs_examples(example: CodeExample, eval_example: EvalExample) -> None:
     if settings.get("test") == "run":
         eval_example.run_print_check(example)
         eval_example.run(example)
+
+
+@pytest.mark.parametrize(
+    "script",
+    sorted(DOCS_EXAMPLES.glob("*.py")),
+    ids=lambda p: p.name,
+)
+def test_docs_example_scripts(script: Path) -> None:
+    """Every docs example script must run end to end.
+
+    Each script runs in a subprocess so model registries and engine state
+    never leak between examples (or into other tests).
+    """
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=REPO_ROOT,
+    )
+    assert result.returncode == 0, (
+        f"{script.name} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )

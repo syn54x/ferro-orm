@@ -190,3 +190,71 @@ What this means in practice:
 
 This rule binds human contributors and AI agents equally, and overrides any
 agent default that biases toward minimal or expedient changes.
+
+---
+
+## I-8: Docs examples show both field-declaration styles
+
+Ferro supports two equivalent ways to declare model fields: assignment
+(`name: str = Field(unique=True)`) and `Annotated` metadata
+(`name: Annotated[str, Field(unique=True)]`). Every documentation example
+that declares model fields with `Field()`/`FerroField()` options must show
+**both** styles, side by side, as content tabs:
+
+    === "Assignment"
+
+        ```python
+        --8<-- "docs/examples/<example>.py:models"
+        ```
+
+    === "Annotated"
+
+        ```python
+        --8<-- "docs/examples/<example>_annotated.py:models"
+        ```
+
+Rules:
+
+- Both tabs must be backed by real, runnable code. Snippet-embedded model
+  definitions get a runnable `<name>_annotated.py` companion in
+  `docs/examples/` (exercised by `tests/test_docs_examples.py`); inline
+  blocks are written in both styles and compile-checked by the same test.
+- Constructs with only one valid form appear identically in both tabs and
+  are not tabbed on their own: forward FKs are always
+  `Annotated[Target, ForeignKey(...)]`, and `BackRef()` / `ManyToMany()`
+  are always assignments.
+- Code blocks that do not declare fields (queries, mutations, transactions,
+  usage snippets) are not affected by this rule.
+
+This keeps users from ever wondering whether something is possible in their
+preferred declaration style.
+
+---
+
+## I-9: Lambda predicates are the official query style
+
+Documentation and examples use the lambda predicate style for all queries:
+
+```python
+adults = await User.where(lambda t: t.age >= 18).all()
+```
+
+Rules:
+
+- **Every query example** in docs, docstring `Examples:` sections, and
+  `docs/examples/` scripts uses lambda predicates.
+- When the predicate styles themselves are documented, present them in
+  order **lambda > `col()` > operator**, with lambda labeled the officially
+  recommended style.
+- **Operator style** (`User.where(User.age >= 18)`) is compatible today but
+  is slated for deprecation in a future release and fails static type
+  checking (`User.age >= 18` types as `bool`; `where()` expects
+  `QueryNode | Predicate`). Docs say so explicitly wherever the style is
+  shown.
+- **`order_by` is not a predicate** and keeps attribute style
+  (`order_by(User.age, "desc")`). Passing a lambda to `order_by` silently
+  produces a junk column name — never show it.
+
+The canonical comparisons live in `docs/pages/guide/queries.md`
+("Predicate Styles") and `docs/pages/concepts/query-typing.md`; everywhere
+else uses lambda without restating the trade-offs.

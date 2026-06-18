@@ -133,12 +133,12 @@ permissions:
 
 **Why These Permissions:**
 - `pages: write` - Allows the workflow to:
-  - Deploy the generated MkDocs static site to GitHub Pages
+  - Deploy the generated Zensical static site to GitHub Pages
   - Update the Pages deployment for the repository
 - `id-token: write` - Allows secure OIDC auth for Pages deployment
 
 **What It Does:**
-- Builds MkDocs docs
+- Builds Zensical docs
 - Deploys docs to GitHub Pages
 
 ---

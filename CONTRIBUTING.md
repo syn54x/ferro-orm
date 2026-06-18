@@ -37,7 +37,7 @@ This will install all development dependencies including:
 - Testing tools (pytest, pytest-asyncio, pytest-cov)
 - Linting and formatting tools (ruff, prek)
 - Build tools (maturin)
-- Documentation tools (mkdocs-material)
+- Documentation tools (zensical)
 - Release tools (commitizen, python-semantic-release)
 
 ### 3. Install Pre-commit Hooks
@@ -102,10 +102,10 @@ cargo clippy               # Rust linting
 
 ```bash
 # Serve documentation locally (with live reload)
-uv run mkdocs serve
+uv run zensical serve
 
 # Build documentation
-uv run mkdocs build
+uv run zensical build
 
 # Documentation will be available at http://127.0.0.1:8000/
 ```
