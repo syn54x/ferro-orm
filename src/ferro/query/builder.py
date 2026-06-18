@@ -110,15 +110,21 @@ class Query(Generic[T]):
     def where(self, node: "QueryNode | Predicate[T]") -> "Query[T]":
         """Add a filter condition to the query.
 
-        Accepts either a :class:`QueryNode` (built directly with operator
-        syntax or with :func:`ferro.query.col`) or a lambda predicate of
-        shape ``Callable[[QueryProxy[T]], QueryNode]``. The lambda receives
-        a fresh :class:`QueryProxy` whose attributes return
+        The recommended style is a lambda predicate of shape
+        ``Callable[[QueryProxy[T]], QueryNode]``. The lambda receives a
+        fresh :class:`QueryProxy` whose attributes return
         :class:`FieldProxy` instances, so ``lambda t: t.archived == False``
-        builds a comparison without static-typing friction.
+        builds a comparison without static-typing friction. A prebuilt
+        :class:`QueryNode` is also accepted, built either with
+        :func:`ferro.query.col` (the type-safe escape hatch that preserves
+        operator shape) or with operator syntax on class attributes. The
+        bare operator form (``User.where(User.age >= 18)``) is planned for
+        deprecation in a future release and does not type-check statically:
+        the class attribute types as the field type, so the comparison
+        resolves to ``bool``, not ``QueryNode``.
 
         Args:
-            node: A ``QueryNode`` or a predicate callable.
+            node: A predicate callable or a ``QueryNode``.
 
         Returns:
             The current Query instance for chaining.
@@ -128,8 +134,8 @@ class Query(Generic[T]):
                 or if the callable does not return a ``QueryNode``.
 
         Examples:
-            >>> q1 = User.where(User.id == 1)
-            >>> q2 = User.where(lambda t: t.archived == False)  # noqa: E712
+            >>> q1 = User.where(lambda t: t.archived == False)  # noqa: E712
+            >>> q2 = User.where(User.id == 1)
             >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """
@@ -204,7 +210,7 @@ class Query(Generic[T]):
             A list of model instances.
 
         Examples:
-            >>> users = await User.where(User.active == True).all()
+            >>> users = await User.where(lambda t: t.active == True).all()  # noqa: E712
             >>> isinstance(users, list)
             True
         """
@@ -232,7 +238,7 @@ class Query(Generic[T]):
             The count of matching records.
 
         Examples:
-            >>> total = await User.where(User.active == True).count()
+            >>> total = await User.where(lambda t: t.active == True).count()  # noqa: E712
             >>> isinstance(total, int)
             True
         """
@@ -256,7 +262,7 @@ class Query(Generic[T]):
             The number of records updated.
 
         Examples:
-            >>> updated = await User.where(User.id == 1).update(name="Taylor")
+            >>> updated = await User.where(lambda t: t.id == 1).update(name="Taylor")
             >>> isinstance(updated, int)
             True
         """
@@ -304,7 +310,7 @@ class Query(Generic[T]):
             The number of records deleted.
 
         Examples:
-            >>> deleted = await User.where(User.disabled == True).delete()
+            >>> deleted = await User.where(lambda t: t.disabled == True).delete()  # noqa: E712
             >>> isinstance(deleted, int)
             True
         """
@@ -326,7 +332,7 @@ class Query(Generic[T]):
             True if records exist, otherwise False.
 
         Examples:
-            >>> found = await User.where(User.email == "a@b.com").exists()
+            >>> found = await User.where(lambda t: t.email == "a@b.com").exists()
             >>> isinstance(found, bool)
             True
         """

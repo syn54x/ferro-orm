@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   build-docs:
-    name: Build docs (MkDocs)
+    name: Build docs (Zensical)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -40,9 +40,9 @@ jobs:
         run: |
           uv sync --only-group docs --no-install-project --python 3.13
 
-      - name: Build MkDocs site
+      - name: Build Zensical site
         run: |
-          uv run --no-sync mkdocs build
+          uv run --no-sync zensical build --clean
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

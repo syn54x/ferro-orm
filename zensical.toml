@@ -1,0 +1,144 @@
+[project]
+site_name = "Ferro ORM"
+site_description = "A high-performance, Rust-backed, Pydantic-driven async ORM for Python."
+site_url = "https://syn54x.github.io/ferro-orm/"
+repo_url = "https://github.com/syn54x/ferro-orm"
+repo_name = "syn54x/ferro-orm"
+edit_uri = "edit/main/docs/pages/"
+copyright = "&copy; 2026 Ferro ORM contributors"
+docs_dir = "docs/pages"
+site_dir = "site"
+watch = ["src", "docs/examples", "README.md", "CHANGELOG.md", "CONTRIBUTING.md"]
+extra_css = ["stylesheets/extra.css"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Why Ferro" = "why-ferro.md" },
+  { "Getting Started" = [
+    { "Installation" = "getting-started/installation.md" },
+    { "Quickstart Tutorial" = "getting-started/quickstart.md" },
+    { "Next Steps" = "getting-started/next-steps.md" },
+  ] },
+  { "Guide" = [
+    { "Models & Fields" = "guide/models-and-fields.md" },
+    { "Queries" = "guide/queries.md" },
+    { "Mutations" = "guide/mutations.md" },
+    { "Relationships" = "guide/relationships.md" },
+    { "Transactions" = "guide/transactions.md" },
+    { "Raw SQL" = "guide/raw-sql.md" },
+    { "Connections & Databases" = "guide/connections.md" },
+    { "Schema Migrations" = "guide/migrations.md" },
+  ] },
+  { "How-To" = [
+    { "Testing" = "howto/testing.md" },
+    { "Pagination" = "howto/pagination.md" },
+    { "Timestamps" = "howto/timestamps.md" },
+    { "Soft Deletes" = "howto/soft-deletes.md" },
+    { "Multiple Databases" = "howto/multiple-databases.md" },
+    { "Migrating from SQLAlchemy" = "howto/migrate-from-sqlalchemy.md" },
+  ] },
+  { "Concepts" = [
+    { "Architecture" = "concepts/architecture.md" },
+    { "Identity Map" = "concepts/identity-map.md" },
+    { "Type Safety" = "concepts/type-safety.md" },
+    { "Typed Query Predicates" = "concepts/query-typing.md" },
+    { "Database Backends" = "concepts/backends.md" },
+    { "Performance" = "concepts/performance.md" },
+  ] },
+  { "API Reference" = [
+    { "Model" = "api/model.md" },
+    { "Fields & Types" = "api/fields.md" },
+    { "Queries" = "api/queries.md" },
+    { "Relationships" = "api/relationships.md" },
+    { "Transactions" = "api/transactions.md" },
+    { "Raw SQL" = "api/raw-sql.md" },
+    { "Connection & Registry" = "api/connection.md" },
+    { "Migrations" = "api/migrations.md" },
+    { "Exceptions" = "api/exceptions.md" },
+  ] },
+  { "Community" = [
+    { "FAQ" = "faq.md" },
+    { "Roadmap" = "roadmap.md" },
+    { "Contributing" = "contributing.md" },
+    { "Changelog" = "changelog.md" },
+  ] },
+]
+
+[project.theme]
+features = [
+  "navigation.tabs",
+  "navigation.sections",
+  "navigation.expand",
+  "navigation.top",
+  "toc.follow",
+  "search.suggest",
+  "search.highlight",
+  "content.code.copy",
+  "content.code.annotate",
+  "content.action.edit",
+  "content.action.view",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "light-rust"
+primary = "custom"
+accent = "amber"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "custom"
+accent = "amber"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+inventories = ["https://docs.python.org/3/objects.inv"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+show_source = true
+show_root_heading = true
+show_root_full_path = false
+show_category_heading = true
+show_if_no_docstring = true
+members_order = "source"
+
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.md_in_html]
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.tables]
+
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.keys]
+[project.markdown_extensions.pymdownx.mark]
+[project.markdown_extensions.pymdownx.smartsymbols]
+
+[project.markdown_extensions.pymdownx.superfences]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+
+[project.markdown_extensions.pymdownx.snippets]
+base_path = ["."]
+check_paths = true
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+
+[project.markdown_extensions.pymdownx.emoji]
+emoji_index = "zensical.extensions.emoji.twemoji"
+emoji_generator = "zensical.extensions.emoji.to_svg"

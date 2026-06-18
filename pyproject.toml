@@ -47,9 +47,8 @@ ci-test = [
     "greenlet>=3.3.1",
 ]
 docs = [
-    "mkdocs-material>=9.5.0",
-    "mkdocs-llmstxt>=0.3.0",
-    "mkdocstrings[python]>=0.24.0",
+    "zensical>=0.0.45",
+    "mkdocstrings-python>=1.16.0",
     "pymdown-extensions>=10.7.0",
 ]
 release = [
@@ -68,9 +67,8 @@ dev = [
     "python-semantic-release>=9.0.0",
     "alembic>=1.18.1",
     "sqlalchemy>=2.0.46",
-    "mkdocs-material>=9.5.0",
-    "mkdocs-llmstxt>=0.3.0",
-    "mkdocstrings[python]>=0.24.0",
+    "zensical>=0.0.45",
+    "mkdocstrings-python>=1.16.0",
     "pymdown-extensions>=10.7.0",
     "pytest-examples>=0.0.18",
     "psycopg[binary]>=3.3.3",
