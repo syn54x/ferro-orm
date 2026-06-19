@@ -1,3 +1,10 @@
+"""SchemaIR compilation and fingerprint helpers for Phase 1.
+
+This module compiles the canonical Ferro-enriched JSON schema metadata into
+RFC-shaped SchemaIR envelopes and persists deterministic fingerprints for
+individual models and full model sets.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -17,6 +24,7 @@ _IR_VERSION = 1
 
 
 def _canonical_json(value: dict[str, Any]) -> str:
+    """Serialize an IR artifact with deterministic key ordering."""
     return json.dumps(
         value,
         sort_keys=True,
@@ -26,10 +34,12 @@ def _canonical_json(value: dict[str, Any]) -> str:
 
 
 def _fingerprint(value: dict[str, Any]) -> str:
+    """Return the canonical SHA-256 fingerprint for an IR artifact."""
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _resolve_ref(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, Any]:
+    """Inline a local ``#/$defs/...`` reference into a property schema."""
     ref_path = col_info.get("$ref")
     if not isinstance(ref_path, str):
         return col_info
@@ -46,6 +56,7 @@ def _resolve_ref(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, 
 
 
 def _logical_type(col_info: dict[str, Any]) -> str:
+    """Map schema type metadata to SchemaIR ``logical_type``."""
     field_type, field_format = _effective_type_and_format(col_info)
     if field_type == "integer":
         return "integer"
@@ -67,6 +78,7 @@ def _logical_type(col_info: dict[str, Any]) -> str:
 
 
 def _default_db_type(col_info: dict[str, Any]) -> str:
+    """Map schema metadata to the default canonical Ferro ``db_type`` token."""
     field_type, field_format = _effective_type_and_format(col_info)
     if field_type == "integer":
         return "bigint"
@@ -86,6 +98,7 @@ def _default_db_type(col_info: dict[str, Any]) -> str:
 
 
 def _effective_type_and_format(col_info: dict[str, Any]) -> tuple[Any, Any]:
+    """Resolve concrete type/format from direct fields or ``anyOf`` unions."""
     field_type = col_info.get("type")
     field_format = col_info.get("format")
     if field_type is not None:
@@ -103,6 +116,7 @@ def _effective_type_and_format(col_info: dict[str, Any]) -> tuple[Any, Any]:
 
 
 def _is_nullable(col_name: str, col_info: dict[str, Any], required_fields: set[str]) -> bool:
+    """Determine nullability from explicit Ferro hint or required-field fallback."""
     nullable_hint = col_info.get("ferro_nullable")
     if isinstance(nullable_hint, bool):
         return nullable_hint
@@ -112,6 +126,7 @@ def _is_nullable(col_name: str, col_info: dict[str, Any], required_fields: set[s
 def _column_ir(
     col_name: str, col_info: dict[str, Any], required_fields: set[str]
 ) -> dict[str, Any]:
+    """Compile one schema property into a SchemaIR ``columns[]`` entry."""
     return {
         "name": col_name,
         "logical_type": _logical_type(col_info),
@@ -127,26 +142,32 @@ def _column_ir(
 
 
 def _fk_name(table_name: str, col_name: str, to_table: str) -> str:
+    """Build canonical foreign-key name for SchemaIR metadata."""
     return f"fk_{table_name}_{col_name}_{to_table}"
 
 
 def _single_index_name(table_name: str, col_name: str) -> str:
+    """Build canonical single-column index name."""
     return f"idx_{table_name}_{col_name}"
 
 
 def _single_unique_name(table_name: str, col_name: str) -> str:
+    """Build canonical single-column unique-constraint name."""
     return f"uq_{table_name}_{col_name}"
 
 
 def _composite_index_name(table_name: str, columns: list[str]) -> str:
+    """Build canonical composite index name."""
     return f"idx_{table_name}_{'_'.join(columns)}"
 
 
 def _composite_unique_name(table_name: str, columns: list[str]) -> str:
+    """Build canonical composite unique-constraint name."""
     return f"uq_{table_name}_{'_'.join(columns)}"
 
 
 def _checks_from_columns(table_name: str, columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compile per-column ``db_check`` markers into SchemaIR ``checks[]`` entries."""
     checks: list[dict[str, Any]] = []
     for col in columns:
         if col.get("db_check") is not True:
@@ -164,6 +185,15 @@ def _checks_from_columns(table_name: str, columns: list[dict[str, Any]]) -> list
 
 
 def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    """Compile one model schema dict into a SchemaIR payload object.
+
+    Args:
+        model_name: Registered model class name.
+        schema: Canonical Ferro-enriched model schema.
+
+    Returns:
+        A SchemaIR payload object ready to be wrapped in an IR envelope.
+    """
     table_name = model_name.lower()
     properties = schema.get("properties", {})
     if not isinstance(properties, dict):
@@ -264,6 +294,7 @@ def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[s
 
 
 def wrap_schema_ir(payload: dict[str, Any]) -> dict[str, Any]:
+    """Wrap a SchemaIR payload with the standard IR envelope fields."""
     return {
         "ir_kind": "schema",
         "ir_version": _IR_VERSION,
@@ -272,6 +303,15 @@ def wrap_schema_ir(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def compile_model_schema_ir(model_name: str, model_cls: type[Any]) -> dict[str, Any]:
+    """Compile and persist a single model's SchemaIR envelope + fingerprint.
+
+    Args:
+        model_name: Registry key / model class name.
+        model_cls: Python model class to compile.
+
+    Returns:
+        The compiled SchemaIR envelope for ``model_cls``.
+    """
     schema = build_model_schema(model_cls)
     payload = compile_schema_ir_payload(model_name, schema)
     envelope = wrap_schema_ir(payload)
@@ -281,6 +321,11 @@ def compile_model_schema_ir(model_name: str, model_cls: type[Any]) -> dict[str, 
 
 
 def compile_registry_schema_ir() -> dict[str, Any]:
+    """Compile and persist a deterministic SchemaIR envelope for all models.
+
+    Returns:
+        The compiled model-set SchemaIR envelope, sorted by model name.
+    """
     models: list[dict[str, Any]] = []
     for model_name, model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
         if model_name == "Model":
@@ -305,4 +350,5 @@ def compile_registry_schema_ir() -> dict[str, Any]:
 
 
 def schema_ir_fingerprint(ir_envelope: dict[str, Any]) -> str:
+    """Return a deterministic SHA-256 fingerprint for a SchemaIR envelope."""
     return _fingerprint(ir_envelope)
