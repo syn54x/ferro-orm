@@ -312,14 +312,20 @@ fn shadow_compare_migration_plan(
     backend: SqlDialect,
     opts: MigrateOptions,
 ) -> Result<(), String> {
-    let legacy =
-        plan_table_migration(table_lower, schema, live, backend, opts).map_err(|e| e.to_string())?;
+    let legacy = plan_table_migration(table_lower, schema, live, backend, opts)
+        .map_err(|e| e.to_string())?;
     let schema_roundtrip: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(schema).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     let live_roundtrip = live.to_vec();
-    let shadow = plan_table_migration(table_lower, &schema_roundtrip, &live_roundtrip, backend, opts)
-        .map_err(|e| e.to_string())?;
+    let shadow = plan_table_migration(
+        table_lower,
+        &schema_roundtrip,
+        &live_roundtrip,
+        backend,
+        opts,
+    )
+    .map_err(|e| e.to_string())?;
     if legacy.statements == shadow.statements
         && legacy.drop_columns == shadow.drop_columns
         && legacy.warnings == shadow.warnings
@@ -622,7 +628,8 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
 
         let mut plan = plan_table_migration(&table_lower, &schema, &live, backend, opts)?;
         if engine.is_shadow_runtime_enabled()
-            && let Err(diff) = shadow_compare_migration_plan(&table_lower, &schema, &live, backend, opts)
+            && let Err(diff) =
+                shadow_compare_migration_plan(&table_lower, &schema, &live, backend, opts)
         {
             crate::log_debug(format!("⚠️ Ferro shadow runtime mismatch: {diff}"));
             if std::env::var("FERRO_SHADOW_RUNTIME_STRICT")

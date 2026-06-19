@@ -1,13 +1,14 @@
 import json
 import uuid
+import warnings
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 
 import pytest
 from ferro import Model, connect
-from ferro.query import Query, QueryNode
-from ferro.query.builder import _query_def_to_json
+from ferro.query import Query, QueryNode, col
+from ferro.query.builder import _query_ir_payload_to_json
 from ferro.query.nodes import _serialize_query_value
 from pydantic import Field
 
@@ -47,7 +48,7 @@ def test_serialize_query_value_normalizes_non_json_native_values():
     json.dumps(serialized)
 
 
-def test_query_def_to_json_serializes_m2m_context_without_mutating_query_state():
+def test_query_ir_payload_to_json_serializes_m2m_context_without_mutating_query_state():
     source_id = uuid.uuid4()
     query = Query(Model)._m2m(
         "post_tags",
@@ -57,18 +58,21 @@ def test_query_def_to_json_serializes_m2m_context_without_mutating_query_state()
     )
     query_def = {
         "model_name": "Tag",
-        "where_clause": [],
+        "where": [],
         "order_by": [],
         "limit": None,
         "offset": None,
         "m2m": query._m2m_context,
     }
 
-    query_json = _query_def_to_json(query_def)
+    query_json = _query_ir_payload_to_json(query_def)
+    payload = json.loads(query_json)
 
     assert query._m2m_context["source_id"] == source_id
     assert isinstance(query._m2m_context["source_id"], uuid.UUID)
-    assert json.loads(query_json)["m2m"]["source_id"] == str(source_id)
+    assert payload["ir_kind"] == "query"
+    assert payload["ir_version"] == 1
+    assert payload["payload"]["m2m"]["source_id"] == str(source_id)
 
 
 def test_query_node_to_dict_serializes_uuid_values_inside_in_filters():
@@ -77,6 +81,16 @@ def test_query_node_to_dict_serializes_uuid_values_inside_in_filters():
     node = QueryNode(column="run_id", operator="IN", value=[uid1, uid2])
 
     assert node.to_dict()["value"] == [str(uid1), str(uid2)]
+
+
+def test_query_node_to_ir_dict_uses_query_ir_shape():
+    node = QueryNode(column="age", operator=">=", value=18)
+    payload = node.to_ir_dict()
+
+    assert payload["node_kind"] == "leaf"
+    assert payload["column"] == "age"
+    assert payload["operator"] == ">="
+    assert payload["value"] == {"kind": "int", "value": 18}
 
 
 def test_field_proxy_operator_overloading():
@@ -108,7 +122,8 @@ def test_model_where_clause():
         id: int = Field(json_schema_extra={"primary_key": True})
         age: int
 
-    query = QueryUser.where(QueryUser.age >= 21)
+    with pytest.deprecated_call(match="Operator predicate style"):
+        query = QueryUser.where(QueryUser.age >= 21)
 
     assert isinstance(query, Query)
     assert len(query.where_clause) == 1
@@ -126,7 +141,8 @@ def test_query_chaining_placeholders():
         id: int = Field(json_schema_extra={"primary_key": True})
         age: int
 
-    query = QueryUser.where(QueryUser.age >= 18).limit(10).offset(5)
+    with pytest.deprecated_call(match="Operator predicate style"):
+        query = QueryUser.where(QueryUser.age >= 18).limit(10).offset(5)
 
     assert query._limit == 10
     assert query._offset == 5
@@ -155,6 +171,18 @@ def test_in_operator_lshift():
 
     with pytest.raises(TypeError, match="expects a list, tuple, or set"):
         _ = QueryUser.username << "not a list"
+
+
+def test_col_style_where_does_not_emit_deprecation_warning():
+    class ColUser(Model):
+        id: int = Field(json_schema_extra={"primary_key": True})
+        age: int
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always", DeprecationWarning)
+        query = ColUser.where(col(ColUser.age) >= 21)
+    assert isinstance(query, Query)
+    assert not [w for w in captured if issubclass(w.category, DeprecationWarning)]
 
 
 @pytest.mark.asyncio

@@ -253,7 +253,7 @@ Issue references:
 
 ### Phase 3 - QueryIR cutover
 
-Status: `Not started`
+Status: `In progress`
 
 Issue references:
 
@@ -264,13 +264,21 @@ Issue references:
 - Move query execution to typed QueryIR and retire internal JSON query contracts.
 
 **Deliverables**
-- [ ] Runtime query compilation consumes QueryIR.
-- [ ] Lambda predicate style is first-class; legacy operator style on deprecation track.
-- [ ] JSON query payload bridge removed from core execution path.
+- [x] Runtime query compilation consumes QueryIR.
+- [x] Lambda predicate style is first-class; legacy operator style on deprecation track.
+- [x] JSON query payload bridge removed from core execution path.
 
 **Exit gate**
-- [ ] Query builder integration tests pass fully on QueryIR path.
-- [ ] Compatibility behavior explicitly documented for remaining public API differences.
+- [x] Query builder integration tests pass fully on QueryIR path.
+- [x] Compatibility behavior explicitly documented for remaining public API differences.
+
+**Evidence (working branch; pending merge to `feat/ir-first`)**
+- QueryIR envelope emission from Python query builder: `src/ferro/query/builder.py`, `src/ferro/query/nodes.py`
+- QueryIR envelope consumption on runtime query operations: `src/operations.rs`, `src/ferro/_core.pyi`
+- Query/typing/deprecation test coverage: `tests/test_query_builder.py`, `tests/test_query_typing.py`, `tests/test_static_contracts.py`, `tests/test_shadow_reports.py`
+- Docs + migration updates for deprecation/compatibility: `docs/pages/guide/queries.md`, `docs/pages/concepts/query-typing.md`, `docs/pages/api/queries.md`, `docs/examples/predicates.py`, `docs/plans/ir-first-migration-guide.md`
+- Verification command:
+  - `uv run pytest tests/test_static_contracts.py tests/test_query_builder.py tests/test_query_typing.py tests/test_shadow_reports.py -q`
 
 ---
 
@@ -497,6 +505,7 @@ Append updates as concise entries.
 - `2026-06-19` - Phase 1 implementation landed on working branch: added `ferro-schema-ir`, Python->SchemaIR compiler, model-set fingerprinting, and stable representative snapshot checks.
 - `2026-06-19` - Phase 2 scaffolding landed on working branch: internal shadow runtime flag/hook wiring, semantic comparison harness, stable SQLite/Postgres shadow report fixtures, and touched-path CI gate for shadow reports.
 - `2026-06-19` - Phase 2 merged via [#105](https://github.com/syn54x/ferro-orm/pull/105); issues [#80](https://github.com/syn54x/ferro-orm/issues/80), [#81](https://github.com/syn54x/ferro-orm/issues/81), [#82](https://github.com/syn54x/ferro-orm/issues/82), [#83](https://github.com/syn54x/ferro-orm/issues/83) synchronized and closed.
+- `2026-06-19` - Phase 3 working-branch implementation landed: QueryIR envelope hot-path cutover for query operations, operator-style deprecation warnings, and synchronized query docs/migration guidance updates.
 
 ## Immediate next actions
 

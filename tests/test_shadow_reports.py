@@ -10,7 +10,7 @@ from ferro._core import (
     _render_migration_sql_for_test,
     _shadow_compare_query_plan_for_test,
 )
-from ferro.query.builder import _query_def_to_json
+from ferro.query.builder import _query_ir_payload_to_json
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -25,12 +25,22 @@ def _report_for_backend(dialect: str) -> dict:
             "age": {"type": "integer"},
         }
     }
-    query_json = _query_def_to_json(
+    query_json = _query_ir_payload_to_json(
         {
             "model_name": "ShadowUser",
-            "where_clause": [
-                {"is_compound": False, "column": "age", "operator": ">=", "value": 18},
-                {"is_compound": False, "column": "name", "operator": "LIKE", "value": "a%"},
+            "where": [
+                {
+                    "node_kind": "leaf",
+                    "column": "age",
+                    "operator": ">=",
+                    "value": {"kind": "int", "value": 18},
+                },
+                {
+                    "node_kind": "leaf",
+                    "column": "name",
+                    "operator": "LIKE",
+                    "value": {"kind": "string", "value": "a%"},
+                },
             ],
             "order_by": [{"column": "age", "direction": "desc"}],
             "limit": 5,
