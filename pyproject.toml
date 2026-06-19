@@ -80,6 +80,9 @@ dev = [
 
 [tool.pytest.ini_options]
 addopts = "--cov=src"
+markers = [
+    "deprecated_operator_path: tests that assert temporary operator-style predicate compatibility and are scheduled for removal in v0.13.0",
+]
 
 [tool.commitizen]
 name = "cz_conventional_commits"

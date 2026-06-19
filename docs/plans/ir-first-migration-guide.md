@@ -59,6 +59,10 @@ No user-facing runtime behavior changes expected. Shadow planning is internal-on
 | [#86](https://github.com/syn54x/ferro-orm/issues/86) | Operator-style predicates (`Model.field OP value`) are deprecated with runtime warnings | minor | Migrate call sites to `where(lambda t: ...)` (recommended) or `col(Model.field)` | Deprecation message includes replacement + removal target (`v0.13.0`) |
 | [#87](https://github.com/syn54x/ferro-orm/issues/87) | Python query builder now emits QueryIR envelope payloads to Rust runtime | minor | No action for public `Model.where`/`Query.where` usage; update internal tests/tools that serialized legacy `where_clause` JSON | Compatibility behavior remains documented in query typing docs during deprecation window |
 
+Phase 3 test-migration note:
+
+- Tests that exist only to verify temporary operator-style compatibility are tagged `deprecated_operator_path` and scheduled for removal/rewrite at `v0.13.0`.
+
 ### Phase 4
 
 _TBD_
@@ -78,3 +82,8 @@ _TBD_
 ### Phase 8
 
 _TBD_
+
+Planned cutover checklist (target: `v0.13.0`):
+
+- Remove deprecated operator-style predicate support.
+- Remove or rewrite all tests tagged `deprecated_operator_path`.

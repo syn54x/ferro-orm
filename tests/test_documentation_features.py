@@ -264,7 +264,7 @@ async def test_refresh_method(db_url):
     user = await User.create(username="alice", email="alice@example.com")
 
     # Simulate external update
-    await User.where(User.id == user.id).update(email="updated@example.com")
+    await User.where(lambda t: t.id == user.id).update(email="updated@example.com")
 
     # Refresh instance
     await user.refresh()
@@ -337,7 +337,7 @@ async def test_where_equality(db_url):
     await User.create(username="alice", email="alice@example.com", is_active=True)
     await User.create(username="bob", email="bob@example.com", is_active=False)
 
-    active_users = await User.where(User.is_active == True).all()
+    active_users = await User.where(lambda t: t.is_active == True).all()  # noqa: E712
     assert len(active_users) == 1
     assert active_users[0].username == "alice"
 
@@ -352,11 +352,11 @@ async def test_where_comparison_operators(db_url):
         )
 
     # Greater than
-    expensive = await Product.where(Product.price > Decimal("20")).all()
+    expensive = await Product.where(lambda t: t.price > Decimal("20")).all()
     assert len(expensive) == 2  # 30 and 40
 
     # Less than or equal
-    cheap = await Product.where(Product.price <= Decimal("20")).all()
+    cheap = await Product.where(lambda t: t.price <= Decimal("20")).all()
     assert len(cheap) == 3  # 0, 10, 20
 
 
@@ -368,7 +368,7 @@ async def test_where_like_operator(db_url):
     await User.create(username="bob", email="bob@yahoo.com")
     await User.create(username="charlie", email="charlie@gmail.com")
 
-    gmail_users = await User.where(User.email.like("%gmail.com")).all()
+    gmail_users = await User.where(lambda t: t.email.like("%gmail.com")).all()
     assert len(gmail_users) == 2
 
 
@@ -384,7 +384,7 @@ async def test_where_in_operator(db_url):
 
     # Use enum values instead of enum instances
     staff = await User.where(
-        User.role.in_([UserRole.ADMIN.value, UserRole.MODERATOR.value])
+        lambda t: t.role.in_([UserRole.ADMIN.value, UserRole.MODERATOR.value])
     ).all()
     assert len(staff) == 2
 
@@ -407,7 +407,7 @@ async def test_logical_and_operator(db_url):
     )
 
     active_admins = await User.where(
-        (User.is_active == True) & (User.role == UserRole.ADMIN.value)
+        lambda t: (t.is_active == True) & (t.role == UserRole.ADMIN.value)  # noqa: E712
     ).all()
     assert len(active_admins) == 1
     assert active_admins[0].username == "alice"
@@ -424,7 +424,8 @@ async def test_logical_or_operator(db_url):
     )
 
     staff = await User.where(
-        (User.role == UserRole.ADMIN.value) | (User.role == UserRole.MODERATOR.value)
+        lambda t: (t.role == UserRole.ADMIN.value)
+        | (t.role == UserRole.MODERATOR.value)
     ).all()
     assert len(staff) == 2
 
@@ -471,11 +472,11 @@ async def test_query_first(db_url):
     await connect(db_url, auto_migrate=True)
     await User.create(username="alice", email="alice@example.com")
 
-    user = await User.where(User.username == "alice").first()
+    user = await User.where(lambda t: t.username == "alice").first()
     assert user is not None
     assert user.username == "alice"
 
-    none_user = await User.where(User.username == "nonexistent").first()
+    none_user = await User.where(lambda t: t.username == "nonexistent").first()
     assert none_user is None
 
 
@@ -487,7 +488,7 @@ async def test_query_count(db_url):
     await User.create(username="bob", email="bob@example.com", is_active=True)
     await User.create(username="charlie", email="charlie@example.com", is_active=False)
 
-    active_count = await User.where(User.is_active == True).count()
+    active_count = await User.where(lambda t: t.is_active == True).count()  # noqa: E712
     assert active_count == 2
 
 
@@ -497,10 +498,12 @@ async def test_query_exists(db_url):
     await connect(db_url, auto_migrate=True)
     await User.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
 
-    has_admin = await User.where(User.role == UserRole.ADMIN.value).exists()
+    has_admin = await User.where(lambda t: t.role == UserRole.ADMIN.value).exists()
     assert has_admin is True
 
-    has_moderator = await User.where(User.role == UserRole.MODERATOR.value).exists()
+    has_moderator = await User.where(
+        lambda t: t.role == UserRole.MODERATOR.value
+    ).exists()
     assert has_moderator is False
 
 
@@ -511,10 +514,12 @@ async def test_query_update(db_url):
     await User.create(username="alice", email="alice@example.com", is_active=True)
     await User.create(username="bob", email="bob@example.com", is_active=True)
 
-    count = await User.where(User.is_active == True).update(is_active=False)
+    count = await User.where(lambda t: t.is_active == True).update(  # noqa: E712
+        is_active=False
+    )
     assert count == 2
 
-    active_users = await User.where(User.is_active == True).all()
+    active_users = await User.where(lambda t: t.is_active == True).all()  # noqa: E712
     assert len(active_users) == 0
 
 
@@ -525,7 +530,7 @@ async def test_query_delete(db_url):
     await User.create(username="alice", email="alice@example.com", is_active=True)
     await User.create(username="bob", email="bob@example.com", is_active=False)
 
-    count = await User.where(User.is_active == False).delete()
+    count = await User.where(lambda t: t.is_active == False).delete()  # noqa: E712
     assert count == 1
 
     remaining = await User.all()
@@ -588,7 +593,7 @@ async def test_reverse_relation_filtering(db_url):
     )
     await Post.create(title="Draft", content="Content", author=author, published=False)
 
-    published = await author.posts.where(Post.published == True).all()
+    published = await author.posts.where(lambda t: t.published == True).all()  # noqa: E712
     assert len(published) == 1
     assert published[0].title == "Published"
 
@@ -604,7 +609,7 @@ async def test_shadow_field_access(db_url):
     assert post.author_id == author.id
 
     # Query by shadow field
-    posts = await Post.where(Post.author_id == author.id).all()
+    posts = await Post.where(lambda t: t.author_id == author.id).all()
     assert len(posts) == 1
 
 
@@ -796,15 +801,15 @@ async def test_tutorial_blog_example(db_url):
     comment2 = await Comment.create(text="Thanks for sharing", author=alice, post=post1)
 
     # Query: Find all published posts
-    published = await Post.where(Post.published == True).all()
+    published = await Post.where(lambda t: t.published == True).all()  # noqa: E712
     assert len(published) == 2
 
     # Query: Find posts by author
-    alice_posts = await Post.where(Post.author_id == alice.id).all()
+    alice_posts = await Post.where(lambda t: t.author_id == alice.id).all()
     assert len(alice_posts) == 2
 
     # Query: Get post with pattern matching
-    post = await Post.where(Post.title.like("%Fast%")).first()
+    post = await Post.where(lambda t: t.title.like("%Fast%")).first()
     assert post is not None
     assert post.title == "Why Ferro is Fast"
 
@@ -820,7 +825,7 @@ async def test_tutorial_blog_example(db_url):
     draft.published = True
     await draft.save()
 
-    published_after = await Post.where(Post.published == True).all()
+    published_after = await Post.where(lambda t: t.published == True).all()  # noqa: E712
     assert len(published_after) == 3
 
 

@@ -176,6 +176,8 @@ class TestLambdaPredicates:
 
 
 class TestOperatorPathUnchanged:
+    pytestmark = pytest.mark.deprecated_operator_path
+
     @pytest.mark.asyncio
     async def test_operator_eq_still_works(self, db_url):
         """The original ``Model.field == value`` form is unchanged at runtime.
@@ -209,6 +211,8 @@ class TestOperatorPathUnchanged:
 
 
 class TestCombinedStyles:
+    pytestmark = pytest.mark.deprecated_operator_path
+
     @pytest.mark.asyncio
     async def test_mixed_chain_executes(self, db_url):
         """Operator + col() + lambda chained together filter correctly."""

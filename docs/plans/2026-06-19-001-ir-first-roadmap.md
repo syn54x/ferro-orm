@@ -276,6 +276,7 @@ Issue references:
 - QueryIR envelope emission from Python query builder: `src/ferro/query/builder.py`, `src/ferro/query/nodes.py`
 - QueryIR envelope consumption on runtime query operations: `src/operations.rs`, `src/ferro/_core.pyi`
 - Query/typing/deprecation test coverage: `tests/test_query_builder.py`, `tests/test_query_typing.py`, `tests/test_static_contracts.py`, `tests/test_shadow_reports.py`
+- Deprecated-compat test inventory marker: `pytest.mark.deprecated_operator_path` (see `pyproject.toml`)
 - Docs + migration updates for deprecation/compatibility: `docs/pages/guide/queries.md`, `docs/pages/concepts/query-typing.md`, `docs/pages/api/queries.md`, `docs/examples/predicates.py`, `docs/plans/ir-first-migration-guide.md`
 - Verification command:
   - `uv run pytest tests/test_static_contracts.py tests/test_query_builder.py tests/test_query_typing.py tests/test_shadow_reports.py -q`
@@ -366,6 +367,7 @@ Issue references:
 **Deliverables**
 - [ ] Public upgrade release shipped with migration guide and deprecation messaging.
 - [ ] Deprecated compatibility paths remain available during the migration window.
+- [ ] Deprecated-compat test inventory is tagged and tracked for removal (`pytest.mark.deprecated_operator_path`).
 - [ ] Migration guide and upgrade checklist.
 - [ ] Final release checklist and changelog entries.
 
@@ -390,6 +392,7 @@ Issue references:
 
 **Deliverables**
 - [ ] Legacy compatibility code paths removed.
+- [ ] Deprecated-compat test inventory removed (all `deprecated_operator_path` tests deleted or rewritten).
 - [ ] Final migration-guide cutover notes for `v0.13.0`.
 - [ ] Release checklist and changelog entries for shim removal.
 

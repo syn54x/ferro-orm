@@ -113,6 +113,7 @@ def test_field_proxy_operator_overloading():
     assert expr.value == 18
 
 
+@pytest.mark.deprecated_operator_path
 def test_model_where_clause():
     """
     Test that Model.where() returns a Query object with the correct condition.
@@ -132,6 +133,7 @@ def test_model_where_clause():
     assert query.where_clause[0].value == 21
 
 
+@pytest.mark.deprecated_operator_path
 def test_query_chaining_placeholders():
     """
     Test that Query object supports chaining (even if not yet executed).
@@ -205,19 +207,19 @@ async def test_query_execution(db_url):
     await FilterUser(id=3, username="alice", age=35).save()
 
     # 1. Test basic filter
-    results = await FilterUser.where(FilterUser.age >= 30).all()
+    results = await FilterUser.where(lambda t: t.age >= 30).all()
     assert len(results) == 2
     assert {r.username for r in results} == {"taylor", "alice"}
 
     # 2. Test IN filter
-    results_in = await FilterUser.where(FilterUser.username << ["jeff", "alice"]).all()
+    results_in = await FilterUser.where(lambda t: t.username << ["jeff", "alice"]).all()
     assert len(results_in) == 2
     assert {r.username for r in results_in} == {"jeff", "alice"}
 
     # 3. Test combined filters (Chaining)
-    results_chained = (
-        await FilterUser.where(FilterUser.age < 35).where(FilterUser.age > 20).all()
-    )
+    results_chained = await FilterUser.where(lambda t: t.age < 35).where(
+        lambda t: t.age > 20
+    ).all()
     assert len(results_chained) == 2
     assert {r.username for r in results_chained} == {"taylor", "jeff"}
 
@@ -236,12 +238,12 @@ async def test_query_first(db_url):
     await FirstUser(id=1, username="taylor").save()
 
     # 1. Match found
-    user = await FirstUser.where(FirstUser.username == "taylor").first()
+    user = await FirstUser.where(lambda t: t.username == "taylor").first()
     assert user is not None
     assert user.username == "taylor"
 
     # 2. No match found
-    no_user = await FirstUser.where(FirstUser.username == "nonexistent").first()
+    no_user = await FirstUser.where(lambda t: t.username == "nonexistent").first()
     assert no_user is None
 
 
@@ -263,7 +265,7 @@ async def test_sql_injection_protection(db_url):
 
     # If not parameterized, this might return the user.
     # If parameterized, it should look for the literal string and return None.
-    result = await SafeUser.where(SafeUser.username == injection_string).first()
+    result = await SafeUser.where(lambda t: t.username == injection_string).first()
 
     assert result is None
 
@@ -287,7 +289,7 @@ async def test_query_bitwise_logic(db_url):
     # 1. Test OR (|)
     # SQL: SELECT * FROM logicuser WHERE age < 30 OR username == 'alice'
     results_or = await LogicUser.where(
-        (LogicUser.age < 30) | (LogicUser.username == "alice")
+        lambda t: (t.age < 30) | (t.username == "alice")
     ).all()
     assert len(results_or) == 2
     assert {r.username for r in results_or} == {"jeff", "alice"}
@@ -295,7 +297,7 @@ async def test_query_bitwise_logic(db_url):
     # 2. Test nested AND (&) within WHERE
     # SQL: SELECT * FROM logicuser WHERE (age > 20) AND (username != 'taylor')
     results_and = await LogicUser.where(
-        (LogicUser.age > 20) & (LogicUser.username != "taylor")
+        lambda t: (t.age > 20) & (t.username != "taylor")
     ).all()
     assert len(results_and) == 2
     assert {r.username for r in results_and} == {"jeff", "alice"}
@@ -304,8 +306,7 @@ async def test_query_bitwise_logic(db_url):
     # SQL: SELECT * FROM logicuser WHERE (username == 'taylor' OR username == 'jeff') AND age > 28
     # Only taylor (30) matches both. jeff (25) is under 28.
     results_complex = await LogicUser.where(
-        ((LogicUser.username == "taylor") | (LogicUser.username == "jeff"))
-        & (LogicUser.age > 28)
+        lambda t: ((t.username == "taylor") | (t.username == "jeff")) & (t.age > 28)
     ).all()
     assert len(results_complex) == 1
     assert results_complex[0].username == "taylor"
@@ -328,10 +329,8 @@ async def test_query_bitwise_multiple_where(db_url):
     await LogicUser(id=3, username="alice", age=35).save()
 
     # (A OR B) AND (C)
-    query = LogicUser.where(
-        (LogicUser.username == "jeff") | (LogicUser.username == "alice")
-    )
-    query = query.where(LogicUser.age > 30)
+    query = LogicUser.where(lambda t: (t.username == "jeff") | (t.username == "alice"))
+    query = query.where(lambda t: t.age > 30)
 
     results = await query.all()
     assert len(results) == 1
