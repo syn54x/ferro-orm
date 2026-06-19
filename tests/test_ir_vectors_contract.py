@@ -4,6 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from ferro import clear_registry, reset_engine
+
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
@@ -158,3 +162,58 @@ def test_ir_vectors_match_phase0_contract_envelope() -> None:
         )
         assert isinstance(ir["payload"], dict), f"{label}.ir.payload must be object"
         _validate_domain_payload(vector["domain"], ir["payload"], f"{label}.ir.payload")
+
+
+@pytest.fixture()
+def clean_model_registry() -> None:
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    reset_engine()
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+    yield
+    reset_engine()
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+
+def _load_vector(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_phase1_schema_compiler_matches_snapshot(clean_model_registry: None) -> None:
+    from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
+    from ferro.relations import resolve_relationships
+
+    from tests.test_cross_emitter_parity import _build_fixture_models
+
+    _build_fixture_models()
+    resolve_relationships()
+
+    compiled = compile_registry_schema_ir()
+    snapshot = _load_vector(VECTORS_DIR / "schema_phase1_fixture_models_v1.json")
+
+    assert compiled == snapshot["ir"]
+    assert schema_ir_fingerprint(compiled) == snapshot["fingerprint"]
+
+
+def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> None:
+    from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
+    from ferro.relations import resolve_relationships
+
+    from tests.test_cross_emitter_parity import _build_fixture_models
+
+    _build_fixture_models()
+    resolve_relationships()
+
+    first = compile_registry_schema_ir()
+    first_fp = schema_ir_fingerprint(first)
+    second = compile_registry_schema_ir()
+    second_fp = schema_ir_fingerprint(second)
+
+    assert first == second
+    assert first_fp == second_fp

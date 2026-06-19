@@ -186,7 +186,7 @@ Issue references:
 
 ### Phase 1 - Build IR core and compiler
 
-Status: `Not started`
+Status: `In progress`
 
 Issue references:
 
@@ -197,13 +197,23 @@ Issue references:
 - Introduce a Rust-owned IR crate and compile Python model metadata into deterministic IR artifacts.
 
 **Deliverables**
-- [ ] `ferro-schema-ir` crate added with versioned serde types.
-- [ ] Python -> SchemaIR compiler path added.
-- [ ] IR hashing/fingerprinting persisted for model sets.
+- [x] `ferro-schema-ir` crate added with versioned serde types.
+- [x] Python -> SchemaIR compiler path added.
+- [x] IR hashing/fingerprinting persisted for model sets.
 
 **Exit gate**
-- [ ] Existing representative models compile to stable IR snapshots in CI.
-- [ ] No user-visible behavior changes yet.
+- [x] Existing representative models compile to stable IR snapshots in CI.
+- [x] No user-visible behavior changes yet.
+
+**Evidence (working branch; pending merge to `feat/ir-first`)**
+- IR crate: `crates/ferro-schema-ir/` (versioned serde types + RFC vector round-trip tests)
+- Compiler + persistence: `src/ferro/ir/compiler.py`, `src/ferro/ir/__init__.py`, `src/ferro/metaclass.py`, `src/ferro/relations/__init__.py`, `src/ferro/state.py`
+- Stable representative snapshot fixture: `tests/fixtures/ir_vectors/schema_phase1_fixture_models_v1.json`
+- CI gate extension: `tests/test_ir_vectors_contract.py` (snapshot-compare + determinism tests)
+- Verification commands:
+  - `cargo test -p ferro-schema-ir`
+  - `uv run pytest tests/test_ir_vectors_contract.py -q`
+  - `uv run pytest tests/test_cross_emitter_parity.py -q`
 
 ---
 
@@ -473,6 +483,7 @@ Append updates as concise entries.
 - `2026-06-19` - Roadmap initialized.
 - `2026-06-19` - Branching policy set: phase work branches from `feat/ir-first` and merges back into `feat/ir-first` until final promotion to `main`.
 - `2026-06-19` - Phase 0 completed and merged via [#75](https://github.com/syn54x/ferro-orm/pull/75).
+- `2026-06-19` - Phase 1 implementation landed on working branch: added `ferro-schema-ir`, Python->SchemaIR compiler, model-set fingerprinting, and stable representative snapshot checks.
 
 ## Immediate next actions
 

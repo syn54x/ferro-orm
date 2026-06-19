@@ -1,0 +1,215 @@
+{
+  "vector_name": "schema_phase1_fixture_models_v1",
+  "domain": "schema",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "schema",
+    "ir_version": 1,
+    "payload": {
+      "dialect_agnostic": true,
+      "models": [
+        {
+          "model_name": "Member",
+          "table_name": "member",
+          "columns": [
+            {
+              "name": "email",
+              "logical_type": "string",
+              "db_type": "text",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": true,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "db_type": "bigint",
+              "nullable": true,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "org_id",
+              "logical_type": "integer",
+              "db_type": "bigint",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": true,
+              "default": null,
+              "format": null
+            }
+          ],
+          "foreign_keys": [
+            {
+              "column": "org_id",
+              "to_table": "org",
+              "to_column": "id",
+              "on_delete": "CASCADE",
+              "name": "fk_member_org_id_org"
+            }
+          ],
+          "indexes": [
+            {
+              "name": "idx_member_org_id",
+              "columns": [
+                "org_id"
+              ],
+              "unique": false
+            }
+          ],
+          "uniques": [
+            {
+              "name": "uq_member_email",
+              "columns": [
+                "email"
+              ]
+            }
+          ],
+          "checks": []
+        },
+        {
+          "model_name": "Org",
+          "table_name": "org",
+          "columns": [
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "db_type": "bigint",
+              "nullable": true,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "name",
+              "logical_type": "string",
+              "db_type": "text",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": true,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "slug",
+              "logical_type": "string",
+              "db_type": "text",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": true,
+              "index": false,
+              "default": null,
+              "format": null
+            }
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "name": "idx_org_name",
+              "columns": [
+                "name"
+              ],
+              "unique": false
+            }
+          ],
+          "uniques": [
+            {
+              "name": "uq_org_slug",
+              "columns": [
+                "slug"
+              ]
+            }
+          ],
+          "checks": []
+        },
+        {
+          "model_name": "Project",
+          "table_name": "project",
+          "columns": [
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "db_type": "bigint",
+              "nullable": true,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "name",
+              "logical_type": "string",
+              "db_type": "text",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "org_id",
+              "logical_type": "integer",
+              "db_type": "bigint",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": true,
+              "default": null,
+              "format": null
+            }
+          ],
+          "foreign_keys": [
+            {
+              "column": "org_id",
+              "to_table": "org",
+              "to_column": "id",
+              "on_delete": "CASCADE",
+              "name": "fk_project_org_id_org"
+            }
+          ],
+          "indexes": [
+            {
+              "name": "idx_project_org_id",
+              "columns": [
+                "org_id"
+              ],
+              "unique": false
+            },
+            {
+              "name": "idx_project_org_id_name",
+              "columns": [
+                "org_id",
+                "name"
+              ],
+              "unique": false
+            }
+          ],
+          "uniques": [],
+          "checks": []
+        }
+      ]
+    }
+  },
+  "fingerprint": "e32e8b0dbb67269dc456904d344dca7cecd506aabe1837a544fc9fba5efc3d3d"
+}

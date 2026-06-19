@@ -25,6 +25,7 @@ from ._core import register_model_schema
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyRelation
 from .fields import FERRO_FIELD_EXTRA_KEY
+from .ir import compile_model_schema_ir, compile_registry_schema_ir
 from .query import FieldProxy, Relation
 from .relations.descriptors import ForwardDescriptor
 from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
@@ -535,5 +536,7 @@ class ModelMetaclass(type(BaseModel)):
             if schema:
                 setattr(cls, "__ferro_schema__", schema)
                 register_model_schema(name, json.dumps(schema))
+                compile_model_schema_ir(name, cls)
+                compile_registry_schema_ir()
         except Exception as e:
             raise RuntimeError(f"Ferro failed to register model '{name}': {e}")

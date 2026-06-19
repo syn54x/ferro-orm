@@ -8,6 +8,7 @@ from .._shadow_fk_types import (
     schema_fragment_for_pk,
 )
 from ..base import ForeignKey, ManyToManyRelation
+from ..ir import compile_registry_schema_ir
 from ..schema_metadata import build_model_schema
 from ..state import (  # noqa: F401
     _JOIN_TABLE_REGISTRY,
@@ -148,4 +149,5 @@ def resolve_relationships():
         except Exception:
             pass
 
+    compile_registry_schema_ir()
     _PENDING_RELATIONS.clear()
