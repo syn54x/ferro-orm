@@ -56,9 +56,9 @@ def _render_migration_sql_for_test(
     ...
 
 def _shadow_compare_query_plan_for_test(
-    query_json: str, dialect: str, operation: str = "select"
+    query_payload_json: str, dialect: str, operation: str = "select"
 ) -> str:
-    """Test-only: compare legacy vs QueryIR-roundtrip query planning semantics."""
+    """Test-only: compare query payload planning semantics."""
     ...
 
 async def fetch_all(
@@ -66,13 +66,13 @@ async def fetch_all(
 ) -> list[Any]: ...
 async def fetch_filtered(
     cls: object,
-    query_json: str,
+    query_ir_json: str,
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
 ) -> list[Any]: ...
 async def count_filtered(
     name: str,
-    query_json: str,
+    query_ir_json: str,
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
 ) -> int: ...
@@ -102,13 +102,13 @@ async def delete_record(
 ) -> bool: ...
 async def delete_filtered(
     name: str,
-    query_json: str,
+    query_ir_json: str,
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
 ) -> int: ...
 async def update_filtered(
     name: str,
-    query_json: str,
+    query_ir_json: str,
     update_json: str,
     tx_id: Optional[str] = None,
     using: Optional[str] = None,

@@ -11,12 +11,13 @@ use crate::state::{
     IDENTITY_MAP, MODEL_REGISTRY, RustValue, SqlDialect, TRANSACTION_REGISTRY,
     TransactionConnection, TransactionHandle, connection_for_route, engine_for_connection,
 };
+use ferro_schema_ir::{IrEnvelope, QueryIrPayload};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query, SimpleExpr,
     SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -62,6 +63,33 @@ fn active_route_for_operation(
 
 fn active_connection_for_route(using: Option<String>) -> PyResult<(String, Arc<EngineHandle>)> {
     connection_for_route(using)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct QueryIrEnvelope {
+    ir_kind: String,
+    ir_version: u32,
+    payload: QueryIrPayload,
+}
+
+fn query_def_from_ir_json(query_ir_json: &str) -> PyResult<QueryDef> {
+    let envelope: QueryIrEnvelope = serde_json::from_str(query_ir_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR JSON: {}", e))
+    })?;
+    if envelope.ir_kind != "query" {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Invalid QueryIR envelope kind {:?}; expected \"query\"",
+            envelope.ir_kind
+        )));
+    }
+    if envelope.ir_version != 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unsupported QueryIR version {}; expected 1",
+            envelope.ir_version
+        )));
+    }
+    query_def_from_ir_payload(envelope.payload)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR: {e}")))
 }
 
 /// Initialize Pydantic v2 slots that `BaseModel.__init__` normally sets, after zero-copy
@@ -1608,29 +1636,27 @@ pub fn save_bulk_records(
     })
 }
 
-/// Fetches records for a given model class based on a JSON-defined query.
+/// Fetches records for a given model class based on a QueryIR-defined query.
 ///
 /// Args:
 ///     cls (PyAny): The Python model class.
-///     query_json (str): The serialized QueryDef JSON.
+///     query_ir_json (str): The serialized QueryIR envelope JSON.
 ///
 /// Returns:
 ///     list[PyAny]: A list of hydrated model instances.
 #[pyfunction]
-#[pyo3(signature = (cls, query_json, tx_id=None, using=None))]
+#[pyo3(signature = (cls, query_ir_json, tx_id=None, using=None))]
 pub fn fetch_filtered<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
-    query_json: String,
+    query_ir_json: String,
     tx_id: Option<String>,
     using: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
 
-    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
-    })?;
+    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
@@ -1717,7 +1743,12 @@ pub fn fetch_filtered<'py>(
             let (s, values) = sea_query_build_for_backend!(select, backend);
             (s, values, pk, schema.clone())
         };
-        maybe_compare_shadow_query_artifacts(&engine, "fetch_filtered", &query_def, &bind_values.0)?;
+        maybe_compare_shadow_query_artifacts(
+            &engine,
+            "fetch_filtered",
+            &query_def,
+            &bind_values.0,
+        )?;
 
         let parsed_data = match tx_conn {
             Some(conn_arc) => {
@@ -1804,17 +1835,15 @@ pub fn fetch_filtered<'py>(
 
 /// Returns the number of records matching a filtered query.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, tx_id=None, using=None))]
+#[pyo3(signature = (name, query_ir_json, tx_id=None, using=None))]
 pub fn count_filtered(
     py: Python<'_>,
     name: String,
-    query_json: String,
+    query_ir_json: String,
     tx_id: Option<String>,
     using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
-    })?;
+    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
@@ -1876,7 +1905,12 @@ pub fn count_filtered(
             select.cond_where(query_def.to_condition_for_backend(backend));
             sea_query_build_for_backend!(select, backend)
         };
-        maybe_compare_shadow_query_artifacts(&engine, "count_filtered", &query_def, &bind_values.0)?;
+        maybe_compare_shadow_query_artifacts(
+            &engine,
+            "count_filtered",
+            &query_def,
+            &bind_values.0,
+        )?;
 
         let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
         let count = match tx_conn {
@@ -2009,17 +2043,15 @@ pub fn delete_record(
 
 /// Deletes records matching a filtered query.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, tx_id=None, using=None))]
+#[pyo3(signature = (name, query_ir_json, tx_id=None, using=None))]
 pub fn delete_filtered(
     py: Python<'_>,
     name: String,
-    query_json: String,
+    query_ir_json: String,
     tx_id: Option<String>,
     using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
-    })?;
+    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
@@ -2035,7 +2067,12 @@ pub fn delete_filtered(
                 .cond_where(query_def.to_condition_for_backend(backend));
             sea_query_build_for_backend!(delete, backend)
         };
-        maybe_compare_shadow_query_artifacts(&engine, "delete_filtered", &query_def, &bind_values.0)?;
+        maybe_compare_shadow_query_artifacts(
+            &engine,
+            "delete_filtered",
+            &query_def,
+            &bind_values.0,
+        )?;
 
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
@@ -2055,18 +2092,16 @@ pub fn delete_filtered(
 
 /// Updates records matching a filtered query with provided values.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, update_json, tx_id=None, using=None))]
+#[pyo3(signature = (name, query_ir_json, update_json, tx_id=None, using=None))]
 pub fn update_filtered(
     py: Python<'_>,
     name: String,
-    query_json: String,
+    query_ir_json: String,
     update_json: String,
     tx_id: Option<String>,
     using: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
-    })?;
+    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
 
     let update_values: serde_json::Value = serde_json::from_str(&update_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid update JSON: {}", e))
@@ -2115,7 +2150,12 @@ pub fn update_filtered(
             }
             sea_query_build_for_backend!(update, backend)
         };
-        maybe_compare_shadow_query_artifacts(&engine, "update_filtered", &query_def, &bind_values.0)?;
+        maybe_compare_shadow_query_artifacts(
+            &engine,
+            "update_filtered",
+            &query_def,
+            &bind_values.0,
+        )?;
 
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
@@ -2522,9 +2562,9 @@ pub fn raw_fetch_one<'py>(
 
 #[pyfunction]
 #[pyo3(name = "_shadow_compare_query_plan_for_test")]
-#[pyo3(signature = (query_json, dialect, operation="select".to_string()))]
+#[pyo3(signature = (query_payload_json, dialect, operation="select".to_string()))]
 pub fn _shadow_compare_query_plan_for_test(
-    query_json: String,
+    query_payload_json: String,
     dialect: String,
     operation: String,
 ) -> PyResult<String> {
@@ -2538,12 +2578,35 @@ pub fn _shadow_compare_query_plan_for_test(
             )));
         }
     };
-    let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
-    })?;
+    let query_def: QueryDef = if let Ok(ir_envelope) =
+        serde_json::from_str::<IrEnvelope<QueryIrPayload>>(&query_payload_json)
+    {
+        if ir_envelope.ir_kind != "query" {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid QueryIR envelope kind {:?}; expected \"query\"",
+                ir_envelope.ir_kind
+            )));
+        }
+        if ir_envelope.ir_version != 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unsupported QueryIR version {}; expected 1",
+                ir_envelope.ir_version
+            )));
+        }
+        query_def_from_ir_payload(ir_envelope.payload).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR payload: {e}"))
+        })?
+    } else {
+        serde_json::from_str(&query_payload_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid query payload JSON: {}", e))
+        })?
+    };
     let mut select_legacy = Query::select();
     select_legacy.from(Alias::new(query_def.model_name.to_lowercase()));
-    select_legacy.column((Alias::new(query_def.model_name.to_lowercase()), sea_query::Asterisk));
+    select_legacy.column((
+        Alias::new(query_def.model_name.to_lowercase()),
+        sea_query::Asterisk,
+    ));
     select_legacy.cond_where(query_def.to_condition_for_backend(backend));
     if let Some(ref orders) = query_def.order_by {
         for order in orders {
@@ -2576,8 +2639,9 @@ pub fn _shadow_compare_query_plan_for_test(
             "artifact": shadow,
         },
     });
-    serde_json::to_string(&payload)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to encode JSON: {e}")))
+    serde_json::to_string(&payload).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to encode JSON: {e}"))
+    })
 }
 
 #[cfg(test)]

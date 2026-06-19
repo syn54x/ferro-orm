@@ -31,7 +31,7 @@ from ferro.query import col
 rows = await User.where(col(User.archived) == False).all()
 ```
 
-`col()` is a runtime-identity helper that statically narrows its argument back to `FieldProxy[T]`. It does no work at runtime beyond an `isinstance` guard (and raises `TypeError` if you accidentally hand it a literal). Reach for it when you want to keep the operator shape on an existing call site while staying type-safe.
+`col()` is a runtime helper that returns a typed `FieldProxy[T]` for the same column while preserving the operator shape. It validates input with an `isinstance` guard (and raises `TypeError` if you accidentally hand it a literal). Reach for it when you want to keep the operator shape on an existing call site while staying type-safe.
 
 ### 3. Operator (legacy)
 
@@ -40,8 +40,8 @@ rows = await User.where(User.id == 1).all()
 rows = await User.where(User.email.like("%@example.com")).all()
 ```
 
-!!! warning "Operator style will be deprecated"
-    The operator style is compatible today but slated for deprecation in a future release. It also fails static type checking: checkers read `User.id == 1` through your Pydantic annotations as a `bool`, while `where()` expects a `QueryNode | Predicate`. Use lambda predicates for new code, or `col()` when migrating existing operator-style call sites with minimal diff.
+!!! warning "Operator style is deprecated"
+    The operator style is compatible today but on the `v0.13.0` removal track. It also fails static type checking: checkers read `User.id == 1` through your Pydantic annotations as a `bool`, while `where()` expects a `QueryNode | Predicate`. Use lambda predicates for new code, or `col()` when migrating existing operator-style call sites with minimal diff.
 
 ## When to Use Which
 
@@ -79,7 +79,7 @@ published = await author.posts.where(lambda t: t.published == True).all()
 - Your model annotations. `archived: bool = False` stays exactly as it is.
 - The metaclass's `FieldProxy` injection. Class attribute access is unchanged.
 - Pydantic schema generation, JSON schema output, or model validation.
-- The Rust FFI bridge or how `QueryNode`s are serialized for the engine.
+- The Rust FFI bridge architecture (predicates now serialize through QueryIR envelopes).
 - The operator-path runtime. Existing `Model.field == value` calls take the same code path they always have.
 
 ## Scope Boundaries

@@ -1,6 +1,6 @@
-"""Build fluent query objects that serialize filter definitions for the Rust core"""
+"""Build fluent query objects that serialize QueryIR payloads for the Rust core."""
 
-import json
+import warnings
 from typing import TYPE_CHECKING, Any, Generic, Type, TypeVar, overload
 
 from .._core import (
@@ -21,9 +21,41 @@ T = TypeVar("T")
 E = TypeVar("E")
 
 
-def _query_def_to_json(query_def: dict[str, Any]) -> str:
-    """Serialize query definitions while preserving typed values in live Query state."""
-    return json.dumps(_serialize_query_value(query_def))
+try:
+    from warnings import deprecated as _warnings_deprecated
+except ImportError:
+
+    def _warnings_deprecated(message: str, **_: Any):
+        def _decorate(func):
+            def _wrapped(*args, **kwargs):
+                warnings.warn(message, DeprecationWarning, stacklevel=3)
+                return func(*args, **kwargs)
+
+            return _wrapped
+
+        return _decorate
+
+
+def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
+    """Serialize a QueryIR payload into a versioned IR envelope JSON string."""
+    import json
+
+    return json.dumps(
+        {
+            "ir_kind": "query",
+            "ir_version": 1,
+            "payload": _serialize_query_value(query_payload),
+        }
+    )
+
+
+@_warnings_deprecated(
+    "Operator predicate style (Model.field OP value) is deprecated; use lambda "
+    "predicates (`where(lambda t: ...)`) or col(Model.field) instead. Planned "
+    "removal: v0.13.0."
+)
+def _deprecated_operator_query_node(node: QueryNode) -> QueryNode:
+    return node
 
 
 def _resolve_where_node(node: Any) -> QueryNode:
@@ -34,6 +66,8 @@ def _resolve_where_node(node: Any) -> QueryNode:
     a ``QueryNode`` (the lambda path).
     """
     if isinstance(node, QueryNode):
+        if node.uses_operator_style():
+            return _deprecated_operator_query_node(node)
         return node
     if callable(node):
         result = node(QueryProxy())
@@ -118,8 +152,9 @@ class Query(Generic[T]):
         :class:`QueryNode` is also accepted, built either with
         :func:`ferro.query.col` (the type-safe escape hatch that preserves
         operator shape) or with operator syntax on class attributes. The
-        bare operator form (``User.where(User.age >= 18)``) is planned for
-        deprecation in a future release and does not type-check statically:
+        bare operator form (``User.where(User.age >= 18)``) is deprecated and
+        on the v0.13.0 removal track. It does not
+        type-check statically:
         the class attribute types as the field type, so the comparison
         resolves to ``bool``, not ``QueryNode``.
 
@@ -135,7 +170,7 @@ class Query(Generic[T]):
 
         Examples:
             >>> q1 = User.where(lambda t: t.archived == False)  # noqa: E712
-            >>> q2 = User.where(User.id == 1)
+            >>> q2 = User.where(lambda t: t.id == 1)
             >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """
@@ -216,7 +251,7 @@ class Query(Generic[T]):
         """
         query_def = {
             "model_name": self.model_cls.__name__,
-            "where_clause": [node.to_dict() for node in self.where_clause],
+            "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": self.order_by_clause,
             "limit": self._limit,
             "offset": self._offset,
@@ -224,7 +259,7 @@ class Query(Generic[T]):
         }
         tx_id, using = self._transaction_or_using()
         results = await fetch_filtered(
-            self.model_cls, _query_def_to_json(query_def), tx_id, using
+            self.model_cls, _query_ir_payload_to_json(query_def), tx_id, using
         )
         for instance in results:
             if hasattr(self.model_cls, "_fix_types"):
@@ -244,12 +279,15 @@ class Query(Generic[T]):
         """
         query_def = {
             "model_name": self.model_cls.__name__,
-            "where_clause": [node.to_dict() for node in self.where_clause],
+            "where": [node.to_ir_dict() for node in self.where_clause],
+            "order_by": [],
+            "limit": None,
+            "offset": None,
             "m2m": self._m2m_context,
         }
         tx_id, using = self._transaction_or_using()
         return await count_filtered(
-            self.model_cls.__name__, _query_def_to_json(query_def), tx_id, using
+            self.model_cls.__name__, _query_ir_payload_to_json(query_def), tx_id, using
         )
 
     async def update(self, **fields) -> int:
@@ -268,9 +306,11 @@ class Query(Generic[T]):
         """
         query_def = {
             "model_name": self.model_cls.__name__,
-            "where_clause": [node.to_dict() for node in self.where_clause],
+            "where": [node.to_ir_dict() for node in self.where_clause],
+            "order_by": [],
             "limit": self._limit,
             "offset": self._offset,
+            "m2m": None,
         }
         from pydantic_core import to_json
 
@@ -278,7 +318,7 @@ class Query(Generic[T]):
         # Use pydantic_core.to_json to handle Decimals, UUIDs, etc. in kwargs
         return await update_filtered(
             self.model_cls.__name__,
-            _query_def_to_json(query_def),
+            _query_ir_payload_to_json(query_def),
             to_json(fields).decode(),
             tx_id,
             using,
@@ -316,13 +356,15 @@ class Query(Generic[T]):
         """
         query_def = {
             "model_name": self.model_cls.__name__,
-            "where_clause": [node.to_dict() for node in self.where_clause],
+            "where": [node.to_ir_dict() for node in self.where_clause],
+            "order_by": [],
             "limit": self._limit,
             "offset": self._offset,
+            "m2m": None,
         }
         tx_id, using = self._transaction_or_using()
         return await delete_filtered(
-            self.model_cls.__name__, _query_def_to_json(query_def), tx_id, using
+            self.model_cls.__name__, _query_ir_payload_to_json(query_def), tx_id, using
         )
 
     async def exists(self) -> bool:

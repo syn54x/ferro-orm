@@ -43,14 +43,16 @@ def _clear_state():
 
 
 class TestColWrapper:
-    def test_col_returns_same_field_proxy(self):
-        """col(FieldProxy) is identity at runtime."""
+    def test_col_returns_field_proxy_with_same_column(self):
+        """col(FieldProxy) returns a typed query proxy for the same column."""
 
         class ColUser(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             archived: bool = False
 
-        assert col(ColUser.archived) is ColUser.archived  # type: ignore[arg-type]
+        wrapped = col(ColUser.archived)  # type: ignore[arg-type]
+        assert isinstance(wrapped, FieldProxy)
+        assert wrapped.column == "archived"
 
     def test_col_eq_builds_query_node(self):
         """col(field) == value builds a QueryNode with the right shape."""
@@ -174,6 +176,8 @@ class TestLambdaPredicates:
 
 
 class TestOperatorPathUnchanged:
+    pytestmark = pytest.mark.deprecated_operator_path
+
     @pytest.mark.asyncio
     async def test_operator_eq_still_works(self, db_url):
         """The original ``Model.field == value`` form is unchanged at runtime.
@@ -193,7 +197,10 @@ class TestOperatorPathUnchanged:
         await OpUser(id=1, email="a@b.com").save()
         await OpUser(id=2, email="c@d.com").save()
 
-        rows = await OpUser.where(OpUser.email == "a@b.com").all()  # ty: ignore[no-matching-overload]
+        with pytest.deprecated_call(match="Operator predicate style"):
+            rows = await OpUser.where(
+                OpUser.email == "a@b.com"
+            ).all()  # ty: ignore[no-matching-overload]
         assert len(rows) == 1
         assert rows[0].email == "a@b.com"
 
@@ -204,6 +211,8 @@ class TestOperatorPathUnchanged:
 
 
 class TestCombinedStyles:
+    pytestmark = pytest.mark.deprecated_operator_path
+
     @pytest.mark.asyncio
     async def test_mixed_chain_executes(self, db_url):
         """Operator + col() + lambda chained together filter correctly."""
@@ -218,12 +227,13 @@ class TestCombinedStyles:
         await MixUser(id=1_001, role="admin", archived=True).save()
         await MixUser(id=2, role="user", archived=False).save()
 
-        rows = await (
-            MixUser.where(MixUser.id == 1)  # ty: ignore[no-matching-overload]
-            .where(col(MixUser.archived) == False)  # noqa: E712
-            .where(lambda t: t.role == "admin")
-            .all()
-        )
+        with pytest.deprecated_call(match="Operator predicate style"):
+            rows = await (
+                MixUser.where(MixUser.id == 1)  # ty: ignore[no-matching-overload]
+                .where(col(MixUser.archived) == False)  # noqa: E712
+                .where(lambda t: t.role == "admin")
+                .all()
+            )
         assert len(rows) == 1
         assert rows[0].id == 1
 

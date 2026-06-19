@@ -340,7 +340,11 @@ pub fn query_def_from_ir_payload(payload: QueryIrPayload) -> Result<QueryDef, St
     };
     Ok(QueryDef {
         model_name: payload.model_name,
-        where_clause: payload.where_clause.iter().map(query_node_from_ir).collect(),
+        where_clause: payload
+            .where_clause
+            .iter()
+            .map(query_node_from_ir)
+            .collect(),
         order_by: if payload.order_by.is_empty() {
             None
         } else {

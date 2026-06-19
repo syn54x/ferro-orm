@@ -440,8 +440,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         A prebuilt :class:`QueryNode` is also accepted, built either with
         :func:`ferro.query.col` (the type-safe escape hatch that preserves
         operator shape) or with operator syntax on class attributes. The
-        bare operator form (``User.where(User.age >= 18)``) is planned for
-        deprecation in a future release and does not type-check statically:
+        bare operator form (``User.where(User.age >= 18)``) is deprecated and
+        on the v0.13.0 removal track. It does not
+        type-check statically:
         the class attribute types as the field type, so the comparison
         resolves to ``bool``, not ``QueryNode``. See
         ``docs/concepts/query-typing.md`` for the trade-offs between the
@@ -455,7 +456,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         Examples:
             >>> q1 = User.where(lambda t: t.archived == False)  # noqa: E712
-            >>> q2 = User.where(User.id == 1)
+            >>> q2 = User.where(lambda t: t.id == 1)
             >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """

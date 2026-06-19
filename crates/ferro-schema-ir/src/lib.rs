@@ -141,7 +141,8 @@ mod tests {
 
     #[test]
     fn schema_fixture_roundtrip() {
-        let fixture = include_str!("../../../tests/fixtures/ir_vectors/schema_invoice_baseline_v1.json");
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/schema_invoice_baseline_v1.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("schema fixture must parse");
         let ir = parsed
@@ -156,7 +157,8 @@ mod tests {
 
     #[test]
     fn query_fixture_roundtrip() {
-        let fixture = include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v1.json");
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v1.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query fixture must parse");
         let ir = parsed
@@ -171,7 +173,8 @@ mod tests {
 
     #[test]
     fn codec_fixture_roundtrip() {
-        let fixture = include_str!("../../../tests/fixtures/ir_vectors/codec_registry_core_v1.json");
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/codec_registry_core_v1.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("codec fixture must parse");
         let ir = parsed
