@@ -88,7 +88,7 @@ Definition of done addition:
 ## Program status
 
 - Overall status: `In progress`
-- Current phase: `Phase 1`
+- Current phase: `Phase 3`
 - Last updated: `2026-06-19`
 - Roadmap owner: `@syn54x`
 
@@ -219,7 +219,7 @@ Issue references:
 
 ### Phase 2 - Shadow runtime dual-run
 
-Status: `Not started`
+Status: `Complete`
 
 Issue references:
 
@@ -230,13 +230,24 @@ Issue references:
 - Run IR-derived runtime planning in shadow mode and compare semantics against current runtime path.
 
 **Deliverables**
-- [ ] Query/DDL shadow planner behind internal flag.
-- [ ] Semantic diff harness (result shape, bind semantics, not only SQL strings).
-- [ ] Backend matrix shadow reports for SQLite/Postgres.
+- [x] Query/DDL shadow planner behind internal flag.
+- [x] Semantic diff harness (result shape, bind semantics, not only SQL strings).
+- [x] Backend matrix shadow reports for SQLite/Postgres.
 
 **Exit gate**
-- [ ] Zero semantic mismatches across integration suite.
-- [ ] Shadow reports are stable and required in CI for touched paths.
+- [x] Zero semantic mismatches across integration suite.
+- [x] Shadow reports are stable and required in CI for touched paths.
+
+**Evidence (merged to `feat/ir-first`)**
+- Phase 2 merge PR: [#105](https://github.com/syn54x/ferro-orm/pull/105) (merge commit `383a3ab`)
+- Query/DDL shadow compare wiring: `src/backend.rs`, `src/connection.rs`, `src/operations.rs`, `src/query.rs`, `src/schema.rs`, `src/migrate.rs`
+- Shadow report fixtures + harness: `tests/fixtures/shadow_reports/`, `tests/test_shadow_reports.py`
+- CI touched-path gate: `.github/workflows/ci.yml` (`changed-shadow-paths`, `test-shadow-reports-pr`)
+- Issue sync comments:
+  - [#80 comment](https://github.com/syn54x/ferro-orm/issues/80#issuecomment-4753239409)
+  - [#81 comment](https://github.com/syn54x/ferro-orm/issues/81#issuecomment-4753239194)
+  - [#82 comment](https://github.com/syn54x/ferro-orm/issues/82#issuecomment-4753239269)
+  - [#83 comment](https://github.com/syn54x/ferro-orm/issues/83#issuecomment-4753239338)
 
 ---
 
@@ -485,6 +496,7 @@ Append updates as concise entries.
 - `2026-06-19` - Phase 0 completed and merged via [#75](https://github.com/syn54x/ferro-orm/pull/75).
 - `2026-06-19` - Phase 1 implementation landed on working branch: added `ferro-schema-ir`, Python->SchemaIR compiler, model-set fingerprinting, and stable representative snapshot checks.
 - `2026-06-19` - Phase 2 scaffolding landed on working branch: internal shadow runtime flag/hook wiring, semantic comparison harness, stable SQLite/Postgres shadow report fixtures, and touched-path CI gate for shadow reports.
+- `2026-06-19` - Phase 2 merged via [#105](https://github.com/syn54x/ferro-orm/pull/105); issues [#80](https://github.com/syn54x/ferro-orm/issues/80), [#81](https://github.com/syn54x/ferro-orm/issues/81), [#82](https://github.com/syn54x/ferro-orm/issues/82), [#83](https://github.com/syn54x/ferro-orm/issues/83) synchronized and closed.
 
 ## Immediate next actions
 
