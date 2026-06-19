@@ -306,4 +306,3 @@ def compile_registry_schema_ir() -> dict[str, Any]:
 
 def schema_ir_fingerprint(ir_envelope: dict[str, Any]) -> str:
     return _fingerprint(ir_envelope)
-
