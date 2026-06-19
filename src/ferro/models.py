@@ -441,7 +441,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         :func:`ferro.query.col` (the type-safe escape hatch that preserves
         operator shape) or with operator syntax on class attributes. The
         bare operator form (``User.where(User.age >= 18)``) is deprecated and
-        on the Phase 7 removal track (next major release). It does not
+        on the v0.13.0 removal track. It does not
         type-check statically:
         the class attribute types as the field type, so the comparison
         resolves to ``bool``, not ``QueryNode``. See

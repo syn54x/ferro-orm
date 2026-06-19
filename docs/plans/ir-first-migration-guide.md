@@ -56,7 +56,7 @@ No user-facing runtime behavior changes expected. Shadow planning is internal-on
 | Issue | Change | Impact | User action | Notes |
 | --- | --- | --- | --- | --- |
 | [#85](https://github.com/syn54x/ferro-orm/issues/85) | Runtime query compilation now consumes QueryIR envelopes on core execution paths | minor | No API change for lambda/`col()` query callers; if you rely on internal `_core` query payload shape, migrate to QueryIR envelope (`ir_kind`, `ir_version`, `payload`) | Internal JSON `QueryDef` payload contract is no longer the core hot-path boundary |
-| [#86](https://github.com/syn54x/ferro-orm/issues/86) | Operator-style predicates (`Model.field OP value`) are deprecated with runtime warnings | minor | Migrate call sites to `where(lambda t: ...)` (recommended) or `col(Model.field)` | Deprecation message includes replacement + removal target (Phase 7 / next major release) |
+| [#86](https://github.com/syn54x/ferro-orm/issues/86) | Operator-style predicates (`Model.field OP value`) are deprecated with runtime warnings | minor | Migrate call sites to `where(lambda t: ...)` (recommended) or `col(Model.field)` | Deprecation message includes replacement + removal target (`v0.13.0`) |
 | [#87](https://github.com/syn54x/ferro-orm/issues/87) | Python query builder now emits QueryIR envelope payloads to Rust runtime | minor | No action for public `Model.where`/`Query.where` usage; update internal tests/tools that serialized legacy `where_clause` JSON | Compatibility behavior remains documented in query typing docs during deprecation window |
 
 ### Phase 4
@@ -72,5 +72,9 @@ _TBD_
 _TBD_
 
 ### Phase 7
+
+_TBD_
+
+### Phase 8
 
 _TBD_

@@ -30,7 +30,7 @@ Move Ferro to an IR-first architecture where schema, query, migration, and codec
 - Query execution consumes typed QueryIR (not ad-hoc JSON payloads).
 - Hydration path is single and ABI-defined for Pydantic slot initialization.
 - Global registries are removed from hot-path runtime operations in favor of explicit engine/session state.
-- Legacy compatibility shims are removed in the final major-version cut.
+- Legacy compatibility shims are removed in the explicit `v0.13.0` cutover.
 - User-facing migration guidance is continuously updated and release-ready at each phase boundary.
 
 ## Living migration guide requirement
@@ -351,7 +351,7 @@ Issue references:
 
 ---
 
-### Phase 7 - Major version release and shim removal
+### Phase 7 - Major-version public release with compatibility window
 
 Status: `Not started`
 
@@ -361,16 +361,41 @@ Issue references:
 - `Sub-issues:` [#101](https://github.com/syn54x/ferro-orm/issues/101), [#102](https://github.com/syn54x/ferro-orm/issues/102), [#103](https://github.com/syn54x/ferro-orm/issues/103)
 
 **Objective**
-- Complete migration by removing compatibility shims and releasing IR-first major version.
+- Release the IR-first upgrade publicly while keeping deprecated compatibility paths available through a defined migration window.
 
 **Deliverables**
-- [ ] Legacy code paths removed.
+- [ ] Public upgrade release shipped with migration guide and deprecation messaging.
+- [ ] Deprecated compatibility paths remain available during the migration window.
 - [ ] Migration guide and upgrade checklist.
 - [ ] Final release checklist and changelog entries.
 
 **Exit gate**
 - [ ] Release branch green across full backend/test matrix.
 - [ ] Migration guide validated against at least one real example project.
+- [ ] Deprecation warnings explicitly point to `v0.13.0` as the removal release.
+
+---
+
+### Phase 8 - Compatibility cutover and shim removal (`v0.13.0`)
+
+Status: `Not started`
+
+Issue references:
+
+- `Epic:` _TBD_
+- `Sub-issues:` _TBD_
+
+**Objective**
+- Complete migration by removing deprecated compatibility shims in `v0.13.0`.
+
+**Deliverables**
+- [ ] Legacy compatibility code paths removed.
+- [ ] Final migration-guide cutover notes for `v0.13.0`.
+- [ ] Release checklist and changelog entries for shim removal.
+
+**Exit gate**
+- [ ] Full backend/test matrix green with deprecated paths removed.
+- [ ] Migration guide validated against at least one real example project on the `v0.13.0` code path.
 
 ## Workstreams and ownership
 
@@ -460,7 +485,7 @@ async with engines.session("app"):
 Use this roadmap as the source for issues and project fields.
 
 **Recommended project fields**
-- `Phase`: 0, 1, 2, 3, 4, 5, 6, 7
+- `Phase`: 0, 1, 2, 3, 4, 5, 6, 7, 8
 - `Workstream`: WS1..WS6
 - `Type`: RFC, Infra, Runtime, Migration, Test, Docs, Release
 - `Status`: Backlog, Ready, In Progress, Blocked, In Review, Done
@@ -506,6 +531,7 @@ Append updates as concise entries.
 - `2026-06-19` - Phase 2 scaffolding landed on working branch: internal shadow runtime flag/hook wiring, semantic comparison harness, stable SQLite/Postgres shadow report fixtures, and touched-path CI gate for shadow reports.
 - `2026-06-19` - Phase 2 merged via [#105](https://github.com/syn54x/ferro-orm/pull/105); issues [#80](https://github.com/syn54x/ferro-orm/issues/80), [#81](https://github.com/syn54x/ferro-orm/issues/81), [#82](https://github.com/syn54x/ferro-orm/issues/82), [#83](https://github.com/syn54x/ferro-orm/issues/83) synchronized and closed.
 - `2026-06-19` - Phase 3 working-branch implementation landed: QueryIR envelope hot-path cutover for query operations, operator-style deprecation warnings, and synchronized query docs/migration guidance updates.
+- `2026-06-19` - Sequencing update: Phase 7 is now public release with deprecated compatibility support; hard removal moved to Phase 8 (`v0.13.0`).
 
 ## Immediate next actions
 
