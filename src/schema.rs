@@ -631,6 +631,27 @@ fn build_create_table_sqls(
     (table_sql, index_sqls)
 }
 
+fn shadow_compare_create_table_sqls(
+    name: &str,
+    schema: &serde_json::Value,
+    backend: SqlDialect,
+) -> Result<(), String> {
+    let legacy = build_create_table_sqls(name, schema, backend);
+    let schema_roundtrip: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(schema).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let shadow = build_create_table_sqls(name, &schema_roundtrip, backend);
+    if legacy == shadow {
+        return Ok(());
+    }
+    Err(format!(
+        "shadow create-table mismatch for '{}': legacy={} shadow={}",
+        name,
+        serde_json::to_string(&legacy).unwrap_or_else(|_| "<legacy>".to_string()),
+        serde_json::to_string(&shadow).unwrap_or_else(|_| "<shadow>".to_string()),
+    ))
+}
+
 /// Internal utility to create all registered tables in the database.
 ///
 /// This is used by both the `connect(auto_migrate=True)` flow and the
@@ -650,6 +671,17 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
 
     for (name, schema) in order_schemas_for_creation(schemas) {
         let (sql, index_sqls) = build_create_table_sqls(&name, &schema, backend);
+        if engine.is_shadow_runtime_enabled()
+            && let Err(diff) = shadow_compare_create_table_sqls(&name, &schema, backend)
+        {
+            crate::log_debug(format!("⚠️ Ferro shadow runtime mismatch: {diff}"));
+            if std::env::var("FERRO_SHADOW_RUNTIME_STRICT")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(diff));
+            }
+        }
 
         engine.execute_sql(&sql).await.map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(

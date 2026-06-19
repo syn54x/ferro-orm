@@ -6,7 +6,7 @@
 use crate::backend::{
     BackendKind, EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind,
 };
-use crate::query::QueryDef;
+use crate::query::{QueryDef, query_def_from_ir_payload};
 use crate::state::{
     IDENTITY_MAP, MODEL_REGISTRY, RustValue, SqlDialect, TRANSACTION_REGISTRY,
     TransactionConnection, TransactionHandle, connection_for_route, engine_for_connection,
@@ -16,6 +16,7 @@ use sea_query::{
     Alias, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query, SimpleExpr,
     SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -351,6 +352,87 @@ macro_rules! sea_query_to_string_for_backend {
             crate::state::SqlDialect::Postgres => $stmt.to_string(PostgresQueryBuilder),
         }
     }};
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct QueryPlanArtifact {
+    operation: String,
+    semantic_signature: Vec<String>,
+    bind_semantics: Vec<String>,
+}
+
+fn bind_semantics(bind_values: &[SeaValue]) -> Vec<String> {
+    engine_bind_values_from_sea(bind_values)
+        .into_iter()
+        .map(|value| format!("{value:?}"))
+        .collect()
+}
+
+fn query_plan_artifact(
+    operation: &str,
+    query_def: &QueryDef,
+    bind_values: &[SeaValue],
+) -> QueryPlanArtifact {
+    let mut semantic_signature = query_def
+        .semantic_signature()
+        .where_semantics
+        .into_iter()
+        .collect::<Vec<_>>();
+    semantic_signature.sort();
+
+    QueryPlanArtifact {
+        operation: operation.to_string(),
+        semantic_signature,
+        bind_semantics: bind_semantics(bind_values),
+    }
+}
+
+fn shadow_artifact_from_ir_roundtrip(
+    operation: &str,
+    query_def: &QueryDef,
+    bind_values: &[SeaValue],
+) -> Result<QueryPlanArtifact, String> {
+    let ir_payload = query_def.to_ir_payload();
+    let ir_roundtrip = query_def_from_ir_payload(ir_payload)?;
+    Ok(query_plan_artifact(operation, &ir_roundtrip, bind_values))
+}
+
+fn compare_shadow_query_artifacts(
+    operation: &str,
+    query_def: &QueryDef,
+    bind_values: &[SeaValue],
+) -> Result<(), String> {
+    let legacy = query_plan_artifact(operation, query_def, bind_values);
+    let shadow = shadow_artifact_from_ir_roundtrip(operation, query_def, bind_values)?;
+    if legacy == shadow {
+        return Ok(());
+    }
+    let legacy_json = serde_json::to_string(&legacy).unwrap_or_else(|_| "<legacy>".to_string());
+    let shadow_json = serde_json::to_string(&shadow).unwrap_or_else(|_| "<shadow>".to_string());
+    Err(format!(
+        "shadow planner mismatch for '{operation}': legacy={legacy_json} shadow={shadow_json}"
+    ))
+}
+
+fn maybe_compare_shadow_query_artifacts(
+    engine: &EngineHandle,
+    operation: &str,
+    query_def: &QueryDef,
+    bind_values: &[SeaValue],
+) -> PyResult<()> {
+    if !engine.is_shadow_runtime_enabled() {
+        return Ok(());
+    }
+    if let Err(diff) = compare_shadow_query_artifacts(operation, query_def, bind_values) {
+        crate::log_debug(format!("⚠️ Ferro shadow runtime mismatch: {diff}"));
+        if std::env::var("FERRO_SHADOW_RUNTIME_STRICT")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(diff));
+        }
+    }
+    Ok(())
 }
 
 /// On Postgres, cast text-like special columns in SELECT output so Python hydration
@@ -1635,6 +1717,7 @@ pub fn fetch_filtered<'py>(
             let (s, values) = sea_query_build_for_backend!(select, backend);
             (s, values, pk, schema.clone())
         };
+        maybe_compare_shadow_query_artifacts(&engine, "fetch_filtered", &query_def, &bind_values.0)?;
 
         let parsed_data = match tx_conn {
             Some(conn_arc) => {
@@ -1793,6 +1876,7 @@ pub fn count_filtered(
             select.cond_where(query_def.to_condition_for_backend(backend));
             sea_query_build_for_backend!(select, backend)
         };
+        maybe_compare_shadow_query_artifacts(&engine, "count_filtered", &query_def, &bind_values.0)?;
 
         let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
         let count = match tx_conn {
@@ -1951,6 +2035,7 @@ pub fn delete_filtered(
                 .cond_where(query_def.to_condition_for_backend(backend));
             sea_query_build_for_backend!(delete, backend)
         };
+        maybe_compare_shadow_query_artifacts(&engine, "delete_filtered", &query_def, &bind_values.0)?;
 
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
@@ -2030,6 +2115,7 @@ pub fn update_filtered(
             }
             sea_query_build_for_backend!(update, backend)
         };
+        maybe_compare_shadow_query_artifacts(&engine, "update_filtered", &query_def, &bind_values.0)?;
 
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
@@ -2432,6 +2518,66 @@ pub fn raw_fetch_one<'py>(
             None => Ok(py.None()),
         })
     })
+}
+
+#[pyfunction]
+#[pyo3(name = "_shadow_compare_query_plan_for_test")]
+#[pyo3(signature = (query_json, dialect, operation="select".to_string()))]
+pub fn _shadow_compare_query_plan_for_test(
+    query_json: String,
+    dialect: String,
+    operation: String,
+) -> PyResult<String> {
+    let backend = match dialect.as_str() {
+        "postgres" => SqlDialect::Postgres,
+        "sqlite" => SqlDialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
+                other
+            )));
+        }
+    };
+    let query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
+    })?;
+    let mut select_legacy = Query::select();
+    select_legacy.from(Alias::new(query_def.model_name.to_lowercase()));
+    select_legacy.column((Alias::new(query_def.model_name.to_lowercase()), sea_query::Asterisk));
+    select_legacy.cond_where(query_def.to_condition_for_backend(backend));
+    if let Some(ref orders) = query_def.order_by {
+        for order in orders {
+            let dir = if order.direction.to_lowercase() == "desc" {
+                Order::Desc
+            } else {
+                Order::Asc
+            };
+            select_legacy.order_by(Alias::new(&order.column), dir);
+        }
+    }
+    if let Some(limit) = query_def.limit {
+        select_legacy.limit(limit);
+    }
+    if let Some(offset) = query_def.offset {
+        select_legacy.offset(offset);
+    }
+    let (legacy_sql, legacy_values) = sea_query_build_for_backend!(select_legacy, backend);
+    let legacy = query_plan_artifact(&operation, &query_def, &legacy_values.0);
+
+    let shadow = shadow_artifact_from_ir_roundtrip(&operation, &query_def, &legacy_values.0)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let payload = serde_json::json!({
+        "matches": legacy == shadow,
+        "legacy": {
+            "sql": legacy_sql,
+            "artifact": legacy,
+        },
+        "shadow": {
+            "artifact": shadow,
+        },
+    });
+    serde_json::to_string(&payload)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to encode JSON: {e}")))
 }
 
 #[cfg(test)]
