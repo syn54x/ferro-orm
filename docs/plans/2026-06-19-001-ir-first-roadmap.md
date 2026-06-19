@@ -87,8 +87,8 @@ Definition of done addition:
 
 ## Program status
 
-- Overall status: `Not started`
-- Current phase: `Phase 0`
+- Overall status: `In progress`
+- Current phase: `Phase 1`
 - Last updated: `2026-06-19`
 - Roadmap owner: `@syn54x`
 
@@ -150,7 +150,7 @@ Definition of synchronized:
 
 ### Phase 0 - Contract and RFC freeze
 
-Status: `In progress`
+Status: `Complete`
 
 Issue references:
 
@@ -166,12 +166,13 @@ Issue references:
 - [x] Golden test vector format for schema/query/codec conformance fixtures.
 
 **Exit gate**
-- [ ] RFC approved and merged.
-- [ ] Golden vectors committed and validated by CI harness skeleton.
+- [x] RFC approved and merged.
+- [x] Golden vectors committed and validated by CI harness skeleton.
 
-**Evidence (branch `feat/ir-first`)**
-- RFC draft: `docs/rfc/ir-contracts-v1.md`
-- Invariant spec draft: `docs/solutions/patterns/ir-invariants.md`
+**Evidence (merged to `feat/ir-first`)**
+- Phase 0 merge PR: [#75](https://github.com/syn54x/ferro-orm/pull/75) (merge commit `c8c5308`)
+- RFC: `docs/rfc/ir-contracts-v1.md`
+- Invariant spec: `docs/solutions/patterns/ir-invariants.md`
 - Golden vectors: `tests/fixtures/ir_vectors/README.md`, `tests/fixtures/ir_vectors/*.json`
 - CI harness skeleton: `tests/test_ir_vectors_contract.py`
 - CI wiring: `.github/workflows/ci.yml` (IR vector contract harness step in Python test jobs)
@@ -436,6 +437,7 @@ Append updates as concise entries.
 
 - `2026-06-19` - Roadmap initialized.
 - `2026-06-19` - Branching policy set: phase work branches from `feat/ir-first` and merges back into `feat/ir-first` until final promotion to `main`.
+- `2026-06-19` - Phase 0 completed and merged via [#75](https://github.com/syn54x/ferro-orm/pull/75).
 
 ## Immediate next actions
 
