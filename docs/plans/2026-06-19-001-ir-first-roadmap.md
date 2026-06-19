@@ -384,8 +384,8 @@ Status: `Not started`
 
 Issue references:
 
-- `Epic:` _TBD_
-- `Sub-issues:` _TBD_
+- `Epic:` [#107](https://github.com/syn54x/ferro-orm/issues/107)
+- `Sub-issues:` [#108](https://github.com/syn54x/ferro-orm/issues/108), [#109](https://github.com/syn54x/ferro-orm/issues/109), [#110](https://github.com/syn54x/ferro-orm/issues/110)
 
 **Objective**
 - Complete migration by removing deprecated compatibility shims in `v0.13.0`.
@@ -535,6 +535,7 @@ Append updates as concise entries.
 - `2026-06-19` - Phase 2 merged via [#105](https://github.com/syn54x/ferro-orm/pull/105); issues [#80](https://github.com/syn54x/ferro-orm/issues/80), [#81](https://github.com/syn54x/ferro-orm/issues/81), [#82](https://github.com/syn54x/ferro-orm/issues/82), [#83](https://github.com/syn54x/ferro-orm/issues/83) synchronized and closed.
 - `2026-06-19` - Phase 3 working-branch implementation landed: QueryIR envelope hot-path cutover for query operations, operator-style deprecation warnings, and synchronized query docs/migration guidance updates.
 - `2026-06-19` - Sequencing update: Phase 7 is now public release with deprecated compatibility support; hard removal moved to Phase 8 (`v0.13.0`).
+- `2026-06-19` - Phase 8 issue set created and linked: epic [#107](https://github.com/syn54x/ferro-orm/issues/107) with sub-issues [#108](https://github.com/syn54x/ferro-orm/issues/108), [#109](https://github.com/syn54x/ferro-orm/issues/109), [#110](https://github.com/syn54x/ferro-orm/issues/110).
 
 ## Immediate next actions
 
