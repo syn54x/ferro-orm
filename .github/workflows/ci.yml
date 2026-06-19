@@ -3,9 +3,9 @@ name: CI
 on:
   workflow_call:
   pull_request:
-    branches: [main]
+    branches: [main, feat/ir-first]
   push:
-    branches: [main]
+    branches: [main, feat/ir-first]
   workflow_dispatch:
 
 concurrency:
@@ -126,6 +126,10 @@ jobs:
         run: |
           uv run maturin develop
 
+      - name: Run IR vector contract harness
+        run: |
+          uv run pytest -v tests/test_ir_vectors_contract.py
+
       - name: Run pytest
         run: |
           uv run pytest -v --cov=src --cov-report=xml --cov-report=term
@@ -168,6 +172,10 @@ jobs:
       - name: Build Rust extension
         run: |
           uv run maturin develop
+
+      - name: Run IR vector contract harness
+        run: |
+          uv run pytest -v tests/test_ir_vectors_contract.py
 
       - name: Run pytest
         run: |

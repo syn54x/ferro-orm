@@ -1,0 +1,56 @@
+{
+  "vector_name": "codec_registry_core_v1",
+  "domain": "codec",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "codec",
+    "ir_version": 1,
+    "payload": {
+      "bind_rules": [
+        {
+          "logical_type": "uuid",
+          "db_type": "uuid",
+          "non_null_wire_kind": "uuid",
+          "null_wire_kind": "uuid_null"
+        },
+        {
+          "logical_type": "integer",
+          "db_type": "bigint",
+          "non_null_wire_kind": "i64",
+          "null_wire_kind": "i64_null"
+        },
+        {
+          "logical_type": "string",
+          "db_type": "text",
+          "non_null_wire_kind": "string",
+          "null_wire_kind": "string_null"
+        }
+      ],
+      "fetch_rules": [
+        {
+          "db_type": "uuid",
+          "wire_kind": "uuid",
+          "python_kind": "uuid.UUID"
+        },
+        {
+          "db_type": "bigint",
+          "wire_kind": "i64",
+          "python_kind": "int"
+        },
+        {
+          "db_type": "text",
+          "wire_kind": "string",
+          "python_kind": "str"
+        }
+      ],
+      "hydration_abi": {
+        "constructor_mode": "direct_dict",
+        "required_slots": [
+          "__pydantic_fields_set__",
+          "__pydantic_extra__",
+          "__pydantic_private__"
+        ]
+      }
+    }
+  }
+}
