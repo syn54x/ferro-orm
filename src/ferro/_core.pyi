@@ -55,6 +55,12 @@ def _render_migration_sql_for_test(
     """
     ...
 
+def _shadow_compare_query_plan_for_test(
+    query_json: str, dialect: str, operation: str = "select"
+) -> str:
+    """Test-only: compare legacy vs QueryIR-roundtrip query planning semantics."""
+    ...
+
 async def fetch_all(
     cls: object, tx_id: Optional[str] = None, using: Optional[str] = None
 ) -> list[Any]: ...

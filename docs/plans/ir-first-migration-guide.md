@@ -43,7 +43,13 @@ No user-facing runtime behavior changes expected.
 
 ### Phase 2
 
-_TBD_
+No user-facing runtime behavior changes expected. Shadow planning is internal-only and defaults off.
+
+| Issue | Change | Impact | User action | Notes |
+| --- | --- | --- | --- | --- |
+| [#81](https://github.com/syn54x/ferro-orm/issues/81) | Internal shadow planner flag and runtime dual-run compare hooks for query/DDL planning | none | none | Internal env-controlled verification path (`FERRO_SHADOW_RUNTIME` / `FERRO_SHADOW_RUNTIME_STRICT`) for CI and maintainers; no public API behavior cutover |
+| [#82](https://github.com/syn54x/ferro-orm/issues/82) | Semantic diff harness for query planning semantics and bind semantics | none | none | Test-only helper `_shadow_compare_query_plan_for_test` + backend-matrix strict checks |
+| [#83](https://github.com/syn54x/ferro-orm/issues/83) | Stable SQLite/Postgres shadow reports + touched-path CI enforcement | none | none | Golden shadow reports in `tests/fixtures/shadow_reports/` and path-gated CI workflow job |
 
 ### Phase 3
 

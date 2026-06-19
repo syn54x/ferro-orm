@@ -484,6 +484,7 @@ Append updates as concise entries.
 - `2026-06-19` - Branching policy set: phase work branches from `feat/ir-first` and merges back into `feat/ir-first` until final promotion to `main`.
 - `2026-06-19` - Phase 0 completed and merged via [#75](https://github.com/syn54x/ferro-orm/pull/75).
 - `2026-06-19` - Phase 1 implementation landed on working branch: added `ferro-schema-ir`, Python->SchemaIR compiler, model-set fingerprinting, and stable representative snapshot checks.
+- `2026-06-19` - Phase 2 scaffolding landed on working branch: internal shadow runtime flag/hook wiring, semantic comparison harness, stable SQLite/Postgres shadow report fixtures, and touched-path CI gate for shadow reports.
 
 ## Immediate next actions
 

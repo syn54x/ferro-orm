@@ -102,6 +102,8 @@ pub struct EngineHandle {
     spec: Option<PoolSpec>,
     /// When false, Ferro skips the identity map for this connection (no lookup/register on load).
     identity_map_enabled: bool,
+    /// Enables internal IR shadow-planner comparisons at runtime.
+    shadow_runtime_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +206,7 @@ impl EngineHandle {
             pool: Arc::new(RwLock::new(pool)),
             spec: Some(spec),
             identity_map_enabled: true,
+            shadow_runtime_enabled: false,
         })
     }
 
@@ -217,6 +220,7 @@ impl EngineHandle {
             pool: Arc::new(RwLock::new(BackendPool::Sqlite(Arc::new(pool)))),
             spec: None,
             identity_map_enabled: true,
+            shadow_runtime_enabled: false,
         }
     }
 
@@ -230,6 +234,7 @@ impl EngineHandle {
             pool: Arc::new(RwLock::new(BackendPool::Postgres(Arc::new(pool)))),
             spec: None,
             identity_map_enabled: true,
+            shadow_runtime_enabled: false,
         }
     }
 
@@ -318,6 +323,17 @@ impl EngineHandle {
     #[must_use]
     pub fn with_identity_map_enabled(mut self, enabled: bool) -> Self {
         self.identity_map_enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn is_shadow_runtime_enabled(&self) -> bool {
+        self.shadow_runtime_enabled
+    }
+
+    #[must_use]
+    pub fn with_shadow_runtime_enabled(mut self, enabled: bool) -> Self {
+        self.shadow_runtime_enabled = enabled;
         self
     }
 

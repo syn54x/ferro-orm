@@ -1,10 +1,13 @@
 use crate::state::{MODEL_REGISTRY, SqlDialect};
+use ferro_schema_ir::{
+    QueryIrPayload, QueryNode as QueryIrNode, QueryOrderBy as QueryIrOrderBy, QueryValue,
+};
 use sea_query::{Alias, Condition, Expr, SimpleExpr};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryNode {
     pub is_compound: bool,
     pub operator: String,
@@ -16,13 +19,13 @@ pub struct QueryNode {
     pub right: Option<Box<QueryNode>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OrderBy {
     pub column: String,
     pub direction: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct M2mContext {
     pub join_table: String,
     pub source_col: String,
@@ -30,7 +33,7 @@ pub struct M2mContext {
     pub source_id: Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryDef {
     #[allow(dead_code)]
     pub model_name: String,
@@ -43,6 +46,16 @@ pub struct QueryDef {
     /// Python query JSON payload.
     #[serde(skip)]
     pub postgres_enum_udt: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuerySemanticSignature {
+    pub model_name: String,
+    pub where_semantics: Vec<String>,
+    pub order_by: Vec<(String, String)>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub m2m: Option<(String, String, String, String)>,
 }
 
 impl QueryDef {
@@ -258,6 +271,226 @@ impl QueryDef {
             return Expr::value(typed_null);
         }
         Expr::value(json_to_sea_value(val))
+    }
+
+    pub fn to_ir_payload(&self) -> QueryIrPayload {
+        QueryIrPayload {
+            model_name: self.model_name.clone(),
+            where_clause: self.where_clause.iter().map(query_node_to_ir).collect(),
+            order_by: self
+                .order_by
+                .as_ref()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| QueryIrOrderBy {
+                            column: item.column.clone(),
+                            direction: item.direction.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            limit: self.limit,
+            offset: self.offset,
+            m2m: self
+                .m2m
+                .as_ref()
+                .and_then(|m2m| serde_json::to_value(m2m).ok()),
+        }
+    }
+
+    pub fn semantic_signature(&self) -> QuerySemanticSignature {
+        QuerySemanticSignature {
+            model_name: self.model_name.clone(),
+            where_semantics: self
+                .where_clause
+                .iter()
+                .map(query_node_semantic_string)
+                .collect(),
+            order_by: self
+                .order_by
+                .as_ref()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| (item.column.clone(), item.direction.to_ascii_lowercase()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            limit: self.limit,
+            offset: self.offset,
+            m2m: self.m2m.as_ref().map(|m2m| {
+                (
+                    m2m.join_table.clone(),
+                    m2m.source_col.clone(),
+                    m2m.target_col.clone(),
+                    query_value_semantic_string(&m2m.source_id),
+                )
+            }),
+        }
+    }
+}
+
+pub fn query_def_from_ir_payload(payload: QueryIrPayload) -> Result<QueryDef, String> {
+    let m2m: Option<M2mContext> = match payload.m2m {
+        Some(value) => serde_json::from_value(value)
+            .map(Some)
+            .map_err(|e| format!("invalid QueryIR m2m payload: {e}"))?,
+        None => None,
+    };
+    Ok(QueryDef {
+        model_name: payload.model_name,
+        where_clause: payload.where_clause.iter().map(query_node_from_ir).collect(),
+        order_by: if payload.order_by.is_empty() {
+            None
+        } else {
+            Some(
+                payload
+                    .order_by
+                    .iter()
+                    .map(|item| OrderBy {
+                        column: item.column.clone(),
+                        direction: item.direction.clone(),
+                    })
+                    .collect(),
+            )
+        },
+        limit: payload.limit,
+        offset: payload.offset,
+        m2m,
+        postgres_enum_udt: HashMap::new(),
+    })
+}
+
+fn query_node_to_ir(node: &QueryNode) -> QueryIrNode {
+    if node.is_compound {
+        let left = node
+            .left
+            .as_ref()
+            .map(|inner| Box::new(query_node_to_ir(inner)))
+            .unwrap_or_else(|| {
+                Box::new(QueryIrNode::Leaf {
+                    operator: "==".to_string(),
+                    column: "__invalid__".to_string(),
+                    value: QueryValue {
+                        kind: "null".to_string(),
+                        value: Value::Null,
+                    },
+                })
+            });
+        let right = node
+            .right
+            .as_ref()
+            .map(|inner| Box::new(query_node_to_ir(inner)))
+            .unwrap_or_else(|| {
+                Box::new(QueryIrNode::Leaf {
+                    operator: "==".to_string(),
+                    column: "__invalid__".to_string(),
+                    value: QueryValue {
+                        kind: "null".to_string(),
+                        value: Value::Null,
+                    },
+                })
+            });
+        return QueryIrNode::Compound {
+            operator: node.operator.clone(),
+            left,
+            right,
+        };
+    }
+
+    let value = node.value.clone().unwrap_or(Value::Null);
+    QueryIrNode::Leaf {
+        operator: node.operator.clone(),
+        column: node.column.clone().unwrap_or_default(),
+        value: QueryValue {
+            kind: query_value_kind(&value).to_string(),
+            value,
+        },
+    }
+}
+
+fn query_node_from_ir(node: &QueryIrNode) -> QueryNode {
+    match node {
+        QueryIrNode::Leaf {
+            operator,
+            column,
+            value,
+        } => QueryNode {
+            is_compound: false,
+            operator: operator.clone(),
+            column: Some(column.clone()),
+            value: if value.value.is_null() {
+                None
+            } else {
+                Some(value.value.clone())
+            },
+            left: None,
+            right: None,
+        },
+        QueryIrNode::Compound {
+            operator,
+            left,
+            right,
+        } => QueryNode {
+            is_compound: true,
+            operator: operator.clone(),
+            column: None,
+            value: None,
+            left: Some(Box::new(query_node_from_ir(left))),
+            right: Some(Box::new(query_node_from_ir(right))),
+        },
+    }
+}
+
+fn query_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                "int"
+            } else {
+                "float"
+            }
+        }
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn query_node_semantic_string(node: &QueryNode) -> String {
+    if node.is_compound {
+        let left = node
+            .left
+            .as_ref()
+            .map(|inner| query_node_semantic_string(inner))
+            .unwrap_or_else(|| "<missing-left>".to_string());
+        let right = node
+            .right
+            .as_ref()
+            .map(|inner| query_node_semantic_string(inner))
+            .unwrap_or_else(|| "<missing-right>".to_string());
+        return format!("({left} {} {right})", node.operator.to_ascii_uppercase());
+    }
+
+    let column = node
+        .column
+        .as_ref()
+        .map_or_else(|| "<missing-column>".to_string(), Clone::clone);
+    let value = node
+        .value
+        .as_ref()
+        .map_or_else(|| "null".to_string(), query_value_semantic_string);
+    format!("{} {} {}", column, node.operator, value)
+}
+
+fn query_value_semantic_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => format!("\"{s}\""),
+        Value::Null => "null".to_string(),
+        _ => value.to_string(),
     }
 }
 
@@ -764,5 +997,41 @@ mod tests {
             sql.contains("AS numeric"),
             "decimal cast preserved until follow-up: {sql}"
         );
+    }
+
+    #[test]
+    fn query_ir_roundtrip_preserves_semantics_signature() {
+        let query_def: QueryDef = serde_json::from_value(json!({
+            "model_name": "Widget",
+            "where_clause": [
+                {
+                    "is_compound": true,
+                    "operator": "OR",
+                    "left": {
+                        "is_compound": false,
+                        "column": "age",
+                        "operator": ">=",
+                        "value": 18
+                    },
+                    "right": {
+                        "is_compound": false,
+                        "column": "name",
+                        "operator": "LIKE",
+                        "value": "a%"
+                    }
+                }
+            ],
+            "order_by": [{"column": "age", "direction": "DESC"}],
+            "limit": 10,
+            "offset": 5,
+            "m2m": null
+        }))
+        .expect("query json must deserialize");
+        let before = query_def.semantic_signature();
+        let ir = query_def.to_ir_payload();
+        let roundtrip = super::query_def_from_ir_payload(ir).expect("QueryIR roundtrip");
+        let after = roundtrip.semantic_signature();
+
+        assert_eq!(before, after);
     }
 }

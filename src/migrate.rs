@@ -305,6 +305,35 @@ pub fn plan_table_migration(
     Ok(plan)
 }
 
+fn shadow_compare_migration_plan(
+    table_lower: &str,
+    schema: &serde_json::Value,
+    live: &[LiveColumn],
+    backend: SqlDialect,
+    opts: MigrateOptions,
+) -> Result<(), String> {
+    let legacy =
+        plan_table_migration(table_lower, schema, live, backend, opts).map_err(|e| e.to_string())?;
+    let schema_roundtrip: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(schema).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let live_roundtrip = live.to_vec();
+    let shadow = plan_table_migration(table_lower, &schema_roundtrip, &live_roundtrip, backend, opts)
+        .map_err(|e| e.to_string())?;
+    if legacy.statements == shadow.statements
+        && legacy.drop_columns == shadow.drop_columns
+        && legacy.warnings == shadow.warnings
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "shadow migration-plan mismatch for '{}': legacy={} shadow={}",
+        table_lower,
+        serde_json::to_string(&legacy.statements).unwrap_or_else(|_| "<legacy>".to_string()),
+        serde_json::to_string(&shadow.statements).unwrap_or_else(|_| "<shadow>".to_string())
+    ))
+}
+
 /// Plan the `ADD COLUMN` (and any follow-up DDL) for a model column missing
 /// from the live table.
 fn plan_missing_column(
@@ -592,6 +621,17 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
         };
 
         let mut plan = plan_table_migration(&table_lower, &schema, &live, backend, opts)?;
+        if engine.is_shadow_runtime_enabled()
+            && let Err(diff) = shadow_compare_migration_plan(&table_lower, &schema, &live, backend, opts)
+        {
+            crate::log_debug(format!("⚠️ Ferro shadow runtime mismatch: {diff}"));
+            if std::env::var("FERRO_SHADOW_RUNTIME_STRICT")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(diff));
+            }
+        }
         if plan.is_empty() {
             warnings.append(&mut plan.warnings);
             continue;
