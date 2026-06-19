@@ -92,6 +92,21 @@ Definition of done addition:
 - Last updated: `2026-06-19`
 - Roadmap owner: `@syn54x`
 
+## Branching and release policy
+
+IR program integration branch:
+
+- `feat/ir-first` is the staging branch for all roadmap work.
+- Starting work on any phase issue requires creating a new branch from `feat/ir-first`.
+- Phase PRs must target `feat/ir-first` (not `main`).
+- Completed phase work merges back into `feat/ir-first`.
+
+Promotion to release:
+
+- `main` must not receive partial IR migration work.
+- Merge `feat/ir-first` into `main` only when the IR program is complete and release-ready.
+- Release notes and migration guide updates are required at promotion time.
+
 ## Traceability rule (roadmap <-> GitHub issues)
 
 - Every roadmap deliverable and exit gate must reference one or more GitHub issues.
@@ -135,7 +150,7 @@ Definition of synchronized:
 
 ### Phase 0 - Contract and RFC freeze
 
-Status: `Not started`
+Status: `In progress`
 
 Issue references:
 
@@ -146,13 +161,25 @@ Issue references:
 - Define versioned IR contracts and non-negotiable invariants before implementation.
 
 **Deliverables**
-- [ ] RFC: `SchemaIR`, `QueryIR`, `CodecIR` structure and versioning strategy.
-- [ ] Invariant spec doc covering parity, hydration ABI, null/bind correctness.
-- [ ] Golden test vector format for schema/query/codec conformance fixtures.
+- [x] RFC: `SchemaIR`, `QueryIR`, `CodecIR` structure and versioning strategy.
+- [x] Invariant spec doc covering parity, hydration ABI, null/bind correctness.
+- [x] Golden test vector format for schema/query/codec conformance fixtures.
 
 **Exit gate**
 - [ ] RFC approved and merged.
 - [ ] Golden vectors committed and validated by CI harness skeleton.
+
+**Evidence (branch `feat/ir-first`)**
+- RFC draft: `docs/rfc/ir-contracts-v1.md`
+- Invariant spec draft: `docs/solutions/patterns/ir-invariants.md`
+- Golden vectors: `tests/fixtures/ir_vectors/README.md`, `tests/fixtures/ir_vectors/*.json`
+- CI harness skeleton: `tests/test_ir_vectors_contract.py`
+- CI wiring: `.github/workflows/ci.yml` (IR vector contract harness step in Python test jobs)
+- Issue sync comments:
+  - [#71 comment](https://github.com/syn54x/ferro-orm/issues/71#issuecomment-4752226422)
+  - [#72 comment](https://github.com/syn54x/ferro-orm/issues/72#issuecomment-4752226080)
+  - [#73 comment](https://github.com/syn54x/ferro-orm/issues/73#issuecomment-4752226172)
+  - [#74 comment](https://github.com/syn54x/ferro-orm/issues/74#issuecomment-4752226261)
 
 ---
 
@@ -408,9 +435,10 @@ Use this roadmap as the source for issues and project fields.
 Append updates as concise entries.
 
 - `2026-06-19` - Roadmap initialized.
+- `2026-06-19` - Branching policy set: phase work branches from `feat/ir-first` and merges back into `feat/ir-first` until final promotion to `main`.
 
 ## Immediate next actions
 
-- [ ] Create GitHub issues for Phase 0 deliverables.
-- [ ] Create `IR-P0` milestone and seed with Phase 0 issues.
+- [x] Create GitHub issues for Phase 0 deliverables.
+- [x] Create `IR-P0` milestone and seed with Phase 0 issues.
 - [ ] Assign DRO for Phase 0 RFC.

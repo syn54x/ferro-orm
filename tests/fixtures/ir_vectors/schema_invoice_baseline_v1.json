@@ -1,0 +1,101 @@
+{
+  "vector_name": "schema_invoice_baseline_v1",
+  "domain": "schema",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "schema",
+    "ir_version": 1,
+    "payload": {
+      "dialect_agnostic": true,
+      "models": [
+        {
+          "model_name": "Invoice",
+          "table_name": "invoice",
+          "columns": [
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "db_type": "bigint",
+              "nullable": false,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "number",
+              "logical_type": "string",
+              "db_type": "varchar(64)",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": true,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "customer_id",
+              "logical_type": "integer",
+              "db_type": "bigint",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": true,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "created_at",
+              "logical_type": "datetime",
+              "db_type": "timestamptz",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": true,
+              "default": "now()",
+              "format": "date-time"
+            }
+          ],
+          "foreign_keys": [
+            {
+              "column": "customer_id",
+              "to_table": "customer",
+              "to_column": "id",
+              "on_delete": "CASCADE",
+              "name": "fk_invoice_customer_id_customer"
+            }
+          ],
+          "indexes": [
+            {
+              "name": "idx_invoice_created_at",
+              "columns": ["created_at"],
+              "unique": false
+            },
+            {
+              "name": "idx_invoice_customer_id",
+              "columns": ["customer_id"],
+              "unique": false
+            }
+          ],
+          "uniques": [
+            {
+              "name": "uq_invoice_number",
+              "columns": ["number"]
+            }
+          ],
+          "checks": [
+            {
+              "name": "ck_invoice_number",
+              "expression": "length(number) > 0"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
