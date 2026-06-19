@@ -188,6 +188,11 @@ Issue references:
 
 Status: `Not started`
 
+Issue references:
+
+- `Epic:` [#76](https://github.com/syn54x/ferro-orm/issues/76)
+- `Sub-issues:` [#77](https://github.com/syn54x/ferro-orm/issues/77), [#78](https://github.com/syn54x/ferro-orm/issues/78), [#79](https://github.com/syn54x/ferro-orm/issues/79)
+
 **Objective**
 - Introduce a Rust-owned IR crate and compile Python model metadata into deterministic IR artifacts.
 
@@ -205,6 +210,11 @@ Status: `Not started`
 ### Phase 2 - Shadow runtime dual-run
 
 Status: `Not started`
+
+Issue references:
+
+- `Epic:` [#80](https://github.com/syn54x/ferro-orm/issues/80)
+- `Sub-issues:` [#81](https://github.com/syn54x/ferro-orm/issues/81), [#82](https://github.com/syn54x/ferro-orm/issues/82), [#83](https://github.com/syn54x/ferro-orm/issues/83)
 
 **Objective**
 - Run IR-derived runtime planning in shadow mode and compare semantics against current runtime path.
@@ -224,6 +234,11 @@ Status: `Not started`
 
 Status: `Not started`
 
+Issue references:
+
+- `Epic:` [#84](https://github.com/syn54x/ferro-orm/issues/84)
+- `Sub-issues:` [#85](https://github.com/syn54x/ferro-orm/issues/85), [#86](https://github.com/syn54x/ferro-orm/issues/86), [#87](https://github.com/syn54x/ferro-orm/issues/87)
+
 **Objective**
 - Move query execution to typed QueryIR and retire internal JSON query contracts.
 
@@ -241,6 +256,11 @@ Status: `Not started`
 ### Phase 4 - SchemaIR migration and DDL cutover
 
 Status: `Not started`
+
+Issue references:
+
+- `Epic:` [#88](https://github.com/syn54x/ferro-orm/issues/88)
+- `Sub-issues:` [#89](https://github.com/syn54x/ferro-orm/issues/89), [#90](https://github.com/syn54x/ferro-orm/issues/90), [#91](https://github.com/syn54x/ferro-orm/issues/91)
 
 **Objective**
 - Make SchemaIR the only schema truth for migration planning and DDL emission.
@@ -260,6 +280,11 @@ Status: `Not started`
 
 Status: `Not started`
 
+Issue references:
+
+- `Epic:` [#92](https://github.com/syn54x/ferro-orm/issues/92)
+- `Sub-issues:` [#93](https://github.com/syn54x/ferro-orm/issues/93), [#94](https://github.com/syn54x/ferro-orm/issues/94), [#95](https://github.com/syn54x/ferro-orm/issues/95)
+
 **Objective**
 - Centralize bind/fetch type behavior and formalize the hydration ABI.
 
@@ -278,6 +303,11 @@ Status: `Not started`
 
 Status: `Not started`
 
+Issue references:
+
+- `Epic:` [#96](https://github.com/syn54x/ferro-orm/issues/96)
+- `Sub-issues:` [#97](https://github.com/syn54x/ferro-orm/issues/97), [#98](https://github.com/syn54x/ferro-orm/issues/98), [#99](https://github.com/syn54x/ferro-orm/issues/99)
+
 **Objective**
 - Replace global mutable registries in hot paths with explicit session/engine scoped state.
 
@@ -295,6 +325,11 @@ Status: `Not started`
 ### Phase 7 - Major version release and shim removal
 
 Status: `Not started`
+
+Issue references:
+
+- `Epic:` [#100](https://github.com/syn54x/ferro-orm/issues/100)
+- `Sub-issues:` [#101](https://github.com/syn54x/ferro-orm/issues/101), [#102](https://github.com/syn54x/ferro-orm/issues/102), [#103](https://github.com/syn54x/ferro-orm/issues/103)
 
 **Objective**
 - Complete migration by removing compatibility shims and releasing IR-first major version.
