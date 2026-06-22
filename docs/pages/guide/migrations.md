@@ -89,6 +89,8 @@ await ferro.migrate(using="service")   # against a named connection
 
 Ferro doesn't reinvent migrations: it bridges your models into SQLAlchemy metadata that [Alembic](https://alembic.sqlalchemy.org/) — the industry-standard migration tool — uses to autogenerate versioned, reviewable migration scripts.
 
+As of the IR-first cutover work, `get_metadata()` is built from the compiled SchemaIR modelset so runtime DDL and Alembic autogenerate consume the same schema artifacts.
+
 ### Install
 
 ```bash
@@ -120,7 +122,7 @@ target_metadata = get_metadata()
 # The rest of env.py stays as generated.
 ```
 
-`get_metadata()` produces a faithful SQLAlchemy reflection of your models:
+`get_metadata()` produces a faithful SQLAlchemy reflection of your models (via SchemaIR):
 
 - **Nullability** follows the same rules as the runtime schema: with the default `nullable="infer"`, a column is nullable iff its annotation allows `None` (a default alone does not make it nullable); shadow `*_id` columns infer from the *relation* annotation; `on_delete="SET NULL"` implies nullable; explicit `nullable=True/False` overrides. Primary keys are always `NOT NULL`.
 - **Composite constraints** (`__ferro_composite_uniques__`, `__ferro_composite_indexes__`) emit matching `UniqueConstraint` / `Index` objects, including the automatic constraints on many-to-many join tables.

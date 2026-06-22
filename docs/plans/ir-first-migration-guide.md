@@ -65,7 +65,17 @@ Phase 3 test-migration note:
 
 ### Phase 4
 
-_TBD_
+| Issue | Change | Impact | User action | Notes |
+| --- | --- | --- | --- | --- |
+| [#89](https://github.com/syn54x/ferro-orm/issues/89) | SchemaIR compiler fidelity extended for `db_check` expressions, enum metadata, and join-table model inclusion | minor | No API changes for model declaration; if you consume internal SchemaIR fixtures, refresh snapshots to include join-table and enum/check artifacts | Artifacts: `src/ferro/ir/compiler.py`, `tests/test_ir_vectors_contract.py` |
+| [#90](https://github.com/syn54x/ferro-orm/issues/90) | Introduce `crates/ferro-migrate` with typed `SchemaIR(old,new)` diff operations and backend SQL emission entrypoint | minor | No user API change; maintainers/tools consuming migration internals should move to `ferro-migrate` plan ops | Artifacts: `crates/ferro-migrate/`, `src/migrate.rs` |
+| [#91](https://github.com/syn54x/ferro-orm/issues/91) | Alembic `get_metadata()` now derives from SchemaIR modelset; legacy JSON-lowering helpers deprecated | minor | Keep using `get_metadata()`; if you directly import private `ferro.migrations.alembic._build_sa_table` / `_map_to_sa_type`, migrate away now | Deprecated helpers emit `DeprecationWarning` with planned removal `v0.13.0` |
+
+Phase 4 deprecation note:
+
+- Deprecated: `ferro.migrations.alembic._build_sa_table()` and `ferro.migrations.alembic._map_to_sa_type()`
+- Replacement: `get_metadata()` (SchemaIR-backed) and internal IR lowering via `_sa_type_from_ir_column()`
+- Removal target: `v0.13.0`
 
 ### Phase 5
 

@@ -13,6 +13,7 @@ from typing import Any
 
 from ..schema_metadata import build_model_schema
 from ..state import (
+    _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
     _SCHEMA_IR_BY_MODEL,
     _SCHEMA_IR_FINGERPRINT_BY_MODEL,
@@ -55,6 +56,26 @@ def _resolve_ref(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, 
     }
 
 
+def _resolve_nested_refs(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, Any]:
+    """Resolve local refs in one-level nested ``anyOf`` entries."""
+    any_of = col_info.get("anyOf")
+    if not isinstance(any_of, list):
+        return col_info
+    resolved_any_of: list[Any] = []
+    changed = False
+    for candidate in any_of:
+        if not isinstance(candidate, dict):
+            resolved_any_of.append(candidate)
+            continue
+        resolved_candidate = _resolve_ref(schema, candidate)
+        if resolved_candidate is not candidate:
+            changed = True
+        resolved_any_of.append(resolved_candidate)
+    if not changed:
+        return col_info
+    return {**col_info, "anyOf": resolved_any_of}
+
+
 def _logical_type(col_info: dict[str, Any]) -> str:
     """Map schema type metadata to SchemaIR ``logical_type``."""
     field_type, field_format = _effective_type_and_format(col_info)
@@ -74,6 +95,8 @@ def _logical_type(col_info: dict[str, Any]) -> str:
         if field_format == "uuid":
             return "uuid"
         return "string"
+    if field_type in {"object", "array"}:
+        return "json"
     return "unknown"
 
 
@@ -111,8 +134,23 @@ def _effective_type_and_format(col_info: dict[str, Any]) -> tuple[Any, Any]:
             candidate_type = candidate.get("type")
             if candidate_type is None or candidate_type == "null":
                 continue
-            return candidate_type, candidate.get("format")
+            return candidate_type, candidate.get("format") or field_format
     return field_type, field_format
+
+
+def _enum_values(col_info: dict[str, Any]) -> list[Any] | None:
+    direct = col_info.get("enum")
+    if isinstance(direct, list):
+        return direct
+    any_of = col_info.get("anyOf")
+    if isinstance(any_of, list):
+        for candidate in any_of:
+            if not isinstance(candidate, dict):
+                continue
+            enum_values = candidate.get("enum")
+            if isinstance(enum_values, list):
+                return enum_values
+    return None
 
 
 def _is_nullable(col_name: str, col_info: dict[str, Any], required_fields: set[str]) -> bool:
@@ -127,10 +165,12 @@ def _column_ir(
     col_name: str, col_info: dict[str, Any], required_fields: set[str]
 ) -> dict[str, Any]:
     """Compile one schema property into a SchemaIR ``columns[]`` entry."""
-    return {
+    db_type_value = col_info.get("db_type")
+    db_type_explicit = isinstance(db_type_value, str) and bool(db_type_value)
+    column_ir = {
         "name": col_name,
         "logical_type": _logical_type(col_info),
-        "db_type": col_info.get("db_type") or _default_db_type(col_info),
+        "db_type": db_type_value if db_type_explicit else _default_db_type(col_info),
         "nullable": _is_nullable(col_name, col_info, required_fields),
         "primary_key": bool(col_info.get("primary_key", False)),
         "autoincrement": bool(col_info.get("autoincrement", False)),
@@ -139,6 +179,15 @@ def _column_ir(
         "default": col_info.get("default"),
         "format": col_info.get("format"),
     }
+    enum_values = _enum_values(col_info)
+    if isinstance(enum_values, list):
+        column_ir["enum_values"] = list(enum_values)
+    if db_type_explicit:
+        column_ir["db_type_explicit"] = True
+    enum_type_name = col_info.get("enum_type_name")
+    if isinstance(enum_type_name, str) and enum_type_name:
+        column_ir["enum_type_name"] = enum_type_name
+    return column_ir
 
 
 def _fk_name(table_name: str, col_name: str, to_table: str) -> str:
@@ -158,12 +207,18 @@ def _single_unique_name(table_name: str, col_name: str) -> str:
 
 def _composite_index_name(table_name: str, columns: list[str]) -> str:
     """Build canonical composite index name."""
-    return f"idx_{table_name}_{'_'.join(columns)}"
+    raw = f"idx_{table_name}_{'_'.join(columns)}"
+    if len(raw) > 63:
+        return f"{raw[:59]}_idx"
+    return raw
 
 
 def _composite_unique_name(table_name: str, columns: list[str]) -> str:
     """Build canonical composite unique-constraint name."""
-    return f"uq_{table_name}_{'_'.join(columns)}"
+    raw = f"uq_{table_name}_{'_'.join(columns)}"
+    if len(raw) > 63:
+        return f"{raw[:60]}_uq"
+    return raw
 
 
 def _checks_from_columns(table_name: str, columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -175,16 +230,33 @@ def _checks_from_columns(table_name: str, columns: list[dict[str, Any]]) -> list
         col_name = col.get("name")
         if not isinstance(col_name, str) or not col_name:
             continue
+        enum_values = _enum_values(col)
+        if not isinstance(enum_values, list) or not enum_values:
+            continue
+        rendered: list[str] = []
+        for value in enum_values:
+            if isinstance(value, bool):
+                rendered.append(str(value).lower())
+            elif isinstance(value, (int, float)):
+                rendered.append(str(value))
+            else:
+                escaped = str(value).replace("'", "''")
+                rendered.append(f"'{escaped}'")
         checks.append(
             {
                 "name": f"ck_{table_name}_{col_name}",
-                "expression": f"{col_name} IS NOT NULL",
+                "expression": f"{col_name} IN ({', '.join(rendered)})",
             }
         )
     return checks
 
 
-def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[str, Any]:
+def compile_schema_ir_payload(
+    model_name: str,
+    schema: dict[str, Any],
+    *,
+    table_name: str | None = None,
+) -> dict[str, Any]:
     """Compile one model schema dict into a SchemaIR payload object.
 
     Args:
@@ -194,7 +266,7 @@ def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[s
     Returns:
         A SchemaIR payload object ready to be wrapped in an IR envelope.
     """
-    table_name = model_name.lower()
+    resolved_table_name = table_name or model_name.lower()
     properties = schema.get("properties", {})
     if not isinstance(properties, dict):
         properties = {}
@@ -207,6 +279,7 @@ def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[s
         if not isinstance(col_info, dict):
             continue
         resolved = _resolve_ref(schema, col_info)
+        resolved = _resolve_nested_refs(schema, resolved)
         resolved_with_name = {"name": col_name, **resolved}
         resolved_columns.append(resolved_with_name)
 
@@ -234,13 +307,13 @@ def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[s
                         "to_table": to_table,
                         "to_column": "id",
                         "on_delete": fk.get("on_delete"),
-                        "name": _fk_name(table_name, col_name, to_table),
+                        "name": _fk_name(resolved_table_name, col_name, to_table),
                     }
                 )
         if bool(col.get("index", False)):
             indexes.append(
                 {
-                    "name": _single_index_name(table_name, col_name),
+                    "name": _single_index_name(resolved_table_name, col_name),
                     "columns": [col_name],
                     "unique": False,
                 }
@@ -248,7 +321,7 @@ def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[s
         if bool(col.get("unique", False)):
             uniques.append(
                 {
-                    "name": _single_unique_name(table_name, col_name),
+                    "name": _single_unique_name(resolved_table_name, col_name),
                     "columns": [col_name],
                 }
             )
@@ -261,7 +334,7 @@ def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[s
             continue
         indexes.append(
             {
-                "name": _composite_index_name(table_name, cols),
+                "name": _composite_index_name(resolved_table_name, cols),
                 "columns": cols,
                 "unique": False,
             }
@@ -273,11 +346,13 @@ def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[s
         cols = [c for c in composite if isinstance(c, str) and c]
         if len(cols) != len(composite):
             continue
-        uniques.append({"name": _composite_unique_name(table_name, cols), "columns": cols})
+        uniques.append(
+            {"name": _composite_unique_name(resolved_table_name, cols), "columns": cols}
+        )
 
     model_payload = {
         "model_name": model_name,
-        "table_name": table_name,
+        "table_name": resolved_table_name,
         "columns": columns,
         "foreign_keys": sorted(
             foreign_keys,
@@ -286,7 +361,7 @@ def compile_schema_ir_payload(model_name: str, schema: dict[str, Any]) -> dict[s
         "indexes": sorted(indexes, key=lambda item: item["name"]),
         "uniques": sorted(uniques, key=lambda item: item["name"]),
         "checks": sorted(
-            _checks_from_columns(table_name, resolved_columns),
+            _checks_from_columns(resolved_table_name, resolved_columns),
             key=lambda item: item["name"],
         ),
     }
@@ -333,6 +408,18 @@ def compile_registry_schema_ir() -> dict[str, Any]:
         model_envelope = compile_model_schema_ir(model_name, model_cls)
         model_payload = model_envelope["payload"]["models"][0]
         models.append(model_payload)
+
+    for table_name, table_schema in sorted(
+        _JOIN_TABLE_REGISTRY.items(), key=lambda item: item[0]
+    ):
+        if not isinstance(table_schema, dict):
+            continue
+        join_payload = compile_schema_ir_payload(
+            table_name,
+            table_schema,
+            table_name=table_name,
+        )["models"][0]
+        models.append(join_payload)
 
     envelope = {
         "ir_kind": "schema",

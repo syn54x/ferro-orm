@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ferro import clear_registry, reset_engine
+from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry, reset_engine
 
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
 SUPPORTED_IR_VERSION = 1
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
+
+
+class _DocFormat(StrEnum):
+    PDF = "pdf"
+    JSON = "json"
 
 
 def _load_vectors() -> list[tuple[Path, dict[str, Any]]]:
@@ -217,3 +223,43 @@ def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> 
 
     assert first == second
     assert first_fp == second_fp
+
+
+def test_schema_ir_compiler_emits_db_check_expression_for_closed_domain(
+    clean_model_registry: None,
+) -> None:
+    from ferro.ir import compile_registry_schema_ir
+    from ferro.relations import resolve_relationships
+
+    class Document(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        format: _DocFormat = Field(db_type="text", db_check=True)
+
+    resolve_relationships()
+    compiled = compile_registry_schema_ir()
+    models = compiled["payload"]["models"]
+    document = next(model for model in models if model["table_name"] == "document")
+    checks = document["checks"]
+    assert checks == [
+        {"name": "ck_document_format", "expression": "format IN ('pdf', 'json')"}
+    ]
+
+
+def test_schema_ir_compiler_includes_join_table_models(clean_model_registry: None) -> None:
+    from ferro.ir import compile_registry_schema_ir
+    from ferro.relations import resolve_relationships
+
+    class Tag(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        posts: Relation[list["Post"]] = ManyToMany(related_name="tags")
+
+    class Post(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str
+        tags: Relation[list["Tag"]] = BackRef()
+
+    resolve_relationships()
+    compiled = compile_registry_schema_ir()
+    table_names = {model["table_name"] for model in compiled["payload"]["models"]}
+    assert "tag_posts" in table_names

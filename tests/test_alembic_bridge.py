@@ -15,6 +15,7 @@ from ferro import (
     clear_registry,
     reset_engine,
 )
+from ferro.migrations.alembic import _build_sa_table
 from ferro.migrations import get_metadata
 from ferro.schema_metadata import build_model_schema
 
@@ -66,6 +67,21 @@ def test_metadata_translation():
     fk = list(post_table.c.author_id.foreign_keys)[0]
     assert fk.target_fullname == "user.id"
     assert fk.ondelete == "CASCADE"
+
+
+def test_legacy_json_table_builder_emits_deprecation_warning():
+    md = sa.MetaData()
+    schema = {
+        "properties": {
+            "id": {"type": "integer", "primary_key": True, "autoincrement": True},
+            "name": {"type": "string"},
+        }
+    }
+    with pytest.deprecated_call(
+        match="_build_sa_table\\(\\) is deprecated.*Planned removal: v0\\.13\\.0"
+    ):
+        _build_sa_table(md, "legacydoc", schema, model_cls=None)
+    assert "legacydoc" in md.tables
 
 
 def test_foreign_key_unique_true_propagates_to_shadow_column():
