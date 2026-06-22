@@ -115,6 +115,41 @@ def _validate_codec_payload(payload: dict[str, Any], label: str) -> None:
     assert isinstance(payload["fetch_rules"], list) and payload["fetch_rules"], (
         f"{label}.fetch_rules must be non-empty list"
     )
+    bind_rules = payload["bind_rules"]
+    fetch_rules = payload["fetch_rules"]
+    for i, rule in enumerate(bind_rules):
+        rule_label = f"{label}.bind_rules[{i}]"
+        assert isinstance(rule, dict), f"{rule_label} must be object"
+        _require_keys(
+            rule,
+            {"logical_type", "db_type", "non_null_wire_kind", "null_wire_kind"},
+            rule_label,
+        )
+    for i, rule in enumerate(fetch_rules):
+        rule_label = f"{label}.fetch_rules[{i}]"
+        assert isinstance(rule, dict), f"{rule_label} must be object"
+        _require_keys(rule, {"db_type", "wire_kind", "python_kind"}, rule_label)
+
+    bind_type_pairs = {(r["logical_type"], r["db_type"]) for r in bind_rules}
+    required_bind_pairs = {
+        ("uuid", "uuid"),
+        ("decimal", "numeric"),
+        ("datetime", "timestamptz"),
+        ("date", "date"),
+        ("enum", "enum"),
+    }
+    assert required_bind_pairs.issubset(bind_type_pairs), (
+        f"{label}.bind_rules missing required type pairs: "
+        f"{sorted(required_bind_pairs - bind_type_pairs)}"
+    )
+
+    fetch_db_types = {r["db_type"] for r in fetch_rules}
+    required_fetch_db_types = {"uuid", "numeric", "timestamptz", "date", "enum"}
+    assert required_fetch_db_types.issubset(fetch_db_types), (
+        f"{label}.fetch_rules missing required db types: "
+        f"{sorted(required_fetch_db_types - fetch_db_types)}"
+    )
+
     hydration_abi = payload["hydration_abi"]
     assert isinstance(hydration_abi, dict), f"{label}.hydration_abi must be object"
     _require_keys(hydration_abi, {"constructor_mode", "required_slots"}, f"{label}.hydration_abi")
@@ -125,6 +160,11 @@ def _validate_codec_payload(payload: dict[str, Any], label: str) -> None:
     assert isinstance(required_slots, list) and required_slots, (
         f"{label}.hydration_abi.required_slots must be non-empty list"
     )
+    assert {
+        "__pydantic_fields_set__",
+        "__pydantic_extra__",
+        "__pydantic_private__",
+    }.issubset(set(required_slots)), f"{label}.hydration_abi.required_slots missing required slots"
 
 
 def _validate_domain_payload(domain: str, payload: dict[str, Any], label: str) -> None:

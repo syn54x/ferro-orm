@@ -79,7 +79,11 @@ Phase 4 deprecation note:
 
 ### Phase 5
 
-_TBD_
+| Issue | Change | Impact | User action | Notes |
+| --- | --- | --- | --- | --- |
+| [#93](https://github.com/syn54x/ferro-orm/issues/93) | Unified Rust codec registry now drives schema-aware bind/fetch lowering for insert/update/filter/m2m/fetch paths | minor | No API change; if you rely on internal Rust helper names (`schema_value_expr`, `value_rhs_simple_expr_for_backend`, `backend_column_value_expr`), migrate to codec registry entrypoints | Artifacts: `src/codec.rs`, `src/operations.rs`, `src/query.rs` |
+| [#94](https://github.com/syn54x/ferro-orm/issues/94) | Hydration ABI is centralized into one helper that enforces `direct_dict` + required Pydantic slot initialization | minor | No API change; hydration behavior is now deterministic across `get/all/first` fetch paths | Artifacts: `src/hydration.rs`, `tests/test_hydration.py` |
+| [#95](https://github.com/syn54x/ferro-orm/issues/95) | Codec conformance vectors and backend-matrix tests expanded for null/uuid/decimal/temporal/enum semantics | minor | No API change; expect stricter/clearer type behavior in edge cases previously relying on fallback coercions | Artifacts: `tests/fixtures/ir_vectors/codec_registry_core_v1.json`, `tests/test_ir_vectors_contract.py`, `tests/test_typed_null_binds.py` |
 
 ### Phase 6
 

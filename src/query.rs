@@ -1,4 +1,4 @@
-use crate::state::{MODEL_REGISTRY, SqlDialect};
+use crate::state::SqlDialect;
 use ferro_schema_ir::{
     QueryIrPayload, QueryNode as QueryIrNode, QueryOrderBy as QueryIrOrderBy, QueryValue,
 };
@@ -218,59 +218,14 @@ impl QueryDef {
         infer_uuid_without_schema: bool,
         backend: SqlDialect,
     ) -> SimpleExpr {
-        if let Value::String(s) = val {
-            if backend == SqlDialect::Postgres {
-                if let Some(tn) = crate::schema_bind::native_postgres_enum_udt_name(
-                    col_name,
-                    &self.postgres_enum_udt,
-                ) {
-                    return crate::schema_bind::postgres_enum_string_rhs_expr(s, tn);
-                }
-
-                if let Ok(parsed) = uuid::Uuid::parse_str(s) {
-                    let schema_uuid = model_column_is_uuid(&self.model_name, col_name);
-                    if schema_uuid || infer_uuid_without_schema {
-                        return Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed))));
-                    }
-                }
-
-                if model_column_format(&self.model_name, col_name) == Some("date-time") {
-                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                        .cast_as("timestamptz");
-                }
-                if model_column_format(&self.model_name, col_name) == Some("date") {
-                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                        .cast_as("date");
-                }
-                if model_column_format(&self.model_name, col_name) == Some("binary") {
-                    return Expr::value(sea_query::Value::Bytes(Some(Box::new(
-                        s.as_bytes().to_vec(),
-                    ))));
-                }
-                if model_column_is_decimal(&self.model_name, col_name) {
-                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                        .cast_as("numeric");
-                }
-            }
-
-            if model_column_is_decimal(&self.model_name, col_name)
-                && let Ok(parsed) = s.parse::<f64>()
-            {
-                return Expr::value(sea_query::Value::Double(Some(parsed)));
-            }
-        }
-
-        // Typed-null pick from column metadata. This fixes the schema-driven
-        // half of #38 for UPDATE column values and query-filter predicates;
-        // without it, every NULL bind goes out as text. Unknown columns fall
-        // through to json_to_sea_value (which preserves legacy String(None))
-        // -- the bind layer's NullKind::String is the documented fallback.
-        if val.is_null()
-            && let Some(typed_null) = typed_null_for_column(&self.model_name, col_name)
-        {
-            return Expr::value(typed_null);
-        }
-        Expr::value(json_to_sea_value(val))
+        crate::codec::query_bind_expr(
+            &self.model_name,
+            col_name,
+            val,
+            infer_uuid_without_schema,
+            backend,
+            &self.postgres_enum_udt,
+        )
     }
 
     pub fn to_ir_payload(&self) -> QueryIrPayload {
@@ -496,175 +451,6 @@ fn query_value_semantic_string(value: &Value) -> String {
         Value::Null => "null".to_string(),
         _ => value.to_string(),
     }
-}
-
-/// Pick a typed SeaQuery `None` variant for a `NULL` value in
-/// `value_rhs_simple_expr_for_backend`. Returns `None` if the model or column
-/// isn't in the registry, or if the column type is one we still emit via
-/// `CAST` (temporal). The caller falls through to `json_to_sea_value` in
-/// either case, which preserves the legacy text-typed null.
-fn typed_null_for_column(model_name: &str, col_name: &str) -> Option<sea_query::Value> {
-    let registry = MODEL_REGISTRY.read().ok()?;
-    let schema = registry.get(model_name)?;
-    let props = schema.get("properties").and_then(|p| p.as_object())?;
-    let col_info = props.get(col_name)?;
-
-    if column_is_uuid_property(schema, col_name) {
-        return Some(sea_query::Value::Uuid(None));
-    }
-    if property_schema_is_decimal(col_info) {
-        // Decimal still uses cast_as("numeric") for non-null today; matching
-        // null path keeps emitter behavior aligned. Native numeric typed bind
-        // is deferred (plan §3 Scope Boundaries).
-        return Some(sea_query::Value::Double(None));
-    }
-    let format = property_schema_format(col_info);
-    if matches!(format, Some("date-time") | Some("date") | Some("time")) {
-        // Temporal typed nulls are deferred to issue #40.
-        return None;
-    }
-    if format == Some("binary") {
-        return Some(sea_query::Value::Bytes(None));
-    }
-
-    // Walk anyOf to find the non-null type variant -- this is how Pydantic
-    // shapes `T | None` schemas.
-    let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let s = t.get("type")?.as_str()?;
-                    if s != "null" { Some(s) } else { None }
-                })
-            })
-    });
-
-    match json_type {
-        Some("integer") => Some(sea_query::Value::BigInt(None)),
-        Some("number") => Some(sea_query::Value::Double(None)),
-        Some("boolean") => Some(sea_query::Value::Bool(None)),
-        Some("string") => Some(sea_query::Value::String(None)),
-        _ => None,
-    }
-}
-
-fn json_to_sea_value(value: &Value) -> sea_query::Value {
-    match value {
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                sea_query::Value::BigInt(Some(i))
-            } else if let Some(f) = n.as_f64() {
-                sea_query::Value::Double(Some(f))
-            } else {
-                sea_query::Value::String(None)
-            }
-        }
-        Value::String(s) => sea_query::Value::String(Some(Box::new(s.clone()))),
-        Value::Bool(b) => sea_query::Value::Bool(Some(*b)),
-        Value::Null => sea_query::Value::String(None),
-        _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
-    }
-}
-
-fn model_column_is_uuid(model_name: &str, col: &str) -> bool {
-    let Ok(registry) = MODEL_REGISTRY.read() else {
-        return false;
-    };
-    let Some(schema) = registry.get(model_name) else {
-        return false;
-    };
-    column_is_uuid_property(schema, col)
-}
-
-fn model_column_is_decimal(model_name: &str, col: &str) -> bool {
-    let Ok(registry) = MODEL_REGISTRY.read() else {
-        return false;
-    };
-    let Some(schema) = registry.get(model_name) else {
-        return false;
-    };
-    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
-        return false;
-    };
-    let Some(col_info) = props.get(col) else {
-        return false;
-    };
-    property_schema_is_decimal(col_info)
-}
-
-fn model_column_format(model_name: &str, col: &str) -> Option<&'static str> {
-    let Ok(registry) = MODEL_REGISTRY.read() else {
-        return None;
-    };
-    let schema = registry.get(model_name)?;
-    let props = schema.get("properties").and_then(|p| p.as_object())?;
-    let col_info = props.get(col)?;
-    match property_schema_format(col_info) {
-        Some("uuid") => Some("uuid"),
-        Some("date-time") => Some("date-time"),
-        Some("date") => Some("date"),
-        Some("binary") => Some("binary"),
-        _ => None,
-    }
-}
-
-fn column_is_uuid_property(schema: &Value, col: &str) -> bool {
-    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
-        return false;
-    };
-    let Some(col_info) = props.get(col) else {
-        return false;
-    };
-    property_schema_is_uuid(col_info)
-}
-
-pub(crate) fn property_schema_format(col_info: &Value) -> Option<&str> {
-    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types
-                    .iter()
-                    .find_map(|t| t.get("format").and_then(|f| f.as_str()))
-            })
-    })
-}
-
-pub(crate) fn property_schema_is_decimal(col_info: &Value) -> bool {
-    col_info
-        .get("anyOf")
-        .and_then(|a| a.as_array())
-        .map(|types| {
-            let has_number = types
-                .iter()
-                .any(|t| t.get("type").and_then(|ty| ty.as_str()) == Some("number"));
-            let has_patterned_string = types.iter().any(|t| {
-                t.get("type").and_then(|ty| ty.as_str()) == Some("string")
-                    && t.get("pattern").is_some()
-            });
-            has_number && has_patterned_string
-        })
-        .unwrap_or(false)
-}
-
-/// JSON Schema fragment for one model field: `string` + `format: uuid` (incl. optional `anyOf`).
-pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
-    let format = property_schema_format(col_info);
-    let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let s = t.get("type")?.as_str()?;
-                    if s == "null" { None } else { Some(s) }
-                })
-            })
-    });
-    json_type == Some("string") && format == Some("uuid")
 }
 
 #[cfg(test)]
