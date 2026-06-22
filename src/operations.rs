@@ -2519,7 +2519,7 @@ mod schema_value_expr_tests {
         )
         .unwrap();
 
-        // Decimal binds as float8-typed null; native numeric is deferred.
+        // Decimal null uses a typed float bind to avoid text-typed NULLs on Postgres.
         assert!(matches!(values.0.as_slice(), [SeaValue::Double(None)]));
     }
 

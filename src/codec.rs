@@ -39,18 +39,27 @@ fn format(col_info: &Value) -> Option<&str> {
 }
 
 fn is_decimal(col_info: &Value) -> bool {
+    if col_info.get("db_type").and_then(Value::as_str) == Some("numeric") {
+        return true;
+    }
+    if col_info.get("type").and_then(Value::as_str) == Some("string") && col_info.get("pattern").is_some()
+    {
+        return true;
+    }
     col_info
         .get("anyOf")
-        .and_then(|a| a.as_array())
+        .and_then(Value::as_array)
         .map(|types| {
-            let has_number = types
-                .iter()
-                .any(|t| t.get("type").and_then(|ty| ty.as_str()) == Some("number"));
             let has_patterned_string = types.iter().any(|t| {
-                t.get("type").and_then(|ty| ty.as_str()) == Some("string")
-                    && t.get("pattern").is_some()
+                t.get("type").and_then(Value::as_str) == Some("string") && t.get("pattern").is_some()
             });
-            has_number && has_patterned_string
+            let has_only_decimal_compatible_types = types.iter().all(|t| {
+                matches!(
+                    t.get("type").and_then(Value::as_str),
+                    Some("string" | "number" | "null")
+                )
+            });
+            has_patterned_string && has_only_decimal_compatible_types
         })
         .unwrap_or(false)
 }
@@ -167,10 +176,9 @@ pub fn schema_bind_expr(
 
     if let Value::String(s) = value
         && backend == SqlDialect::Postgres
-        && let Some(tn) =
-            crate::schema_bind::postgres_enum_type_name_for_column(col_name, enum_udt, col_info)
+        && let Some(tn) = crate::schema_bind::native_postgres_enum_udt_name(col_name, enum_udt)
     {
-        return Ok(crate::schema_bind::postgres_enum_string_rhs_expr(s, &tn));
+        return Ok(crate::schema_bind::postgres_enum_string_rhs_expr(s, tn));
     }
 
     if is_uuid_pg {
@@ -262,11 +270,7 @@ pub fn schema_bind_expr(
             let v = if col_format == Some("binary") {
                 SeaValue::Bytes(None)
             } else if col_is_decimal {
-                if backend == SqlDialect::Postgres {
-                    SeaValue::String(None)
-                } else {
-                    SeaValue::Double(None)
-                }
+                SeaValue::Double(None)
             } else if backend == SqlDialect::Postgres && temporal_cast.is_some() {
                 SeaValue::String(None)
             } else {
