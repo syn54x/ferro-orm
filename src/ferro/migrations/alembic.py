@@ -217,6 +217,8 @@ def _sa_type_from_ir_column(col_name: str, col: Dict[str, Any]) -> "sa.types.Typ
         return sa.Numeric()
     if logical_type == "string":
         return sa.String()
+    if logical_type == "json":
+        return sa.JSON()
     if logical_type in {"datetime", "date", "time", "uuid"}:
         if logical_type == "datetime":
             return sa.DateTime()

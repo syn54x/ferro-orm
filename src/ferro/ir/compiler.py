@@ -95,6 +95,8 @@ def _logical_type(col_info: dict[str, Any]) -> str:
         if field_format == "uuid":
             return "uuid"
         return "string"
+    if field_type in {"object", "array"}:
+        return "json"
     return "unknown"
 
 
@@ -132,7 +134,7 @@ def _effective_type_and_format(col_info: dict[str, Any]) -> tuple[Any, Any]:
             candidate_type = candidate.get("type")
             if candidate_type is None or candidate_type == "null":
                 continue
-            return candidate_type, candidate.get("format")
+            return candidate_type, candidate.get("format") or field_format
     return field_type, field_format
 
 
