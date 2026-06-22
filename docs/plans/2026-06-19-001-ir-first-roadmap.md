@@ -186,7 +186,7 @@ Issue references:
 
 ### Phase 1 - Build IR core and compiler
 
-Status: `In progress`
+Status: `Complete`
 
 Issue references:
 
@@ -301,10 +301,10 @@ Issue references:
 - [x] Alembic adapter consumes IR outputs (no independent schema derivation).
 
 **Exit gate**
-- [ ] No independent parallel DDL emitter remains.
-- [ ] Cross-emitter parity class is structurally eliminated.
+- [x] No independent parallel DDL emitter remains.
+- [x] Cross-emitter parity class is structurally eliminated.
 
-**Evidence (working branch; pending merge to `feat/ir-first`)**
+**Evidence (merged to `feat/ir-first`)**
 - New planner/emitter crate: `crates/ferro-migrate/` (`plan_from_ir`, `emit_sql`, unit tests)
 - SchemaIR fidelity updates: `src/ferro/ir/compiler.py`, `crates/ferro-schema-ir/src/lib.rs`
 - Runtime planner now consumes typed IR diff path before SQL planning: `src/migrate.rs`
