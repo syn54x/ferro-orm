@@ -38,11 +38,37 @@ fn format(col_info: &Value) -> Option<&str> {
     })
 }
 
+fn pattern_looks_decimal(pattern: &str) -> bool {
+    if !pattern.contains("\\d") {
+        return false;
+    }
+    let mut escaped = false;
+    for ch in pattern.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch.is_ascii_alphabetic() {
+            return false;
+        }
+    }
+    true
+}
+
 fn is_decimal(col_info: &Value) -> bool {
     if col_info.get("db_type").and_then(Value::as_str) == Some("numeric") {
         return true;
     }
-    if col_info.get("type").and_then(Value::as_str) == Some("string") && col_info.get("pattern").is_some()
+    if col_info.get("type").and_then(Value::as_str) == Some("string")
+        && col_info
+            .get("pattern")
+            .and_then(Value::as_str)
+            .map(pattern_looks_decimal)
+            .unwrap_or(false)
     {
         return true;
     }
@@ -51,7 +77,12 @@ fn is_decimal(col_info: &Value) -> bool {
         .and_then(Value::as_array)
         .map(|types| {
             let has_patterned_string = types.iter().any(|t| {
-                t.get("type").and_then(Value::as_str) == Some("string") && t.get("pattern").is_some()
+                t.get("type").and_then(Value::as_str) == Some("string")
+                    && t
+                        .get("pattern")
+                        .and_then(Value::as_str)
+                        .map(pattern_looks_decimal)
+                        .unwrap_or(false)
             });
             let has_only_decimal_compatible_types = types.iter().all(|t| {
                 matches!(
