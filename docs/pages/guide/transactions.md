@@ -26,6 +26,20 @@ A transaction is pinned to one connection. Open it against a [named connection](
 --8<-- "docs/examples/multiple_databases.py:transaction"
 ```
 
+## Sessions + Transactions
+
+`transaction()` composes with sessions. If a session is active, transactions inherit that session route by default:
+
+```python
+import ferro
+
+async with ferro.engines.session("analytics"):
+    async with ferro.transaction():
+        await Metric.create(name="requests", value=1)
+```
+
+You can also pass an explicit session handle (`transaction(session=my_session)`) when ambient context is different and you need a deterministic override.
+
 ## Raw SQL Inside a Transaction
 
 `transaction()` yields a `Transaction` handle exposing `execute` / `fetch_all` / `fetch_one` for raw SQL on the transaction's own connection — useful for Postgres GUCs (`set_config`, `SET LOCAL`), advisory locks, or any one-off statement that doesn't fit a model:

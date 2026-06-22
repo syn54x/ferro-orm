@@ -101,6 +101,21 @@ Raw SQL routes the same way via `using=`: `await ferro.execute("...", using="ana
 
 Ferro does not provide automatic router policies, read/write splitting, distributed transactions, or cross-connection joins — route each operation explicitly. See [Multiple Databases](../howto/multiple-databases.md) for fuller patterns.
 
+## Sessions (recommended)
+
+Session-scoped routing is now the preferred runtime model:
+
+```python
+import ferro
+
+async with ferro.engines.session("analytics") as s:
+    rows = await s.query(User).where(lambda t: t.active == True).all()  # noqa: E712
+```
+
+Inside an active session context, convenience APIs (`User.all()`, `User.where(...)`, `ferro.execute(...)`) automatically bind to that session's connection.
+
+Legacy implicit default-connection routing (calling unqualified operations outside a session) is still temporarily supported for compatibility, but now emits a deprecation warning and is on the `v0.13.0` removal track.
+
 ## The Default Connection
 
 Unqualified operations (`User.all()`, top-level `execute(...)`) use the default connection. It is established three ways:

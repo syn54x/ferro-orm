@@ -28,6 +28,7 @@ from .fields import BackRef, Field, ManyToMany
 from .models import Model, transaction
 from .query import Relation
 from .raw import Transaction, execute, fetch_all, fetch_one
+from .session import Session, engines
 
 # Set up the Ferro logger
 _logger = logging.getLogger("ferro")
@@ -154,4 +155,6 @@ __all__ = [
     "fetch_all",
     "fetch_one",
     "Transaction",
+    "Session",
+    "engines",
 ]

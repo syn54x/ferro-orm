@@ -34,6 +34,7 @@ Treat these as non-negotiable IR invariants:
 1. **Cross-emitter parity**: every schema artifact name/type/default/nullability must match across emitters.
 2. **Hydration ABI**: zero-copy hydration must initialize required Pydantic slots exactly.
 3. **Typed null/bind correctness**: schema-driven paths must emit type-correct binds, including typed NULLs.
+4. **Session-scoped runtime state**: hot-path identity and transaction state is scoped to explicit/ambient sessions, not hidden globals.
 
 Every IR contract change must preserve or explicitly version these invariants.
 
@@ -124,3 +125,29 @@ When updating `SchemaIR`, `QueryIR`, or `CodecIR`:
 - New IR field appears in one emitter path but not another.
 
 If any appears, treat it as a correctness bug, not a warning-level mismatch.
+
+## Invariant IV: Session-scoped runtime state
+
+### Contract
+
+Core CRUD/query/raw operation routing must derive mutable runtime state from explicit or ambient session context.
+
+- Transaction state is session-scoped.
+- Identity map state is session-scoped.
+- Nested sessions shadow and restore deterministically.
+- Legacy implicit default routing is compatibility-only and on a declared removal timeline.
+
+### Why it exists
+
+Global mutable runtime state in hot paths makes concurrent multi-DB behavior fragile and creates hidden coupling between unrelated tasks.
+
+### Enforcement anchors
+
+- `src/ferro/session.py`
+- `src/ferro/state.py`
+- `src/ferro/models.py`
+- `src/ferro/query/builder.py`
+- `src/ferro/raw.py`
+- `src/state.rs`
+- `src/operations.rs`
+- `tests/test_session.py`

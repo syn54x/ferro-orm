@@ -1,10 +1,10 @@
 # Identity Map
 
-Ferro keeps an identity map: within a single process and connection, the same database row always resolves to the same Python object.
+Ferro keeps an identity map: within a single session and connection, the same database row resolves to the same Python object.
 
 ## What It Is
 
-The identity map is a per-connection cache in the Rust engine, keyed by `(model name, primary key)`. When a query hydrates a row whose primary key is already in the map, Ferro returns the existing instance instead of building a duplicate.
+The identity map is a session-scoped cache in the Rust engine, keyed by `(connection, model name, primary key)`. When a query hydrates a row whose primary key is already in the session map, Ferro returns the existing instance instead of building a duplicate.
 
 ```mermaid
 graph LR
@@ -13,7 +13,7 @@ graph LR
     IM --> Same[Same Python instance]
 ```
 
-Each named connection has its own map — instances loaded through `using("replica")` are tracked separately from instances loaded through the default connection.
+Each active session keeps its own map. Within a session, connection routing is deterministic and tracked independently from other concurrent sessions.
 
 ## Why It Matters
 
