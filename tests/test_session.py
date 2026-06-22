@@ -96,4 +96,3 @@ async def test_legacy_unqualified_operation_warns(tmp_path):
 
     assert created.id == 10
     assert loaded.label == "legacy"
-
