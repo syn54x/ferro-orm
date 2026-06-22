@@ -87,7 +87,17 @@ Phase 4 deprecation note:
 
 ### Phase 6
 
-_TBD_
+| Issue | Change | Impact | User action | Notes |
+| --- | --- | --- | --- | --- |
+| [#97](https://github.com/syn54x/ferro-orm/issues/97) | Add explicit `Session`/`engines.session(name)` runtime boundary for ambient model/query/raw routing | minor | Prefer `async with ferro.engines.session(\"name\")` around request/task work; use `session=` explicit overrides when needed | Adds deterministic nested-session shadow/restore semantics |
+| [#98](https://github.com/syn54x/ferro-orm/issues/98) | Core CRUD/query/transaction hot paths now support session-scoped transaction + identity-map state in Rust | minor | No call-site change required if you use sessions; behavior is now isolated per session under concurrent workloads | Legacy global fallback remains only for compatibility paths |
+| [#99](https://github.com/syn54x/ferro-orm/issues/99) | Temporary compatibility shim keeps implicit default-connection routing but emits deprecation warnings | minor | Migrate unqualified operations (`Model.*`, `ferro.execute/fetch_*`) to run inside sessions; keep `using=` for explicit one-off routing | Deprecation warning points to removal target `v0.13.0` |
+
+Phase 6 deprecation note:
+
+- Deprecated: implicit default-connection routing outside an active session context.
+- Replacement: `async with ferro.engines.session(\"name\")` (ambient routing) or explicit `session=` arguments.
+- Removal target: `v0.13.0`.
 
 ### Phase 7
 

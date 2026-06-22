@@ -92,7 +92,9 @@ class Query(Generic[T]):
         order_by_clause: Sort definitions sent to the Rust core.
     """
 
-    def __init__(self, model_cls: Type[T], using: str | None = None):
+    def __init__(
+        self, model_cls: Type[T], using: str | None = None, session: Any | None = None
+    ):
         """Initialize a query for a model class.
 
         Args:
@@ -105,23 +107,19 @@ class Query(Generic[T]):
         """
         self.model_cls = model_cls
         self._using = using
+        self._session = session
         self.where_clause: list["QueryNode"] = []
         self.order_by_clause: list[dict[str, str]] = []
         self._limit: int | None = None
         self._offset: int | None = None
         self._m2m_context: dict[str, Any] | None = None
 
-    def _transaction_or_using(self) -> tuple[str | None, str | None]:
-        from ..state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
+    def _transaction_or_using(self) -> tuple[str | None, str | None, str | None]:
+        from ..state import resolve_operation_scope
 
-        tx_id = _CURRENT_TRANSACTION.get()
-        if tx_id is not None and self._using is not None:
-            if self._using == _CURRENT_TRANSACTION_CONNECTION.get():
-                return tx_id, None
-            raise ValueError(
-                "ORM queries inside a transaction inherit the transaction connection"
-            )
-        return tx_id, self._using
+        return resolve_operation_scope(
+            using=self._using, session=self._session, allow_legacy_default=True
+        )
 
     def _m2m(
         self, join_table: str, source_col: str, target_col: str, source_id: Any
@@ -257,9 +255,13 @@ class Query(Generic[T]):
             "offset": self._offset,
             "m2m": self._m2m_context,
         }
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         results = await fetch_filtered(
-            self.model_cls, _query_ir_payload_to_json(query_def), tx_id, using
+            self.model_cls,
+            _query_ir_payload_to_json(query_def),
+            tx_id,
+            using,
+            session_id=session_id,
         )
         for instance in results:
             if hasattr(self.model_cls, "_fix_types"):
@@ -285,9 +287,13 @@ class Query(Generic[T]):
             "offset": None,
             "m2m": self._m2m_context,
         }
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         return await count_filtered(
-            self.model_cls.__name__, _query_ir_payload_to_json(query_def), tx_id, using
+            self.model_cls.__name__,
+            _query_ir_payload_to_json(query_def),
+            tx_id,
+            using,
+            session_id=session_id,
         )
 
     async def update(self, **fields) -> int:
@@ -314,7 +320,7 @@ class Query(Generic[T]):
         }
         from pydantic_core import to_json
 
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         # Use pydantic_core.to_json to handle Decimals, UUIDs, etc. in kwargs
         return await update_filtered(
             self.model_cls.__name__,
@@ -322,6 +328,7 @@ class Query(Generic[T]):
             to_json(fields).decode(),
             tx_id,
             using,
+            session_id=session_id,
         )
 
     async def first(self) -> T | None:
@@ -362,9 +369,13 @@ class Query(Generic[T]):
             "offset": self._offset,
             "m2m": None,
         }
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         return await delete_filtered(
-            self.model_cls.__name__, _query_ir_payload_to_json(query_def), tx_id, using
+            self.model_cls.__name__,
+            _query_ir_payload_to_json(query_def),
+            tx_id,
+            using,
+            session_id=session_id,
         )
 
     async def exists(self) -> bool:
@@ -407,7 +418,7 @@ class Query(Generic[T]):
 
         from ..state import _CURRENT_TRANSACTION
 
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         await add_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
@@ -416,6 +427,7 @@ class Query(Generic[T]):
             ids,
             tx_id,
             using,
+            session_id=session_id,
         )
 
     async def remove(self, *instances: Any) -> None:
@@ -443,7 +455,7 @@ class Query(Generic[T]):
 
         from ..state import _CURRENT_TRANSACTION
 
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         await remove_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
@@ -452,6 +464,7 @@ class Query(Generic[T]):
             ids,
             tx_id,
             using,
+            session_id=session_id,
         )
 
     async def clear(self) -> None:
@@ -471,13 +484,14 @@ class Query(Generic[T]):
 
         from ..state import _CURRENT_TRANSACTION
 
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         await clear_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
             self._m2m_context["source_id"],
             tx_id,
             using,
+            session_id=session_id,
         )
 
     def __repr__(self):

@@ -88,7 +88,7 @@ Definition of done addition:
 ## Program status
 
 - Overall status: `In progress`
-- Current phase: `Phase 6`
+- Current phase: `Phase 7`
 - Last updated: `2026-06-22`
 - Roadmap owner: `@syn54x`
 
@@ -350,7 +350,7 @@ Issue references:
 
 ### Phase 6 - Sessionized runtime state
 
-Status: `Not started`
+Status: `Complete`
 
 Issue references:
 
@@ -361,13 +361,24 @@ Issue references:
 - Replace global mutable registries in hot paths with explicit session/engine scoped state.
 
 **Deliverables**
-- [ ] Session/UnitOfWork abstraction for identity map + transaction state.
-- [ ] Engine-scoped registries replace global lookups in core operations.
-- [ ] Temporary compatibility shim for legacy call sites.
+- [x] Session/UnitOfWork abstraction for identity map + transaction state.
+- [x] Engine-scoped registries replace global lookups in core operations.
+- [x] Temporary compatibility shim for legacy call sites.
 
 **Exit gate**
-- [ ] Core CRUD/query paths no longer require global registries.
-- [ ] Session lifecycle and concurrency semantics documented.
+- [x] Core CRUD/query paths no longer require global registries.
+- [x] Session lifecycle and concurrency semantics documented.
+
+**Evidence (working branch; pending merge to `feat/ir-first`)**
+- Session API + ambient context routing: `src/ferro/session.py`, `src/ferro/state.py`, `src/ferro/models.py`, `src/ferro/query/builder.py`, `src/ferro/raw.py`, `src/ferro/__init__.py`, `src/ferro/_core.pyi`
+- Session-scoped Rust runtime state for tx/identity-map hot paths: `src/state.rs`, `src/operations.rs`, `src/connection.rs`, `src/lib.rs`
+- Session lifecycle/concurrency + compatibility coverage: `tests/test_session.py`, `tests/test_connection.py`, `tests/test_transactions.py`, `tests/test_named_connections_integration.py`
+- Docs/migration/invariant updates for sessionized runtime and compatibility shim: `docs/pages/guide/connections.md`, `docs/pages/guide/transactions.md`, `docs/pages/howto/multiple-databases.md`, `docs/pages/concepts/identity-map.md`, `docs/pages/api/connection.md`, `docs/pages/api/transactions.md`, `docs/plans/ir-first-migration-guide.md`, `docs/solutions/patterns/ir-invariants.md`
+- Verification commands:
+  - `cargo check`
+  - `cargo test` (fails in local environment due missing Python symbol linkage for PyO3 test target; non-blocking for Phase 6 code paths)
+  - `cargo test -p ferro-schema-ir -p ferro-migrate`
+  - `uv run pytest tests/test_session.py tests/test_connection.py tests/test_transactions.py tests/test_named_connections_integration.py tests/test_query_builder.py tests/test_raw_sql.py tests/test_crud.py tests/test_deletion.py tests/test_bulk_update.py tests/test_hydration.py tests/test_ir_vectors_contract.py tests/test_shadow_reports.py -q`
 
 ---
 
@@ -557,6 +568,7 @@ Append updates as concise entries.
 - `2026-06-19` - Phase 8 issue set created and linked: epic [#107](https://github.com/syn54x/ferro-orm/issues/107) with sub-issues [#108](https://github.com/syn54x/ferro-orm/issues/108), [#109](https://github.com/syn54x/ferro-orm/issues/109), [#110](https://github.com/syn54x/ferro-orm/issues/110).
 - `2026-06-19` - Phase 4 working-branch implementation landed: added `ferro-migrate` (`SchemaIR(old,new)` diff + SQL emission entrypoint), expanded SchemaIR fidelity (enum/check/join-table coverage), switched Alembic metadata derivation to SchemaIR, and added deprecation warnings for superseded JSON-only Alembic helpers (target removal `v0.13.0`).
 - `2026-06-22` - Phase 5 working-branch implementation landed: added unified codec registry module (`src/codec.rs`) across insert/update/filter/m2m/fetch paths, extracted single hydration ABI helper (`src/hydration.rs`) with required Pydantic slot initialization, and expanded codec conformance vectors/tests for null/uuid/decimal/temporal/enum semantics.
+- `2026-06-22` - Phase 6 working-branch implementation landed: introduced sessionized runtime API (`engines.session` / `Session`) and ambient session routing, moved transaction/identity-map hot-path state to session scope in Rust with compatibility fallback + deprecation warnings, added session lifecycle tests, and synchronized migration/guide/API/invariant docs.
 
 ## Immediate next actions
 

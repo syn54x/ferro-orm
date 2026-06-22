@@ -5,7 +5,10 @@
 
 use crate::backend::{BackendKind, EngineHandle, PoolSpec};
 use crate::migrate::{MigrateOptions, internal_migrate};
-use crate::state::{CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, ENGINE, IDENTITY_MAP};
+use crate::state::{
+    CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, ENGINE, IDENTITY_MAP, SESSION_REGISTRY,
+    TRANSACTION_REGISTRY,
+};
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -313,6 +316,8 @@ pub fn reset_engine() -> PyResult<()> {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Default Connection")
     })? = None;
     IDENTITY_MAP.clear();
+    TRANSACTION_REGISTRY.clear();
+    SESSION_REGISTRY.clear();
     Ok(())
 }
 

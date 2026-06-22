@@ -22,6 +22,15 @@ Everything runs on the default connection unless routed. `Model.using(name)` ret
 
 Routing is per-call: `using()` doesn't change any global state, so two coroutines can talk to different databases concurrently without interfering.
 
+For session-first workflows, use `engines.session(name)` to pin a full block:
+
+```python
+import ferro
+
+async with ferro.engines.session("analytics") as s:
+    metrics = await s.query(Metric).where(lambda t: t.value > 0).all()
+```
+
 ## Transactions on Named Connections
 
 `transaction(using=...)` pins a transaction to one named connection:
