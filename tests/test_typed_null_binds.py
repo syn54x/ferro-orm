@@ -21,6 +21,7 @@ See ``docs/plans/2026-04-29-001-typed-null-binds-plan.md`` for context.
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+import enum
 from typing import Annotated, Any
 
 import pytest
@@ -369,3 +370,43 @@ async def test_invalid_uuid_raises_pyvalueerror_or_pydantic_error(db_url):
         assert "withuuid" in msg.lower() or "WithUuid" in msg
         assert "run_id" in msg
         assert "not-a-uuid" in msg
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_temporal_update_to_none_uses_unified_codec_path(db_url):
+    class TemporalUpdate(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        attached_at: datetime | None = None
+
+    await connect(db_url, auto_migrate=True)
+    row = await TemporalUpdate.create(attached_at=datetime.now(UTC))
+    updated = await TemporalUpdate.where(TemporalUpdate.id == row.id).update(attached_at=None)
+    assert updated == 1
+
+    fetched = await TemporalUpdate.get(row.id)
+    assert fetched is not None
+    assert fetched.attached_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_nullable_enum_null_and_value_roundtrip(db_url):
+    class RunState(str, enum.Enum):
+        READY = "ready"
+        DONE = "done"
+
+    class EnumNullRow(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        state: RunState | None = None
+
+    await connect(db_url, auto_migrate=True)
+    null_row = await EnumNullRow.create()
+    set_row = await EnumNullRow.create(state=RunState.READY)
+
+    fetched_null = await EnumNullRow.get(null_row.id)
+    fetched_set = await EnumNullRow.get(set_row.id)
+    assert fetched_null is not None
+    assert fetched_set is not None
+    assert fetched_null.state is None
+    assert fetched_set.state == RunState.READY

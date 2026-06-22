@@ -88,8 +88,8 @@ Definition of done addition:
 ## Program status
 
 - Overall status: `In progress`
-- Current phase: `Phase 4`
-- Last updated: `2026-06-19`
+- Current phase: `Phase 6`
+- Last updated: `2026-06-22`
 - Roadmap owner: `@syn54x`
 
 ## Branching and release policy
@@ -318,7 +318,7 @@ Issue references:
 
 ### Phase 5 - Codec and hydration ABI unification
 
-Status: `Not started`
+Status: `Complete`
 
 Issue references:
 
@@ -329,13 +329,22 @@ Issue references:
 - Centralize bind/fetch type behavior and formalize the hydration ABI.
 
 **Deliverables**
-- [ ] Unified codec registry used by insert/update/filter/m2m/fetch.
-- [ ] Hydration ABI layer with explicit Pydantic slot initialization contract.
-- [ ] Codec conformance tests for null/uuid/decimal/temporal/enum semantics.
+- [x] Unified codec registry used by insert/update/filter/m2m/fetch.
+- [x] Hydration ABI layer with explicit Pydantic slot initialization contract.
+- [x] Codec conformance tests for null/uuid/decimal/temporal/enum semantics.
 
 **Exit gate**
-- [ ] One hydration path only.
-- [ ] One codec path only (documented exceptions removed or justified by design).
+- [x] One hydration path only.
+- [x] One codec path only (documented exceptions removed or justified by design).
+
+**Evidence (working branch; pending merge to `feat/ir-first`)**
+- Unified codec registry + routing: `src/codec.rs`, `src/operations.rs`, `src/query.rs`, `src/lib.rs`
+- Hydration ABI unification: `src/hydration.rs`, `src/operations.rs`, `tests/test_hydration.py`
+- Codec vectors + conformance: `tests/fixtures/ir_vectors/codec_registry_core_v1.json`, `tests/test_ir_vectors_contract.py`, `tests/test_typed_null_binds.py`, `tests/test_structural_types.py`, `tests/test_temporal_types.py`, `tests/test_enum_cold_hydration.py`
+- Verification commands:
+  - `cargo check`
+  - `cargo test -p ferro-schema-ir`
+  - `uv run pytest tests/test_ir_vectors_contract.py tests/test_hydration.py tests/test_typed_null_binds.py tests/test_structural_types.py tests/test_temporal_types.py tests/test_enum_cold_hydration.py -q`
 
 ---
 
@@ -547,6 +556,7 @@ Append updates as concise entries.
 - `2026-06-19` - Sequencing update: Phase 7 is now public release with deprecated compatibility support; hard removal moved to Phase 8 (`v0.13.0`).
 - `2026-06-19` - Phase 8 issue set created and linked: epic [#107](https://github.com/syn54x/ferro-orm/issues/107) with sub-issues [#108](https://github.com/syn54x/ferro-orm/issues/108), [#109](https://github.com/syn54x/ferro-orm/issues/109), [#110](https://github.com/syn54x/ferro-orm/issues/110).
 - `2026-06-19` - Phase 4 working-branch implementation landed: added `ferro-migrate` (`SchemaIR(old,new)` diff + SQL emission entrypoint), expanded SchemaIR fidelity (enum/check/join-table coverage), switched Alembic metadata derivation to SchemaIR, and added deprecation warnings for superseded JSON-only Alembic helpers (target removal `v0.13.0`).
+- `2026-06-22` - Phase 5 working-branch implementation landed: added unified codec registry module (`src/codec.rs`) across insert/update/filter/m2m/fetch paths, extracted single hydration ABI helper (`src/hydration.rs`) with required Pydantic slot initialization, and expanded codec conformance vectors/tests for null/uuid/decimal/temporal/enum semantics.
 
 ## Immediate next actions
 

@@ -5,7 +5,9 @@
 //! hydration using PyO3 and SQLx.
 
 mod backend;
+mod codec;
 mod connection;
+mod hydration;
 mod introspect;
 mod migrate;
 mod operations;

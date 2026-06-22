@@ -11,6 +11,8 @@ related_files:
   - src/schema.rs
   - src/query.rs
   - src/operations.rs
+  - src/codec.rs
+  - src/hydration.rs
   - src/backend.rs
   - tests/test_cross_emitter_parity.py
   - tests/test_db_type_cross_emitter_parity.py
@@ -78,8 +80,9 @@ Skipping slot initialization can pass basic reads but later fails with runtime `
 
 ### Enforcement anchors
 
-- `src/operations.rs` (`set_pydantic_hydration_slots`)
+- `src/hydration.rs` (`hydrate_model_instance`)
 - `src/backend.rs` row materialization flow
+- `src/codec.rs` typed fetch decode used by hydration paths
 - `tests/test_hydration.py`
 - `docs/solutions/issues/pydantic-slots-missing-after-ferro-hydration.md`
 
@@ -99,7 +102,7 @@ Untyped binds (especially NULL/UUID) can cause backend-specific mismatches or hi
 
 ### Enforcement anchors
 
-- `src/query.rs` (`value_rhs_simple_expr_for_backend`, typed-null selection)
+- `src/codec.rs` (`schema_bind_expr`, `query_bind_expr`, `m2m_bind_expr`)
 - `src/operations.rs` (`engine_bind_values_from_sea`)
 - `src/backend.rs` (`EngineBindValue`, `NullKind`)
 - `tests/test_typed_null_binds.py`

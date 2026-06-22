@@ -24,6 +24,30 @@
           "db_type": "text",
           "non_null_wire_kind": "string",
           "null_wire_kind": "string_null"
+        },
+        {
+          "logical_type": "decimal",
+          "db_type": "numeric",
+          "non_null_wire_kind": "numeric_text",
+          "null_wire_kind": "numeric_null"
+        },
+        {
+          "logical_type": "datetime",
+          "db_type": "timestamptz",
+          "non_null_wire_kind": "timestamp_text",
+          "null_wire_kind": "timestamp_null"
+        },
+        {
+          "logical_type": "date",
+          "db_type": "date",
+          "non_null_wire_kind": "date_text",
+          "null_wire_kind": "date_null"
+        },
+        {
+          "logical_type": "enum",
+          "db_type": "enum",
+          "non_null_wire_kind": "enum_text",
+          "null_wire_kind": "enum_null"
         }
       ],
       "fetch_rules": [
@@ -41,6 +65,26 @@
           "db_type": "text",
           "wire_kind": "string",
           "python_kind": "str"
+        },
+        {
+          "db_type": "numeric",
+          "wire_kind": "numeric_text",
+          "python_kind": "decimal.Decimal"
+        },
+        {
+          "db_type": "timestamptz",
+          "wire_kind": "timestamp_text",
+          "python_kind": "datetime.datetime"
+        },
+        {
+          "db_type": "date",
+          "wire_kind": "date_text",
+          "python_kind": "datetime.date"
+        },
+        {
+          "db_type": "enum",
+          "wire_kind": "enum_text",
+          "python_kind": "enum.Enum"
         }
       ],
       "hydration_abi": {

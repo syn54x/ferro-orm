@@ -8,8 +8,8 @@ use crate::backend::{
 };
 use crate::query::{QueryDef, query_def_from_ir_payload};
 use crate::state::{
-    IDENTITY_MAP, MODEL_REGISTRY, RustValue, SqlDialect, TRANSACTION_REGISTRY,
-    TransactionConnection, TransactionHandle, connection_for_route, engine_for_connection,
+    IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, TRANSACTION_REGISTRY, TransactionConnection,
+    TransactionHandle, connection_for_route, engine_for_connection,
 };
 use ferro_schema_ir::{IrEnvelope, QueryIrPayload};
 use pyo3::prelude::*;
@@ -92,35 +92,6 @@ fn query_def_from_ir_json(query_ir_json: &str) -> PyResult<QueryDef> {
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR: {e}")))
 }
 
-/// Initialize Pydantic v2 slots that `BaseModel.__init__` normally sets, after zero-copy
-/// hydration (`__new__` + `__dict__` population).
-///
-/// These attributes live in `__slots__`; if never assigned, reads raise `AttributeError`,
-/// which breaks `dict(model)`, iteration, `model_copy`, and libraries that recurse results
-/// (for example Prefect's `visit_collection`).
-///
-/// When `model_config["extra"] == "allow"`, `__pydantic_extra__` starts as an empty dict;
-/// otherwise it is `None`. `__pydantic_private__` is always `None` for ORM-hydrated rows.
-fn set_pydantic_hydration_slots<'py>(
-    py: Python<'py>,
-    cls: &Bound<'py, PyAny>,
-    instance: &Bound<'py, PyAny>,
-) -> PyResult<()> {
-    let model_config = cls.getattr(pyo3::intern!(py, "model_config"))?;
-    let extra_policy = model_config.call_method1(
-        pyo3::intern!(py, "get"),
-        (pyo3::intern!(py, "extra"), pyo3::intern!(py, "ignore")),
-    )?;
-    let extra_slot = if extra_policy.eq(pyo3::intern!(py, "allow"))? {
-        pyo3::types::PyDict::new(py).into_any().unbind()
-    } else {
-        py.None()
-    };
-    instance.setattr(pyo3::intern!(py, "__pydantic_extra__"), extra_slot)?;
-    instance.setattr(pyo3::intern!(py, "__pydantic_private__"), py.None())?;
-    Ok(())
-}
-
 /// Map SeaQuery `Value` variants to `EngineBindValue`.
 ///
 /// Typed `None` variants are preserved as `Null(NullKind::T)` so the bind
@@ -195,101 +166,24 @@ async fn execute_transaction_sql(
     conn.execute_sql(sql).await
 }
 
+#[cfg(test)]
 fn engine_value_to_rust_value(
     value: EngineValue,
     schema: &serde_json::Value,
     col_name: &str,
-) -> RustValue {
-    let prop = schema
-        .get("properties")
-        .and_then(|p| p.get(col_name))
-        .map(|col_info| resolve_ref(schema, col_info));
-
-    let format = prop.and_then(property_format);
-    let is_decimal = prop
-        .and_then(|p| p.get("anyOf"))
-        .and_then(|a| a.as_array())
-        .map(|types| {
-            let has_number = types
-                .iter()
-                .any(|t| t.get("type").and_then(|ty| ty.as_str()) == Some("number"));
-            let has_patterned_string = types.iter().any(|t| {
-                t.get("type").and_then(|ty| ty.as_str()) == Some("string")
-                    && t.get("pattern").is_some()
-            });
-            has_number && has_patterned_string
-        })
-        .unwrap_or(false);
-    let json_type = prop.and_then(property_json_type);
-
-    if is_decimal {
-        return match value {
-            EngineValue::I64(v) => RustValue::Decimal(v.to_string()),
-            EngineValue::F64(v) => RustValue::Decimal(v.to_string()),
-            EngineValue::String(v) => RustValue::Decimal(v),
-            _ => RustValue::None,
-        };
-    }
-
-    if format == Some("binary") {
-        return match value {
-            EngineValue::Bytes(v) => RustValue::Blob(v),
-            EngineValue::String(v) => RustValue::Blob(v.into_bytes()),
-            _ => RustValue::None,
-        };
-    }
-
-    match value {
-        EngineValue::I64(v) if json_type == Some("boolean") => RustValue::Bool(v != 0),
-        EngineValue::I64(v) => RustValue::BigInt(v),
-        EngineValue::F64(v) => RustValue::Double(v),
-        EngineValue::Bytes(v) => RustValue::Blob(v),
-        EngineValue::String(v) => match (json_type, format) {
-            (_, Some("date-time")) => RustValue::DateTime(v),
-            (_, Some("date")) => RustValue::Date(v),
-            (_, Some("uuid")) => RustValue::Uuid(v),
-            (Some("object"), _) | (Some("array"), _) => {
-                if let Ok(json_val) = serde_json::from_str(&v) {
-                    RustValue::Json(json_val)
-                } else {
-                    RustValue::String(v)
-                }
-            }
-            _ => RustValue::String(v),
-        },
-        EngineValue::Bool(v) => RustValue::Bool(v),
-        EngineValue::Null => RustValue::None,
-    }
+) -> crate::state::RustValue {
+    crate::codec::decode_engine_value(value, schema, col_name)
 }
 
 /// One parsed row: the primary-key value (when present) plus all column values.
-type ParsedRow = (Option<String>, Vec<(String, RustValue)>);
+type ParsedRow = crate::codec::ParsedRow;
 
 fn typed_rows_to_parsed_data(
     rows: Vec<EngineRow>,
     schema: &serde_json::Value,
     pk_col: Option<&str>,
 ) -> Vec<ParsedRow> {
-    rows.into_iter()
-        .map(|row| {
-            let mut row_pk_val = None;
-            let mut fields = Vec::with_capacity(row.values.len());
-
-            for (col_name, value) in row.values {
-                if pk_col == Some(col_name.as_str()) {
-                    row_pk_val = match &value {
-                        EngineValue::I64(v) => Some(v.to_string()),
-                        EngineValue::String(v) => Some(v.clone()),
-                        _ => None,
-                    };
-                }
-                let value = engine_value_to_rust_value(value, schema, &col_name);
-                fields.push((col_name, value));
-            }
-
-            (row_pk_val, fields)
-        })
-        .collect()
+    crate::codec::typed_rows_to_parsed_data(rows, schema, pk_col)
 }
 
 fn engine_row_string(row: &EngineRow, column_name: &str) -> Option<String> {
@@ -465,42 +359,6 @@ fn maybe_compare_shadow_query_artifacts(
 
 /// On Postgres, cast text-like special columns in SELECT output so Python hydration
 /// sees the same string representation as SQLite.
-fn property_json_type(col_info: &serde_json::Value) -> Option<&str> {
-    col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let s = t.get("type")?.as_str()?;
-                    if s != "null" { None.or(Some(s)) } else { None }
-                })
-            })
-    })
-}
-
-fn property_format(col_info: &serde_json::Value) -> Option<&str> {
-    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let ty = t.get("type")?.as_str()?;
-                    if ty == "null" {
-                        None
-                    } else {
-                        t.get("format").and_then(|f| f.as_str())
-                    }
-                })
-            })
-    })
-}
-
-fn property_is_enum(col_info: &serde_json::Value) -> bool {
-    col_info.get("enum").and_then(|e| e.as_array()).is_some()
-}
-
 fn apply_postgres_text_select_columns(
     select: &mut sea_query::SelectStatement,
     table_name: &str,
@@ -508,64 +366,13 @@ fn apply_postgres_text_select_columns(
     pg_native_enum_columns: &HashSet<String>,
     backend: SqlDialect,
 ) {
-    use sea_query::{Alias, Expr};
-
-    let tbl = Alias::new(table_name);
-    if backend != SqlDialect::Postgres {
-        select.column((tbl.clone(), sea_query::Asterisk));
-        return;
-    }
-    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
-        select.column((tbl.clone(), sea_query::Asterisk));
-        return;
-    };
-    let need_text_from_schema = properties.values().any(|col_info| {
-        let resolved = resolve_ref(schema, col_info);
-        matches!(
-            property_format(resolved),
-            Some("uuid" | "date-time" | "date" | "decimal")
-        ) || matches!(property_json_type(resolved), Some("object" | "array"))
-            || property_is_enum(resolved)
-    });
-    let need_text_from_native_enum = properties
-        .keys()
-        .any(|k| pg_native_enum_columns.contains(k.as_str()));
-    if !need_text_from_schema && !need_text_from_native_enum {
-        select.column((tbl.clone(), sea_query::Asterisk));
-        return;
-    }
-    for (col_name, col_info) in properties {
-        let col_iden = Alias::new(col_name.as_str());
-        let col_info = resolve_ref(schema, col_info);
-        if matches!(
-            property_format(col_info),
-            Some("uuid" | "date-time" | "date" | "decimal")
-        ) || matches!(property_json_type(col_info), Some("object" | "array"))
-            || property_is_enum(col_info)
-            || pg_native_enum_columns.contains(col_name.as_str())
-        {
-            let expr = Expr::cast_as(
-                Expr::col((tbl.clone(), col_iden.clone())),
-                Alias::new("text"),
-            );
-            select.expr_as(expr, col_iden);
-        } else {
-            select.column((tbl.clone(), col_iden));
-        }
-    }
-}
-
-fn resolve_ref<'a>(
-    schema: &'a serde_json::Value,
-    col_info: &'a serde_json::Value,
-) -> &'a serde_json::Value {
-    if let Some(ref_path) = col_info.get("$ref").and_then(|r| r.as_str())
-        && let Some(def_name) = ref_path.strip_prefix("#/$defs/")
-        && let Some(def) = schema.get("$defs").and_then(|defs| defs.get(def_name))
-    {
-        return def;
-    }
-    col_info
+    crate::codec::apply_postgres_text_select_columns(
+        select,
+        table_name,
+        schema,
+        pg_native_enum_columns,
+        backend,
+    );
 }
 
 /// Maps each table column to its PostgreSQL enum `typname` (``typtype = 'e'``) for the current schema.
@@ -675,16 +482,6 @@ async fn postgres_temporal_cast_by_column(
     Ok(out)
 }
 
-fn schema_property<'a>(
-    schema: &'a serde_json::Value,
-    col_name: &str,
-) -> Option<&'a serde_json::Value> {
-    schema
-        .get("properties")
-        .and_then(|p| p.get(col_name))
-        .map(|prop| resolve_ref(schema, prop))
-}
-
 /// Build a SeaQuery expression for a column value, preserving type information
 /// across NULL and primitive binds so the SQLx layer can emit a parameter with
 /// the correct OID on strict-typing backends (notably PostgreSQL).
@@ -707,153 +504,16 @@ fn schema_value_expr(
     ts_cast: &HashMap<String, String>,
     backend: SqlDialect,
 ) -> PyResult<SimpleExpr> {
-    let col_info = schema_property(schema, col_name);
-    let format = col_info.and_then(property_format);
-    let json_type = col_info.and_then(property_json_type);
-    let is_decimal = col_info
-        .and_then(|prop| prop.get("anyOf"))
-        .and_then(|a| a.as_array())
-        .map(|items| items.iter().any(|item| item.get("pattern").is_some()))
-        .unwrap_or(false);
-    // UUID columns are detected either via DB introspection (uuid_columns
-    // populated by postgres_uuid_column_names) or via Pydantic format hint.
-    let is_uuid_pg = backend == SqlDialect::Postgres
-        && (uuid_columns.contains(col_name) || format == Some("uuid"));
-
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && let Some(tn) =
-            crate::schema_bind::postgres_enum_type_name_for_column(col_name, enum_udt, col_info)
-    {
-        return Ok(crate::schema_bind::postgres_enum_string_rhs_expr(s, &tn));
-    }
-
-    if is_uuid_pg {
-        return match value {
-            serde_json::Value::Null => Ok(Expr::value(sea_query::Value::Uuid(None))),
-            serde_json::Value::String(s) => {
-                let parsed = uuid::Uuid::parse_str(s).map_err(|_| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "Invalid UUID for {table_name}.{col_name}: {s}"
-                    ))
-                })?;
-                Ok(Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed)))))
-            }
-            // Anything else (number, bool, etc.) for a UUID column is a
-            // user-side bug; let the existing fallthrough surface it.
-            _ => Ok(Expr::value(sea_query::Value::String(Some(Box::new(
-                value.to_string(),
-            ))))),
-        };
-    }
-
-    // Temporal types (date, date-time, time) are deferred to issue #40 pending
-    // the chrono-vs-time crate decision. For now they keep cast_as wrappers.
-    if value.is_null()
-        && backend == SqlDialect::Postgres
-        && let Some(cast) = ts_cast.get(col_name)
-    {
-        return Ok(Expr::value(sea_query::Value::String(None)).cast_as(Alias::new(cast.as_str())));
-    }
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && let Some(cast) = ts_cast.get(col_name)
-    {
-        return Ok(
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                .cast_as(Alias::new(cast.as_str())),
-        );
-    }
-
-    let expr = match value {
-        value
-            if backend == SqlDialect::Postgres && matches!(json_type, Some("object" | "array")) =>
-        {
-            // JSON/JSONB binding is out of scope for the typed-null refactor.
-            if value.is_null() {
-                Expr::value(sea_query::Value::String(None)).cast_as("json")
-            } else {
-                Expr::value(sea_query::Value::String(Some(Box::new(value.to_string()))))
-                    .cast_as("json")
-            }
-        }
-        serde_json::Value::String(s)
-            if backend == SqlDialect::Postgres && format == Some("date-time") =>
-        {
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("timestamptz")
-        }
-        serde_json::Value::String(s)
-            if backend == SqlDialect::Postgres && format == Some("date") =>
-        {
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("date")
-        }
-        serde_json::Value::String(s) if json_type == Some("integer") => {
-            if let Ok(parsed) = s.parse::<i64>() {
-                Expr::value(sea_query::Value::BigInt(Some(parsed)))
-            } else {
-                Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            }
-        }
-        serde_json::Value::String(s) if json_type == Some("number") => {
-            if let Ok(parsed) = s.parse::<f64>() {
-                Expr::value(sea_query::Value::Double(Some(parsed)))
-            } else {
-                Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            }
-        }
-        serde_json::Value::String(s) if format == Some("binary") => Expr::value(
-            sea_query::Value::Bytes(Some(Box::new(s.as_bytes().to_vec()))),
-        ),
-        serde_json::Value::String(s) if is_decimal => {
-            if let Ok(parsed) = s.parse::<f64>() {
-                Expr::value(sea_query::Value::Double(Some(parsed)))
-            } else {
-                Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            }
-        }
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Expr::value(sea_query::Value::BigInt(Some(i)))
-            } else if let Some(f) = n.as_f64() {
-                Expr::value(sea_query::Value::Double(Some(f)))
-            } else {
-                Expr::value(sea_query::Value::String(None))
-            }
-        }
-        serde_json::Value::String(s) => {
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-        }
-        serde_json::Value::Bool(b)
-            if json_type == Some("boolean") && backend == SqlDialect::Sqlite =>
-        {
-            Expr::value(sea_query::Value::BigInt(Some(if *b { 1 } else { 0 })))
-        }
-        serde_json::Value::Bool(b) => Expr::value(sea_query::Value::Bool(Some(*b))),
-        serde_json::Value::Null => {
-            // Typed-null pick from column metadata. UUID is handled above;
-            // JSON/temporal are handled above. This arm covers primitives,
-            // bytes, and decimal. Unknown shapes fall through to text-typed
-            // null (the bind layer logs this as NullKind::String / Untyped).
-            let v = if format == Some("binary") {
-                sea_query::Value::Bytes(None)
-            } else if is_decimal {
-                // Decimal binds as float8-typed null today; native numeric
-                // typed null is deferred (see plan §3 Scope Boundaries).
-                sea_query::Value::Double(None)
-            } else {
-                match json_type {
-                    Some("integer") => sea_query::Value::BigInt(None),
-                    Some("number") => sea_query::Value::Double(None),
-                    Some("boolean") => sea_query::Value::Bool(None),
-                    Some("string") => sea_query::Value::String(None),
-                    _ => sea_query::Value::String(None),
-                }
-            };
-            Expr::value(v)
-        }
-        _ => Expr::value(sea_query::Value::String(Some(Box::new(value.to_string())))),
-    };
-    Ok(expr)
+    crate::codec::schema_bind_expr(
+        schema,
+        table_name,
+        col_name,
+        value,
+        enum_udt,
+        uuid_columns,
+        ts_cast,
+        backend,
+    )
 }
 
 /// Wrap an M2M target/source ID in a SeaQuery expression for a join table.
@@ -869,15 +529,7 @@ fn backend_column_value_expr(
     uuid_columns: &HashSet<String>,
     backend: SqlDialect,
 ) -> SimpleExpr {
-    if backend == SqlDialect::Postgres && uuid_columns.contains(col_name) {
-        if let sea_query::Value::String(Some(s)) = &value
-            && let Ok(parsed) = uuid::Uuid::parse_str(s)
-        {
-            return Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed))));
-        }
-        return Expr::value(value).cast_as("uuid");
-    }
-    Expr::value(value)
+    crate::codec::m2m_bind_expr(col_name, value, uuid_columns, backend)
 }
 
 #[pyfunction]
@@ -1119,11 +771,6 @@ pub fn fetch_all<'py>(
                 }
             }
 
-            let dict_str = pyo3::intern!(py, "__dict__");
-            let pydantic_fields_set_str = pyo3::intern!(py, "__pydantic_fields_set__");
-            let new_str = pyo3::intern!(py, "__new__");
-            let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
-
             for (row_pk_val, fields) in parsed_data {
                 if use_identity_map
                     && let Some(ref pk_val) = row_pk_val
@@ -1134,21 +781,13 @@ pub fn fetch_all<'py>(
                     continue;
                 }
 
-                let instance = cls.call_method1(new_str, (cls,))?;
-                let dict_attr = instance.getattr(dict_str)?;
-                let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
-                dict.set_item(connection_attr_str, &connection_name)?;
-                let fields_set = pyo3::types::PySet::empty(py)?;
-
-                for (col_name, val) in fields {
-                    let py_val = val.into_py_any(py)?;
-                    let py_name = py_col_names.get(&col_name).unwrap().bind(py);
-                    dict.set_item(py_name, py_val)?;
-                    fields_set.add(py_name)?;
-                }
-
-                let _ = instance.setattr(pydantic_fields_set_str, fields_set);
-                set_pydantic_hydration_slots(py, cls, &instance)?;
+                let instance = crate::hydration::hydrate_model_instance(
+                    py,
+                    cls,
+                    &connection_name,
+                    fields,
+                    &py_col_names,
+                )?;
 
                 if use_identity_map && let Some(pk_val) = row_pk_val {
                     IDENTITY_MAP.insert(
@@ -1294,24 +933,14 @@ pub fn fetch_one<'py>(
         match parsed_row {
             Some(fields) => Python::attach(|py| {
                 let cls = cls_py.bind(py);
-                let instance = cls.call_method1("__new__", (cls,))?;
-                let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
-                let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
-                dict.set_item(
-                    pyo3::intern!(py, "__ferro_connection_name"),
+                let py_col_names = HashMap::new();
+                let instance = crate::hydration::hydrate_model_instance(
+                    py,
+                    cls,
                     &connection_name,
+                    fields,
+                    &py_col_names,
                 )?;
-                let fields_set = pyo3::types::PySet::empty(py)?;
-
-                for (col_name, val) in fields {
-                    let py_val = val.into_py_any(py)?;
-                    let py_name = pyo3::types::PyString::new(py, &col_name);
-                    dict.set_item(&py_name, py_val)?;
-                    fields_set.add(&py_name)?;
-                }
-
-                let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
-                set_pydantic_hydration_slots(py, cls, &instance)?;
                 if use_identity_map {
                     IDENTITY_MAP.insert(
                         (connection_name.clone(), name.clone(), pk_val),
@@ -1788,11 +1417,6 @@ pub fn fetch_filtered<'py>(
                 }
             }
 
-            let dict_str = pyo3::intern!(py, "__dict__");
-            let pydantic_fields_set_str = pyo3::intern!(py, "__pydantic_fields_set__");
-            let new_str = pyo3::intern!(py, "__new__");
-            let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
-
             for (row_pk_val, fields) in parsed_data {
                 if use_identity_map
                     && let Some(ref pk_val) = row_pk_val
@@ -1803,21 +1427,13 @@ pub fn fetch_filtered<'py>(
                     continue;
                 }
 
-                let instance = cls.call_method1(new_str, (cls,))?;
-                let dict_attr = instance.getattr(dict_str)?;
-                let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
-                dict.set_item(connection_attr_str, &connection_name)?;
-                let fields_set = pyo3::types::PySet::empty(py)?;
-
-                for (col_name, val) in fields {
-                    let py_val = val.into_py_any(py)?;
-                    let py_name = py_col_names.get(&col_name).unwrap().bind(py);
-                    dict.set_item(py_name, py_val)?;
-                    fields_set.add(py_name)?;
-                }
-
-                let _ = instance.setattr(pydantic_fields_set_str, fields_set);
-                set_pydantic_hydration_slots(py, cls, &instance)?;
+                let instance = crate::hydration::hydrate_model_instance(
+                    py,
+                    cls,
+                    &connection_name,
+                    fields,
+                    &py_col_names,
+                )?;
 
                 if use_identity_map && let Some(pk_val) = row_pk_val {
                     IDENTITY_MAP.insert(
@@ -2903,7 +2519,7 @@ mod schema_value_expr_tests {
         )
         .unwrap();
 
-        // Decimal binds as float8-typed null; native numeric is deferred.
+        // Decimal null uses a typed float bind to avoid text-typed NULLs on Postgres.
         assert!(matches!(values.0.as_slice(), [SeaValue::Double(None)]));
     }
 
