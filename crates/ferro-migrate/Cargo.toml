@@ -1,0 +1,7 @@
+[package]
+name = "ferro-migrate"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ferro-schema-ir = { path = "../ferro-schema-ir" }

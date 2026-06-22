@@ -30,6 +30,8 @@ pub struct SchemaColumn {
     pub name: String,
     pub logical_type: String,
     pub db_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_type_explicit: Option<bool>,
     pub nullable: bool,
     pub primary_key: bool,
     pub autoincrement: bool,
@@ -37,6 +39,10 @@ pub struct SchemaColumn {
     pub index: bool,
     pub default: Option<Value>,
     pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_type_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
