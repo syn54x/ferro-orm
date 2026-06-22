@@ -169,7 +169,6 @@ def _column_ir(
         "name": col_name,
         "logical_type": _logical_type(col_info),
         "db_type": db_type_value if db_type_explicit else _default_db_type(col_info),
-        "db_type_explicit": db_type_explicit,
         "nullable": _is_nullable(col_name, col_info, required_fields),
         "primary_key": bool(col_info.get("primary_key", False)),
         "autoincrement": bool(col_info.get("autoincrement", False)),
@@ -181,6 +180,8 @@ def _column_ir(
     enum_values = _enum_values(col_info)
     if isinstance(enum_values, list):
         column_ir["enum_values"] = list(enum_values)
+    if db_type_explicit:
+        column_ir["db_type_explicit"] = True
     enum_type_name = col_info.get("enum_type_name")
     if isinstance(enum_type_name, str) and enum_type_name:
         column_ir["enum_type_name"] = enum_type_name
@@ -204,12 +205,18 @@ def _single_unique_name(table_name: str, col_name: str) -> str:
 
 def _composite_index_name(table_name: str, columns: list[str]) -> str:
     """Build canonical composite index name."""
-    return f"idx_{table_name}_{'_'.join(columns)}"
+    raw = f"idx_{table_name}_{'_'.join(columns)}"
+    if len(raw) > 63:
+        return f"{raw[:59]}_idx"
+    return raw
 
 
 def _composite_unique_name(table_name: str, columns: list[str]) -> str:
     """Build canonical composite unique-constraint name."""
-    return f"uq_{table_name}_{'_'.join(columns)}"
+    raw = f"uq_{table_name}_{'_'.join(columns)}"
+    if len(raw) > 63:
+        return f"{raw[:60]}_uq"
+    return raw
 
 
 def _checks_from_columns(table_name: str, columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
