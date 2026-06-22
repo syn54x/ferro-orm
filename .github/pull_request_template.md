@@ -33,4 +33,12 @@
 
 ## Related Issues
 
-<!-- Example: Closes #123 -->
+- Closes #
+- Closes #
+
+<!-- Use one line per completed issue: Closes #123 / Fixes #123 / Resolves #123 -->
+
+## Exit Steps
+
+- [ ] Related completed issues are linked above with Closes/Fixes/Resolves
+- [ ] Issue statuses are updated/auto-close on merge
