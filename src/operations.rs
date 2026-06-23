@@ -833,6 +833,13 @@ pub fn open_session(using: Option<String>) -> PyResult<(String, String)> {
 
 #[pyfunction]
 pub fn close_session(session_id: String) -> PyResult<()> {
+    let session = session_state(&session_id)?;
+    if !session.transaction_registry.is_empty() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "Cannot close session while transactions are active. \
+             Exit all transaction() blocks before closing the session.",
+        ));
+    }
     if !unregister_session(&session_id) {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
             "Session '{}' is not active",

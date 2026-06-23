@@ -56,7 +56,8 @@ class Session:
 
         Raises:
             RuntimeError: If the ambient session in this asyncio context does not
-                match this handle (same-context lifecycle misuse).
+                match this handle (same-context lifecycle misuse), or if
+                session-scoped transactions are still open.
         """
         if self.session_id is None and self._token is None:
             return

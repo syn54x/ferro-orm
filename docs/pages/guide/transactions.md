@@ -40,6 +40,8 @@ async with ferro.engines.session("analytics"):
 
 You can also pass an explicit session handle (`transaction(session=my_session)`) when ambient context is different and you need a deterministic override.
 
+`Session.close()` raises `RuntimeError` while session-scoped transactions are still open. Exit all `transaction()` blocks before closing the session.
+
 ## Raw SQL Inside a Transaction
 
 `transaction()` yields a `Transaction` handle exposing `execute` / `fetch_all` / `fetch_one` for raw SQL on the transaction's own connection — useful for Postgres GUCs (`set_config`, `SET LOCAL`), advisory locks, or any one-off statement that doesn't fit a model:
