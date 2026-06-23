@@ -1,4 +1,6 @@
+import asyncio
 import warnings
+from contextlib import AsyncExitStack
 from typing import Annotated
 
 import pytest
@@ -128,3 +130,258 @@ async def test_legacy_unqualified_operation_warns(tmp_path):
 
     assert created.id == 10
     assert loaded.label == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_session_exit_from_different_asyncio_context_succeeds(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    stack = AsyncExitStack()
+    await stack.__aenter__()
+    await stack.enter_async_context(ferro.engines.session("default"))
+    await SessionMarker.create(id=1, label="demo")
+
+    async def close_stack() -> None:
+        await stack.__aexit__(None, None, None)
+
+    await asyncio.create_task(close_stack())
+
+    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
+        await SessionMarker.all()
+
+
+@pytest.mark.asyncio
+async def test_session_close_from_different_context_succeeds(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+    await SessionMarker.create(id=2, label="demo")
+
+    async def close_session() -> None:
+        await session.close()
+
+    await asyncio.create_task(close_session())
+    assert session.session_id is None
+
+    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
+        await SessionMarker.all()
+
+
+@pytest.mark.asyncio
+async def test_session_close_is_idempotent(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+    await session.close()
+    await session.close()
+    assert session.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_nested_session_cross_context_close_inner_then_outer(tmp_path):
+    app_db = tmp_path / "app.db"
+    analytics_db = tmp_path / "analytics.db"
+
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await ferro.connect(f"sqlite:{analytics_db}?mode=rwc", name="analytics")
+    await ferro.create_tables()
+    await ferro.create_tables(using="analytics")
+
+    outer = ferro.engines.session("app")
+    inner = ferro.engines.session("analytics")
+    await outer.__aenter__()
+    await SessionMarker.create(id=1, label="app")
+    await inner.__aenter__()
+    await SessionMarker.create(id=1, label="analytics")
+
+    async def close_inner() -> None:
+        await inner.close()
+
+    await asyncio.create_task(close_inner())
+
+    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
+        await SessionMarker.all()
+
+    rows = await SessionMarker.all(session=outer)
+    assert [row.label for row in rows] == ["app"]
+
+    async def close_outer() -> None:
+        await outer.close()
+
+    await asyncio.create_task(close_outer())
+    assert outer.session_id is None
+
+    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
+        await SessionMarker.all(session=outer)
+
+
+@pytest.mark.asyncio
+async def test_ambient_operations_after_session_close_fail_with_session_closed_error(
+    tmp_path,
+):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+    await SessionMarker.create(id=3, label="demo")
+
+    async def close_session() -> None:
+        await session.close()
+
+    await asyncio.create_task(close_session())
+
+    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
+        await SessionMarker.all()
+
+
+@pytest.mark.asyncio
+async def test_explicit_session_query_after_close_fails_with_session_closed_error(
+    tmp_path,
+):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
+        await session.query(SessionMarker).where(lambda t: t.id == 1).first()
+
+
+@pytest.mark.asyncio
+async def test_same_context_exit_when_ambient_session_replaced_raises_clear_error(
+    tmp_path,
+):
+    from ferro.state import _CURRENT_SESSION
+
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await ferro.create_tables()
+
+    outer = ferro.engines.session("app")
+    inner = ferro.engines.session("analytics")
+    await outer.__aenter__()
+    _CURRENT_SESSION.set(inner)
+
+    with pytest.raises(RuntimeError, match="ambient session does not match"):
+        await outer.close()
+
+    assert outer.session_id is not None
+    assert _CURRENT_SESSION.get() is inner
+
+
+@pytest.mark.asyncio
+async def test_same_context_outer_close_after_inner_cross_context_close_raises(
+    tmp_path,
+):
+    app_db = tmp_path / "app.db"
+    analytics_db = tmp_path / "analytics.db"
+
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await ferro.connect(f"sqlite:{analytics_db}?mode=rwc", name="analytics")
+    await ferro.create_tables()
+    await ferro.create_tables(using="analytics")
+
+    outer = ferro.engines.session("app")
+    inner = ferro.engines.session("analytics")
+    await outer.__aenter__()
+    await inner.__aenter__()
+
+    async def close_inner() -> None:
+        await inner.close()
+
+    await asyncio.create_task(close_inner())
+
+    with pytest.raises(RuntimeError, match="ambient session does not match"):
+        await outer.close()
+
+    assert outer.session_id is not None
+
+
+@pytest.mark.asyncio
+async def test_stale_ambient_with_using_still_raises_session_closed(tmp_path):
+    app_db = tmp_path / "app.db"
+    analytics_db = tmp_path / "analytics.db"
+
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await ferro.connect(f"sqlite:{analytics_db}?mode=rwc", name="analytics")
+    await ferro.create_tables()
+    await ferro.create_tables(using="analytics")
+
+    session = ferro.engines.session("app")
+    await session.__aenter__()
+
+    async def close_session() -> None:
+        await session.close()
+
+    await asyncio.create_task(close_session())
+
+    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
+        await SessionMarker.all(using="analytics")
+
+
+@pytest.mark.asyncio
+async def test_transaction_after_cross_context_close_raises(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+
+    async def close_session() -> None:
+        await session.close()
+
+    await asyncio.create_task(close_session())
+
+    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
+        async with ferro.transaction():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_aexit_preserves_body_exception_when_close_fails(tmp_path):
+    from ferro.state import _CURRENT_SESSION
+
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await ferro.create_tables()
+
+    outer = ferro.engines.session("app")
+    inner = ferro.engines.session("analytics")
+    await outer.__aenter__()
+    _CURRENT_SESSION.set(inner)
+
+    body_error = ValueError("body failed")
+    with pytest.raises(ValueError, match="body failed") as exc_info:
+        await outer.__aexit__(ValueError, body_error, None)
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "ambient session does not match" in str(exc_info.value.__cause__)
+
+
+@pytest.mark.asyncio
+async def test_aexit_preserves_cancelled_error_when_close_fails(tmp_path):
+    from ferro.state import _CURRENT_SESSION
+
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await ferro.create_tables()
+
+    outer = ferro.engines.session("app")
+    inner = ferro.engines.session("analytics")
+    await outer.__aenter__()
+    _CURRENT_SESSION.set(inner)
+
+    cancelled = asyncio.CancelledError("shutdown")
+    with pytest.raises(asyncio.CancelledError, match="shutdown") as exc_info:
+        await outer.__aexit__(asyncio.CancelledError, cancelled, None)
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "ambient session does not match" in str(exc_info.value.__cause__)
