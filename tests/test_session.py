@@ -41,7 +41,7 @@ async def test_session_query_api_routes_to_bound_connection(tmp_path):
     assert fetched.label == "analytics"
 
     with pytest.warns(
-        DeprecationWarning, match="Implicit default-connection routing.*v0\\.13\\.0"
+        DeprecationWarning, match="Implicit default-connection routing.*v0\\.14\\.0"
     ):
         default_rows = await SessionMarker.all()
     assert default_rows == []
@@ -92,11 +92,11 @@ async def test_legacy_unqualified_operation_warns(tmp_path):
     await ferro.create_tables()
 
     with pytest.warns(
-        DeprecationWarning, match="Implicit default-connection routing.*v0\\.13\\.0"
+        DeprecationWarning, match="Implicit default-connection routing.*v0\\.14\\.0"
     ):
         created = await SessionMarker.create(id=10, label="legacy")
     with pytest.warns(
-        DeprecationWarning, match="Implicit default-connection routing.*v0\\.13\\.0"
+        DeprecationWarning, match="Implicit default-connection routing.*v0\\.14\\.0"
     ):
         loaded = await SessionMarker.get(10)
 

@@ -23,8 +23,8 @@ call* a few APIs, not how you declare your data.
 
 `v0.12.x` ships a **compatibility window**: the older call styles still work,
 but each one now emits a `DeprecationWarning` whose message ends with
-`Planned removal: v0.13.0`. Treat `v0.12.x` as your window to migrate before the
-old surfaces are removed in `v0.13.0`.
+`Planned removal in v0.14.0`. Treat `v0.12.x` and `v0.13.x` as your window to migrate before the
+old surfaces are removed in `v0.14.0`.
 
 Turn deprecation warnings into failures on a migration branch so nothing slips
 through:
@@ -129,10 +129,10 @@ directly in your Alembic `env.py`.
 
 | Deprecated surface | Replacement | Removed in |
 | --- | --- | --- |
-| `Model.where(Model.field OP value)` | `where(lambda t: ...)` or `col(Model.field)` | `v0.13.0` |
-| Unqualified ORM/raw operations outside an active session | `async with ferro.engines.session("name")` or explicit `session=` | `v0.13.0` |
-| `ferro.migrations.alembic._build_sa_table` | `ferro.migrations.get_metadata()` | `v0.13.0` |
-| `ferro.migrations.alembic._map_to_sa_type` | `ferro.migrations.get_metadata()` | `v0.13.0` |
+| `Model.where(Model.field OP value)` | `where(lambda t: ...)` or `col(Model.field)` | `v0.14.0` |
+| Unqualified ORM/raw operations outside an active session | `async with ferro.engines.session("name")` or explicit `session=` | `v0.14.0` |
+| `ferro.migrations.alembic._build_sa_table` | `ferro.migrations.get_metadata()` | `v0.14.0` |
+| `ferro.migrations.alembic._map_to_sa_type` | `ferro.migrations.get_metadata()` | `v0.14.0` |
 
 ## Verifying your migration
 
@@ -143,5 +143,5 @@ paths you exercise:
 uv run pytest -W error::DeprecationWarning
 ```
 
-A clean run means your codebase is ready for `v0.13.0`, where these
+A clean run means your codebase is ready for `v0.14.0`, where these
 compatibility shims are removed.

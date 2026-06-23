@@ -197,7 +197,7 @@ class TestOperatorPathUnchanged:
         await OpUser(id=1, email="a@b.com").save()
         await OpUser(id=2, email="c@d.com").save()
 
-        with pytest.deprecated_call(match="Operator predicate style.*v0\\.13\\.0"):
+        with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
             rows = await OpUser.where(
                 OpUser.email == "a@b.com"
             ).all()  # ty: ignore[no-matching-overload]
@@ -227,7 +227,7 @@ class TestCombinedStyles:
         await MixUser(id=1_001, role="admin", archived=True).save()
         await MixUser(id=2, role="user", archived=False).save()
 
-        with pytest.deprecated_call(match="Operator predicate style.*v0\\.13\\.0"):
+        with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
             rows = await (
                 MixUser.where(MixUser.id == 1)  # ty: ignore[no-matching-overload]
                 .where(col(MixUser.archived) == False)  # noqa: E712

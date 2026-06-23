@@ -45,7 +45,7 @@ def test_pytest_marker_documents_v013_removal_target():
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     content = pyproject.read_text(encoding="utf-8")
     marker_entry = re.search(
-        r'deprecated_operator_path:[^"]*v0\.13\.0[^"]*',
+        r'deprecated_operator_path:[^"]*v0\.14\.0[^"]*',
         content,
     )
     assert marker_entry is not None

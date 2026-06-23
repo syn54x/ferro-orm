@@ -123,7 +123,7 @@ def test_model_where_clause():
         id: int = Field(json_schema_extra={"primary_key": True})
         age: int
 
-    with pytest.deprecated_call(match="Operator predicate style.*v0\\.13\\.0"):
+    with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
         query = QueryUser.where(QueryUser.age >= 21)
 
     assert isinstance(query, Query)
@@ -143,7 +143,7 @@ def test_query_chaining_placeholders():
         id: int = Field(json_schema_extra={"primary_key": True})
         age: int
 
-    with pytest.deprecated_call(match="Operator predicate style.*v0\\.13\\.0"):
+    with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
         query = QueryUser.where(QueryUser.age >= 18).limit(10).offset(5)
 
     assert query._limit == 10

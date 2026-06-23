@@ -12,12 +12,12 @@
 ### Testing
 
 - **deprecation**: Add inventory contract coverage for `deprecated_operator_path`
-  and enforce `v0.13.0` removal-target assertions across compat warning tests
+  and enforce `v0.14.0` removal-target assertions across compat warning tests
 
 ### Refactoring
 
 - **deprecation**: Centralize compatibility-window warning text to keep
-  `Planned removal: v0.13.0` messaging consistent across query/session/alembic paths
+  `Planned removal in v0.14.0` messaging consistent across query/session/alembic paths
 
 
 ## v0.11.0 (2026-06-11)

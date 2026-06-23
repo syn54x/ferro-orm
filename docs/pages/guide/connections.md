@@ -114,7 +114,7 @@ async with ferro.engines.session("analytics") as s:
 
 Inside an active session context, convenience APIs (`User.all()`, `User.where(...)`, `ferro.execute(...)`) automatically bind to that session's connection.
 
-Legacy implicit default-connection routing (calling unqualified operations outside a session) is still temporarily supported for compatibility, but now emits a deprecation warning and is on the `v0.13.0` removal track.
+Legacy implicit default-connection routing (calling unqualified operations outside a session) is still temporarily supported for compatibility, but now emits a deprecation warning and is on the `v0.14.0` removal track.
 Follow [Migrating to v0.12.0](../howto/migrating-to-v0-12-0.md) to remove these legacy call sites during the compatibility window.
 
 ## The Default Connection

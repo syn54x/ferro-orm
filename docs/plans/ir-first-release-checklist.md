@@ -10,7 +10,7 @@ compatibility window through `v0.12.x`.
   - [#101](https://github.com/syn54x/ferro-orm/issues/101)
   - [#102](https://github.com/syn54x/ferro-orm/issues/102)
   - [#103](https://github.com/syn54x/ferro-orm/issues/103)
-- [ ] Deprecation warnings consistently include `Planned removal: v0.13.0`.
+- [ ] Deprecation warnings consistently include `Planned removal in v0.14.0`.
 - [ ] Deprecated-compat inventory is still tracked via
       `pytest.mark.deprecated_operator_path`.
 - [ ] User migration docs are complete:

@@ -30,7 +30,7 @@ Move Ferro to an IR-first architecture where schema, query, migration, and codec
 - Query execution consumes typed QueryIR (not ad-hoc JSON payloads).
 - Hydration path is single and ABI-defined for Pydantic slot initialization.
 - Global registries are removed from hot-path runtime operations in favor of explicit engine/session state.
-- Legacy compatibility shims are removed in the explicit `v0.13.0` cutover.
+- Legacy compatibility shims are removed in the explicit `v0.14.0` cutover.
 - User-facing migration guidance is continuously updated and release-ready at each phase boundary.
 
 ## Living migration guide requirement
@@ -404,7 +404,7 @@ Issue references:
 **Exit gate**
 - [x] Release branch green across full backend/test matrix.
 - [x] Migration guide validated against at least one real example project.
-- [x] Deprecation warnings explicitly point to `v0.13.0` as the removal release.
+- [x] Deprecation warnings explicitly point to `v0.14.0` as the removal release.
 
 **Evidence (working branch; pending merge to `feat/ir-first`)**
 - Deprecation messaging consistency primitive + call-site adoption: `src/ferro/_deprecations.py`, `src/ferro/query/builder.py`, `src/ferro/state.py`, `src/ferro/migrations/alembic.py`
@@ -424,7 +424,7 @@ Issue references:
 
 ---
 
-### Phase 8 - Compatibility cutover and shim removal (`v0.13.0`)
+### Phase 8 - Compatibility cutover and shim removal (`v0.14.0`)
 
 Status: `Not started`
 
@@ -434,17 +434,17 @@ Issue references:
 - `Sub-issues:` _TBD_
 
 **Objective**
-- Complete migration by removing deprecated compatibility shims in `v0.13.0`.
+- Complete migration by removing deprecated compatibility shims in `v0.14.0`.
 
 **Deliverables**
 - [ ] Legacy compatibility code paths removed.
 - [ ] Deprecated-compat test inventory removed (all `deprecated_operator_path` tests deleted or rewritten).
-- [ ] Final migration-guide cutover notes for `v0.13.0`.
+- [ ] Final migration-guide cutover notes for `v0.14.0`.
 - [ ] Release checklist and changelog entries for shim removal.
 
 **Exit gate**
 - [ ] Full backend/test matrix green with deprecated paths removed.
-- [ ] Migration guide validated against at least one real example project on the `v0.13.0` code path.
+- [ ] Migration guide validated against at least one real example project on the `v0.14.0` code path.
 
 ## Workstreams and ownership
 
@@ -580,12 +580,12 @@ Append updates as concise entries.
 - `2026-06-19` - Phase 2 scaffolding landed on working branch: internal shadow runtime flag/hook wiring, semantic comparison harness, stable SQLite/Postgres shadow report fixtures, and touched-path CI gate for shadow reports.
 - `2026-06-19` - Phase 2 merged via [#105](https://github.com/syn54x/ferro-orm/pull/105); issues [#80](https://github.com/syn54x/ferro-orm/issues/80), [#81](https://github.com/syn54x/ferro-orm/issues/81), [#82](https://github.com/syn54x/ferro-orm/issues/82), [#83](https://github.com/syn54x/ferro-orm/issues/83) synchronized and closed.
 - `2026-06-19` - Phase 3 working-branch implementation landed: QueryIR envelope hot-path cutover for query operations, operator-style deprecation warnings, and synchronized query docs/migration guidance updates.
-- `2026-06-19` - Sequencing update: Phase 7 is now public release with deprecated compatibility support; hard removal moved to Phase 8 (`v0.13.0`).
+- `2026-06-19` - Sequencing update: Phase 7 is now public release with deprecated compatibility support; hard removal moved to Phase 8 (`v0.14.0`).
 - `2026-06-19` - Phase 8 issue set created and linked: epic [#107](https://github.com/syn54x/ferro-orm/issues/107) with sub-issues [#108](https://github.com/syn54x/ferro-orm/issues/108), [#109](https://github.com/syn54x/ferro-orm/issues/109), [#110](https://github.com/syn54x/ferro-orm/issues/110).
-- `2026-06-19` - Phase 4 working-branch implementation landed: added `ferro-migrate` (`SchemaIR(old,new)` diff + SQL emission entrypoint), expanded SchemaIR fidelity (enum/check/join-table coverage), switched Alembic metadata derivation to SchemaIR, and added deprecation warnings for superseded JSON-only Alembic helpers (target removal `v0.13.0`).
+- `2026-06-19` - Phase 4 working-branch implementation landed: added `ferro-migrate` (`SchemaIR(old,new)` diff + SQL emission entrypoint), expanded SchemaIR fidelity (enum/check/join-table coverage), switched Alembic metadata derivation to SchemaIR, and added deprecation warnings for superseded JSON-only Alembic helpers (target removal `v0.14.0`).
 - `2026-06-22` - Phase 5 working-branch implementation landed: added unified codec registry module (`src/codec.rs`) across insert/update/filter/m2m/fetch paths, extracted single hydration ABI helper (`src/hydration.rs`) with required Pydantic slot initialization, and expanded codec conformance vectors/tests for null/uuid/decimal/temporal/enum semantics.
 - `2026-06-22` - Phase 6 working-branch implementation landed: introduced sessionized runtime API (`engines.session` / `Session`) and ambient session routing, moved transaction/identity-map hot-path state to session scope in Rust with compatibility fallback + deprecation warnings, added session lifecycle tests, and synchronized migration/guide/API/invariant docs.
-- `2026-06-22` - Phase 7 working-branch implementation landed: completed version-centric public migration guidance (`Migrating to v0.12.0`), added release checklist + changelog entries, centralized `v0.13.0` deprecation-target messaging across compatibility paths, added deprecated-path inventory tests, and validated full Rust/Python/docs/release verification matrix.
+- `2026-06-22` - Phase 7 working-branch implementation landed: completed version-centric public migration guidance (`Migrating to v0.12.0`), added release checklist + changelog entries, centralized `v0.14.0` deprecation-target messaging across compatibility paths, added deprecated-path inventory tests, and validated full Rust/Python/docs/release verification matrix.
 
 ## Immediate next actions
 

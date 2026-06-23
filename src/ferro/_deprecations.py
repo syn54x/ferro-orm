@@ -11,7 +11,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 # Canonical IR-first compatibility window.
 IR_FIRST_DEPRECATION_SINCE = "v0.12.0"
-IR_FIRST_DEPRECATION_REMOVE_IN = "v0.13.0"
+IR_FIRST_DEPRECATION_REMOVE_IN = "v0.14.0"
 
 # Back-compat alias used by inventory/docs.
 REMOVAL_RELEASE = IR_FIRST_DEPRECATION_REMOVE_IN

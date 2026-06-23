@@ -43,13 +43,13 @@ def test_deprecated_decorator_emits_warning():
         return "ok"
 
     with pytest.deprecated_call(
-        match=r"Legacy helper is deprecated\..*v0\.12\.0.*v0\.13\.0"
+        match=r"Legacy helper is deprecated\..*v0\.12\.0.*v0\.14\.0"
     ):
         assert legacy_helper() == "ok"
 
 
 def test_warn_deprecated_emits_warning():
-    with pytest.deprecated_call(match="Inline legacy path is deprecated.*v0\\.13\\.0"):
+    with pytest.deprecated_call(match="Inline legacy path is deprecated.*v0\\.14\\.0"):
         warn_deprecated(
             reason="Inline legacy path is deprecated.",
             since=IR_FIRST_DEPRECATION_SINCE,
