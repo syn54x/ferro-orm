@@ -31,7 +31,7 @@ from typing import Any
 from ._core import raw_execute as _raw_execute
 from ._core import raw_fetch_all as _raw_fetch_all
 from ._core import raw_fetch_one as _raw_fetch_one
-from .state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
+from .state import resolve_operation_scope
 
 __all__ = ["execute", "fetch_all", "fetch_one", "Transaction"]
 
@@ -68,16 +68,17 @@ def _check_sql(sql: str) -> None:
         raise ValueError("sql must be a non-empty statement")
 
 
-def _transaction_or_using(using: str | None) -> tuple[str | None, str | None]:
-    tx_id = _CURRENT_TRANSACTION.get()
-    if tx_id is not None and using is not None:
-        if using == _CURRENT_TRANSACTION_CONNECTION.get():
-            return tx_id, None
-        raise ValueError("Raw SQL inside a transaction inherits the transaction connection")
-    return tx_id, using
+def _transaction_or_using(
+    using: str | None, session: Any | None
+) -> tuple[str | None, str | None, str | None]:
+    return resolve_operation_scope(
+        using=using, session=session, allow_legacy_default=True
+    )
 
 
-async def execute(sql: str, *args: Any, using: str | None = None) -> int:
+async def execute(
+    sql: str, *args: Any, using: str | None = None, session: Any | None = None
+) -> int:
     """Run a raw SQL statement, returning rows affected.
 
     Honors the active ``transaction()`` block via the ``_CURRENT_TRANSACTION``
@@ -88,12 +89,12 @@ async def execute(sql: str, *args: Any, using: str | None = None) -> int:
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
-    tx_id, using = _transaction_or_using(using)
-    return await _raw_execute(sql, marshalled, tx_id, using)
+    tx_id, using, session_id = _transaction_or_using(using, session)
+    return await _raw_execute(sql, marshalled, tx_id, using, session_id=session_id)
 
 
 async def fetch_all(
-    sql: str, *args: Any, using: str | None = None
+    sql: str, *args: Any, using: str | None = None, session: Any | None = None
 ) -> list[dict[str, Any]]:
     """Run a raw SQL query and return all rows as a list of dicts.
 
@@ -102,12 +103,12 @@ async def fetch_all(
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
-    tx_id, using = _transaction_or_using(using)
-    return await _raw_fetch_all(sql, marshalled, tx_id, using)
+    tx_id, using, session_id = _transaction_or_using(using, session)
+    return await _raw_fetch_all(sql, marshalled, tx_id, using, session_id=session_id)
 
 
 async def fetch_one(
-    sql: str, *args: Any, using: str | None = None
+    sql: str, *args: Any, using: str | None = None, session: Any | None = None
 ) -> dict[str, Any] | None:
     """Run a raw SQL query and return the first row as a dict, or ``None``.
 
@@ -115,8 +116,8 @@ async def fetch_one(
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
-    tx_id, using = _transaction_or_using(using)
-    return await _raw_fetch_one(sql, marshalled, tx_id, using)
+    tx_id, using, session_id = _transaction_or_using(using, session)
+    return await _raw_fetch_one(sql, marshalled, tx_id, using, session_id=session_id)
 
 
 class Transaction:
@@ -132,22 +133,27 @@ class Transaction:
     subsequent call raises :class:`RuntimeError`.
     """
 
-    __slots__ = ("_tx_id",)
+    __slots__ = ("_tx_id", "_session_id")
 
-    def __init__(self, tx_id: str) -> None:
+    def __init__(self, tx_id: str, session_id: str | None = None) -> None:
         self._tx_id = tx_id
+        self._session_id = session_id
 
     async def execute(self, sql: str, *args: Any) -> int:
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
-        return await _raw_execute(sql, marshalled, self._tx_id)
+        return await _raw_execute(sql, marshalled, self._tx_id, session_id=self._session_id)
 
     async def fetch_all(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
-        return await _raw_fetch_all(sql, marshalled, self._tx_id)
+        return await _raw_fetch_all(
+            sql, marshalled, self._tx_id, session_id=self._session_id
+        )
 
     async def fetch_one(self, sql: str, *args: Any) -> dict[str, Any] | None:
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
-        return await _raw_fetch_one(sql, marshalled, self._tx_id)
+        return await _raw_fetch_one(
+            sql, marshalled, self._tx_id, session_id=self._session_id
+        )

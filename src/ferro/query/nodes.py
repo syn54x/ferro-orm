@@ -36,6 +36,7 @@ class QueryNode:
         left: "QueryNode | None" = None,
         right: "QueryNode | None" = None,
         is_compound: bool = False,
+        predicate_style: str | None = None,
     ):
         """Initialize a query expression node
 
@@ -53,6 +54,7 @@ class QueryNode:
         self.left = left
         self.right = right
         self.is_compound = is_compound
+        self.predicate_style = predicate_style
 
     def __or__(self, other: "QueryNode") -> "QueryNode":
         """Combine two nodes with logical OR
@@ -70,7 +72,15 @@ class QueryNode:
         """
         if not isinstance(other, QueryNode):
             return NotImplemented
-        return QueryNode(left=self, operator="OR", right=other, is_compound=True)
+        return QueryNode(
+            left=self,
+            operator="OR",
+            right=other,
+            is_compound=True,
+            predicate_style="operator"
+            if self.uses_operator_style() or other.uses_operator_style()
+            else self.predicate_style or other.predicate_style,
+        )
 
     def __and__(self, other: "QueryNode") -> "QueryNode":
         """Combine two nodes with logical AND
@@ -88,7 +98,15 @@ class QueryNode:
         """
         if not isinstance(other, QueryNode):
             return NotImplemented
-        return QueryNode(left=self, operator="AND", right=other, is_compound=True)
+        return QueryNode(
+            left=self,
+            operator="AND",
+            right=other,
+            is_compound=True,
+            predicate_style="operator"
+            if self.uses_operator_style() or other.uses_operator_style()
+            else self.predicate_style or other.predicate_style,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the query node tree into a JSON-friendly dictionary
@@ -116,6 +134,30 @@ class QueryNode:
             "is_compound": True,
         }
 
+    def to_ir_dict(self) -> dict[str, Any]:
+        """Serialize the query node tree into a QueryIR payload shape."""
+        if not self.is_compound:
+            serialized = _serialize_query_value(self.value)
+            return {
+                "node_kind": "leaf",
+                "column": self.column,
+                "operator": self.operator,
+                "value": {"kind": _query_value_kind(serialized), "value": serialized},
+            }
+        return {
+            "node_kind": "compound",
+            "operator": self.operator,
+            "left": self.left.to_ir_dict() if self.left else None,
+            "right": self.right.to_ir_dict() if self.right else None,
+        }
+
+    def uses_operator_style(self) -> bool:
+        if self.is_compound:
+            return (self.left.uses_operator_style() if self.left else False) or (
+                self.right.uses_operator_style() if self.right else False
+            )
+        return self.predicate_style == "operator"
+
     def __repr__(self):
         """Return a developer-friendly representation of the node"""
         if not self.is_compound:
@@ -138,6 +180,24 @@ def _serialize_query_value(value: Any) -> Any:
     return value
 
 
+def _query_value_kind(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, dict):
+        return "object"
+    return "unknown"
+
+
 class FieldProxy(Generic[TField]):
     """Capture field comparisons and build query nodes
 
@@ -154,41 +214,50 @@ class FieldProxy(Generic[TField]):
         True
     """
 
-    def __init__(self, column: str):
+    def __init__(self, column: str, predicate_style: str = "operator"):
         """Initialize a field proxy for a specific column
 
         Args:
             column: Database column name to target in expressions.
         """
         self.column = column
+        self.predicate_style = predicate_style
 
     def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an equality comparison node"""
-        return QueryNode(self.column, "==", other)
+        return QueryNode(
+            self.column, "==", other, predicate_style=self.predicate_style
+        )
 
     def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an inequality comparison node"""
-        return QueryNode(self.column, "!=", other)
+        return QueryNode(
+            self.column, "!=", other, predicate_style=self.predicate_style
+        )
 
     def __lt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than comparison node"""
-        return QueryNode(self.column, "<", other)
+        return QueryNode(self.column, "<", other, predicate_style=self.predicate_style)
 
     def __le__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than-or-equal comparison node"""
-        return QueryNode(self.column, "<=", other)
+        return QueryNode(
+            self.column, "<=", other, predicate_style=self.predicate_style
+        )
 
     def __gt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than comparison node"""
-        return QueryNode(self.column, ">", other)
+        return QueryNode(self.column, ">", other, predicate_style=self.predicate_style)
 
     def __ge__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than-or-equal comparison node"""
-        return QueryNode(self.column, ">=", other)
+        return QueryNode(
+            self.column, ">=", other, predicate_style=self.predicate_style
+        )
 
     def in_(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
@@ -213,7 +282,9 @@ class FieldProxy(Generic[TField]):
             raise TypeError(
                 f"The 'in_' operator expects a list, tuple, or set, got {type(other).__name__}"
             )
-        return QueryNode(self.column, "IN", list(other))
+        return QueryNode(
+            self.column, "IN", list(other), predicate_style=self.predicate_style
+        )
 
     def like(self: "FieldProxy[str]", pattern: str) -> QueryNode:
         """Build a ``LIKE`` comparison node
@@ -233,7 +304,9 @@ class FieldProxy(Generic[TField]):
             >>> email_filter.operator
             'LIKE'
         """
-        return QueryNode(self.column, "LIKE", pattern)
+        return QueryNode(
+            self.column, "LIKE", pattern, predicate_style=self.predicate_style
+        )
 
     def __lshift__(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
@@ -292,7 +365,7 @@ def col(value: TField) -> "FieldProxy[TField]":
         raise TypeError(
             f"col() expects a model column reference (FieldProxy), got {type(value).__name__}"
         )
-    return value  # type: ignore[return-value]
+    return FieldProxy(value.column, predicate_style="col")  # type: ignore[return-value]
 
 
 class QueryProxy(Generic[TModel]):
@@ -319,7 +392,7 @@ class QueryProxy(Generic[TModel]):
 
     def __getattr__(self, name: str) -> "FieldProxy[Any]":
         """Return a fresh ``FieldProxy`` for any attribute name."""
-        return FieldProxy(name)
+        return FieldProxy(name, predicate_style="lambda")
 
 
 Predicate: TypeAlias = Callable[[QueryProxy[TModel]], QueryNode]

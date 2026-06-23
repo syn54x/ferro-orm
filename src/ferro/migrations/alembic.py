@@ -9,6 +9,13 @@ except ImportError:
     sa = None
 
 from .._annotation_utils import _VARCHAR_RE
+from .._deprecations import (
+    IR_FIRST_DEPRECATION_REMOVE_IN,
+    IR_FIRST_DEPRECATION_SINCE,
+    IR_FIRST_MIGRATION_GUIDE_ALEMBIC,
+    deprecated,
+)
+from ..ir import compile_registry_schema_ir
 from ..schema_metadata import build_model_schema
 from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 
@@ -67,27 +74,172 @@ def get_metadata() -> "sa.MetaData":
 
     resolve_relationships()
 
-    # 2. Process all registered models
-    for model_name, model_cls in _MODEL_REGISTRY_PY.items():
-        # Skip the base Model class
-        if model_name == "Model":
-            continue
-
-        table_name = model_name.lower()
-
-        try:
-            schema = build_model_schema(model_cls)
-        except Exception:
-            # Fallback if standard pydantic schema fails (e.g. circular refs)
-            continue
-
-        _build_sa_table(metadata, table_name, schema, model_cls)
-
-    # 3. Process join tables
-    for join_table_name, join_schema in _JOIN_TABLE_REGISTRY.items():
-        _build_sa_table(metadata, join_table_name, join_schema, model_cls=None)
+    # 2. Build SQLAlchemy metadata from SchemaIR modelset only.
+    schema_ir = compile_registry_schema_ir()
+    payload = schema_ir.get("payload", {})
+    models = payload.get("models", [])
+    for model_ir in models:
+        if isinstance(model_ir, dict):
+            _build_sa_table_from_ir(metadata, model_ir)
 
     return metadata
+
+
+def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -> None:
+    table_name = model_ir.get("table_name")
+    if not isinstance(table_name, str) or not table_name:
+        return
+
+    columns = []
+    columns_by_name: dict[str, Any] = {}
+    for col in model_ir.get("columns") or []:
+        if not isinstance(col, dict):
+            continue
+        col_name = col.get("name")
+        if not isinstance(col_name, str) or not col_name:
+            continue
+        sa_type = _sa_type_from_ir_column(col_name, col)
+        kwargs = {
+            "primary_key": bool(col.get("primary_key", False)),
+            "nullable": bool(col.get("nullable", True))
+            if not bool(col.get("primary_key", False))
+            else False,
+            "unique": bool(col.get("unique", False)),
+            "index": bool(col.get("index", False)),
+        }
+        columns.append(sa.Column(col_name, sa_type, **kwargs))
+        columns_by_name[col_name] = columns[-1]
+
+    table_args: list[Any] = list(columns)
+
+    for check in model_ir.get("checks") or []:
+        if not isinstance(check, dict):
+            continue
+        expression = check.get("expression")
+        name = check.get("name")
+        if not isinstance(expression, str) or not expression:
+            continue
+        if not isinstance(name, str) or not name:
+            continue
+        table_args.append(sa.CheckConstraint(expression, name=name))
+
+    for unique in model_ir.get("uniques") or []:
+        if not isinstance(unique, dict):
+            continue
+        cols = unique.get("columns")
+        name = unique.get("name")
+        if not isinstance(cols, list) or len(cols) < 1:
+            continue
+        if not all(isinstance(c, str) and c for c in cols):
+            continue
+        if len(cols) == 1:
+            column_name = cols[0]
+            if bool(model_ir_column_flag(model_ir, column_name, "unique")):
+                continue
+        if isinstance(name, str) and name:
+            table_args.append(sa.UniqueConstraint(*cols, name=name))
+        else:
+            table_args.append(sa.UniqueConstraint(*cols))
+
+    table = sa.Table(table_name, metadata, *table_args)
+
+    for fk in model_ir.get("foreign_keys") or []:
+        if not isinstance(fk, dict):
+            continue
+        col_name = fk.get("column")
+        to_table = fk.get("to_table")
+        to_column = fk.get("to_column") or "id"
+        if not isinstance(col_name, str) or col_name not in columns_by_name:
+            continue
+        if not isinstance(to_table, str) or not to_table:
+            continue
+        if not isinstance(to_column, str) or not to_column:
+            continue
+        on_delete = fk.get("on_delete")
+        column = table.columns[col_name]
+        column.append_foreign_key(
+            sa.ForeignKey(
+                f"{to_table}.{to_column}",
+                ondelete=on_delete if isinstance(on_delete, str) else None,
+            )
+        )
+
+    for index in model_ir.get("indexes") or []:
+        if not isinstance(index, dict):
+            continue
+        cols = index.get("columns")
+        name = index.get("name")
+        unique = bool(index.get("unique", False))
+        if not isinstance(cols, list) or not cols:
+            continue
+        if not isinstance(name, str) or not name:
+            continue
+        if not all(isinstance(c, str) and c in table.columns for c in cols):
+            continue
+        if len(cols) == 1:
+            column_name = cols[0]
+            if bool(model_ir_column_flag(model_ir, column_name, "index")):
+                continue
+        sa.Index(name, *(table.columns[c] for c in cols), unique=unique)
+
+
+def model_ir_column_flag(model_ir: Dict[str, Any], column_name: str, flag: str) -> bool:
+    for col in model_ir.get("columns") or []:
+        if not isinstance(col, dict):
+            continue
+        if col.get("name") != column_name:
+            continue
+        return bool(col.get(flag, False))
+    return False
+
+
+def _sa_type_from_ir_column(col_name: str, col: Dict[str, Any]) -> "sa.types.TypeEngine":
+    db_type_explicit = bool(col.get("db_type_explicit", False))
+    db_type = col.get("db_type")
+    if db_type_explicit and isinstance(db_type, str):
+        mapped = _db_type_to_sa_type(db_type)
+        if mapped is not None:
+            return mapped
+
+    enum_values = col.get("enum_values")
+    enum_type_name = col.get("enum_type_name")
+    if isinstance(enum_values, list) and enum_values:
+        labels = [str(v) for v in enum_values]
+        enum_name = (
+            enum_type_name
+            if isinstance(enum_type_name, str) and enum_type_name
+            else col_name
+        )
+        return sa.Enum(*labels, name=enum_name)
+
+    logical_type = col.get("logical_type")
+    if logical_type == "boolean":
+        return sa.Boolean()
+    if logical_type == "integer":
+        return sa.Integer()
+    if logical_type == "number":
+        return sa.Float()
+    if logical_type == "decimal":
+        return sa.Numeric()
+    if logical_type == "string":
+        return sa.String()
+    if logical_type == "json":
+        return sa.JSON()
+    if logical_type in {"datetime", "date", "time", "uuid"}:
+        if logical_type == "datetime":
+            return sa.DateTime()
+        if logical_type == "date":
+            return sa.Date()
+        if logical_type == "time":
+            return sa.Time()
+        return sa.Uuid() if hasattr(sa, "Uuid") else sa.String(36)
+
+    if isinstance(db_type, str):
+        mapped = _db_type_to_sa_type(db_type)
+        if mapped is not None:
+            return mapped
+
+    return sa.String()
 
 
 def _resolve_ref(schema: Dict[str, Any], col_info: Dict[str, Any]) -> Dict[str, Any]:
@@ -175,6 +327,15 @@ def _resolve_sa_column_nullable(
     return _infer_nullable_join_table(col_name, col_info, required_fields)
 
 
+@deprecated(
+    reason=(
+        "_build_sa_table() is deprecated. Alembic metadata now derives from "
+        "SchemaIR. Use get_metadata() / IR-backed helpers instead."
+    ),
+    since=IR_FIRST_DEPRECATION_SINCE,
+    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
+    reference=IR_FIRST_MIGRATION_GUIDE_ALEMBIC,
+)
 def _build_sa_table(
     metadata: "sa.MetaData",
     table_name: str,
@@ -306,6 +467,15 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
     return None
 
 
+@deprecated(
+    reason=(
+        "_map_to_sa_type() is deprecated. Type lowering now flows through "
+        "SchemaIR and _sa_type_from_ir_column()."
+    ),
+    since=IR_FIRST_DEPRECATION_SINCE,
+    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
+    reference=IR_FIRST_MIGRATION_GUIDE_ALEMBIC,
+)
 def _map_to_sa_type(
     schema: Dict[str, Any],
     col_info: Dict[str, Any],

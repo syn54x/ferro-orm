@@ -33,6 +33,7 @@ async def main() -> None:
     assert len(adults) == 3
 
     # --8<-- [start:operator-style]
+    # Deprecated path (planned removal: v0.14.0).
     adults = await User.where(User.age >= 18).all()
     # --8<-- [end:operator-style]
     assert len(adults) == 3

@@ -7,6 +7,8 @@ to provide a seamless, high-performance database experience.
 
 import logging
 
+from . import _deprecations as _deprecations  # noqa: F401 — enable deprecation visibility
+
 from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic import Field as PydanticField
 
@@ -28,6 +30,7 @@ from .fields import BackRef, Field, ManyToMany
 from .models import Model, transaction
 from .query import Relation
 from .raw import Transaction, execute, fetch_all, fetch_one
+from .session import Session, engines
 
 # Set up the Ferro logger
 _logger = logging.getLogger("ferro")
@@ -154,4 +157,6 @@ __all__ = [
     "fetch_all",
     "fetch_one",
     "Transaction",
+    "Session",
+    "engines",
 ]

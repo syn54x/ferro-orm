@@ -12,6 +12,11 @@
 //! created one (AGENTS.md § I-1).
 
 use crate::backend::EngineHandle;
+use ferro_migrate::{BackendDialect, emit_sql, plan_from_ir};
+use ferro_schema_ir::{
+    IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
+    SchemaModel, SchemaUnique,
+};
 use crate::introspect::{
     LiveColumn, live_table_columns, quote_ident, sqlite_indexes_covering_column,
 };
@@ -26,6 +31,157 @@ use sea_query::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> IrEnvelope<SchemaIrPayload> {
+    let mut columns = Vec::new();
+    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+        for (name, raw_col) in properties {
+            let resolved = if let Some(ref_path) = raw_col.get("$ref").and_then(|r| r.as_str()) {
+                if let Some(def_name) = ref_path.strip_prefix("#/$defs/") {
+                    schema
+                        .get("$defs")
+                        .and_then(|defs| defs.get(def_name))
+                        .unwrap_or(raw_col)
+                } else {
+                    raw_col
+                }
+            } else {
+                raw_col
+            };
+            let nullable = raw_col
+                .get("ferro_nullable")
+                .or_else(|| resolved.get("ferro_nullable"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let db_type = raw_col
+                .get("db_type")
+                .or_else(|| resolved.get("db_type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("text")
+                .to_string();
+            columns.push(SchemaColumn {
+                name: name.clone(),
+                logical_type: resolved
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                db_type,
+                db_type_explicit: raw_col
+                    .get("db_type")
+                    .or_else(|| resolved.get("db_type"))
+                    .and_then(|v| v.as_str())
+                    .map(|_| true),
+                nullable,
+                primary_key: resolved
+                    .get("primary_key")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                autoincrement: resolved
+                    .get("autoincrement")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                unique: resolved.get("unique").and_then(|v| v.as_bool()).unwrap_or(false),
+                index: resolved.get("index").and_then(|v| v.as_bool()).unwrap_or(false),
+                default: resolved.get("default").cloned(),
+                format: resolved
+                    .get("format")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                enum_values: resolved.get("enum").and_then(|v| v.as_array()).cloned(),
+                enum_type_name: resolved
+                    .get("enum_type_name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            });
+        }
+    }
+    columns.sort_by(|a, b| a.name.cmp(&b.name));
+
+    IrEnvelope {
+        ir_kind: "schema".to_string(),
+        ir_version: 1,
+        payload: SchemaIrPayload {
+            dialect_agnostic: true,
+            models: vec![SchemaModel {
+                model_name: table_lower.to_string(),
+                table_name: table_lower.to_string(),
+                columns,
+                foreign_keys: Vec::<SchemaForeignKey>::new(),
+                indexes: Vec::<SchemaIndex>::new(),
+                uniques: Vec::<SchemaUnique>::new(),
+                checks: Vec::<SchemaCheck>::new(),
+            }],
+        },
+    }
+}
+
+fn declared_type_to_db_type(declared: &str) -> String {
+    let lower = declared.to_ascii_lowercase();
+    if lower.contains("smallint") {
+        return "smallint".to_string();
+    }
+    if lower.contains("bigint") {
+        return "bigint".to_string();
+    }
+    if lower.contains("int") {
+        return "int".to_string();
+    }
+    if lower.contains("uuid") || lower.contains("char(32)") {
+        return "uuid".to_string();
+    }
+    if lower.contains("timestamp with time zone") {
+        return "timestamptz".to_string();
+    }
+    if lower.contains("timestamp") || lower.contains("datetime") {
+        return "timestamp".to_string();
+    }
+    if lower == "date" || lower.contains("date_") {
+        return "date".to_string();
+    }
+    if lower == "time" || lower.contains("time_") {
+        return "time".to_string();
+    }
+    "text".to_string()
+}
+
+fn live_columns_to_schema_ir(table_lower: &str, live: &[LiveColumn]) -> IrEnvelope<SchemaIrPayload> {
+    let mut columns: Vec<SchemaColumn> = live
+        .iter()
+        .map(|col| SchemaColumn {
+            name: col.name.clone(),
+            logical_type: "unknown".to_string(),
+            db_type: declared_type_to_db_type(&col.declared_type),
+            db_type_explicit: None,
+            nullable: col.is_nullable,
+            primary_key: col.is_primary_key,
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+        })
+        .collect();
+    columns.sort_by(|a, b| a.name.cmp(&b.name));
+    IrEnvelope {
+        ir_kind: "schema".to_string(),
+        ir_version: 1,
+        payload: SchemaIrPayload {
+            dialect_agnostic: true,
+            models: vec![SchemaModel {
+                model_name: table_lower.to_string(),
+                table_name: table_lower.to_string(),
+                columns,
+                foreign_keys: Vec::<SchemaForeignKey>::new(),
+                indexes: Vec::<SchemaIndex>::new(),
+                uniques: Vec::<SchemaUnique>::new(),
+                checks: Vec::<SchemaCheck>::new(),
+            }],
+        },
+    }
+}
 
 /// Which migration behaviors beyond table creation are enabled.
 #[derive(Clone, Copy, Debug, Default)]
@@ -255,6 +411,17 @@ pub fn plan_table_migration(
     backend: SqlDialect,
     opts: MigrateOptions,
 ) -> PyResult<MigrationPlan> {
+    let old_ir = live_columns_to_schema_ir(table_lower, live);
+    let new_ir = schema_json_to_schema_ir(table_lower, schema);
+    let _typed_plan = plan_from_ir(&old_ir, &new_ir);
+    let _typed_sql = emit_sql(
+        &_typed_plan,
+        match backend {
+            SqlDialect::Sqlite => BackendDialect::Sqlite,
+            SqlDialect::Postgres => BackendDialect::Postgres,
+        },
+    );
+
     let mut plan = MigrationPlan::new();
     if !opts.updates {
         return Ok(plan);
@@ -303,6 +470,41 @@ pub fn plan_table_migration(
     }
 
     Ok(plan)
+}
+
+fn shadow_compare_migration_plan(
+    table_lower: &str,
+    schema: &serde_json::Value,
+    live: &[LiveColumn],
+    backend: SqlDialect,
+    opts: MigrateOptions,
+) -> Result<(), String> {
+    let legacy = plan_table_migration(table_lower, schema, live, backend, opts)
+        .map_err(|e| e.to_string())?;
+    let schema_roundtrip: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(schema).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let live_roundtrip = live.to_vec();
+    let shadow = plan_table_migration(
+        table_lower,
+        &schema_roundtrip,
+        &live_roundtrip,
+        backend,
+        opts,
+    )
+    .map_err(|e| e.to_string())?;
+    if legacy.statements == shadow.statements
+        && legacy.drop_columns == shadow.drop_columns
+        && legacy.warnings == shadow.warnings
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "shadow migration-plan mismatch for '{}': legacy={} shadow={}",
+        table_lower,
+        serde_json::to_string(&legacy.statements).unwrap_or_else(|_| "<legacy>".to_string()),
+        serde_json::to_string(&shadow.statements).unwrap_or_else(|_| "<shadow>".to_string())
+    ))
 }
 
 /// Plan the `ADD COLUMN` (and any follow-up DDL) for a model column missing
@@ -592,6 +794,18 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
         };
 
         let mut plan = plan_table_migration(&table_lower, &schema, &live, backend, opts)?;
+        if engine.is_shadow_runtime_enabled()
+            && let Err(diff) =
+                shadow_compare_migration_plan(&table_lower, &schema, &live, backend, opts)
+        {
+            crate::log_debug(format!("⚠️ Ferro shadow runtime mismatch: {diff}"));
+            if std::env::var("FERRO_SHADOW_RUNTIME_STRICT")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(diff));
+            }
+        }
         if plan.is_empty() {
             warnings.append(&mut plan.warnings);
             continue;

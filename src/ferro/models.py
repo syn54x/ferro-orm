@@ -13,6 +13,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from .query import Predicate
+    from .session import Session
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -31,44 +32,39 @@ from .base import ForeignKey, foreign_key_allows_none
 from .exceptions import ModelDoesNotExist
 from .metaclass import ModelMetaclass
 from .query import Query, QueryNode
-from .state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
+from .state import (
+    _CURRENT_TRANSACTION,
+    _CURRENT_TRANSACTION_CONNECTION,
+    resolve_operation_scope,
+    resolve_transaction_scope,
+)
 
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
 
 
-def _transaction_or_using(using: str | None) -> tuple[str | None, str | None]:
-    tx_id = _CURRENT_TRANSACTION.get()
-    if tx_id is not None and using is not None:
-        tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
-        if using == tx_connection:
-            return tx_id, None
-        raise ValueError(
-            "ORM operations inside a transaction inherit the transaction connection"
-        )
-    return tx_id, using
+def _transaction_or_using(
+    using: str | None, session: "Session | None"
+) -> tuple[str | None, str | None, str | None]:
+    return resolve_operation_scope(
+        using=using, session=session, allow_legacy_default=True
+    )
 
 
 def _instance_transaction_route(
-    instance: object, using: str | None
-) -> tuple[str | None, str | None, str | None]:
+    instance: object, using: str | None, session: "Session | None"
+) -> tuple[str | None, str | None, str | None, str | None]:
     origin = _instance_origin(instance)
     if using is not None and origin is not None and using != origin:
         raise ValueError("Instance is already bound to a different connection")
 
-    tx_id = _CURRENT_TRANSACTION.get()
+    tx_id, route_using, session_id = _transaction_or_using(using, session)
     if tx_id is not None:
         tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
-        if using is not None:
-            if using == tx_connection:
-                return tx_id, None, origin or tx_connection
-            raise ValueError(
-                "ORM operations inside a transaction inherit the transaction connection"
-            )
-        return tx_id, None, origin or tx_connection
+        return tx_id, route_using, origin or tx_connection, session_id
 
-    effective_using = using or origin
-    return None, effective_using, effective_using
+    effective_using = route_using or origin
+    return None, effective_using, effective_using, session_id
 
 
 def _instance_origin(instance: object) -> str | None:
@@ -82,7 +78,7 @@ def _set_instance_origin(instance: object, using: str | None) -> None:
 
 
 @asynccontextmanager
-async def transaction(using: str | None = None):
+async def transaction(using: str | None = None, *, session: "Session | None" = None):
     """Run database operations inside a transaction context.
 
     Yields a :class:`~ferro.raw.Transaction` handle bound to this transaction's
@@ -107,16 +103,18 @@ async def transaction(using: str | None = None):
     """
     from .raw import Transaction
 
-    parent_tx_id = _CURRENT_TRANSACTION.get()
-    tx_id = await begin_transaction(parent_tx_id, using)
-    connection_name = transaction_connection_name(tx_id)
+    parent_tx_id, effective_using, session_id = resolve_transaction_scope(
+        using=using, session=session, allow_legacy_default=True
+    )
+    tx_id = await begin_transaction(parent_tx_id, effective_using, session_id=session_id)
+    connection_name = transaction_connection_name(tx_id, session_id=session_id)
     token = _CURRENT_TRANSACTION.set(tx_id)
     connection_token = _CURRENT_TRANSACTION_CONNECTION.set(connection_name)
     try:
-        yield Transaction(tx_id)
-        await commit_transaction(tx_id)
+        yield Transaction(tx_id, session_id=session_id)
+        await commit_transaction(tx_id, session_id=session_id)
     except Exception:
-        await rollback_transaction(tx_id)
+        await rollback_transaction(tx_id, session_id=session_id)
         raise
     finally:
         _CURRENT_TRANSACTION.reset(token)
@@ -216,7 +214,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     raise ValueError(f"{field_name} is required")
         return self
 
-    async def save(self, *, using: str | None = None) -> None:
+    async def save(
+        self, *, using: str | None = None, session: "Session | None" = None
+    ) -> None:
         """Persist the current model instance
 
         Returns:
@@ -226,11 +226,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> user = User(name="Taylor")
             >>> await user.save()
         """
-        tx_id, operation_using, identity_using = _instance_transaction_route(
-            self, using
+        tx_id, operation_using, identity_using, session_id = _instance_transaction_route(
+            self, using, session
         )
         new_id = await save_record(
-            self.__class__.__name__, self.model_dump_json(), tx_id, operation_using
+            self.__class__.__name__,
+            self.model_dump_json(),
+            tx_id,
+            operation_using,
+            session_id=session_id,
         )
 
         pk_val = None
@@ -256,11 +260,17 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         if pk_val is not None:
             register_instance(
-                self.__class__.__name__, str(pk_val), self, identity_using
+                self.__class__.__name__,
+                str(pk_val),
+                self,
+                identity_using,
+                session_id=session_id,
             )
             _set_instance_origin(self, identity_using)
 
-    async def delete(self, *, using: str | None = None) -> None:
+    async def delete(
+        self, *, using: str | None = None, session: "Session | None" = None
+    ) -> None:
         """Delete the current model instance from storage
 
         Returns:
@@ -273,8 +283,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         pk_field_name = self.__class__._primary_key_field_name()
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
-        _tx_id, operation_using, identity_using = _instance_transaction_route(
-            self, using
+        _tx_id, operation_using, identity_using, session_id = _instance_transaction_route(
+            self, using, session
         )
 
         if pk_val is not None:
@@ -287,7 +297,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     getattr(self.__class__, pk_field_name) == pk_val
                 )
             await query.delete()
-            evict_instance(name, str(pk_val), identity_using)
+            evict_instance(
+                name, str(pk_val), identity_using, session_id=session_id
+            )
 
     @classmethod
     def _primary_key_field_name(cls) -> str | None:
@@ -320,7 +332,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     pass
 
     @classmethod
-    async def all(cls, *, using: str | None = None) -> list[Self]:
+    async def all(
+        cls, *, using: str | None = None, session: "Session | None" = None
+    ) -> list[Self]:
         """Fetch all records for this model class
 
         Returns:
@@ -331,14 +345,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> isinstance(users, list)
             True
         """
-        tx_id, using = _transaction_or_using(using)
-        results = await fetch_all(cls, tx_id, using)
+        tx_id, using, session_id = _transaction_or_using(using, session)
+        results = await fetch_all(cls, tx_id, using, session_id=session_id)
         for instance in results:
             cls._fix_types(instance)
         return results
 
     @classmethod
-    async def get(cls, pk: Any) -> Self:
+    async def get(cls, pk: Any, *, session: "Session | None" = None) -> Self:
         """Fetch one record by primary key value.
 
         Args:
@@ -356,13 +370,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> isinstance(user, User)
             True
         """
-        instance = await cls.get_or_none(pk)
+        instance = await cls.get_or_none(pk, session=session)
         if instance is None:
             raise ModelDoesNotExist(cls, pk)
         return instance
 
     @classmethod
-    async def get_or_none(cls, pk: Any) -> Self | None:
+    async def get_or_none(
+        cls, pk: Any, *, session: "Session | None" = None
+    ) -> Self | None:
         """Fetch one record by primary key, or return None if no row exists.
 
         Args:
@@ -375,12 +391,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if pk_field_name is None:
             raise RuntimeError(f"Model {cls.__name__} does not define a primary key")
 
-        instance = await cls.where(getattr(cls, pk_field_name) == pk).first()
+        instance = await cls.where(getattr(cls, pk_field_name) == pk, session=session).first()
         if instance:
             cls._fix_types(instance)
         return instance
 
-    async def refresh(self, *, using: str | None = None) -> None:
+    async def refresh(
+        self, *, using: str | None = None, session: "Session | None" = None
+    ) -> None:
         """Reload this instance from storage using its primary key
 
         Returns:
@@ -400,11 +418,11 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise RuntimeError("Cannot refresh a model without a primary key")
 
         name = self.__class__.__name__
-        _tx_id, operation_using, identity_using = _instance_transaction_route(
-            self, using
+        _tx_id, operation_using, identity_using, session_id = _instance_transaction_route(
+            self, using, session
         )
 
-        evict_instance(name, str(pk_val), identity_using)
+        evict_instance(name, str(pk_val), identity_using, session_id=session_id)
         query = self.__class__.where(getattr(self.__class__, pk_field_name) == pk_val)
         if operation_using is not None:
             query = Query(self.__class__, using=operation_using).where(
@@ -416,7 +434,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise RuntimeError(f"Instance not found in database: {name}({pk_val})")
 
         self.__dict__.update(fresh_instance.__dict__)
-        register_instance(name, str(pk_val), self, identity_using)
+        register_instance(
+            name, str(pk_val), self, identity_using, session_id=session_id
+        )
         _set_instance_origin(self, identity_using)
         self.__class__._fix_types(self)
 
@@ -429,7 +449,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     def where(cls, node: "Predicate[Self]") -> Query[Self]: ...
 
     @classmethod
-    def where(cls, node: "QueryNode | Predicate[Self]") -> Query[Self]:
+    def where(
+        cls, node: "QueryNode | Predicate[Self]", *, session: "Session | None" = None
+    ) -> Query[Self]:
         """Start a fluent query with an initial condition.
 
         The recommended style is a lambda predicate of shape
@@ -440,8 +462,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         A prebuilt :class:`QueryNode` is also accepted, built either with
         :func:`ferro.query.col` (the type-safe escape hatch that preserves
         operator shape) or with operator syntax on class attributes. The
-        bare operator form (``User.where(User.age >= 18)``) is planned for
-        deprecation in a future release and does not type-check statically:
+        bare operator form (``User.where(User.age >= 18)``) is deprecated and
+        on the v0.14.0 removal track. It does not
+        type-check statically:
         the class attribute types as the field type, so the comparison
         resolves to ``bool``, not ``QueryNode``. See
         ``docs/concepts/query-typing.md`` for the trade-offs between the
@@ -455,14 +478,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         Examples:
             >>> q1 = User.where(lambda t: t.archived == False)  # noqa: E712
-            >>> q2 = User.where(User.id == 1)
+            >>> q2 = User.where(lambda t: t.id == 1)
             >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """
-        return Query(cls).where(node)
+        return Query(cls, session=session).where(node)
 
     @classmethod
-    def select(cls) -> Query[Self]:
+    def select(cls, *, session: "Session | None" = None) -> Query[Self]:
         """Start an empty fluent query for this model class
 
         Returns:
@@ -473,7 +496,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> isinstance(query, Query)
             True
         """
-        return Query(cls)
+        return Query(cls, session=session)
 
     @classmethod
     def using(cls, name: str) -> "ModelConnection[Self]":
@@ -481,7 +504,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return ModelConnection(cls, name)
 
     @classmethod
-    async def create(cls, **fields) -> Self:
+    async def create(cls, *, session: "Session | None" = None, **fields) -> Self:
         """Create and persist a new model instance
 
         Args:
@@ -496,12 +519,16 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             True
         """
         instance = cls(**fields)
-        await instance.save()
+        await instance.save(session=session)
         return instance
 
     @classmethod
     async def bulk_create(
-        cls, instances: list[Self], *, using: str | None = None
+        cls,
+        instances: list[Self],
+        *,
+        using: str | None = None,
+        session: "Session | None" = None,
     ) -> int:
         """Persist multiple instances in a single bulk operation
 
@@ -520,12 +547,18 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             return 0
         # Use mode="json" to ensure Decimals, UUIDs, etc. are serialized correctly
         data = [i.model_dump(mode="json") for i in instances]
-        tx_id, using = _transaction_or_using(using)
-        return await save_bulk_records(cls.__name__, json.dumps(data), tx_id, using)
+        tx_id, using, session_id = _transaction_or_using(using, session)
+        return await save_bulk_records(
+            cls.__name__, json.dumps(data), tx_id, using, session_id=session_id
+        )
 
     @classmethod
     async def get_or_create(
-        cls, defaults: dict[str, Any] | None = None, **fields
+        cls,
+        defaults: dict[str, Any] | None = None,
+        *,
+        session: "Session | None" = None,
+        **fields,
     ) -> tuple[Self, bool]:
         """Fetch a record by filters or create one when missing
 
@@ -541,7 +574,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> isinstance(created, bool)
             True
         """
-        query = Query(cls)
+        query = Query(cls, session=session)
         for key, val in fields.items():
             query = query.where(getattr(cls, key) == val)
 
@@ -550,11 +583,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             return instance, False
 
         params = {**fields, **(defaults or {})}
-        return await cls.create(**params), True
+        return await cls.create(session=session, **params), True
 
     @classmethod
     async def update_or_create(
-        cls, defaults: dict[str, Any] | None = None, **fields
+        cls,
+        defaults: dict[str, Any] | None = None,
+        *,
+        session: "Session | None" = None,
+        **fields,
     ) -> tuple[Self, bool]:
         """Update a matched record or create one when missing
 
@@ -565,7 +602,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         Returns:
             A tuple of ``(instance, created)`` where ``created`` is True for new records.
         """
-        query = Query(cls)
+        query = Query(cls, session=session)
         for key, val in fields.items():
             query = query.where(getattr(cls, key) == val)
 
@@ -573,11 +610,11 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if instance:
             for key, val in (defaults or {}).items():
                 setattr(instance, key, val)
-            await instance.save()
+            await instance.save(session=session)
             return instance, False
 
         params = {**fields, **(defaults or {})}
-        return await cls.create(**params), True
+        return await cls.create(session=session, **params), True
 
 
 class ModelConnection[M: Model]:

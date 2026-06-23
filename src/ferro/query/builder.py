@@ -1,8 +1,13 @@
-"""Build fluent query objects that serialize filter definitions for the Rust core"""
+"""Build fluent query objects that serialize QueryIR payloads for the Rust core."""
 
-import json
 from typing import TYPE_CHECKING, Any, Generic, Type, TypeVar, overload
 
+from .._deprecations import (
+    IR_FIRST_DEPRECATION_REMOVE_IN,
+    IR_FIRST_DEPRECATION_SINCE,
+    IR_FIRST_MIGRATION_GUIDE_PREDICATES,
+    deprecated,
+)
 from .._core import (
     add_m2m_links,
     clear_m2m_links,
@@ -21,9 +26,30 @@ T = TypeVar("T")
 E = TypeVar("E")
 
 
-def _query_def_to_json(query_def: dict[str, Any]) -> str:
-    """Serialize query definitions while preserving typed values in live Query state."""
-    return json.dumps(_serialize_query_value(query_def))
+def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
+    """Serialize a QueryIR payload into a versioned IR envelope JSON string."""
+    import json
+
+    return json.dumps(
+        {
+            "ir_kind": "query",
+            "ir_version": 1,
+            "payload": _serialize_query_value(query_payload),
+        }
+    )
+
+
+@deprecated(
+    reason=(
+        "Operator predicate style (Model.field OP value) is deprecated; use lambda "
+        "predicates (`where(lambda t: ...)`) or col(Model.field) instead."
+    ),
+    since=IR_FIRST_DEPRECATION_SINCE,
+    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
+    reference=IR_FIRST_MIGRATION_GUIDE_PREDICATES,
+)
+def _deprecated_operator_query_node(node: QueryNode) -> QueryNode:
+    return node
 
 
 def _resolve_where_node(node: Any) -> QueryNode:
@@ -34,6 +60,8 @@ def _resolve_where_node(node: Any) -> QueryNode:
     a ``QueryNode`` (the lambda path).
     """
     if isinstance(node, QueryNode):
+        if node.uses_operator_style():
+            return _deprecated_operator_query_node(node)
         return node
     if callable(node):
         result = node(QueryProxy())
@@ -58,7 +86,9 @@ class Query(Generic[T]):
         order_by_clause: Sort definitions sent to the Rust core.
     """
 
-    def __init__(self, model_cls: Type[T], using: str | None = None):
+    def __init__(
+        self, model_cls: Type[T], using: str | None = None, session: Any | None = None
+    ):
         """Initialize a query for a model class.
 
         Args:
@@ -71,23 +101,19 @@ class Query(Generic[T]):
         """
         self.model_cls = model_cls
         self._using = using
+        self._session = session
         self.where_clause: list["QueryNode"] = []
         self.order_by_clause: list[dict[str, str]] = []
         self._limit: int | None = None
         self._offset: int | None = None
         self._m2m_context: dict[str, Any] | None = None
 
-    def _transaction_or_using(self) -> tuple[str | None, str | None]:
-        from ..state import _CURRENT_TRANSACTION, _CURRENT_TRANSACTION_CONNECTION
+    def _transaction_or_using(self) -> tuple[str | None, str | None, str | None]:
+        from ..state import resolve_operation_scope
 
-        tx_id = _CURRENT_TRANSACTION.get()
-        if tx_id is not None and self._using is not None:
-            if self._using == _CURRENT_TRANSACTION_CONNECTION.get():
-                return tx_id, None
-            raise ValueError(
-                "ORM queries inside a transaction inherit the transaction connection"
-            )
-        return tx_id, self._using
+        return resolve_operation_scope(
+            using=self._using, session=self._session, allow_legacy_default=True
+        )
 
     def _m2m(
         self, join_table: str, source_col: str, target_col: str, source_id: Any
@@ -118,8 +144,9 @@ class Query(Generic[T]):
         :class:`QueryNode` is also accepted, built either with
         :func:`ferro.query.col` (the type-safe escape hatch that preserves
         operator shape) or with operator syntax on class attributes. The
-        bare operator form (``User.where(User.age >= 18)``) is planned for
-        deprecation in a future release and does not type-check statically:
+        bare operator form (``User.where(User.age >= 18)``) is deprecated and
+        on the v0.14.0 removal track. It does not
+        type-check statically:
         the class attribute types as the field type, so the comparison
         resolves to ``bool``, not ``QueryNode``.
 
@@ -135,7 +162,7 @@ class Query(Generic[T]):
 
         Examples:
             >>> q1 = User.where(lambda t: t.archived == False)  # noqa: E712
-            >>> q2 = User.where(User.id == 1)
+            >>> q2 = User.where(lambda t: t.id == 1)
             >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """
@@ -216,15 +243,19 @@ class Query(Generic[T]):
         """
         query_def = {
             "model_name": self.model_cls.__name__,
-            "where_clause": [node.to_dict() for node in self.where_clause],
+            "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": self.order_by_clause,
             "limit": self._limit,
             "offset": self._offset,
             "m2m": self._m2m_context,
         }
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         results = await fetch_filtered(
-            self.model_cls, _query_def_to_json(query_def), tx_id, using
+            self.model_cls,
+            _query_ir_payload_to_json(query_def),
+            tx_id,
+            using,
+            session_id=session_id,
         )
         for instance in results:
             if hasattr(self.model_cls, "_fix_types"):
@@ -244,12 +275,19 @@ class Query(Generic[T]):
         """
         query_def = {
             "model_name": self.model_cls.__name__,
-            "where_clause": [node.to_dict() for node in self.where_clause],
+            "where": [node.to_ir_dict() for node in self.where_clause],
+            "order_by": [],
+            "limit": None,
+            "offset": None,
             "m2m": self._m2m_context,
         }
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         return await count_filtered(
-            self.model_cls.__name__, _query_def_to_json(query_def), tx_id, using
+            self.model_cls.__name__,
+            _query_ir_payload_to_json(query_def),
+            tx_id,
+            using,
+            session_id=session_id,
         )
 
     async def update(self, **fields) -> int:
@@ -268,20 +306,23 @@ class Query(Generic[T]):
         """
         query_def = {
             "model_name": self.model_cls.__name__,
-            "where_clause": [node.to_dict() for node in self.where_clause],
+            "where": [node.to_ir_dict() for node in self.where_clause],
+            "order_by": [],
             "limit": self._limit,
             "offset": self._offset,
+            "m2m": None,
         }
         from pydantic_core import to_json
 
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         # Use pydantic_core.to_json to handle Decimals, UUIDs, etc. in kwargs
         return await update_filtered(
             self.model_cls.__name__,
-            _query_def_to_json(query_def),
+            _query_ir_payload_to_json(query_def),
             to_json(fields).decode(),
             tx_id,
             using,
+            session_id=session_id,
         )
 
     async def first(self) -> T | None:
@@ -316,13 +357,19 @@ class Query(Generic[T]):
         """
         query_def = {
             "model_name": self.model_cls.__name__,
-            "where_clause": [node.to_dict() for node in self.where_clause],
+            "where": [node.to_ir_dict() for node in self.where_clause],
+            "order_by": [],
             "limit": self._limit,
             "offset": self._offset,
+            "m2m": None,
         }
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         return await delete_filtered(
-            self.model_cls.__name__, _query_def_to_json(query_def), tx_id, using
+            self.model_cls.__name__,
+            _query_ir_payload_to_json(query_def),
+            tx_id,
+            using,
+            session_id=session_id,
         )
 
     async def exists(self) -> bool:
@@ -365,7 +412,7 @@ class Query(Generic[T]):
 
         from ..state import _CURRENT_TRANSACTION
 
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         await add_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
@@ -374,6 +421,7 @@ class Query(Generic[T]):
             ids,
             tx_id,
             using,
+            session_id=session_id,
         )
 
     async def remove(self, *instances: Any) -> None:
@@ -401,7 +449,7 @@ class Query(Generic[T]):
 
         from ..state import _CURRENT_TRANSACTION
 
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         await remove_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
@@ -410,6 +458,7 @@ class Query(Generic[T]):
             ids,
             tx_id,
             using,
+            session_id=session_id,
         )
 
     async def clear(self) -> None:
@@ -429,13 +478,14 @@ class Query(Generic[T]):
 
         from ..state import _CURRENT_TRANSACTION
 
-        tx_id, using = self._transaction_or_using()
+        tx_id, using, session_id = self._transaction_or_using()
         await clear_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
             self._m2m_context["source_id"],
             tx_id,
             using,
+            session_id=session_id,
         )
 
     def __repr__(self):

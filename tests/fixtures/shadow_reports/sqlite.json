@@ -1,0 +1,47 @@
+{
+  "create_table": [
+    "CREATE TABLE IF NOT EXISTS \"shadowuser\" ( \"age\" integer, \"id\" integer PRIMARY KEY AUTOINCREMENT, \"name\" varchar )",
+    []
+  ],
+  "migration": [
+    [
+      "ALTER TABLE \"shadowuser\" ADD COLUMN \"age\" integer",
+      "ALTER TABLE \"shadowuser\" ADD COLUMN \"name\" varchar"
+    ],
+    []
+  ],
+  "query_compare": {
+    "legacy": {
+      "artifact": {
+        "bind_semantics": [
+          "I64(18)",
+          "String(\"a%\")",
+          "I64(5)",
+          "I64(1)"
+        ],
+        "operation": "select",
+        "semantic_signature": [
+          "age >= 18",
+          "name LIKE \"a%\""
+        ]
+      },
+      "sql": "SELECT \"shadowuser\".* FROM \"shadowuser\" WHERE \"age\" >= ? AND \"name\" LIKE ? ORDER BY \"age\" DESC LIMIT ? OFFSET ?"
+    },
+    "matches": true,
+    "shadow": {
+      "artifact": {
+        "bind_semantics": [
+          "I64(18)",
+          "String(\"a%\")",
+          "I64(5)",
+          "I64(1)"
+        ],
+        "operation": "select",
+        "semantic_signature": [
+          "age >= 18",
+          "name LIKE \"a%\""
+        ]
+      }
+    }
+  }
+}

@@ -154,6 +154,51 @@ pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> = Lazy
 pub static IDENTITY_MAP: Lazy<DashMap<(String, String, String), Py<PyAny>>> =
     Lazy::new(DashMap::new);
 
+/// Session-scoped runtime state for Phase 6 sessionized execution.
+///
+/// A session pins connection routing and keeps transactional/identity state local
+/// to that session so concurrent sessions do not bleed mutable runtime state.
+pub struct SessionState {
+    pub connection_name: String,
+    pub transaction_registry: DashMap<String, TransactionHandle>,
+    pub identity_map: DashMap<(String, String, String), Py<PyAny>>,
+}
+
+impl SessionState {
+    pub fn new(connection_name: String) -> Self {
+        Self {
+            connection_name,
+            transaction_registry: DashMap::new(),
+            identity_map: DashMap::new(),
+        }
+    }
+}
+
+/// Global registry of active sessions.
+pub static SESSION_REGISTRY: Lazy<DashMap<String, Arc<SessionState>>> = Lazy::new(DashMap::new);
+
+pub fn register_session(connection_name: String) -> String {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    SESSION_REGISTRY.insert(session_id.clone(), Arc::new(SessionState::new(connection_name)));
+    session_id
+}
+
+pub fn unregister_session(session_id: &str) -> bool {
+    SESSION_REGISTRY.remove(session_id).is_some()
+}
+
+pub fn session_state(session_id: &str) -> PyResult<Arc<SessionState>> {
+    SESSION_REGISTRY
+        .get(session_id)
+        .map(|entry| entry.value().clone())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Session '{}' is not active",
+                session_id
+            ))
+        })
+}
+
 /// A Rust-native representation of database values.
 ///
 /// Used during the GIL-free parsing phase to move data from the database

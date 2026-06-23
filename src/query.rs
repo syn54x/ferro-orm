@@ -1,10 +1,13 @@
-use crate::state::{MODEL_REGISTRY, SqlDialect};
+use crate::state::SqlDialect;
+use ferro_schema_ir::{
+    QueryIrPayload, QueryNode as QueryIrNode, QueryOrderBy as QueryIrOrderBy, QueryValue,
+};
 use sea_query::{Alias, Condition, Expr, SimpleExpr};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryNode {
     pub is_compound: bool,
     pub operator: String,
@@ -16,13 +19,13 @@ pub struct QueryNode {
     pub right: Option<Box<QueryNode>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OrderBy {
     pub column: String,
     pub direction: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct M2mContext {
     pub join_table: String,
     pub source_col: String,
@@ -30,7 +33,7 @@ pub struct M2mContext {
     pub source_id: Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryDef {
     #[allow(dead_code)]
     pub model_name: String,
@@ -45,29 +48,57 @@ pub struct QueryDef {
     pub postgres_enum_udt: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuerySemanticSignature {
+    pub model_name: String,
+    pub where_semantics: Vec<String>,
+    pub order_by: Vec<(String, String)>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub m2m: Option<(String, String, String, String)>,
+}
+
 impl QueryDef {
-    pub fn to_condition_for_backend(&self, backend: SqlDialect) -> Condition {
+    pub fn to_condition_for_backend(
+        &self,
+        backend: SqlDialect,
+    ) -> Result<Condition, String> {
         let mut condition = Condition::all();
         for node in &self.where_clause {
-            condition = condition.add(self.node_to_condition_for_backend(node, backend));
+            condition = condition.add(self.node_to_condition_for_backend(node, backend)?);
         }
-        condition
+        Ok(condition)
     }
 
-    fn node_to_condition_for_backend(&self, node: &QueryNode, backend: SqlDialect) -> Condition {
+    fn node_to_condition_for_backend(
+        &self,
+        node: &QueryNode,
+        backend: SqlDialect,
+    ) -> Result<Condition, String> {
         if node.is_compound {
-            let left_cond =
-                self.node_to_condition_for_backend(node.left.as_ref().unwrap(), backend);
-            let right_cond =
-                self.node_to_condition_for_backend(node.right.as_ref().unwrap(), backend);
+            let left = node
+                .left
+                .as_ref()
+                .ok_or_else(|| "compound QueryNode is missing left child".to_string())?;
+            let right = node
+                .right
+                .as_ref()
+                .ok_or_else(|| "compound QueryNode is missing right child".to_string())?;
+            let left_cond = self.node_to_condition_for_backend(left, backend)?;
+            let right_cond = self.node_to_condition_for_backend(right, backend)?;
 
-            match node.operator.as_str() {
+            Ok(match node.operator.as_str() {
                 "OR" => Condition::any().add(left_cond).add(right_cond),
                 "AND" => Condition::all().add(left_cond).add(right_cond),
-                _ => Condition::all(), // Should not happen
-            }
+                op => {
+                    return Err(format!("unsupported compound QueryNode operator: {op}"));
+                }
+            })
         } else {
-            let col_name = node.column.as_ref().unwrap();
+            let col_name = node
+                .column
+                .as_ref()
+                .ok_or_else(|| "leaf QueryNode is missing column".to_string())?;
             let col = Expr::col(Alias::new(col_name));
 
             // Python `None` becomes JSON `null`, which serde deserializes as
@@ -136,7 +167,10 @@ impl QueryDef {
                     )),
                 }
             } else {
-                let val = node.value.as_ref().unwrap();
+                let val = node
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| format!("leaf QueryNode for column '{col_name}' is missing value"))?;
                 match node.operator.as_str() {
                     "==" => col
                         .eq(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
@@ -144,8 +178,7 @@ impl QueryDef {
                         .ne(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
                     "<" => col
                         .lt(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
-                    "<=" => col
-                        .lte(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
+                    "<=" => col.lte(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
                     ">" => col
                         .gt(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
                     ">=" => col
@@ -177,7 +210,7 @@ impl QueryDef {
                         .eq(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
                 }
             };
-            Condition::all().add(expr)
+            Ok(Condition::all().add(expr))
         }
     }
 
@@ -205,229 +238,239 @@ impl QueryDef {
         infer_uuid_without_schema: bool,
         backend: SqlDialect,
     ) -> SimpleExpr {
-        if let Value::String(s) = val {
-            if backend == SqlDialect::Postgres {
-                if let Some(tn) = crate::schema_bind::native_postgres_enum_udt_name(
-                    col_name,
-                    &self.postgres_enum_udt,
-                ) {
-                    return crate::schema_bind::postgres_enum_string_rhs_expr(s, tn);
-                }
-
-                if let Ok(parsed) = uuid::Uuid::parse_str(s) {
-                    let schema_uuid = model_column_is_uuid(&self.model_name, col_name);
-                    if schema_uuid || infer_uuid_without_schema {
-                        return Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed))));
-                    }
-                }
-
-                if model_column_format(&self.model_name, col_name) == Some("date-time") {
-                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                        .cast_as("timestamptz");
-                }
-                if model_column_format(&self.model_name, col_name) == Some("date") {
-                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                        .cast_as("date");
-                }
-                if model_column_format(&self.model_name, col_name) == Some("binary") {
-                    return Expr::value(sea_query::Value::Bytes(Some(Box::new(
-                        s.as_bytes().to_vec(),
-                    ))));
-                }
-                if model_column_is_decimal(&self.model_name, col_name) {
-                    return Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                        .cast_as("numeric");
-                }
-            }
-
-            if model_column_is_decimal(&self.model_name, col_name)
-                && let Ok(parsed) = s.parse::<f64>()
-            {
-                return Expr::value(sea_query::Value::Double(Some(parsed)));
-            }
-        }
-
-        // Typed-null pick from column metadata. This fixes the schema-driven
-        // half of #38 for UPDATE column values and query-filter predicates;
-        // without it, every NULL bind goes out as text. Unknown columns fall
-        // through to json_to_sea_value (which preserves legacy String(None))
-        // -- the bind layer's NullKind::String is the documented fallback.
-        if val.is_null()
-            && let Some(typed_null) = typed_null_for_column(&self.model_name, col_name)
-        {
-            return Expr::value(typed_null);
-        }
-        Expr::value(json_to_sea_value(val))
-    }
-}
-
-/// Pick a typed SeaQuery `None` variant for a `NULL` value in
-/// `value_rhs_simple_expr_for_backend`. Returns `None` if the model or column
-/// isn't in the registry, or if the column type is one we still emit via
-/// `CAST` (temporal). The caller falls through to `json_to_sea_value` in
-/// either case, which preserves the legacy text-typed null.
-fn typed_null_for_column(model_name: &str, col_name: &str) -> Option<sea_query::Value> {
-    let registry = MODEL_REGISTRY.read().ok()?;
-    let schema = registry.get(model_name)?;
-    let props = schema.get("properties").and_then(|p| p.as_object())?;
-    let col_info = props.get(col_name)?;
-
-    if column_is_uuid_property(schema, col_name) {
-        return Some(sea_query::Value::Uuid(None));
-    }
-    if property_schema_is_decimal(col_info) {
-        // Decimal still uses cast_as("numeric") for non-null today; matching
-        // null path keeps emitter behavior aligned. Native numeric typed bind
-        // is deferred (plan §3 Scope Boundaries).
-        return Some(sea_query::Value::Double(None));
-    }
-    let format = property_schema_format(col_info);
-    if matches!(format, Some("date-time") | Some("date") | Some("time")) {
-        // Temporal typed nulls are deferred to issue #40.
-        return None;
-    }
-    if format == Some("binary") {
-        return Some(sea_query::Value::Bytes(None));
+        crate::codec::query_bind_expr(
+            &self.model_name,
+            col_name,
+            val,
+            infer_uuid_without_schema,
+            backend,
+            &self.postgres_enum_udt,
+        )
     }
 
-    // Walk anyOf to find the non-null type variant -- this is how Pydantic
-    // shapes `T | None` schemas.
-    let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let s = t.get("type")?.as_str()?;
-                    if s != "null" { Some(s) } else { None }
+    pub fn to_ir_payload(&self) -> QueryIrPayload {
+        QueryIrPayload {
+            model_name: self.model_name.clone(),
+            where_clause: self.where_clause.iter().map(query_node_to_ir).collect(),
+            order_by: self
+                .order_by
+                .as_ref()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| QueryIrOrderBy {
+                            column: item.column.clone(),
+                            direction: item.direction.clone(),
+                        })
+                        .collect()
                 })
-            })
-    });
-
-    match json_type {
-        Some("integer") => Some(sea_query::Value::BigInt(None)),
-        Some("number") => Some(sea_query::Value::Double(None)),
-        Some("boolean") => Some(sea_query::Value::Bool(None)),
-        Some("string") => Some(sea_query::Value::String(None)),
-        _ => None,
-    }
-}
-
-fn json_to_sea_value(value: &Value) -> sea_query::Value {
-    match value {
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                sea_query::Value::BigInt(Some(i))
-            } else if let Some(f) = n.as_f64() {
-                sea_query::Value::Double(Some(f))
-            } else {
-                sea_query::Value::String(None)
-            }
+                .unwrap_or_default(),
+            limit: self.limit,
+            offset: self.offset,
+            m2m: self
+                .m2m
+                .as_ref()
+                .and_then(|m2m| serde_json::to_value(m2m).ok()),
         }
-        Value::String(s) => sea_query::Value::String(Some(Box::new(s.clone()))),
-        Value::Bool(b) => sea_query::Value::Bool(Some(*b)),
-        Value::Null => sea_query::Value::String(None),
-        _ => sea_query::Value::String(Some(Box::new(value.to_string()))),
+    }
+
+    pub fn semantic_signature(&self) -> QuerySemanticSignature {
+        QuerySemanticSignature {
+            model_name: self.model_name.clone(),
+            where_semantics: self
+                .where_clause
+                .iter()
+                .map(query_node_semantic_string)
+                .collect(),
+            order_by: self
+                .order_by
+                .as_ref()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| (item.column.clone(), item.direction.to_ascii_lowercase()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            limit: self.limit,
+            offset: self.offset,
+            m2m: self.m2m.as_ref().map(|m2m| {
+                (
+                    m2m.join_table.clone(),
+                    m2m.source_col.clone(),
+                    m2m.target_col.clone(),
+                    query_value_semantic_string(&m2m.source_id),
+                )
+            }),
+        }
     }
 }
 
-fn model_column_is_uuid(model_name: &str, col: &str) -> bool {
-    let Ok(registry) = MODEL_REGISTRY.read() else {
-        return false;
+pub fn query_def_from_ir_payload(payload: QueryIrPayload) -> Result<QueryDef, String> {
+    let m2m: Option<M2mContext> = match payload.m2m {
+        Some(value) => serde_json::from_value(value)
+            .map(Some)
+            .map_err(|e| format!("invalid QueryIR m2m payload: {e}"))?,
+        None => None,
     };
-    let Some(schema) = registry.get(model_name) else {
-        return false;
-    };
-    column_is_uuid_property(schema, col)
-}
-
-fn model_column_is_decimal(model_name: &str, col: &str) -> bool {
-    let Ok(registry) = MODEL_REGISTRY.read() else {
-        return false;
-    };
-    let Some(schema) = registry.get(model_name) else {
-        return false;
-    };
-    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
-        return false;
-    };
-    let Some(col_info) = props.get(col) else {
-        return false;
-    };
-    property_schema_is_decimal(col_info)
-}
-
-fn model_column_format(model_name: &str, col: &str) -> Option<&'static str> {
-    let Ok(registry) = MODEL_REGISTRY.read() else {
-        return None;
-    };
-    let schema = registry.get(model_name)?;
-    let props = schema.get("properties").and_then(|p| p.as_object())?;
-    let col_info = props.get(col)?;
-    match property_schema_format(col_info) {
-        Some("uuid") => Some("uuid"),
-        Some("date-time") => Some("date-time"),
-        Some("date") => Some("date"),
-        Some("binary") => Some("binary"),
-        _ => None,
-    }
-}
-
-fn column_is_uuid_property(schema: &Value, col: &str) -> bool {
-    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
-        return false;
-    };
-    let Some(col_info) = props.get(col) else {
-        return false;
-    };
-    property_schema_is_uuid(col_info)
-}
-
-pub(crate) fn property_schema_format(col_info: &Value) -> Option<&str> {
-    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types
+    Ok(QueryDef {
+        model_name: payload.model_name,
+        where_clause: payload
+            .where_clause
+            .iter()
+            .map(query_node_from_ir)
+            .collect(),
+        order_by: if payload.order_by.is_empty() {
+            None
+        } else {
+            Some(
+                payload
+                    .order_by
                     .iter()
-                    .find_map(|t| t.get("format").and_then(|f| f.as_str()))
-            })
+                    .map(|item| OrderBy {
+                        column: item.column.clone(),
+                        direction: item.direction.clone(),
+                    })
+                    .collect(),
+            )
+        },
+        limit: payload.limit,
+        offset: payload.offset,
+        m2m,
+        postgres_enum_udt: HashMap::new(),
     })
 }
 
-pub(crate) fn property_schema_is_decimal(col_info: &Value) -> bool {
-    col_info
-        .get("anyOf")
-        .and_then(|a| a.as_array())
-        .map(|types| {
-            let has_number = types
-                .iter()
-                .any(|t| t.get("type").and_then(|ty| ty.as_str()) == Some("number"));
-            let has_patterned_string = types.iter().any(|t| {
-                t.get("type").and_then(|ty| ty.as_str()) == Some("string")
-                    && t.get("pattern").is_some()
+fn query_node_to_ir(node: &QueryNode) -> QueryIrNode {
+    if node.is_compound {
+        let left = node
+            .left
+            .as_ref()
+            .map(|inner| Box::new(query_node_to_ir(inner)))
+            .unwrap_or_else(|| {
+                Box::new(QueryIrNode::Leaf {
+                    operator: "==".to_string(),
+                    column: "__invalid__".to_string(),
+                    value: QueryValue {
+                        kind: "null".to_string(),
+                        value: Value::Null,
+                    },
+                })
             });
-            has_number && has_patterned_string
-        })
-        .unwrap_or(false)
+        let right = node
+            .right
+            .as_ref()
+            .map(|inner| Box::new(query_node_to_ir(inner)))
+            .unwrap_or_else(|| {
+                Box::new(QueryIrNode::Leaf {
+                    operator: "==".to_string(),
+                    column: "__invalid__".to_string(),
+                    value: QueryValue {
+                        kind: "null".to_string(),
+                        value: Value::Null,
+                    },
+                })
+            });
+        return QueryIrNode::Compound {
+            operator: node.operator.clone(),
+            left,
+            right,
+        };
+    }
+
+    let value = node.value.clone().unwrap_or(Value::Null);
+    QueryIrNode::Leaf {
+        operator: node.operator.clone(),
+        column: node.column.clone().unwrap_or_default(),
+        value: QueryValue {
+            kind: query_value_kind(&value).to_string(),
+            value,
+        },
+    }
 }
 
-/// JSON Schema fragment for one model field: `string` + `format: uuid` (incl. optional `anyOf`).
-pub(crate) fn property_schema_is_uuid(col_info: &Value) -> bool {
-    let format = property_schema_format(col_info);
-    let json_type = col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let s = t.get("type")?.as_str()?;
-                    if s == "null" { None } else { Some(s) }
-                })
-            })
-    });
-    json_type == Some("string") && format == Some("uuid")
+fn query_node_from_ir(node: &QueryIrNode) -> QueryNode {
+    match node {
+        QueryIrNode::Leaf {
+            operator,
+            column,
+            value,
+        } => QueryNode {
+            is_compound: false,
+            operator: operator.clone(),
+            column: Some(column.clone()),
+            value: if value.value.is_null() {
+                None
+            } else {
+                Some(value.value.clone())
+            },
+            left: None,
+            right: None,
+        },
+        QueryIrNode::Compound {
+            operator,
+            left,
+            right,
+        } => QueryNode {
+            is_compound: true,
+            operator: operator.clone(),
+            column: None,
+            value: None,
+            left: Some(Box::new(query_node_from_ir(left))),
+            right: Some(Box::new(query_node_from_ir(right))),
+        },
+    }
+}
+
+fn query_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                "int"
+            } else {
+                "float"
+            }
+        }
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn query_node_semantic_string(node: &QueryNode) -> String {
+    if node.is_compound {
+        let left = node
+            .left
+            .as_ref()
+            .map(|inner| query_node_semantic_string(inner))
+            .unwrap_or_else(|| "<missing-left>".to_string());
+        let right = node
+            .right
+            .as_ref()
+            .map(|inner| query_node_semantic_string(inner))
+            .unwrap_or_else(|| "<missing-right>".to_string());
+        return format!("({left} {} {right})", node.operator.to_ascii_uppercase());
+    }
+
+    let column = node
+        .column
+        .as_ref()
+        .map_or_else(|| "<missing-column>".to_string(), Clone::clone);
+    let value = node
+        .value
+        .as_ref()
+        .map_or_else(|| "null".to_string(), query_value_semantic_string);
+    format!("{} {} {}", column, node.operator, value)
+}
+
+fn query_value_semantic_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => format!("\"{s}\""),
+        Value::Null => "null".to_string(),
+        _ => value.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -492,7 +535,10 @@ mod tests {
         let mut select = Query::select();
         select
             .from(Alias::new("pending"))
-            .cond_where(q.to_condition_for_backend(BackendKind::Sqlite));
+            .cond_where(
+                q.to_condition_for_backend(BackendKind::Sqlite)
+                    .expect("valid test query"),
+            );
         let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
         assert!(sql.contains("is null"), "expected IS NULL, got {sql}");
         assert!(
@@ -522,7 +568,10 @@ mod tests {
         let mut select = Query::select();
         select
             .from(Alias::new("pending"))
-            .cond_where(q.to_condition_for_backend(BackendKind::Sqlite));
+            .cond_where(
+                q.to_condition_for_backend(BackendKind::Sqlite)
+                    .expect("valid test query"),
+            );
         let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
         assert!(
             sql.contains("is not null"),
@@ -764,5 +813,41 @@ mod tests {
             sql.contains("AS numeric"),
             "decimal cast preserved until follow-up: {sql}"
         );
+    }
+
+    #[test]
+    fn query_ir_roundtrip_preserves_semantics_signature() {
+        let query_def: QueryDef = serde_json::from_value(json!({
+            "model_name": "Widget",
+            "where_clause": [
+                {
+                    "is_compound": true,
+                    "operator": "OR",
+                    "left": {
+                        "is_compound": false,
+                        "column": "age",
+                        "operator": ">=",
+                        "value": 18
+                    },
+                    "right": {
+                        "is_compound": false,
+                        "column": "name",
+                        "operator": "LIKE",
+                        "value": "a%"
+                    }
+                }
+            ],
+            "order_by": [{"column": "age", "direction": "DESC"}],
+            "limit": 10,
+            "offset": 5,
+            "m2m": null
+        }))
+        .expect("query json must deserialize");
+        let before = query_def.semantic_signature();
+        let ir = query_def.to_ir_payload();
+        let roundtrip = super::query_def_from_ir_payload(ir).expect("QueryIR roundtrip");
+        let after = roundtrip.semantic_signature();
+
+        assert_eq!(before, after);
     }
 }

@@ -6,53 +6,93 @@
 use crate::backend::{
     BackendKind, EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind,
 };
-use crate::query::QueryDef;
+use crate::query::{QueryDef, query_def_from_ir_payload};
 use crate::state::{
-    IDENTITY_MAP, MODEL_REGISTRY, RustValue, SqlDialect, TRANSACTION_REGISTRY,
+    IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, TRANSACTION_REGISTRY,
     TransactionConnection, TransactionHandle, connection_for_route, engine_for_connection,
+    register_session, session_state, unregister_session,
 };
+use ferro_schema_ir::{IrEnvelope, QueryIrPayload};
 use pyo3::prelude::*;
 use sea_query::{
-    Alias, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query, SimpleExpr,
-    SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
+    Alias, Condition, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query,
+    SimpleExpr, SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-fn get_transaction_connection(tx_id: Option<String>) -> Option<TransactionConnection> {
-    tx_id.and_then(|id| {
-        TRANSACTION_REGISTRY
+fn get_transaction_connection(
+    tx_id: Option<String>,
+    session_id: Option<&str>,
+) -> PyResult<Option<TransactionConnection>> {
+    if let Some(id) = tx_id {
+        if let Some(session_id) = session_id {
+            let session = session_state(session_id)?;
+            return Ok(session
+                .transaction_registry
+                .get(&id)
+                .map(|tx| tx.value().conn.clone()));
+        }
+        return Ok(TRANSACTION_REGISTRY
             .get(&id)
-            .map(|tx| tx.value().conn.clone())
-    })
+            .map(|tx| tx.value().conn.clone()));
+    }
+    Ok(None)
 }
 
-fn get_transaction_route(tx_id: Option<String>) -> Option<(String, TransactionConnection)> {
-    tx_id.and_then(|id| {
-        TRANSACTION_REGISTRY
+fn get_transaction_route(
+    tx_id: Option<String>,
+    session_id: Option<&str>,
+) -> PyResult<Option<(String, TransactionConnection)>> {
+    if let Some(id) = tx_id {
+        if let Some(session_id) = session_id {
+            let session = session_state(session_id)?;
+            return Ok(session
+                .transaction_registry
+                .get(&id)
+                .map(|tx| (tx.value().connection_name.clone(), tx.value().conn.clone())));
+        }
+        return Ok(TRANSACTION_REGISTRY
             .get(&id)
-            .map(|tx| (tx.value().connection_name.clone(), tx.value().conn.clone()))
-    })
+            .map(|tx| (tx.value().connection_name.clone(), tx.value().conn.clone())));
+    }
+    Ok(None)
 }
 
-fn active_engine_for_connection(using: Option<String>) -> PyResult<Arc<EngineHandle>> {
+fn active_engine_for_connection(
+    using: Option<String>,
+    session_id: Option<&str>,
+) -> PyResult<Arc<EngineHandle>> {
+    if let Some(session_id) = session_id {
+        let session = session_state(session_id)?;
+        let connection_name = using.unwrap_or_else(|| session.connection_name.clone());
+        return engine_for_connection(Some(connection_name));
+    }
     engine_for_connection(using)
 }
 
 fn active_route_for_operation(
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<(
     String,
     Arc<EngineHandle>,
     Option<TransactionConnection>,
     BackendKind,
 )> {
-    let tx_route = get_transaction_route(tx_id);
+    let tx_route = get_transaction_route(tx_id, session_id.as_deref())?;
+    let session_connection = if let Some(ref sid) = session_id {
+        Some(session_state(sid)?.connection_name.clone())
+    } else {
+        None
+    };
     let route_using = tx_route
         .as_ref()
         .map(|(connection_name, _)| connection_name.clone())
-        .or(using);
+        .or(using)
+        .or(session_connection);
     let (connection_name, engine) = active_connection_for_route(route_using)?;
     let backend = engine.backend();
     let tx_conn = tx_route.map(|(_, conn)| conn);
@@ -63,33 +103,135 @@ fn active_connection_for_route(using: Option<String>) -> PyResult<(String, Arc<E
     connection_for_route(using)
 }
 
-/// Initialize Pydantic v2 slots that `BaseModel.__init__` normally sets, after zero-copy
-/// hydration (`__new__` + `__dict__` population).
-///
-/// These attributes live in `__slots__`; if never assigned, reads raise `AttributeError`,
-/// which breaks `dict(model)`, iteration, `model_copy`, and libraries that recurse results
-/// (for example Prefect's `visit_collection`).
-///
-/// When `model_config["extra"] == "allow"`, `__pydantic_extra__` starts as an empty dict;
-/// otherwise it is `None`. `__pydantic_private__` is always `None` for ORM-hydrated rows.
-fn set_pydantic_hydration_slots<'py>(
-    py: Python<'py>,
-    cls: &Bound<'py, PyAny>,
-    instance: &Bound<'py, PyAny>,
+fn identity_map_get(
+    session_id: Option<&str>,
+    key: &(String, String, String),
+) -> PyResult<Option<Py<PyAny>>> {
+    if let Some(session_id) = session_id {
+        let session = session_state(session_id)?;
+        return Ok(session.identity_map.get(key).map(|entry| {
+            Python::attach(|py| entry.value().clone_ref(py))
+        }));
+    }
+    Ok(IDENTITY_MAP
+        .get(key)
+        .map(|entry| Python::attach(|py| entry.value().clone_ref(py))))
+}
+
+fn identity_map_insert(
+    session_id: Option<&str>,
+    key: (String, String, String),
+    value: Py<PyAny>,
 ) -> PyResult<()> {
-    let model_config = cls.getattr(pyo3::intern!(py, "model_config"))?;
-    let extra_policy = model_config.call_method1(
-        pyo3::intern!(py, "get"),
-        (pyo3::intern!(py, "extra"), pyo3::intern!(py, "ignore")),
-    )?;
-    let extra_slot = if extra_policy.eq(pyo3::intern!(py, "allow"))? {
-        pyo3::types::PyDict::new(py).into_any().unbind()
-    } else {
-        py.None()
-    };
-    instance.setattr(pyo3::intern!(py, "__pydantic_extra__"), extra_slot)?;
-    instance.setattr(pyo3::intern!(py, "__pydantic_private__"), py.None())?;
+    if let Some(session_id) = session_id {
+        let session = session_state(session_id)?;
+        session.identity_map.insert(key, value);
+        return Ok(());
+    }
+    IDENTITY_MAP.insert(key, value);
     Ok(())
+}
+
+fn identity_map_remove(session_id: Option<&str>, key: &(String, String, String)) -> PyResult<()> {
+    if let Some(session_id) = session_id {
+        let session = session_state(session_id)?;
+        session.identity_map.remove(key);
+        return Ok(());
+    }
+    IDENTITY_MAP.remove(key);
+    Ok(())
+}
+
+fn identity_map_retain_model(session_id: Option<&str>, model_name: &str) -> PyResult<()> {
+    if let Some(session_id) = session_id {
+        let session = session_state(session_id)?;
+        session
+            .identity_map
+            .retain(|(_, m_name, _), _| m_name != model_name);
+        return Ok(());
+    }
+    IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != model_name);
+    Ok(())
+}
+
+fn identity_map_clear(session_id: Option<&str>) -> PyResult<()> {
+    if let Some(session_id) = session_id {
+        let session = session_state(session_id)?;
+        session.identity_map.clear();
+        return Ok(());
+    }
+    IDENTITY_MAP.clear();
+    Ok(())
+}
+
+fn tx_get(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<TransactionHandle>> {
+    if let Some(session_id) = session_id {
+        let session = session_state(session_id)?;
+        return Ok(session
+            .transaction_registry
+            .get(tx_id)
+            .map(|entry| entry.value().clone()));
+    }
+    Ok(TRANSACTION_REGISTRY
+        .get(tx_id)
+        .map(|entry| entry.value().clone()))
+}
+
+fn tx_insert(session_id: Option<&str>, tx_id: String, handle: TransactionHandle) -> PyResult<()> {
+    if let Some(session_id) = session_id {
+        let session = session_state(session_id)?;
+        session.transaction_registry.insert(tx_id, handle);
+        return Ok(());
+    }
+    TRANSACTION_REGISTRY.insert(tx_id, handle);
+    Ok(())
+}
+
+fn tx_remove(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<TransactionHandle>> {
+    if let Some(session_id) = session_id {
+        let session = session_state(session_id)?;
+        return Ok(session
+            .transaction_registry
+            .remove(tx_id)
+            .map(|(_, handle)| handle));
+    }
+    Ok(TRANSACTION_REGISTRY.remove(tx_id).map(|(_, handle)| handle))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct QueryIrEnvelope {
+    ir_kind: String,
+    ir_version: u32,
+    payload: QueryIrPayload,
+}
+
+fn query_def_from_ir_json(query_ir_json: &str) -> PyResult<QueryDef> {
+    let envelope: QueryIrEnvelope = serde_json::from_str(query_ir_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR JSON: {}", e))
+    })?;
+    if envelope.ir_kind != "query" {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Invalid QueryIR envelope kind {:?}; expected \"query\"",
+            envelope.ir_kind
+        )));
+    }
+    if envelope.ir_version != 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unsupported QueryIR version {}; expected 1",
+            envelope.ir_version
+        )));
+    }
+    query_def_from_ir_payload(envelope.payload)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR: {e}")))
+}
+
+fn query_condition_for_backend(
+    query_def: &QueryDef,
+    backend: SqlDialect,
+) -> PyResult<Condition> {
+    query_def
+        .to_condition_for_backend(backend)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 /// Map SeaQuery `Value` variants to `EngineBindValue`.
@@ -166,101 +308,24 @@ async fn execute_transaction_sql(
     conn.execute_sql(sql).await
 }
 
+#[cfg(test)]
 fn engine_value_to_rust_value(
     value: EngineValue,
     schema: &serde_json::Value,
     col_name: &str,
-) -> RustValue {
-    let prop = schema
-        .get("properties")
-        .and_then(|p| p.get(col_name))
-        .map(|col_info| resolve_ref(schema, col_info));
-
-    let format = prop.and_then(property_format);
-    let is_decimal = prop
-        .and_then(|p| p.get("anyOf"))
-        .and_then(|a| a.as_array())
-        .map(|types| {
-            let has_number = types
-                .iter()
-                .any(|t| t.get("type").and_then(|ty| ty.as_str()) == Some("number"));
-            let has_patterned_string = types.iter().any(|t| {
-                t.get("type").and_then(|ty| ty.as_str()) == Some("string")
-                    && t.get("pattern").is_some()
-            });
-            has_number && has_patterned_string
-        })
-        .unwrap_or(false);
-    let json_type = prop.and_then(property_json_type);
-
-    if is_decimal {
-        return match value {
-            EngineValue::I64(v) => RustValue::Decimal(v.to_string()),
-            EngineValue::F64(v) => RustValue::Decimal(v.to_string()),
-            EngineValue::String(v) => RustValue::Decimal(v),
-            _ => RustValue::None,
-        };
-    }
-
-    if format == Some("binary") {
-        return match value {
-            EngineValue::Bytes(v) => RustValue::Blob(v),
-            EngineValue::String(v) => RustValue::Blob(v.into_bytes()),
-            _ => RustValue::None,
-        };
-    }
-
-    match value {
-        EngineValue::I64(v) if json_type == Some("boolean") => RustValue::Bool(v != 0),
-        EngineValue::I64(v) => RustValue::BigInt(v),
-        EngineValue::F64(v) => RustValue::Double(v),
-        EngineValue::Bytes(v) => RustValue::Blob(v),
-        EngineValue::String(v) => match (json_type, format) {
-            (_, Some("date-time")) => RustValue::DateTime(v),
-            (_, Some("date")) => RustValue::Date(v),
-            (_, Some("uuid")) => RustValue::Uuid(v),
-            (Some("object"), _) | (Some("array"), _) => {
-                if let Ok(json_val) = serde_json::from_str(&v) {
-                    RustValue::Json(json_val)
-                } else {
-                    RustValue::String(v)
-                }
-            }
-            _ => RustValue::String(v),
-        },
-        EngineValue::Bool(v) => RustValue::Bool(v),
-        EngineValue::Null => RustValue::None,
-    }
+) -> crate::state::RustValue {
+    crate::codec::decode_engine_value(value, schema, col_name)
 }
 
 /// One parsed row: the primary-key value (when present) plus all column values.
-type ParsedRow = (Option<String>, Vec<(String, RustValue)>);
+type ParsedRow = crate::codec::ParsedRow;
 
 fn typed_rows_to_parsed_data(
     rows: Vec<EngineRow>,
     schema: &serde_json::Value,
     pk_col: Option<&str>,
 ) -> Vec<ParsedRow> {
-    rows.into_iter()
-        .map(|row| {
-            let mut row_pk_val = None;
-            let mut fields = Vec::with_capacity(row.values.len());
-
-            for (col_name, value) in row.values {
-                if pk_col == Some(col_name.as_str()) {
-                    row_pk_val = match &value {
-                        EngineValue::I64(v) => Some(v.to_string()),
-                        EngineValue::String(v) => Some(v.clone()),
-                        _ => None,
-                    };
-                }
-                let value = engine_value_to_rust_value(value, schema, &col_name);
-                fields.push((col_name, value));
-            }
-
-            (row_pk_val, fields)
-        })
-        .collect()
+    crate::codec::typed_rows_to_parsed_data(rows, schema, pk_col)
 }
 
 fn engine_row_string(row: &EngineRow, column_name: &str) -> Option<String> {
@@ -353,44 +418,89 @@ macro_rules! sea_query_to_string_for_backend {
     }};
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct QueryPlanArtifact {
+    operation: String,
+    semantic_signature: Vec<String>,
+    bind_semantics: Vec<String>,
+}
+
+fn bind_semantics(bind_values: &[SeaValue]) -> Vec<String> {
+    engine_bind_values_from_sea(bind_values)
+        .into_iter()
+        .map(|value| format!("{value:?}"))
+        .collect()
+}
+
+fn query_plan_artifact(
+    operation: &str,
+    query_def: &QueryDef,
+    bind_values: &[SeaValue],
+) -> QueryPlanArtifact {
+    let mut semantic_signature = query_def
+        .semantic_signature()
+        .where_semantics
+        .into_iter()
+        .collect::<Vec<_>>();
+    semantic_signature.sort();
+
+    QueryPlanArtifact {
+        operation: operation.to_string(),
+        semantic_signature,
+        bind_semantics: bind_semantics(bind_values),
+    }
+}
+
+fn shadow_artifact_from_ir_roundtrip(
+    operation: &str,
+    query_def: &QueryDef,
+    bind_values: &[SeaValue],
+) -> Result<QueryPlanArtifact, String> {
+    let ir_payload = query_def.to_ir_payload();
+    let ir_roundtrip = query_def_from_ir_payload(ir_payload)?;
+    Ok(query_plan_artifact(operation, &ir_roundtrip, bind_values))
+}
+
+fn compare_shadow_query_artifacts(
+    operation: &str,
+    query_def: &QueryDef,
+    bind_values: &[SeaValue],
+) -> Result<(), String> {
+    let legacy = query_plan_artifact(operation, query_def, bind_values);
+    let shadow = shadow_artifact_from_ir_roundtrip(operation, query_def, bind_values)?;
+    if legacy == shadow {
+        return Ok(());
+    }
+    let legacy_json = serde_json::to_string(&legacy).unwrap_or_else(|_| "<legacy>".to_string());
+    let shadow_json = serde_json::to_string(&shadow).unwrap_or_else(|_| "<shadow>".to_string());
+    Err(format!(
+        "shadow planner mismatch for '{operation}': legacy={legacy_json} shadow={shadow_json}"
+    ))
+}
+
+fn maybe_compare_shadow_query_artifacts(
+    engine: &EngineHandle,
+    operation: &str,
+    query_def: &QueryDef,
+    bind_values: &[SeaValue],
+) -> PyResult<()> {
+    if !engine.is_shadow_runtime_enabled() {
+        return Ok(());
+    }
+    if let Err(diff) = compare_shadow_query_artifacts(operation, query_def, bind_values) {
+        crate::log_debug(format!("⚠️ Ferro shadow runtime mismatch: {diff}"));
+        if std::env::var("FERRO_SHADOW_RUNTIME_STRICT")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(diff));
+        }
+    }
+    Ok(())
+}
+
 /// On Postgres, cast text-like special columns in SELECT output so Python hydration
 /// sees the same string representation as SQLite.
-fn property_json_type(col_info: &serde_json::Value) -> Option<&str> {
-    col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let s = t.get("type")?.as_str()?;
-                    if s != "null" { None.or(Some(s)) } else { None }
-                })
-            })
-    })
-}
-
-fn property_format(col_info: &serde_json::Value) -> Option<&str> {
-    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let ty = t.get("type")?.as_str()?;
-                    if ty == "null" {
-                        None
-                    } else {
-                        t.get("format").and_then(|f| f.as_str())
-                    }
-                })
-            })
-    })
-}
-
-fn property_is_enum(col_info: &serde_json::Value) -> bool {
-    col_info.get("enum").and_then(|e| e.as_array()).is_some()
-}
-
 fn apply_postgres_text_select_columns(
     select: &mut sea_query::SelectStatement,
     table_name: &str,
@@ -398,64 +508,13 @@ fn apply_postgres_text_select_columns(
     pg_native_enum_columns: &HashSet<String>,
     backend: SqlDialect,
 ) {
-    use sea_query::{Alias, Expr};
-
-    let tbl = Alias::new(table_name);
-    if backend != SqlDialect::Postgres {
-        select.column((tbl.clone(), sea_query::Asterisk));
-        return;
-    }
-    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
-        select.column((tbl.clone(), sea_query::Asterisk));
-        return;
-    };
-    let need_text_from_schema = properties.values().any(|col_info| {
-        let resolved = resolve_ref(schema, col_info);
-        matches!(
-            property_format(resolved),
-            Some("uuid" | "date-time" | "date" | "decimal")
-        ) || matches!(property_json_type(resolved), Some("object" | "array"))
-            || property_is_enum(resolved)
-    });
-    let need_text_from_native_enum = properties
-        .keys()
-        .any(|k| pg_native_enum_columns.contains(k.as_str()));
-    if !need_text_from_schema && !need_text_from_native_enum {
-        select.column((tbl.clone(), sea_query::Asterisk));
-        return;
-    }
-    for (col_name, col_info) in properties {
-        let col_iden = Alias::new(col_name.as_str());
-        let col_info = resolve_ref(schema, col_info);
-        if matches!(
-            property_format(col_info),
-            Some("uuid" | "date-time" | "date" | "decimal")
-        ) || matches!(property_json_type(col_info), Some("object" | "array"))
-            || property_is_enum(col_info)
-            || pg_native_enum_columns.contains(col_name.as_str())
-        {
-            let expr = Expr::cast_as(
-                Expr::col((tbl.clone(), col_iden.clone())),
-                Alias::new("text"),
-            );
-            select.expr_as(expr, col_iden);
-        } else {
-            select.column((tbl.clone(), col_iden));
-        }
-    }
-}
-
-fn resolve_ref<'a>(
-    schema: &'a serde_json::Value,
-    col_info: &'a serde_json::Value,
-) -> &'a serde_json::Value {
-    if let Some(ref_path) = col_info.get("$ref").and_then(|r| r.as_str())
-        && let Some(def_name) = ref_path.strip_prefix("#/$defs/")
-        && let Some(def) = schema.get("$defs").and_then(|defs| defs.get(def_name))
-    {
-        return def;
-    }
-    col_info
+    crate::codec::apply_postgres_text_select_columns(
+        select,
+        table_name,
+        schema,
+        pg_native_enum_columns,
+        backend,
+    );
 }
 
 /// Maps each table column to its PostgreSQL enum `typname` (``typtype = 'e'``) for the current schema.
@@ -565,16 +624,6 @@ async fn postgres_temporal_cast_by_column(
     Ok(out)
 }
 
-fn schema_property<'a>(
-    schema: &'a serde_json::Value,
-    col_name: &str,
-) -> Option<&'a serde_json::Value> {
-    schema
-        .get("properties")
-        .and_then(|p| p.get(col_name))
-        .map(|prop| resolve_ref(schema, prop))
-}
-
 /// Build a SeaQuery expression for a column value, preserving type information
 /// across NULL and primitive binds so the SQLx layer can emit a parameter with
 /// the correct OID on strict-typing backends (notably PostgreSQL).
@@ -597,153 +646,16 @@ fn schema_value_expr(
     ts_cast: &HashMap<String, String>,
     backend: SqlDialect,
 ) -> PyResult<SimpleExpr> {
-    let col_info = schema_property(schema, col_name);
-    let format = col_info.and_then(property_format);
-    let json_type = col_info.and_then(property_json_type);
-    let is_decimal = col_info
-        .and_then(|prop| prop.get("anyOf"))
-        .and_then(|a| a.as_array())
-        .map(|items| items.iter().any(|item| item.get("pattern").is_some()))
-        .unwrap_or(false);
-    // UUID columns are detected either via DB introspection (uuid_columns
-    // populated by postgres_uuid_column_names) or via Pydantic format hint.
-    let is_uuid_pg = backend == SqlDialect::Postgres
-        && (uuid_columns.contains(col_name) || format == Some("uuid"));
-
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && let Some(tn) =
-            crate::schema_bind::postgres_enum_type_name_for_column(col_name, enum_udt, col_info)
-    {
-        return Ok(crate::schema_bind::postgres_enum_string_rhs_expr(s, &tn));
-    }
-
-    if is_uuid_pg {
-        return match value {
-            serde_json::Value::Null => Ok(Expr::value(sea_query::Value::Uuid(None))),
-            serde_json::Value::String(s) => {
-                let parsed = uuid::Uuid::parse_str(s).map_err(|_| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "Invalid UUID for {table_name}.{col_name}: {s}"
-                    ))
-                })?;
-                Ok(Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed)))))
-            }
-            // Anything else (number, bool, etc.) for a UUID column is a
-            // user-side bug; let the existing fallthrough surface it.
-            _ => Ok(Expr::value(sea_query::Value::String(Some(Box::new(
-                value.to_string(),
-            ))))),
-        };
-    }
-
-    // Temporal types (date, date-time, time) are deferred to issue #40 pending
-    // the chrono-vs-time crate decision. For now they keep cast_as wrappers.
-    if value.is_null()
-        && backend == SqlDialect::Postgres
-        && let Some(cast) = ts_cast.get(col_name)
-    {
-        return Ok(Expr::value(sea_query::Value::String(None)).cast_as(Alias::new(cast.as_str())));
-    }
-    if let serde_json::Value::String(s) = value
-        && backend == SqlDialect::Postgres
-        && let Some(cast) = ts_cast.get(col_name)
-    {
-        return Ok(
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-                .cast_as(Alias::new(cast.as_str())),
-        );
-    }
-
-    let expr = match value {
-        value
-            if backend == SqlDialect::Postgres && matches!(json_type, Some("object" | "array")) =>
-        {
-            // JSON/JSONB binding is out of scope for the typed-null refactor.
-            if value.is_null() {
-                Expr::value(sea_query::Value::String(None)).cast_as("json")
-            } else {
-                Expr::value(sea_query::Value::String(Some(Box::new(value.to_string()))))
-                    .cast_as("json")
-            }
-        }
-        serde_json::Value::String(s)
-            if backend == SqlDialect::Postgres && format == Some("date-time") =>
-        {
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("timestamptz")
-        }
-        serde_json::Value::String(s)
-            if backend == SqlDialect::Postgres && format == Some("date") =>
-        {
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone())))).cast_as("date")
-        }
-        serde_json::Value::String(s) if json_type == Some("integer") => {
-            if let Ok(parsed) = s.parse::<i64>() {
-                Expr::value(sea_query::Value::BigInt(Some(parsed)))
-            } else {
-                Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            }
-        }
-        serde_json::Value::String(s) if json_type == Some("number") => {
-            if let Ok(parsed) = s.parse::<f64>() {
-                Expr::value(sea_query::Value::Double(Some(parsed)))
-            } else {
-                Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            }
-        }
-        serde_json::Value::String(s) if format == Some("binary") => Expr::value(
-            sea_query::Value::Bytes(Some(Box::new(s.as_bytes().to_vec()))),
-        ),
-        serde_json::Value::String(s) if is_decimal => {
-            if let Ok(parsed) = s.parse::<f64>() {
-                Expr::value(sea_query::Value::Double(Some(parsed)))
-            } else {
-                Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-            }
-        }
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Expr::value(sea_query::Value::BigInt(Some(i)))
-            } else if let Some(f) = n.as_f64() {
-                Expr::value(sea_query::Value::Double(Some(f)))
-            } else {
-                Expr::value(sea_query::Value::String(None))
-            }
-        }
-        serde_json::Value::String(s) => {
-            Expr::value(sea_query::Value::String(Some(Box::new(s.clone()))))
-        }
-        serde_json::Value::Bool(b)
-            if json_type == Some("boolean") && backend == SqlDialect::Sqlite =>
-        {
-            Expr::value(sea_query::Value::BigInt(Some(if *b { 1 } else { 0 })))
-        }
-        serde_json::Value::Bool(b) => Expr::value(sea_query::Value::Bool(Some(*b))),
-        serde_json::Value::Null => {
-            // Typed-null pick from column metadata. UUID is handled above;
-            // JSON/temporal are handled above. This arm covers primitives,
-            // bytes, and decimal. Unknown shapes fall through to text-typed
-            // null (the bind layer logs this as NullKind::String / Untyped).
-            let v = if format == Some("binary") {
-                sea_query::Value::Bytes(None)
-            } else if is_decimal {
-                // Decimal binds as float8-typed null today; native numeric
-                // typed null is deferred (see plan §3 Scope Boundaries).
-                sea_query::Value::Double(None)
-            } else {
-                match json_type {
-                    Some("integer") => sea_query::Value::BigInt(None),
-                    Some("number") => sea_query::Value::Double(None),
-                    Some("boolean") => sea_query::Value::Bool(None),
-                    Some("string") => sea_query::Value::String(None),
-                    _ => sea_query::Value::String(None),
-                }
-            };
-            Expr::value(v)
-        }
-        _ => Expr::value(sea_query::Value::String(Some(Box::new(value.to_string())))),
-    };
-    Ok(expr)
+    crate::codec::schema_bind_expr(
+        schema,
+        table_name,
+        col_name,
+        value,
+        enum_udt,
+        uuid_columns,
+        ts_cast,
+        backend,
+    )
 }
 
 /// Wrap an M2M target/source ID in a SeaQuery expression for a join table.
@@ -759,23 +671,16 @@ fn backend_column_value_expr(
     uuid_columns: &HashSet<String>,
     backend: SqlDialect,
 ) -> SimpleExpr {
-    if backend == SqlDialect::Postgres && uuid_columns.contains(col_name) {
-        if let sea_query::Value::String(Some(s)) = &value
-            && let Ok(parsed) = uuid::Uuid::parse_str(s)
-        {
-            return Expr::value(sea_query::Value::Uuid(Some(Box::new(parsed))));
-        }
-        return Expr::value(value).cast_as("uuid");
-    }
-    Expr::value(value)
+    crate::codec::m2m_bind_expr(col_name, value, uuid_columns, backend)
 }
 
 #[pyfunction]
-#[pyo3(signature = (parent_tx_id=None, using=None))]
+#[pyo3(signature = (parent_tx_id=None, using=None, session_id=None))]
 pub fn begin_transaction(
     py: Python<'_>,
     parent_tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let tx_id = uuid::Uuid::new_v4().to_string();
@@ -786,12 +691,10 @@ pub fn begin_transaction(
                 ));
             }
 
-            let parent = TRANSACTION_REGISTRY.get(&parent_tx_id).ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Parent transaction not found")
-            })?;
+            let parent = tx_get(session_id.as_deref(), &parent_tx_id)?
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Parent transaction not found"))?;
             let conn = parent.conn.clone();
             let connection_name = parent.connection_name.clone();
-            drop(parent);
 
             let savepoint_name = format!("sp_{}", tx_id.replace('-', "_"));
             execute_transaction_sql(&conn, &format!("SAVEPOINT {savepoint_name}"))
@@ -803,20 +706,27 @@ pub fn begin_transaction(
                     ))
                 })?;
 
-            TRANSACTION_REGISTRY.insert(
+            tx_insert(
+                session_id.as_deref(),
                 tx_id.clone(),
                 TransactionHandle::nested(conn, savepoint_name, connection_name),
-            );
+            )?;
         } else {
-            let (connection_name, engine) = active_connection_for_route(using)?;
+            let (connection_name, engine) = active_route_for_operation(
+                None,
+                using,
+                session_id.clone(),
+            )
+            .map(|(name, engine, _, _)| (name, engine))?;
             let conn = engine.begin_transaction_connection().await.map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
             })?;
 
-            TRANSACTION_REGISTRY.insert(
+            tx_insert(
+                session_id.as_deref(),
                 tx_id.clone(),
                 TransactionHandle::root(conn, connection_name),
-            );
+            )?;
         }
 
         Ok(tx_id)
@@ -824,12 +734,15 @@ pub fn begin_transaction(
 }
 
 #[pyfunction]
-pub fn commit_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, PyAny>> {
+#[pyo3(signature = (tx_id, session_id=None))]
+pub fn commit_transaction(
+    py: Python<'_>,
+    tx_id: String,
+    session_id: Option<String>,
+) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let tx_handle = TRANSACTION_REGISTRY
-            .remove(&tx_id)
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?
-            .1;
+        let tx_handle = tx_remove(session_id.as_deref(), &tx_id)?
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?;
 
         if let Some(savepoint_name) = tx_handle.savepoint_name {
             execute_transaction_sql(
@@ -856,20 +769,23 @@ pub fn commit_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, P
 }
 
 #[pyfunction]
-pub fn transaction_connection_name(tx_id: String) -> PyResult<String> {
-    TRANSACTION_REGISTRY
-        .get(&tx_id)
-        .map(|tx| tx.value().connection_name.clone())
+#[pyo3(signature = (tx_id, session_id=None))]
+pub fn transaction_connection_name(tx_id: String, session_id: Option<String>) -> PyResult<String> {
+    tx_get(session_id.as_deref(), &tx_id)?
+        .map(|tx| tx.connection_name)
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))
 }
 
 #[pyfunction]
-pub fn rollback_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_, PyAny>> {
+#[pyo3(signature = (tx_id, session_id=None))]
+pub fn rollback_transaction(
+    py: Python<'_>,
+    tx_id: String,
+    session_id: Option<String>,
+) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let tx_handle = TRANSACTION_REGISTRY
-            .remove(&tx_id)
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?
-            .1;
+        let tx_handle = tx_remove(session_id.as_deref(), &tx_id)?
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?;
 
         if let Some(savepoint_name) = tx_handle.savepoint_name {
             execute_transaction_sql(
@@ -902,9 +818,27 @@ pub fn rollback_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_,
                 })?;
         }
 
-        IDENTITY_MAP.clear();
+        identity_map_clear(session_id.as_deref())?;
         Ok(())
     })
+}
+
+#[pyfunction]
+#[pyo3(signature = (using=None))]
+pub fn open_session(using: Option<String>) -> PyResult<String> {
+    let (connection_name, _) = active_connection_for_route(using)?;
+    Ok(register_session(connection_name))
+}
+
+#[pyfunction]
+pub fn close_session(session_id: String) -> PyResult<()> {
+    if !unregister_session(&session_id) {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Session '{}' is not active",
+            session_id
+        )));
+    }
+    Ok(())
 }
 
 /// Fetches all records for a given model class.
@@ -921,18 +855,19 @@ pub fn rollback_transaction(py: Python<'_>, tx_id: String) -> PyResult<Bound<'_,
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if the query fails.
 #[pyfunction]
-#[pyo3(signature = (cls, tx_id=None, using=None))]
+#[pyo3(signature = (cls, tx_id=None, using=None, session_id=None))]
 pub fn fetch_all<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
+        let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
@@ -1009,42 +944,32 @@ pub fn fetch_all<'py>(
                 }
             }
 
-            let dict_str = pyo3::intern!(py, "__dict__");
-            let pydantic_fields_set_str = pyo3::intern!(py, "__pydantic_fields_set__");
-            let new_str = pyo3::intern!(py, "__new__");
-            let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
-
             for (row_pk_val, fields) in parsed_data {
                 if use_identity_map
                     && let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) =
-                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
+                    && let Some(existing_obj) = identity_map_get(
+                        session_id.as_deref(),
+                        &(connection_name.clone(), name.clone(), pk_val.clone()),
+                    )?
                 {
-                    results.append(existing_obj.value().clone_ref(py))?;
+                    results.append(existing_obj.clone_ref(py))?;
                     continue;
                 }
 
-                let instance = cls.call_method1(new_str, (cls,))?;
-                let dict_attr = instance.getattr(dict_str)?;
-                let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
-                dict.set_item(connection_attr_str, &connection_name)?;
-                let fields_set = pyo3::types::PySet::empty(py)?;
-
-                for (col_name, val) in fields {
-                    let py_val = val.into_py_any(py)?;
-                    let py_name = py_col_names.get(&col_name).unwrap().bind(py);
-                    dict.set_item(py_name, py_val)?;
-                    fields_set.add(py_name)?;
-                }
-
-                let _ = instance.setattr(pydantic_fields_set_str, fields_set);
-                set_pydantic_hydration_slots(py, cls, &instance)?;
+                let instance = crate::hydration::hydrate_model_instance(
+                    py,
+                    cls,
+                    &connection_name,
+                    fields,
+                    &py_col_names,
+                )?;
 
                 if use_identity_map && let Some(pk_val) = row_pk_val {
-                    IDENTITY_MAP.insert(
+                    identity_map_insert(
+                        session_id.as_deref(),
                         (connection_name.clone(), name.clone(), pk_val),
                         instance.clone().unbind(),
-                    );
+                    )?;
                 }
 
                 results.append(instance)?;
@@ -1069,29 +994,32 @@ pub fn fetch_all<'py>(
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if the query fails.
 #[pyfunction]
-#[pyo3(signature = (cls, pk_val, tx_id=None, using=None))]
+#[pyo3(signature = (cls, pk_val, tx_id=None, using=None, session_id=None))]
 pub fn fetch_one<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     pk_val: String,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
-    let (connection_name, engine) = active_connection_for_route(using.clone())?;
+    let (connection_name, engine) = active_route_for_operation(tx_id.clone(), using.clone(), session_id.clone()).map(|(c,e,_,_)|(c,e))?;
 
     // Check Identity Map first (if no transaction, or even with transaction, IM is usually safe)
     if engine.is_identity_map_enabled()
-        && let Some(existing_obj) =
-            IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
+        && let Some(existing_obj) = identity_map_get(
+            session_id.as_deref(),
+            &(connection_name.clone(), name.clone(), pk_val.clone()),
+        )?
     {
-        let obj = existing_obj.value().clone_ref(py);
+        let obj = existing_obj.clone_ref(py);
         return pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) });
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
+        let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
@@ -1184,29 +1112,20 @@ pub fn fetch_one<'py>(
         match parsed_row {
             Some(fields) => Python::attach(|py| {
                 let cls = cls_py.bind(py);
-                let instance = cls.call_method1("__new__", (cls,))?;
-                let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
-                let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
-                dict.set_item(
-                    pyo3::intern!(py, "__ferro_connection_name"),
+                let py_col_names = HashMap::new();
+                let instance = crate::hydration::hydrate_model_instance(
+                    py,
+                    cls,
                     &connection_name,
+                    fields,
+                    &py_col_names,
                 )?;
-                let fields_set = pyo3::types::PySet::empty(py)?;
-
-                for (col_name, val) in fields {
-                    let py_val = val.into_py_any(py)?;
-                    let py_name = pyo3::types::PyString::new(py, &col_name);
-                    dict.set_item(&py_name, py_val)?;
-                    fields_set.add(&py_name)?;
-                }
-
-                let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
-                set_pydantic_hydration_slots(py, cls, &instance)?;
                 if use_identity_map {
-                    IDENTITY_MAP.insert(
+                    identity_map_insert(
+                        session_id.as_deref(),
                         (connection_name.clone(), name.clone(), pk_val),
                         instance.clone().unbind(),
-                    );
+                    )?;
                 }
                 Ok(instance.into_any().unbind())
             }),
@@ -1226,17 +1145,18 @@ pub fn fetch_one<'py>(
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or if the save fails.
 #[pyfunction]
-#[pyo3(signature = (name, data, tx_id=None, using=None))]
+#[pyo3(signature = (name, data, tx_id=None, using=None, session_id=None))]
 pub fn save_record(
     py: Python<'_>,
     name: String,
     data: String,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_connection_name, engine, tx_conn, backend) =
-            active_route_for_operation(tx_id, using)?;
+            active_route_for_operation(tx_id, using, session_id.clone())?;
 
         // ... schema and record logic ...
         let (schema, record_obj) = {
@@ -1313,7 +1233,9 @@ pub fn save_record(
                 .into_table(Alias::new(&table_name))
                 .columns(columns.clone())
                 .values(values)
-                .unwrap()
+                .map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("invalid INSERT values: {e}"))
+                })?
                 .to_owned();
             if let Some(pk) = pk_col.as_ref()
                 && (pk_provided || !pk_is_auto)
@@ -1399,17 +1321,18 @@ pub fn save_record(
 
 /// Persists multiple model instances in a single batch operation.
 #[pyfunction]
-#[pyo3(signature = (name, data_list_json, tx_id=None, using=None))]
+#[pyo3(signature = (name, data_list_json, tx_id=None, using=None, session_id=None))]
 pub fn save_bulk_records(
     py: Python<'_>,
     name: String,
     data_list_json: String,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_connection_name, engine, tx_conn, backend) =
-            active_route_for_operation(tx_id, using)?;
+            active_route_for_operation(tx_id, using, session_id.clone())?;
 
         let schema = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1526,32 +1449,31 @@ pub fn save_bulk_records(
     })
 }
 
-/// Fetches records for a given model class based on a JSON-defined query.
+/// Fetches records for a given model class based on a QueryIR-defined query.
 ///
 /// Args:
 ///     cls (PyAny): The Python model class.
-///     query_json (str): The serialized QueryDef JSON.
+///     query_ir_json (str): The serialized QueryIR envelope JSON.
 ///
 /// Returns:
 ///     list[PyAny]: A list of hydrated model instances.
 #[pyfunction]
-#[pyo3(signature = (cls, query_json, tx_id=None, using=None))]
+#[pyo3(signature = (cls, query_ir_json, tx_id=None, using=None, session_id=None))]
 pub fn fetch_filtered<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
-    query_json: String,
+    query_ir_json: String,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
 
-    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
-    })?;
+    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
+        let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
@@ -1614,7 +1536,7 @@ pub fn fetch_filtered<'py>(
                 ));
             }
 
-            select.cond_where(query_def.to_condition_for_backend(backend));
+            select.cond_where(query_condition_for_backend(&query_def, backend)?);
             if let Some(ref orders) = query_def.order_by {
                 for order in orders {
                     let col = Alias::new(&order.column);
@@ -1635,6 +1557,12 @@ pub fn fetch_filtered<'py>(
             let (s, values) = sea_query_build_for_backend!(select, backend);
             (s, values, pk, schema.clone())
         };
+        maybe_compare_shadow_query_artifacts(
+            &engine,
+            "fetch_filtered",
+            &query_def,
+            &bind_values.0,
+        )?;
 
         let parsed_data = match tx_conn {
             Some(conn_arc) => {
@@ -1674,42 +1602,32 @@ pub fn fetch_filtered<'py>(
                 }
             }
 
-            let dict_str = pyo3::intern!(py, "__dict__");
-            let pydantic_fields_set_str = pyo3::intern!(py, "__pydantic_fields_set__");
-            let new_str = pyo3::intern!(py, "__new__");
-            let connection_attr_str = pyo3::intern!(py, "__ferro_connection_name");
-
             for (row_pk_val, fields) in parsed_data {
                 if use_identity_map
                     && let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) =
-                        IDENTITY_MAP.get(&(connection_name.clone(), name.clone(), pk_val.clone()))
+                    && let Some(existing_obj) = identity_map_get(
+                        session_id.as_deref(),
+                        &(connection_name.clone(), name.clone(), pk_val.clone()),
+                    )?
                 {
-                    results.append(existing_obj.value().clone_ref(py))?;
+                    results.append(existing_obj.clone_ref(py))?;
                     continue;
                 }
 
-                let instance = cls.call_method1(new_str, (cls,))?;
-                let dict_attr = instance.getattr(dict_str)?;
-                let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
-                dict.set_item(connection_attr_str, &connection_name)?;
-                let fields_set = pyo3::types::PySet::empty(py)?;
-
-                for (col_name, val) in fields {
-                    let py_val = val.into_py_any(py)?;
-                    let py_name = py_col_names.get(&col_name).unwrap().bind(py);
-                    dict.set_item(py_name, py_val)?;
-                    fields_set.add(py_name)?;
-                }
-
-                let _ = instance.setattr(pydantic_fields_set_str, fields_set);
-                set_pydantic_hydration_slots(py, cls, &instance)?;
+                let instance = crate::hydration::hydrate_model_instance(
+                    py,
+                    cls,
+                    &connection_name,
+                    fields,
+                    &py_col_names,
+                )?;
 
                 if use_identity_map && let Some(pk_val) = row_pk_val {
-                    IDENTITY_MAP.insert(
+                    identity_map_insert(
+                        session_id.as_deref(),
                         (connection_name.clone(), name.clone(), pk_val),
                         instance.clone().unbind(),
-                    );
+                    )?;
                 }
 
                 results.append(instance)?;
@@ -1721,20 +1639,19 @@ pub fn fetch_filtered<'py>(
 
 /// Returns the number of records matching a filtered query.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, tx_id=None, using=None))]
+#[pyo3(signature = (name, query_ir_json, tx_id=None, using=None, session_id=None))]
 pub fn count_filtered(
     py: Python<'_>,
     name: String,
-    query_json: String,
+    query_ir_json: String,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
-    })?;
+    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
 
         let table_name = name.to_lowercase();
         query_def.postgres_enum_udt =
@@ -1790,9 +1707,15 @@ pub fn count_filtered(
                 select.from(Alias::new(&table_name));
             }
 
-            select.cond_where(query_def.to_condition_for_backend(backend));
+            select.cond_where(query_condition_for_backend(&query_def, backend)?);
             sea_query_build_for_backend!(select, backend)
         };
+        maybe_compare_shadow_query_artifacts(
+            &engine,
+            "count_filtered",
+            &query_def,
+            &bind_values.0,
+        )?;
 
         let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
         let count = match tx_conn {
@@ -1829,43 +1752,60 @@ pub fn count_filtered(
 
 /// Registers a live Python object in the global Identity Map.
 #[pyfunction]
-#[pyo3(signature = (name, pk, obj, using=None))]
+#[pyo3(signature = (name, pk, obj, using=None, session_id=None))]
 pub fn register_instance(
     name: String,
     pk: String,
     obj: Py<PyAny>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<()> {
-    let (connection_name, engine) = active_connection_for_route(using)?;
+    let (connection_name, engine) = active_route_for_operation(
+        None,
+        using,
+        session_id.clone(),
+    )
+    .map(|(name, engine, _, _)| (name, engine))?;
     if engine.is_identity_map_enabled() {
-        IDENTITY_MAP.insert((connection_name, name, pk), obj);
+        identity_map_insert(session_id.as_deref(), (connection_name, name, pk), obj)?;
     }
     Ok(())
 }
 
 /// Evicts a specific model instance from the global Identity Map.
 #[pyfunction]
-#[pyo3(signature = (name, pk, using=None))]
-pub fn evict_instance(name: String, pk: String, using: Option<String>) -> PyResult<()> {
-    let (connection_name, engine) = active_connection_for_route(using)?;
+#[pyo3(signature = (name, pk, using=None, session_id=None))]
+pub fn evict_instance(
+    name: String,
+    pk: String,
+    using: Option<String>,
+    session_id: Option<String>,
+) -> PyResult<()> {
+    let (connection_name, engine) = active_route_for_operation(
+        None,
+        using,
+        session_id.clone(),
+    )
+    .map(|(name, engine, _, _)| (name, engine))?;
     if engine.is_identity_map_enabled() {
-        IDENTITY_MAP.remove(&(connection_name, name, pk));
+        identity_map_remove(session_id.as_deref(), &(connection_name, name, pk))?;
     }
     Ok(())
 }
 
 /// Deletes a record by its primary key.
 #[pyfunction]
-#[pyo3(signature = (name, pk_val, tx_id=None, using=None))]
+#[pyo3(signature = (name, pk_val, tx_id=None, using=None, session_id=None))]
 pub fn delete_record(
     py: Python<'_>,
     name: String,
     pk_val: String,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
 
         let table_name = name.to_lowercase();
         // ... sql ...
@@ -1925,20 +1865,19 @@ pub fn delete_record(
 
 /// Deletes records matching a filtered query.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, tx_id=None, using=None))]
+#[pyo3(signature = (name, query_ir_json, tx_id=None, using=None, session_id=None))]
 pub fn delete_filtered(
     py: Python<'_>,
     name: String,
-    query_json: String,
+    query_ir_json: String,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
-    })?;
+    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
 
         let table_name = name.to_lowercase();
         query_def.postgres_enum_udt =
@@ -1948,9 +1887,15 @@ pub fn delete_filtered(
             let mut delete = Query::delete();
             delete
                 .from_table(Alias::new(&table_name))
-                .cond_where(query_def.to_condition_for_backend(backend));
+                .cond_where(query_condition_for_backend(&query_def, backend)?);
             sea_query_build_for_backend!(delete, backend)
         };
+        maybe_compare_shadow_query_artifacts(
+            &engine,
+            "delete_filtered",
+            &query_def,
+            &bind_values.0,
+        )?;
 
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
@@ -1961,7 +1906,7 @@ pub fn delete_filtered(
 
         // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
         if engine.is_identity_map_enabled() {
-            IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
+            identity_map_retain_model(session_id.as_deref(), &name)?;
         }
 
         Ok(rows_affected)
@@ -1970,18 +1915,17 @@ pub fn delete_filtered(
 
 /// Updates records matching a filtered query with provided values.
 #[pyfunction]
-#[pyo3(signature = (name, query_json, update_json, tx_id=None, using=None))]
+#[pyo3(signature = (name, query_ir_json, update_json, tx_id=None, using=None, session_id=None))]
 pub fn update_filtered(
     py: Python<'_>,
     name: String,
-    query_json: String,
+    query_ir_json: String,
     update_json: String,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let mut query_def: QueryDef = serde_json::from_str(&query_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid query JSON: {}", e))
-    })?;
+    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
 
     let update_values: serde_json::Value = serde_json::from_str(&update_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid update JSON: {}", e))
@@ -1992,7 +1936,7 @@ pub fn update_filtered(
     })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
 
         let table_name = name.to_lowercase();
         let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
@@ -2011,7 +1955,7 @@ pub fn update_filtered(
             })?;
             let mut update = UpdateStatement::new()
                 .table(Alias::new(&table_name))
-                .cond_where(query_def.to_condition_for_backend(backend))
+                .cond_where(query_condition_for_backend(&query_def, backend)?)
                 .to_owned();
             for (key, value) in update_map {
                 update.value(
@@ -2030,6 +1974,12 @@ pub fn update_filtered(
             }
             sea_query_build_for_backend!(update, backend)
         };
+        maybe_compare_shadow_query_artifacts(
+            &engine,
+            "update_filtered",
+            &query_def,
+            &bind_values.0,
+        )?;
 
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
@@ -2040,7 +1990,7 @@ pub fn update_filtered(
 
         // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
         if engine.is_identity_map_enabled() {
-            IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != &name);
+            identity_map_retain_model(session_id.as_deref(), &name)?;
         }
 
         Ok(rows_affected)
@@ -2048,7 +1998,7 @@ pub fn update_filtered(
 }
 
 #[pyfunction]
-#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None))]
+#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None, session_id=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn add_m2m_links<'py>(
     py: Python<'py>,
@@ -2059,6 +2009,7 @@ pub fn add_m2m_links<'py>(
     target_ids: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
     let t_ids: Vec<sea_query::Value> = target_ids
@@ -2067,7 +2018,7 @@ pub fn add_m2m_links<'py>(
         .collect::<PyResult<Vec<_>>>()?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
         let uuid_columns =
             postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
 
@@ -2088,7 +2039,11 @@ pub fn add_m2m_links<'py>(
                         ),
                         backend_column_value_expr(&target_col, t_id, &uuid_columns, backend),
                     ])
-                    .unwrap();
+                    .map_err(|e| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "invalid M2M INSERT values: {e}"
+                        ))
+                    })?;
             }
             sea_query_build_for_backend!(insert, backend)
         };
@@ -2104,7 +2059,7 @@ pub fn add_m2m_links<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None))]
+#[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None, session_id=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn remove_m2m_links<'py>(
     py: Python<'py>,
@@ -2115,6 +2070,7 @@ pub fn remove_m2m_links<'py>(
     target_ids: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
     let t_ids: Vec<sea_query::Value> = target_ids
@@ -2123,7 +2079,7 @@ pub fn remove_m2m_links<'py>(
         .collect::<PyResult<Vec<_>>>()?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using)?;
+        let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
         let uuid_columns =
             postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
 
@@ -2162,7 +2118,7 @@ pub fn remove_m2m_links<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (join_table, source_col, source_id, tx_id=None, using=None))]
+#[pyo3(signature = (join_table, source_col, source_id, tx_id=None, using=None, session_id=None))]
 pub fn clear_m2m_links<'py>(
     py: Python<'py>,
     join_table: String,
@@ -2170,14 +2126,15 @@ pub fn clear_m2m_links<'py>(
     source_id: Bound<'py, PyAny>,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (engine, tx_conn, backend) = {
-            let engine = active_engine_for_connection(using)?;
+            let engine = active_engine_for_connection(using, session_id.as_deref())?;
             let backend = engine.backend();
-            let tx_conn = get_transaction_connection(tx_id);
+            let tx_conn = get_transaction_connection(tx_id, session_id.as_deref())?;
             (engine, tx_conn, backend)
         };
         let uuid_columns =
@@ -2289,12 +2246,14 @@ fn python_to_engine_bind_value(
 /// Look up a transaction connection by id, returning a sharper error than the
 /// CRUD path's "Transaction not found" — this surface is reachable by users
 /// who hold a `Transaction` handle past the end of `async with transaction():`.
-fn get_raw_tx_conn(tx_id: Option<String>) -> PyResult<Option<TransactionConnection>> {
+fn get_raw_tx_conn(
+    tx_id: Option<String>,
+    session_id: Option<&str>,
+) -> PyResult<Option<TransactionConnection>> {
     match tx_id {
         Some(id) => {
-            let conn = TRANSACTION_REGISTRY
-                .get(&id)
-                .map(|tx| tx.value().conn.clone())
+            let conn = tx_get(session_id, &id)?
+                .map(|tx| tx.conn)
                 .ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err(
                         "Transaction has already been closed or never existed",
@@ -2318,19 +2277,20 @@ fn get_raw_tx_conn(tx_id: Option<String>) -> PyResult<Option<TransactionConnecti
 ///   not a supported primitive (the Python `_marshal` wrapper guarantees this
 ///   never trips in normal use).
 #[pyfunction]
-#[pyo3(signature = (sql, args, tx_id=None, using=None))]
+#[pyo3(signature = (sql, args, tx_id=None, using=None, session_id=None))]
 pub fn raw_execute<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
         .map(python_to_engine_bind_value)
         .collect::<PyResult<_>>()?;
-    let tx_conn = get_raw_tx_conn(tx_id)?;
+    let tx_conn = get_raw_tx_conn(tx_id, session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let rows_affected = match tx_conn {
@@ -2339,7 +2299,7 @@ pub fn raw_execute<'py>(
                 conn.execute_sql_with_binds(&sql, &bind_values).await
             }
             None => {
-                let engine = active_engine_for_connection(using)?;
+                let engine = active_engine_for_connection(using, session_id.as_deref())?;
                 engine.execute_sql_with_binds(&sql, &bind_values).await
             }
         }
@@ -2357,19 +2317,20 @@ pub fn raw_execute<'py>(
 /// UUID/datetime/JSON columns come back as strings — Ferro does not decode them
 /// for raw SQL. If you want typed rows, use the ORM.
 #[pyfunction]
-#[pyo3(signature = (sql, args, tx_id=None, using=None))]
+#[pyo3(signature = (sql, args, tx_id=None, using=None, session_id=None))]
 pub fn raw_fetch_all<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
         .map(python_to_engine_bind_value)
         .collect::<PyResult<_>>()?;
-    let tx_conn = get_raw_tx_conn(tx_id)?;
+    let tx_conn = get_raw_tx_conn(tx_id, session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let rows = match tx_conn {
@@ -2378,7 +2339,7 @@ pub fn raw_fetch_all<'py>(
                 conn.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
             None => {
-                let engine = active_engine_for_connection(using)?;
+                let engine = active_engine_for_connection(using, session_id.as_deref())?;
                 engine.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
         }
@@ -2398,19 +2359,20 @@ pub fn raw_fetch_all<'py>(
 
 /// Run a raw SQL query and return the first row as a dict, or `None`.
 #[pyfunction]
-#[pyo3(signature = (sql, args, tx_id=None, using=None))]
+#[pyo3(signature = (sql, args, tx_id=None, using=None, session_id=None))]
 pub fn raw_fetch_one<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     tx_id: Option<String>,
     using: Option<String>,
+    session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
         .map(python_to_engine_bind_value)
         .collect::<PyResult<_>>()?;
-    let tx_conn = get_raw_tx_conn(tx_id)?;
+    let tx_conn = get_raw_tx_conn(tx_id, session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let rows = match tx_conn {
@@ -2419,7 +2381,7 @@ pub fn raw_fetch_one<'py>(
                 conn.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
             None => {
-                let engine = active_engine_for_connection(using)?;
+                let engine = active_engine_for_connection(using, session_id.as_deref())?;
                 engine.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
         }
@@ -2431,6 +2393,90 @@ pub fn raw_fetch_one<'py>(
             Some(row) => Ok(engine_row_to_pydict(py, row)?.into_any().unbind()),
             None => Ok(py.None()),
         })
+    })
+}
+
+#[pyfunction]
+#[pyo3(name = "_shadow_compare_query_plan_for_test")]
+#[pyo3(signature = (query_payload_json, dialect, operation="select".to_string()))]
+pub fn _shadow_compare_query_plan_for_test(
+    query_payload_json: String,
+    dialect: String,
+    operation: String,
+) -> PyResult<String> {
+    let backend = match dialect.as_str() {
+        "postgres" => SqlDialect::Postgres,
+        "sqlite" => SqlDialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
+                other
+            )));
+        }
+    };
+    let query_def: QueryDef = if let Ok(ir_envelope) =
+        serde_json::from_str::<IrEnvelope<QueryIrPayload>>(&query_payload_json)
+    {
+        if ir_envelope.ir_kind != "query" {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid QueryIR envelope kind {:?}; expected \"query\"",
+                ir_envelope.ir_kind
+            )));
+        }
+        if ir_envelope.ir_version != 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unsupported QueryIR version {}; expected 1",
+                ir_envelope.ir_version
+            )));
+        }
+        query_def_from_ir_payload(ir_envelope.payload).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR payload: {e}"))
+        })?
+    } else {
+        serde_json::from_str(&query_payload_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid query payload JSON: {}", e))
+        })?
+    };
+    let mut select_legacy = Query::select();
+    select_legacy.from(Alias::new(query_def.model_name.to_lowercase()));
+    select_legacy.column((
+        Alias::new(query_def.model_name.to_lowercase()),
+        sea_query::Asterisk,
+    ));
+    select_legacy.cond_where(query_condition_for_backend(&query_def, backend)?);
+    if let Some(ref orders) = query_def.order_by {
+        for order in orders {
+            let dir = if order.direction.to_lowercase() == "desc" {
+                Order::Desc
+            } else {
+                Order::Asc
+            };
+            select_legacy.order_by(Alias::new(&order.column), dir);
+        }
+    }
+    if let Some(limit) = query_def.limit {
+        select_legacy.limit(limit);
+    }
+    if let Some(offset) = query_def.offset {
+        select_legacy.offset(offset);
+    }
+    let (legacy_sql, legacy_values) = sea_query_build_for_backend!(select_legacy, backend);
+    let legacy = query_plan_artifact(&operation, &query_def, &legacy_values.0);
+
+    let shadow = shadow_artifact_from_ir_roundtrip(&operation, &query_def, &legacy_values.0)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let payload = serde_json::json!({
+        "matches": legacy == shadow,
+        "legacy": {
+            "sql": legacy_sql,
+            "artifact": legacy,
+        },
+        "shadow": {
+            "artifact": shadow,
+        },
+    });
+    serde_json::to_string(&payload).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to encode JSON: {e}"))
     })
 }
 
@@ -2684,7 +2730,7 @@ mod schema_value_expr_tests {
                 }
             }
         });
-        let (_, values) = build_pg_value(
+        let (sql, values) = build_pg_value(
             &schema,
             "thing",
             "amount",
@@ -2693,8 +2739,11 @@ mod schema_value_expr_tests {
         )
         .unwrap();
 
-        // Decimal binds as float8-typed null; native numeric is deferred.
-        assert!(matches!(values.0.as_slice(), [SeaValue::Double(None)]));
+        assert!(matches!(values.0.as_slice(), [SeaValue::String(None)]));
+        assert!(
+            sql.to_ascii_lowercase().contains("numeric"),
+            "expected numeric cast for decimal NULL, got {sql}"
+        );
     }
 
     #[test]

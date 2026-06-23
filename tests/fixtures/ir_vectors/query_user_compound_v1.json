@@ -1,0 +1,58 @@
+{
+  "vector_name": "query_user_compound_v1",
+  "domain": "query",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "query",
+    "ir_version": 1,
+    "payload": {
+      "model_name": "User",
+      "where": [
+        {
+          "node_kind": "compound",
+          "operator": "AND",
+          "left": {
+            "node_kind": "leaf",
+            "column": "active",
+            "operator": "==",
+            "value": {
+              "kind": "bool",
+              "value": true
+            }
+          },
+          "right": {
+            "node_kind": "compound",
+            "operator": "OR",
+            "left": {
+              "node_kind": "leaf",
+              "column": "email",
+              "operator": "LIKE",
+              "value": {
+                "kind": "string",
+                "value": "%@ferro.dev"
+              }
+            },
+            "right": {
+              "node_kind": "leaf",
+              "column": "role",
+              "operator": "IN",
+              "value": {
+                "kind": "list",
+                "value": ["admin", "owner"]
+              }
+            }
+          }
+        }
+      ],
+      "order_by": [
+        {
+          "column": "id",
+          "direction": "asc"
+        }
+      ],
+      "limit": 100,
+      "offset": 0,
+      "m2m": null
+    }
+  }
+}

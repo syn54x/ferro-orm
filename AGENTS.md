@@ -258,3 +258,21 @@ Rules:
 The canonical comparisons live in `docs/pages/guide/queries.md`
 ("Predicate Styles") and `docs/pages/concepts/query-typing.md`; everywhere
 else uses lambda without restating the trade-offs.
+
+---
+
+## I-10: PRs must close scoped issues explicitly
+
+Issue closure is part of feature completion, not optional cleanup.
+
+Rules:
+
+- Every PR that completes scoped work **must** include GitHub auto-close
+  keywords in the PR body for each completed issue, e.g.
+  `Closes #89`, `Fixes #90`, `Resolves #91`.
+- Do not rely on manual post-merge issue triage when the work is already done
+  in the PR; encode closure directly in the PR body.
+- PRs must include an explicit exit-steps checklist item confirming issue status
+  updates are complete before merge.
+- AI agents and human contributors follow the same requirement. If issue status
+  closure is missing, the PR is not done.

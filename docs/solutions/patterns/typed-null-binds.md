@@ -4,14 +4,16 @@ type: pattern
 tags: [convention, invariant, bridge, ffi, rust, sea-query, sqlx, postgres, sqlite]
 related_files:
   - src/backend.rs
+  - src/codec.rs
+  - src/hydration.rs
   - src/operations.rs
   - src/query.rs
   - tests/test_typed_null_binds.py
   - tests/test_sqlite_alembic_reconnect_hydration.py
-related_issues: [38, 40, 41, 56]
+related_issues: [38, 41, 56]
 related_prs: [62]
 captured: 2026-04-29
-last_updated: 2026-05-20
+last_updated: 2026-06-22
 ---
 
 ## Problem
@@ -41,21 +43,21 @@ exception.**
 ```dot
 digraph typed_null_flow {
   "JSON null"        [shape=box];
-  "schema_value_expr (INSERT)"               [shape=box];
-  "value_rhs_simple_expr_for_backend (UPDATE/filter)"  [shape=box];
-  "backend_column_value_expr (M2M)"          [shape=box];
+  "codec::schema_bind_expr (INSERT/UPDATE)"  [shape=box];
+  "codec::query_bind_expr (filter)"          [shape=box];
+  "codec::m2m_bind_expr (M2M)"               [shape=box];
   "SeaValue::T(None)"                        [shape=oval];
   "engine_bind_values_from_sea"              [shape=box];
   "EngineBindValue::Null(NullKind::T)"       [shape=oval];
   "bind_engine_value"                        [shape=box];
   "Option::<T>::None"                        [shape=oval];
 
-  "JSON null" -> "schema_value_expr (INSERT)";
-  "JSON null" -> "value_rhs_simple_expr_for_backend (UPDATE/filter)";
-  "JSON null" -> "backend_column_value_expr (M2M)";
-  "schema_value_expr (INSERT)"                          -> "SeaValue::T(None)";
-  "value_rhs_simple_expr_for_backend (UPDATE/filter)"   -> "SeaValue::T(None)";
-  "backend_column_value_expr (M2M)"                     -> "SeaValue::T(None)";
+  "JSON null" -> "codec::schema_bind_expr (INSERT/UPDATE)";
+  "JSON null" -> "codec::query_bind_expr (filter)";
+  "JSON null" -> "codec::m2m_bind_expr (M2M)";
+  "codec::schema_bind_expr (INSERT/UPDATE)" -> "SeaValue::T(None)";
+  "codec::query_bind_expr (filter)" -> "SeaValue::T(None)";
+  "codec::m2m_bind_expr (M2M)" -> "SeaValue::T(None)";
   "SeaValue::T(None)" -> "engine_bind_values_from_sea";
   "engine_bind_values_from_sea" -> "EngineBindValue::Null(NullKind::T)";
   "EngineBindValue::Null(NullKind::T)" -> "bind_engine_value";
@@ -65,13 +67,12 @@ digraph typed_null_flow {
 
 ## Schema-driven emitters (must use typed nulls)
 
-| Path             | Function                                                | File               |
-|------------------|----------------------------------------------------------|--------------------|
-| INSERT values    | `schema_value_expr`                                      | `src/operations.rs`|
-| UPDATE values    | `schema_value_expr` (called from `update_filtered`)      | `src/operations.rs`|
-| Filter / UPDATE  | `value_rhs_simple_expr_for_backend`                      | `src/query.rs`     |
-| Filter null pick | `typed_null_for_column` (called by ^)                    | `src/query.rs`     |
-| M2M target IDs   | `backend_column_value_expr`                              | `src/operations.rs`|
+| Path             | Function                       | File           |
+|------------------|--------------------------------|----------------|
+| INSERT values    | `schema_bind_expr`             | `src/codec.rs` |
+| UPDATE values    | `schema_bind_expr`             | `src/codec.rs` |
+| Filter / UPDATE  | `query_bind_expr`              | `src/codec.rs` |
+| M2M target IDs   | `m2m_bind_expr`                | `src/codec.rs` |
 
 **`IS NULL` for typed `== None`:** JSON `null` on `QueryNode::value` deserializes
 as `Option<serde_json::Value>::None` (serde), not `Some(Value::Null)`.
@@ -87,17 +88,11 @@ variants:
 | `int \| None`                 | `BigInt(None)`     | `I64`                    | `Option::<i64>::None`  |
 | `bool \| None`                | `Bool(None)`       | `Bool`                   | `Option::<bool>::None` |
 | `float \| None`               | `Double(None)`     | `F64`                    | `Option::<f64>::None`  |
-| `Decimal \| None`             | `Double(None)` *   | `F64` *                  | `Option::<f64>::None` *|
+| `Decimal \| None`             | `String(None).cast_as("numeric")` | `String` | `Option::<String>::None` |
 | `str \| None`                 | `String(None)`     | `String`                 | `Option::<String>::None` |
 | `bytes \| None`               | `Bytes(None)`      | `Bytes`                  | `Option::<Vec<u8>>::None` |
 | `UUID \| None`                | `Uuid(None)`       | `Uuid`                   | `Option::<sqlx::types::Uuid>::None` |
-| `datetime \| None` / `date`   | `String(None).cast_as(...)` ** | -- | -- |
-
-\* Decimal binds as `float8`-typed null today. Native `numeric` typed binds
-are deferred (see plan §3 Scope Boundaries).
-
-\*\* Temporal types continue to use `cast_as` until issue [#40] picks a
-   datetime crate (`chrono` vs `time`).
+| `datetime \| None` / `date`   | `String(None).cast_as(...)` | `String` | `Option::<String>::None` |
 
 ## Fetch-time row materialization (read path)
 
@@ -210,13 +205,11 @@ Ferro itself.
 - `docs/solutions/issues/sqlite-integer-decimal-hydrates-as-none.md`: INTEGER
   NUMERIC Decimal → `None` on reconnect (issue [#58]).
 - Issue [#38]: the original bug report.
-- Issue [#40]: temporal typed binds (deferred follow-up).
 - Issue [#41]: filter `== None` panic / `IS NULL` compile path — debugging story in
   `docs/solutions/issues/typed-where-null-panics-is-null.md`.
 - PR [#62]: `fix(query): typed predicates col == None → IS NULL / IS NOT NULL`.
 
 [#38]: https://github.com/syn54x/ferro-orm/issues/38
-[#40]: https://github.com/syn54x/ferro-orm/issues/40
 [#41]: https://github.com/syn54x/ferro-orm/issues/41
 [#56]: https://github.com/syn54x/ferro-orm/issues/56
 [#58]: https://github.com/syn54x/ferro-orm/issues/58
