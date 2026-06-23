@@ -1,6 +1,18 @@
 # CHANGELOG
 
 
+## v0.12.1 (Unreleased)
+
+### Bug Fixes
+
+- Stop emitting operator-predicate deprecation warnings from built-in ORM helpers
+  (`get_or_none`, `delete`, `refresh`, `get_or_create`, `update_or_create`, and
+  connection-bound accessors) ([#121](https://github.com/syn54x/ferro-orm/issues/121))
+- Bind `engines.session()` with no argument to the default registered connection so
+  ambient routing works after unnamed `connect(dsn)`
+  ([#122](https://github.com/syn54x/ferro-orm/issues/122))
+
+
 ## v0.12.0 (2026-06-23)
 
 ### Documentation

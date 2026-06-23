@@ -31,7 +31,7 @@ from ._core import (
 from .base import ForeignKey, foreign_key_allows_none
 from .exceptions import ModelDoesNotExist
 from .metaclass import ModelMetaclass
-from .query import Query, QueryNode
+from .query import Predicate, Query, QueryNode
 from .state import (
     _CURRENT_TRANSACTION,
     _CURRENT_TRANSACTION_CONNECTION,
@@ -41,6 +41,11 @@ from .state import (
 
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
+
+
+def _field_eq(field_name: str, value: Any) -> Predicate[Any]:
+    """Build a lambda predicate for dynamic field equality without operator style."""
+    return lambda t, f=field_name, v=value: getattr(t, f) == v
 
 
 def _transaction_or_using(
@@ -289,12 +294,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         if pk_val is not None:
             name = self.__class__.__name__
-            query = self.__class__.where(
-                getattr(self.__class__, pk_field_name) == pk_val
-            )
+            query = self.__class__.where(_field_eq(pk_field_name, pk_val))
             if operation_using is not None:
                 query = Query(self.__class__, using=operation_using).where(
-                    getattr(self.__class__, pk_field_name) == pk_val
+                    _field_eq(pk_field_name, pk_val)
                 )
             await query.delete()
             evict_instance(
@@ -391,7 +394,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if pk_field_name is None:
             raise RuntimeError(f"Model {cls.__name__} does not define a primary key")
 
-        instance = await cls.where(getattr(cls, pk_field_name) == pk, session=session).first()
+        instance = await cls.where(
+            _field_eq(pk_field_name, pk), session=session
+        ).first()
         if instance:
             cls._fix_types(instance)
         return instance
@@ -423,10 +428,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         )
 
         evict_instance(name, str(pk_val), identity_using, session_id=session_id)
-        query = self.__class__.where(getattr(self.__class__, pk_field_name) == pk_val)
+        query = self.__class__.where(_field_eq(pk_field_name, pk_val))
         if operation_using is not None:
             query = Query(self.__class__, using=operation_using).where(
-                getattr(self.__class__, pk_field_name) == pk_val
+                _field_eq(pk_field_name, pk_val)
             )
         fresh_instance = await query.first()
 
@@ -576,7 +581,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         query = Query(cls, session=session)
         for key, val in fields.items():
-            query = query.where(getattr(cls, key) == val)
+            query = query.where(_field_eq(key, val))
 
         instance = await query.first()
         if instance:
@@ -604,7 +609,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         query = Query(cls, session=session)
         for key, val in fields.items():
-            query = query.where(getattr(cls, key) == val)
+            query = query.where(_field_eq(key, val))
 
         instance = await query.first()
         if instance:
@@ -662,9 +667,7 @@ class ModelConnection[M: Model]:
                 f"Model {self.model_cls.__name__} does not define a primary key"
             )
 
-        instance = await self.where(
-            getattr(self.model_cls, pk_field_name) == pk
-        ).first()
+        instance = await self.where(_field_eq(pk_field_name, pk)).first()
         if instance:
             self.model_cls._fix_types(instance)
         return instance
@@ -677,7 +680,7 @@ class ModelConnection[M: Model]:
     ) -> tuple[M, bool]:
         query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
-            query = query.where(getattr(self.model_cls, key) == val)
+            query = query.where(_field_eq(key, val))
 
         instance = await query.first()
         if instance:
@@ -691,7 +694,7 @@ class ModelConnection[M: Model]:
     ) -> tuple[M, bool]:
         query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
-            query = query.where(getattr(self.model_cls, key) == val)
+            query = query.where(_field_eq(key, val))
 
         instance = await query.first()
         if instance:

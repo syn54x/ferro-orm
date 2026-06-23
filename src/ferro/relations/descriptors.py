@@ -69,9 +69,10 @@ class RelationshipDescriptor(BaseModel):
 
         pk_val = getattr(instance, pk_field)
 
+        fk_field = f"{self.field_name}_id"
         if self.is_one_to_one:
             return self._target_model.where(
-                getattr(self._target_model, f"{self.field_name}_id") == pk_val
+                lambda t, f=fk_field, v=pk_val: getattr(t, f) == v
             ).first()
 
         from ..query.builder import Relation
@@ -79,9 +80,7 @@ class RelationshipDescriptor(BaseModel):
         return Relation(
             self._target_model,
             using=_instance_origin_outside_transaction(instance),
-        ).where(
-            getattr(self._target_model, f"{self.field_name}_id") == pk_val
-        )
+        ).where(lambda t, f=fk_field, v=pk_val: getattr(t, f) == v)
 
 
 class ForwardDescriptor(BaseModel):

@@ -825,9 +825,10 @@ pub fn rollback_transaction(
 
 #[pyfunction]
 #[pyo3(signature = (using=None))]
-pub fn open_session(using: Option<String>) -> PyResult<String> {
+pub fn open_session(using: Option<String>) -> PyResult<(String, String)> {
     let (connection_name, _) = active_connection_for_route(using)?;
-    Ok(register_session(connection_name))
+    let session_id = register_session(connection_name.clone());
+    Ok((session_id, connection_name))
 }
 
 #[pyfunction]
