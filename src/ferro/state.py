@@ -34,6 +34,16 @@ _LEGACY_DEFAULT_CONNECTION_REASON = (
     "ORM/raw operations."
 )
 
+_SESSION_CLOSED_MESSAGE = (
+    "Session is closed. Open a new session with "
+    "`async with ferro.engines.session(...)` or pass an active session handle."
+)
+
+
+def _ensure_active_session(session: SessionLike | None) -> None:
+    if session is not None and session.session_id is None:
+        raise RuntimeError(_SESSION_CLOSED_MESSAGE)
+
 # Global registry for models (Python side)
 _MODEL_REGISTRY_PY = {}
 
@@ -75,6 +85,8 @@ def resolve_operation_scope(
             )
         if explicit_session is None and using != effective_session.connection_name:
             effective_session = None
+
+    _ensure_active_session(effective_session)
 
     session_id = effective_session.session_id if effective_session is not None else None
 
@@ -123,6 +135,8 @@ def resolve_transaction_scope(
             )
         if explicit_session is None and using != effective_session.connection_name:
             effective_session = None
+
+    _ensure_active_session(effective_session)
 
     if parent_tx_id is not None:
         # Nested tx route is always inherited from parent.
