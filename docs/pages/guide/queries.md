@@ -75,6 +75,7 @@ Both methods also exist on `Model.using("name")` for [named connections](connect
 
     !!! warning "Operator style is deprecated"
         The operator style is compatible today but on the `v0.13.0` removal track. It is also incompatible with static type checkers (ty, mypy, Pyright): they see `User.age >= 18` as a `bool` from your Pydantic annotations, while `where()` expects a `QueryNode | Predicate`. Prefer the lambda style.
+        See [Migrating to v0.12.0](../howto/migrating-to-v0-12-0.md) for the compatibility-window migration checklist.
 
 Lambda predicates keep the call site fully type-checked because the proxy's attributes are real `FieldProxy` objects in the type checker's eyes, not your Pydantic annotations. Reach for `col()` only when you want to preserve the operator shape on a single attribute. See [Typed Query Predicates](../concepts/query-typing.md) for the full reasoning.
 

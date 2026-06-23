@@ -1,8 +1,13 @@
 """Build fluent query objects that serialize QueryIR payloads for the Rust core."""
 
-import warnings
 from typing import TYPE_CHECKING, Any, Generic, Type, TypeVar, overload
 
+from .._deprecations import (
+    IR_FIRST_DEPRECATION_REMOVE_IN,
+    IR_FIRST_DEPRECATION_SINCE,
+    IR_FIRST_MIGRATION_GUIDE_PREDICATES,
+    deprecated,
+)
 from .._core import (
     add_m2m_links,
     clear_m2m_links,
@@ -21,21 +26,6 @@ T = TypeVar("T")
 E = TypeVar("E")
 
 
-try:
-    from warnings import deprecated as _warnings_deprecated
-except ImportError:
-
-    def _warnings_deprecated(message: str, **_: Any):
-        def _decorate(func):
-            def _wrapped(*args, **kwargs):
-                warnings.warn(message, DeprecationWarning, stacklevel=3)
-                return func(*args, **kwargs)
-
-            return _wrapped
-
-        return _decorate
-
-
 def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
     """Serialize a QueryIR payload into a versioned IR envelope JSON string."""
     import json
@@ -49,10 +39,14 @@ def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
     )
 
 
-@_warnings_deprecated(
-    "Operator predicate style (Model.field OP value) is deprecated; use lambda "
-    "predicates (`where(lambda t: ...)`) or col(Model.field) instead. Planned "
-    "removal: v0.13.0."
+@deprecated(
+    reason=(
+        "Operator predicate style (Model.field OP value) is deprecated; use lambda "
+        "predicates (`where(lambda t: ...)`) or col(Model.field) instead."
+    ),
+    since=IR_FIRST_DEPRECATION_SINCE,
+    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
+    reference=IR_FIRST_MIGRATION_GUIDE_PREDICATES,
 )
 def _deprecated_operator_query_node(node: QueryNode) -> QueryNode:
     return node

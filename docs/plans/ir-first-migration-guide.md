@@ -101,7 +101,35 @@ Phase 6 deprecation note:
 
 ### Phase 7
 
-_TBD_
+Public release phase for the IR-first architecture with a defined compatibility
+window. Deprecated paths remain supported in `v0.12.x` and are removed in
+`v0.13.0`.
+
+| Issue | Change | Impact | User action | Notes |
+| --- | --- | --- | --- | --- |
+| [#100](https://github.com/syn54x/ferro-orm/issues/100) | Coordinate public IR-first release readiness and compatibility window evidence | minor | Follow the `v0.12.0` migration checklist before upgrading production workloads | Phase-level coordination/evidence issue |
+| [#101](https://github.com/syn54x/ferro-orm/issues/101) | Ship public IR-first release while keeping compatibility paths during migration window | minor | Keep legacy call sites working short-term, but migrate off deprecated surfaces immediately | Deprecated paths stay live only through the compatibility window |
+| [#102](https://github.com/syn54x/ferro-orm/issues/102) | Publish version-centric migration guide and upgrade checklist | minor | Follow [Migrating to v0.12.0](../pages/howto/migrating-to-v0-12-0.md) step-by-step | Includes IR-first rationale and concrete migration actions |
+| [#103](https://github.com/syn54x/ferro-orm/issues/103) | Finalize release checklist/changelog and validate deprecation target consistency | minor | Validate that internal/private deprecated usage has been removed from your codebase | All Phase 7 deprecation warnings explicitly target `v0.13.0` removal |
+
+Deprecated compatibility inventory for the Phase 7 window:
+
+- Operator-style predicates (`Model.field OP value`) are deprecated.
+  - Replacement: `where(lambda t: ...)` (official) or `col(Model.field)`.
+  - Removal target: `v0.13.0`.
+- Implicit default-connection routing outside an active session is deprecated.
+  - Replacement: `async with ferro.engines.session("name")` or explicit `session=`.
+  - Removal target: `v0.13.0`.
+- Private Alembic JSON helper APIs are deprecated:
+  - `ferro.migrations.alembic._build_sa_table`
+  - `ferro.migrations.alembic._map_to_sa_type`
+  - Replacement: `ferro.migrations.get_metadata()`.
+  - Removal target: `v0.13.0`.
+
+Phase 7 migration artifacts:
+
+- User migration checklist: [Migrating to v0.12.0](../pages/howto/migrating-to-v0-12-0.md)
+- Maintainer release checklist: [IR-first release checklist](ir-first-release-checklist.md)
 
 ### Phase 8
 

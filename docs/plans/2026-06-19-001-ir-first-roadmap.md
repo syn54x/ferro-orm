@@ -384,7 +384,7 @@ Issue references:
 
 ### Phase 7 - Major-version public release with compatibility window
 
-Status: `Not started`
+Status: `Complete`
 
 Issue references:
 
@@ -395,16 +395,32 @@ Issue references:
 - Release the IR-first upgrade publicly while keeping deprecated compatibility paths available through a defined migration window.
 
 **Deliverables**
-- [ ] Public upgrade release shipped with migration guide and deprecation messaging.
-- [ ] Deprecated compatibility paths remain available during the migration window.
-- [ ] Deprecated-compat test inventory is tagged and tracked for removal (`pytest.mark.deprecated_operator_path`).
-- [ ] Migration guide and upgrade checklist.
-- [ ] Final release checklist and changelog entries.
+- [x] Public upgrade release shipped with migration guide and deprecation messaging.
+- [x] Deprecated compatibility paths remain available during the migration window.
+- [x] Deprecated-compat test inventory is tagged and tracked for removal (`pytest.mark.deprecated_operator_path`).
+- [x] Migration guide and upgrade checklist.
+- [x] Final release checklist and changelog entries.
 
 **Exit gate**
-- [ ] Release branch green across full backend/test matrix.
-- [ ] Migration guide validated against at least one real example project.
-- [ ] Deprecation warnings explicitly point to `v0.13.0` as the removal release.
+- [x] Release branch green across full backend/test matrix.
+- [x] Migration guide validated against at least one real example project.
+- [x] Deprecation warnings explicitly point to `v0.13.0` as the removal release.
+
+**Evidence (working branch; pending merge to `feat/ir-first`)**
+- Deprecation messaging consistency primitive + call-site adoption: `src/ferro/_deprecations.py`, `src/ferro/query/builder.py`, `src/ferro/state.py`, `src/ferro/migrations/alembic.py`
+- Deprecated inventory and warning-target coverage: `tests/test_deprecated_operator_inventory.py`, `tests/test_query_builder.py`, `tests/test_query_typing.py`, `tests/test_session.py`, `tests/test_alembic_bridge.py`
+- Phase 7 migration/release docs: `docs/plans/ir-first-migration-guide.md`, `docs/pages/howto/migrating-to-v0-12-0.md`, `docs/plans/ir-first-release-checklist.md`, `docs/pages/guide/queries.md`, `docs/pages/concepts/query-typing.md`, `docs/pages/api/queries.md`, `docs/pages/guide/connections.md`, `docs/pages/api/migrations.md`, `zensical.toml`, `CHANGELOG.md`
+- Migration-guide validation against real example project surface: `uv run pytest -v tests/test_docs_examples.py` (includes `docs/examples/*.py` scripts and migration guide code snippet validation)
+- Verification commands:
+  - `cargo test --no-default-features --features testing`
+  - `cargo test -p ferro-schema-ir -p ferro-migrate`
+  - `uv run pytest -v tests/test_ir_vectors_contract.py`
+  - `uv run pytest -v --cov=src --cov-report=xml --cov-report=term`
+  - `uv run pytest -v -m "backend_matrix or postgres_only" --db-backends=sqlite,postgres`
+  - `uv run pytest -v -m deprecated_operator_path`
+  - `uv run pytest -v tests/test_query_builder.py tests/test_query_typing.py tests/test_session.py tests/test_alembic_bridge.py tests/test_docs_examples.py`
+  - `uv run zensical build --clean`
+  - `uv run maturin build --release`
 
 ---
 
@@ -569,6 +585,7 @@ Append updates as concise entries.
 - `2026-06-19` - Phase 4 working-branch implementation landed: added `ferro-migrate` (`SchemaIR(old,new)` diff + SQL emission entrypoint), expanded SchemaIR fidelity (enum/check/join-table coverage), switched Alembic metadata derivation to SchemaIR, and added deprecation warnings for superseded JSON-only Alembic helpers (target removal `v0.13.0`).
 - `2026-06-22` - Phase 5 working-branch implementation landed: added unified codec registry module (`src/codec.rs`) across insert/update/filter/m2m/fetch paths, extracted single hydration ABI helper (`src/hydration.rs`) with required Pydantic slot initialization, and expanded codec conformance vectors/tests for null/uuid/decimal/temporal/enum semantics.
 - `2026-06-22` - Phase 6 working-branch implementation landed: introduced sessionized runtime API (`engines.session` / `Session`) and ambient session routing, moved transaction/identity-map hot-path state to session scope in Rust with compatibility fallback + deprecation warnings, added session lifecycle tests, and synchronized migration/guide/API/invariant docs.
+- `2026-06-22` - Phase 7 working-branch implementation landed: completed version-centric public migration guidance (`Migrating to v0.12.0`), added release checklist + changelog entries, centralized `v0.13.0` deprecation-target messaging across compatibility paths, added deprecated-path inventory tests, and validated full Rust/Python/docs/release verification matrix.
 
 ## Immediate next actions
 

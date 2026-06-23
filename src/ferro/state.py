@@ -1,6 +1,13 @@
 from contextvars import ContextVar
-import warnings
+
 from typing import Any, Protocol
+
+from ._deprecations import (
+    IR_FIRST_DEPRECATION_REMOVE_IN,
+    IR_FIRST_DEPRECATION_SINCE,
+    IR_FIRST_MIGRATION_GUIDE_SESSIONS,
+    warn_deprecated,
+)
 
 # Context variable to store the active transaction ID for the current task
 _CURRENT_TRANSACTION: ContextVar[str | None] = ContextVar(
@@ -21,11 +28,10 @@ _CURRENT_SESSION: ContextVar[SessionLike | None] = ContextVar(
     "current_session", default=None
 )
 
-
-_LEGACY_DEFAULT_CONNECTION_DEPRECATION = (
+_LEGACY_DEFAULT_CONNECTION_REASON = (
     "Implicit default-connection routing without an active session is deprecated; "
     "use `async with ferro.engines.session(\"name\")` (or pass `session=...`) for "
-    "ORM/raw operations. Planned removal: v0.13.0."
+    "ORM/raw operations."
 )
 
 # Global registry for models (Python side)
@@ -88,7 +94,13 @@ def resolve_operation_scope(
         effective_session.connection_name if effective_session is not None else None
     )
     if effective_using is None and allow_legacy_default:
-        warnings.warn(_LEGACY_DEFAULT_CONNECTION_DEPRECATION, DeprecationWarning, stacklevel=3)
+        warn_deprecated(
+            reason=_LEGACY_DEFAULT_CONNECTION_REASON,
+            since=IR_FIRST_DEPRECATION_SINCE,
+            remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
+            reference=IR_FIRST_MIGRATION_GUIDE_SESSIONS,
+            stacklevel=2,
+        )
     return None, effective_using, session_id
 
 
@@ -122,7 +134,13 @@ def resolve_transaction_scope(
         effective_session.connection_name if effective_session is not None else None
     )
     if effective_using is None and allow_legacy_default:
-        warnings.warn(_LEGACY_DEFAULT_CONNECTION_DEPRECATION, DeprecationWarning, stacklevel=3)
+        warn_deprecated(
+            reason=_LEGACY_DEFAULT_CONNECTION_REASON,
+            since=IR_FIRST_DEPRECATION_SINCE,
+            remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
+            reference=IR_FIRST_MIGRATION_GUIDE_SESSIONS,
+            stacklevel=2,
+        )
     return None, effective_using, (
         effective_session.session_id if effective_session is not None else None
     )

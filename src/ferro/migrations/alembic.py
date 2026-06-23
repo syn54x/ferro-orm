@@ -9,6 +9,12 @@ except ImportError:
     sa = None
 
 from .._annotation_utils import _VARCHAR_RE
+from .._deprecations import (
+    IR_FIRST_DEPRECATION_REMOVE_IN,
+    IR_FIRST_DEPRECATION_SINCE,
+    IR_FIRST_MIGRATION_GUIDE_ALEMBIC,
+    deprecated,
+)
 from ..ir import compile_registry_schema_ir
 from ..schema_metadata import build_model_schema
 from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
@@ -321,6 +327,15 @@ def _resolve_sa_column_nullable(
     return _infer_nullable_join_table(col_name, col_info, required_fields)
 
 
+@deprecated(
+    reason=(
+        "_build_sa_table() is deprecated. Alembic metadata now derives from "
+        "SchemaIR. Use get_metadata() / IR-backed helpers instead."
+    ),
+    since=IR_FIRST_DEPRECATION_SINCE,
+    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
+    reference=IR_FIRST_MIGRATION_GUIDE_ALEMBIC,
+)
 def _build_sa_table(
     metadata: "sa.MetaData",
     table_name: str,
@@ -328,12 +343,6 @@ def _build_sa_table(
     model_cls: type[Any] | None = None,
 ):
     """Build a SQLAlchemy Table object from a Ferro JSON schema."""
-    warnings.warn(
-        "_build_sa_table() is deprecated. Alembic metadata now derives from SchemaIR. "
-        "Use get_metadata() / IR-backed helpers instead. Planned removal: v0.13.0.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
     columns = []
 
     properties = schema.get("properties", {})
@@ -458,6 +467,15 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
     return None
 
 
+@deprecated(
+    reason=(
+        "_map_to_sa_type() is deprecated. Type lowering now flows through "
+        "SchemaIR and _sa_type_from_ir_column()."
+    ),
+    since=IR_FIRST_DEPRECATION_SINCE,
+    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
+    reference=IR_FIRST_MIGRATION_GUIDE_ALEMBIC,
+)
 def _map_to_sa_type(
     schema: Dict[str, Any],
     col_info: Dict[str, Any],
@@ -476,12 +494,6 @@ def _map_to_sa_type(
     every other branch -- it is the canonical user-facing storage knob and is
     validated at class-definition time (see ``metaclass._validate_db_type_options``).
     """
-    warnings.warn(
-        "_map_to_sa_type() is deprecated. Type lowering now flows through SchemaIR "
-        "and _sa_type_from_ir_column(). Planned removal: v0.13.0.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
     # Resolve $ref if present
     col_info = _resolve_ref(schema, col_info)
 
