@@ -15,7 +15,7 @@ from ferro import (
     clear_registry,
     reset_engine,
 )
-from ferro.migrations.alembic import _build_sa_table
+from ferro.migrations.alembic import _build_sa_table, _map_to_sa_type
 from ferro.migrations import get_metadata
 from ferro.schema_metadata import build_model_schema
 
@@ -78,10 +78,20 @@ def test_legacy_json_table_builder_emits_deprecation_warning():
         }
     }
     with pytest.deprecated_call(
-        match="_build_sa_table\\(\\) is deprecated.*Planned removal: v0\\.13\\.0"
+        match="_build_sa_table\\(\\) is deprecated.*Planned removal in v0\\.14\\.0"
     ):
         _build_sa_table(md, "legacydoc", schema, model_cls=None)
     assert "legacydoc" in md.tables
+
+
+def test_legacy_map_to_sa_type_emits_deprecation_warning():
+    schema = {"properties": {}}
+    col_info = {"type": "string"}
+    with pytest.deprecated_call(
+        match="_map_to_sa_type\\(\\) is deprecated.*Planned removal in v0\\.14\\.0"
+    ):
+        resolved = _map_to_sa_type(schema, col_info, "legacy_field")
+    assert isinstance(resolved, sa.String)
 
 
 def test_foreign_key_unique_true_propagates_to_shadow_column():

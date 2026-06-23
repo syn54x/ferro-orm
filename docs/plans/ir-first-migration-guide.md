@@ -56,12 +56,12 @@ No user-facing runtime behavior changes expected. Shadow planning is internal-on
 | Issue | Change | Impact | User action | Notes |
 | --- | --- | --- | --- | --- |
 | [#85](https://github.com/syn54x/ferro-orm/issues/85) | Runtime query compilation now consumes QueryIR envelopes on core execution paths | minor | No API change for lambda/`col()` query callers; if you rely on internal `_core` query payload shape, migrate to QueryIR envelope (`ir_kind`, `ir_version`, `payload`) | Internal JSON `QueryDef` payload contract is no longer the core hot-path boundary |
-| [#86](https://github.com/syn54x/ferro-orm/issues/86) | Operator-style predicates (`Model.field OP value`) are deprecated with runtime warnings | minor | Migrate call sites to `where(lambda t: ...)` (recommended) or `col(Model.field)` | Deprecation message includes replacement + removal target (`v0.13.0`) |
+| [#86](https://github.com/syn54x/ferro-orm/issues/86) | Operator-style predicates (`Model.field OP value`) are deprecated with runtime warnings | minor | Migrate call sites to `where(lambda t: ...)` (recommended) or `col(Model.field)` | Deprecation message includes replacement + removal target (`v0.14.0`) |
 | [#87](https://github.com/syn54x/ferro-orm/issues/87) | Python query builder now emits QueryIR envelope payloads to Rust runtime | minor | No action for public `Model.where`/`Query.where` usage; update internal tests/tools that serialized legacy `where_clause` JSON | Compatibility behavior remains documented in query typing docs during deprecation window |
 
 Phase 3 test-migration note:
 
-- Tests that exist only to verify temporary operator-style compatibility are tagged `deprecated_operator_path` and scheduled for removal/rewrite at `v0.13.0`.
+- Tests that exist only to verify temporary operator-style compatibility are tagged `deprecated_operator_path` and scheduled for removal/rewrite at `v0.14.0`.
 
 ### Phase 4
 
@@ -69,13 +69,13 @@ Phase 3 test-migration note:
 | --- | --- | --- | --- | --- |
 | [#89](https://github.com/syn54x/ferro-orm/issues/89) | SchemaIR compiler fidelity extended for `db_check` expressions, enum metadata, and join-table model inclusion | minor | No API changes for model declaration; if you consume internal SchemaIR fixtures, refresh snapshots to include join-table and enum/check artifacts | Artifacts: `src/ferro/ir/compiler.py`, `tests/test_ir_vectors_contract.py` |
 | [#90](https://github.com/syn54x/ferro-orm/issues/90) | Introduce `crates/ferro-migrate` with typed `SchemaIR(old,new)` diff operations and backend SQL emission entrypoint | minor | No user API change; maintainers/tools consuming migration internals should move to `ferro-migrate` plan ops | Artifacts: `crates/ferro-migrate/`, `src/migrate.rs` |
-| [#91](https://github.com/syn54x/ferro-orm/issues/91) | Alembic `get_metadata()` now derives from SchemaIR modelset; legacy JSON-lowering helpers deprecated | minor | Keep using `get_metadata()`; if you directly import private `ferro.migrations.alembic._build_sa_table` / `_map_to_sa_type`, migrate away now | Deprecated helpers emit `DeprecationWarning` with planned removal `v0.13.0` |
+| [#91](https://github.com/syn54x/ferro-orm/issues/91) | Alembic `get_metadata()` now derives from SchemaIR modelset; legacy JSON-lowering helpers deprecated | minor | Keep using `get_metadata()`; if you directly import private `ferro.migrations.alembic._build_sa_table` / `_map_to_sa_type`, migrate away now | Deprecated helpers emit `DeprecationWarning` with planned removal `v0.14.0` |
 
 Phase 4 deprecation note:
 
 - Deprecated: `ferro.migrations.alembic._build_sa_table()` and `ferro.migrations.alembic._map_to_sa_type()`
 - Replacement: `get_metadata()` (SchemaIR-backed) and internal IR lowering via `_sa_type_from_ir_column()`
-- Removal target: `v0.13.0`
+- Removal target: `v0.14.0`
 
 ### Phase 5
 
@@ -91,23 +91,51 @@ Phase 4 deprecation note:
 | --- | --- | --- | --- | --- |
 | [#97](https://github.com/syn54x/ferro-orm/issues/97) | Add explicit `Session`/`engines.session(name)` runtime boundary for ambient model/query/raw routing | minor | Prefer `async with ferro.engines.session(\"name\")` around request/task work; use `session=` explicit overrides when needed | Adds deterministic nested-session shadow/restore semantics |
 | [#98](https://github.com/syn54x/ferro-orm/issues/98) | Core CRUD/query/transaction hot paths now support session-scoped transaction + identity-map state in Rust | minor | No call-site change required if you use sessions; behavior is now isolated per session under concurrent workloads | Legacy global fallback remains only for compatibility paths |
-| [#99](https://github.com/syn54x/ferro-orm/issues/99) | Temporary compatibility shim keeps implicit default-connection routing but emits deprecation warnings | minor | Migrate unqualified operations (`Model.*`, `ferro.execute/fetch_*`) to run inside sessions; keep `using=` for explicit one-off routing | Deprecation warning points to removal target `v0.13.0` |
+| [#99](https://github.com/syn54x/ferro-orm/issues/99) | Temporary compatibility shim keeps implicit default-connection routing but emits deprecation warnings | minor | Migrate unqualified operations (`Model.*`, `ferro.execute/fetch_*`) to run inside sessions; keep `using=` for explicit one-off routing | Deprecation warning points to removal target `v0.14.0` |
 
 Phase 6 deprecation note:
 
 - Deprecated: implicit default-connection routing outside an active session context.
 - Replacement: `async with ferro.engines.session(\"name\")` (ambient routing) or explicit `session=` arguments.
-- Removal target: `v0.13.0`.
+- Removal target: `v0.14.0`.
 
 ### Phase 7
 
-_TBD_
+Public release phase for the IR-first architecture with a defined compatibility
+window. Deprecated paths remain supported in `v0.12.x` and are removed in
+`v0.14.0`.
+
+| Issue | Change | Impact | User action | Notes |
+| --- | --- | --- | --- | --- |
+| [#100](https://github.com/syn54x/ferro-orm/issues/100) | Coordinate public IR-first release readiness and compatibility window evidence | minor | Follow the `v0.12.0` migration checklist before upgrading production workloads | Phase-level coordination/evidence issue |
+| [#101](https://github.com/syn54x/ferro-orm/issues/101) | Ship public IR-first release while keeping compatibility paths during migration window | minor | Keep legacy call sites working short-term, but migrate off deprecated surfaces immediately | Deprecated paths stay live only through the compatibility window |
+| [#102](https://github.com/syn54x/ferro-orm/issues/102) | Publish version-centric migration guide and upgrade checklist | minor | Follow [Migrating to v0.12.0](../pages/howto/migrating-to-v0-12-0.md) step-by-step | Includes IR-first rationale and concrete migration actions |
+| [#103](https://github.com/syn54x/ferro-orm/issues/103) | Finalize release checklist/changelog and validate deprecation target consistency | minor | Validate that internal/private deprecated usage has been removed from your codebase | All Phase 7 deprecation warnings explicitly target `v0.14.0` removal |
+
+Deprecated compatibility inventory for the Phase 7 window:
+
+- Operator-style predicates (`Model.field OP value`) are deprecated.
+  - Replacement: `where(lambda t: ...)` (official) or `col(Model.field)`.
+  - Removal target: `v0.14.0`.
+- Implicit default-connection routing outside an active session is deprecated.
+  - Replacement: `async with ferro.engines.session("name")` or explicit `session=`.
+  - Removal target: `v0.14.0`.
+- Private Alembic JSON helper APIs are deprecated:
+  - `ferro.migrations.alembic._build_sa_table`
+  - `ferro.migrations.alembic._map_to_sa_type`
+  - Replacement: `ferro.migrations.get_metadata()`.
+  - Removal target: `v0.14.0`.
+
+Phase 7 migration artifacts:
+
+- User migration checklist: [Migrating to v0.12.0](../pages/howto/migrating-to-v0-12-0.md)
+- Maintainer release checklist: [IR-first release checklist](ir-first-release-checklist.md)
 
 ### Phase 8
 
 _TBD_
 
-Planned cutover checklist (target: `v0.13.0`):
+Planned cutover checklist (target: `v0.14.0`):
 
 - Remove deprecated operator-style predicate support.
 - Remove or rewrite all tests tagged `deprecated_operator_path`.

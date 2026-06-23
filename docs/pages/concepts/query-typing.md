@@ -41,7 +41,8 @@ rows = await User.where(User.email.like("%@example.com")).all()
 ```
 
 !!! warning "Operator style is deprecated"
-    The operator style is compatible today but on the `v0.13.0` removal track. It also fails static type checking: checkers read `User.id == 1` through your Pydantic annotations as a `bool`, while `where()` expects a `QueryNode | Predicate`. Use lambda predicates for new code, or `col()` when migrating existing operator-style call sites with minimal diff.
+    The operator style is compatible today but on the `v0.14.0` removal track. It also fails static type checking: checkers read `User.id == 1` through your Pydantic annotations as a `bool`, while `where()` expects a `QueryNode | Predicate`. Use lambda predicates for new code, or `col()` when migrating existing operator-style call sites with minimal diff.
+    See [Migrating to v0.12.0](../howto/migrating-to-v0-12-0.md) for the Phase 7 migration checklist.
 
 ## When to Use Which
 

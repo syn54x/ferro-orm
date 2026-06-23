@@ -7,6 +7,8 @@ to provide a seamless, high-performance database experience.
 
 import logging
 
+from . import _deprecations as _deprecations  # noqa: F401 — enable deprecation visibility
+
 from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic import Field as PydanticField
 
