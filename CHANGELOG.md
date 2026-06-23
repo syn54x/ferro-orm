@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.12.1 (2026-06-23)
+
+### Bug Fixes
+
+- Stop framework predicate warnings and bind unnamed sessions to default
+  ([#124](https://github.com/syn54x/ferro-orm/pull/124),
+  [`66b92d8`](https://github.com/syn54x/ferro-orm/commit/66b92d8b691a1ad806691b9841bcbaf93c78f691))
+
+
 ## v0.12.0 (2026-06-23)
 
 ### Documentation
