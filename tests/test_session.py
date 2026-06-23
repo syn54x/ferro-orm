@@ -343,3 +343,45 @@ async def test_transaction_after_cross_context_close_raises(tmp_path):
     with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
         async with ferro.transaction():
             pass
+
+
+@pytest.mark.asyncio
+async def test_aexit_preserves_body_exception_when_close_fails(tmp_path):
+    from ferro.state import _CURRENT_SESSION
+
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await ferro.create_tables()
+
+    outer = ferro.engines.session("app")
+    inner = ferro.engines.session("analytics")
+    await outer.__aenter__()
+    _CURRENT_SESSION.set(inner)
+
+    body_error = ValueError("body failed")
+    with pytest.raises(ValueError, match="body failed") as exc_info:
+        await outer.__aexit__(ValueError, body_error, None)
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "ambient session does not match" in str(exc_info.value.__cause__)
+
+
+@pytest.mark.asyncio
+async def test_aexit_preserves_cancelled_error_when_close_fails(tmp_path):
+    from ferro.state import _CURRENT_SESSION
+
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
+    await ferro.create_tables()
+
+    outer = ferro.engines.session("app")
+    inner = ferro.engines.session("analytics")
+    await outer.__aenter__()
+    _CURRENT_SESSION.set(inner)
+
+    cancelled = asyncio.CancelledError("shutdown")
+    with pytest.raises(asyncio.CancelledError, match="shutdown") as exc_info:
+        await outer.__aexit__(asyncio.CancelledError, cancelled, None)
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "ambient session does not match" in str(exc_info.value.__cause__)

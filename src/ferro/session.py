@@ -42,9 +42,11 @@ class Session:
         try:
             await self.close()
         except Exception as close_exc:
-            if exc_type is not None:
-                raise close_exc from exc
-            raise
+            if exc_type is None:
+                raise
+            if exc is not None:
+                raise exc from close_exc
+            raise close_exc
 
     async def close(self) -> None:
         """Close this session and release its runtime state.
