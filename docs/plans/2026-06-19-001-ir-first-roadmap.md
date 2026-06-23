@@ -87,7 +87,7 @@ Definition of done addition:
 
 ## Program status
 
-- Overall status: `Complete` (Phases 0–7 merged; Phase 8 shim removal pending)
+- Overall status: `In progress` (Phases 0–7 merged; Phase 8 ferro-migrate cutover pending; Phase 9 shim removal pending)
 - Current phase: `Phase 8`
 - Last updated: `2026-06-23`
 - Roadmap owner: `@syn54x`
@@ -285,7 +285,7 @@ Issue references:
 
 ### Phase 4 - SchemaIR migration and DDL cutover
 
-Status: `In progress`
+Status: `Complete` (Alembic path; runtime `auto_migrate` cutover deferred to Phase 8)
 
 Issue references:
 
@@ -296,18 +296,18 @@ Issue references:
 - Make SchemaIR the only schema truth for migration planning and DDL emission.
 
 **Deliverables**
-- [x] `ferro-migrate` planner: `SchemaIR(old) -> SchemaIR(new) -> MigrationPlan`.
-- [x] Backend emitters from `MigrationPlan`.
+- [x] `ferro-migrate` planner scaffold: `SchemaIR(old) -> SchemaIR(new) -> MigrationPlan`.
+- [~] Backend emitters from `MigrationPlan` — entrypoint landed; executable DDL for all ops deferred to Phase 8 ([#90](https://github.com/syn54x/ferro-orm/issues/90) scaffold only).
 - [x] Alembic adapter consumes IR outputs (no independent schema derivation).
 
 **Exit gate**
-- [x] No independent parallel DDL emitter remains.
-- [x] Cross-emitter parity class is structurally eliminated.
+- [x] Alembic no longer independently derives schema semantics.
+- [ ] Runtime `auto_migrate` executes the IR migration plan — **deferred to Phase 8**.
 
 **Evidence (merged to `feat/ir-first`)**
 - New planner/emitter crate: `crates/ferro-migrate/` (`plan_from_ir`, `emit_sql`, unit tests)
 - SchemaIR fidelity updates: `src/ferro/ir/compiler.py`, `crates/ferro-schema-ir/src/lib.rs`
-- Runtime planner now consumes typed IR diff path before SQL planning: `src/migrate.rs`
+- Runtime planner IR adapter scaffold (plan computed, not executed): `src/migrate.rs`
 - Alembic metadata now derives from SchemaIR modelset: `src/ferro/migrations/alembic.py`
 - Deprecation coverage for superseded JSON helper path: `tests/test_alembic_bridge.py`
 - Verification commands:
@@ -424,14 +424,44 @@ Issue references:
 
 ---
 
-### Phase 8 - Compatibility cutover and shim removal (`v0.14.0`)
+### Phase 8 - Runtime migration IR cutover (`v0.13.0`)
 
 Status: `Not started`
 
 Issue references:
 
-- `Epic:` _TBD_
-- `Sub-issues:` _TBD_
+- `Epic:` [#117](https://github.com/syn54x/ferro-orm/issues/117)
+- `Sub-issues:` [#118](https://github.com/syn54x/ferro-orm/issues/118), [#119](https://github.com/syn54x/ferro-orm/issues/119), [#120](https://github.com/syn54x/ferro-orm/issues/120)
+
+**Objective**
+- Finish `ferro-migrate` and cut runtime `auto_migrate` over to the SchemaIR migration pipeline so runtime DDL and Alembic share one planner (AGENTS.md I-1).
+
+**Deliverables**
+- [ ] `ferro-migrate` `emit_sql` emits executable DDL for all `MigrationOp` variants on SQLite and Postgres (no comment placeholders).
+- [ ] `plan_table_migration` executes the IR plan; legacy enriched-JSON diff walk removed from `src/migrate.rs`.
+- [ ] Shadow/parity gate: IR migration path matches `create_tables` and Alembic for the `auto_migrate` capability matrix.
+- [ ] Duplicate `schema_json_to_schema_ir` / `live_columns_to_schema_ir` lowering consolidated or single-sourced where feasible.
+
+**Exit gate**
+- [ ] `cargo test -p ferro-migrate` green with full op coverage.
+- [ ] `tests/test_auto_migrate.py` and `tests/test_migrate_plan.py` green on SQLite + Postgres backend matrix.
+- [ ] No discarded `_typed_plan` scaffolding in `migrate.rs`.
+
+**Verification commands**
+- `cargo test -p ferro-schema-ir -p ferro-migrate`
+- `uv run pytest tests/test_ir_vectors_contract.py tests/test_migrate_plan.py tests/test_auto_migrate.py tests/test_alembic_autogenerate.py -q`
+- `uv run pytest -m "backend_matrix or postgres_only" --db-backends=sqlite,postgres tests/test_auto_migrate.py tests/test_migrate_plan.py -q`
+
+---
+
+### Phase 9 - Compatibility cutover and shim removal (`v0.14.0`)
+
+Status: `Not started`
+
+Issue references:
+
+- `Epic:` [#107](https://github.com/syn54x/ferro-orm/issues/107)
+- `Sub-issues:` [#108](https://github.com/syn54x/ferro-orm/issues/108), [#109](https://github.com/syn54x/ferro-orm/issues/109), [#110](https://github.com/syn54x/ferro-orm/issues/110)
 
 **Objective**
 - Complete migration by removing deprecated compatibility shims in `v0.14.0`.
@@ -581,7 +611,9 @@ Append updates as concise entries.
 - `2026-06-19` - Phase 2 merged via [#105](https://github.com/syn54x/ferro-orm/pull/105); issues [#80](https://github.com/syn54x/ferro-orm/issues/80), [#81](https://github.com/syn54x/ferro-orm/issues/81), [#82](https://github.com/syn54x/ferro-orm/issues/82), [#83](https://github.com/syn54x/ferro-orm/issues/83) synchronized and closed.
 - `2026-06-19` - Phase 3 working-branch implementation landed: QueryIR envelope hot-path cutover for query operations, operator-style deprecation warnings, and synchronized query docs/migration guidance updates.
 - `2026-06-19` - Sequencing update: Phase 7 is now public release with deprecated compatibility support; hard removal moved to Phase 8 (`v0.14.0`).
-- `2026-06-19` - Phase 8 issue set created and linked: epic [#107](https://github.com/syn54x/ferro-orm/issues/107) with sub-issues [#108](https://github.com/syn54x/ferro-orm/issues/108), [#109](https://github.com/syn54x/ferro-orm/issues/109), [#110](https://github.com/syn54x/ferro-orm/issues/110).
+- `2026-06-19` - Phase 9 issue set created and linked: epic [#107](https://github.com/syn54x/ferro-orm/issues/107) with sub-issues [#108](https://github.com/syn54x/ferro-orm/issues/108), [#109](https://github.com/syn54x/ferro-orm/issues/109), [#110](https://github.com/syn54x/ferro-orm/issues/110) (originally filed as Phase 8; renumbered 2026-06-23).
+- `2026-06-23` - Phase 8 issue set created and linked: epic [#117](https://github.com/syn54x/ferro-orm/issues/117) with sub-issues [#118](https://github.com/syn54x/ferro-orm/issues/118), [#119](https://github.com/syn54x/ferro-orm/issues/119), [#120](https://github.com/syn54x/ferro-orm/issues/120).
+- `2026-06-23` - Sequencing update: inserted Phase 8 (`ferro-migrate` runtime cutover, `v0.13.0`); prior shim-removal phase renumbered to Phase 9 (`v0.14.0`). Phase 4 exit gates corrected to reflect Alembic-only cutover on `feat/ir-first`.
 - `2026-06-19` - Phase 4 working-branch implementation landed: added `ferro-migrate` (`SchemaIR(old,new)` diff + SQL emission entrypoint), expanded SchemaIR fidelity (enum/check/join-table coverage), switched Alembic metadata derivation to SchemaIR, and added deprecation warnings for superseded JSON-only Alembic helpers (target removal `v0.14.0`).
 - `2026-06-22` - Phase 5 working-branch implementation landed: added unified codec registry module (`src/codec.rs`) across insert/update/filter/m2m/fetch paths, extracted single hydration ABI helper (`src/hydration.rs`) with required Pydantic slot initialization, and expanded codec conformance vectors/tests for null/uuid/decimal/temporal/enum semantics.
 - `2026-06-22` - Phase 6 working-branch implementation landed: introduced sessionized runtime API (`engines.session` / `Session`) and ambient session routing, moved transaction/identity-map hot-path state to session scope in Rust with compatibility fallback + deprecation warnings, added session lifecycle tests, and synchronized migration/guide/API/invariant docs.

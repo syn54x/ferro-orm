@@ -68,7 +68,7 @@ Phase 3 test-migration note:
 | Issue | Change | Impact | User action | Notes |
 | --- | --- | --- | --- | --- |
 | [#89](https://github.com/syn54x/ferro-orm/issues/89) | SchemaIR compiler fidelity extended for `db_check` expressions, enum metadata, and join-table model inclusion | minor | No API changes for model declaration; if you consume internal SchemaIR fixtures, refresh snapshots to include join-table and enum/check artifacts | Artifacts: `src/ferro/ir/compiler.py`, `tests/test_ir_vectors_contract.py` |
-| [#90](https://github.com/syn54x/ferro-orm/issues/90) | Introduce `crates/ferro-migrate` with typed `SchemaIR(old,new)` diff operations and backend SQL emission entrypoint | minor | No user API change; maintainers/tools consuming migration internals should move to `ferro-migrate` plan ops | Artifacts: `crates/ferro-migrate/`, `src/migrate.rs` |
+| [#90](https://github.com/syn54x/ferro-orm/issues/90) | Introduce `crates/ferro-migrate` planner scaffold and SQL emission entrypoint (executable DDL deferred to Phase 8) | minor | No user API change | Phase 4 landed scaffold only; completion tracked in [#118](https://github.com/syn54x/ferro-orm/issues/118)–[#120](https://github.com/syn54x/ferro-orm/issues/120) |
 | [#91](https://github.com/syn54x/ferro-orm/issues/91) | Alembic `get_metadata()` now derives from SchemaIR modelset; legacy JSON-lowering helpers deprecated | minor | Keep using `get_metadata()`; if you directly import private `ferro.migrations.alembic._build_sa_table` / `_map_to_sa_type`, migrate away now | Deprecated helpers emit `DeprecationWarning` with planned removal `v0.14.0` |
 
 Phase 4 deprecation note:
@@ -133,9 +133,33 @@ Phase 7 migration artifacts:
 
 ### Phase 8
 
-_TBD_
+Runtime migration IR cutover (target: `v0.13.0`).
 
-Planned cutover checklist (target: `v0.14.0`):
+| Issue | Change | Impact | User action | Notes |
+| --- | --- | --- | --- | --- |
+| [#117](https://github.com/syn54x/ferro-orm/issues/117) | Coordinate `ferro-migrate` runtime cutover and parity exit gates | none | No action — internal planner cutover | Epic |
+| [#118](https://github.com/syn54x/ferro-orm/issues/118) | Complete executable SQL emission from `MigrationPlan` for all ops (SQLite + Postgres) | none | No action | Continues #90 scaffold |
+| [#119](https://github.com/syn54x/ferro-orm/issues/119) | Wire `auto_migrate` / `plan_table_migration` to execute ferro-migrate IR plans | none | No action — behavior must remain observably identical | Retires discarded `_typed_plan` path |
+| [#120](https://github.com/syn54x/ferro-orm/issues/120) | Parity gate + remove legacy JSON diff path in `src/migrate.rs` | none | No action | AGENTS.md I-1 enforcement |
+
+- **Migration impact:** `none` for public APIs — `connect(auto_migrate=...)` and `ferro.migrate` signatures unchanged.
+- **Internal change:** `auto_migrate` executes `ferro-migrate` `SchemaIR(old,new)` plans instead of the legacy enriched-JSON diff walk in `src/migrate.rs`.
+- **Parity requirement:** auto-migrated schema artifacts must remain byte-identical to `create_tables` and Alembic (AGENTS.md I-1).
+
+### Phase 9
+
+Compatibility cutover and shim removal (target: `v0.14.0`).
+
+| Issue | Change | Impact | User action | Notes |
+| --- | --- | --- | --- | --- |
+| [#107](https://github.com/syn54x/ferro-orm/issues/107) | Coordinate hard removal of deprecated compatibility surfaces | breaking | Migrate off all deprecated paths before upgrading to `v0.14.0` | Epic |
+| [#108](https://github.com/syn54x/ferro-orm/issues/108) | Remove deprecated runtime compatibility code paths | breaking | Use lambda/`col()` predicates and session-scoped routing | Operator style, ambient routing, Alembic JSON helpers |
+| [#109](https://github.com/syn54x/ferro-orm/issues/109) | Remove deprecated compatibility test inventory | minor | No user action | `deprecated_operator_path` marker removal |
+| [#110](https://github.com/syn54x/ferro-orm/issues/110) | Publish `v0.14.0` cutover migration and release notes | breaking | Follow final cutover guide at release | Changelog + checklist |
+
+Planned cutover checklist:
 
 - Remove deprecated operator-style predicate support.
+- Remove ambient default-connection routing outside an active session.
+- Remove private Alembic JSON helper APIs (`_build_sa_table`, `_map_to_sa_type`).
 - Remove or rewrite all tests tagged `deprecated_operator_path`.
