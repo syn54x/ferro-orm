@@ -15,8 +15,8 @@ use crate::state::{
 use ferro_schema_ir::{IrEnvelope, QueryIrPayload};
 use pyo3::prelude::*;
 use sea_query::{
-    Alias, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query, SimpleExpr,
-    SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
+    Alias, Condition, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query,
+    SimpleExpr, SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -223,6 +223,15 @@ fn query_def_from_ir_json(query_ir_json: &str) -> PyResult<QueryDef> {
     }
     query_def_from_ir_payload(envelope.payload)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR: {e}")))
+}
+
+fn query_condition_for_backend(
+    query_def: &QueryDef,
+    backend: SqlDialect,
+) -> PyResult<Condition> {
+    query_def
+        .to_condition_for_backend(backend)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 /// Map SeaQuery `Value` variants to `EngineBindValue`.
@@ -1224,7 +1233,9 @@ pub fn save_record(
                 .into_table(Alias::new(&table_name))
                 .columns(columns.clone())
                 .values(values)
-                .unwrap()
+                .map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("invalid INSERT values: {e}"))
+                })?
                 .to_owned();
             if let Some(pk) = pk_col.as_ref()
                 && (pk_provided || !pk_is_auto)
@@ -1525,7 +1536,7 @@ pub fn fetch_filtered<'py>(
                 ));
             }
 
-            select.cond_where(query_def.to_condition_for_backend(backend));
+            select.cond_where(query_condition_for_backend(&query_def, backend)?);
             if let Some(ref orders) = query_def.order_by {
                 for order in orders {
                     let col = Alias::new(&order.column);
@@ -1696,7 +1707,7 @@ pub fn count_filtered(
                 select.from(Alias::new(&table_name));
             }
 
-            select.cond_where(query_def.to_condition_for_backend(backend));
+            select.cond_where(query_condition_for_backend(&query_def, backend)?);
             sea_query_build_for_backend!(select, backend)
         };
         maybe_compare_shadow_query_artifacts(
@@ -1876,7 +1887,7 @@ pub fn delete_filtered(
             let mut delete = Query::delete();
             delete
                 .from_table(Alias::new(&table_name))
-                .cond_where(query_def.to_condition_for_backend(backend));
+                .cond_where(query_condition_for_backend(&query_def, backend)?);
             sea_query_build_for_backend!(delete, backend)
         };
         maybe_compare_shadow_query_artifacts(
@@ -1944,7 +1955,7 @@ pub fn update_filtered(
             })?;
             let mut update = UpdateStatement::new()
                 .table(Alias::new(&table_name))
-                .cond_where(query_def.to_condition_for_backend(backend))
+                .cond_where(query_condition_for_backend(&query_def, backend)?)
                 .to_owned();
             for (key, value) in update_map {
                 update.value(
@@ -2028,7 +2039,11 @@ pub fn add_m2m_links<'py>(
                         ),
                         backend_column_value_expr(&target_col, t_id, &uuid_columns, backend),
                     ])
-                    .unwrap();
+                    .map_err(|e| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "invalid M2M INSERT values: {e}"
+                        ))
+                    })?;
             }
             sea_query_build_for_backend!(insert, backend)
         };
@@ -2428,7 +2443,7 @@ pub fn _shadow_compare_query_plan_for_test(
         Alias::new(query_def.model_name.to_lowercase()),
         sea_query::Asterisk,
     ));
-    select_legacy.cond_where(query_def.to_condition_for_backend(backend));
+    select_legacy.cond_where(query_condition_for_backend(&query_def, backend)?);
     if let Some(ref orders) = query_def.order_by {
         for order in orders {
             let dir = if order.direction.to_lowercase() == "desc" {
@@ -2715,7 +2730,7 @@ mod schema_value_expr_tests {
                 }
             }
         });
-        let (_, values) = build_pg_value(
+        let (sql, values) = build_pg_value(
             &schema,
             "thing",
             "amount",
@@ -2724,8 +2739,11 @@ mod schema_value_expr_tests {
         )
         .unwrap();
 
-        // Decimal null uses a typed float bind to avoid text-typed NULLs on Postgres.
-        assert!(matches!(values.0.as_slice(), [SeaValue::Double(None)]));
+        assert!(matches!(values.0.as_slice(), [SeaValue::String(None)]));
+        assert!(
+            sql.to_ascii_lowercase().contains("numeric"),
+            "expected numeric cast for decimal NULL, got {sql}"
+        );
     }
 
     #[test]

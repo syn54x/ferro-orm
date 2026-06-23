@@ -298,6 +298,9 @@ pub fn schema_bind_expr(
         }
         Value::Bool(b) => Expr::value(SeaValue::Bool(Some(*b))),
         Value::Null => {
+            if col_is_decimal && backend == SqlDialect::Postgres {
+                return Ok(Expr::value(SeaValue::String(None)).cast_as("numeric"));
+            }
             let v = if col_format == Some("binary") {
                 SeaValue::Bytes(None)
             } else if col_is_decimal {

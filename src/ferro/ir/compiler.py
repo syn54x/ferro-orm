@@ -11,14 +11,13 @@ import hashlib
 import json
 from typing import Any
 
+from .. import state as ferro_state
 from ..schema_metadata import build_model_schema
 from ..state import (
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
     _SCHEMA_IR_BY_MODEL,
     _SCHEMA_IR_FINGERPRINT_BY_MODEL,
-    _SCHEMA_IR_MODELSET,
-    _SCHEMA_IR_MODELSET_FINGERPRINT,
 )
 
 _IR_VERSION = 1
@@ -430,9 +429,8 @@ def compile_registry_schema_ir() -> dict[str, Any]:
         },
     }
 
-    global _SCHEMA_IR_MODELSET, _SCHEMA_IR_MODELSET_FINGERPRINT
-    _SCHEMA_IR_MODELSET = envelope
-    _SCHEMA_IR_MODELSET_FINGERPRINT = _fingerprint(envelope)
+    ferro_state._SCHEMA_IR_MODELSET = envelope
+    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = _fingerprint(envelope)
     return envelope
 
 

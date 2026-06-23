@@ -1,25 +1,6 @@
 # CHANGELOG
 
 
-## v0.12.0 (2026-06-22)
-
-### Documentation
-
-- **release**: Publish Phase 7 migration/release guidance for the IR-first public release
-  (`docs/plans/ir-first-migration-guide.md`, `docs/pages/howto/migrating-to-v0-12-0.md`,
-  `docs/plans/ir-first-release-checklist.md`)
-
-### Testing
-
-- **deprecation**: Add inventory contract coverage for `deprecated_operator_path`
-  and enforce `v0.14.0` removal-target assertions across compat warning tests
-
-### Refactoring
-
-- **deprecation**: Centralize compatibility-window warning text to keep
-  `Planned removal in v0.14.0` messaging consistent across query/session/alembic paths
-
-
 ## v0.11.0 (2026-06-11)
 
 ### Chores

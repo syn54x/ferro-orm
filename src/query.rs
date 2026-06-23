@@ -59,28 +59,46 @@ pub struct QuerySemanticSignature {
 }
 
 impl QueryDef {
-    pub fn to_condition_for_backend(&self, backend: SqlDialect) -> Condition {
+    pub fn to_condition_for_backend(
+        &self,
+        backend: SqlDialect,
+    ) -> Result<Condition, String> {
         let mut condition = Condition::all();
         for node in &self.where_clause {
-            condition = condition.add(self.node_to_condition_for_backend(node, backend));
+            condition = condition.add(self.node_to_condition_for_backend(node, backend)?);
         }
-        condition
+        Ok(condition)
     }
 
-    fn node_to_condition_for_backend(&self, node: &QueryNode, backend: SqlDialect) -> Condition {
+    fn node_to_condition_for_backend(
+        &self,
+        node: &QueryNode,
+        backend: SqlDialect,
+    ) -> Result<Condition, String> {
         if node.is_compound {
-            let left_cond =
-                self.node_to_condition_for_backend(node.left.as_ref().unwrap(), backend);
-            let right_cond =
-                self.node_to_condition_for_backend(node.right.as_ref().unwrap(), backend);
+            let left = node
+                .left
+                .as_ref()
+                .ok_or_else(|| "compound QueryNode is missing left child".to_string())?;
+            let right = node
+                .right
+                .as_ref()
+                .ok_or_else(|| "compound QueryNode is missing right child".to_string())?;
+            let left_cond = self.node_to_condition_for_backend(left, backend)?;
+            let right_cond = self.node_to_condition_for_backend(right, backend)?;
 
-            match node.operator.as_str() {
+            Ok(match node.operator.as_str() {
                 "OR" => Condition::any().add(left_cond).add(right_cond),
                 "AND" => Condition::all().add(left_cond).add(right_cond),
-                _ => Condition::all(), // Should not happen
-            }
+                op => {
+                    return Err(format!("unsupported compound QueryNode operator: {op}"));
+                }
+            })
         } else {
-            let col_name = node.column.as_ref().unwrap();
+            let col_name = node
+                .column
+                .as_ref()
+                .ok_or_else(|| "leaf QueryNode is missing column".to_string())?;
             let col = Expr::col(Alias::new(col_name));
 
             // Python `None` becomes JSON `null`, which serde deserializes as
@@ -149,7 +167,10 @@ impl QueryDef {
                     )),
                 }
             } else {
-                let val = node.value.as_ref().unwrap();
+                let val = node
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| format!("leaf QueryNode for column '{col_name}' is missing value"))?;
                 match node.operator.as_str() {
                     "==" => col
                         .eq(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
@@ -157,8 +178,7 @@ impl QueryDef {
                         .ne(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
                     "<" => col
                         .lt(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
-                    "<=" => col
-                        .lte(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
+                    "<=" => col.lte(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
                     ">" => col
                         .gt(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
                     ">=" => col
@@ -190,7 +210,7 @@ impl QueryDef {
                         .eq(self.value_rhs_simple_expr_for_backend(col_name, val, false, backend)),
                 }
             };
-            Condition::all().add(expr)
+            Ok(Condition::all().add(expr))
         }
     }
 
@@ -515,7 +535,10 @@ mod tests {
         let mut select = Query::select();
         select
             .from(Alias::new("pending"))
-            .cond_where(q.to_condition_for_backend(BackendKind::Sqlite));
+            .cond_where(
+                q.to_condition_for_backend(BackendKind::Sqlite)
+                    .expect("valid test query"),
+            );
         let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
         assert!(sql.contains("is null"), "expected IS NULL, got {sql}");
         assert!(
@@ -545,7 +568,10 @@ mod tests {
         let mut select = Query::select();
         select
             .from(Alias::new("pending"))
-            .cond_where(q.to_condition_for_backend(BackendKind::Sqlite));
+            .cond_where(
+                q.to_condition_for_backend(BackendKind::Sqlite)
+                    .expect("valid test query"),
+            );
         let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
         assert!(
             sql.contains("is not null"),

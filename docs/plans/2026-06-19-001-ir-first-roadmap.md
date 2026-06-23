@@ -87,9 +87,9 @@ Definition of done addition:
 
 ## Program status
 
-- Overall status: `In progress`
-- Current phase: `Phase 7`
-- Last updated: `2026-06-22`
+- Overall status: `Complete` (Phases 0–7 merged; Phase 8 shim removal pending)
+- Current phase: `Phase 8`
+- Last updated: `2026-06-23`
 - Roadmap owner: `@syn54x`
 
 ## Branching and release policy

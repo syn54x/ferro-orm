@@ -212,19 +212,27 @@ def test_ir_vectors_match_phase0_contract_envelope() -> None:
 
 @pytest.fixture()
 def clean_model_registry() -> None:
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro import state as ferro_state
 
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    ferro_state._MODEL_REGISTRY_PY.clear()
+    ferro_state._PENDING_RELATIONS.clear()
+    ferro_state._JOIN_TABLE_REGISTRY.clear()
+    ferro_state._SCHEMA_IR_BY_MODEL.clear()
+    ferro_state._SCHEMA_IR_FINGERPRINT_BY_MODEL.clear()
+    ferro_state._SCHEMA_IR_MODELSET = None
+    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = None
     yield
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    ferro_state._MODEL_REGISTRY_PY.clear()
+    ferro_state._PENDING_RELATIONS.clear()
+    ferro_state._JOIN_TABLE_REGISTRY.clear()
+    ferro_state._SCHEMA_IR_BY_MODEL.clear()
+    ferro_state._SCHEMA_IR_FINGERPRINT_BY_MODEL.clear()
+    ferro_state._SCHEMA_IR_MODELSET = None
+    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = None
 
 
 def _load_vector(path: Path) -> dict[str, Any]:
@@ -263,6 +271,27 @@ def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> 
 
     assert first == second
     assert first_fp == second_fp
+
+
+def test_compile_registry_schema_ir_persists_modelset_cache(
+    clean_model_registry: None,
+) -> None:
+    from ferro import state as ferro_state
+    from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
+    from ferro.relations import resolve_relationships
+
+    from tests.test_cross_emitter_parity import _build_fixture_models
+
+    _build_fixture_models()
+    resolve_relationships()
+
+    ferro_state._SCHEMA_IR_MODELSET = None
+    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = None
+
+    compiled = compile_registry_schema_ir()
+
+    assert ferro_state._SCHEMA_IR_MODELSET == compiled
+    assert ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT == schema_ir_fingerprint(compiled)
 
 
 def test_schema_ir_compiler_emits_db_check_expression_for_closed_domain(

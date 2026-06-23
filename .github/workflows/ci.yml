@@ -387,6 +387,10 @@ jobs:
         run: |
           ok() { [[ "$1" == "success" || "$1" == "skipped" ]]; }
 
+          if [[ "${{ needs.changed-shadow-paths.result }}" == "failure" ]]; then
+            echo "Shadow path detection failed; refusing to treat shadow gate as passed."
+            exit 1
+          fi
           if ! ok "${{ needs.lint-and-format.result }}"; then exit 1; fi
           if ! ok "${{ needs.test-python-pr.result }}"; then exit 1; fi
           if ! ok "${{ needs.test-python-main.result }}"; then exit 1; fi

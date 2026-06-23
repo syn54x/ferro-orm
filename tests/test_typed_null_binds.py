@@ -178,12 +178,7 @@ async def test_uuid_pk_filter_by_string_does_not_send_text(db_url):
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_insert_with_none_for_decimal(db_url):
-    """Nullable Decimal columns accept ``None`` on INSERT.
-
-    Decimal is currently bound as ``float8``-typed null on Postgres; native
-    ``numeric`` typed binds are deferred (plan §3 Scope Boundaries). This
-    test asserts user-facing behavior, not the wire-level type.
-    """
+    """Nullable Decimal columns accept ``None`` on INSERT with typed null binds."""
 
     class WithDecimal(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
