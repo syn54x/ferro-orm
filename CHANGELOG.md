@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v0.12.0 (2026-06-23)
+
+### Documentation
+
+- Rewrite site on Zensical with runnable examples
+  ([#70](https://github.com/syn54x/ferro-orm/pull/70),
+  [`da86911`](https://github.com/syn54x/ferro-orm/commit/da869118c55314363139a021c139a52a2bc8d1fb))
+
+### Features
+
+- IR-first architecture program (Phases 0–7) ([#116](https://github.com/syn54x/ferro-orm/pull/116),
+  [`1c22857`](https://github.com/syn54x/ferro-orm/commit/1c228577aa663c4630a5c8a33f0bb000ebe288b2))
+
+
 ## v0.11.0 (2026-06-11)
 
 ### Chores
