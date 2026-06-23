@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.12.2 (2026-06-23)
+
+### Bug Fixes
+
+- Cross-context session teardown (Fixes #123) ([#127](https://github.com/syn54x/ferro-orm/pull/127),
+  [`6b9ae13`](https://github.com/syn54x/ferro-orm/commit/6b9ae1332becef88f14bdb4beae1d24e3a4104cd))
+
+
 ## v0.12.1 (2026-06-23)
 
 ### Bug Fixes
