@@ -139,6 +139,10 @@ class App:
 
 `Session.close()` is safe across asyncio contexts and idempotent. Prefer explicit `session=` routing when ambient context may be unavailable in the closing task.
 
+After a cross-context close, the enter task may still hold a stale ambient session object until a new session is opened; ambient operations then raise `RuntimeError` with a session-closed message (including when `using=` names another connection). If nested sessions are open, close inner sessions from the same task or via cross-context `close()` before closing the outer handle in the original task.
+
+Operations on a closed session handle (ambient or explicit `session=`) raise `RuntimeError` rather than falling back to legacy default routing.
+
 `ferro.reset_engine()` tears down **all** connections and is intended for test isolation — not per-session app lifecycle teardown.
 
 Legacy implicit default-connection routing (calling unqualified operations outside a session) is still temporarily supported for compatibility, but now emits a deprecation warning and is on the `v0.14.0` removal track.

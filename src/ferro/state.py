@@ -86,6 +86,9 @@ def resolve_operation_scope(
         if explicit_session is None and using != effective_session.connection_name:
             effective_session = None
 
+    if explicit_session is None and ambient_session is not None:
+        _ensure_active_session(ambient_session)
+
     _ensure_active_session(effective_session)
 
     session_id = effective_session.session_id if effective_session is not None else None
@@ -135,6 +138,9 @@ def resolve_transaction_scope(
             )
         if explicit_session is None and using != effective_session.connection_name:
             effective_session = None
+
+    if explicit_session is None and ambient_session is not None:
+        _ensure_active_session(ambient_session)
 
     _ensure_active_session(effective_session)
 
