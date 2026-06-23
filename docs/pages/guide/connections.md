@@ -139,6 +139,8 @@ class App:
 
 `Session.close()` is safe across asyncio contexts and idempotent. Prefer explicit `session=` routing when ambient context may be unavailable in the closing task.
 
+Close raises `RuntimeError` if session-scoped transactions are still open — exit all `transaction()` blocks before closing the session.
+
 After a cross-context close, the enter task may still hold a stale ambient session object until a new session is opened; ambient operations then raise `RuntimeError` with a session-closed message (including when `using=` names another connection). If nested sessions are open, close inner sessions from the same task or via cross-context `close()` before closing the outer handle in the original task.
 
 Operations on a closed session handle (ambient or explicit `session=`) raise `RuntimeError` rather than falling back to legacy default routing.

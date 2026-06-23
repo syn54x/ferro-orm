@@ -199,6 +199,20 @@ pub fn session_state(session_id: &str) -> PyResult<Arc<SessionState>> {
         })
 }
 
+pub(crate) const SESSION_CLOSE_ACTIVE_TRANSACTIONS_MSG: &str =
+    "Cannot close session while transactions are active. \
+     Exit all transaction() blocks before closing the session.";
+
+pub fn ensure_session_idle_for_close(session_id: &str) -> PyResult<()> {
+    let session = session_state(session_id)?;
+    if !session.transaction_registry.is_empty() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            SESSION_CLOSE_ACTIVE_TRANSACTIONS_MSG,
+        ));
+    }
+    Ok(())
+}
+
 /// A Rust-native representation of database values.
 ///
 /// Used during the GIL-free parsing phase to move data from the database
@@ -260,5 +274,55 @@ impl RustValue {
             }
             RustValue::None => Ok(py.None().into_bound(py)),
         }
+    }
+}
+
+#[cfg(test)]
+mod session_close_tests {
+    use super::{TransactionHandle, register_session, unregister_session, SESSION_REGISTRY};
+    use crate::backend::EngineHandle;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn close_guard_uses_transaction_registry_emptiness() {
+        let session_id = register_session("default".to_string());
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool");
+        let engine = EngineHandle::new_sqlite(pool);
+        let conn = engine
+            .begin_transaction_connection()
+            .await
+            .expect("begin transaction connection");
+
+        {
+            let session = SESSION_REGISTRY
+                .get(&session_id)
+                .expect("session registered")
+                .value()
+                .clone();
+            session.transaction_registry.insert(
+                "tx-test".to_string(),
+                TransactionHandle::root(conn, "default".to_string()),
+            );
+            assert!(!session.transaction_registry.is_empty());
+        }
+
+        SESSION_REGISTRY
+            .get(&session_id)
+            .expect("session registered")
+            .transaction_registry
+            .clear();
+        assert!(
+            SESSION_REGISTRY
+                .get(&session_id)
+                .expect("session registered")
+                .transaction_registry
+                .is_empty()
+        );
+        assert!(unregister_session(&session_id));
     }
 }

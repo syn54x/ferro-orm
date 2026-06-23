@@ -9,8 +9,8 @@ use crate::backend::{
 use crate::query::{QueryDef, query_def_from_ir_payload};
 use crate::state::{
     IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, TRANSACTION_REGISTRY,
-    TransactionConnection, TransactionHandle, connection_for_route, engine_for_connection,
-    register_session, session_state, unregister_session,
+    TransactionConnection, TransactionHandle, connection_for_route, ensure_session_idle_for_close,
+    engine_for_connection, register_session, session_state, unregister_session,
 };
 use ferro_schema_ir::{IrEnvelope, QueryIrPayload};
 use pyo3::prelude::*;
@@ -833,6 +833,7 @@ pub fn open_session(using: Option<String>) -> PyResult<(String, String)> {
 
 #[pyfunction]
 pub fn close_session(session_id: String) -> PyResult<()> {
+    ensure_session_idle_for_close(&session_id)?;
     if !unregister_session(&session_id) {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
             "Session '{}' is not active",

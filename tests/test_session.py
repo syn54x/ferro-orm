@@ -1,4 +1,5 @@
 import asyncio
+import re
 import warnings
 from contextlib import AsyncExitStack
 from typing import Annotated
@@ -343,6 +344,144 @@ async def test_transaction_after_cross_context_close_raises(tmp_path):
     with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
         async with ferro.transaction():
             pass
+
+
+_ACTIVE_TX_CLOSE_MSG = (
+    "Cannot close session while transactions are active. "
+    "Exit all transaction() blocks before closing the session."
+)
+
+
+@pytest.mark.asyncio
+async def test_close_rejected_during_active_transaction_cross_context(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+
+    async with ferro.transaction():
+        close_error: BaseException | None = None
+
+        async def try_close() -> None:
+            nonlocal close_error
+            try:
+                await session.close()
+            except BaseException as exc:
+                close_error = exc
+
+        await asyncio.create_task(try_close())
+
+        assert isinstance(close_error, RuntimeError)
+        assert str(close_error) == _ACTIVE_TX_CLOSE_MSG
+        assert session.session_id is not None
+
+        created = await SessionMarker.create(label="during-tx")
+        assert created.id is not None
+
+    fetched = await SessionMarker.where(lambda t: t.label == "during-tx").first()
+    assert fetched is not None
+
+    await session.close()
+    assert session.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_close_rejected_during_active_transaction_same_context(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+
+    async with ferro.transaction():
+        with pytest.raises(RuntimeError, match=re.escape(_ACTIVE_TX_CLOSE_MSG)):
+            await session.close()
+        assert session.session_id is not None
+        created = await SessionMarker.create(label="same-context")
+        assert created.id is not None
+
+    fetched = await SessionMarker.where(lambda t: t.label == "same-context").first()
+    assert fetched is not None
+
+    await session.close()
+    assert session.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_close_rejected_during_active_transaction_rollback(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+
+    try:
+        async with ferro.transaction():
+            with pytest.raises(RuntimeError, match=re.escape(_ACTIVE_TX_CLOSE_MSG)):
+                await session.close()
+            assert session.session_id is not None
+            await SessionMarker.create(label="rolled-back")
+            raise RuntimeError("abort tx")
+    except RuntimeError:
+        pass
+
+    assert session.session_id is not None
+    assert not await SessionMarker.where(lambda t: t.label == "rolled-back").exists()
+
+    await session.close()
+    assert session.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_close_rejected_with_explicit_transaction_session(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+
+    async with ferro.transaction(session=session):
+        with pytest.raises(RuntimeError, match=re.escape(_ACTIVE_TX_CLOSE_MSG)):
+            await session.close()
+        assert session.session_id is not None
+        created = await SessionMarker.create(label="explicit-session")
+        assert created.id is not None
+
+    fetched = await SessionMarker.where(lambda t: t.label == "explicit-session").first()
+    assert fetched is not None
+
+    await session.close()
+    assert session.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_close_rejected_during_nested_transaction(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+
+    async with ferro.transaction():
+        async with ferro.transaction():
+            with pytest.raises(RuntimeError, match=re.escape(_ACTIVE_TX_CLOSE_MSG)):
+                await session.close()
+            assert session.session_id is not None
+            inner = await SessionMarker.create(label="nested-inner")
+            assert inner.id is not None
+
+        with pytest.raises(RuntimeError, match=re.escape(_ACTIVE_TX_CLOSE_MSG)):
+            await session.close()
+        assert session.session_id is not None
+        outer = await SessionMarker.create(label="nested-outer")
+        assert outer.id is not None
+
+    assert await SessionMarker.where(lambda t: t.label == "nested-inner").exists()
+    assert await SessionMarker.where(lambda t: t.label == "nested-outer").exists()
+
+    await session.close()
+    assert session.session_id is None
 
 
 @pytest.mark.asyncio
