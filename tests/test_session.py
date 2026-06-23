@@ -1,3 +1,4 @@
+import warnings
 from typing import Annotated
 
 import pytest
@@ -83,6 +84,31 @@ async def test_explicit_session_override_beats_ambient(tmp_path):
             await SessionMarker.create(id=1, label="analytics")
             rows = await SessionMarker.all(session=app_session)
             assert [row.label for row in rows] == ["app"]
+
+
+@pytest.mark.asyncio
+async def test_unnamed_session_binds_default_connection(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    async with ferro.engines.session() as session:
+        assert session.connection_name == "default"
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
+            exists = await SessionMarker.where(
+                lambda t: t.label == "missing"
+            ).exists()
+            created = await SessionMarker.create(id=20, label="session-bound")
+
+        session_warnings = [
+            w
+            for w in caught
+            if issubclass(w.category, DeprecationWarning)
+            and "without an active session" in str(w.message)
+        ]
+        assert not session_warnings
+        assert exists is False
+        assert created.id == 20
 
 
 @pytest.mark.asyncio

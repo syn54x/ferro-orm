@@ -17,7 +17,9 @@ class Session:
     _token: Any = None
 
     async def __aenter__(self) -> "Session":
-        self.session_id = _core_open_session(self.connection_name)
+        self.session_id, resolved_name = _core_open_session(self.connection_name)
+        if self.connection_name is None:
+            self.connection_name = resolved_name
         self._token = _CURRENT_SESSION.set(self)
         return self
 

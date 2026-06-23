@@ -72,6 +72,10 @@ active session relied on implicit default-connection routing. That fallback is
 deprecated. Wrap request- or task-scoped work in a session so routing, the
 identity map, and transactions are explicit and isolated under concurrency.
 
+After a single unnamed `connect(dsn)`, `async with ferro.engines.session()` (no
+argument) binds to that default connection — you do not need to pass
+`"default"` explicitly.
+
 === "Before (deprecated)"
 
     ```python

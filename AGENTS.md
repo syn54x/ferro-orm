@@ -90,7 +90,8 @@ If you add a new schema feature (e.g. partial indexes, exclusion constraints):
    numbered list above.
 2. Implement it in **both** the Alembic and Rust paths in the same PR.
 3. Add a parity test that asserts the names match.
-4. Add a regression entry to `CHANGELOG.md`.
+4. Do not edit `CHANGELOG.md` manually — release tooling records entries at
+   release time (see I-11).
 
 ---
 
@@ -276,3 +277,21 @@ Rules:
   updates are complete before merge.
 - AI agents and human contributors follow the same requirement. If issue status
   closure is missing, the PR is not done.
+
+---
+
+## I-11: Do not edit CHANGELOG.md manually
+
+`CHANGELOG.md` is updated automatically by the release workflow (semantic
+release / release tooling). Agents and contributors must **not** add,
+reorder, or edit changelog entries in feature, bugfix, or docs PRs.
+
+What to do instead:
+
+- Describe user-visible changes in the PR title and body.
+- Rely on conventional commit messages and the release process to populate
+  `CHANGELOG.md` after merge.
+
+If release tooling fails to capture a change, fix the release configuration or
+commit message conventions — do not patch `CHANGELOG.md` by hand in ordinary
+PRs.
