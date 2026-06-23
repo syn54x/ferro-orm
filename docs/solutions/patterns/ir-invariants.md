@@ -7,7 +7,10 @@ related_files:
   - docs/rfc/ir-contracts-v1.md
   - docs/solutions/patterns/cross-emitter-ddl-parity.md
   - docs/solutions/patterns/typed-null-binds.md
+  - docs/solutions/architecture-patterns/ir-first-merge-readiness-review.md
+  - src/ferro/ir/compiler.py
   - src/ferro/migrations/alembic.py
+  - crates/ferro-migrate/src/lib.rs
   - src/schema.rs
   - src/query.rs
   - src/operations.rs
@@ -16,16 +19,26 @@ related_files:
   - src/backend.rs
   - tests/test_cross_emitter_parity.py
   - tests/test_db_type_cross_emitter_parity.py
+  - tests/test_ir_vectors_contract.py
   - tests/test_typed_null_binds.py
   - tests/test_hydration.py
-related_issues: [71, 72, 73, 74]
+related_issues: [71, 72, 73, 74, 88, 89, 91, 93, 94, 100, 117, 118, 119, 120]
 related_prs: []
 captured: 2026-06-19
+last_refreshed: 2026-06-23
 ---
 
 ## Problem
 
-Ferro currently crosses Python and Rust boundaries using multiple JSON-shaped contracts and independently enforced conventions. Without one explicit invariant spec, drift can appear as phantom DDL diffs, typed-null regressions, or hydration attribute errors that only show up at runtime.
+Ferro crosses Python and Rust boundaries through versioned IR envelopes — **SchemaIR**
+at class-creation time and **QueryIR** per operation — plus enriched JSON schema
+for the Rust registry. Phases 1–7 of the IR-first program are complete; runtime
+`auto_migrate` still executes a legacy enriched-JSON diff until Phase 8
+(`ferro-migrate` cutover, issues #117–#120).
+
+Without one explicit invariant spec, drift can appear as phantom DDL diffs,
+typed-null regressions, hydration attribute errors, or silent cache misses that
+only show up at runtime.
 
 ## Takeaway
 
@@ -56,12 +69,15 @@ If emitters disagree, users get phantom autogenerate diffs and noisy migration h
 
 ### Enforcement anchors
 
-- `src/ferro/migrations/alembic.py` naming convention.
-- `src/schema.rs` naming/type emission helpers.
+- `src/ferro/ir/compiler.py` — SchemaIR compilation and `ferro.state` modelset cache.
+- `src/ferro/migrations/alembic.py` — `get_metadata()` derives from SchemaIR modelset.
+- `crates/ferro-migrate/src/lib.rs` — `SchemaIR(old,new)` planner (executable DDL Phase 8).
+- `src/schema.rs` — runtime DDL emitter behind `connect(auto_migrate=True)`.
 - `tests/test_cross_emitter_parity.py`
 - `tests/test_db_type_cross_emitter_parity.py`
 - `tests/test_schema_constraints.py`
 - `tests/test_alembic_autogenerate.py`
+- `tests/test_ir_vectors_contract.py`
 
 ## Invariant II: Hydration ABI
 
@@ -116,13 +132,19 @@ When updating `SchemaIR`, `QueryIR`, or `CodecIR`:
 2. Add or update golden vectors that encode the invariant boundary.
 3. Add a regression test that fails before the change and passes after.
 4. Reject designs that only mitigate symptoms; fill the primitive gap.
+5. Propagate failures across the FFI boundary via `PyResult` — never `unwrap()`
+   (AGENTS.md I-3). Malformed IR must raise actionable Python exceptions.
+6. When caching compiled IR in Python, assign through the canonical module
+   (`ferro_state._SCHEMA_IR_MODELSET = ...`) — not `global` on imported names.
 
 ## How to recognize a violation
 
 - Alembic autogenerate proposes drop/recreate with no real model change.
-- Query/filter updates start failing only on one backend for NULL/UUID values.
+- Query/filter updates start failing only on one backend for NULL/UUID/decimal values.
 - Hydrated instances error on `__pydantic_*` slot access.
 - New IR field appears in one emitter path but not another.
+- `ferro.state._SCHEMA_IR_MODELSET` is `None` after `compile_registry_schema_ir()`.
+- Bad QueryIR or bind tuples panic in Rust instead of raising `PyValueError`.
 
 If any appears, treat it as a correctness bug, not a warning-level mismatch.
 
@@ -151,3 +173,10 @@ Global mutable runtime state in hot paths makes concurrent multi-DB behavior fra
 - `src/state.rs`
 - `src/operations.rs`
 - `tests/test_session.py`
+
+## Related
+
+- [`ir-first-merge-readiness-review.md`](../architecture-patterns/ir-first-merge-readiness-review.md) — pre-merge checklist that caught invariant violations on `feat/ir-first`
+- [`cross-emitter-ddl-parity.md`](cross-emitter-ddl-parity.md) — concrete naming recipes for Invariant I
+- [`typed-null-binds.md`](typed-null-binds.md) — bind-path detail for Invariant III
+- [`docs/plans/2026-06-19-001-ir-first-roadmap.md`](../../plans/2026-06-19-001-ir-first-roadmap.md) — phase status and exit gates
