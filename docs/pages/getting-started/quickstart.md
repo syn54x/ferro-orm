@@ -54,7 +54,7 @@ A Ferro model is a Pydantic model — annotated fields become columns, and defau
 
 - `Post.get(pk)` fetches one row by primary key.
 - `where(...)` filters, `order_by(...)` sorts, `limit(...)` slices — and nothing touches the database until a terminal like `.all()`, `.first()`, `.count()`, or `.exists()` runs the query.
-- `lambda t: t.published == True` is a lambda predicate — the officially recommended query style. Two other styles exist for compatibility; see [Queries](../guide/queries.md#predicate-styles) for the comparison.
+- `lambda post: post.published == True` is a lambda predicate — the officially recommended query style. Name the parameter after the row type in lowercase singular (`user` for `User`, `post` for `Post`). Two other styles exist for compatibility; see [Queries](../guide/queries.md#predicate-styles) for the comparison.
 
 !!! note "What happened"
     Thanks to Ferro's identity map, `Post.get(post.id)` returns the *same Python object* as the `post` you created earlier — not a duplicate copy. One row, one instance.

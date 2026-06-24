@@ -237,13 +237,15 @@ preferred declaration style.
 Documentation and examples use the lambda predicate style for all queries:
 
 ```python
-adults = await User.where(lambda t: t.age >= 18).all()
+adults = await User.where(lambda user: user.age >= 18).all()
 ```
 
 Rules:
 
 - **Every query example** in docs, docstring `Examples:` sections, and
   `docs/examples/` scripts uses lambda predicates.
+- Name the lambda parameter after the model in **lowercase singular**
+  (`user` for `User`, `post` for `Post`) so filters read naturally.
 - When the predicate styles themselves are documented, present them in
   order **lambda > `col()` > operator**, with lambda labeled the officially
   recommended style.

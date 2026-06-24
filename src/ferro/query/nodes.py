@@ -373,11 +373,11 @@ class QueryProxy(Generic[TModel]):
 
     A fresh ``QueryProxy`` is constructed each time a lambda predicate is
     evaluated. Any attribute access returns a :class:`FieldProxy` for the
-    accessed name, so ``lambda t: t.archived == False`` builds a
+    accessed name, so ``lambda user: user.archived == False`` builds a
     :class:`QueryNode` without ever asking the model class what type
     ``archived`` is. The ``TModel`` type parameter exists so user-supplied
-    lambdas can narrow ``t`` to a specific model in static analysis; the
-    proxy itself ignores the parameter at runtime.
+    lambdas can name the proxy after the model (``user`` for ``User``) in
+    static analysis; the proxy itself ignores the parameter at runtime.
 
     The proxy attribute return type is intentionally ``FieldProxy[Any]`` for
     now — wiring per-field types through a lambda parameter requires
@@ -385,7 +385,7 @@ class QueryProxy(Generic[TModel]):
     feature's scope.
 
     Examples:
-        >>> rows = await User.where(lambda t: t.archived == False).all()  # noqa: E712
+        >>> rows = await User.where(lambda user: user.archived == False).all()  # noqa: E712
     """
 
     __slots__ = ()

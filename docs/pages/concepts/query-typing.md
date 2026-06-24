@@ -13,13 +13,13 @@ The lambda and `col()` styles give you the runtime ergonomics back without forci
 ### 1. Lambda predicate (recommended)
 
 ```python
-rows = await User.where(lambda t: t.archived == False).all()
+rows = await User.where(lambda user: user.archived == False).all()
 rows = await User.where(
-    lambda t: (t.role == "admin") & (t.active == True)
+    lambda user: (user.role == "admin") & (user.active == True)
 ).all()
 ```
 
-This is the officially recommended style — use it for all new code. The lambda receives a `QueryProxy` whose attribute access yields a fresh `FieldProxy` for each name, so `t.archived == False` is a `QueryNode` from the type checker's point of view as well as at runtime. The call site stays free of `# type: ignore` even when comparing booleans, integers, or any other value type, and the full operator surface is available: `.like()`, `.in_()`, `&`, `|`, `== None`, and shadow FK columns (`t.author_id`).
+This is the officially recommended style — use it for all new code. Name the lambda parameter after the model in lowercase singular (`user` for `User`, `post` for `Post`) so predicates read like English. The lambda receives a `QueryProxy` whose attribute access yields a fresh `FieldProxy` for each name, so `user.archived == False` is a `QueryNode` from the type checker's point of view as well as at runtime. The call site stays free of `# type: ignore` even when comparing booleans, integers, or any other value type, and the full operator surface is available: `.like()`, `.in_()`, `&`, `|`, `== None`, and shadow FK columns (`user.author_id`).
 
 The proxy attribute type is currently `FieldProxy[Any]`, which is a deliberate scope decision (see [Scope boundaries](#scope-boundaries) below). Pyright still resolves the predicate's *return* type as `QueryNode` correctly.
 
@@ -62,7 +62,7 @@ You can mix all three on a single chain — useful mid-migration. They compose b
 from ferro.query import col
 
 rows = await (
-    User.where(lambda t: t.role == "admin")     # lambda (recommended)
+    User.where(lambda user: user.role == "admin")     # lambda (recommended)
     .where(col(User.archived) == False)         # col()
     .where(User.id == 1)                        # operator (legacy)
     .all()
@@ -72,7 +72,7 @@ rows = await (
 `Relation.where` (used on `BackRef` collections) accepts the same three shapes:
 
 ```python
-published = await author.posts.where(lambda t: t.published == True).all()
+published = await author.posts.where(lambda post: post.published == True).all()
 ```
 
 ## What This Doesn't Change
@@ -87,11 +87,11 @@ published = await author.posts.where(lambda t: t.published == True).all()
 
 The current implementation deliberately stops short of:
 
-- **Per-field types on the lambda proxy.** `t.archived` resolves to `FieldProxy[Any]`, not `FieldProxy[bool]`. Wiring per-field types through the proxy needs `@dataclass_transform` plumbing on the metaclass; that's future work.
+- **Per-field types on the lambda proxy.** `user.archived` resolves to `FieldProxy[Any]`, not `FieldProxy[bool]`. Wiring per-field types through the proxy needs `@dataclass_transform` plumbing on the metaclass; that's future work.
 - **A type-checker plugin.** Ferro stays plugin-free.
 - **A kwargs-style or template-string predicate API.** Both have been considered; neither shipped here.
 
-If `t.archived` resolving as `FieldProxy[Any]` ever bites you statically, drop back to `col(Model.archived) == ...` for that one comparison — that's exactly the role `col()` plays.
+If `user.archived` resolving as `FieldProxy[Any]` ever bites you statically, drop back to `col(Model.archived) == ...` for that one comparison — that's exactly the role `col()` plays.
 
 ## Reference
 

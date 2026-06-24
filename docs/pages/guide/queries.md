@@ -144,13 +144,13 @@ Queries are lazy — nothing hits the database until you await a terminal:
 Every `ForeignKey` field gets a shadow `*_id` column you can filter on like any scalar:
 
 ```python
-posts = await Post.where(lambda t: t.author_id == user.id).all()
+posts = await Post.where(lambda post: post.author_id == user.id).all()
 ```
 
 Reverse relations (`BackRef`) are chainable queries themselves — filter, order, and slice them before executing:
 
 ```python
-published = await author.posts.where(lambda t: t.published == True).all()  # noqa: E712
+published = await author.posts.where(lambda post: post.published == True).all()  # noqa: E712
 latest = await author.posts.order_by(Post.created_at, "desc").limit(5).all()
 n = await author.posts.count()
 ```
