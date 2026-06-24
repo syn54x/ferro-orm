@@ -1,9 +1,16 @@
+//! Schema-driven value encoding and decoding between JSON, SeaQuery, and [`RustValue`].
+//!
+//! Centralizes bind-expression construction for INSERT/UPDATE/query paths and row decoding
+//! after GIL-free fetch. Postgres-specific casts (UUID, enum UDT, temporal, JSON text) live
+//! here so SQLite and Postgres stay observationally equivalent at the Python boundary.
+
 use crate::backend::{EngineRow, EngineValue};
 use crate::state::{MODEL_REGISTRY, RustValue, SqlDialect};
 use sea_query::{Alias, Expr, SelectStatement, SimpleExpr, Value as SeaValue};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+/// One ORM row after GIL-free decode: optional stringified PK plus column values.
 pub type ParsedRow = (Option<String>, Vec<(String, RustValue)>);
 
 fn json_type(col_info: &Value) -> Option<&str> {
@@ -135,6 +142,17 @@ fn model_schema_property(model_name: &str, col_name: &str) -> Option<Value> {
     Some(col_info.clone())
 }
 
+/// Expand a `SELECT` column list on Postgres so text-like columns hydrate identically to SQLite.
+///
+/// UUID, temporal, decimal, JSON, enum, and native enum UDT columns are wrapped in
+/// `CAST(... AS text)` in the projection. Other backends receive `SELECT *`.
+///
+/// # Arguments
+/// * `select` — SeaQuery select under construction (mutated in place).
+/// * `table_name` — Physical table name for column qualification.
+/// * `schema` — Model JSON schema (`properties` map).
+/// * `pg_native_enum_columns` — Columns whose live type is `typtype = 'e'` in `pg_catalog`.
+/// * `backend` — Active dialect; no-op expansion when not Postgres.
 pub fn apply_postgres_text_select_columns(
     select: &mut SelectStatement,
     table_name: &str,
@@ -187,6 +205,26 @@ pub fn apply_postgres_text_select_columns(
     }
 }
 
+/// Build a typed SeaQuery RHS expression for INSERT/UPDATE from JSON field values.
+///
+/// Uses model schema metadata plus live Postgres catalog hints (`enum_udt`, `uuid_columns`,
+/// `ts_cast`) to emit OID-correct binds. See `docs/solutions/patterns/typed-null-binds.md`.
+///
+/// # Arguments
+/// * `schema` — Full model JSON schema.
+/// * `table_name` — Table name (for UUID parse error messages).
+/// * `col_name` — Target column.
+/// * `value` — JSON value from the Python layer (`null` for SQL `NULL`).
+/// * `enum_udt` — Native Postgres enum type names by column.
+/// * `uuid_columns` — Columns stored as SQL `uuid` on Postgres.
+/// * `ts_cast` — Per-column `CAST` target for date/timestamp families.
+/// * `backend` — Active SQL dialect.
+///
+/// # Returns
+/// A SeaQuery `SimpleExpr` suitable for `.values([...])` or `.set(...)`.
+///
+/// # Errors
+/// Returns `PyValueError` when a Postgres UUID string fails to parse.
 #[allow(clippy::too_many_arguments)]
 pub fn schema_bind_expr(
     schema: &Value,
@@ -323,6 +361,21 @@ pub fn schema_bind_expr(
     Ok(expr)
 }
 
+/// Build a typed SeaQuery RHS for WHERE-clause predicates.
+///
+/// Differs from [`schema_bind_expr`] in that enum casting uses catalog introspection only
+/// (not schema `enum_type_name`) so auto-migrated TEXT enum columns keep text binds.
+///
+/// # Arguments
+/// * `model_name` — Model class name for registry schema lookup.
+/// * `col_name` — Filtered column.
+/// * `val` — JSON RHS from the query IR.
+/// * `infer_uuid_without_schema` — When true, parse UUID strings even if schema lacks `format: uuid`.
+/// * `backend` — Active SQL dialect.
+/// * `postgres_enum_udt` — Native enum UDT names from `pg_catalog`.
+///
+/// # Returns
+/// A SeaQuery expression for the predicate RHS.
 pub fn query_bind_expr(
     model_name: &str,
     col_name: &str,
@@ -404,6 +457,16 @@ pub fn query_bind_expr(
     Expr::value(json_value_to_sea_value(val))
 }
 
+/// Wrap a many-to-many join-column bind with Postgres UUID typing when needed.
+///
+/// # Arguments
+/// * `col_name` — Join table column (`source_id` or `target_id`).
+/// * `value` — SeaQuery value produced from the Python ID.
+/// * `uuid_columns` — UUID-typed columns on the join table (Postgres catalog).
+/// * `backend` — Active SQL dialect.
+///
+/// # Returns
+/// Expression with `Value::Uuid` when the column is a Postgres UUID; otherwise passes `value` through.
 pub fn m2m_bind_expr(
     col_name: &str,
     value: SeaValue,
@@ -421,6 +484,16 @@ pub fn m2m_bind_expr(
     Expr::value(value)
 }
 
+/// Coerce a JSON literal into a SeaQuery `Value` without schema context.
+///
+/// Used as the fallback arm of [`query_bind_expr`] for non-null primitives.
+/// JSON `null` maps to `String(None)` (untyped null) — prefer schema-aware paths for NULL.
+///
+/// # Arguments
+/// * `value` — JSON value from the query IR.
+///
+/// # Returns
+/// Best-effort SeaQuery `Value` (`BigInt`, `Double`, `Bool`, `String`, or untyped null).
 pub fn json_value_to_sea_value(value: &Value) -> SeaValue {
     match value {
         Value::Number(n) => {
@@ -439,6 +512,18 @@ pub fn json_value_to_sea_value(value: &Value) -> SeaValue {
     }
 }
 
+/// Decode one [`EngineValue`] into a [`RustValue`] using model column metadata.
+///
+/// Applies decimal, binary, boolean-as-integer (SQLite), UUID, temporal, and JSON rules
+/// before the generic scalar mapping.
+///
+/// # Arguments
+/// * `value` — Wire value from SQLx fetch.
+/// * `schema` — Model JSON schema.
+/// * `col_name` — Column being decoded.
+///
+/// # Returns
+/// Rust-native value ready for [`RustValue::into_py_any`].
 pub fn decode_engine_value(value: EngineValue, schema: &Value, col_name: &str) -> RustValue {
     let prop = schema
         .get("properties")
@@ -489,6 +574,15 @@ pub fn decode_engine_value(value: EngineValue, schema: &Value, col_name: &str) -
     }
 }
 
+/// Decode a batch of [`EngineRow`]s into GIL-free [`ParsedRow`] data.
+///
+/// # Arguments
+/// * `rows` — Raw rows from the engine.
+/// * `schema` — Model JSON schema for per-column decoding.
+/// * `pk_col` — Primary key column name when known (extracts stringified PK per row).
+///
+/// # Returns
+/// One `(pk, fields)` tuple per input row.
 pub fn typed_rows_to_parsed_data(
     rows: Vec<EngineRow>,
     schema: &Value,

@@ -1,3 +1,8 @@
+//! SQLx-backed database engine: pools, connections, typed binds, and row fetch.
+//!
+//! [`EngineHandle`] is the per-connection runtime entry point. All SQL execution flows through
+//! it so pool refresh, identity-map policy, and shadow-runtime hooks stay centralized.
+
 use sqlx::ColumnIndex;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgPoolOptions;
@@ -32,12 +37,16 @@ impl BackendKind {
 /// (see [`EngineHandle::refresh_pool`]).
 #[derive(Clone, Debug)]
 pub struct PoolSpec {
+    /// Classified backend for pool construction.
     pub backend: BackendKind,
+    /// Connection URL passed to SQLx (`sqlite:…`, `postgres://…`).
     pub url: String,
     /// Postgres `SET search_path` applied to every new connection
     /// (the `ferro_search_path` URL parameter).
     pub search_path: Option<String>,
+    /// Maximum pool size.
     pub max_connections: u32,
+    /// Minimum idle connections kept warm.
     pub min_connections: u32,
 }
 
@@ -121,9 +130,14 @@ impl BackendPool {
     }
 }
 
+/// A checked-out pool connection participating in a transaction or session.
+///
+/// Wrapped by [`crate::state::TransactionHandle`] and guarded by an async `Mutex`.
 #[allow(dead_code)]
 pub enum EngineConnection {
+    /// SQLite pool connection.
     Sqlite(PoolConnection<Sqlite>),
+    /// Postgres pool connection.
     Postgres(PoolConnection<Postgres>),
 }
 
@@ -148,12 +162,18 @@ pub enum NullKind {
     Untyped,
 }
 
+/// One bind parameter with optional SQL type tag for `NULL`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineBindValue {
+    /// Boolean bind.
     Bool(bool),
+    /// 64-bit integer bind.
     I64(i64),
+    /// Floating-point bind.
     F64(f64),
+    /// Text bind.
     String(String),
+    /// Binary bind.
     Bytes(Vec<u8>),
     /// Typed UUID bind. Required so non-null UUIDs reach Postgres with the
     /// correct OID instead of being coerced to `text` (which fails since PG
@@ -163,28 +183,44 @@ pub enum EngineBindValue {
     Null(NullKind),
 }
 
+/// One fetched row as ordered `(column_name, value)` pairs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineRow {
+    /// Column values in result-set order.
     pub values: Vec<(String, EngineValue)>,
 }
 
+/// Result metadata from `INSERT`/`UPDATE`/`DELETE` execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineExecuteResult {
+    /// Rows reported by the driver.
     pub rows_affected: u64,
+    /// SQLite `last_insert_rowid()` when available.
     pub last_insert_id: Option<i64>,
 }
 
+/// Scalar value on the engine wire before schema-aware decoding.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineValue {
+    /// Boolean column.
     Bool(bool),
+    /// Integer column.
     I64(i64),
+    /// Floating-point column.
     F64(f64),
+    /// Text or text-cast column.
     String(String),
+    /// Binary column.
     Bytes(Vec<u8>),
+    /// SQL `NULL`.
     Null,
 }
 
 impl EngineValue {
+    /// Coerce to `i64` when the wire value is numeric or a parseable decimal string.
+    ///
+    /// # Returns
+    /// `Some(i64)` for `I64` variants and parseable `String` values; otherwise `None`.
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Self::I64(value) => Some(*value),
@@ -690,6 +726,7 @@ where
     }
 }
 
+/// Error returned when a connection URL scheme is not `sqlite:` or `postgres`/`postgresql`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnsupportedDatabaseUrl {
     scheme: String,
