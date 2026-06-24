@@ -139,7 +139,7 @@ Runtime migration IR cutover (target: `v0.13.0`).
 | --- | --- | --- | --- | --- |
 | [#117](https://github.com/syn54x/ferro-orm/issues/117) | Coordinate `ferro-migrate` runtime cutover and parity exit gates | none | No action — internal planner cutover | Epic |
 | [#118](https://github.com/syn54x/ferro-orm/issues/118) | Complete executable SQL emission from `MigrationPlan` for all ops (SQLite + Postgres) | none | No action | Continues #90 scaffold |
-| [#119](https://github.com/syn54x/ferro-orm/issues/119) | Wire `auto_migrate` / `plan_table_migration` to execute ferro-migrate IR plans | none | No action — behavior must remain observably identical | Retires discarded `_typed_plan` path |
+| [#119](https://github.com/syn54x/ferro-orm/issues/119) | Wire `auto_migrate` / `plan_table_migration` to execute ferro-migrate IR plans | none | No action — behavior must remain observably identical | `_typed_plan` scaffold removed; runtime executes IR plan |
 | [#120](https://github.com/syn54x/ferro-orm/issues/120) | Parity gate + remove legacy JSON diff path in `src/migrate.rs` | none | No action | AGENTS.md I-1 enforcement |
 
 - **Migration impact:** `none` for public APIs — `connect(auto_migrate=...)` and `ferro.migrate` signatures unchanged.

@@ -7,33 +7,49 @@
 //! dropped. Capability matrix and semantics are documented on the Python
 //! `ferro.connect` / `ferro.migrate` APIs.
 //!
-//! Column DDL is produced by the same `build_column_plan` the CREATE TABLE
-//! emitter uses, so an auto-migrated database is byte-identical to a freshly
-//! created one (AGENTS.md § I-1).
+//! Runtime migration plans are produced by `ferro-migrate` from SchemaIR so
+//! auto-migrate shares the same planner core as other DDL paths (AGENTS.md § I-1).
 
 use crate::backend::EngineHandle;
-use ferro_migrate::{BackendDialect, emit_sql, plan_from_ir};
+use crate::introspect::{
+    LiveColumn, live_table_columns, quote_ident, sqlite_indexes_covering_column,
+};
+use crate::schema::{internal_create_tables, order_schemas_for_creation};
+use crate::state::{IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, engine_for_connection};
+use ferro_migrate::{BackendDialect, MigrationOp, emit_sql, plan_from_ir};
 use ferro_schema_ir::{
     IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
     SchemaModel, SchemaUnique,
 };
-use crate::introspect::{
-    LiveColumn, live_table_columns, quote_ident, sqlite_indexes_covering_column,
-};
-use crate::schema::{
-    CanonicalType, ColumnPlan, apply_canonical_type, build_column_plan, internal_create_tables,
-    order_schemas_for_creation,
-};
-use crate::state::{IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, engine_for_connection};
 use pyo3::prelude::*;
-use sea_query::{
-    Alias, ColumnDef, ForeignKeyAction, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table,
-};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> IrEnvelope<SchemaIrPayload> {
+fn schema_json_to_schema_ir(
+    table_lower: &str,
+    schema: &serde_json::Value,
+) -> IrEnvelope<SchemaIrPayload> {
+    fn infer_db_type(resolved: &serde_json::Value) -> String {
+        let logical = resolved.get("type").and_then(|v| v.as_str());
+        let format = resolved.get("format").and_then(|v| v.as_str());
+        match (logical, format) {
+            (Some("integer"), _) => "int".to_string(),
+            (Some("number"), Some("decimal")) => "double".to_string(),
+            (Some("number"), _) => "double".to_string(),
+            (Some("boolean"), _) => "int".to_string(),
+            (Some("string"), Some("uuid")) => "uuid".to_string(),
+            (Some("string"), Some("date-time")) => "timestamptz".to_string(),
+            (Some("string"), Some("date")) => "date".to_string(),
+            (Some("string"), Some("time")) => "time".to_string(),
+            (Some("string"), _) => "varchar(255)".to_string(),
+            (Some("array"), _) | (Some("object"), _) => "text".to_string(),
+            _ => "text".to_string(),
+        }
+    }
+
     let mut columns = Vec::new();
+    let mut foreign_keys = Vec::new();
+    let mut checks = Vec::new();
     if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
         for (name, raw_col) in properties {
             let resolved = if let Some(ref_path) = raw_col.get("$ref").and_then(|r| r.as_str()) {
@@ -57,8 +73,8 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                 .get("db_type")
                 .or_else(|| resolved.get("db_type"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("text")
-                .to_string();
+                .map(str::to_string)
+                .unwrap_or_else(|| infer_db_type(resolved));
             columns.push(SchemaColumn {
                 name: name.clone(),
                 logical_type: resolved
@@ -81,8 +97,14 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                     .get("autoincrement")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
-                unique: resolved.get("unique").and_then(|v| v.as_bool()).unwrap_or(false),
-                index: resolved.get("index").and_then(|v| v.as_bool()).unwrap_or(false),
+                unique: resolved
+                    .get("unique")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                index: resolved
+                    .get("index")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 default: resolved.get("default").cloned(),
                 format: resolved
                     .get("format")
@@ -94,6 +116,52 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
             });
+            if let Some(fk) = raw_col
+                .get("foreign_key")
+                .or_else(|| resolved.get("foreign_key"))
+                .and_then(|v| v.as_object())
+            {
+                let to_table = fk
+                    .get("to_table")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if !to_table.is_empty() {
+                    foreign_keys.push(SchemaForeignKey {
+                        column: name.clone(),
+                        to_table,
+                        to_column: "id".to_string(),
+                        on_delete: fk
+                            .get("on_delete")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        name: None,
+                    });
+                }
+            }
+            let db_check = raw_col
+                .get("db_check")
+                .or_else(|| resolved.get("db_check"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if db_check
+                && let Some(values) = resolved.get("enum").and_then(|v| v.as_array())
+                && !values.is_empty()
+            {
+                let rendered: Vec<String> = values
+                    .iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        other => format!("'{}'", other.to_string().replace('\'', "''")),
+                    })
+                    .collect();
+                checks.push(SchemaCheck {
+                    name: format!("ck_{}_{}", table_lower, name),
+                    expression: format!("\"{}\" IN ({})", name, rendered.join(", ")),
+                });
+            }
         }
     }
     columns.sort_by(|a, b| a.name.cmp(&b.name));
@@ -107,17 +175,23 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                 model_name: table_lower.to_string(),
                 table_name: table_lower.to_string(),
                 columns,
-                foreign_keys: Vec::<SchemaForeignKey>::new(),
+                foreign_keys,
                 indexes: Vec::<SchemaIndex>::new(),
                 uniques: Vec::<SchemaUnique>::new(),
-                checks: Vec::<SchemaCheck>::new(),
+                checks,
             }],
         },
     }
 }
 
-fn declared_type_to_db_type(declared: &str) -> String {
-    let lower = declared.to_ascii_lowercase();
+fn declared_type_to_db_type(col: &LiveColumn) -> String {
+    let lower = col.declared_type.to_ascii_lowercase();
+    if lower.contains("character varying") || lower.contains("varchar") {
+        if let Some(n) = col.char_max_len {
+            return format!("varchar({n})");
+        }
+        return "varchar(255)".to_string();
+    }
     if lower.contains("smallint") {
         return "smallint".to_string();
     }
@@ -145,13 +219,20 @@ fn declared_type_to_db_type(declared: &str) -> String {
     "text".to_string()
 }
 
-fn live_columns_to_schema_ir(table_lower: &str, live: &[LiveColumn]) -> IrEnvelope<SchemaIrPayload> {
+fn live_columns_to_schema_ir(
+    table_lower: &str,
+    live: &[LiveColumn],
+) -> IrEnvelope<SchemaIrPayload> {
     let mut columns: Vec<SchemaColumn> = live
         .iter()
         .map(|col| SchemaColumn {
             name: col.name.clone(),
-            logical_type: "unknown".to_string(),
-            db_type: declared_type_to_db_type(&col.declared_type),
+            logical_type: if col.is_enum_udt {
+                "enum_udt".to_string()
+            } else {
+                "unknown".to_string()
+            },
+            db_type: declared_type_to_db_type(col),
             db_type_explicit: None,
             nullable: col.is_nullable,
             primary_key: col.is_primary_key,
@@ -229,88 +310,6 @@ impl MigrationPlan {
     }
 }
 
-/// The `information_schema.data_type` spelling Postgres reports for each
-/// canonical type, used to detect drift between model and live schema.
-fn pg_type_matches(canonical: CanonicalType, live: &LiveColumn) -> bool {
-    let data_type = live.declared_type.as_str();
-    match canonical {
-        CanonicalType::Integer => data_type == "integer",
-        CanonicalType::SmallInt => data_type == "smallint",
-        CanonicalType::BigInt => data_type == "bigint",
-        CanonicalType::Double => data_type == "double precision",
-        CanonicalType::Decimal => data_type == "numeric",
-        CanonicalType::Boolean => data_type == "boolean",
-        CanonicalType::Json => data_type == "json",
-        CanonicalType::Text => data_type == "text",
-        CanonicalType::Varchar(None) => {
-            data_type == "character varying" && live.char_max_len.is_none()
-        }
-        CanonicalType::Varchar(Some(n)) => {
-            data_type == "character varying" && live.char_max_len == Some(i64::from(n))
-        }
-        CanonicalType::Char(n) => {
-            data_type == "character" && live.char_max_len == Some(i64::from(n))
-        }
-        CanonicalType::Uuid => data_type == "uuid",
-        // DateTime is the SQLite rendering of the timestamp tokens; treat it
-        // like a plain timestamp if it ever reaches a Postgres comparison.
-        CanonicalType::DateTime | CanonicalType::Timestamp => {
-            data_type == "timestamp without time zone"
-        }
-        CanonicalType::TimestampTz => data_type == "timestamp with time zone",
-        CanonicalType::Date => data_type == "date",
-        CanonicalType::Time => data_type == "time without time zone",
-        CanonicalType::Blob => data_type == "bytea",
-    }
-}
-
-/// The DDL spelling used in `ALTER TABLE ... ALTER COLUMN ... TYPE <x> USING <col>::<x>`.
-fn pg_alter_type_target(canonical: CanonicalType) -> String {
-    match canonical {
-        CanonicalType::Integer => "integer".to_string(),
-        CanonicalType::SmallInt => "smallint".to_string(),
-        CanonicalType::BigInt => "bigint".to_string(),
-        CanonicalType::Double => "double precision".to_string(),
-        CanonicalType::Decimal => "numeric".to_string(),
-        CanonicalType::Boolean => "boolean".to_string(),
-        CanonicalType::Json => "json".to_string(),
-        CanonicalType::Text => "text".to_string(),
-        CanonicalType::Varchar(None) => "varchar".to_string(),
-        CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
-        CanonicalType::Char(n) => format!("char({n})"),
-        CanonicalType::Uuid => "uuid".to_string(),
-        CanonicalType::DateTime | CanonicalType::Timestamp => "timestamp".to_string(),
-        CanonicalType::TimestampTz => "timestamptz".to_string(),
-        CanonicalType::Date => "date".to_string(),
-        CanonicalType::Time => "time".to_string(),
-        CanonicalType::Blob => "bytea".to_string(),
-    }
-}
-
-/// The declared-type string sea-query's SQLite builder renders for each
-/// canonical type (pinned by the cross-emitter parity tests).
-fn sqlite_declared_type(canonical: CanonicalType) -> String {
-    match canonical {
-        CanonicalType::Integer => "integer".to_string(),
-        CanonicalType::SmallInt => "smallint".to_string(),
-        CanonicalType::BigInt => "bigint".to_string(),
-        CanonicalType::Double => "double".to_string(),
-        CanonicalType::Decimal => "real".to_string(),
-        CanonicalType::Boolean => "boolean".to_string(),
-        CanonicalType::Json => "json_text".to_string(),
-        CanonicalType::Text => "text".to_string(),
-        CanonicalType::Varchar(None) => "varchar".to_string(),
-        CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
-        CanonicalType::Char(n) => format!("char({n})"),
-        CanonicalType::Uuid => "uuid_text".to_string(),
-        CanonicalType::DateTime | CanonicalType::Timestamp => "datetime_text".to_string(),
-        CanonicalType::TimestampTz => "timestamp_with_timezone_text".to_string(),
-        CanonicalType::Date => "date_text".to_string(),
-        CanonicalType::Time => "time_text".to_string(),
-        CanonicalType::Blob => "blob".to_string(),
-    }
-}
-
 /// Storage-semantics class of a declared SQLite type. SQLite is dynamically
 /// typed: many declared-type spellings are storage-equivalent (its type
 /// affinity rules), so drift warnings fire only when the *class* changes —
@@ -358,44 +357,6 @@ fn sqlite_type_class(declared: &str) -> SqliteTypeClass {
 
 /// Single-column unique index name with the 63-char Postgres-identifier
 /// guard; matches the composite `uq_` convention (AGENTS.md § I-1).
-fn single_unique_index_name(table_lower: &str, col_name: &str) -> String {
-    let raw = format!("uq_{}_{}", table_lower, col_name);
-    if raw.chars().count() > 63 {
-        return format!("{}_uq", raw.chars().take(60).collect::<String>());
-    }
-    raw
-}
-
-fn fk_action_sql(action: ForeignKeyAction) -> &'static str {
-    match action {
-        ForeignKeyAction::Restrict => "RESTRICT",
-        ForeignKeyAction::SetNull => "SET NULL",
-        ForeignKeyAction::SetDefault => "SET DEFAULT",
-        ForeignKeyAction::NoAction => "NO ACTION",
-        ForeignKeyAction::Cascade => "CASCADE",
-    }
-}
-
-/// Convert a JSON-schema scalar default into a sea-query literal usable to
-/// backfill a NOT NULL column add. Non-scalars (and `null`) are not usable.
-fn literal_default_value(default: &serde_json::Value) -> Option<sea_query::Value> {
-    match default {
-        serde_json::Value::Bool(value) => Some((*value).into()),
-        serde_json::Value::Number(value) => value
-            .as_i64()
-            .map(sea_query::Value::from)
-            .or_else(|| value.as_f64().map(sea_query::Value::from)),
-        serde_json::Value::String(value) => Some(value.clone().into()),
-        _ => None,
-    }
-}
-
-fn render_alter(stmt: &sea_query::TableAlterStatement, backend: SqlDialect) -> String {
-    match backend {
-        SqlDialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
-        SqlDialect::Postgres => stmt.to_string(PostgresQueryBuilder),
-    }
-}
 
 /// Diff one registered model schema against its live table and produce the
 /// DDL plan. Pure with respect to the database — callers introspect first.
@@ -411,64 +372,53 @@ pub fn plan_table_migration(
     backend: SqlDialect,
     opts: MigrateOptions,
 ) -> PyResult<MigrationPlan> {
-    let old_ir = live_columns_to_schema_ir(table_lower, live);
-    let new_ir = schema_json_to_schema_ir(table_lower, schema);
-    let _typed_plan = plan_from_ir(&old_ir, &new_ir);
-    let _typed_sql = emit_sql(
-        &_typed_plan,
-        match backend {
-            SqlDialect::Sqlite => BackendDialect::Sqlite,
-            SqlDialect::Postgres => BackendDialect::Postgres,
-        },
-    );
-
     let mut plan = MigrationPlan::new();
     if !opts.updates {
         return Ok(plan);
     }
 
+    let old_ir = live_columns_to_schema_ir(table_lower, live);
+    let new_ir = schema_json_to_schema_ir(table_lower, schema);
+    let mut typed_plan = plan_from_ir(&old_ir, &new_ir);
+    if !opts.destructive {
+        typed_plan.operations.retain(|op| {
+            !matches!(
+                op,
+                MigrationOp::DropColumn { .. } | MigrationOp::DropTable { .. }
+            )
+        });
+    }
+
+    let emitted = emit_sql(
+        &typed_plan,
+        match backend {
+            SqlDialect::Sqlite => BackendDialect::Sqlite,
+            SqlDialect::Postgres => BackendDialect::Postgres,
+        },
+    )
+    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
     let live_by_name: HashMap<&str, &LiveColumn> =
         live.iter().map(|col| (col.name.as_str(), col)).collect();
-
-    let mut model_columns: HashSet<&str> = HashSet::new();
-
-    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-        for (col_name, raw_col_info) in properties {
-            model_columns.insert(col_name.as_str());
-            let col_plan = build_column_plan(table_lower, col_name, raw_col_info, schema, backend);
-
-            match live_by_name.get(col_name.as_str()) {
-                None => plan_missing_column(table_lower, col_name, &col_plan, backend, &mut plan)?,
-                Some(live_col) => {
-                    plan_existing_column(
-                        table_lower,
-                        col_name,
-                        &col_plan,
-                        live_col,
-                        backend,
-                        &mut plan,
-                    );
-                }
-            }
+    for encoded in emitted.drop_columns {
+        let Some((drop_table, drop_col)) = encoded.split_once("::") else {
+            continue;
+        };
+        if drop_table != table_lower {
+            continue;
         }
-    }
-
-    if opts.destructive {
-        for live_col in live {
-            if model_columns.contains(live_col.name.as_str()) {
-                continue;
-            }
-            if live_col.is_primary_key {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Cannot drop column '{}.{}': it is part of the primary key. \
-                     Primary-key changes must be migrated with Alembic.",
-                    table_lower, live_col.name
-                )));
-            }
-            plan.drop_columns.push(live_col.name.clone());
+        if let Some(live_col) = live_by_name.get(drop_col)
+            && live_col.is_primary_key
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Cannot drop column '{}.{}': it is part of the primary key. Primary-key changes must be migrated with Alembic.",
+                table_lower, drop_col
+            )));
         }
+        plan.drop_columns.push(drop_col.to_string());
     }
-
+    plan.statements = emitted.statements;
+    plan.warnings = emitted.warnings;
     Ok(plan)
 }
 
@@ -505,204 +455,6 @@ fn shadow_compare_migration_plan(
         serde_json::to_string(&legacy.statements).unwrap_or_else(|_| "<legacy>".to_string()),
         serde_json::to_string(&shadow.statements).unwrap_or_else(|_| "<shadow>".to_string())
     ))
-}
-
-/// Plan the `ADD COLUMN` (and any follow-up DDL) for a model column missing
-/// from the live table.
-fn plan_missing_column(
-    table_lower: &str,
-    col_name: &str,
-    col_plan: &ColumnPlan,
-    backend: SqlDialect,
-    plan: &mut MigrationPlan,
-) -> PyResult<()> {
-    if col_plan.is_primary_key {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Cannot add column '{}.{}': it is a primary key, and primary keys cannot \
-             be added to existing tables. Use Alembic for this migration.",
-            table_lower, col_name
-        )));
-    }
-
-    // NOT NULL columns need a literal default to backfill existing rows.
-    let backfill_default = if col_plan.is_nullable {
-        None
-    } else {
-        let literal = col_plan
-            .literal_default
-            .as_ref()
-            .and_then(literal_default_value);
-        match literal {
-            Some(value) => Some(value),
-            None => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Cannot add NOT NULL column '{}.{}' to an existing table: it has no \
-                     literal default to backfill existing rows. Make the field nullable, \
-                     give it a literal default, or use Alembic for this migration.",
-                    table_lower, col_name
-                )));
-            }
-        }
-    };
-
-    // SQLite's ADD COLUMN cannot take a UNIQUE constraint; an explicit unique
-    // index provides the same guarantee.
-    let inline_unique = col_plan.is_unique && backend == SqlDialect::Postgres;
-
-    let mut col_def = ColumnDef::new(Alias::new(col_name));
-    apply_canonical_type(&mut col_def, col_plan.canonical);
-    if !col_plan.is_nullable {
-        col_def.not_null();
-    }
-    if inline_unique {
-        col_def.unique_key();
-    }
-    if let Some(default_value) = &backfill_default {
-        col_def.default(default_value.clone());
-    }
-
-    let stmt = Table::alter()
-        .table(Alias::new(table_lower))
-        .add_column(&mut col_def)
-        .to_owned();
-    plan.statements.push(render_alter(&stmt, backend));
-
-    // The DEFAULT above exists only to backfill: a fresh CREATE TABLE emits no
-    // server default, so drop it for parity. SQLite cannot drop a column
-    // default; the leftover is documented (Alembic's compare_server_default
-    // is off by default, so it produces no phantom diff).
-    if backfill_default.is_some() && backend == SqlDialect::Postgres {
-        plan.statements.push(format!(
-            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
-            quote_ident(table_lower),
-            quote_ident(col_name)
-        ));
-    }
-
-    if col_plan.is_unique && backend == SqlDialect::Sqlite {
-        let index_name = single_unique_index_name(table_lower, col_name);
-        let index_stmt = Index::create()
-            .unique()
-            .name(&index_name)
-            .table(Alias::new(table_lower))
-            .col(Alias::new(col_name))
-            .if_not_exists()
-            .to_owned();
-        plan.statements
-            .push(index_stmt.to_string(SqliteQueryBuilder));
-        plan.warnings.push(format!(
-            "Added unique column '{}.{}' as a unique index '{}' (SQLite cannot add an \
-             inline UNIQUE constraint to an existing table).",
-            table_lower, col_name, index_name
-        ));
-    }
-
-    // Single-column index and db_check constraint, exactly as CREATE TABLE
-    // would emit them.
-    plan.statements.extend(col_plan.index_sqls.iter().cloned());
-
-    if let Some(fk) = &col_plan.fk {
-        match backend {
-            SqlDialect::Postgres => {
-                // Unnamed, so Postgres assigns "<table>_<col>_fkey" — the same
-                // name an inline FK from CREATE TABLE receives.
-                plan.statements.push(format!(
-                    "ALTER TABLE {} ADD FOREIGN KEY ({}) REFERENCES {} (\"id\") ON DELETE {}",
-                    quote_ident(table_lower),
-                    quote_ident(col_name),
-                    quote_ident(&fk.to_table),
-                    fk_action_sql(fk.on_delete)
-                ));
-            }
-            SqlDialect::Sqlite => {
-                plan.warnings.push(format!(
-                    "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint \
-                     (SQLite cannot add table constraints to an existing table). Referential \
-                     integrity for this column is not database-enforced; use Alembic if you \
-                     need the constraint.",
-                    table_lower, col_name
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Reconcile an existing live column with the model definition. Postgres gets
-/// native `ALTER COLUMN` DDL; SQLite cannot alter columns in place, so drift
-/// surfaces as warnings (and is usually cosmetic there thanks to type
-/// affinity).
-fn plan_existing_column(
-    table_lower: &str,
-    col_name: &str,
-    col_plan: &ColumnPlan,
-    live: &LiveColumn,
-    backend: SqlDialect,
-    plan: &mut MigrationPlan,
-) {
-    // Primary keys (incl. autoincrement/serial) are never reconciled.
-    if col_plan.is_primary_key || live.is_primary_key {
-        return;
-    }
-
-    match backend {
-        SqlDialect::Postgres => {
-            // Native enum columns only exist via Alembic; leave them to it.
-            if !live.is_enum_udt && !pg_type_matches(col_plan.canonical, live) {
-                let target = pg_alter_type_target(col_plan.canonical);
-                plan.statements.push(format!(
-                    "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",
-                    table = quote_ident(table_lower),
-                    col = quote_ident(col_name),
-                    target = target,
-                ));
-            }
-            if !col_plan.is_nullable && live.is_nullable {
-                plan.statements.push(format!(
-                    "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                    quote_ident(table_lower),
-                    quote_ident(col_name)
-                ));
-            } else if col_plan.is_nullable && !live.is_nullable {
-                plan.statements.push(format!(
-                    "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                    quote_ident(table_lower),
-                    quote_ident(col_name)
-                ));
-            }
-        }
-        SqlDialect::Sqlite => {
-            let expected = sqlite_declared_type(col_plan.canonical);
-            if sqlite_type_class(&live.declared_type) != sqlite_type_class(&expected) {
-                plan.warnings.push(format!(
-                    "Column '{}.{}' is declared '{}' in the database but the model expects \
-                     '{}'. SQLite cannot change column types in place; use Alembic to \
-                     migrate this column.",
-                    table_lower, col_name, live.declared_type, expected
-                ));
-            }
-            if col_plan.is_nullable != live.is_nullable {
-                plan.warnings.push(format!(
-                    "Column '{}.{}' is {} in the database but the model expects {}. SQLite \
-                     cannot change column nullability in place; use Alembic to migrate \
-                     this column.",
-                    table_lower,
-                    col_name,
-                    if live.is_nullable {
-                        "nullable"
-                    } else {
-                        "NOT NULL"
-                    },
-                    if col_plan.is_nullable {
-                        "nullable"
-                    } else {
-                        "NOT NULL"
-                    },
-                ));
-            }
-        }
-    }
 }
 
 /// Drop one column, resolving SQLite index dependencies first.

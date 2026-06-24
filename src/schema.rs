@@ -5,6 +5,7 @@
 
 use crate::backend::EngineHandle;
 use crate::state::{MODEL_REGISTRY, SqlDialect, engine_for_connection};
+use ferro_migrate::{BackendDialect, ddl as shared_ddl};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, ColumnDef, ForeignKey, ForeignKeyAction, Index, PostgresQueryBuilder,
@@ -88,6 +89,57 @@ fn schema_dependencies(schema: &serde_json::Value) -> Vec<String> {
     deps
 }
 
+fn to_backend_dialect(backend: SqlDialect) -> BackendDialect {
+    match backend {
+        SqlDialect::Sqlite => BackendDialect::Sqlite,
+        SqlDialect::Postgres => BackendDialect::Postgres,
+    }
+}
+
+fn from_shared_canonical(canonical: shared_ddl::CanonicalType) -> CanonicalType {
+    match canonical {
+        shared_ddl::CanonicalType::Integer => CanonicalType::Integer,
+        shared_ddl::CanonicalType::SmallInt => CanonicalType::SmallInt,
+        shared_ddl::CanonicalType::BigInt => CanonicalType::BigInt,
+        shared_ddl::CanonicalType::Double => CanonicalType::Double,
+        shared_ddl::CanonicalType::Decimal => CanonicalType::Decimal,
+        shared_ddl::CanonicalType::Boolean => CanonicalType::Boolean,
+        shared_ddl::CanonicalType::Json => CanonicalType::Json,
+        shared_ddl::CanonicalType::Text => CanonicalType::Text,
+        shared_ddl::CanonicalType::Varchar(v) => CanonicalType::Varchar(v),
+        shared_ddl::CanonicalType::Char(n) => CanonicalType::Char(n),
+        shared_ddl::CanonicalType::Uuid => CanonicalType::Uuid,
+        shared_ddl::CanonicalType::DateTime => CanonicalType::DateTime,
+        shared_ddl::CanonicalType::Timestamp => CanonicalType::Timestamp,
+        shared_ddl::CanonicalType::TimestampTz => CanonicalType::TimestampTz,
+        shared_ddl::CanonicalType::Date => CanonicalType::Date,
+        shared_ddl::CanonicalType::Time => CanonicalType::Time,
+        shared_ddl::CanonicalType::Blob => CanonicalType::Blob,
+    }
+}
+
+fn to_shared_canonical(canonical: CanonicalType) -> shared_ddl::CanonicalType {
+    match canonical {
+        CanonicalType::Integer => shared_ddl::CanonicalType::Integer,
+        CanonicalType::SmallInt => shared_ddl::CanonicalType::SmallInt,
+        CanonicalType::BigInt => shared_ddl::CanonicalType::BigInt,
+        CanonicalType::Double => shared_ddl::CanonicalType::Double,
+        CanonicalType::Decimal => shared_ddl::CanonicalType::Decimal,
+        CanonicalType::Boolean => shared_ddl::CanonicalType::Boolean,
+        CanonicalType::Json => shared_ddl::CanonicalType::Json,
+        CanonicalType::Text => shared_ddl::CanonicalType::Text,
+        CanonicalType::Varchar(v) => shared_ddl::CanonicalType::Varchar(v),
+        CanonicalType::Char(n) => shared_ddl::CanonicalType::Char(n),
+        CanonicalType::Uuid => shared_ddl::CanonicalType::Uuid,
+        CanonicalType::DateTime => shared_ddl::CanonicalType::DateTime,
+        CanonicalType::Timestamp => shared_ddl::CanonicalType::Timestamp,
+        CanonicalType::TimestampTz => shared_ddl::CanonicalType::TimestampTz,
+        CanonicalType::Date => shared_ddl::CanonicalType::Date,
+        CanonicalType::Time => shared_ddl::CanonicalType::Time,
+        CanonicalType::Blob => shared_ddl::CanonicalType::Blob,
+    }
+}
+
 pub(crate) fn order_schemas_for_creation(
     schemas: std::collections::HashMap<String, serde_json::Value>,
 ) -> Vec<(String, serde_json::Value)> {
@@ -157,62 +209,7 @@ pub(crate) enum CanonicalType {
 }
 
 pub(crate) fn apply_canonical_type(col_def: &mut ColumnDef, canonical: CanonicalType) {
-    match canonical {
-        CanonicalType::Integer => {
-            col_def.integer();
-        }
-        CanonicalType::SmallInt => {
-            col_def.small_integer();
-        }
-        CanonicalType::BigInt => {
-            col_def.big_integer();
-        }
-        CanonicalType::Double => {
-            col_def.double();
-        }
-        CanonicalType::Decimal => {
-            col_def.decimal();
-        }
-        CanonicalType::Boolean => {
-            col_def.boolean();
-        }
-        CanonicalType::Json => {
-            col_def.json();
-        }
-        CanonicalType::Text => {
-            col_def.text();
-        }
-        CanonicalType::Varchar(None) => {
-            col_def.string();
-        }
-        CanonicalType::Varchar(Some(n)) => {
-            col_def.string_len(n);
-        }
-        CanonicalType::Char(n) => {
-            col_def.char_len(n);
-        }
-        CanonicalType::Uuid => {
-            col_def.uuid();
-        }
-        CanonicalType::DateTime => {
-            col_def.date_time();
-        }
-        CanonicalType::Timestamp => {
-            col_def.timestamp();
-        }
-        CanonicalType::TimestampTz => {
-            col_def.timestamp_with_time_zone();
-        }
-        CanonicalType::Date => {
-            col_def.date();
-        }
-        CanonicalType::Time => {
-            col_def.time();
-        }
-        CanonicalType::Blob => {
-            col_def.blob();
-        }
-    }
+    shared_ddl::apply_canonical_type(col_def, to_shared_canonical(canonical));
 }
 
 fn json_type_to_canonical(json_type: &str, backend: SqlDialect) -> CanonicalType {
@@ -305,9 +302,7 @@ fn db_check_constraint_name(table_lower: &str, col_name: &str) -> String {
 }
 
 fn parse_varchar_token(token: &str) -> Option<u32> {
-    let body = token.strip_prefix("varchar(")?.strip_suffix(')')?;
-    let n: u32 = body.parse().ok()?;
-    if n == 0 { None } else { Some(n) }
+    shared_ddl::parse_varchar_token(token)
 }
 
 /// Map a canonical `db_type` token to a [`CanonicalType`]. Returns `None` when
@@ -319,31 +314,8 @@ fn parse_varchar_token(token: &str) -> Option<u32> {
 /// ::_db_type_to_sa_type`. Add new tokens to both emitters in the same change
 /// and update the parity test. See AGENTS.md § I-1.
 fn db_type_token_to_canonical(token: &str, backend: SqlDialect) -> Option<CanonicalType> {
-    // Per-dialect resolution is chosen to byte-match SA's compilation in the
-    // Alembic bridge. SQLite emits the typed keyword (BIGINT, SMALLINT,
-    // CHAR(32), DATETIME) and lets SQLite type affinity normalize at
-    // runtime; the parity test (U5) pins both sides token-for-token.
-    match token {
-        "text" => Some(CanonicalType::Text),
-        "smallint" => Some(CanonicalType::SmallInt),
-        "int" => Some(CanonicalType::Integer),
-        "bigint" => Some(CanonicalType::BigInt),
-        "uuid" => Some(match backend {
-            SqlDialect::Sqlite => CanonicalType::Char(32),
-            SqlDialect::Postgres => CanonicalType::Uuid,
-        }),
-        "timestamp" => Some(match backend {
-            SqlDialect::Sqlite => CanonicalType::DateTime,
-            SqlDialect::Postgres => CanonicalType::Timestamp,
-        }),
-        "timestamptz" => Some(match backend {
-            SqlDialect::Sqlite => CanonicalType::DateTime,
-            SqlDialect::Postgres => CanonicalType::TimestampTz,
-        }),
-        "date" => Some(CanonicalType::Date),
-        "time" => Some(CanonicalType::Time),
-        other => parse_varchar_token(other).map(|n| CanonicalType::Varchar(Some(n))),
-    }
+    shared_ddl::db_type_token_to_canonical(token, to_backend_dialect(backend))
+        .map(from_shared_canonical)
 }
 
 /// Resolve a model property to its backend-specific [`CanonicalType`].
@@ -360,22 +332,13 @@ pub(crate) fn canonical_column_type(
         .get("db_type")
         .or_else(|| resolved_col_info.get("db_type"))
         .and_then(|v| v.as_str());
-    if let Some(token) = db_type_token
-        && let Some(canonical) = db_type_token_to_canonical(token, backend)
-    {
-        return canonical;
-    }
-
     let (json_type, format) = property_json_type_and_format(resolved_col_info);
-    match (json_type, format) {
-        (Some("string"), Some("date-time")) => CanonicalType::TimestampTz,
-        (Some("string"), Some("date")) => CanonicalType::Date,
-        (Some("string"), Some("uuid")) => CanonicalType::Uuid,
-        (Some(_), Some("decimal")) => CanonicalType::Decimal,
-        (Some("string"), Some("binary")) => CanonicalType::Blob,
-        (Some(t), _) => json_type_to_canonical(t, backend),
-        (None, _) => CanonicalType::Varchar(None),
-    }
+    from_shared_canonical(shared_ddl::canonical_column_type_from_parts(
+        db_type_token,
+        json_type,
+        format,
+        to_backend_dialect(backend),
+    ))
 }
 
 fn render_check_values(col_info: &serde_json::Value) -> Option<String> {

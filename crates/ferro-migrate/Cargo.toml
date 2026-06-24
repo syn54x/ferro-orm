@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 ferro-schema-ir = { path = "../ferro-schema-ir" }
+sea-query = { version = "0.32", features = ["with-uuid"] }
+serde_json = "1.0"

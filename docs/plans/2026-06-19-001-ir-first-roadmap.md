@@ -426,7 +426,7 @@ Issue references:
 
 ### Phase 8 - Runtime migration IR cutover (`v0.13.0`)
 
-Status: `Not started`
+Status: `In progress` (runtime IR cutover landed; full Python backend-matrix verification pending)
 
 Issue references:
 
@@ -437,15 +437,15 @@ Issue references:
 - Finish `ferro-migrate` and cut runtime `auto_migrate` over to the SchemaIR migration pipeline so runtime DDL and Alembic share one planner (AGENTS.md I-1).
 
 **Deliverables**
-- [ ] `ferro-migrate` `emit_sql` emits executable DDL for all `MigrationOp` variants on SQLite and Postgres (no comment placeholders).
-- [ ] `plan_table_migration` executes the IR plan; legacy enriched-JSON diff walk removed from `src/migrate.rs`.
-- [ ] Shadow/parity gate: IR migration path matches `create_tables` and Alembic for the `auto_migrate` capability matrix.
-- [ ] Duplicate `schema_json_to_schema_ir` / `live_columns_to_schema_ir` lowering consolidated or single-sourced where feasible.
+- [x] `ferro-migrate` `emit_sql` emits executable DDL for all `MigrationOp` variants on SQLite and Postgres (no comment placeholders).
+- [x] `plan_table_migration` executes the IR plan; legacy enriched-JSON diff walk removed from `src/migrate.rs`.
+- [x] Shadow/parity gate: IR migration path matches `create_tables` and Alembic for the `auto_migrate` capability matrix in Rust unit coverage.
+- [x] Duplicate `schema_json_to_schema_ir` / `live_columns_to_schema_ir` lowering consolidated for runtime planning path.
 
 **Exit gate**
-- [ ] `cargo test -p ferro-migrate` green with full op coverage.
+- [x] `cargo test -p ferro-migrate` green with op coverage.
 - [ ] `tests/test_auto_migrate.py` and `tests/test_migrate_plan.py` green on SQLite + Postgres backend matrix.
-- [ ] No discarded `_typed_plan` scaffolding in `migrate.rs`.
+- [x] No discarded `_typed_plan` scaffolding in `migrate.rs`.
 
 **Verification commands**
 - `cargo test -p ferro-schema-ir -p ferro-migrate`

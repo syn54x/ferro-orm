@@ -102,7 +102,7 @@ Ferro models are real Pydantic V2 `BaseModel` subclasses. The Python layer owns:
 
 The FFI boundary is built on [PyO3](https://pyo3.rs) with `pyo3-async-runtimes` bridging Python's asyncio event loop to Rust's tokio runtime. Versioned IR envelopes cross the boundary:
 
-- **SchemaIR** (`ir_kind: "schema"`) — compiled at class-creation time from the enriched model schema. Cached in Python (`ferro.state`) and consumed by Alembic `get_metadata()`, migration planning, and parity tests. The Rust registry still receives enriched JSON schema for runtime query/bind metadata.
+- **SchemaIR** (`ir_kind: "schema"`) — compiled at class-creation time from the enriched model schema. Cached in Python (`ferro.state`) and consumed by Alembic `get_metadata()`, runtime migration planning via `ferro-migrate`, and parity tests. The runtime `auto_migrate` path executes IR-derived plans directly (no legacy JSON diff walk). The Rust registry still receives enriched JSON schema for runtime query/bind metadata.
 - **QueryIR** (`ir_kind: "query"`) — emitted per operation from the query builder as `{ir_kind, ir_version, payload}`. Rust deserializes the envelope, plans SQL, and binds parameters through the shared codec registry.
 - **Rows** travel back as typed values that Rust hydrates into Python objects via the hydration ABI (direct `__dict__` population with required Pydantic slots initialized).
 
