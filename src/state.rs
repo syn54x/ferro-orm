@@ -30,6 +30,16 @@ pub static CONNECTION_REGISTRY: Lazy<RwLock<HashMap<String, Arc<EngineHandle>>>>
 pub static DEFAULT_CONNECTION_NAME: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
 
 /// Resolve a connection name and engine by explicit connection name, or by the selected default.
+///
+/// # Arguments
+/// * `using` — Registered connection name, or `None` to use [`DEFAULT_CONNECTION_NAME`].
+///
+/// # Returns
+/// `(connection_name, engine)` for the resolved route.
+///
+/// # Errors
+/// * `PyValueError` — Unknown or invalid connection name.
+/// * `PyRuntimeError` — No default selected when required, registry lock failure, or engine missing.
 pub fn connection_for_route(using: Option<String>) -> PyResult<(String, Arc<EngineHandle>)> {
     let Some(connection_name) = using else {
         let default_name = DEFAULT_CONNECTION_NAME
@@ -108,21 +118,39 @@ pub fn connection_for_route(using: Option<String>) -> PyResult<(String, Arc<Engi
 }
 
 /// Resolve an engine by explicit connection name, or by the selected default.
+///
+/// # Arguments
+/// * `using` — Registered connection name, or `None` for the default connection.
+///
+/// # Returns
+/// Shared [`EngineHandle`] for the route.
+///
+/// # Errors
+/// Same as [`connection_for_route`].
 pub fn engine_for_connection(using: Option<String>) -> PyResult<Arc<EngineHandle>> {
     connection_for_route(using).map(|(_, engine)| engine)
 }
 
-/// Active transaction handle.
+/// Active transaction handle (root `BEGIN` or nested `SAVEPOINT`).
 #[derive(Clone)]
 pub struct TransactionHandle {
+    /// Shared mutex around the live [`EngineConnection`].
     pub conn: TransactionConnection,
+    /// Savepoint name when this is a nested transaction; `None` for the root.
     pub savepoint_name: Option<String>,
+    /// Connection name the transaction was opened on (for routing and identity map keys).
     pub connection_name: String,
 }
 
+/// Async mutex wrapper around a checked-out [`EngineConnection`].
 pub type TransactionConnection = Arc<Mutex<EngineConnection>>;
 
 impl TransactionHandle {
+    /// Create a root transaction handle after `BEGIN`.
+    ///
+    /// # Arguments
+    /// * `conn` — Checked-out connection that has started a transaction.
+    /// * `connection_name` — Registered Ferro connection name.
     pub fn root(conn: EngineConnection, connection_name: String) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -131,6 +159,12 @@ impl TransactionHandle {
         }
     }
 
+    /// Create a nested transaction handle after `SAVEPOINT`.
+    ///
+    /// # Arguments
+    /// * `conn` — Parent transaction connection (shared with the root).
+    /// * `savepoint_name` — Generated savepoint identifier.
+    /// * `connection_name` — Registered Ferro connection name.
     pub fn nested(
         conn: TransactionConnection,
         savepoint_name: String,
@@ -159,12 +193,16 @@ pub static IDENTITY_MAP: Lazy<DashMap<(String, String, String), Py<PyAny>>> =
 /// A session pins connection routing and keeps transactional/identity state local
 /// to that session so concurrent sessions do not bleed mutable runtime state.
 pub struct SessionState {
+    /// Connection pinned for the lifetime of this session.
     pub connection_name: String,
+    /// Transactions opened within this session (isolated from global registry).
     pub transaction_registry: DashMap<String, TransactionHandle>,
+    /// Session-local identity map (isolated from global [`IDENTITY_MAP`]).
     pub identity_map: DashMap<(String, String, String), Py<PyAny>>,
 }
 
 impl SessionState {
+    /// Allocate empty session state for `connection_name`.
     pub fn new(connection_name: String) -> Self {
         Self {
             connection_name,
@@ -177,16 +215,40 @@ impl SessionState {
 /// Global registry of active sessions.
 pub static SESSION_REGISTRY: Lazy<DashMap<String, Arc<SessionState>>> = Lazy::new(DashMap::new);
 
+/// Register a new session bound to `connection_name`.
+///
+/// # Arguments
+/// * `connection_name` — Registered connection to pin for the session.
+///
+/// # Returns
+/// Opaque session UUID string for subsequent operations.
 pub fn register_session(connection_name: String) -> String {
     let session_id = uuid::Uuid::new_v4().to_string();
     SESSION_REGISTRY.insert(session_id.clone(), Arc::new(SessionState::new(connection_name)));
     session_id
 }
 
+/// Remove a session from [`SESSION_REGISTRY`].
+///
+/// # Arguments
+/// * `session_id` — Id returned by [`register_session`].
+///
+/// # Returns
+/// `true` when the session existed and was removed.
 pub fn unregister_session(session_id: &str) -> bool {
     SESSION_REGISTRY.remove(session_id).is_some()
 }
 
+/// Look up active session state.
+///
+/// # Arguments
+/// * `session_id` — Id returned by [`register_session`].
+///
+/// # Returns
+/// Shared [`SessionState`] for the session.
+///
+/// # Errors
+/// `PyRuntimeError` when the session id is unknown.
 pub fn session_state(session_id: &str) -> PyResult<Arc<SessionState>> {
     SESSION_REGISTRY
         .get(session_id)
@@ -203,6 +265,13 @@ pub(crate) const SESSION_CLOSE_ACTIVE_TRANSACTIONS_MSG: &str =
     "Cannot close session while transactions are active. \
      Exit all transaction() blocks before closing the session.";
 
+/// Guard that a session has no open transactions before close.
+///
+/// # Arguments
+/// * `session_id` — Session being closed.
+///
+/// # Errors
+/// `PyRuntimeError` with [`SESSION_CLOSE_ACTIVE_TRANSACTIONS_MSG`] when transactions remain.
 pub fn ensure_session_idle_for_close(session_id: &str) -> PyResult<()> {
     let session = session_state(session_id)?;
     if !session.transaction_registry.is_empty() {
@@ -219,16 +288,27 @@ pub fn ensure_session_idle_for_close(session_id: &str) -> PyResult<()> {
 /// into Rust memory before acquiring the Python GIL for object injection.
 #[derive(Clone, Debug)]
 pub enum RustValue {
+    /// 64-bit integer (SQLite booleans may arrive as 0/1).
     BigInt(i64),
+    /// IEEE double.
     Double(f64),
+    /// Plain text / enum label before Python coercion.
     String(String),
+    /// Boolean after schema-aware decode.
     Bool(bool),
+    /// ISO datetime string (`format: date-time`).
     DateTime(String),
+    /// ISO date string (`format: date`).
     Date(String),
+    /// Parsed JSON object or array column.
     Json(serde_json::Value),
+    /// Binary column bytes.
     Blob(Vec<u8>),
+    /// UUID string (`format: uuid`).
     Uuid(String),
+    /// Decimal/numeric as string (preserves precision).
     Decimal(String),
+    /// SQL `NULL`.
     None,
 }
 

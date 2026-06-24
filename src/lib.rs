@@ -62,7 +62,7 @@ pub fn emit_user_warning(message: &str) {
     });
 }
 
-/// Returns the current version of the Ferro core.
+/// Returns the current version of the Ferro core (`CARGO_PKG_VERSION`).
 #[pyfunction]
 fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()

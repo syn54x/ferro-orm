@@ -1,3 +1,8 @@
+//! Query IR lowering to SeaQuery `Condition`s and semantic signatures for shadow comparison.
+//!
+//! Accepts legacy JSON query trees and canonical [`QueryIrPayload`] from `ferro_schema_ir`,
+//! then builds backend-aware filter SQL with typed null/UUID/enum binds via [`crate::codec`].
+
 use crate::state::SqlDialect;
 use ferro_schema_ir::{
     QueryIrPayload, QueryNode as QueryIrNode, QueryOrderBy as QueryIrOrderBy, QueryValue,
@@ -7,40 +12,63 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Legacy JSON query predicate node (leaf or compound AND/OR).
+///
+/// Prefer deserializing [`ferro_schema_ir::QueryNode`] and converting via
+/// [`query_def_from_ir_payload`] for new code paths.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryNode {
+    /// `true` when `operator` is `AND`/`OR` and `left`/`right` are set.
     pub is_compound: bool,
+    /// `AND`, `OR`, or a leaf operator (`==`, `!=`, `<`, `IN`, …).
     pub operator: String,
-    // Fields for simple node
+    /// Leaf column name (when `is_compound` is false).
     pub column: Option<String>,
+    /// Leaf RHS JSON value (when `is_compound` is false).
     pub value: Option<Value>,
-    // Fields for compound node
+    /// Left child for compound nodes.
     pub left: Option<Box<QueryNode>>,
+    /// Right child for compound nodes.
     pub right: Option<Box<QueryNode>>,
 }
 
+/// One `ORDER BY` term in a [`QueryDef`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OrderBy {
+    /// Column identifier.
     pub column: String,
+    /// `"asc"` or `"desc"` (case-insensitive when rendered).
     pub direction: String,
 }
 
+/// Many-to-many join context for filtered relation loads.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct M2mContext {
+    /// Association/join table name.
     pub join_table: String,
+    /// FK column pointing at the source model.
     pub source_col: String,
+    /// FK column pointing at the target model.
     pub target_col: String,
+    /// Source row primary key (JSON scalar).
     pub source_id: Value,
 }
 
+/// Fully resolved query plan ready for SeaQuery rendering.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryDef {
+    /// Target model class name.
     #[allow(dead_code)]
     pub model_name: String,
+    /// Root predicates (implicit AND).
     pub where_clause: Vec<QueryNode>,
+    /// Sort order when present.
     pub order_by: Option<Vec<OrderBy>>,
+    /// `LIMIT` clause.
     pub limit: Option<u64>,
+    /// `OFFSET` clause.
     pub offset: Option<u64>,
+    /// M2M join filter when loading through an association table.
     pub m2m: Option<M2mContext>,
     /// Populated from `pg_catalog` before building filter SQL. Not part of the
     /// Python query JSON payload.
@@ -48,17 +76,34 @@ pub struct QueryDef {
     pub postgres_enum_udt: HashMap<String, String>,
 }
 
+/// Canonical semantic fingerprint of a query for shadow-runtime parity checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuerySemanticSignature {
+    /// Model being queried.
     pub model_name: String,
+    /// Normalized predicate strings in evaluation order.
     pub where_semantics: Vec<String>,
+    /// `(column, direction)` pairs for `ORDER BY`.
     pub order_by: Vec<(String, String)>,
+    /// Limit when set.
     pub limit: Option<u64>,
+    /// Offset when set.
     pub offset: Option<u64>,
+    /// `(join_table, source_col, target_col, source_id)` when M2M-filtered.
     pub m2m: Option<(String, String, String, String)>,
 }
 
 impl QueryDef {
+    /// Combine all root predicates into one SeaQuery `Condition` (AND of nodes).
+    ///
+    /// # Arguments
+    /// * `backend` — Dialect for typed binds and operator lowering.
+    ///
+    /// # Returns
+    /// `Condition::all()` with each `where_clause` node applied.
+    ///
+    /// # Errors
+    /// Returns `Err(String)` for malformed nodes or unsupported operators.
     pub fn to_condition_for_backend(
         &self,
         backend: SqlDialect,
@@ -248,6 +293,10 @@ impl QueryDef {
         )
     }
 
+    /// Serialize this plan back to canonical query IR (round-trip helper / shadow tests).
+    ///
+    /// # Returns
+    /// [`QueryIrPayload`] suitable for JSON encoding.
     pub fn to_ir_payload(&self) -> QueryIrPayload {
         QueryIrPayload {
             model_name: self.model_name.clone(),
@@ -274,6 +323,10 @@ impl QueryDef {
         }
     }
 
+    /// Build a stable semantic signature for shadow-runtime SQL comparison.
+    ///
+    /// # Returns
+    /// Normalized predicate strings and sort/M2M metadata independent of bind spelling.
     pub fn semantic_signature(&self) -> QuerySemanticSignature {
         QuerySemanticSignature {
             model_name: self.model_name.clone(),
@@ -306,6 +359,17 @@ impl QueryDef {
     }
 }
 
+/// Convert canonical query IR into a runtime [`QueryDef`].
+///
+/// # Arguments
+/// * `payload` — Deserialized [`QueryIrPayload`] from Python.
+///
+/// # Returns
+/// A `QueryDef` with legacy [`QueryNode`] trees and empty `postgres_enum_udt`
+/// (callers populate enum UDT from catalog before building SQL).
+///
+/// # Errors
+/// Returns `Err(String)` when the `m2m` JSON blob cannot deserialize into [`M2mContext`].
 pub fn query_def_from_ir_payload(payload: QueryIrPayload) -> Result<QueryDef, String> {
     let m2m: Option<M2mContext> = match payload.m2m {
         Some(value) => serde_json::from_value(value)

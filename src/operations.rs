@@ -674,6 +674,21 @@ fn backend_column_value_expr(
     crate::codec::m2m_bind_expr(col_name, value, uuid_columns, backend)
 }
 
+/// Begin a root database transaction or a nested savepoint.
+///
+/// Root transactions call `BEGIN` on a fresh pool connection. Nested transactions require
+/// `parent_tx_id` and issue `SAVEPOINT` on the parent's connection.
+///
+/// Args:
+///     parent_tx_id (str | None): Parent transaction for nested savepoints.
+///     using (str | None): Connection name for root transactions (ignored when nested).
+///     session_id (str | None): When set, store the handle in session-local registry.
+///
+/// Returns:
+///     str: Opaque transaction id for `commit_transaction` / `rollback_transaction`.
+///
+/// # Errors
+/// `PyValueError` when `using` is passed with a parent id. `PyRuntimeError` on BEGIN/SAVEPOINT failure.
 #[pyfunction]
 #[pyo3(signature = (parent_tx_id=None, using=None, session_id=None))]
 pub fn begin_transaction(
@@ -733,6 +748,17 @@ pub fn begin_transaction(
     })
 }
 
+/// Commit a transaction or release a nested savepoint.
+///
+/// Args:
+///     tx_id (str): Id returned by `begin_transaction`.
+///     session_id (str | None): Session scope when the transaction was opened.
+///
+/// Returns:
+///     None
+///
+/// # Errors
+/// `PyRuntimeError` when the id is unknown or `COMMIT` / `RELEASE SAVEPOINT` fails.
 #[pyfunction]
 #[pyo3(signature = (tx_id, session_id=None))]
 pub fn commit_transaction(
@@ -768,6 +794,17 @@ pub fn commit_transaction(
     })
 }
 
+/// Return the connection name a transaction was opened on.
+///
+/// Args:
+///     tx_id (str): Active transaction id.
+///     session_id (str | None): Session scope when the transaction was opened.
+///
+/// Returns:
+///     str: Registered connection name.
+///
+/// # Errors
+/// `PyRuntimeError` when the transaction id is not found.
 #[pyfunction]
 #[pyo3(signature = (tx_id, session_id=None))]
 pub fn transaction_connection_name(tx_id: String, session_id: Option<String>) -> PyResult<String> {
@@ -776,6 +813,17 @@ pub fn transaction_connection_name(tx_id: String, session_id: Option<String>) ->
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))
 }
 
+/// Roll back a transaction or nested savepoint and clear the identity map.
+///
+/// Args:
+///     tx_id (str): Id returned by `begin_transaction`.
+///     session_id (str | None): Session scope when the transaction was opened.
+///
+/// Returns:
+///     None
+///
+/// # Errors
+/// `PyRuntimeError` when the id is unknown or rollback SQL fails.
 #[pyfunction]
 #[pyo3(signature = (tx_id, session_id=None))]
 pub fn rollback_transaction(
@@ -823,6 +871,16 @@ pub fn rollback_transaction(
     })
 }
 
+/// Open a session that pins connection routing and isolates transaction/identity state.
+///
+/// Args:
+///     using (str | None): Connection to bind; defaults to the selected default connection.
+///
+/// Returns:
+///     tuple[str, str]: `(session_id, connection_name)`.
+///
+/// # Errors
+/// Same routing errors as [`crate::state::connection_for_route`].
 #[pyfunction]
 #[pyo3(signature = (using=None))]
 pub fn open_session(using: Option<String>) -> PyResult<(String, String)> {
@@ -831,6 +889,16 @@ pub fn open_session(using: Option<String>) -> PyResult<(String, String)> {
     Ok((session_id, connection_name))
 }
 
+/// Close a session after all transactions have exited.
+///
+/// Args:
+///     session_id (str): Id returned by `open_session`.
+///
+/// Returns:
+///     None
+///
+/// # Errors
+/// `PyRuntimeError` when transactions are still active or the session is unknown.
 #[pyfunction]
 pub fn close_session(session_id: String) -> PyResult<()> {
     ensure_session_idle_for_close(&session_id)?;
@@ -1321,7 +1389,20 @@ pub fn save_record(
     })
 }
 
-/// Persists multiple model instances in a single batch operation.
+/// Persist multiple model instances in a single batch `INSERT`.
+///
+/// Args:
+///     name (str): Model class name.
+///     data_list_json (str): JSON array of record objects (column → value).
+///     tx_id (str | None): Optional active transaction.
+///     using (str | None): Connection override.
+///     session_id (str | None): Session-scoped routing when set.
+///
+/// Returns:
+///     int: Number of rows inserted.
+///
+/// # Errors
+/// `PyValueError` for invalid JSON; `PyRuntimeError` on registry/execute failures.
 #[pyfunction]
 #[pyo3(signature = (name, data_list_json, tx_id=None, using=None, session_id=None))]
 pub fn save_bulk_records(
@@ -1639,7 +1720,20 @@ pub fn fetch_filtered<'py>(
     })
 }
 
-/// Returns the number of records matching a filtered query.
+/// Return the number of rows matching a filtered query.
+///
+/// Args:
+///     name (str): Model class name.
+///     query_ir_json (str): Serialized Query IR envelope JSON.
+///     tx_id (str | None): Optional active transaction.
+///     using (str | None): Connection override.
+///     session_id (str | None): Session-scoped routing when set.
+///
+/// Returns:
+///     int: Row count.
+///
+/// # Errors
+/// `PyRuntimeError` on registry, planning, or SQL failures.
 #[pyfunction]
 #[pyo3(signature = (name, query_ir_json, tx_id=None, using=None, session_id=None))]
 pub fn count_filtered(
@@ -1752,7 +1846,19 @@ pub fn count_filtered(
     })
 }
 
-/// Registers a live Python object in the global Identity Map.
+/// Register a live Python instance in the identity map for deduplication.
+///
+/// Args:
+///     connection_name (str): Connection the instance belongs to.
+///     name (str): Model class name.
+///     pk_val (str): Stringified primary key.
+///     obj (PyAny): Model instance to cache.
+///
+/// Returns:
+///     None
+///
+/// # Errors
+/// `PyRuntimeError` when the identity map cannot be updated.
 #[pyfunction]
 #[pyo3(signature = (name, pk, obj, using=None, session_id=None))]
 pub fn register_instance(
@@ -1774,7 +1880,15 @@ pub fn register_instance(
     Ok(())
 }
 
-/// Evicts a specific model instance from the global Identity Map.
+/// Remove one instance from the identity map.
+///
+/// Args:
+///     connection_name (str): Connection the instance was loaded on.
+///     name (str): Model class name.
+///     pk_val (str): Stringified primary key.
+///
+/// Returns:
+///     None
 #[pyfunction]
 #[pyo3(signature = (name, pk, using=None, session_id=None))]
 pub fn evict_instance(
@@ -1865,7 +1979,20 @@ pub fn delete_record(
     })
 }
 
-/// Deletes records matching a filtered query.
+/// Delete rows matching a filtered query.
+///
+/// Args:
+///     name (str): Model class name.
+///     query_ir_json (str): Serialized Query IR envelope JSON.
+///     tx_id (str | None): Optional active transaction.
+///     using (str | None): Connection override.
+///     session_id (str | None): Session-scoped routing when set.
+///
+/// Returns:
+///     int: Rows deleted.
+///
+/// # Errors
+/// `PyRuntimeError` on planning or execute failure.
 #[pyfunction]
 #[pyo3(signature = (name, query_ir_json, tx_id=None, using=None, session_id=None))]
 pub fn delete_filtered(
@@ -1915,7 +2042,21 @@ pub fn delete_filtered(
     })
 }
 
-/// Updates records matching a filtered query with provided values.
+/// Update rows matching a filtered query with column values from JSON.
+///
+/// Args:
+///     name (str): Model class name.
+///     query_ir_json (str): Serialized Query IR envelope JSON.
+///     values_json (str): JSON object of column → value assignments.
+///     tx_id (str | None): Optional active transaction.
+///     using (str | None): Connection override.
+///     session_id (str | None): Session-scoped routing when set.
+///
+/// Returns:
+///     int: Rows updated. Clears the identity map for the model when enabled.
+///
+/// # Errors
+/// `PyValueError` for invalid values JSON; `PyRuntimeError` on execute failure.
 #[pyfunction]
 #[pyo3(signature = (name, query_ir_json, update_json, tx_id=None, using=None, session_id=None))]
 pub fn update_filtered(
@@ -1999,6 +2140,23 @@ pub fn update_filtered(
     })
 }
 
+/// Insert many-to-many association rows into a join table.
+///
+/// Args:
+///     join_table (str): Association table name.
+///     source_col (str): FK column for the source model.
+///     target_col (str): FK column for the target model.
+///     source_id: Source row primary key.
+///     target_ids: Target row primary keys to link.
+///     tx_id (str | None): Optional active transaction.
+///     using (str | None): Connection override.
+///     session_id (str | None): Session-scoped routing when set.
+///
+/// Returns:
+///     None
+///
+/// # Errors
+/// `PyValueError` when an id is `None` or INSERT values are invalid; `PyRuntimeError` on execute failure.
 #[pyfunction]
 #[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None, session_id=None))]
 #[allow(clippy::too_many_arguments)]
@@ -2060,6 +2218,23 @@ pub fn add_m2m_links<'py>(
     })
 }
 
+/// Delete specific many-to-many association rows from a join table.
+///
+/// Args:
+///     join_table (str): Association table name.
+///     source_col (str): FK column for the source model.
+///     target_col (str): FK column for the target model.
+///     source_id: Source row primary key.
+///     target_ids: Target ids to unlink (must match existing rows).
+///     tx_id (str | None): Optional active transaction.
+///     using (str | None): Connection override.
+///     session_id (str | None): Session-scoped routing when set.
+///
+/// Returns:
+///     None
+///
+/// # Errors
+/// `PyRuntimeError` on execute failure.
 #[pyfunction]
 #[pyo3(signature = (join_table, source_col, target_col, source_id, target_ids, tx_id=None, using=None, session_id=None))]
 #[allow(clippy::too_many_arguments)]
@@ -2119,6 +2294,21 @@ pub fn remove_m2m_links<'py>(
     })
 }
 
+/// Delete all many-to-many links for a source row from a join table.
+///
+/// Args:
+///     join_table (str): Association table name.
+///     source_col (str): FK column for the source model.
+///     source_id: Source row primary key.
+///     tx_id (str | None): Optional active transaction.
+///     using (str | None): Connection override.
+///     session_id (str | None): Session-scoped routing when set.
+///
+/// Returns:
+///     None
+///
+/// # Errors
+/// `PyRuntimeError` on execute failure.
 #[pyfunction]
 #[pyo3(signature = (join_table, source_col, source_id, tx_id=None, using=None, session_id=None))]
 pub fn clear_m2m_links<'py>(
@@ -2360,6 +2550,19 @@ pub fn raw_fetch_all<'py>(
 }
 
 /// Run a raw SQL query and return the first row as a dict, or `None`.
+///
+/// Args:
+///     sql (str): Parameterized SQL (`?` / `$n` placeholders).
+///     args: Bind parameters (marshalled to typed engine binds).
+///     tx_id (str | None): Optional active transaction.
+///     using (str | None): Connection override.
+///     session_id (str | None): Session-scoped routing when set.
+///
+/// Returns:
+///     dict[str, Any] | None: First row as wire-close primitives, or `None` when no rows.
+///
+/// Values are wire-close primitives (`str | int | float | bool | bytes | None`).
+/// UUID/datetime/JSON columns come back as strings — use the ORM for typed hydration.
 #[pyfunction]
 #[pyo3(signature = (sql, args, tx_id=None, using=None, session_id=None))]
 pub fn raw_fetch_one<'py>(
@@ -2398,6 +2601,18 @@ pub fn raw_fetch_one<'py>(
     })
 }
 
+/// Compare legacy and IR query planners for shadow-runtime parity tests.
+///
+/// Args:
+///     query_payload_json (str): Query IR envelope JSON or legacy query JSON.
+///     dialect (str): `"postgres"` or `"sqlite"`.
+///     operation (str): Planner operation label (default `"select"`).
+///
+/// Returns:
+///     str: Semantic diff or match summary for assertions in pytest.
+///
+/// # Errors
+/// `PyValueError` for unknown dialect or unparseable JSON.
 #[pyfunction]
 #[pyo3(name = "_shadow_compare_query_plan_for_test")]
 #[pyo3(signature = (query_payload_json, dialect, operation="select".to_string()))]

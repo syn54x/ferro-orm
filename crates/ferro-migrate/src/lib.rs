@@ -1,34 +1,89 @@
+//! Schema IR diffing and coarse SQL emission for migration planning experiments.
+//!
+//! Compares two [`SchemaIrPayload`] snapshots and produces a [`MigrationPlan`]. Full typed
+//! `ADD COLUMN` / `ALTER COLUMN` DDL is still owned by the runtime auto-migrate path in
+//! `src/migrate.rs`; this crate expresses structural intent at the IR layer.
+
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// SQL dialect tag for [`emit_sql`] placeholder rendering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendDialect {
+    /// SQLite 3.
     Sqlite,
+    /// PostgreSQL.
     Postgres,
 }
 
+/// One structural change inferred from an IR diff.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MigrationOp {
-    AddTable { table: String },
-    DropTable { table: String },
-    AddColumn { table: String, column: String },
-    DropColumn { table: String, column: String },
-    AlterColumnType { table: String, column: String },
-    AlterColumnNullability { table: String, column: String },
+    /// A model exists in the new IR but not the old — table creation is delegated to the schema emitter.
+    AddTable {
+        /// Table to create.
+        table: String,
+    },
+    /// A model was removed — emits `DROP TABLE`.
+    DropTable {
+        /// Table to drop.
+        table: String,
+    },
+    /// A column exists on the model in the new IR but not in the live/old IR.
+    AddColumn {
+        /// Owning table.
+        table: String,
+        /// Column to add (typed DDL planned elsewhere).
+        column: String,
+    },
+    /// A column was removed from the model.
+    DropColumn {
+        /// Owning table.
+        table: String,
+        /// Column to drop.
+        column: String,
+    },
+    /// `db_type` changed for a column that exists in both snapshots.
+    AlterColumnType {
+        /// Owning table.
+        table: String,
+        /// Column whose storage type drifted.
+        column: String,
+    },
+    /// `nullable` changed for a column that exists in both snapshots.
+    AlterColumnNullability {
+        /// Owning table.
+        table: String,
+        /// Column whose nullability drifted.
+        column: String,
+    },
 }
 
+/// Ordered migration operations plus non-fatal warnings collected during planning.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MigrationPlan {
+    /// Structural operations to apply (in order).
     pub operations: Vec<MigrationOp>,
+    /// Human-readable warnings (e.g. backend limitations) that do not abort planning.
     pub warnings: Vec<String>,
 }
 
 impl MigrationPlan {
+    /// Returns `true` when there are no operations to run.
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
     }
 }
 
+/// Render coarse SQL (or comments) for each operation in `plan`.
+///
+/// # Arguments
+/// * `plan` — Operations produced by [`plan_from_ir`].
+/// * `dialect` — Target backend; affects comment text for unsupported alters on SQLite.
+///
+/// # Returns
+/// One SQL string (or explanatory comment line) per operation. `AddTable` / `AddColumn` /
+/// type-nullability alters are comments pointing callers at the full schema emitter.
 pub fn emit_sql(plan: &MigrationPlan, dialect: BackendDialect) -> Vec<String> {
     let mut sql = Vec::new();
     for operation in &plan.operations {
@@ -76,6 +131,18 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: BackendDialect) -> Vec<String> {
     sql
 }
 
+/// Diff two schema IR envelopes and produce a [`MigrationPlan`].
+///
+/// Compares tables by `table_name` and columns by name within shared tables. Does not
+/// diff indexes, FKs, or checks yet — only table/column presence and `db_type` / `nullable`.
+///
+/// # Arguments
+/// * `old_ir` — Baseline schema snapshot.
+/// * `new_ir` — Desired schema snapshot.
+///
+/// # Returns
+/// A plan with add/drop/alter operations. Never fails; structural ambiguity is expressed
+/// as operations, not errors.
 pub fn plan_from_ir(
     old_ir: &IrEnvelope<SchemaIrPayload>,
     new_ir: &IrEnvelope<SchemaIrPayload>,
