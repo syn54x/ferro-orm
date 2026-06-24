@@ -438,14 +438,16 @@ Issue references:
 
 **Deliverables**
 - [ ] `ferro-migrate` `emit_sql` emits executable DDL for all `MigrationOp` variants on SQLite and Postgres (no comment placeholders).
-- [ ] `plan_table_migration` executes the IR plan; legacy enriched-JSON diff walk removed from `src/migrate.rs`.
-- [ ] Shadow/parity gate: IR migration path matches `create_tables` and Alembic for the `auto_migrate` capability matrix.
+- [ ] `plan_table_migration` executes the IR plan as the primary runtime path; legacy enriched-JSON diff walk **deprecated** but retained for shadow comparison (removal deferred to Phase 9).
+- [ ] Shadow/parity gate: IR migration path matches legacy planner, `create_tables`, and Alembic for the `auto_migrate` capability matrix.
+- [ ] `shadow_compare_migration_plan` compares IR vs legacy output (not legacy roundtrip); `FERRO_SHADOW_RUNTIME` / `FERRO_SHADOW_RUNTIME_STRICT` enforce drift in CI.
 - [ ] Duplicate `schema_json_to_schema_ir` / `live_columns_to_schema_ir` lowering consolidated or single-sourced where feasible.
 
 **Exit gate**
 - [ ] `cargo test -p ferro-migrate` green with full op coverage.
 - [ ] `tests/test_auto_migrate.py` and `tests/test_migrate_plan.py` green on SQLite + Postgres backend matrix.
-- [ ] No discarded `_typed_plan` scaffolding in `migrate.rs`.
+- [ ] IR planner is live; no discarded `_typed_plan` scaffolding in `migrate.rs`.
+- [ ] Legacy JSON diff planner deprecated and shadow-compared; **not** removed (Phase 9).
 
 **Verification commands**
 - `cargo test -p ferro-schema-ir -p ferro-migrate`
@@ -467,7 +469,7 @@ Issue references:
 - Complete migration by removing deprecated compatibility shims in `v0.14.0`.
 
 **Deliverables**
-- [ ] Legacy compatibility code paths removed.
+- [ ] Legacy compatibility code paths removed (operator-style predicates, ambient session routing, private Alembic JSON helpers, **deprecated enriched-JSON migration planner** in `src/migrate.rs`).
 - [ ] Deprecated-compat test inventory removed (all `deprecated_operator_path` tests deleted or rewritten).
 - [ ] Final migration-guide cutover notes for `v0.14.0`.
 - [ ] Release checklist and changelog entries for shim removal.
@@ -614,6 +616,7 @@ Append updates as concise entries.
 - `2026-06-19` - Phase 9 issue set created and linked: epic [#107](https://github.com/syn54x/ferro-orm/issues/107) with sub-issues [#108](https://github.com/syn54x/ferro-orm/issues/108), [#109](https://github.com/syn54x/ferro-orm/issues/109), [#110](https://github.com/syn54x/ferro-orm/issues/110) (originally filed as Phase 8; renumbered 2026-06-23).
 - `2026-06-23` - Phase 8 issue set created and linked: epic [#117](https://github.com/syn54x/ferro-orm/issues/117) with sub-issues [#118](https://github.com/syn54x/ferro-orm/issues/118), [#119](https://github.com/syn54x/ferro-orm/issues/119), [#120](https://github.com/syn54x/ferro-orm/issues/120).
 - `2026-06-23` - Sequencing update: inserted Phase 8 (`ferro-migrate` runtime cutover, `v0.13.0`); prior shim-removal phase renumbered to Phase 9 (`v0.14.0`). Phase 4 exit gates corrected to reflect Alembic-only cutover on `feat/ir-first`.
+- `2026-06-24` - Phase 8 scope update: legacy enriched-JSON migration planner is deprecated and shadow-compared in Phase 8; hard removal moves to Phase 9 (`v0.14.0`) after parity confidence.
 - `2026-06-19` - Phase 4 working-branch implementation landed: added `ferro-migrate` (`SchemaIR(old,new)` diff + SQL emission entrypoint), expanded SchemaIR fidelity (enum/check/join-table coverage), switched Alembic metadata derivation to SchemaIR, and added deprecation warnings for superseded JSON-only Alembic helpers (target removal `v0.14.0`).
 - `2026-06-22` - Phase 5 working-branch implementation landed: added unified codec registry module (`src/codec.rs`) across insert/update/filter/m2m/fetch paths, extracted single hydration ABI helper (`src/hydration.rs`) with required Pydantic slot initialization, and expanded codec conformance vectors/tests for null/uuid/decimal/temporal/enum semantics.
 - `2026-06-22` - Phase 6 working-branch implementation landed: introduced sessionized runtime API (`engines.session` / `Session`) and ambient session routing, moved transaction/identity-map hot-path state to session scope in Rust with compatibility fallback + deprecation warnings, added session lifecycle tests, and synchronized migration/guide/API/invariant docs.

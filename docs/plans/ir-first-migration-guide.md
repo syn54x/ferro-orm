@@ -139,12 +139,12 @@ Runtime migration IR cutover (target: `v0.13.0`).
 | --- | --- | --- | --- | --- |
 | [#117](https://github.com/syn54x/ferro-orm/issues/117) | Coordinate `ferro-migrate` runtime cutover and parity exit gates | none | No action — internal planner cutover | Epic |
 | [#118](https://github.com/syn54x/ferro-orm/issues/118) | Complete executable SQL emission from `MigrationPlan` for all ops (SQLite + Postgres) | none | No action | Continues #90 scaffold |
-| [#119](https://github.com/syn54x/ferro-orm/issues/119) | Wire `auto_migrate` / `plan_table_migration` to execute ferro-migrate IR plans | none | No action — behavior must remain observably identical | Retires discarded `_typed_plan` path |
-| [#120](https://github.com/syn54x/ferro-orm/issues/120) | Parity gate + remove legacy JSON diff path in `src/migrate.rs` | none | No action | AGENTS.md I-1 enforcement |
+| [#119](https://github.com/syn54x/ferro-orm/issues/119) | Wire `auto_migrate` / `plan_table_migration` to execute ferro-migrate IR plans | none | No action — behavior must remain observably identical | IR planner becomes primary; legacy path deprecated |
+| [#120](https://github.com/syn54x/ferro-orm/issues/120) | Parity gate + shadow comparison (IR vs legacy, `create_tables`, Alembic) | none | No action | Legacy planner retained deprecated; removal in Phase 9 |
 
 - **Migration impact:** `none` for public APIs — `connect(auto_migrate=...)` and `ferro.migrate` signatures unchanged.
-- **Internal change:** `auto_migrate` executes `ferro-migrate` `SchemaIR(old,new)` plans instead of the legacy enriched-JSON diff walk in `src/migrate.rs`.
-- **Parity requirement:** auto-migrated schema artifacts must remain byte-identical to `create_tables` and Alembic (AGENTS.md I-1).
+- **Internal change:** `auto_migrate` executes `ferro-migrate` `SchemaIR(old,new)` plans as the primary path. The legacy enriched-JSON diff walk in `src/migrate.rs` is **deprecated** and kept for shadow comparison until Phase 9 removal.
+- **Parity requirement:** IR planner output must match the legacy planner, `create_tables`, and Alembic for the `auto_migrate` capability matrix (AGENTS.md I-1).
 
 ### Phase 9
 
@@ -162,4 +162,5 @@ Planned cutover checklist:
 - Remove deprecated operator-style predicate support.
 - Remove ambient default-connection routing outside an active session.
 - Remove private Alembic JSON helper APIs (`_build_sa_table`, `_map_to_sa_type`).
+- Remove deprecated enriched-JSON migration planner in `src/migrate.rs` (shadow reference only after Phase 8).
 - Remove or rewrite all tests tagged `deprecated_operator_path`.
