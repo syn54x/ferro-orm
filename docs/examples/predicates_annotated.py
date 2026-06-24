@@ -26,7 +26,7 @@ async def main() -> None:
         ]
     )
 
-    adults = await User.where(lambda t: t.age >= 18).all()
+    adults = await User.where(lambda user: user.age >= 18).all()
     assert len(adults) == 2
 
     print("predicates_annotated example ran successfully")

@@ -28,7 +28,7 @@ async def main() -> None:
     )
 
     # --8<-- [start:filtering]
-    adults = await User.where(lambda t: t.age >= 18).all()
+    adults = await User.where(lambda user: user.age >= 18).all()
     # --8<-- [end:filtering]
     assert len(adults) == 3
 
@@ -44,14 +44,14 @@ async def main() -> None:
     assert len(active) == 3
 
     # --8<-- [start:lambda-style]
-    admins = await User.where(lambda t: (t.role == "admin") & (t.archived == False)).all()  # noqa: E712
+    admins = await User.where(lambda user: (user.role == "admin") & (user.archived == False)).all()  # noqa: E712
     # --8<-- [end:lambda-style]
     assert len(admins) == 1
 
     # --8<-- [start:operators]
-    teens = await User.where(lambda t: (t.age >= 13) & (t.age <= 19)).all()
-    a_names = await User.where(lambda t: t.name.like("a%")).all()
-    staff = await User.where(lambda t: t.role.in_(["admin", "moderator"])).all()
+    teens = await User.where(lambda user: (user.age >= 13) & (user.age <= 19)).all()
+    a_names = await User.where(lambda user: user.name.like("a%")).all()
+    staff = await User.where(lambda user: user.role.in_(["admin", "moderator"])).all()
     # --8<-- [end:operators]
     assert len(teens) == 2
     assert len(a_names) == 1
@@ -59,10 +59,10 @@ async def main() -> None:
 
     # --8<-- [start:combining]
     # & is AND, | is OR — parenthesize each side
-    flagged = await User.where(lambda t: (t.age < 18) | (t.archived == True)).all()  # noqa: E712
+    flagged = await User.where(lambda user: (user.age < 18) | (user.archived == True)).all()  # noqa: E712
 
     # Chained .where() calls also AND together
-    young_members = await User.where(lambda t: t.role == "member").where(lambda t: t.age < 21).all()
+    young_members = await User.where(lambda user: user.role == "member").where(lambda user: user.age < 21).all()
     # --8<-- [end:combining]
     assert len(flagged) == 2
     assert len(young_members) == 2
@@ -76,9 +76,9 @@ async def main() -> None:
 
     # --8<-- [start:terminals]
     everyone = await User.all()
-    first_admin = await User.where(lambda t: t.role == "admin").first()
+    first_admin = await User.where(lambda user: user.role == "admin").first()
     headcount = await User.select().count()
-    any_minors = await User.where(lambda t: t.age < 18).exists()
+    any_minors = await User.where(lambda user: user.age < 18).exists()
     # --8<-- [end:terminals]
     assert len(everyone) == 4
     assert first_admin is not None

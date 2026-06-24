@@ -57,7 +57,7 @@ async def main() -> None:
 
     # Filter, order, and slice
     published = (
-        await Post.where(lambda t: t.published == True)  # noqa: E712
+        await Post.where(lambda post: post.published == True)  # noqa: E712
         .order_by(Post.created_at, "desc")
         .limit(10)
         .all()
@@ -65,7 +65,7 @@ async def main() -> None:
 
     # Aggregate terminals
     total = await Post.select().count()
-    has_drafts = await Post.where(lambda t: t.published == False).exists()  # noqa: E712
+    has_drafts = await Post.where(lambda post: post.published == False).exists()  # noqa: E712
     # --8<-- [end:query]
     assert same_post is post  # identity map: same Python object
     assert len(published) == 2
@@ -77,7 +77,7 @@ async def main() -> None:
     author = await same_post.author
 
     # Reverse access: the BackRef is a chainable query
-    alice_posts = await author.posts.where(lambda t: t.published == True).all()  # noqa: E712
+    alice_posts = await author.posts.where(lambda post: post.published == True).all()  # noqa: E712
     # --8<-- [end:relationships]
     assert author.name == "Alice"
     assert len(alice_posts) == 2
@@ -88,10 +88,10 @@ async def main() -> None:
     await post.save()
 
     # Update many rows at once
-    updated = await Post.where(lambda t: t.published == False).update(published=True)  # noqa: E712
+    updated = await Post.where(lambda post: post.published == False).update(published=True)  # noqa: E712
 
     # Delete
-    deleted = await Post.where(lambda t: t.title == "Unfinished Draft").delete()
+    deleted = await Post.where(lambda post: post.title == "Unfinished Draft").delete()
     # --8<-- [end:update-delete]
     assert updated == 1
     assert deleted == 1

@@ -41,7 +41,7 @@ pip install ferro-orm
 pip install "ferro-orm[alembic]"
 ```
 
-Ferro currently supports SQLite and PostgreSQL as runtime backends. Named multi-database routing and custom connection-pool kwargs are planned, but not part of the current public API.
+Ferro currently supports SQLite and PostgreSQL. Register multiple named connections with `connect(..., name="...")` when a process needs more than one database — see the [connections guide](https://syn54x.github.io/ferro-orm/guide/connections/).
 
 ## Quick Start
 
@@ -60,8 +60,8 @@ async def main():
     # Create
     alice = await User.create(username="alice")
 
-    # Query
-    active_users = await User.where(User.is_active == True).all()
+    # Query (lambda predicates — name the parameter after the model, e.g. user for User)
+    active_users = await User.where(lambda user: user.is_active == True).all()
     print(f"Found {len(active_users)} active users.")
 
 if __name__ == "__main__":

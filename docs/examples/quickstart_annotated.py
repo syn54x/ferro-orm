@@ -39,7 +39,7 @@ async def main() -> None:
 
     assert post.id is not None
     assert (await post.author).email == "alice@example.com"
-    assert len(await alice.posts.where(lambda t: t.published == True).all()) == 1  # noqa: E712
+    assert len(await alice.posts.where(lambda post: post.published == True).all()) == 1  # noqa: E712
 
     print("quickstart_annotated example ran successfully")
 
