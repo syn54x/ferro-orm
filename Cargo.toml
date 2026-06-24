@@ -3,7 +3,7 @@ members = [".", "crates/ferro-schema-ir", "crates/ferro-migrate"]
 
 [package]
 name = "ferro"
-version = "0.12.2"
+version = "0.12.3"
 edition = "2024"
 
 [lib]

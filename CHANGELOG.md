@@ -1,6 +1,19 @@
 # CHANGELOG
 
 
+## v0.12.3 (2026-06-24)
+
+### Bug Fixes
+
+- **session**: Reject close while transactions are active
+  ([#128](https://github.com/syn54x/ferro-orm/pull/128),
+  [`e46f183`](https://github.com/syn54x/ferro-orm/commit/e46f183fba7a3bcbc635f7e66502a77aeb56861d))
+
+- **session**: Serialize concurrent close teardown
+  ([#129](https://github.com/syn54x/ferro-orm/pull/129),
+  [`7afa616`](https://github.com/syn54x/ferro-orm/commit/7afa6168abd2eb19b564fc1c2ab9956e03a20fe9))
+
+
 ## v0.12.2 (2026-06-23)
 
 ### Bug Fixes
