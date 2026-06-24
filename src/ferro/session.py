@@ -28,6 +28,7 @@ class Session:
     _enter_task: asyncio.Task[Any] | None = field(
         default=None, repr=False, compare=False
     )
+    _close_lock: asyncio.Lock | None = field(default=None, repr=False, compare=False)
 
     async def __aenter__(self) -> "Session":
         self.session_id, resolved_name = _core_open_session(self.connection_name)
@@ -59,26 +60,30 @@ class Session:
                 match this handle (same-context lifecycle misuse), or if
                 session-scoped transactions are still open.
         """
-        if self.session_id is None and self._token is None:
-            return
+        if self._close_lock is None:
+            self._close_lock = asyncio.Lock()
 
-        self._assert_close_allowed()
+        async with self._close_lock:
+            if self.session_id is None and self._token is None:
+                return
 
-        if self.session_id is not None:
-            session_id = self.session_id
-            _core_close_session(session_id)
-            self.session_id = None
+            self._assert_close_allowed()
 
-        if self._token is None:
+            if self.session_id is not None:
+                session_id = self.session_id
+                _core_close_session(session_id)
+                self.session_id = None
+
+            if self._token is None:
+                self._enter_context = None
+                self._enter_task = None
+                return
+
+            token = self._token
+            self._token = None
             self._enter_context = None
             self._enter_task = None
-            return
-
-        token = self._token
-        self._token = None
-        self._enter_context = None
-        self._enter_task = None
-        self._restore_ambient_session(token)
+            self._restore_ambient_session(token)
 
     def _assert_close_allowed(self) -> None:
         if self._token is None:

@@ -184,6 +184,35 @@ async def test_session_close_is_idempotent(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_close_same_loop_is_idempotent(tmp_path):
+    app_db = tmp_path / "app.db"
+    await ferro.connect(f"sqlite:{app_db}?mode=rwc", auto_migrate=True)
+
+    session = ferro.engines.session("default")
+    await session.__aenter__()
+    await SessionMarker.create(id=1, label="demo")
+
+    barrier = asyncio.Barrier(2)
+
+    async def close_after_barrier() -> None:
+        await barrier.wait()
+        await session.close()
+
+    results = await asyncio.gather(
+        close_after_barrier(),
+        close_after_barrier(),
+        return_exceptions=True,
+    )
+    assert not any(isinstance(r, BaseException) for r in results)
+    assert session.session_id is None
+
+    await session.close()
+
+    with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
+        await SessionMarker.all()
+
+
+@pytest.mark.asyncio
 async def test_nested_session_cross_context_close_inner_then_outer(tmp_path):
     app_db = tmp_path / "app.db"
     analytics_db = tmp_path / "analytics.db"
