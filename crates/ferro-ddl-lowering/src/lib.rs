@@ -129,6 +129,33 @@ pub fn db_type_token_to_canonical(token: &str, dialect: Dialect) -> Option<Canon
     }
 }
 
+/// Map a resolved [`CanonicalType`] back to the canonical Ferro `db_type` token
+/// vocabulary used in SchemaIR and cross-emitter parity tests.
+pub fn canonical_to_db_type_token(canonical: CanonicalType, dialect: Dialect) -> String {
+    match canonical {
+        CanonicalType::Integer => "int".to_string(),
+        CanonicalType::SmallInt => "smallint".to_string(),
+        CanonicalType::BigInt => "bigint".to_string(),
+        CanonicalType::Double => "double".to_string(),
+        CanonicalType::Decimal => "numeric".to_string(),
+        CanonicalType::Boolean => "boolean".to_string(),
+        CanonicalType::Json => "json".to_string(),
+        CanonicalType::Text => "text".to_string(),
+        CanonicalType::Varchar(None) => "varchar".to_string(),
+        CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
+        CanonicalType::Char(n) => match (dialect, n) {
+            (Dialect::Sqlite, 32) => "uuid".to_string(),
+            _ => format!("char({n})"),
+        },
+        CanonicalType::Uuid => "uuid".to_string(),
+        CanonicalType::DateTime | CanonicalType::Timestamp => "timestamp".to_string(),
+        CanonicalType::TimestampTz => "timestamptz".to_string(),
+        CanonicalType::Date => "date".to_string(),
+        CanonicalType::Time => "time".to_string(),
+        CanonicalType::Blob => "bytea".to_string(),
+    }
+}
+
 /// Resolve a [`SchemaColumn`] to its canonical storage type.
 pub fn canonical_from_schema_column(
     col: &SchemaColumn,

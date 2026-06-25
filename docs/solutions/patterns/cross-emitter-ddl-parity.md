@@ -8,7 +8,7 @@ related_files:
   - src/schema.rs
   - tests/test_alembic_autogenerate.py
   - tests/test_schema_constraints.py
-related_issues: [32]
+related_issues: [32, 120]
 related_prs: [36]
 captured: 2026-04-28
 ---
@@ -96,3 +96,30 @@ token × dialect plus `ck_<table>_<col>` parity).
 
 If you see any of those, the cross-emitter parity invariant has been broken.
 The fix is _always_ to align both emitters, never to silence the diff.
+
+## Migration planner shadow gate (Phase 8 / #120)
+
+Auto-migrate has two Rust planners until Phase 9 ([#108](https://github.com/syn54x/ferro-orm/issues/108)):
+
+- **Primary:** `plan_table_migration` — SchemaIR diff (`plan_from_ir`) + `emit_sql_with_ir`.
+- **Reference:** `plan_table_migration_legacy` — enriched-JSON walk via `build_column_plan`.
+
+`shadow_compare_migration_plan` in `src/migrate.rs` diffs IR vs legacy on
+`statements`, `drop_columns`, and `warnings`. When `FERRO_SHADOW_RUNTIME=1` is
+set, `internal_migrate` runs this compare on every table diff; with
+`FERRO_SHADOW_RUNTIME_STRICT=1`, a mismatch aborts the migration.
+
+**When IR and legacy disagree**, align the IR path to legacy (KTD-1 in the
+#120 plan) unless legacy is objectively wrong vs Alembic/`create_tables` — then
+fix both in the same PR with cross-emitter proof.
+
+**CI enforcement:**
+
+- `cargo test migrate::tests::ir_legacy_parity_matrix` — explicit matrix.
+- `tests/test_shadow_reports.py` — `_shadow_compare_migration_plan_for_test` fixtures.
+- `tests/test_cross_emitter_parity.py` — Alembic vs post-migrate database.
+
+**Adapter rule:** `schema_json_to_schema_ir` must derive column `db_type` /
+nullability / PK metadata from `build_column_plan` (via `canonical_to_db_type_token`
+in `src/schema.rs`). Do not add a third independent inference function in
+`src/migrate.rs`.

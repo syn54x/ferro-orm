@@ -43,5 +43,24 @@
         ]
       }
     }
+  },
+  "migration_compare": {
+    "ir": {
+      "drop_columns": [],
+      "statements": [
+        "ALTER TABLE \"shadowuser\" ADD COLUMN \"age\" integer",
+        "ALTER TABLE \"shadowuser\" ADD COLUMN \"name\" varchar"
+      ],
+      "warnings": []
+    },
+    "legacy": {
+      "drop_columns": [],
+      "statements": [
+        "ALTER TABLE \"shadowuser\" ADD COLUMN \"age\" integer",
+        "ALTER TABLE \"shadowuser\" ADD COLUMN \"name\" varchar"
+      ],
+      "warnings": []
+    },
+    "matches": true
   }
 }
