@@ -1,8 +1,8 @@
 # Requirements: Wire runtime auto_migrate to ferro-migrate IR planner (#119)
 
-**Date:** 2026-06-24  
-**Epic:** [#117](https://github.com/syn54x/ferro-orm/issues/117)  
-**Issue:** [#119](https://github.com/syn54x/ferro-orm/issues/119)  
+**Date:** 2026-06-24
+**Epic:** [#117](https://github.com/syn54x/ferro-orm/issues/117)
+**Issue:** [#119](https://github.com/syn54x/ferro-orm/issues/119)
 **Phase:** 8 — Runtime migration IR cutover (`v0.13.0`)
 
 ---
@@ -62,14 +62,14 @@ Make `plan_table_migration` produce the same `(statements, drop_columns, warning
 
 Wire IR plan + `emit_sql_with_ir` as primary. Enrich JSON→IR adapters only enough for `test_migrate_plan.py` parity. Extract legacy helper unchanged for #120.
 
-**Pros:** Smallest correct cutover; #118 emission logic is already tested; legacy preserved for shadow.  
+**Pros:** Smallest correct cutover; #118 emission logic is already tested; legacy preserved for shadow.
 **Cons:** Temporary duplication between adapters and `build_column_plan` until #120 consolidates.
 
 ### B. Consolidate adapters first, then wire
 
 Refactor `schema_json_to_schema_ir` to share `build_column_plan` metadata extraction before switching the hot path.
 
-**Pros:** Less duplication long-term.  
+**Pros:** Less duplication long-term.
 **Cons:** Larger blast radius; mixes #119 execution wiring with #120 consolidation; harder to bisect parity failures.
 
 ### C. Dual-run with legacy execution

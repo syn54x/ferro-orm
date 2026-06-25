@@ -25,7 +25,7 @@ use crate::introspect::{
 };
 use crate::schema::{
     CanonicalType, ColumnPlan, apply_canonical_type, build_column_plan, internal_create_tables,
-    order_schemas_for_creation,
+    order_schemas_for_creation, property_json_type_and_format,
 };
 use crate::state::{IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, engine_for_connection};
 use pyo3::prelude::*;
@@ -81,10 +81,8 @@ fn infer_schema_db_type(raw_col: &serde_json::Value, resolved: &serde_json::Valu
     {
         return db_type.to_string();
     }
-    match (
-        resolved.get("type").and_then(|v| v.as_str()),
-        resolved.get("format").and_then(|v| v.as_str()),
-    ) {
+    let (json_type, format) = property_json_type_and_format(resolved);
+    match (json_type, format) {
         (_, Some("date-time")) => "timestamptz".to_string(),
         (_, Some("uuid")) => "uuid".to_string(),
         (_, Some("date")) => "date".to_string(),
@@ -92,6 +90,7 @@ fn infer_schema_db_type(raw_col: &serde_json::Value, resolved: &serde_json::Valu
         (Some("boolean"), _) => "boolean".to_string(),
         (Some("number"), _) => "double".to_string(),
         (Some("string"), _) => "varchar".to_string(),
+        (Some("object" | "array"), _) => "json".to_string(),
         _ => "text".to_string(),
     }
 }
@@ -149,9 +148,8 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                 .map(|_| true);
             columns.push(SchemaColumn {
                 name: name.clone(),
-                logical_type: resolved
-                    .get("type")
-                    .and_then(|v| v.as_str())
+                logical_type: property_json_type_and_format(resolved)
+                    .0
                     .unwrap_or("unknown")
                     .to_string(),
                 db_type,
@@ -1494,6 +1492,31 @@ mod tests {
         let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
             .unwrap();
         assert!(plan.statements.is_empty(), "{:?}", plan.statements);
+    }
+
+    #[test]
+    fn optional_string_anyof_add_column_uses_varchar_spelling() {
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "motto": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": null,
+                },
+            }
+        });
+        let live_cols = vec![LiveColumn {
+            is_primary_key: true,
+            ..live("id", "integer")
+        }];
+        let plan =
+            plan_table_migration("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES).unwrap();
+        let sql = &plan.statements[0];
+        assert!(sql.contains("ADD COLUMN \"motto\""), "{sql}");
+        assert!(
+            !sql.to_uppercase().contains(" TEXT "),
+            "Optional anyOf string columns must not render as TEXT: {sql}"
+        );
     }
 
     #[test]

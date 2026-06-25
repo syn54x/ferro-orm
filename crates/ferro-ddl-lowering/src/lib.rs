@@ -124,6 +124,7 @@ pub fn db_type_token_to_canonical(token: &str, dialect: Dialect) -> Option<Canon
         }),
         "date" => Some(CanonicalType::Date),
         "time" => Some(CanonicalType::Time),
+        "varchar" => Some(CanonicalType::Varchar(None)),
         other => parse_varchar_token(other).map(|n| CanonicalType::Varchar(Some(n))),
     }
 }

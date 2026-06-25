@@ -13,8 +13,8 @@ origin: docs/brainstorms/2026-06-24-ir-p8-119-wire-automigrate-requirements.md
 
 Cut `plan_table_migration` over to `plan_from_ir` + `emit_sql_with_ir` as the sole hot-path planner. Extract the existing enriched-JSON diff into a deprecated `plan_table_migration_legacy` helper for #120 shadow comparison. Enrich JSON→IR adapters minimally so render-level and integration tests remain byte-identical.
 
-**Closes:** [#119](https://github.com/syn54x/ferro-orm/issues/119)  
-**Base branch:** `feat/ir-p8-migrate-cutover`  
+**Closes:** [#119](https://github.com/syn54x/ferro-orm/issues/119)
+**Base branch:** `feat/ir-p8-migrate-cutover`
 **Feature branch:** `feat/ir-p8-119-wire-automigrate`
 
 ---
