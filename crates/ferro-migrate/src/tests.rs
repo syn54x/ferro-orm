@@ -70,6 +70,15 @@ fn col_with_flags(
     }
 }
 
+fn pk_col(name: &str, db_type: &str) -> SchemaColumn {
+    SchemaColumn {
+        primary_key: true,
+        autoincrement: true,
+        nullable: false,
+        ..col(name, db_type, false)
+    }
+}
+
 fn assert_no_comment_placeholders(statements: &[String]) {
     for sql in statements {
         assert!(
@@ -217,6 +226,30 @@ fn emit_sql_with_ir_add_table_sqlite() {
     let result =
         emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, BackendDialect::Sqlite).unwrap();
     assert!(result.statements[0].starts_with("CREATE TABLE"));
+}
+
+#[test]
+fn emit_sql_with_ir_add_table_unique_inline_sqlite() {
+    let model = SchemaModel {
+        columns: vec![col_with_flags("email", "text", true, true, false, None)],
+        uniques: vec![SchemaUnique {
+            name: "uq_user_email".to_string(),
+            columns: vec!["email".to_string()],
+        }],
+        ..schema_model("user", vec![])
+    };
+    let new_ir = envelope(vec![model]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddTable {
+            table: "user".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let result =
+        emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, BackendDialect::Sqlite).unwrap();
+    assert_eq!(result.statements.len(), 1);
+    assert!(result.statements[0].contains("UNIQUE"));
+    assert!(!result.statements.iter().any(|s| s.contains("CREATE UNIQUE INDEX")));
 }
 
 #[test]
@@ -492,6 +525,57 @@ fn emit_sql_with_ir_unsafe_not_null_add_errors() {
     let err = emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap_err();
     assert!(err.message.contains("NOT NULL"));
     assert!(err.message.contains("no literal default"));
+}
+
+#[test]
+fn emit_sql_with_ir_drop_primary_key_column_errors() {
+    let old_ir = envelope(vec![schema_model("user", vec![pk_col("id", "int"), col("legacy", "text", true)])]);
+    let new_ir = envelope(vec![schema_model("user", vec![pk_col("id", "int")])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::DropColumn {
+            table: "user".to_string(),
+            column: "id".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let err = emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap_err();
+    assert!(err.message.contains("primary key"));
+}
+
+#[test]
+fn emit_sql_with_ir_add_table_missing_model_errors() {
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddTable {
+            table: "missing".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let err =
+        emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Postgres)
+            .unwrap_err();
+    assert!(err.message.contains("model 'missing' not found"));
+}
+
+#[test]
+fn emit_sql_with_ir_alter_column_type_unknown_db_type_errors() {
+    let bad_col = SchemaColumn {
+        db_type: "not_a_real_token".to_string(),
+        logical_type: "unknown".to_string(),
+        ..col("name", "text", true)
+    };
+    let old_ir = envelope(vec![schema_model("user", vec![col("name", "text", true)])]);
+    let new_ir = envelope(vec![schema_model("user", vec![bad_col])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AlterColumnType {
+            table: "user".to_string(),
+            column: "name".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let err =
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap_err();
+    assert!(err.message.contains("Cannot alter type"));
+    assert!(err.message.contains("unknown db_type"));
 }
 
 #[test]

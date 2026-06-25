@@ -73,7 +73,7 @@ fn render_create_table(model: &SchemaModel, dialect: BackendDialect) -> Result<S
         if !col.nullable {
             col_def.not_null();
         }
-        if col.unique && dialect == BackendDialect::Postgres {
+        if col.unique {
             col_def.unique_key();
         }
         table_stmt.col(&mut col_def);
@@ -110,6 +110,17 @@ fn render_index_sql(
     }
 }
 
+fn single_column_unique_is_inline(model: &SchemaModel, unique_columns: &[String]) -> bool {
+    if unique_columns.len() != 1 {
+        return false;
+    }
+    let col_name = &unique_columns[0];
+    model
+        .columns
+        .iter()
+        .any(|col| col.name == *col_name && col.unique)
+}
+
 fn post_create_artifacts(
     model: &SchemaModel,
     dialect: BackendDialect,
@@ -129,6 +140,9 @@ fn post_create_artifacts(
     }
 
     for unique in &model.uniques {
+        if single_column_unique_is_inline(model, &unique.columns) {
+            continue;
+        }
         statements.push(render_index_sql(
             table_lower,
             &unique.name,
@@ -395,7 +409,7 @@ fn emit_alter_column_type(
     old_col: &SchemaColumn,
     new_col: &SchemaColumn,
     dialect: BackendDialect,
-) -> EmissionResult {
+) -> Result<EmissionResult, EmissionError> {
     let mut result = EmissionResult::default();
     let ld = lowering_dialect(dialect);
 
@@ -407,14 +421,19 @@ fn emit_alter_column_type(
                      is deferred to Alembic.",
                     table, column
                 ));
-                return result;
+                return Ok(result);
             }
             if old_col.primary_key || new_col.primary_key {
-                return result;
+                return Ok(result);
             }
-            let Ok(new_canonical) = canonical_from_schema_column(new_col, ld) else {
-                return result;
-            };
+            let new_canonical = canonical_from_schema_column(new_col, ld).map_err(|message| {
+                EmissionError {
+                    message: format!(
+                        "Cannot alter type for '{}.{}': {}",
+                        table, column, message
+                    ),
+                }
+            })?;
             let target = pg_alter_type_target(new_canonical);
             result.statements.push(format!(
                 "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",
@@ -425,11 +444,16 @@ fn emit_alter_column_type(
         }
         BackendDialect::Sqlite => {
             if old_col.primary_key || new_col.primary_key {
-                return result;
+                return Ok(result);
             }
-            let Ok(new_canonical) = canonical_from_schema_column(new_col, ld) else {
-                return result;
-            };
+            let new_canonical = canonical_from_schema_column(new_col, ld).map_err(|message| {
+                EmissionError {
+                    message: format!(
+                        "Cannot alter type for '{}.{}': {}",
+                        table, column, message
+                    ),
+                }
+            })?;
             if sqlite_type_storage_drift(&old_col.db_type, new_canonical) {
                 result.warnings.push(format!(
                     "Column '{}.{}' is declared '{}' in the database but the model expects \
@@ -443,7 +467,7 @@ fn emit_alter_column_type(
             }
         }
     }
-    result
+    Ok(result)
 }
 
 fn emit_alter_column_nullability(
@@ -514,14 +538,12 @@ pub fn emit_sql_with_ir(
         warnings: plan.warnings.clone(),
     };
 
-    let add_table_models: Vec<&SchemaModel> = plan
-        .operations
-        .iter()
-        .filter_map(|op| match op {
-            MigrationOp::AddTable { table } => find_model(&new_models, table).ok(),
-            _ => None,
-        })
-        .collect();
+    let mut add_table_models = Vec::new();
+    for operation in &plan.operations {
+        if let MigrationOp::AddTable { table } = operation {
+            add_table_models.push(find_model(&new_models, table)?);
+        }
+    }
 
     if !add_table_models.is_empty() {
         emit_add_table_passes(add_table_models, dialect, &mut result)?;
@@ -542,6 +564,17 @@ pub fn emit_sql_with_ir(
                 result.warnings.extend(partial.warnings);
             }
             MigrationOp::DropColumn { table, column } => {
+                let old_model = find_model(&old_models, table)?;
+                let old_col = find_column(old_model, column)?;
+                if old_col.primary_key {
+                    return Err(EmissionError {
+                        message: format!(
+                            "Cannot drop column '{}.{}': it is part of the primary key. \
+                             Primary-key changes must be migrated with Alembic.",
+                            table, column
+                        ),
+                    });
+                }
                 result.statements.push(format!(
                     "ALTER TABLE \"{}\" DROP COLUMN \"{}\"",
                     table, column
@@ -552,7 +585,7 @@ pub fn emit_sql_with_ir(
                 let new_model = find_model(&new_models, table)?;
                 let old_col = find_column(old_model, column)?;
                 let new_col = find_column(new_model, column)?;
-                let partial = emit_alter_column_type(table, column, old_col, new_col, dialect);
+                let partial = emit_alter_column_type(table, column, old_col, new_col, dialect)?;
                 result.statements.extend(partial.statements);
                 result.warnings.extend(partial.warnings);
             }
