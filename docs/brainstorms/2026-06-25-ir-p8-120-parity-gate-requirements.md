@@ -53,7 +53,7 @@ Make **IR vs legacy planner parity** a enforced, test-backed contract for the su
 - Removing `plan_table_migration_legacy` or the JSON properties walk.
 - New public Python APIs.
 - Alembic bridge rewrites beyond existing parity tests.
-- Runtime dual-execution (execute legacy when IR differs) — rejected per I-7.
+- Runtime dual-execution (execute legacy when IR differs) — rejected per I-6.
 
 ---
 

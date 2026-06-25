@@ -1,4 +1,4 @@
-"""Annotated-style companion to quickstart.py (AGENTS.md I-8).
+"""Annotated-style companion to quickstart.py (AGENTS.md I-7).
 
 Same models as docs/examples/quickstart.py, declared with ``Annotated``
 metadata instead of assignment. Field options move into ``Annotated[...]``;

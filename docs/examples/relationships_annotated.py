@@ -1,4 +1,4 @@
-"""Annotated-style companion to relationships.py (AGENTS.md I-8).
+"""Annotated-style companion to relationships.py (AGENTS.md I-7).
 
 Field options move into ``Annotated[...]``. The relationship declarations
 themselves are identical in both styles: forward FKs are always
