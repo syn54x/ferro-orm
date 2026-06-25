@@ -1,5 +1,10 @@
 [workspace]
-members = [".", "crates/ferro-schema-ir", "crates/ferro-migrate"]
+members = [
+    ".",
+    "crates/ferro-schema-ir",
+    "crates/ferro-ddl-lowering",
+    "crates/ferro-migrate",
+]
 
 [package]
 name = "ferro"
