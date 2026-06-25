@@ -14,6 +14,7 @@
 //! Phase 9.
 
 use crate::backend::EngineHandle;
+use ferro_ddl_lowering::db_check_constraint_name;
 use ferro_migrate::{BackendDialect, MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
     IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
@@ -206,7 +207,7 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                 && let Some(expression) = migrate_check_expression(name, resolved)
             {
                 checks.push(SchemaCheck {
-                    name: format!("ck_{table_lower}_{name}"),
+                    name: db_check_constraint_name(table_lower, name),
                     expression,
                 });
             }
@@ -232,8 +233,28 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
     }
 }
 
+/// Map `information_schema.columns.data_type` spellings to the same `db_type`
+/// token vocabulary `infer_schema_db_type` uses for model columns (mirrors
+/// `pg_type_matches` on the legacy planner path).
 fn declared_type_to_db_type(declared: &str) -> String {
     let lower = declared.to_ascii_lowercase();
+    match lower.as_str() {
+        "boolean" => return "boolean".to_string(),
+        "double precision" | "real" => return "double".to_string(),
+        "numeric" => return "numeric".to_string(),
+        "json" | "jsonb" => return "json".to_string(),
+        "bytea" => return "bytea".to_string(),
+        "text" => return "text".to_string(),
+        "integer" => return "int".to_string(),
+        "smallint" => return "smallint".to_string(),
+        "bigint" => return "bigint".to_string(),
+        "uuid" => return "uuid".to_string(),
+        "date" => return "date".to_string(),
+        "time without time zone" => return "time".to_string(),
+        "timestamp without time zone" => return "timestamp".to_string(),
+        "timestamp with time zone" => return "timestamptz".to_string(),
+        _ => {}
+    }
     if lower.contains("character varying") || lower == "varchar" {
         return "varchar".to_string();
     }
@@ -1473,6 +1494,107 @@ mod tests {
         let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
             .unwrap();
         assert!(plan.statements.is_empty(), "{:?}", plan.statements);
+    }
+
+    #[test]
+    fn pg_matching_primitive_columns_emit_no_type_alter() {
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "is_active": {"type": "boolean"},
+                "amount": {"type": "number"},
+                "total": {"type": "number", "db_type": "numeric"},
+                "meta": {"type": "object", "db_type": "json"},
+            }
+        });
+        let live_cols = vec![
+            LiveColumn {
+                is_primary_key: true,
+                ..live("id", "integer")
+            },
+            live("is_active", "boolean"),
+            live("amount", "double precision"),
+            live("total", "numeric"),
+            LiveColumn {
+                declared_type: "jsonb".to_string(),
+                ..live("meta", "jsonb")
+            },
+        ];
+        let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
+            .unwrap();
+        assert!(
+            !plan
+                .statements
+                .iter()
+                .any(|sql| sql.contains("ALTER COLUMN") && sql.contains(" TYPE ")),
+            "matching live/model types must not reconcile: {:?}",
+            plan.statements
+        );
+    }
+
+    #[test]
+    fn pg_db_check_add_column_emits_named_check_constraint() {
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "status": {
+                    "type": "string",
+                    "db_type": "text",
+                    "db_check": true,
+                    "enum": ["pending", "approved"],
+                },
+            }
+        });
+        let live_cols = vec![LiveColumn {
+            is_primary_key: true,
+            ..live("id", "integer")
+        }];
+        let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
+            .unwrap();
+        assert!(
+            plan.statements.iter().any(|sql| {
+                sql.contains("ADD CONSTRAINT \"ck_doc_status\"")
+                    && sql.contains("CHECK (\"status\" IN ('pending', 'approved'))")
+            }),
+            "{:?}",
+            plan.statements
+        );
+    }
+
+    #[test]
+    fn pg_db_check_add_column_uses_truncated_constraint_name() {
+        let long_col = "a".repeat(70);
+        let table = "verylongtable";
+        let expected_name = db_check_constraint_name(table, &long_col);
+        assert_eq!(expected_name.chars().count(), 63);
+
+        let mut properties = serde_json::Map::new();
+        properties.insert("id".into(), json!({"type": "integer", "primary_key": true}));
+        properties.insert(
+            long_col.clone(),
+            json!({
+                "type": "string",
+                "db_type": "text",
+                "db_check": true,
+                "enum": ["pending", "approved"],
+            }),
+        );
+        let schema = json!({ "properties": properties });
+        let live_cols = vec![LiveColumn {
+            is_primary_key: true,
+            ..live("id", "integer")
+        }];
+        let plan =
+            plan_table_migration(table, &schema, &live_cols, SqlDialect::Postgres, UPDATES).unwrap();
+        let check_sql = plan
+            .statements
+            .iter()
+            .find(|sql| sql.contains("ADD CONSTRAINT"))
+            .expect("expected ADD CONSTRAINT for db_check column");
+        assert!(
+            check_sql.contains(&format!("ADD CONSTRAINT \"{expected_name}\"")),
+            "{check_sql}"
+        );
     }
 
     #[test]
