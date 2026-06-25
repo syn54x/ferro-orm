@@ -7,12 +7,14 @@
 //! dropped. Capability matrix and semantics are documented on the Python
 //! `ferro.connect` / `ferro.migrate` APIs.
 //!
-//! Column DDL is produced by the same `build_column_plan` the CREATE TABLE
-//! emitter uses, so an auto-migrated database is byte-identical to a freshly
-//! created one (AGENTS.md § I-1).
+//! Column DDL for auto-migrate is planned via SchemaIR diffing (`plan_from_ir`) and
+//! lowered by `ferro-migrate` (`emit_sql_with_ir`), so an auto-migrated database
+//! matches a freshly created one (AGENTS.md § I-1). The legacy enriched-JSON
+//! planner (`plan_table_migration_legacy`) is retained for shadow comparison until
+//! Phase 9.
 
 use crate::backend::EngineHandle;
-use ferro_migrate::{BackendDialect, emit_sql, plan_from_ir};
+use ferro_migrate::{BackendDialect, MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
     IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
     SchemaModel, SchemaUnique,
@@ -32,33 +34,118 @@ use sea_query::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+fn resolve_col_schema<'a>(
+    schema: &'a serde_json::Value,
+    raw_col: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    if let Some(ref_path) = raw_col.get("$ref").and_then(|r| r.as_str()) {
+        if let Some(def_name) = ref_path.strip_prefix("#/$defs/") {
+            return schema
+                .get("$defs")
+                .and_then(|defs| defs.get(def_name))
+                .unwrap_or(raw_col);
+        }
+    }
+    raw_col
+}
+
+fn migrate_column_bool(
+    raw_col: &serde_json::Value,
+    resolved: &serde_json::Value,
+    key: &str,
+) -> Option<bool> {
+    raw_col
+        .get(key)
+        .or_else(|| resolved.get(key))
+        .and_then(|value| value.as_bool())
+}
+
+fn migrate_column_object<'a>(
+    raw_col: &'a serde_json::Value,
+    resolved: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    raw_col
+        .get(key)
+        .or_else(|| resolved.get(key))
+        .and_then(|value| value.as_object())
+}
+
+/// Infer canonical `db_type` tokens when the schema omits an explicit `db_type=`.
+fn infer_schema_db_type(raw_col: &serde_json::Value, resolved: &serde_json::Value) -> String {
+    if let Some(db_type) = raw_col
+        .get("db_type")
+        .or_else(|| resolved.get("db_type"))
+        .and_then(|v| v.as_str())
+    {
+        return db_type.to_string();
+    }
+    match (
+        resolved.get("type").and_then(|v| v.as_str()),
+        resolved.get("format").and_then(|v| v.as_str()),
+    ) {
+        (_, Some("date-time")) => "timestamptz".to_string(),
+        (_, Some("uuid")) => "uuid".to_string(),
+        (_, Some("date")) => "date".to_string(),
+        (Some("integer"), _) => "int".to_string(),
+        (Some("boolean"), _) => "boolean".to_string(),
+        (Some("number"), _) => "double".to_string(),
+        (Some("string"), _) => "varchar".to_string(),
+        _ => "text".to_string(),
+    }
+}
+
+fn migrate_check_expression(col_name: &str, col_info: &serde_json::Value) -> Option<String> {
+    let values = col_info.get("enum").and_then(|v| v.as_array())?;
+    if values.is_empty() {
+        return None;
+    }
+    let rendered: Vec<String> = values
+        .iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            other => format!("'{}'", other.to_string().replace('\'', "''")),
+        })
+        .collect();
+    Some(format!("\"{}\" IN ({})", col_name, rendered.join(", ")))
+}
+
+fn schema_ir_column<'a>(
+    envelope: &'a IrEnvelope<SchemaIrPayload>,
+    table: &str,
+    column: &str,
+) -> Option<&'a SchemaColumn> {
+    envelope
+        .payload
+        .models
+        .iter()
+        .find(|model| model.table_name == table)
+        .and_then(|model| model.columns.iter().find(|col| col.name == column))
+}
+
+fn backend_dialect(backend: SqlDialect) -> BackendDialect {
+    match backend {
+        SqlDialect::Sqlite => BackendDialect::Sqlite,
+        SqlDialect::Postgres => BackendDialect::Postgres,
+    }
+}
+
 fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> IrEnvelope<SchemaIrPayload> {
     let mut columns = Vec::new();
+    let mut foreign_keys = Vec::new();
+    let mut checks = Vec::new();
     if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
         for (name, raw_col) in properties {
-            let resolved = if let Some(ref_path) = raw_col.get("$ref").and_then(|r| r.as_str()) {
-                if let Some(def_name) = ref_path.strip_prefix("#/$defs/") {
-                    schema
-                        .get("$defs")
-                        .and_then(|defs| defs.get(def_name))
-                        .unwrap_or(raw_col)
-                } else {
-                    raw_col
-                }
-            } else {
-                raw_col
-            };
-            let nullable = raw_col
-                .get("ferro_nullable")
-                .or_else(|| resolved.get("ferro_nullable"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let db_type = raw_col
+            let resolved = resolve_col_schema(schema, raw_col);
+            let nullable = migrate_column_bool(raw_col, resolved, "ferro_nullable").unwrap_or(true);
+            let db_type = infer_schema_db_type(raw_col, resolved);
+            let db_type_explicit = raw_col
                 .get("db_type")
                 .or_else(|| resolved.get("db_type"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("text")
-                .to_string();
+                .map(|_| true);
             columns.push(SchemaColumn {
                 name: name.clone(),
                 logical_type: resolved
@@ -67,11 +154,7 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                     .unwrap_or("unknown")
                     .to_string(),
                 db_type,
-                db_type_explicit: raw_col
-                    .get("db_type")
-                    .or_else(|| resolved.get("db_type"))
-                    .and_then(|v| v.as_str())
-                    .map(|_| true),
+                db_type_explicit,
                 nullable,
                 primary_key: resolved
                     .get("primary_key")
@@ -81,8 +164,8 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                     .get("autoincrement")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
-                unique: resolved.get("unique").and_then(|v| v.as_bool()).unwrap_or(false),
-                index: resolved.get("index").and_then(|v| v.as_bool()).unwrap_or(false),
+                unique: migrate_column_bool(raw_col, resolved, "unique").unwrap_or(false),
+                index: migrate_column_bool(raw_col, resolved, "index").unwrap_or(false),
                 default: resolved.get("default").cloned(),
                 format: resolved
                     .get("format")
@@ -93,7 +176,40 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                     .get("enum_type_name")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
+                postgres_native_enum: false,
             });
+
+            if let Some(fk_info) = migrate_column_object(raw_col, resolved, "foreign_key") {
+                let to_table = fk_info
+                    .get("to_table")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let on_delete = fk_info
+                    .get("on_delete")
+                    .and_then(|o| o.as_str())
+                    .map(str::to_string);
+                foreign_keys.push(SchemaForeignKey {
+                    column: name.clone(),
+                    to_table,
+                    to_column: fk_info
+                        .get("to_column")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("id")
+                        .to_string(),
+                    on_delete,
+                    name: None,
+                });
+            }
+
+            if migrate_column_bool(raw_col, resolved, "db_check").unwrap_or(false)
+                && let Some(expression) = migrate_check_expression(name, resolved)
+            {
+                checks.push(SchemaCheck {
+                    name: format!("ck_{table_lower}_{name}"),
+                    expression,
+                });
+            }
         }
     }
     columns.sort_by(|a, b| a.name.cmp(&b.name));
@@ -107,10 +223,10 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                 model_name: table_lower.to_string(),
                 table_name: table_lower.to_string(),
                 columns,
-                foreign_keys: Vec::<SchemaForeignKey>::new(),
+                foreign_keys,
                 indexes: Vec::<SchemaIndex>::new(),
                 uniques: Vec::<SchemaUnique>::new(),
-                checks: Vec::<SchemaCheck>::new(),
+                checks,
             }],
         },
     }
@@ -118,6 +234,9 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
 
 fn declared_type_to_db_type(declared: &str) -> String {
     let lower = declared.to_ascii_lowercase();
+    if lower.contains("character varying") || lower == "varchar" {
+        return "varchar".to_string();
+    }
     if lower.contains("smallint") {
         return "smallint".to_string();
     }
@@ -162,6 +281,7 @@ fn live_columns_to_schema_ir(table_lower: &str, live: &[LiveColumn]) -> IrEnvelo
             format: None,
             enum_values: None,
             enum_type_name: None,
+            postgres_native_enum: col.is_enum_udt,
         })
         .collect();
     columns.sort_by(|a, b| a.name.cmp(&b.name));
@@ -411,17 +531,66 @@ pub fn plan_table_migration(
     backend: SqlDialect,
     opts: MigrateOptions,
 ) -> PyResult<MigrationPlan> {
+    if !opts.updates {
+        return Ok(MigrationPlan::new());
+    }
+
     let old_ir = live_columns_to_schema_ir(table_lower, live);
     let new_ir = schema_json_to_schema_ir(table_lower, schema);
-    let _typed_plan = plan_from_ir(&old_ir, &new_ir);
-    let _typed_sql = emit_sql(
-        &_typed_plan,
-        match backend {
-            SqlDialect::Sqlite => BackendDialect::Sqlite,
-            SqlDialect::Postgres => BackendDialect::Postgres,
-        },
-    );
+    let mut typed_plan = plan_from_ir(&old_ir, &new_ir);
 
+    if !opts.destructive {
+        typed_plan
+            .operations
+            .retain(|op| !matches!(op, MigrationOp::DropColumn { .. }));
+    }
+
+    let mut plan = MigrationPlan::new();
+    let mut exec_ops = Vec::new();
+
+    for operation in typed_plan.operations {
+        if let MigrationOp::DropColumn { table, column } = &operation {
+            let Some(old_col) = schema_ir_column(&old_ir, table, column) else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Cannot drop column '{}.{}': column metadata missing from live IR context.",
+                    table, column
+                )));
+            };
+            if old_col.primary_key {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Cannot drop column '{}.{}': it is part of the primary key. \
+                     Primary-key changes must be migrated with Alembic.",
+                    table, column
+                )));
+            }
+            plan.drop_columns.push(column.clone());
+        } else {
+            exec_ops.push(operation);
+        }
+    }
+
+    let exec_plan = ferro_migrate::MigrationPlan {
+        operations: exec_ops,
+        warnings: typed_plan.warnings,
+    };
+    let emission = emit_sql_with_ir(&exec_plan, &old_ir, &new_ir, backend_dialect(backend))
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.message))?;
+
+    plan.statements = emission.statements;
+    plan.warnings = emission.warnings;
+    Ok(plan)
+}
+
+/// Deprecated enriched-JSON migration planner retained for #120 shadow comparison.
+/// Phase 9 ([#108](https://github.com/syn54x/ferro-orm/issues/108)) removes this path.
+#[allow(dead_code)]
+fn plan_table_migration_legacy(
+    table_lower: &str,
+    schema: &serde_json::Value,
+    live: &[LiveColumn],
+    backend: SqlDialect,
+    opts: MigrateOptions,
+) -> PyResult<MigrationPlan> {
     let mut plan = MigrationPlan::new();
     if !opts.updates {
         return Ok(plan);

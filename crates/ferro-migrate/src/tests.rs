@@ -51,6 +51,7 @@ fn col(name: &str, db_type: &str, nullable: bool) -> SchemaColumn {
         format: None,
         enum_values: None,
         enum_type_name: None,
+        postgres_native_enum: false,
     }
 }
 
