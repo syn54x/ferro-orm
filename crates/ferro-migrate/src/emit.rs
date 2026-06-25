@@ -415,6 +415,9 @@ fn emit_alter_column_type(
 
     match dialect {
         BackendDialect::Postgres => {
+            if old_col.postgres_native_enum {
+                return Ok(result);
+            }
             if new_col.enum_type_name.is_some() {
                 result.warnings.push(format!(
                     "Column '{}.{}' uses a native Postgres enum type; type reconciliation \

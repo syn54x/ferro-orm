@@ -40,4 +40,5 @@ tokio = { version = "1.49", features = ["full"] }
 pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 uuid = { version = "1.11", features = ["v4"] }
 ferro-schema-ir = { path = "crates/ferro-schema-ir" }
+ferro-ddl-lowering = { path = "crates/ferro-ddl-lowering" }
 ferro-migrate = { path = "crates/ferro-migrate" }

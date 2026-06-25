@@ -194,8 +194,10 @@ await connect("sqlite::memory:", auto_migrate=True)
 ```
 
 - `auto_migrate=True` creates missing tables for every registered model.
-- `migrate_updates=True` (0.11.0) additionally adds missing columns to existing tables, and on PostgreSQL reconciles type and nullability drift.
+- `migrate_updates=True` (0.11.0) additionally adds missing columns to existing tables, and on PostgreSQL reconciles type and nullability drift. Runtime updates are planned from **SchemaIR** diffing (`ferro-migrate`) and executed as backend-specific DDL.
 - `migrate_destructive=True` (0.11.0) additionally drops live columns no longer on the model (never whole tables).
+
+The legacy enriched-JSON migration planner remains in the codebase as a deprecated shadow reference until `v0.14.0` (Phase 9); parity against the IR path is gated in Phase 8 ([#120](https://github.com/syn54x/ferro-orm/issues/120)).
 
 For renames, primary-key changes, and complex transforms, use the [Alembic bridge](../guide/migrations.md). **SchemaIR** is the canonical contract for cross-emitter DDL parity — Alembic `get_metadata()` derives SQLAlchemy metadata from compiled SchemaIR so autogenerate agrees with Ferro's naming and type conventions. The enriched JSON schema in the Rust registry remains the runtime source for query bind typing and hydration metadata.
 

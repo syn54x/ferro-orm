@@ -26,7 +26,9 @@ fn resolve_ref<'a>(
     col_info
 }
 
-fn property_json_type_and_format(col_info: &serde_json::Value) -> (Option<&str>, Option<&str>) {
+pub(crate) fn property_json_type_and_format(
+    col_info: &serde_json::Value,
+) -> (Option<&str>, Option<&str>) {
     let top_type = col_info.get("type").and_then(|t| t.as_str());
     let top_format = col_info.get("format").and_then(|f| f.as_str());
     if top_type.is_some() {
