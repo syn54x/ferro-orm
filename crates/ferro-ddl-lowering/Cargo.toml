@@ -1,10 +1,9 @@
 [package]
-name = "ferro-migrate"
+name = "ferro-ddl-lowering"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ferro-ddl-lowering = { path = "../ferro-ddl-lowering" }
 ferro-schema-ir = { path = "../ferro-schema-ir" }
 sea-query = { version = "0.32", features = ["with-uuid"] }
 serde_json = "1.0"
