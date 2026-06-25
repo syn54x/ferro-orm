@@ -5,6 +5,7 @@
 
 mod emit;
 
+use ferro_ddl_lowering::{schema_columns_storage_drift, Dialect};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -157,7 +158,12 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: BackendDialect) -> Vec<String> {
 pub fn plan_from_ir(
     old_ir: &IrEnvelope<SchemaIrPayload>,
     new_ir: &IrEnvelope<SchemaIrPayload>,
+    dialect: BackendDialect,
 ) -> MigrationPlan {
+    let ddl_dialect = match dialect {
+        BackendDialect::Sqlite => Dialect::Sqlite,
+        BackendDialect::Postgres => Dialect::Postgres,
+    };
     let old_models = index_models(&old_ir.payload.models);
     let new_models = index_models(&new_ir.payload.models);
     let mut plan = MigrationPlan::default();
@@ -183,7 +189,7 @@ pub fn plan_from_ir(
         let Some(new_model) = new_models.get(*table) else {
             continue;
         };
-        diff_model_columns(*table, old_model, new_model, &mut plan);
+        diff_model_columns(*table, old_model, new_model, ddl_dialect, &mut plan);
     }
 
     plan
@@ -201,6 +207,7 @@ fn diff_model_columns(
     table: &str,
     old_model: &SchemaModel,
     new_model: &SchemaModel,
+    dialect: Dialect,
     plan: &mut MigrationPlan,
 ) {
     let old_cols: BTreeMap<&str, _> = old_model
@@ -237,7 +244,7 @@ fn diff_model_columns(
         let Some(new_col) = new_cols.get(*col) else {
             continue;
         };
-        if old_col.db_type != new_col.db_type {
+        if schema_columns_storage_drift(old_col, new_col, dialect) {
             plan.operations.push(MigrationOp::AlterColumnType {
                 table: table.to_string(),
                 column: (*col).to_string(),

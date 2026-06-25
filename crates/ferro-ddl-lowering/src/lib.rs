@@ -103,6 +103,12 @@ fn parse_varchar_token(token: &str) -> Option<u32> {
     if n == 0 { None } else { Some(n) }
 }
 
+fn parse_char_token(token: &str) -> Option<u32> {
+    let body = token.strip_prefix("char(")?.strip_suffix(')')?;
+    let n: u32 = body.parse().ok()?;
+    if n == 0 { None } else { Some(n) }
+}
+
 /// Map a canonical `db_type` token to [`CanonicalType`].
 pub fn db_type_token_to_canonical(token: &str, dialect: Dialect) -> Option<CanonicalType> {
     match token {
@@ -124,35 +130,86 @@ pub fn db_type_token_to_canonical(token: &str, dialect: Dialect) -> Option<Canon
         }),
         "date" => Some(CanonicalType::Date),
         "time" => Some(CanonicalType::Time),
+        "boolean" => Some(match dialect {
+            Dialect::Sqlite => CanonicalType::Integer,
+            Dialect::Postgres => CanonicalType::Boolean,
+        }),
+        "double" => Some(CanonicalType::Double),
+        "numeric" => Some(CanonicalType::Decimal),
+        "json" => Some(CanonicalType::Json),
+        "bytea" => Some(CanonicalType::Blob),
         "varchar" => Some(CanonicalType::Varchar(None)),
-        other => parse_varchar_token(other).map(|n| CanonicalType::Varchar(Some(n))),
+        other => parse_varchar_token(other)
+            .map(|n| CanonicalType::Varchar(Some(n)))
+            .or_else(|| parse_char_token(other).map(CanonicalType::Char)),
     }
 }
 
-/// Map a resolved [`CanonicalType`] back to the canonical Ferro `db_type` token
-/// vocabulary used in SchemaIR and cross-emitter parity tests.
-pub fn canonical_to_db_type_token(canonical: CanonicalType, dialect: Dialect) -> String {
-    match canonical {
-        CanonicalType::Integer => "int".to_string(),
-        CanonicalType::SmallInt => "smallint".to_string(),
-        CanonicalType::BigInt => "bigint".to_string(),
-        CanonicalType::Double => "double".to_string(),
-        CanonicalType::Decimal => "numeric".to_string(),
-        CanonicalType::Boolean => "boolean".to_string(),
-        CanonicalType::Json => "json".to_string(),
-        CanonicalType::Text => "text".to_string(),
-        CanonicalType::Varchar(None) => "varchar".to_string(),
-        CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
-        CanonicalType::Char(n) => match (dialect, n) {
-            (Dialect::Sqlite, 32) => "uuid".to_string(),
-            _ => format!("char({n})"),
+/// Map `information_schema.columns` spellings to the canonical Ferro `db_type` token
+/// vocabulary (mirrors legacy `pg_type_matches` / sqlite storage classes).
+pub fn information_schema_to_db_type_token(
+    declared_type: &str,
+    char_max_len: Option<i64>,
+    dialect: Dialect,
+) -> String {
+    let lower = declared_type.to_ascii_lowercase();
+    let base = match lower.as_str() {
+        "boolean" => match dialect {
+            Dialect::Sqlite => "int",
+            Dialect::Postgres => "boolean",
         },
-        CanonicalType::Uuid => "uuid".to_string(),
-        CanonicalType::DateTime | CanonicalType::Timestamp => "timestamp".to_string(),
-        CanonicalType::TimestampTz => "timestamptz".to_string(),
-        CanonicalType::Date => "date".to_string(),
-        CanonicalType::Time => "time".to_string(),
-        CanonicalType::Blob => "bytea".to_string(),
+        "double precision" | "real" => "double",
+        "numeric" => "numeric",
+        "json" | "jsonb" => "json",
+        "bytea" => "bytea",
+        "text" => "text",
+        "integer" => "int",
+        "smallint" => "smallint",
+        "bigint" => "bigint",
+        "uuid" => "uuid",
+        "date" => "date",
+        "time without time zone" => "time",
+        "timestamp without time zone" => "timestamp",
+        "timestamp with time zone" => "timestamptz",
+        _ if lower.contains("character varying") || lower == "varchar" => "varchar",
+        _ if lower == "character" => "char",
+        _ if lower.contains("smallint") => "smallint",
+        _ if lower.contains("bigint") => "bigint",
+        _ if lower.contains("int") => "int",
+        _ if lower.contains("uuid") || lower.contains("char(32)") => "uuid",
+        _ if lower.contains("timestamp with time zone") => "timestamptz",
+        _ if lower.contains("timestamp") || lower.contains("datetime") => "timestamp",
+        _ if lower == "date" || lower.contains("date_") => "date",
+        _ if lower == "time" || lower.contains("time_") => "time",
+        _ => "text",
+    };
+    match base {
+        "varchar" => char_max_len
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .map(|n| format!("varchar({n})"))
+            .unwrap_or_else(|| "varchar".to_string()),
+        "char" => char_max_len
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .map(|n| format!("char({n})"))
+            .unwrap_or_else(|| "char".to_string()),
+        other => other.to_string(),
+    }
+}
+
+/// Whether two [`SchemaColumn`] snapshots differ in resolved storage type.
+pub fn schema_columns_storage_drift(
+    old_col: &SchemaColumn,
+    new_col: &SchemaColumn,
+    dialect: Dialect,
+) -> bool {
+    match (
+        canonical_from_schema_column(old_col, dialect),
+        canonical_from_schema_column(new_col, dialect),
+    ) {
+        (Ok(old_c), Ok(new_c)) => old_c != new_c,
+        _ => old_col.db_type != new_col.db_type,
     }
 }
 
