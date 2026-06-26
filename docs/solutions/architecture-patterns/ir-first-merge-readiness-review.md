@@ -225,6 +225,7 @@ FFI per `await` as QueryIR inside an active `engines.session()`.
 
 ## Related
 
+- [`ir-first-lowering-consolidation-audit.md`](./ir-first-lowering-consolidation-audit.md) — **structural follow-up (2026-06-26):** this point-in-time review noted runtime `auto_migrate` legacy execution as accepted residual risk; the audit shows the deeper unmet "single source of truth" gap (parallel type encoders, dual SchemaIR producers, CREATE path not on shared lowering) and tracks the fix as roadmap Phase 8.5
 - [`ir-invariants.md`](../patterns/ir-invariants.md) — invariant contract the review validates
 - [`cross-emitter-ddl-parity.md`](../patterns/cross-emitter-ddl-parity.md) — concrete parity symptoms/recipes
 - [`typed-null-binds.md`](../patterns/typed-null-binds.md) — CodecIR/bind enforcement
