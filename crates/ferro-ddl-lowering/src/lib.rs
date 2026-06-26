@@ -236,6 +236,10 @@ pub fn schema_columns_storage_drift(
         canonical_from_schema_column(new_col, dialect),
     ) {
         (Ok(old_c), Ok(new_c)) => old_c != new_c,
+        // Reached only when canonical resolution fails for both columns. At runtime
+        // both sides come from producers that always populate Some(...), so this
+        // Option comparison is behavior-equivalent to the old String comparison.
+        // (Will become load-bearing for None columns when #141 feeds the wire IR here.)
         _ => old_col.db_type != new_col.db_type,
     }
 }
