@@ -99,25 +99,6 @@ def _logical_type(col_info: dict[str, Any]) -> str:
     return "unknown"
 
 
-def _default_db_type(col_info: dict[str, Any]) -> str:
-    """Map schema metadata to the default canonical Ferro ``db_type`` token."""
-    field_type, field_format = _effective_type_and_format(col_info)
-    if field_type == "integer":
-        return "bigint"
-    if field_type == "number":
-        return "text"
-    if field_type == "string":
-        if field_format == "date-time":
-            return "timestamptz"
-        if field_format == "date":
-            return "date"
-        if field_format == "time":
-            return "time"
-        if field_format == "uuid":
-            return "uuid"
-        return "text"
-    return "text"
-
 
 def _effective_type_and_format(col_info: dict[str, Any]) -> tuple[Any, Any]:
     """Resolve concrete type/format from direct fields or ``anyOf`` unions."""
@@ -169,7 +150,6 @@ def _column_ir(
     column_ir = {
         "name": col_name,
         "logical_type": _logical_type(col_info),
-        "db_type": db_type_value if db_type_explicit else _default_db_type(col_info),
         "nullable": _is_nullable(col_name, col_info, required_fields),
         "primary_key": bool(col_info.get("primary_key", False)),
         "autoincrement": bool(col_info.get("autoincrement", False)),
@@ -182,6 +162,7 @@ def _column_ir(
     if isinstance(enum_values, list):
         column_ir["enum_values"] = list(enum_values)
     if db_type_explicit:
+        column_ir["db_type"] = db_type_value
         column_ir["db_type_explicit"] = True
     enum_type_name = col_info.get("enum_type_name")
     if isinstance(enum_type_name, str) and enum_type_name:

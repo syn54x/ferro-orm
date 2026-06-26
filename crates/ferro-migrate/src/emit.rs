@@ -457,14 +457,14 @@ fn emit_alter_column_type(
                     ),
                 }
             })?;
-            if sqlite_type_storage_drift(&old_col.db_type, new_canonical) {
+            if sqlite_type_storage_drift(old_col.db_type.as_deref().unwrap_or(""), new_canonical) {
                 result.warnings.push(format!(
                     "Column '{}.{}' is declared '{}' in the database but the model expects \
                      '{}'. SQLite cannot change column types in place; use Alembic to \
                      migrate this column.",
                     table,
                     column,
-                    old_col.db_type,
+                    old_col.db_type.as_deref().unwrap_or(""),
                     sqlite_declared_type(new_canonical),
                 ));
             }

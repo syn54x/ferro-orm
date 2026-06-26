@@ -236,6 +236,10 @@ pub fn schema_columns_storage_drift(
         canonical_from_schema_column(new_col, dialect),
     ) {
         (Ok(old_c), Ok(new_c)) => old_c != new_c,
+        // Reached only when canonical resolution fails for both columns. At runtime
+        // both sides come from producers that always populate Some(...), so this
+        // Option comparison is behavior-equivalent to the old String comparison.
+        // (Will become load-bearing for None columns when #141 feeds the wire IR here.)
         _ => old_col.db_type != new_col.db_type,
     }
 }
@@ -278,8 +282,8 @@ pub fn canonical_from_schema_column(
     col: &SchemaColumn,
     dialect: Dialect,
 ) -> Result<CanonicalType, String> {
-    canonical_from_parts(&col.logical_type, col.format.as_deref(), &col.db_type, dialect)
-        .map_err(|_| format!("unknown db_type '{}' on column '{}'", col.db_type, col.name))
+    canonical_from_parts(&col.logical_type, col.format.as_deref(), col.db_type.as_deref().unwrap_or(""), dialect)
+        .map_err(|_| format!("unknown db_type '{}' on column '{}'", col.db_type.as_deref().unwrap_or(""), col.name))
 }
 
 /// Single-column index name (`idx_<table>_<col>`).
@@ -511,7 +515,7 @@ mod tests {
         SchemaColumn {
             name: name.to_string(),
             logical_type: "unknown".to_string(),
-            db_type: db_type.to_string(),
+            db_type: Some(db_type.to_string()),
             db_type_explicit: None,
             nullable: true,
             primary_key: false,
