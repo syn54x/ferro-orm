@@ -5,6 +5,7 @@
 
 use crate::backend::EngineHandle;
 use crate::state::{MODEL_REGISTRY, SqlDialect, engine_for_connection};
+use ferro_ddl_lowering::{CanonicalType, Dialect, apply_canonical_type, canonical_from_parts};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, ColumnDef, ForeignKey, ForeignKeyAction, Index, PostgresQueryBuilder,
@@ -130,134 +131,6 @@ pub(crate) fn order_schemas_for_creation(
     ordered
 }
 
-/// Canonical, backend-resolved column type shared by every Rust DDL path —
-/// CREATE TABLE, ALTER TABLE ADD COLUMN, and schema diffing. The pair
-/// `canonical_column_type` → `apply_canonical_type` is the single source of
-/// truth for "what SQL type does this model field get"; any path that needs a
-/// column type must go through it so emitters cannot drift. See AGENTS.md § I-1.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CanonicalType {
-    Integer,
-    SmallInt,
-    BigInt,
-    Double,
-    Decimal,
-    Boolean,
-    Json,
-    Text,
-    /// `varchar` with optional length (`.string()` / `.string_len(n)`).
-    Varchar(Option<u32>),
-    Char(u32),
-    Uuid,
-    /// SQLite rendering of the `timestamp`/`timestamptz` tokens (`.date_time()`).
-    DateTime,
-    Timestamp,
-    TimestampTz,
-    Date,
-    Time,
-    Blob,
-}
-
-/// Map a resolved [`CanonicalType`] back to the canonical Ferro `db_type` token
-/// vocabulary used in SchemaIR and cross-emitter parity tests.
-pub(crate) fn canonical_to_db_type_token(canonical: CanonicalType, backend: SqlDialect) -> String {
-    match canonical {
-        CanonicalType::Integer => "int".to_string(),
-        CanonicalType::SmallInt => "smallint".to_string(),
-        CanonicalType::BigInt => "bigint".to_string(),
-        CanonicalType::Double => "double".to_string(),
-        CanonicalType::Decimal => "numeric".to_string(),
-        CanonicalType::Boolean => "boolean".to_string(),
-        CanonicalType::Json => "json".to_string(),
-        CanonicalType::Text => "text".to_string(),
-        CanonicalType::Varchar(None) => "varchar".to_string(),
-        CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
-        CanonicalType::Char(n) => match (backend, n) {
-            (SqlDialect::Sqlite, 32) => "uuid".to_string(),
-            _ => format!("char({n})"),
-        },
-        CanonicalType::Uuid => "uuid".to_string(),
-        CanonicalType::DateTime | CanonicalType::Timestamp => "timestamp".to_string(),
-        CanonicalType::TimestampTz => "timestamptz".to_string(),
-        CanonicalType::Date => "date".to_string(),
-        CanonicalType::Time => "time".to_string(),
-        CanonicalType::Blob => "bytea".to_string(),
-    }
-}
-
-pub(crate) fn apply_canonical_type(col_def: &mut ColumnDef, canonical: CanonicalType) {
-    match canonical {
-        CanonicalType::Integer => {
-            col_def.integer();
-        }
-        CanonicalType::SmallInt => {
-            col_def.small_integer();
-        }
-        CanonicalType::BigInt => {
-            col_def.big_integer();
-        }
-        CanonicalType::Double => {
-            col_def.double();
-        }
-        CanonicalType::Decimal => {
-            col_def.decimal();
-        }
-        CanonicalType::Boolean => {
-            col_def.boolean();
-        }
-        CanonicalType::Json => {
-            col_def.json();
-        }
-        CanonicalType::Text => {
-            col_def.text();
-        }
-        CanonicalType::Varchar(None) => {
-            col_def.string();
-        }
-        CanonicalType::Varchar(Some(n)) => {
-            col_def.string_len(n);
-        }
-        CanonicalType::Char(n) => {
-            col_def.char_len(n);
-        }
-        CanonicalType::Uuid => {
-            col_def.uuid();
-        }
-        CanonicalType::DateTime => {
-            col_def.date_time();
-        }
-        CanonicalType::Timestamp => {
-            col_def.timestamp();
-        }
-        CanonicalType::TimestampTz => {
-            col_def.timestamp_with_time_zone();
-        }
-        CanonicalType::Date => {
-            col_def.date();
-        }
-        CanonicalType::Time => {
-            col_def.time();
-        }
-        CanonicalType::Blob => {
-            col_def.blob();
-        }
-    }
-}
-
-fn json_type_to_canonical(json_type: &str, backend: SqlDialect) -> CanonicalType {
-    match json_type {
-        "integer" => CanonicalType::Integer,
-        "string" => CanonicalType::Varchar(None),
-        "number" => CanonicalType::Double,
-        "boolean" => match backend {
-            // SQLite stores booleans as integers.
-            SqlDialect::Sqlite => CanonicalType::Integer,
-            SqlDialect::Postgres => CanonicalType::Boolean,
-        },
-        "object" | "array" => CanonicalType::Json,
-        _ => CanonicalType::Varchar(None),
-    }
-}
 
 /// Unique index name for `ferro_composite_uniques`; matches Python Alembic `_build_sa_table`.
 fn composite_unique_index_name(table_lower: &str, col_names: &[&str]) -> String {
@@ -333,78 +206,31 @@ fn db_check_constraint_name(table_lower: &str, col_name: &str) -> String {
     raw
 }
 
-fn parse_varchar_token(token: &str) -> Option<u32> {
-    let body = token.strip_prefix("varchar(")?.strip_suffix(')')?;
-    let n: u32 = body.parse().ok()?;
-    if n == 0 { None } else { Some(n) }
-}
-
-/// Map a canonical `db_type` token to a [`CanonicalType`]. Returns `None` when
-/// the token is unrecognized (the caller falls back to the JSON-type cascade).
-/// Strict per-class-definition validation runs in
-/// `metaclass._validate_db_type_options`.
-///
-/// Duplicated on the Python side in `src/ferro/migrations/alembic.py
-/// ::_db_type_to_sa_type`. Add new tokens to both emitters in the same change
-/// and update the parity test. See AGENTS.md § I-1.
-fn db_type_token_to_canonical(token: &str, backend: SqlDialect) -> Option<CanonicalType> {
-    // Per-dialect resolution is chosen to byte-match SA's compilation in the
-    // Alembic bridge. SQLite emits the typed keyword (BIGINT, SMALLINT,
-    // CHAR(32), DATETIME) and lets SQLite type affinity normalize at
-    // runtime; the parity test (U5) pins both sides token-for-token.
-    match token {
-        "text" => Some(CanonicalType::Text),
-        "smallint" => Some(CanonicalType::SmallInt),
-        "int" => Some(CanonicalType::Integer),
-        "bigint" => Some(CanonicalType::BigInt),
-        "uuid" => Some(match backend {
-            SqlDialect::Sqlite => CanonicalType::Char(32),
-            SqlDialect::Postgres => CanonicalType::Uuid,
-        }),
-        "timestamp" => Some(match backend {
-            SqlDialect::Sqlite => CanonicalType::DateTime,
-            SqlDialect::Postgres => CanonicalType::Timestamp,
-        }),
-        "timestamptz" => Some(match backend {
-            SqlDialect::Sqlite => CanonicalType::DateTime,
-            SqlDialect::Postgres => CanonicalType::TimestampTz,
-        }),
-        "date" => Some(CanonicalType::Date),
-        "time" => Some(CanonicalType::Time),
-        other => parse_varchar_token(other).map(|n| CanonicalType::Varchar(Some(n))),
+/// Translate the runtime backend tag to the lowering crate's dialect at the call seam.
+/// (Unifying these enums is tracked separately as #146 / Phase 8.6.)
+pub(crate) fn sql_dialect_to_lowering(backend: SqlDialect) -> Dialect {
+    match backend {
+        SqlDialect::Sqlite => Dialect::Sqlite,
+        SqlDialect::Postgres => Dialect::Postgres,
     }
 }
 
-/// Resolve a model property to its backend-specific [`CanonicalType`].
-///
-/// `db_type` is the canonical user-facing storage knob: when present and
-/// recognized it overrides every other column-type branch. Otherwise the
-/// Pydantic JSON type/format cascade decides.
+/// Resolve a model property to its backend-specific [`CanonicalType`] via the
+/// shared lowering crate. `db_type` (when set) wins; otherwise the Pydantic
+/// JSON type/format cascade decides; unknown types fall back to `varchar`.
 pub(crate) fn canonical_column_type(
     raw_col_info: &serde_json::Value,
     resolved_col_info: &serde_json::Value,
     backend: SqlDialect,
 ) -> CanonicalType {
-    let db_type_token = raw_col_info
+    let db_type = raw_col_info
         .get("db_type")
         .or_else(|| resolved_col_info.get("db_type"))
-        .and_then(|v| v.as_str());
-    if let Some(token) = db_type_token
-        && let Some(canonical) = db_type_token_to_canonical(token, backend)
-    {
-        return canonical;
-    }
-
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let (json_type, format) = property_json_type_and_format(resolved_col_info);
-    match (json_type, format) {
-        (Some("string"), Some("date-time")) => CanonicalType::TimestampTz,
-        (Some("string"), Some("date")) => CanonicalType::Date,
-        (Some("string"), Some("uuid")) => CanonicalType::Uuid,
-        (Some(_), Some("decimal")) => CanonicalType::Decimal,
-        (Some("string"), Some("binary")) => CanonicalType::Blob,
-        (Some(t), _) => json_type_to_canonical(t, backend),
-        (None, _) => CanonicalType::Varchar(None),
-    }
+    canonical_from_parts(json_type.unwrap_or(""), format, db_type, sql_dialect_to_lowering(backend))
+        .unwrap_or(CanonicalType::Varchar(None))
 }
 
 fn render_check_values(col_info: &serde_json::Value) -> Option<String> {
@@ -1128,14 +954,6 @@ mod tests {
     }
 
     #[test]
-    fn test_db_type_unknown_token_maps_to_none() {
-        assert_eq!(
-            db_type_token_to_canonical("banana", SqlDialect::Postgres),
-            None
-        );
-    }
-
-    #[test]
     fn test_unknown_db_type_token_falls_back_to_json_cascade() {
         // An unrecognized token must not change behavior: the JSON-type
         // cascade decides, exactly as before the CanonicalType refactor.
@@ -1147,11 +965,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_varchar_token_rejects_zero_and_garbage() {
-        assert_eq!(parse_varchar_token("varchar(0)"), None);
-        assert_eq!(parse_varchar_token("varchar(abc)"), None);
-        assert_eq!(parse_varchar_token("varchar()"), None);
-        assert_eq!(parse_varchar_token("varchar(10)"), Some(10));
+    fn canonical_column_type_unknown_and_missing_type_fall_back_to_varchar() {
+        let unknown = serde_json::json!({ "type": "mystery" });
+        assert_eq!(
+            canonical_column_type(&unknown, &unknown, SqlDialect::Postgres),
+            CanonicalType::Varchar(None)
+        );
+        let no_type = serde_json::json!({});
+        assert_eq!(
+            canonical_column_type(&no_type, &no_type, SqlDialect::Sqlite),
+            CanonicalType::Varchar(None)
+        );
     }
 
     #[test]

@@ -145,6 +145,33 @@ pub fn db_type_token_to_canonical(token: &str, dialect: Dialect) -> Option<Canon
     }
 }
 
+/// Map a resolved [`CanonicalType`] back to the canonical Ferro `db_type` token
+/// vocabulary used in SchemaIR and cross-emitter parity tests.
+pub fn canonical_to_db_type_token(canonical: CanonicalType, dialect: Dialect) -> String {
+    match canonical {
+        CanonicalType::Integer => "int".to_string(),
+        CanonicalType::SmallInt => "smallint".to_string(),
+        CanonicalType::BigInt => "bigint".to_string(),
+        CanonicalType::Double => "double".to_string(),
+        CanonicalType::Decimal => "numeric".to_string(),
+        CanonicalType::Boolean => "boolean".to_string(),
+        CanonicalType::Json => "json".to_string(),
+        CanonicalType::Text => "text".to_string(),
+        CanonicalType::Varchar(None) => "varchar".to_string(),
+        CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
+        CanonicalType::Char(n) => match (dialect, n) {
+            (Dialect::Sqlite, 32) => "uuid".to_string(),
+            _ => format!("char({n})"),
+        },
+        CanonicalType::Uuid => "uuid".to_string(),
+        CanonicalType::DateTime | CanonicalType::Timestamp => "timestamp".to_string(),
+        CanonicalType::TimestampTz => "timestamptz".to_string(),
+        CanonicalType::Date => "date".to_string(),
+        CanonicalType::Time => "time".to_string(),
+        CanonicalType::Blob => "bytea".to_string(),
+    }
+}
+
 /// Map `information_schema.columns` spellings to the canonical Ferro `db_type` token
 /// vocabulary (mirrors legacy `pg_type_matches` / sqlite storage classes).
 pub fn information_schema_to_db_type_token(
@@ -213,18 +240,25 @@ pub fn schema_columns_storage_drift(
     }
 }
 
-/// Resolve a [`SchemaColumn`] to its canonical storage type.
-pub fn canonical_from_schema_column(
-    col: &SchemaColumn,
+/// Resolve a model property's `(logical_type, format, db_type)` to a canonical
+/// type. A recognized `db_type` token wins; otherwise the logical-type + format
+/// cascade decides. An empty/unrecognized `db_type` falls through.
+pub fn canonical_from_parts(
+    logical_type: &str,
+    format: Option<&str>,
+    db_type: &str,
     dialect: Dialect,
 ) -> Result<CanonicalType, String> {
-    if let Some(canonical) = db_type_token_to_canonical(&col.db_type, dialect) {
+    if let Some(canonical) = db_type_token_to_canonical(db_type, dialect) {
         return Ok(canonical);
     }
-    match (col.logical_type.as_str(), col.format.as_deref()) {
+    match (logical_type, format) {
         ("string", Some("date-time")) => Ok(CanonicalType::TimestampTz),
         ("string", Some("date")) => Ok(CanonicalType::Date),
         ("string", Some("uuid")) => Ok(CanonicalType::Uuid),
+        // `format = "decimal"` is only ever emitted alongside a concrete logical
+        // type (see src/ferro/schema_metadata.py), so `(None, Some("decimal"))`
+        // never arises from a real model — this broad arm is safe.
         (_, Some("decimal")) => Ok(CanonicalType::Decimal),
         ("string", Some("binary")) => Ok(CanonicalType::Blob),
         ("integer", _) => Ok(CanonicalType::Integer),
@@ -235,11 +269,17 @@ pub fn canonical_from_schema_column(
             Dialect::Postgres => CanonicalType::Boolean,
         }),
         ("object" | "array", _) => Ok(CanonicalType::Json),
-        _ => Err(format!(
-            "unknown db_type '{}' on column '{}'",
-            col.db_type, col.name
-        )),
+        _ => Err(format!("unknown logical_type '{logical_type}'")),
     }
+}
+
+/// Resolve a [`SchemaColumn`] to its canonical storage type.
+pub fn canonical_from_schema_column(
+    col: &SchemaColumn,
+    dialect: Dialect,
+) -> Result<CanonicalType, String> {
+    canonical_from_parts(&col.logical_type, col.format.as_deref(), &col.db_type, dialect)
+        .map_err(|_| format!("unknown db_type '{}' on column '{}'", col.db_type, col.name))
 }
 
 /// Single-column index name (`idx_<table>_<col>`).
@@ -508,5 +548,26 @@ mod tests {
         let old = drift_col("created_at", "timestamp");
         let new = drift_col("created_at", "timestamptz");
         assert!(schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+    }
+
+    #[test]
+    fn canonical_to_db_type_token_roundtrips_core_tokens() {
+        assert_eq!(canonical_to_db_type_token(CanonicalType::Integer, Dialect::Postgres), "int");
+        assert_eq!(canonical_to_db_type_token(CanonicalType::Char(32), Dialect::Sqlite), "uuid");
+        assert_eq!(canonical_to_db_type_token(CanonicalType::Char(10), Dialect::Sqlite), "char(10)");
+        assert_eq!(canonical_to_db_type_token(CanonicalType::TimestampTz, Dialect::Postgres), "timestamptz");
+        assert_eq!(canonical_to_db_type_token(CanonicalType::DateTime, Dialect::Postgres), "timestamp");
+        assert_eq!(canonical_to_db_type_token(CanonicalType::Char(32), Dialect::Postgres), "char(32)");
+    }
+
+    #[test]
+    fn canonical_from_parts_matches_schema_column_path() {
+        // db_type wins
+        assert_eq!(canonical_from_parts("string", None, "bigint", Dialect::Postgres), Ok(CanonicalType::BigInt));
+        // fallback to logical_type/format
+        assert_eq!(canonical_from_parts("string", Some("date-time"), "", Dialect::Postgres), Ok(CanonicalType::TimestampTz));
+        assert_eq!(canonical_from_parts("integer", None, "", Dialect::Sqlite), Ok(CanonicalType::Integer));
+        // unknown is an error (CREATE path maps this to Varchar at its call site)
+        assert!(canonical_from_parts("mystery", None, "", Dialect::Postgres).is_err());
     }
 }
