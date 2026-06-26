@@ -580,3 +580,271 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
     assert (
         data[0]["status"] == "draft"
     ), "existing rows backfilled with the literal default"
+
+
+# ---------------------------------------------------------------------------
+# Index reconciliation (issue #144)
+# ---------------------------------------------------------------------------
+
+
+def _live_index_names(db_url: str, db_backend: str, table: str) -> set[str]:
+    """Return the set of index names on *table* in the live DB.
+
+    For SQLite we use PRAGMA index_list (synchronous raw driver).
+    For Postgres we query pg_indexes via the same synchronous psycopg path used
+    elsewhere in this file.  The postgres_base_url / db_schema_name fixtures are
+    not available here so we parse the search_path from db_url directly.
+    """
+    if db_backend == "sqlite":
+        return _sqlite_index_names(db_url, table)
+
+    # Postgres: extract connection params from the async URL.
+    # URL form: postgres://user:pass@host:port/dbname?options=-c search_path=<schema>
+    import re
+    import psycopg
+
+    m = re.search(r"search_path=([^&]+)", db_url)
+    schema = m.group(1) if m else "public"
+    # Build a synchronous libpq-style DSN by replacing the async scheme.
+    sync_url = db_url.replace("postgres://", "postgresql://", 1)
+    # Strip the options query param for psycopg (it handles search_path separately).
+    base_url = sync_url.split("?")[0]
+
+    with psycopg.connect(base_url, options=f"-c search_path={schema}") as conn:
+        rows = conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = %s AND tablename = %s",
+            (schema, table),
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_index_reconcile_adds_composite_index_to_existing_table(
+    db_url, db_backend, clean_registry
+):
+    """migrate_updates adds a composite Ferro-named index to a pre-existing
+    table that was created without it."""
+    from typing import ClassVar
+
+    class IdxCompModel(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        col_a: int
+        col_b: int
+
+    # Create the table without any indexes.
+    await ferro.connect(db_url)
+    if db_backend == "sqlite":
+        await execute(
+            'CREATE TABLE "idxcompmodel" '
+            '("id" integer PRIMARY KEY AUTOINCREMENT, '
+            '"col_a" integer NOT NULL, "col_b" integer NOT NULL)'
+        )
+    else:
+        await execute(
+            'CREATE TABLE "idxcompmodel" '
+            '("id" serial PRIMARY KEY, '
+            '"col_a" integer NOT NULL, "col_b" integer NOT NULL)'
+        )
+    ferro.reset_engine()
+
+    # Re-register a NEW model class with the composite index annotation.
+    from ferro import clear_registry
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+    class IdxCompModel(Model):  # noqa: F811 — intentional redefinition
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("col_a", "col_b"),
+        )
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        col_a: int
+        col_b: int
+
+    await ferro.connect(db_url, migrate_updates=True)
+
+    names = _live_index_names(db_url, db_backend, "idxcompmodel")
+    assert "idx_idxcompmodel_col_a_col_b" in names, (
+        f"expected composite index idx_idxcompmodel_col_a_col_b, got: {names}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_index_reconcile_adds_single_column_index_to_existing_column(
+    db_url, db_backend, clean_registry
+):
+    """migrate_updates creates idx_<table>_<col> when index=True is added to an
+    existing column that was originally created without an index."""
+
+    class IdxSingleModel(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        status: str
+
+    # Create table with 'status' but no index on it.
+    await ferro.connect(db_url)
+    if db_backend == "sqlite":
+        await execute(
+            'CREATE TABLE "idxsinglemodel" '
+            '("id" integer PRIMARY KEY AUTOINCREMENT, "status" varchar NOT NULL)'
+        )
+    else:
+        await execute(
+            'CREATE TABLE "idxsinglemodel" '
+            '("id" serial PRIMARY KEY, "status" varchar NOT NULL)'
+        )
+    ferro.reset_engine()
+
+    # Re-register with index=True on the existing column.
+    from ferro import clear_registry
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+    class IdxSingleModel(Model):  # noqa: F811
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        status: Annotated[str, FerroField(index=True)]
+
+    await ferro.connect(db_url, migrate_updates=True)
+
+    names = _live_index_names(db_url, db_backend, "idxsinglemodel")
+    assert "idx_idxsinglemodel_status" in names, (
+        f"expected idx_idxsinglemodel_status, got: {names}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_index_reconcile_noop_when_index_already_present(
+    db_url, db_backend, clean_registry
+):
+    """Running migrate_updates a second time when the index already exists must
+    be a no-op: the index remains and auto-migrate does not fail (false-alarm guard)."""
+    from typing import ClassVar
+
+    class IdxNoopModel(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("x", "y"),
+        )
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        x: int
+        y: int
+
+    # First connect creates the table + index.
+    await ferro.connect(db_url, auto_migrate=True)
+    names_after_first = _live_index_names(db_url, db_backend, "idxnoopmodel")
+    assert "idx_idxnoopmodel_x_y" in names_after_first
+    ferro.reset_engine()
+
+    # Second connect — same model, same index already present.
+    await ferro.connect(db_url, migrate_updates=True)
+
+    names_after_second = _live_index_names(db_url, db_backend, "idxnoopmodel")
+    assert "idx_idxnoopmodel_x_y" in names_after_second, (
+        "index must survive second migrate_updates pass (no-op guard)"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_index_reconcile_destructive_drops_removed_composite_index(
+    db_url, db_backend, clean_registry
+):
+    """When a composite index is removed from the model:
+    - migrate_destructive=True drops it.
+    - migrate_updates=True (non-destructive) leaves it intact."""
+    from typing import ClassVar
+
+    class IdxDropModel(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("p", "q"),
+        )
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        p: int
+        q: int
+
+    # Bootstrap with the index present.
+    await ferro.connect(db_url, auto_migrate=True)
+    names = _live_index_names(db_url, db_backend, "idxdropmodel")
+    assert "idx_idxdropmodel_p_q" in names
+    ferro.reset_engine()
+
+    # Re-register model WITHOUT the composite index.
+    from ferro import clear_registry
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+    class IdxDropModel(Model):  # noqa: F811
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        p: int
+        q: int
+
+    # Non-destructive: index must remain.
+    await ferro.connect(db_url, migrate_updates=True)
+    names_after_updates = _live_index_names(db_url, db_backend, "idxdropmodel")
+    assert "idx_idxdropmodel_p_q" in names_after_updates, (
+        "non-destructive pass must leave orphaned ferro index intact"
+    )
+    ferro.reset_engine()
+
+    # Destructive: index must be dropped.
+    await ferro.connect(db_url, migrate_destructive=True)
+    names_after_destructive = _live_index_names(db_url, db_backend, "idxdropmodel")
+    assert "idx_idxdropmodel_p_q" not in names_after_destructive, (
+        "migrate_destructive must drop the orphaned ferro index"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_index_reconcile_user_index_survives_auto_migrate(
+    db_url, db_backend, clean_registry
+):
+    """A hand-created user index (name does NOT start with idx_/uq_) must
+    survive both non-destructive and destructive auto-migrate passes unchanged."""
+    from typing import ClassVar
+
+    class IdxUserModel(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("m", "n"),
+        )
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        m: int
+        n: int
+
+    # Create table with a Ferro composite index AND a custom user index.
+    await ferro.connect(db_url, auto_migrate=True)
+    await execute('CREATE INDEX "my_custom_idx" ON "idxusermodel" ("m")')
+
+    names_initial = _live_index_names(db_url, db_backend, "idxusermodel")
+    assert "idx_idxusermodel_m_n" in names_initial
+    assert "my_custom_idx" in names_initial
+    ferro.reset_engine()
+
+    # Non-destructive pass: both indexes must survive.
+    await ferro.connect(db_url, migrate_updates=True)
+    names_after_updates = _live_index_names(db_url, db_backend, "idxusermodel")
+    assert "idx_idxusermodel_m_n" in names_after_updates
+    assert "my_custom_idx" in names_after_updates, (
+        "user index must survive non-destructive auto-migrate"
+    )
+    ferro.reset_engine()
+
+    # Destructive pass: Ferro index still present (model still has it), user index still present.
+    await ferro.connect(db_url, migrate_destructive=True)
+    names_after_destructive = _live_index_names(db_url, db_backend, "idxusermodel")
+    assert "idx_idxusermodel_m_n" in names_after_destructive
+    assert "my_custom_idx" in names_after_destructive, (
+        "user index must survive destructive auto-migrate"
+    )

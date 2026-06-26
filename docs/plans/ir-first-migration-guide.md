@@ -141,6 +141,7 @@ Runtime migration IR cutover (target: `v0.13.0`).
 | [#118](https://github.com/syn54x/ferro-orm/issues/118) | Complete executable SQL emission from `MigrationPlan` for all ops (SQLite + Postgres) | none | No action | Continues #90 scaffold |
 | [#119](https://github.com/syn54x/ferro-orm/issues/119) | Wire `auto_migrate` / `plan_table_migration` to execute ferro-migrate IR plans | none | No action — behavior must remain observably identical | IR planner becomes primary; legacy path deprecated |
 | [#120](https://github.com/syn54x/ferro-orm/issues/120) | Parity gate + shadow comparison (IR vs legacy, `create_tables`, Alembic) | none | No action | Legacy planner retained deprecated; removal in Phase 9 |
+| [#144](https://github.com/syn54x/ferro-orm/issues/144) | `migrate_updates` now reconciles standalone indexes on existing tables: adds missing Ferro-named indexes (`idx_*` / `uq_*`) and, under `migrate_destructive`, drops orphaned ones | minor | No action required — index reconciliation is automatic under existing flags; hand-created user indexes (names not starting with `idx_`/`uq_`) are never touched | Covered by integration tests in `tests/test_auto_migrate.py` |
 
 - **Migration impact:** `none` for public APIs — `connect(auto_migrate=...)` and `ferro.migrate` signatures unchanged.
 - **Internal change:** `auto_migrate` executes `ferro-migrate` `SchemaIR(old,new)` plans as the primary path. The legacy enriched-JSON diff walk in `src/migrate.rs` is **deprecated** and kept for shadow comparison until Phase 9 removal.

@@ -40,10 +40,13 @@ What it covers is capability-relative per backend:
 | :--- | :--- | :--- |
 | Add missing column | ✅ `ADD COLUMN` | ✅ `ADD COLUMN` |
 | Add the column's index (`index=True`) | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
+| Add composite index (`__ferro_composite_indexes__`) to existing columns | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
 | Add unique column (`unique=True`) | ✅ via explicit unique index + warning | ✅ inline `UNIQUE` |
 | Add foreign-key column | ✅ column only, no FK constraint + warning | ✅ column + FK constraint |
 | Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic) | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
 | Change nullability | ⚠️ `UserWarning`, no DDL | ✅ `SET NOT NULL` / `DROP NOT NULL` |
+| Drop orphaned Ferro-named index (`idx_*` / `uq_*`) | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
+| Inline single-column `UNIQUE` on existing column, index option changes | ❌ never — Alembic territory | ❌ never |
 | Rename column/table, change primary key, drop table | ❌ never — Alembic territory | ❌ never |
 
 Rules worth knowing:
