@@ -87,25 +87,52 @@ Definition of done addition:
 
 ## Program status
 
-- Overall status: `In progress` (Phases 0–7 merged; Phase 8 ferro-migrate cutover pending; Phase 9 shim removal pending)
+- Overall status: `In progress` (Phases 0–7 merged; Phase 8 ferro-migrate cutover landing; Phase 8.5 lowering consolidation pending; Phase 9 shim removal pending)
 - Current phase: `Phase 8`
-- Last updated: `2026-06-23`
+- Last updated: `2026-06-26`
 - Roadmap owner: `@syn54x`
+
+> **Architecture audit (2026-06-26):** a code-grounded audit
+> ([`ir-first-lowering-consolidation-audit.md`](../solutions/architecture-patterns/ir-first-lowering-consolidation-audit.md))
+> found that the program's success criterion *"Runtime DDL, Alembic adapter, and
+> migration planner consume the same IR artifacts"* and the principle *"One source
+> of truth: no parallel emitters"* are **not yet met for the schema domain**: the
+> runtime CREATE path (`src/schema.rs`) keeps its own `CanonicalType` and consumes
+> no IR; SchemaIR is compiled by two independent producers (Python
+> `compile_schema_ir_payload` + Rust `schema_json_to_schema_ir`); and the type
+> system is encoded in ~5 parallel places. Phase 9 removes the legacy *planner*
+> but does not close this gap. **Phase 8.5 (below) is added to close it and gates
+> Phase 9.**
 
 ## Branching and release policy
 
-IR program integration branch:
+> **Policy correction (2026-06-26):** the original model below — *stage all work
+> on `feat/ir-first`, promote to `main` only at program end* — was abandoned early
+> in the program. In practice the IR work ships to `main` incrementally via
+> `0.12.x` releases, and each phase integrates on its own short-lived branch.
+> `feat/ir-first` is **retired** (diverged from `main`, no open PRs); do not branch
+> from it or target it. The current (actual) flow is recorded below; the original
+> text is kept struck-through for history.
 
-- `feat/ir-first` is the staging branch for all roadmap work.
-- Starting work on any phase issue requires creating a new branch from `feat/ir-first`.
-- Phase PRs must target `feat/ir-first` (not `main`).
-- Completed phase work merges back into `feat/ir-first`.
+Current (actual) flow:
 
-Promotion to release:
+- `main` is the trunk. Completed phase work lands on `main` and ships in a
+  `0.1x.y` release. Partial IR work on `main` is acceptable because deprecated
+  paths stay behind the compatibility window until the `v0.14.0` cutover.
+- Each phase uses a short-lived integration branch (e.g.
+  `feat/ir-p8-migrate-cutover` for Phase 8). Sub-issue branches stack onto it and
+  merge via PR; the phase branch then promotes to `main`.
+- Start a new phase/sub-issue branch from `main`, or from the active phase
+  integration branch when stacking within a phase.
+- Release notes and migration-guide updates are required at each promotion to
+  `main`, not only at program end.
 
-- `main` must not receive partial IR migration work.
-- Merge `feat/ir-first` into `main` only when the IR program is complete and release-ready.
-- Release notes and migration guide updates are required at promotion time.
+Original (superseded) policy:
+
+- ~~`feat/ir-first` is the staging branch for all roadmap work.~~
+- ~~Starting work on any phase issue requires creating a new branch from `feat/ir-first`.~~
+- ~~Phase PRs must target `feat/ir-first` (not `main`).~~
+- ~~Completed phase work merges back into `feat/ir-first`; merge into `main` only when the IR program is complete.~~
 
 ## Traceability rule (roadmap <-> GitHub issues)
 
@@ -116,6 +143,33 @@ Promotion to release:
 - Roadmap and issue content are a single source of execution truth and must remain synchronized at all times.
 - Any roadmap change that affects scope, acceptance criteria, ownership, status, risk, sequencing, or exit gates must be reflected in all already-created linked issues in the same work session (or same PR when applicable).
 - Any issue change that affects those same dimensions must be reflected in the roadmap in the same work session (or same PR when applicable).
+
+### Project board and native sub-issues (required)
+
+Filing an issue is not enough. Every epic and sub-issue must be enrolled on the
+GitHub Project and wired into the native issue hierarchy **at filing time** —
+text references and markdown checklists do not satisfy this.
+
+1. **Add to the board.** Every issue goes on **Project #7** (org `syn54x`,
+   <https://github.com/orgs/syn54x/projects/7>):
+   `gh project item-add 7 --owner syn54x --url <issue-url>`. Set `Status` (new
+   work → `Todo`).
+2. **Use GitHub native sub-issues.** Link each sub-issue to its epic with the
+   **native sub-issue** relationship — the issue UI ("Create sub-issue" / "Add
+   existing issue") or the GraphQL mutation (note the feature header):
+   ```
+   gh api graphql -H "GraphQL-Features: sub_issues" -f query='
+     mutation { addSubIssue(input:{ issueId:"<EPIC_NODE_ID>", subIssueId:"<SUB_NODE_ID>" }) { subIssue { number } } }'
+   ```
+   A markdown checklist in the epic body is optional context, **not** a
+   substitute for the native link.
+3. **Group by milestone, not the `Phase` field.** Assign the phase milestone
+   `IR-P<phase>` (e.g. `IR-P8.5`): `gh issue edit <n> --milestone IR-P<phase>`
+   (create it first if absent: `gh api repos/syn54x/ferro-orm/milestones -f title=...`).
+   The board's `Phase` single-select is stale (options stop at `7`) and unused —
+   do not rely on it.
+4. **Verify before claiming done:** the epic reports N native sub-issues and
+   every issue appears on Project #7 with a `Status`.
 
 ### Reference format
 
@@ -441,7 +495,7 @@ Issue references:
 - [x] `plan_table_migration` executes the IR plan as the primary runtime path; legacy enriched-JSON diff walk **deprecated** but retained for shadow comparison (removal deferred to Phase 9).
 - [x] Shadow/parity gate: IR migration path matches legacy planner, `create_tables`, and Alembic for the `auto_migrate` capability matrix.
 - [x] `shadow_compare_migration_plan` compares IR vs legacy output (not legacy roundtrip); `FERRO_SHADOW_RUNTIME` / `FERRO_SHADOW_RUNTIME_STRICT` enforce drift in CI.
-- [x] Duplicate `schema_json_to_schema_ir` / `live_columns_to_schema_ir` lowering consolidated or single-sourced where feasible.
+- [~] Duplicate `schema_json_to_schema_ir` / `live_columns_to_schema_ir` lowering consolidated or single-sourced where feasible. **Correction (2026-06-26 audit):** consolidation was scoped to the migrate path only. The runtime CREATE emitter (`src/schema.rs`) still uses its own `CanonicalType` (not `ferro-ddl-lowering`), and SchemaIR is still produced by two independent compilers (Python + Rust). Full single-sourcing moved to **Phase 8.5**.
 
 **Exit gate**
 - [ ] `cargo test -p ferro-migrate` green with full op coverage.
@@ -456,9 +510,66 @@ Issue references:
 
 ---
 
+### Phase 8.5 - Lowering consolidation & single-source-of-truth closeout (gates Phase 9)
+
+Status: `Not started`
+
+Issue references:
+
+- `Epic:` [#139](https://github.com/syn54x/ferro-orm/issues/139)
+- `Sub-issues:` [#140](https://github.com/syn54x/ferro-orm/issues/140), [#141](https://github.com/syn54x/ferro-orm/issues/141), [#142](https://github.com/syn54x/ferro-orm/issues/142), [#143](https://github.com/syn54x/ferro-orm/issues/143), [#144](https://github.com/syn54x/ferro-orm/issues/144)
+
+> Inserted as `8.5` (not renumbered) so existing Phase 9 issue references
+> (#107–#110) stay valid per the traceability/sync rules. Source:
+> [`ir-first-lowering-consolidation-audit.md`](../solutions/architecture-patterns/ir-first-lowering-consolidation-audit.md).
+
+**Objective**
+- Make the schema/DDL domain actually single-sourced — the property the program
+  set as a success criterion but has not yet met. Until this lands, cross-emitter
+  parity (AGENTS.md I-1) is test-enforced rather than structural, and the legacy
+  planner cannot be safely removed.
+
+**Deliverables**
+- [ ] `src/schema.rs` (runtime CREATE) consumes `ferro-ddl-lowering`; its private
+      `CanonicalType` / `canonical_to_db_type_token` are deleted. One canonical
+      type system across CREATE and migrate.
+- [ ] Single SchemaIR producer: Rust consumes the Python-compiled SchemaIR over
+      FFI (as the Query path does) instead of rebuilding it via
+      `schema_json_to_schema_ir` / `live_columns_to_schema_ir`.
+- [ ] Duplicated helpers in `src/migrate.rs` (`pg_alter_type_target`,
+      `sqlite_declared_type`, `sqlite_type_class`, `single_unique_index_name`,
+      `fk_action_sql`, `literal_default_value`) removed in favor of the
+      `ferro-ddl-lowering` originals.
+- [ ] IR `db_type` is authoritative, or it is dropped for non-explicit columns
+      (emitters must not silently re-derive a value that disagrees with the IR).
+- [ ] Runtime migrate IR populates composite indexes/uniques, or the scope cut is
+      documented with a tracked follow-up.
+
+**Exit gate**
+- [ ] Exactly one `CanonicalType` and one SchemaIR producer remain in the tree
+      (grep-verified; no parallel encoders).
+- [ ] Cross-emitter parity is backed by shared code, not only by
+      `test_cross_emitter_parity.py` / `test_db_type_cross_emitter_parity.py`
+      (those become regression sentinels over shared lowering, not the primary
+      guarantee).
+- [ ] Backend matrix green on SQLite + Postgres.
+
+**Verification commands**
+- `cargo test -p ferro-schema-ir -p ferro-migrate`
+- `cargo test --no-default-features --features testing`
+- `uv run pytest tests/test_cross_emitter_parity.py tests/test_db_type_cross_emitter_parity.py tests/test_ir_vectors_contract.py -q`
+- `uv run pytest -m "backend_matrix or postgres_only" --db-backends=sqlite,postgres tests/test_auto_migrate.py tests/test_migrate_plan.py -q`
+
+---
+
 ### Phase 9 - Compatibility cutover and shim removal (`v0.14.0`)
 
 Status: `Not started`
+
+> **Dependency (2026-06-26 audit):** removal of the deprecated enriched-JSON
+> migration planner in `src/migrate.rs` must not land until **Phase 8.5** has
+> single-sourced the IR path. Deleting the legacy planner while SchemaIR still has
+> two producers and the CREATE path still diverges would leave parity unguarded.
 
 Issue references:
 
@@ -561,12 +672,22 @@ async with engines.session("app"):
 - Attempting convenience model calls outside a session raises a deterministic error.
 - Multi-DB behavior is deterministic under concurrent coroutine workloads.
 
-## GitHub Project mapping (ready to instantiate)
+## GitHub Project mapping
 
-Use this roadmap as the source for issues and project fields.
+**Live project:** org `syn54x`, **Project #7** — <https://github.com/orgs/syn54x/projects/7>.
+Enrollment, native sub-issues, and milestone assignment are **mandatory** for
+every issue; see *Traceability rule → Project board and native sub-issues
+(required)* above for the exact steps.
 
-**Recommended project fields**
-- `Phase`: 0, 1, 2, 3, 4, 5, 6, 7, 8
+> **Field note (2026-06-26):** in practice the board is driven by the **`Status`**
+> field (`Todo` / `In Progress` / `Done`) plus the **`IR-P<phase>` milestone**,
+> with phase/workstream carried in the issue title prefix (`[IR-P<phase>][WSx]`).
+> The custom `Phase` single-select is stale (options stop at `7`) and unused —
+> **group by milestone**. The field list below is the original design intent, not
+> the live schema.
+
+**Project fields (original design intent)**
+- `Phase`: 0, 1, 2, ... — *stale; use the `IR-P<phase>` milestone instead*
 - `Workstream`: WS1..WS6
 - `Type`: RFC, Infra, Runtime, Migration, Test, Docs, Release
 - `Status`: Backlog, Ready, In Progress, Blocked, In Review, Done
@@ -586,7 +707,8 @@ Use this roadmap as the source for issues and project fields.
 
 ## Milestone cadence
 
-- Milestone per phase (`IR-P0`, `IR-P1`, ...).
+- Milestone per phase (`IR-P0`, `IR-P1`, ...); inserted sub-phases use a `.5`
+  suffix milestone (e.g. `IR-P8.5`).
 - Weekly roadmap review:
   - phase status changes
   - new blockers and risk level updates
@@ -600,6 +722,12 @@ Use this roadmap as the source for issues and project fields.
   - Mitigation: golden vector suite plus backend matrix at every phase gate.
 - Risk: compatibility shim drag extends timeline.
   - Mitigation: define shim sunset at creation time with a hard owning phase.
+- Risk: "single source of truth" is asserted by phase gates but not realized in
+  code — parallel type-lowering encoders and a dual SchemaIR producer persist,
+  so cross-emitter parity is test-enforced rather than structural (2026-06-26
+  audit).
+  - Mitigation: Phase 8.5 collapses the encoders and producers; it gates Phase 9
+    so the legacy planner is not removed while parity is unguarded.
 
 ## Progress log
 
@@ -621,6 +749,9 @@ Append updates as concise entries.
 - `2026-06-22` - Phase 5 working-branch implementation landed: added unified codec registry module (`src/codec.rs`) across insert/update/filter/m2m/fetch paths, extracted single hydration ABI helper (`src/hydration.rs`) with required Pydantic slot initialization, and expanded codec conformance vectors/tests for null/uuid/decimal/temporal/enum semantics.
 - `2026-06-22` - Phase 6 working-branch implementation landed: introduced sessionized runtime API (`engines.session` / `Session`) and ambient session routing, moved transaction/identity-map hot-path state to session scope in Rust with compatibility fallback + deprecation warnings, added session lifecycle tests, and synchronized migration/guide/API/invariant docs.
 - `2026-06-22` - Phase 7 working-branch implementation landed: completed version-centric public migration guidance (`Migrating to v0.12.0`), added release checklist + changelog entries, centralized `v0.14.0` deprecation-target messaging across compatibility paths, added deprecated-path inventory tests, and validated full Rust/Python/docs/release verification matrix.
+- `2026-06-26` - Code-grounded architecture audit recorded at `docs/solutions/architecture-patterns/ir-first-lowering-consolidation-audit.md`. Finding: the schema/DDL domain is not yet single-sourced — runtime CREATE (`src/schema.rs`) keeps a private `CanonicalType` and consumes no IR; SchemaIR has two independent producers (Python `compile_schema_ir_payload` + Rust `schema_json_to_schema_ir`); the type system is encoded in ~5 parallel places. Corrected the overclaimed Phase 8 consolidation deliverable (`[x]` → `[~]`).
+- `2026-06-26` - Inserted **Phase 8.5** (lowering consolidation & single-source-of-truth closeout); gates Phase 9 shim removal. Numbered `8.5` (no renumbering) to preserve existing Phase 9 issue references (#107–#110).
+- `2026-06-26` - Phase 8.5 issues filed and linked: epic [#139](https://github.com/syn54x/ferro-orm/issues/139) with sub-issues [#140](https://github.com/syn54x/ferro-orm/issues/140), [#141](https://github.com/syn54x/ferro-orm/issues/141), [#142](https://github.com/syn54x/ferro-orm/issues/142), [#143](https://github.com/syn54x/ferro-orm/issues/143), [#144](https://github.com/syn54x/ferro-orm/issues/144). Audit captured in PR [#138](https://github.com/syn54x/ferro-orm/pull/138).
 
 ## Immediate next actions
 

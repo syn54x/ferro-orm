@@ -10,7 +10,9 @@ several independent code paths.
 A single source of truth removes whole classes of drift bugs:
 
 - **Predictable schema diffs.** Runtime DDL and the Alembic autogenerate bridge
-  derive from the same IR, so migrations stop proposing phantom changes.
+  are held to the same schema contract — Alembic derives its metadata from the
+  compiled SchemaIR, and cross-emitter parity tests pin the runtime emitter to
+  it — so migrations stop proposing phantom changes.
 - **Typed query execution.** Queries compile through typed IR rather than ad-hoc
   JSON, so bind and null semantics behave the same on SQLite and PostgreSQL.
 - **Explicit runtime state.** Connection and transaction routing are scoped to a

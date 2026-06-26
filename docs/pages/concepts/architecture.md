@@ -36,9 +36,18 @@ graph LR
     Builder --> Compiler
     Compiler --> SchemaIR
     SchemaIR --> Alembic
-    SchemaIR --> Migrate
     EnrichedJSON --> Registry
+    EnrichedJSON --> Migrate
 ```
+
+> **Implementation status (2026-06-26):** only `SchemaIR --> Alembic` is a fully
+> realized SchemaIR consumer. The runtime DDL / `ferro-migrate` path currently
+> re-derives its own SchemaIR in Rust from the enriched JSON (it does not consume
+> the Python-compiled SchemaIR envelope), and the runtime CREATE emitter
+> (`src/schema.rs`) uses its own canonical type system rather than the shared
+> `ferro-ddl-lowering` crate. Collapsing these onto one SchemaIR producer and one
+> lowering library is tracked as **Phase 8.5** — see the
+> [IR-first lowering consolidation audit](../../solutions/architecture-patterns/ir-first-lowering-consolidation-audit.md).
 
 ### Runtime path (per operation)
 
@@ -102,7 +111,7 @@ Ferro models are real Pydantic V2 `BaseModel` subclasses. The Python layer owns:
 
 The FFI boundary is built on [PyO3](https://pyo3.rs) with `pyo3-async-runtimes` bridging Python's asyncio event loop to Rust's tokio runtime. Versioned IR envelopes cross the boundary:
 
-- **SchemaIR** (`ir_kind: "schema"`) — compiled at class-creation time from the enriched model schema. Cached in Python (`ferro.state`) and consumed by Alembic `get_metadata()`, migration planning, and parity tests. The Rust registry still receives enriched JSON schema for runtime query/bind metadata.
+- **SchemaIR** (`ir_kind: "schema"`) — compiled at class-creation time from the enriched model schema. Cached in Python (`ferro.state`) and consumed by Alembic `get_metadata()` and parity tests. The Rust registry receives enriched JSON schema for runtime query/bind metadata, and the runtime migration planner currently re-derives its own SchemaIR in Rust from that JSON rather than consuming this envelope (consolidation tracked in [Phase 8.5](../../plans/2026-06-19-001-ir-first-roadmap.md)).
 - **QueryIR** (`ir_kind: "query"`) — emitted per operation from the query builder as `{ir_kind, ir_version, payload}`. Rust deserializes the envelope, plans SQL, and binds parameters through the shared codec registry.
 - **Rows** travel back as typed values that Rust hydrates into Python objects via the hydration ABI (direct `__dict__` population with required Pydantic slots initialized).
 
@@ -199,7 +208,7 @@ await connect("sqlite::memory:", auto_migrate=True)
 
 The legacy enriched-JSON migration planner remains in the codebase as a deprecated shadow reference until `v0.14.0` (Phase 9); parity against the IR path is gated in Phase 8 ([#120](https://github.com/syn54x/ferro-orm/issues/120)).
 
-For renames, primary-key changes, and complex transforms, use the [Alembic bridge](../guide/migrations.md). **SchemaIR** is the canonical contract for cross-emitter DDL parity — Alembic `get_metadata()` derives SQLAlchemy metadata from compiled SchemaIR so autogenerate agrees with Ferro's naming and type conventions. The enriched JSON schema in the Rust registry remains the runtime source for query bind typing and hydration metadata.
+For renames, primary-key changes, and complex transforms, use the [Alembic bridge](../guide/migrations.md). **SchemaIR** is the intended canonical contract for cross-emitter DDL parity — Alembic `get_metadata()` derives SQLAlchemy metadata from compiled SchemaIR so autogenerate agrees with Ferro's naming and type conventions. The runtime CREATE and migrate emitters do not yet consume SchemaIR directly, so today that parity is enforced by tests (`test_cross_emitter_parity.py`, `test_db_type_cross_emitter_parity.py`) rather than by shared lowering code; making it structural is tracked in [Phase 8.5](../../plans/2026-06-19-001-ir-first-roadmap.md). The enriched JSON schema in the Rust registry remains the runtime source for query bind typing and hydration metadata.
 
 ## Async Architecture
 
