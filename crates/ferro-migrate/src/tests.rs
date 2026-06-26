@@ -655,6 +655,44 @@ fn emit_sql_multi_op_ordering() {
 }
 
 #[test]
+fn plan_from_ir_adds_missing_index() {
+    let old = envelope(vec![schema_model("doc", vec![col("a", "text", true), col("b", "text", true)])]);
+    let mut nm = schema_model("doc", vec![col("a", "text", true), col("b", "text", true)]);
+    nm.indexes = vec![SchemaIndex { name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false }];
+    let new = envelope(vec![nm]);
+    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    assert!(plan.operations.contains(&MigrationOp::AddIndex {
+        table: "doc".into(), name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false
+    }));
+}
+
+#[test]
+fn plan_from_ir_drops_orphaned_index() {
+    let mut om = schema_model("doc", vec![col("a", "text", true)]);
+    om.indexes = vec![SchemaIndex { name: "idx_doc_a".into(), columns: vec!["a".into()], unique: false }];
+    let old = envelope(vec![om]);
+    let new = envelope(vec![schema_model("doc", vec![col("a", "text", true)])]); // no index
+    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    assert!(plan.operations.contains(&MigrationOp::DropIndex { table: "doc".into(), name: "idx_doc_a".into() }));
+}
+
+#[test]
+fn emit_add_index_matches_create_path() {
+    let plan = MigrationPlan { operations: vec![MigrationOp::AddIndex {
+        table: "doc".into(), name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false
+    }], warnings: vec![] };
+    let r = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Sqlite).unwrap();
+    assert_eq!(r.statements, vec!["CREATE INDEX IF NOT EXISTS \"idx_doc_a_b\" ON \"doc\" (\"a\", \"b\")".to_string()]);
+}
+
+#[test]
+fn emit_drop_index_renders_drop() {
+    let plan = MigrationPlan { operations: vec![MigrationOp::DropIndex { table: "doc".into(), name: "idx_doc_a".into() }], warnings: vec![] };
+    let r = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Postgres).unwrap();
+    assert_eq!(r.statements, vec!["DROP INDEX IF EXISTS \"idx_doc_a\"".to_string()]);
+}
+
+#[test]
 fn emit_sql_no_comment_placeholders_on_full_plan() {
     let old_ir = envelope(vec![schema_model(
         "doc",

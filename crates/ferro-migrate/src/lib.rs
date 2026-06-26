@@ -85,6 +85,24 @@ pub enum MigrationOp {
         /// Column whose nullability drifted.
         column: String,
     },
+    /// A standalone Ferro-named index/unique present in the model but not live.
+    AddIndex {
+        /// Owning table.
+        table: String,
+        /// Index name.
+        name: String,
+        /// Indexed columns.
+        columns: Vec<String>,
+        /// Whether this is a unique index.
+        unique: bool,
+    },
+    /// A standalone Ferro-named index present live but gone from the model.
+    DropIndex {
+        /// Owning table.
+        table: String,
+        /// Index name.
+        name: String,
+    },
 }
 
 /// Ordered migration operations plus non-fatal warnings collected during planning.
@@ -149,6 +167,12 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: BackendDialect) -> Vec<String> {
                     table, column
                 )),
             },
+            MigrationOp::AddIndex { name, .. } => {
+                sql.push(format!("-- index '{}' handled by emit_sql_with_ir", name));
+            }
+            MigrationOp::DropIndex { name, .. } => {
+                sql.push(format!("-- index '{}' handled by emit_sql_with_ir", name));
+            }
         }
     }
     sql
@@ -190,6 +214,7 @@ pub fn plan_from_ir(
             continue;
         };
         diff_model_columns(*table, old_model, new_model, ddl_dialect, &mut plan);
+        diff_model_indexes(*table, old_model, new_model, &mut plan);
     }
 
     plan
@@ -254,6 +279,40 @@ fn diff_model_columns(
             plan.operations.push(MigrationOp::AlterColumnNullability {
                 table: table.to_string(),
                 column: (*col).to_string(),
+            });
+        }
+    }
+}
+
+fn diff_model_indexes(
+    table: &str,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    plan: &mut MigrationPlan,
+) {
+    let old_by_name: BTreeMap<String, (Vec<String>, bool)> = old_model
+        .indexes
+        .iter()
+        .map(|i| (i.name.clone(), (i.columns.clone(), i.unique)))
+        .collect();
+    let new_set = emit::standalone_indexes(new_model);
+    let new_names: BTreeSet<&str> = new_set.iter().map(|(n, _, _)| n.as_str()).collect();
+
+    for (name, columns, unique) in &new_set {
+        if !old_by_name.contains_key(name) {
+            plan.operations.push(MigrationOp::AddIndex {
+                table: table.to_string(),
+                name: name.clone(),
+                columns: columns.clone(),
+                unique: *unique,
+            });
+        }
+    }
+    for name in old_by_name.keys() {
+        if !new_names.contains(name.as_str()) {
+            plan.operations.push(MigrationOp::DropIndex {
+                table: table.to_string(),
+                name: name.clone(),
             });
         }
     }
