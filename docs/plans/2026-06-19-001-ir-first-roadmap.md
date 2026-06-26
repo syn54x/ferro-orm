@@ -438,16 +438,16 @@ Issue references:
 
 **Deliverables**
 - [ ] `ferro-migrate` `emit_sql` emits executable DDL for all `MigrationOp` variants on SQLite and Postgres (no comment placeholders).
-- [ ] `plan_table_migration` executes the IR plan as the primary runtime path; legacy enriched-JSON diff walk **deprecated** but retained for shadow comparison (removal deferred to Phase 9).
-- [ ] Shadow/parity gate: IR migration path matches legacy planner, `create_tables`, and Alembic for the `auto_migrate` capability matrix.
-- [ ] `shadow_compare_migration_plan` compares IR vs legacy output (not legacy roundtrip); `FERRO_SHADOW_RUNTIME` / `FERRO_SHADOW_RUNTIME_STRICT` enforce drift in CI.
-- [ ] Duplicate `schema_json_to_schema_ir` / `live_columns_to_schema_ir` lowering consolidated or single-sourced where feasible.
+- [x] `plan_table_migration` executes the IR plan as the primary runtime path; legacy enriched-JSON diff walk **deprecated** but retained for shadow comparison (removal deferred to Phase 9).
+- [x] Shadow/parity gate: IR migration path matches legacy planner, `create_tables`, and Alembic for the `auto_migrate` capability matrix.
+- [x] `shadow_compare_migration_plan` compares IR vs legacy output (not legacy roundtrip); `FERRO_SHADOW_RUNTIME` / `FERRO_SHADOW_RUNTIME_STRICT` enforce drift in CI.
+- [x] Duplicate `schema_json_to_schema_ir` / `live_columns_to_schema_ir` lowering consolidated or single-sourced where feasible.
 
 **Exit gate**
 - [ ] `cargo test -p ferro-migrate` green with full op coverage.
 - [ ] `tests/test_auto_migrate.py` and `tests/test_migrate_plan.py` green on SQLite + Postgres backend matrix.
 - [ ] IR planner is live; no discarded `_typed_plan` scaffolding in `migrate.rs`.
-- [ ] Legacy JSON diff planner deprecated and shadow-compared; **not** removed (Phase 9).
+- [x] Legacy JSON diff planner deprecated and shadow-compared; **not** removed (Phase 9).
 
 **Verification commands**
 - `cargo test -p ferro-schema-ir -p ferro-migrate`

@@ -100,7 +100,7 @@ fn plan_from_ir_detects_add_drop_and_alter_ops() {
         vec![col("name", "varchar(120)", true), col("status", "text", false)],
     )]);
 
-    let plan = plan_from_ir(&old_ir, &new_ir);
+    let plan = plan_from_ir(&old_ir, &new_ir, BackendDialect::Sqlite);
     assert!(plan.operations.contains(&MigrationOp::AddColumn {
         table: "doc".to_string(),
         column: "status".to_string(),
@@ -123,7 +123,7 @@ fn plan_from_ir_detects_add_drop_and_alter_ops() {
 fn plan_from_ir_add_and_drop_table() {
     let old_ir = envelope(vec![schema_model("legacy", vec![col("id", "int", false)])]);
     let new_ir = envelope(vec![schema_model("fresh", vec![col("id", "int", false)])]);
-    let plan = plan_from_ir(&old_ir, &new_ir);
+    let plan = plan_from_ir(&old_ir, &new_ir, BackendDialect::Sqlite);
     assert!(plan.operations.contains(&MigrationOp::AddTable {
         table: "fresh".to_string(),
     }));
@@ -667,7 +667,7 @@ fn emit_sql_no_comment_placeholders_on_full_plan() {
             col("extra", "text", true),
         ],
     )]);
-    let plan = plan_from_ir(&old_ir, &new_ir);
+    let plan = plan_from_ir(&old_ir, &new_ir, BackendDialect::Sqlite);
     for dialect in [BackendDialect::Sqlite, BackendDialect::Postgres] {
         let result = emit_sql_with_ir(&plan, &old_ir, &new_ir, dialect).unwrap();
         assert_no_comment_placeholders(&result.statements);

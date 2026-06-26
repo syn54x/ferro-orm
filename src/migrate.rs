@@ -14,7 +14,10 @@
 //! Phase 9.
 
 use crate::backend::EngineHandle;
-use ferro_ddl_lowering::db_check_constraint_name;
+use ferro_ddl_lowering::{
+    Dialect, db_check_constraint_name, information_schema_to_db_type_token,
+    schema_columns_storage_drift,
+};
 use ferro_migrate::{BackendDialect, MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
     IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
@@ -24,7 +27,8 @@ use crate::introspect::{
     LiveColumn, live_table_columns, quote_ident, sqlite_indexes_covering_column,
 };
 use crate::schema::{
-    CanonicalType, ColumnPlan, apply_canonical_type, build_column_plan, internal_create_tables,
+    CanonicalType, ColumnPlan, apply_canonical_type, build_column_plan,
+    canonical_to_db_type_token, internal_create_tables,
     order_schemas_for_creation, property_json_type_and_format,
 };
 use crate::state::{IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, engine_for_connection};
@@ -72,29 +76,6 @@ fn migrate_column_object<'a>(
         .and_then(|value| value.as_object())
 }
 
-/// Infer canonical `db_type` tokens when the schema omits an explicit `db_type=`.
-fn infer_schema_db_type(raw_col: &serde_json::Value, resolved: &serde_json::Value) -> String {
-    if let Some(db_type) = raw_col
-        .get("db_type")
-        .or_else(|| resolved.get("db_type"))
-        .and_then(|v| v.as_str())
-    {
-        return db_type.to_string();
-    }
-    let (json_type, format) = property_json_type_and_format(resolved);
-    match (json_type, format) {
-        (_, Some("date-time")) => "timestamptz".to_string(),
-        (_, Some("uuid")) => "uuid".to_string(),
-        (_, Some("date")) => "date".to_string(),
-        (Some("integer"), _) => "int".to_string(),
-        (Some("boolean"), _) => "boolean".to_string(),
-        (Some("number"), _) => "double".to_string(),
-        (Some("string"), _) => "varchar".to_string(),
-        (Some("object" | "array"), _) => "json".to_string(),
-        _ => "text".to_string(),
-    }
-}
-
 fn migrate_check_expression(col_name: &str, col_info: &serde_json::Value) -> Option<String> {
     let values = col_info.get("enum").and_then(|v| v.as_array())?;
     if values.is_empty() {
@@ -132,20 +113,25 @@ fn backend_dialect(backend: SqlDialect) -> BackendDialect {
     }
 }
 
-fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> IrEnvelope<SchemaIrPayload> {
+fn schema_json_to_schema_ir(
+    table_lower: &str,
+    schema: &serde_json::Value,
+    backend: SqlDialect,
+) -> IrEnvelope<SchemaIrPayload> {
     let mut columns = Vec::new();
     let mut foreign_keys = Vec::new();
     let mut checks = Vec::new();
     if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
         for (name, raw_col) in properties {
             let resolved = resolve_col_schema(schema, raw_col);
-            let nullable = migrate_column_bool(raw_col, resolved, "ferro_nullable").unwrap_or(true);
-            let db_type = infer_schema_db_type(raw_col, resolved);
+            let col_plan = build_column_plan(table_lower, name, raw_col, schema, backend);
             let db_type_explicit = raw_col
                 .get("db_type")
                 .or_else(|| resolved.get("db_type"))
-                .and_then(|v| v.as_str())
-                .map(|_| true);
+                .and_then(|v| v.as_str());
+            let db_type = db_type_explicit
+                .map(str::to_string)
+                .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, backend));
             columns.push(SchemaColumn {
                 name: name.clone(),
                 logical_type: property_json_type_and_format(resolved)
@@ -153,17 +139,11 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
                     .unwrap_or("unknown")
                     .to_string(),
                 db_type,
-                db_type_explicit,
-                nullable,
-                primary_key: resolved
-                    .get("primary_key")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                autoincrement: resolved
-                    .get("autoincrement")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                unique: migrate_column_bool(raw_col, resolved, "unique").unwrap_or(false),
+                db_type_explicit: db_type_explicit.map(|_| true),
+                nullable: col_plan.is_nullable,
+                primary_key: col_plan.is_primary_key,
+                autoincrement: col_plan.autoincrement,
+                unique: col_plan.is_unique,
                 index: migrate_column_bool(raw_col, resolved, "index").unwrap_or(false),
                 default: resolved.get("default").cloned(),
                 format: resolved
@@ -231,65 +211,25 @@ fn schema_json_to_schema_ir(table_lower: &str, schema: &serde_json::Value) -> Ir
     }
 }
 
-/// Map `information_schema.columns.data_type` spellings to the same `db_type`
-/// token vocabulary `infer_schema_db_type` uses for model columns (mirrors
-/// `pg_type_matches` on the legacy planner path).
-fn declared_type_to_db_type(declared: &str) -> String {
-    let lower = declared.to_ascii_lowercase();
-    match lower.as_str() {
-        "boolean" => return "boolean".to_string(),
-        "double precision" | "real" => return "double".to_string(),
-        "numeric" => return "numeric".to_string(),
-        "json" | "jsonb" => return "json".to_string(),
-        "bytea" => return "bytea".to_string(),
-        "text" => return "text".to_string(),
-        "integer" => return "int".to_string(),
-        "smallint" => return "smallint".to_string(),
-        "bigint" => return "bigint".to_string(),
-        "uuid" => return "uuid".to_string(),
-        "date" => return "date".to_string(),
-        "time without time zone" => return "time".to_string(),
-        "timestamp without time zone" => return "timestamp".to_string(),
-        "timestamp with time zone" => return "timestamptz".to_string(),
-        _ => {}
-    }
-    if lower.contains("character varying") || lower == "varchar" {
-        return "varchar".to_string();
-    }
-    if lower.contains("smallint") {
-        return "smallint".to_string();
-    }
-    if lower.contains("bigint") {
-        return "bigint".to_string();
-    }
-    if lower.contains("int") {
-        return "int".to_string();
-    }
-    if lower.contains("uuid") || lower.contains("char(32)") {
-        return "uuid".to_string();
-    }
-    if lower.contains("timestamp with time zone") {
-        return "timestamptz".to_string();
-    }
-    if lower.contains("timestamp") || lower.contains("datetime") {
-        return "timestamp".to_string();
-    }
-    if lower == "date" || lower.contains("date_") {
-        return "date".to_string();
-    }
-    if lower == "time" || lower.contains("time_") {
-        return "time".to_string();
-    }
-    "text".to_string()
-}
-
-fn live_columns_to_schema_ir(table_lower: &str, live: &[LiveColumn]) -> IrEnvelope<SchemaIrPayload> {
+fn live_columns_to_schema_ir(
+    table_lower: &str,
+    live: &[LiveColumn],
+    backend: SqlDialect,
+) -> IrEnvelope<SchemaIrPayload> {
+    let dialect = match backend {
+        SqlDialect::Sqlite => ferro_ddl_lowering::Dialect::Sqlite,
+        SqlDialect::Postgres => ferro_ddl_lowering::Dialect::Postgres,
+    };
     let mut columns: Vec<SchemaColumn> = live
         .iter()
         .map(|col| SchemaColumn {
             name: col.name.clone(),
             logical_type: "unknown".to_string(),
-            db_type: declared_type_to_db_type(&col.declared_type),
+            db_type: information_schema_to_db_type_token(
+                &col.declared_type,
+                col.char_max_len,
+                dialect,
+            ),
             db_type_explicit: None,
             nullable: col.is_nullable,
             primary_key: col.is_primary_key,
@@ -365,41 +305,6 @@ impl MigrationPlan {
 
     fn is_empty(&self) -> bool {
         self.statements.is_empty() && self.drop_columns.is_empty()
-    }
-}
-
-/// The `information_schema.data_type` spelling Postgres reports for each
-/// canonical type, used to detect drift between model and live schema.
-fn pg_type_matches(canonical: CanonicalType, live: &LiveColumn) -> bool {
-    let data_type = live.declared_type.as_str();
-    match canonical {
-        CanonicalType::Integer => data_type == "integer",
-        CanonicalType::SmallInt => data_type == "smallint",
-        CanonicalType::BigInt => data_type == "bigint",
-        CanonicalType::Double => data_type == "double precision",
-        CanonicalType::Decimal => data_type == "numeric",
-        CanonicalType::Boolean => data_type == "boolean",
-        CanonicalType::Json => data_type == "json",
-        CanonicalType::Text => data_type == "text",
-        CanonicalType::Varchar(None) => {
-            data_type == "character varying" && live.char_max_len.is_none()
-        }
-        CanonicalType::Varchar(Some(n)) => {
-            data_type == "character varying" && live.char_max_len == Some(i64::from(n))
-        }
-        CanonicalType::Char(n) => {
-            data_type == "character" && live.char_max_len == Some(i64::from(n))
-        }
-        CanonicalType::Uuid => data_type == "uuid",
-        // DateTime is the SQLite rendering of the timestamp tokens; treat it
-        // like a plain timestamp if it ever reaches a Postgres comparison.
-        CanonicalType::DateTime | CanonicalType::Timestamp => {
-            data_type == "timestamp without time zone"
-        }
-        CanonicalType::TimestampTz => data_type == "timestamp with time zone",
-        CanonicalType::Date => data_type == "date",
-        CanonicalType::Time => data_type == "time without time zone",
-        CanonicalType::Blob => data_type == "bytea",
     }
 }
 
@@ -554,9 +459,9 @@ pub fn plan_table_migration(
         return Ok(MigrationPlan::new());
     }
 
-    let old_ir = live_columns_to_schema_ir(table_lower, live);
-    let new_ir = schema_json_to_schema_ir(table_lower, schema);
-    let mut typed_plan = plan_from_ir(&old_ir, &new_ir);
+    let old_ir = live_columns_to_schema_ir(table_lower, live, backend);
+    let new_ir = schema_json_to_schema_ir(table_lower, schema, backend);
+    let mut typed_plan = plan_from_ir(&old_ir, &new_ir, backend_dialect(backend));
 
     if !opts.destructive {
         typed_plan
@@ -602,7 +507,6 @@ pub fn plan_table_migration(
 
 /// Deprecated enriched-JSON migration planner retained for #120 shadow comparison.
 /// Phase 9 ([#108](https://github.com/syn54x/ferro-orm/issues/108)) removes this path.
-#[allow(dead_code)]
 fn plan_table_migration_legacy(
     table_lower: &str,
     schema: &serde_json::Value,
@@ -621,17 +525,23 @@ fn plan_table_migration_legacy(
     let mut model_columns: HashSet<&str> = HashSet::new();
 
     if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-        for (col_name, raw_col_info) in properties {
-            model_columns.insert(col_name.as_str());
-            let col_plan = build_column_plan(table_lower, col_name, raw_col_info, schema, backend);
+        let mut col_names: Vec<&str> = properties.keys().map(String::as_str).collect();
+        col_names.sort_unstable();
+        for col_name in col_names {
+            let raw_col_info = &properties[col_name];
+            model_columns.insert(col_name);
+            let col_plan =
+                build_column_plan(table_lower, col_name, raw_col_info, schema, backend);
 
-            match live_by_name.get(col_name.as_str()) {
+            match live_by_name.get(col_name) {
                 None => plan_missing_column(table_lower, col_name, &col_plan, backend, &mut plan)?,
                 Some(live_col) => {
                     plan_existing_column(
                         table_lower,
                         col_name,
                         &col_plan,
+                        raw_col_info,
+                        schema,
                         live_col,
                         backend,
                         &mut plan,
@@ -642,6 +552,7 @@ fn plan_table_migration_legacy(
     }
 
     if opts.destructive {
+        let mut drop_columns: Vec<String> = Vec::new();
         for live_col in live {
             if model_columns.contains(live_col.name.as_str()) {
                 continue;
@@ -653,8 +564,10 @@ fn plan_table_migration_legacy(
                     table_lower, live_col.name
                 )));
             }
-            plan.drop_columns.push(live_col.name.clone());
+            drop_columns.push(live_col.name.clone());
         }
+        drop_columns.sort();
+        plan.drop_columns = drop_columns;
     }
 
     Ok(plan)
@@ -667,31 +580,21 @@ fn shadow_compare_migration_plan(
     backend: SqlDialect,
     opts: MigrateOptions,
 ) -> Result<(), String> {
-    let legacy = plan_table_migration(table_lower, schema, live, backend, opts)
+    let ir = plan_table_migration(table_lower, schema, live, backend, opts)
         .map_err(|e| e.to_string())?;
-    let schema_roundtrip: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(schema).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    let live_roundtrip = live.to_vec();
-    let shadow = plan_table_migration(
-        table_lower,
-        &schema_roundtrip,
-        &live_roundtrip,
-        backend,
-        opts,
-    )
-    .map_err(|e| e.to_string())?;
-    if legacy.statements == shadow.statements
-        && legacy.drop_columns == shadow.drop_columns
-        && legacy.warnings == shadow.warnings
+    let legacy = plan_table_migration_legacy(table_lower, schema, live, backend, opts)
+        .map_err(|e| e.to_string())?;
+    if ir.statements == legacy.statements
+        && ir.drop_columns == legacy.drop_columns
+        && ir.warnings == legacy.warnings
     {
         return Ok(());
     }
     Err(format!(
-        "shadow migration-plan mismatch for '{}': legacy={} shadow={}",
+        "shadow migration-plan mismatch for '{}': ir={} legacy={}",
         table_lower,
-        serde_json::to_string(&legacy.statements).unwrap_or_else(|_| "<legacy>".to_string()),
-        serde_json::to_string(&shadow.statements).unwrap_or_else(|_| "<shadow>".to_string())
+        serde_json::to_string(&ir.statements).unwrap_or_else(|_| "<ir>".to_string()),
+        serde_json::to_string(&legacy.statements).unwrap_or_else(|_| "<legacy>".to_string())
     ))
 }
 
@@ -817,6 +720,30 @@ fn plan_missing_column(
     Ok(())
 }
 
+fn schema_column_for_drift(
+    name: &str,
+    db_type: String,
+    nullable: bool,
+    primary_key: bool,
+) -> SchemaColumn {
+    SchemaColumn {
+        name: name.to_string(),
+        logical_type: "unknown".to_string(),
+        db_type,
+        db_type_explicit: None,
+        nullable,
+        primary_key,
+        autoincrement: false,
+        unique: false,
+        index: false,
+        default: None,
+        format: None,
+        enum_values: None,
+        enum_type_name: None,
+        postgres_native_enum: false,
+    }
+}
+
 /// Reconcile an existing live column with the model definition. Postgres gets
 /// native `ALTER COLUMN` DDL; SQLite cannot alter columns in place, so drift
 /// surfaces as warnings (and is usually cosmetic there thanks to type
@@ -825,6 +752,8 @@ fn plan_existing_column(
     table_lower: &str,
     col_name: &str,
     col_plan: &ColumnPlan,
+    raw_col_info: &serde_json::Value,
+    schema: &serde_json::Value,
     live: &LiveColumn,
     backend: SqlDialect,
     plan: &mut MigrationPlan,
@@ -836,8 +765,26 @@ fn plan_existing_column(
 
     match backend {
         SqlDialect::Postgres => {
+            let dialect = Dialect::Postgres;
+            let resolved = resolve_col_schema(schema, raw_col_info);
+            let model_db_type = raw_col_info
+                .get("db_type")
+                .or_else(|| resolved.get("db_type"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, backend));
+            let live_db_type = information_schema_to_db_type_token(
+                &live.declared_type,
+                live.char_max_len,
+                dialect,
+            );
+            let live_col = schema_column_for_drift(col_name, live_db_type, live.is_nullable, false);
+            let model_col =
+                schema_column_for_drift(col_name, model_db_type, col_plan.is_nullable, false);
             // Native enum columns only exist via Alembic; leave them to it.
-            if !live.is_enum_udt && !pg_type_matches(col_plan.canonical, live) {
+            if !live.is_enum_udt
+                && schema_columns_storage_drift(&live_col, &model_col, dialect)
+            {
                 let target = pg_alter_type_target(col_plan.canonical);
                 plan.statements.push(format!(
                     "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",
@@ -861,13 +808,18 @@ fn plan_existing_column(
             }
         }
         SqlDialect::Sqlite => {
+            let live_db_type = information_schema_to_db_type_token(
+                &live.declared_type,
+                live.char_max_len,
+                Dialect::Sqlite,
+            );
             let expected = sqlite_declared_type(col_plan.canonical);
-            if sqlite_type_class(&live.declared_type) != sqlite_type_class(&expected) {
+            if sqlite_type_class(&live_db_type) != sqlite_type_class(&expected) {
                 plan.warnings.push(format!(
                     "Column '{}.{}' is declared '{}' in the database but the model expects \
                      '{}'. SQLite cannot change column types in place; use Alembic to \
                      migrate this column.",
-                    table_lower, col_name, live.declared_type, expected
+                    table_lower, col_name, live_db_type, expected
                 ));
             }
             if col_plan.is_nullable != live.is_nullable {
@@ -1120,6 +1072,62 @@ pub fn _render_migration_sql_for_test(
     Ok((statements, plan.warnings))
 }
 
+fn migration_plan_snapshot(plan: &MigrationPlan) -> serde_json::Value {
+    serde_json::json!({
+        "statements": plan.statements,
+        "drop_columns": plan.drop_columns,
+        "warnings": plan.warnings,
+    })
+}
+
+/// Test-only: compare IR-primary vs legacy migration planners for shadow fixtures.
+///
+/// Returns JSON with `matches`, `ir`, and `legacy` plan snapshots.
+#[pyfunction]
+#[pyo3(name = "_shadow_compare_migration_plan_for_test")]
+#[pyo3(signature = (name, schema_json, live_columns_json, dialect, updates=true, destructive=false))]
+pub fn _shadow_compare_migration_plan_for_test(
+    name: String,
+    schema_json: String,
+    live_columns_json: String,
+    dialect: String,
+    updates: bool,
+    destructive: bool,
+) -> PyResult<String> {
+    let backend = match dialect.as_str() {
+        "postgres" => SqlDialect::Postgres,
+        "sqlite" => SqlDialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
+                other
+            )));
+        }
+    };
+    let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
+    })?;
+    let live: Vec<LiveColumn> = serde_json::from_str(&live_columns_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid live-columns JSON: {}", e))
+    })?;
+
+    let table_lower = name.to_lowercase();
+    let opts = MigrateOptions::laddered(updates, destructive);
+    let ir = plan_table_migration(&table_lower, &schema, &live, backend, opts)?;
+    let legacy = plan_table_migration_legacy(&table_lower, &schema, &live, backend, opts)?;
+    let matches = ir.statements == legacy.statements
+        && ir.drop_columns == legacy.drop_columns
+        && ir.warnings == legacy.warnings;
+    let payload = serde_json::json!({
+        "matches": matches,
+        "ir": migration_plan_snapshot(&ir),
+        "legacy": migration_plan_snapshot(&legacy),
+    });
+    serde_json::to_string(&payload).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to encode JSON: {e}"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1155,6 +1163,66 @@ mod tests {
         })
     }
 
+    fn plan_with_ir_legacy_parity(
+        table: &str,
+        schema: &serde_json::Value,
+        live: &[LiveColumn],
+        backend: SqlDialect,
+        opts: MigrateOptions,
+    ) -> MigrationPlan {
+        let ir = plan_table_migration(table, schema, live, backend, opts)
+            .unwrap_or_else(|e| panic!("IR planner failed for '{table}': {e}"));
+        let legacy = plan_table_migration_legacy(table, schema, live, backend, opts)
+            .unwrap_or_else(|e| panic!("legacy planner failed for '{table}': {e}"));
+        assert_eq!(
+            ir.statements, legacy.statements,
+            "statements mismatch on {table:?} ({backend:?})"
+        );
+        assert_eq!(
+            ir.drop_columns, legacy.drop_columns,
+            "drop_columns mismatch on {table:?} ({backend:?})"
+        );
+        assert_eq!(
+            ir.warnings, legacy.warnings,
+            "warnings mismatch on {table:?} ({backend:?})"
+        );
+        shadow_compare_migration_plan(table, schema, live, backend, opts)
+            .unwrap_or_else(|diff| panic!("shadow compare failed: {diff}"));
+        ir
+    }
+
+    fn assert_ir_legacy_parity(
+        table: &str,
+        schema: &serde_json::Value,
+        live: &[LiveColumn],
+        backend: SqlDialect,
+        opts: MigrateOptions,
+    ) {
+        plan_with_ir_legacy_parity(table, schema, live, backend, opts);
+    }
+
+    fn assert_ir_legacy_parity_err(
+        table: &str,
+        schema: &serde_json::Value,
+        live: &[LiveColumn],
+        backend: SqlDialect,
+        opts: MigrateOptions,
+        needle: &str,
+    ) {
+        let ir_err = plan_table_migration(table, schema, live, backend, opts)
+            .expect_err("IR planner should fail");
+        let legacy_err = plan_table_migration_legacy(table, schema, live, backend, opts)
+            .expect_err("legacy planner should fail");
+        assert!(
+            ir_err.to_string().contains(needle),
+            "IR error missing {needle:?}: {ir_err}"
+        );
+        assert!(
+            legacy_err.to_string().contains(needle),
+            "legacy error missing {needle:?}: {legacy_err}"
+        );
+    }
+
     #[test]
     fn adds_missing_nullable_column_on_both_backends() {
         let schema = invoice_schema();
@@ -1173,7 +1241,7 @@ mod tests {
                 },
             ];
             let plan =
-                plan_table_migration("invoice", &schema, &live_cols, backend, UPDATES).unwrap();
+                plan_with_ir_legacy_parity("invoice", &schema, &live_cols, backend, UPDATES);
             assert_eq!(
                 plan.statements.len(),
                 1,
@@ -1204,8 +1272,7 @@ mod tests {
             live("number", "varchar"),
         ];
         let plan =
-            plan_table_migration("invoice", &schema, &live_cols, SqlDialect::Sqlite, UPDATES)
-                .unwrap();
+            plan_with_ir_legacy_parity("invoice", &schema, &live_cols, SqlDialect::Sqlite, UPDATES);
         // db_type "date" renders date_text on SQLite — identical to CREATE TABLE.
         assert!(
             plan.statements[0].contains("date_text"),
@@ -1227,8 +1294,7 @@ mod tests {
             ..live("id", "integer")
         }];
 
-        let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
-            .unwrap();
+        let plan = plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES);
         assert_eq!(plan.statements.len(), 2, "{:?}", plan.statements);
         assert!(
             plan.statements[0].contains("NOT NULL"),
@@ -1247,7 +1313,7 @@ mod tests {
         );
 
         let plan =
-            plan_table_migration("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES).unwrap();
+            plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES);
         assert_eq!(
             plan.statements.len(),
             1,
@@ -1311,7 +1377,7 @@ mod tests {
         }];
 
         let plan =
-            plan_table_migration("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES).unwrap();
+            plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES);
         assert!(
             !plan.statements[0].to_uppercase().contains("UNIQUE"),
             "inline UNIQUE must be stripped on SQLite: {}",
@@ -1324,8 +1390,7 @@ mod tests {
         );
         assert_eq!(plan.warnings.len(), 1);
 
-        let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
-            .unwrap();
+        let plan = plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES);
         assert!(
             plan.statements[0].to_uppercase().contains("UNIQUE"),
             "Postgres keeps the inline UNIQUE: {}",
@@ -1347,7 +1412,7 @@ mod tests {
             ..live("id", "integer")
         }];
         let plan =
-            plan_table_migration("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES).unwrap();
+            plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES);
         assert_eq!(plan.statements.len(), 2, "{:?}", plan.statements);
         assert!(
             plan.statements[1].contains("\"idx_doc_status\""),
@@ -1372,14 +1437,13 @@ mod tests {
             ..live("id", "integer")
         }];
 
-        let plan = plan_table_migration(
+        let plan = plan_with_ir_legacy_parity(
             "invoice",
             &schema,
             &live_cols,
             SqlDialect::Postgres,
             UPDATES,
-        )
-        .unwrap();
+        );
         assert_eq!(plan.statements.len(), 2, "{:?}", plan.statements);
         assert_eq!(
             plan.statements[1],
@@ -1387,8 +1451,7 @@ mod tests {
         );
 
         let plan =
-            plan_table_migration("invoice", &schema, &live_cols, SqlDialect::Sqlite, UPDATES)
-                .unwrap();
+            plan_with_ir_legacy_parity("invoice", &schema, &live_cols, SqlDialect::Sqlite, UPDATES);
         assert_eq!(plan.statements.len(), 1, "{:?}", plan.statements);
         assert_eq!(plan.warnings.len(), 1);
         assert!(
@@ -1416,14 +1479,13 @@ mod tests {
                 ..live("total", "integer")
             },
         ];
-        let plan = plan_table_migration(
+        let plan = plan_with_ir_legacy_parity(
             "invoice",
             &schema,
             &live_cols,
             SqlDialect::Postgres,
             UPDATES,
-        )
-        .unwrap();
+        );
         assert_eq!(plan.statements.len(), 1, "{:?}", plan.statements);
         assert_eq!(
             plan.statements[0],
@@ -1454,8 +1516,7 @@ mod tests {
                 ..live("b", "character varying")
             },
         ];
-        let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
-            .unwrap();
+        let plan = plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES);
         assert!(
             plan.statements
                 .contains(&"ALTER TABLE \"doc\" ALTER COLUMN \"a\" SET NOT NULL".to_string()),
@@ -1489,8 +1550,7 @@ mod tests {
                 ..live("status", "USER-DEFINED")
             },
         ];
-        let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
-            .unwrap();
+        let plan = plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES);
         assert!(plan.statements.is_empty(), "{:?}", plan.statements);
     }
 
@@ -1510,7 +1570,7 @@ mod tests {
             ..live("id", "integer")
         }];
         let plan =
-            plan_table_migration("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES).unwrap();
+            plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES);
         let sql = &plan.statements[0];
         assert!(sql.contains("ADD COLUMN \"motto\""), "{sql}");
         assert!(
@@ -1543,8 +1603,7 @@ mod tests {
                 ..live("meta", "jsonb")
             },
         ];
-        let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
-            .unwrap();
+        let plan = plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES);
         assert!(
             !plan
                 .statements
@@ -1572,8 +1631,7 @@ mod tests {
             is_primary_key: true,
             ..live("id", "integer")
         }];
-        let plan = plan_table_migration("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES)
-            .unwrap();
+        let plan = plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Postgres, UPDATES);
         assert!(
             plan.statements.iter().any(|sql| {
                 sql.contains("ADD CONSTRAINT \"ck_doc_status\"")
@@ -1608,7 +1666,7 @@ mod tests {
             ..live("id", "integer")
         }];
         let plan =
-            plan_table_migration(table, &schema, &live_cols, SqlDialect::Postgres, UPDATES).unwrap();
+            plan_with_ir_legacy_parity(table, &schema, &live_cols, SqlDialect::Postgres, UPDATES);
         let check_sql = plan
             .statements
             .iter()
@@ -1640,7 +1698,7 @@ mod tests {
             live("count", "varchar"),
         ];
         let plan =
-            plan_table_migration("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES).unwrap();
+            plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES);
         assert!(plan.statements.is_empty(), "{:?}", plan.statements);
         assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
         assert!(
@@ -1667,7 +1725,7 @@ mod tests {
             live("name", "varchar"),
         ];
         let plan =
-            plan_table_migration("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES).unwrap();
+            plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES);
         assert!(plan.statements.is_empty());
         assert_eq!(plan.warnings.len(), 1);
         assert!(
@@ -1695,13 +1753,12 @@ mod tests {
         ];
 
         let plan =
-            plan_table_migration("doc", &schema, &live_cols, SqlDialect::Sqlite, DESTRUCTIVE)
-                .unwrap();
+            plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Sqlite, DESTRUCTIVE);
         assert_eq!(plan.drop_columns, vec!["legacy_notes".to_string()]);
 
         // Without the destructive flag the extra column is untouched.
         let plan =
-            plan_table_migration("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES).unwrap();
+            plan_with_ir_legacy_parity("doc", &schema, &live_cols, SqlDialect::Sqlite, UPDATES);
         assert!(plan.drop_columns.is_empty());
 
         // A live PK column missing from the model is a hard error.
@@ -1710,29 +1767,63 @@ mod tests {
                 "name": {"type": "string"},
             }
         });
-        let err = plan_table_migration(
+        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            assert_ir_legacy_parity_err(
+                "doc",
+                &schema_without_id,
+                &live_cols,
+                backend,
+                DESTRUCTIVE,
+                "primary key",
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_drift_warnings_use_normalized_live_db_type_tokens() {
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "count": {"type": "integer"},
+            }
+        });
+        let live_cols = vec![
+            LiveColumn {
+                is_primary_key: true,
+                declared_type: "INTEGER".to_string(),
+                ..live("id", "integer")
+            },
+            LiveColumn {
+                declared_type: "VARCHAR".to_string(),
+                ..live("count", "varchar")
+            },
+        ];
+        let plan = plan_with_ir_legacy_parity(
             "doc",
-            &schema_without_id,
+            &schema,
             &live_cols,
             SqlDialect::Sqlite,
-            DESTRUCTIVE,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("primary key"), "{err}");
+            UPDATES,
+        );
+        assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+        assert!(
+            plan.warnings[0].contains("declared 'varchar' in the database"),
+            "{}",
+            plan.warnings[0]
+        );
     }
 
     #[test]
     fn no_updates_flag_produces_empty_plan() {
         let schema = invoice_schema();
         let live_cols = vec![live("number", "varchar")];
-        let plan = plan_table_migration(
+        let plan = plan_with_ir_legacy_parity(
             "invoice",
             &schema,
             &live_cols,
             SqlDialect::Sqlite,
             MigrateOptions::default(),
-        )
-        .unwrap();
+        );
         assert!(plan.is_empty());
         assert!(plan.warnings.is_empty());
     }
@@ -1791,5 +1882,166 @@ mod tests {
             vec!["ALTER TABLE \"doc\" DROP COLUMN \"stale\"".to_string()]
         );
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn ir_legacy_parity_matrix() {
+        let invoice = invoice_schema();
+        for (backend, varchar_spelling) in [
+            (SqlDialect::Sqlite, "varchar"),
+            (SqlDialect::Postgres, "character varying"),
+        ] {
+            let live_cols = vec![
+                LiveColumn {
+                    is_primary_key: true,
+                    ..live("id", "integer")
+                },
+                LiveColumn {
+                    is_nullable: false,
+                    ..live("number", varchar_spelling)
+                },
+            ];
+            assert_ir_legacy_parity("invoice", &invoice, &live_cols, backend, UPDATES);
+        }
+
+        let not_null_default = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "status": {"type": "string", "ferro_nullable": false, "default": "draft"},
+            }
+        });
+        let id_only = vec![LiveColumn {
+            is_primary_key: true,
+            ..live("id", "integer")
+        }];
+        assert_ir_legacy_parity(
+            "doc",
+            &not_null_default,
+            &id_only,
+            SqlDialect::Postgres,
+            UPDATES,
+        );
+        assert_ir_legacy_parity(
+            "doc",
+            &not_null_default,
+            &id_only,
+            SqlDialect::Sqlite,
+            UPDATES,
+        );
+
+        let not_null_no_default = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "created_at": {"type": "string", "format": "date-time", "ferro_nullable": false},
+            }
+        });
+        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            assert_ir_legacy_parity_err(
+                "doc",
+                &not_null_no_default,
+                &id_only,
+                backend,
+                UPDATES,
+                "Alembic",
+            );
+        }
+
+        let pk_guard = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "name": {"type": "string"},
+            }
+        });
+        assert_ir_legacy_parity_err(
+            "doc",
+            &pk_guard,
+            &[live("name", "varchar")],
+            SqlDialect::Sqlite,
+            UPDATES,
+            "primary key",
+        );
+
+        let destructive_pk_drop_schema = json!({
+            "properties": {
+                "name": {"type": "string"},
+            }
+        });
+        let destructive_pk_drop_live = vec![
+            LiveColumn {
+                is_primary_key: true,
+                ..live("id", "integer")
+            },
+            live("name", "varchar"),
+            live("legacy_notes", "text"),
+        ];
+        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            assert_ir_legacy_parity_err(
+                "doc",
+                &destructive_pk_drop_schema,
+                &destructive_pk_drop_live,
+                backend,
+                DESTRUCTIVE,
+                "primary key",
+            );
+        }
+
+        let destructive_schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "name": {"type": "string"},
+            }
+        });
+        let destructive_live = vec![
+            LiveColumn {
+                is_primary_key: true,
+                ..live("id", "integer")
+            },
+            live("name", "varchar"),
+            live("legacy_notes", "text"),
+        ];
+        assert_ir_legacy_parity(
+            "doc",
+            &destructive_schema,
+            &destructive_live,
+            SqlDialect::Sqlite,
+            DESTRUCTIVE,
+        );
+        assert_ir_legacy_parity(
+            "doc",
+            &destructive_schema,
+            &destructive_live,
+            SqlDialect::Postgres,
+            DESTRUCTIVE,
+        );
+
+        let no_updates_live = vec![live("number", "varchar")];
+        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            assert_ir_legacy_parity(
+                "invoice",
+                &invoice,
+                &no_updates_live,
+                backend,
+                MigrateOptions::default(),
+            );
+        }
+
+        let multi_col_schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "zebra": {"type": "string", "index": true},
+                "alpha": {"type": "string", "unique": true},
+            }
+        });
+        let multi_col_live = vec![LiveColumn {
+            is_primary_key: true,
+            ..live("id", "integer")
+        }];
+        assert_ir_legacy_parity(
+            "doc",
+            &multi_col_schema,
+            &multi_col_live,
+            SqlDialect::Sqlite,
+            UPDATES,
+        );
     }
 }

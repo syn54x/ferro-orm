@@ -76,7 +76,7 @@ Refactor `schema_json_to_schema_ir` to share `build_column_plan` metadata extrac
 
 Run IR and legacy planners, compare, execute legacy until parity proven.
 
-**Rejected:** Violates I-7 (stop-gap). Phase 8 already defers removal, not primary execution, to shadow comparison in #120.
+**Rejected:** Violates I-6 (stop-gap). Phase 8 already defers removal, not primary execution, to shadow comparison in #120.
 
 ---
 

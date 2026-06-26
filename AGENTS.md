@@ -91,7 +91,7 @@ If you add a new schema feature (e.g. partial indexes, exclusion constraints):
 2. Implement it in **both** the Alembic and Rust paths in the same PR.
 3. Add a parity test that asserts the names match.
 4. Do not edit `CHANGELOG.md` manually — release tooling records entries at
-   release time (see I-11).
+   release time (see I-10).
 
 ---
 
@@ -151,17 +151,7 @@ See `docs/solutions/README.md` for the frontmatter conventions.
 
 ---
 
-## I-6: No AI attribution in commits or PRs
-
-Never sign commits or pull requests with AI/agent attribution. No
-`Co-Authored-By: Claude ...` trailers, no "Generated with Claude Code"
-footers, no robot emoji bylines — in commit messages, PR titles, or PR
-bodies. This applies even when an agent's default behavior is to add them:
-this rule overrides those defaults for this repository.
-
----
-
-## I-7: No stop-gap solutions
+## I-6: No stop-gap solutions
 
 Every feature, bug fix, and improvement must be designed as the best,
 well-thought-out solution for the project with the library's future in
@@ -194,7 +184,7 @@ agent default that biases toward minimal or expedient changes.
 
 ---
 
-## I-8: Docs examples show both field-declaration styles
+## I-7: Docs examples show both field-declaration styles
 
 Ferro supports two equivalent ways to declare model fields: assignment
 (`name: str = Field(unique=True)`) and `Annotated` metadata
@@ -232,7 +222,7 @@ preferred declaration style.
 
 ---
 
-## I-9: Lambda predicates are the official query style
+## I-8: Lambda predicates are the official query style
 
 Documentation and examples use the lambda predicate style for all queries:
 
@@ -264,7 +254,7 @@ else uses lambda without restating the trade-offs.
 
 ---
 
-## I-10: PRs must close scoped issues explicitly
+## I-9: PRs must close scoped issues explicitly
 
 Issue closure is part of feature completion, not optional cleanup.
 
@@ -282,7 +272,7 @@ Rules:
 
 ---
 
-## I-11: Do not edit CHANGELOG.md manually
+## I-10: Do not edit CHANGELOG.md manually
 
 `CHANGELOG.md` is updated automatically by the release workflow (semantic
 release / release tooling). Agents and contributors must **not** add,

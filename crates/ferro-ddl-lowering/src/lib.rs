@@ -103,6 +103,12 @@ fn parse_varchar_token(token: &str) -> Option<u32> {
     if n == 0 { None } else { Some(n) }
 }
 
+fn parse_char_token(token: &str) -> Option<u32> {
+    let body = token.strip_prefix("char(")?.strip_suffix(')')?;
+    let n: u32 = body.parse().ok()?;
+    if n == 0 { None } else { Some(n) }
+}
+
 /// Map a canonical `db_type` token to [`CanonicalType`].
 pub fn db_type_token_to_canonical(token: &str, dialect: Dialect) -> Option<CanonicalType> {
     match token {
@@ -124,8 +130,86 @@ pub fn db_type_token_to_canonical(token: &str, dialect: Dialect) -> Option<Canon
         }),
         "date" => Some(CanonicalType::Date),
         "time" => Some(CanonicalType::Time),
+        "boolean" => Some(match dialect {
+            Dialect::Sqlite => CanonicalType::Integer,
+            Dialect::Postgres => CanonicalType::Boolean,
+        }),
+        "double" => Some(CanonicalType::Double),
+        "numeric" => Some(CanonicalType::Decimal),
+        "json" => Some(CanonicalType::Json),
+        "bytea" => Some(CanonicalType::Blob),
         "varchar" => Some(CanonicalType::Varchar(None)),
-        other => parse_varchar_token(other).map(|n| CanonicalType::Varchar(Some(n))),
+        other => parse_varchar_token(other)
+            .map(|n| CanonicalType::Varchar(Some(n)))
+            .or_else(|| parse_char_token(other).map(CanonicalType::Char)),
+    }
+}
+
+/// Map `information_schema.columns` spellings to the canonical Ferro `db_type` token
+/// vocabulary (mirrors legacy `pg_type_matches` / sqlite storage classes).
+pub fn information_schema_to_db_type_token(
+    declared_type: &str,
+    char_max_len: Option<i64>,
+    dialect: Dialect,
+) -> String {
+    let lower = declared_type.to_ascii_lowercase();
+    let base = match lower.as_str() {
+        "boolean" => match dialect {
+            Dialect::Sqlite => "int",
+            Dialect::Postgres => "boolean",
+        },
+        "double precision" | "real" => "double",
+        "numeric" => "numeric",
+        "json" | "jsonb" => "json",
+        "bytea" => "bytea",
+        "text" => "text",
+        "integer" => "int",
+        "smallint" => "smallint",
+        "bigint" => "bigint",
+        "uuid" => "uuid",
+        "date" => "date",
+        "time without time zone" => "time",
+        "timestamp without time zone" => "timestamp",
+        "timestamp with time zone" => "timestamptz",
+        _ if lower.contains("character varying") || lower == "varchar" => "varchar",
+        _ if lower == "character" => "char",
+        _ if lower.contains("smallint") => "smallint",
+        _ if lower.contains("bigint") => "bigint",
+        _ if lower.contains("int") => "int",
+        _ if lower.contains("uuid") || lower.contains("char(32)") => "uuid",
+        _ if lower.contains("timestamp with time zone") => "timestamptz",
+        _ if lower.contains("timestamp") || lower.contains("datetime") => "timestamp",
+        _ if lower == "date" || lower.contains("date_") => "date",
+        _ if lower == "time" || lower.contains("time_") => "time",
+        _ => "text",
+    };
+    match base {
+        "varchar" => char_max_len
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .map(|n| format!("varchar({n})"))
+            .unwrap_or_else(|| "varchar".to_string()),
+        "char" => char_max_len
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .map(|n| format!("char({n})"))
+            .unwrap_or_else(|| "char".to_string()),
+        other => other.to_string(),
+    }
+}
+
+/// Whether two [`SchemaColumn`] snapshots differ in resolved storage type.
+pub fn schema_columns_storage_drift(
+    old_col: &SchemaColumn,
+    new_col: &SchemaColumn,
+    dialect: Dialect,
+) -> bool {
+    match (
+        canonical_from_schema_column(old_col, dialect),
+        canonical_from_schema_column(new_col, dialect),
+    ) {
+        (Ok(old_c), Ok(new_c)) => old_c != new_c,
+        _ => old_col.db_type != new_col.db_type,
     }
 }
 
@@ -353,5 +437,76 @@ mod tests {
         assert_eq!(single_index_name("user", "email"), "idx_user_email");
         assert_eq!(single_unique_index_name("user", "email"), "uq_user_email");
         assert_eq!(db_check_constraint_name("user", "role"), "ck_user_role");
+    }
+
+    #[test]
+    fn information_schema_to_db_type_token_maps_live_spellings() {
+        assert_eq!(
+            information_schema_to_db_type_token("INTEGER", None, Dialect::Sqlite),
+            "int"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("DATETIME", None, Dialect::Sqlite),
+            "timestamp"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("character varying", Some(40), Dialect::Postgres),
+            "varchar(40)"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("jsonb", None, Dialect::Postgres),
+            "json"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("boolean", None, Dialect::Sqlite),
+            "int"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("boolean", None, Dialect::Postgres),
+            "boolean"
+        );
+    }
+
+    fn drift_col(name: &str, db_type: &str) -> SchemaColumn {
+        SchemaColumn {
+            name: name.to_string(),
+            logical_type: "unknown".to_string(),
+            db_type: db_type.to_string(),
+            db_type_explicit: None,
+            nullable: true,
+            primary_key: false,
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        }
+    }
+
+    #[test]
+    fn schema_columns_storage_drift_compares_canonical_storage() {
+        let old = drift_col("meta", "json");
+        let new = drift_col("meta", "json");
+        assert!(!schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+
+        let old = drift_col("meta", "jsonb");
+        let new = drift_col("meta", "json");
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+
+        let old = drift_col("total", "numeric");
+        let new = drift_col("total", "double");
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+
+        let old = drift_col("count", "varchar");
+        let new = drift_col("count", "int");
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Sqlite));
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+
+        let old = drift_col("created_at", "timestamp");
+        let new = drift_col("created_at", "timestamptz");
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Postgres));
     }
 }
