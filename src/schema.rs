@@ -1147,6 +1147,20 @@ mod tests {
     }
 
     #[test]
+    fn canonical_column_type_unknown_and_missing_type_fall_back_to_varchar() {
+        let unknown = serde_json::json!({ "type": "mystery" });
+        assert_eq!(
+            canonical_column_type(&unknown, &unknown, SqlDialect::Postgres),
+            CanonicalType::Varchar(None)
+        );
+        let no_type = serde_json::json!({});
+        assert_eq!(
+            canonical_column_type(&no_type, &no_type, SqlDialect::Sqlite),
+            CanonicalType::Varchar(None)
+        );
+    }
+
+    #[test]
     fn test_parse_varchar_token_rejects_zero_and_garbage() {
         assert_eq!(parse_varchar_token("varchar(0)"), None);
         assert_eq!(parse_varchar_token("varchar(abc)"), None);
