@@ -223,3 +223,57 @@ def test_updates_false_produces_no_plan():
 def test_unknown_dialect_is_rejected():
     with pytest.raises(ValueError, match="Unknown dialect"):
         render(schema_with({}), PK_ONLY_LIVE, "mysql")
+
+
+# ---------------------------------------------------------------------------
+# Index no-op guard (issue #144) — unit-level assertion
+# ---------------------------------------------------------------------------
+
+# Live-column list for IdxNoopModel: id (PK) + x + y
+_NOOP_LIVE_COLUMNS = [
+    {
+        "name": "id",
+        "declared_type": "integer",
+        "is_primary_key": True,
+        "is_nullable": False,
+    },
+    {"name": "x", "declared_type": "integer", "is_nullable": False},
+    {"name": "y", "declared_type": "integer", "is_nullable": False},
+]
+
+# Schema with a composite index over (x, y).
+_NOOP_SCHEMA = {
+    "properties": {
+        "id": {"type": "integer", "primary_key": True},
+        "x": {"type": "integer", "ferro_nullable": False},
+        "y": {"type": "integer", "ferro_nullable": False},
+    },
+    "ferro_composite_indexes": [["x", "y"]],
+}
+
+# Canonical index name the planner would have created.
+_NOOP_LIVE_INDEXES = [
+    {"name": "idx_idxnoopmodel_x_y", "columns": ["x", "y"], "unique": False}
+]
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+def test_index_noop_emits_zero_ddl_when_index_already_present(dialect):
+    """Planner must produce an empty statement list when the composite index
+    already exists in the live schema — no DROP INDEX + CREATE INDEX churn
+    (false-alarm class of bug, issue #144)."""
+    stmts, warns = _render_migration_sql_for_test(
+        "idxnoopmodel",
+        json.dumps(_NOOP_SCHEMA),
+        json.dumps(_NOOP_LIVE_COLUMNS),
+        dialect,
+        True,   # updates
+        False,  # destructive
+        json.dumps(_NOOP_LIVE_INDEXES),
+    )
+    assert stmts == [], (
+        f"[{dialect}] expected no DDL when index already present, got: {stmts}"
+    )
+    assert warns == [], (
+        f"[{dialect}] expected no warnings when index already present, got: {warns}"
+    )
