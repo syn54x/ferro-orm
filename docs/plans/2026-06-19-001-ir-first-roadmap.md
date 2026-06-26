@@ -144,6 +144,33 @@ Original (superseded) policy:
 - Any roadmap change that affects scope, acceptance criteria, ownership, status, risk, sequencing, or exit gates must be reflected in all already-created linked issues in the same work session (or same PR when applicable).
 - Any issue change that affects those same dimensions must be reflected in the roadmap in the same work session (or same PR when applicable).
 
+### Project board and native sub-issues (required)
+
+Filing an issue is not enough. Every epic and sub-issue must be enrolled on the
+GitHub Project and wired into the native issue hierarchy **at filing time** —
+text references and markdown checklists do not satisfy this.
+
+1. **Add to the board.** Every issue goes on **Project #7** (org `syn54x`,
+   <https://github.com/orgs/syn54x/projects/7>):
+   `gh project item-add 7 --owner syn54x --url <issue-url>`. Set `Status` (new
+   work → `Todo`).
+2. **Use GitHub native sub-issues.** Link each sub-issue to its epic with the
+   **native sub-issue** relationship — the issue UI ("Create sub-issue" / "Add
+   existing issue") or the GraphQL mutation (note the feature header):
+   ```
+   gh api graphql -H "GraphQL-Features: sub_issues" -f query='
+     mutation { addSubIssue(input:{ issueId:"<EPIC_NODE_ID>", subIssueId:"<SUB_NODE_ID>" }) { subIssue { number } } }'
+   ```
+   A markdown checklist in the epic body is optional context, **not** a
+   substitute for the native link.
+3. **Group by milestone, not the `Phase` field.** Assign the phase milestone
+   `IR-P<phase>` (e.g. `IR-P8.5`): `gh issue edit <n> --milestone IR-P<phase>`
+   (create it first if absent: `gh api repos/syn54x/ferro-orm/milestones -f title=...`).
+   The board's `Phase` single-select is stale (options stop at `7`) and unused —
+   do not rely on it.
+4. **Verify before claiming done:** the epic reports N native sub-issues and
+   every issue appears on Project #7 with a `Status`.
+
 ### Reference format
 
 Use issue references inline under each phase:
@@ -645,12 +672,22 @@ async with engines.session("app"):
 - Attempting convenience model calls outside a session raises a deterministic error.
 - Multi-DB behavior is deterministic under concurrent coroutine workloads.
 
-## GitHub Project mapping (ready to instantiate)
+## GitHub Project mapping
 
-Use this roadmap as the source for issues and project fields.
+**Live project:** org `syn54x`, **Project #7** — <https://github.com/orgs/syn54x/projects/7>.
+Enrollment, native sub-issues, and milestone assignment are **mandatory** for
+every issue; see *Traceability rule → Project board and native sub-issues
+(required)* above for the exact steps.
 
-**Recommended project fields**
-- `Phase`: 0, 1, 2, 3, 4, 5, 6, 7, 8
+> **Field note (2026-06-26):** in practice the board is driven by the **`Status`**
+> field (`Todo` / `In Progress` / `Done`) plus the **`IR-P<phase>` milestone**,
+> with phase/workstream carried in the issue title prefix (`[IR-P<phase>][WSx]`).
+> The custom `Phase` single-select is stale (options stop at `7`) and unused —
+> **group by milestone**. The field list below is the original design intent, not
+> the live schema.
+
+**Project fields (original design intent)**
+- `Phase`: 0, 1, 2, ... — *stale; use the `IR-P<phase>` milestone instead*
 - `Workstream`: WS1..WS6
 - `Type`: RFC, Infra, Runtime, Migration, Test, Docs, Release
 - `Status`: Backlog, Ready, In Progress, Blocked, In Review, Done
@@ -670,7 +707,8 @@ Use this roadmap as the source for issues and project fields.
 
 ## Milestone cadence
 
-- Milestone per phase (`IR-P0`, `IR-P1`, ...).
+- Milestone per phase (`IR-P0`, `IR-P1`, ...); inserted sub-phases use a `.5`
+  suffix milestone (e.g. `IR-P8.5`).
 - Weekly roadmap review:
   - phase status changes
   - new blockers and risk level updates
