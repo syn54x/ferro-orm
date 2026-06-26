@@ -46,12 +46,15 @@ def _render_migration_sql_for_test(
     dialect: str,
     updates: bool = True,
     destructive: bool = False,
+    live_indexes_json: str = "",
 ) -> tuple[list[str], list[str]]:
     """Test-only: render the auto-migrate diff for one table without a database.
 
     ``live_columns_json`` is a JSON array of objects with the LiveColumn shape
     (``name``, ``declared_type``, ``is_nullable``, ``is_primary_key``,
-    ``char_max_len``, ``is_enum_udt``). Returns ``(statements, warnings)``.
+    ``char_max_len``, ``is_enum_udt``). ``live_indexes_json`` is a JSON array
+    of objects with the LiveIndex shape (``name``, ``columns``, ``unique``).
+    Returns ``(statements, warnings)``.
     """
     ...
 
@@ -62,8 +65,9 @@ def _shadow_compare_migration_plan_for_test(
     dialect: str,
     updates: bool = True,
     destructive: bool = False,
+    live_indexes_json: str = "",
 ) -> str:
-    """Test-only: compare IR-primary vs legacy migration planners."""
+    """Test-only: compare IR-primary vs legacy migration planners (column-domain scoped)."""
     ...
 
 def _shadow_compare_query_plan_for_test(

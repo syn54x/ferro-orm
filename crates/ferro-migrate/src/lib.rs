@@ -290,6 +290,11 @@ fn diff_model_indexes(
     new_model: &SchemaModel,
     plan: &mut MigrationPlan,
 ) {
+    // Columns present in the old model — indexes that cover only NEW columns are
+    // emitted by emit_add_column during AddColumn processing, so we must not emit
+    // a redundant standalone AddIndex for them.
+    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
+
     let old_by_name: BTreeMap<String, (Vec<String>, bool)> = old_model
         .indexes
         .iter()
@@ -300,6 +305,12 @@ fn diff_model_indexes(
 
     for (name, columns, unique) in &new_set {
         if !old_by_name.contains_key(name) {
+            // Skip AddIndex when all indexed columns are being added in this plan;
+            // emit_add_column already handles the CREATE INDEX for column-add indexes.
+            let all_columns_are_new = columns.iter().all(|c| !old_col_names.contains(c.as_str()));
+            if all_columns_are_new {
+                continue;
+            }
             plan.operations.push(MigrationOp::AddIndex {
                 table: table.to_string(),
                 name: name.clone(),
