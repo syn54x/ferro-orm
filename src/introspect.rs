@@ -40,6 +40,23 @@ pub struct LiveColumn {
     pub is_enum_udt: bool,
 }
 
+/// One live standalone index that Ferro owns (its name follows the `idx_`/`uq_`
+/// convention). Deserialize exists for `_render_migration_sql_for_test`.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct LiveIndex {
+    pub name: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+/// Ferro emits standalone indexes as `idx_<table>_<cols>` and uniques as
+/// `uq_<table>_<cols>`. Reconciliation only ever touches names it owns.
+pub(crate) fn is_ferro_index_name(name: &str) -> bool {
+    name.starts_with("idx_") || name.starts_with("uq_")
+}
+
 /// One live SQLite index covering some column, with enough context to decide
 /// whether it can be dropped ahead of `ALTER TABLE ... DROP COLUMN`.
 #[derive(Clone, Debug)]
@@ -230,6 +247,79 @@ pub async fn sqlite_indexes_covering_column(
     Ok(covering)
 }
 
+/// Live standalone indexes Ferro owns on `table`, normalized across backends.
+pub async fn live_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveIndex>> {
+    match engine.backend() {
+        SqlDialect::Sqlite => sqlite_table_indexes(engine, table).await,
+        SqlDialect::Postgres => postgres_table_indexes(engine, table).await,
+    }
+}
+
+async fn sqlite_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveIndex>> {
+    let list_sql = format!("PRAGMA index_list({})", quote_ident(table));
+    let index_rows = engine
+        .fetch_all_sql_unprepared(&list_sql)
+        .await
+        .map_err(|e| introspection_error("PRAGMA index_list", table, e))?;
+
+    let mut out = Vec::new();
+    for index_row in &index_rows {
+        let Some(name) = row_string(index_row, "name") else { continue };
+        if !is_ferro_index_name(&name) {
+            continue;
+        }
+        let unique = row_bool(index_row, "unique");
+        let info_sql = format!("PRAGMA index_info({})", quote_ident(&name));
+        let col_rows = engine
+            .fetch_all_sql_unprepared(&info_sql)
+            .await
+            .map_err(|e| introspection_error("PRAGMA index_info", table, e))?;
+        // PRAGMA index_info returns rows in `seqno` order already.
+        let columns: Vec<String> = col_rows.iter().filter_map(|r| row_string(r, "name")).collect();
+        out.push(LiveIndex { name, columns, unique });
+    }
+    Ok(out)
+}
+
+async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveIndex>> {
+    // One row per (index, column); `pos` orders columns within the index.
+    let sql = r#"
+        SELECT cl.relname::text AS index_name,
+               i.indisunique     AS is_unique,
+               a.attname::text   AS column_name,
+               array_position(i.indkey, a.attnum) AS pos
+        FROM pg_index i
+        JOIN pg_class cl ON cl.oid = i.indexrelid
+        JOIN pg_class t  ON t.oid  = i.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey)
+        WHERE n.nspname = current_schema()
+          AND t.relname = $1
+          AND NOT i.indisprimary
+        ORDER BY cl.relname, pos
+        "#;
+    let rows = engine
+        .fetch_all_sql_unprepared_with_binds(sql, &[EngineBindValue::String(table.to_string())])
+        .await
+        .map_err(|e| introspection_error("pg_index", table, e))?;
+
+    // Group ordered rows into indexes (rows are already ordered by name, pos).
+    let mut out: Vec<LiveIndex> = Vec::new();
+    for row in &rows {
+        let Some(name) = row_string(row, "index_name") else { continue };
+        if !is_ferro_index_name(&name) {
+            continue;
+        }
+        let unique = row_bool(row, "is_unique");
+        let column = row_string(row, "column_name").unwrap_or_default();
+        match out.last_mut() {
+            Some(last) if last.name == name => last.columns.push(column),
+            _ => out.push(LiveIndex { name, columns: vec![column], unique }),
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +335,15 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn ferro_index_names_are_recognized() {
+        assert!(is_ferro_index_name("idx_user_email"));
+        assert!(is_ferro_index_name("uq_user_email"));
+        assert!(!is_ferro_index_name("sqlite_autoindex_user_1"));
+        assert!(!is_ferro_index_name("user_email_key"));
+        assert!(!is_ferro_index_name("my_custom_index"));
     }
 
     #[tokio::test]
