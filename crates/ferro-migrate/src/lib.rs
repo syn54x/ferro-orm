@@ -305,10 +305,11 @@ fn diff_model_indexes(
 
     for (name, columns, unique) in &new_set {
         if !old_by_name.contains_key(name) {
-            // Skip AddIndex when all indexed columns are being added in this plan;
-            // emit_add_column already handles the CREATE INDEX for column-add indexes.
-            let all_columns_are_new = columns.iter().all(|c| !old_col_names.contains(c.as_str()));
-            if all_columns_are_new {
+            // Skip AddIndex only when it is a single-column index whose sole column is
+            // newly added — emit_add_column already emits that CREATE INDEX.
+            // Composite indexes are never emitted by emit_add_column and must NOT be
+            // skipped here, even when every indexed column is new (AGENTS.md I-1).
+            if columns.len() == 1 && !old_col_names.contains(columns[0].as_str()) {
                 continue;
             }
             plan.operations.push(MigrationOp::AddIndex {

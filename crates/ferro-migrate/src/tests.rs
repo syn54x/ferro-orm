@@ -711,3 +711,59 @@ fn emit_sql_no_comment_placeholders_on_full_plan() {
         assert_no_comment_placeholders(&result.statements);
     }
 }
+
+// Regression: composite index whose columns are all newly added must NOT be skipped.
+// Before the fix, `all_columns_are_new` caused this AddIndex to be silently dropped.
+#[test]
+fn plan_from_ir_composite_all_new_columns_emits_add_index() {
+    let old = envelope(vec![schema_model("doc", vec![col("id", "int", false)])]);
+    let mut nm = schema_model(
+        "doc",
+        vec![col("id", "int", false), col("a", "text", true), col("b", "text", true)],
+    );
+    nm.indexes = vec![SchemaIndex {
+        name: "idx_doc_a_b".to_string(),
+        columns: vec!["a".to_string(), "b".to_string()],
+        unique: false,
+    }];
+    let new = envelope(vec![nm]);
+    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    assert!(
+        plan.operations.contains(&MigrationOp::AddIndex {
+            table: "doc".to_string(),
+            name: "idx_doc_a_b".to_string(),
+            columns: vec!["a".to_string(), "b".to_string()],
+            unique: false,
+        }),
+        "composite index over all-new columns must appear in plan; got: {:?}",
+        plan.operations
+    );
+}
+
+// Regression: single-column index on a newly added column IS correctly skipped
+// because emit_add_column emits the CREATE INDEX for that case.
+#[test]
+fn plan_from_ir_single_column_new_index_is_skipped() {
+    let old = envelope(vec![schema_model("doc", vec![col("id", "int", false)])]);
+    let mut nm = schema_model(
+        "doc",
+        vec![col("id", "int", false), col_with_flags("c", "text", true, false, true, None)],
+    );
+    nm.indexes = vec![SchemaIndex {
+        name: "idx_doc_c".to_string(),
+        columns: vec!["c".to_string()],
+        unique: false,
+    }];
+    let new = envelope(vec![nm]);
+    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    assert!(
+        !plan.operations.contains(&MigrationOp::AddIndex {
+            table: "doc".to_string(),
+            name: "idx_doc_c".to_string(),
+            columns: vec!["c".to_string()],
+            unique: false,
+        }),
+        "single-column index on a new column must NOT appear in plan (emit_add_column handles it); got: {:?}",
+        plan.operations
+    );
+}
