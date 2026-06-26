@@ -562,6 +562,39 @@ Issue references:
 
 ---
 
+### Phase 8.6 - Post-8.5 cross-crate / single-source cleanups
+
+Status: `Not started`
+
+Issue references:
+
+- `Epic:` [#145](https://github.com/syn54x/ferro-orm/issues/145)
+- `Sub-issues:` [#146](https://github.com/syn54x/ferro-orm/issues/146) _(more to be filed by the duplication sweep)_
+
+> Inserted as `8.6` (post-8.5 cleanup backlog). Does **not** gate Phase 9 — it
+> executes after the 8.5 consolidation lands. Source: cleanups surfaced during
+> Phase 8.5.
+
+**Objective**
+- Collect and execute the cross-crate duplication / single-source cleanups that
+  are the same "parallel abstractions kept in sync by hand" anti-pattern as the
+  8.5 lowering work, at the type/boilerplate level.
+
+**Deliverables**
+- [ ] Unify the three dialect enums (`SqlDialect`/`BackendKind`,
+      `ferro-ddl-lowering::Dialect`, `ferro-migrate::BackendDialect`) into one
+      shared `Dialect` in a leaf crate; delete the per-seam translation helpers
+      ([#146](https://github.com/syn54x/ferro-orm/issues/146)).
+- [ ] _Additional items from a read-only Rust duplication sweep (planned after
+      #140 lands): duplicated enums/types across crates, same-logic functions in
+      multiple places, parallel match-arm "translation" boilerplate, repeated
+      magic mappings._
+
+**Exit gate**
+- [ ] Backend matrix green; all cleanups behavior-preserving (no DDL/runtime change).
+
+---
+
 ### Phase 9 - Compatibility cutover and shim removal (`v0.14.0`)
 
 Status: `Not started`
@@ -752,6 +785,7 @@ Append updates as concise entries.
 - `2026-06-26` - Code-grounded architecture audit recorded at `docs/solutions/architecture-patterns/ir-first-lowering-consolidation-audit.md`. Finding: the schema/DDL domain is not yet single-sourced — runtime CREATE (`src/schema.rs`) keeps a private `CanonicalType` and consumes no IR; SchemaIR has two independent producers (Python `compile_schema_ir_payload` + Rust `schema_json_to_schema_ir`); the type system is encoded in ~5 parallel places. Corrected the overclaimed Phase 8 consolidation deliverable (`[x]` → `[~]`).
 - `2026-06-26` - Inserted **Phase 8.5** (lowering consolidation & single-source-of-truth closeout); gates Phase 9 shim removal. Numbered `8.5` (no renumbering) to preserve existing Phase 9 issue references (#107–#110).
 - `2026-06-26` - Phase 8.5 issues filed and linked: epic [#139](https://github.com/syn54x/ferro-orm/issues/139) with sub-issues [#140](https://github.com/syn54x/ferro-orm/issues/140), [#141](https://github.com/syn54x/ferro-orm/issues/141), [#142](https://github.com/syn54x/ferro-orm/issues/142), [#143](https://github.com/syn54x/ferro-orm/issues/143), [#144](https://github.com/syn54x/ferro-orm/issues/144). Audit captured in PR [#138](https://github.com/syn54x/ferro-orm/pull/138).
+- `2026-06-26` - Inserted **Phase 8.6** (post-8.5 cross-crate / single-source cleanup backlog; does not gate Phase 9). Filed epic [#145](https://github.com/syn54x/ferro-orm/issues/145) with seed sub-issue [#146](https://github.com/syn54x/ferro-orm/issues/146) (unify the three dialect enums, surfaced during #140). Remaining 8.6 items to be filed by a read-only Rust duplication sweep planned after #140 lands.
 
 ## Immediate next actions
 
