@@ -15,7 +15,6 @@
             {
               "name": "email",
               "logical_type": "string",
-              "db_type": "text",
               "nullable": false,
               "primary_key": false,
               "autoincrement": false,
@@ -27,7 +26,6 @@
             {
               "name": "id",
               "logical_type": "integer",
-              "db_type": "bigint",
               "nullable": true,
               "primary_key": true,
               "autoincrement": true,
@@ -39,7 +37,6 @@
             {
               "name": "org_id",
               "logical_type": "integer",
-              "db_type": "bigint",
               "nullable": false,
               "primary_key": false,
               "autoincrement": false,
@@ -84,7 +81,6 @@
             {
               "name": "id",
               "logical_type": "integer",
-              "db_type": "bigint",
               "nullable": true,
               "primary_key": true,
               "autoincrement": true,
@@ -96,7 +92,6 @@
             {
               "name": "name",
               "logical_type": "string",
-              "db_type": "text",
               "nullable": false,
               "primary_key": false,
               "autoincrement": false,
@@ -108,7 +103,6 @@
             {
               "name": "slug",
               "logical_type": "string",
-              "db_type": "text",
               "nullable": false,
               "primary_key": false,
               "autoincrement": false,
@@ -145,7 +139,6 @@
             {
               "name": "id",
               "logical_type": "integer",
-              "db_type": "bigint",
               "nullable": true,
               "primary_key": true,
               "autoincrement": true,
@@ -157,7 +150,6 @@
             {
               "name": "name",
               "logical_type": "string",
-              "db_type": "text",
               "nullable": false,
               "primary_key": false,
               "autoincrement": false,
@@ -169,7 +161,6 @@
             {
               "name": "org_id",
               "logical_type": "integer",
-              "db_type": "bigint",
               "nullable": false,
               "primary_key": false,
               "autoincrement": false,
@@ -211,5 +202,5 @@
       ]
     }
   },
-  "fingerprint": "e32e8b0dbb67269dc456904d344dca7cecd506aabe1837a544fc9fba5efc3d3d"
+  "fingerprint": "aafcfe76d373bbce78092eb728456ddc7ff1d6a6f3ac647514e210bc84af143e"
 }

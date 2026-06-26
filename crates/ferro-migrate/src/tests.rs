@@ -40,7 +40,7 @@ fn col(name: &str, db_type: &str, nullable: bool) -> SchemaColumn {
     SchemaColumn {
         name: name.to_string(),
         logical_type: "string".to_string(),
-        db_type: db_type.to_string(),
+        db_type: Some(db_type.to_string()),
         db_type_explicit: None,
         nullable,
         primary_key: false,
@@ -560,7 +560,7 @@ fn emit_sql_with_ir_add_table_missing_model_errors() {
 #[test]
 fn emit_sql_with_ir_alter_column_type_unknown_db_type_errors() {
     let bad_col = SchemaColumn {
-        db_type: "not_a_real_token".to_string(),
+        db_type: Some("not_a_real_token".to_string()),
         logical_type: "unknown".to_string(),
         ..col("name", "text", true)
     };

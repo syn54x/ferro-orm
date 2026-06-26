@@ -314,6 +314,24 @@ def test_schema_ir_compiler_emits_db_check_expression_for_closed_domain(
     ]
 
 
+def test_compiler_omits_db_type_for_non_explicit_columns(clean_model_registry: None) -> None:
+    from ferro import Model, Field, clear_registry
+    from ferro.schema_metadata import build_model_schema
+    from ferro.ir.compiler import compile_schema_ir_payload
+
+    clear_registry()
+    M = type("Acct", (Model,), {
+        "__annotations__": {"id": int | None, "balance": int, "code": str},
+        "id": Field(default=None, primary_key=True),
+        "code": Field(db_type="varchar(32)"),
+    })
+    cols = {c["name"]: c for c in compile_schema_ir_payload("Acct", build_model_schema(M))["models"][0]["columns"]}
+    assert "db_type" not in cols["balance"], cols["balance"]   # non-explicit -> omitted
+    assert "db_type" not in cols["id"], cols["id"]             # non-explicit -> omitted
+    assert cols["code"]["db_type"] == "varchar(32)"            # explicit -> kept
+    assert cols["code"]["db_type_explicit"] is True
+
+
 def test_schema_ir_compiler_includes_join_table_models(clean_model_registry: None) -> None:
     from ferro.ir import compile_registry_schema_ir
     from ferro.relations import resolve_relationships
