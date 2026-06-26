@@ -56,8 +56,10 @@ pub struct SchemaColumn {
     pub name: String,
     /// Pydantic JSON Schema type family (e.g. `"string"`, `"integer"`).
     pub logical_type: String,
-    /// Canonical storage token (`text`, `uuid`, `timestamptz`, …) after Ferro lowering.
-    pub db_type: String,
+    /// Canonical storage token. Present only for columns with an explicit `db_type=`;
+    /// `None` means "derive storage from `logical_type`/`format`".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_type: Option<String>,
     /// `true` when the user set an explicit `db_type=` on the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db_type_explicit: Option<bool>,

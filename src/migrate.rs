@@ -137,7 +137,7 @@ fn schema_json_to_schema_ir(
                     .0
                     .unwrap_or("unknown")
                     .to_string(),
-                db_type,
+                db_type: Some(db_type),
                 db_type_explicit: db_type_explicit.map(|_| true),
                 nullable: col_plan.is_nullable,
                 primary_key: col_plan.is_primary_key,
@@ -224,11 +224,11 @@ fn live_columns_to_schema_ir(
         .map(|col| SchemaColumn {
             name: col.name.clone(),
             logical_type: "unknown".to_string(),
-            db_type: information_schema_to_db_type_token(
+            db_type: Some(information_schema_to_db_type_token(
                 &col.declared_type,
                 col.char_max_len,
                 dialect,
-            ),
+            )),
             db_type_explicit: None,
             nullable: col.is_nullable,
             primary_key: col.is_primary_key,
@@ -728,7 +728,7 @@ fn schema_column_for_drift(
     SchemaColumn {
         name: name.to_string(),
         logical_type: "unknown".to_string(),
-        db_type,
+        db_type: Some(db_type),
         db_type_explicit: None,
         nullable,
         primary_key,

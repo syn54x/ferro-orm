@@ -278,8 +278,8 @@ pub fn canonical_from_schema_column(
     col: &SchemaColumn,
     dialect: Dialect,
 ) -> Result<CanonicalType, String> {
-    canonical_from_parts(&col.logical_type, col.format.as_deref(), &col.db_type, dialect)
-        .map_err(|_| format!("unknown db_type '{}' on column '{}'", col.db_type, col.name))
+    canonical_from_parts(&col.logical_type, col.format.as_deref(), col.db_type.as_deref().unwrap_or(""), dialect)
+        .map_err(|_| format!("unknown db_type '{}' on column '{}'", col.db_type.as_deref().unwrap_or(""), col.name))
 }
 
 /// Single-column index name (`idx_<table>_<col>`).
@@ -511,7 +511,7 @@ mod tests {
         SchemaColumn {
             name: name.to_string(),
             logical_type: "unknown".to_string(),
-            db_type: db_type.to_string(),
+            db_type: Some(db_type.to_string()),
             db_type_explicit: None,
             nullable: true,
             primary_key: false,
