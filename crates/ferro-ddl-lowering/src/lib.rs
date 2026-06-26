@@ -438,4 +438,75 @@ mod tests {
         assert_eq!(single_unique_index_name("user", "email"), "uq_user_email");
         assert_eq!(db_check_constraint_name("user", "role"), "ck_user_role");
     }
+
+    #[test]
+    fn information_schema_to_db_type_token_maps_live_spellings() {
+        assert_eq!(
+            information_schema_to_db_type_token("INTEGER", None, Dialect::Sqlite),
+            "int"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("DATETIME", None, Dialect::Sqlite),
+            "timestamp"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("character varying", Some(40), Dialect::Postgres),
+            "varchar(40)"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("jsonb", None, Dialect::Postgres),
+            "json"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("boolean", None, Dialect::Sqlite),
+            "int"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("boolean", None, Dialect::Postgres),
+            "boolean"
+        );
+    }
+
+    fn drift_col(name: &str, db_type: &str) -> SchemaColumn {
+        SchemaColumn {
+            name: name.to_string(),
+            logical_type: "unknown".to_string(),
+            db_type: db_type.to_string(),
+            db_type_explicit: None,
+            nullable: true,
+            primary_key: false,
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        }
+    }
+
+    #[test]
+    fn schema_columns_storage_drift_compares_canonical_storage() {
+        let old = drift_col("meta", "json");
+        let new = drift_col("meta", "json");
+        assert!(!schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+
+        let old = drift_col("meta", "jsonb");
+        let new = drift_col("meta", "json");
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+
+        let old = drift_col("total", "numeric");
+        let new = drift_col("total", "double");
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+
+        let old = drift_col("count", "varchar");
+        let new = drift_col("count", "int");
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Sqlite));
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+
+        let old = drift_col("created_at", "timestamp");
+        let new = drift_col("created_at", "timestamptz");
+        assert!(schema_columns_storage_drift(&old, &new, Dialect::Postgres));
+    }
 }

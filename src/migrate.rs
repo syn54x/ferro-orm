@@ -808,13 +808,18 @@ fn plan_existing_column(
             }
         }
         SqlDialect::Sqlite => {
+            let live_db_type = information_schema_to_db_type_token(
+                &live.declared_type,
+                live.char_max_len,
+                Dialect::Sqlite,
+            );
             let expected = sqlite_declared_type(col_plan.canonical);
-            if sqlite_type_class(&live.declared_type) != sqlite_type_class(&expected) {
+            if sqlite_type_class(&live_db_type) != sqlite_type_class(&expected) {
                 plan.warnings.push(format!(
                     "Column '{}.{}' is declared '{}' in the database but the model expects \
                      '{}'. SQLite cannot change column types in place; use Alembic to \
                      migrate this column.",
-                    table_lower, col_name, live.declared_type, expected
+                    table_lower, col_name, live_db_type, expected
                 ));
             }
             if col_plan.is_nullable != live.is_nullable {
@@ -1762,15 +1767,50 @@ mod tests {
                 "name": {"type": "string"},
             }
         });
-        let err = plan_table_migration(
+        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            assert_ir_legacy_parity_err(
+                "doc",
+                &schema_without_id,
+                &live_cols,
+                backend,
+                DESTRUCTIVE,
+                "primary key",
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_drift_warnings_use_normalized_live_db_type_tokens() {
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "count": {"type": "integer"},
+            }
+        });
+        let live_cols = vec![
+            LiveColumn {
+                is_primary_key: true,
+                declared_type: "INTEGER".to_string(),
+                ..live("id", "integer")
+            },
+            LiveColumn {
+                declared_type: "VARCHAR".to_string(),
+                ..live("count", "varchar")
+            },
+        ];
+        let plan = plan_with_ir_legacy_parity(
             "doc",
-            &schema_without_id,
+            &schema,
             &live_cols,
             SqlDialect::Sqlite,
-            DESTRUCTIVE,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("primary key"), "{err}");
+            UPDATES,
+        );
+        assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+        assert!(
+            plan.warnings[0].contains("declared 'varchar' in the database"),
+            "{}",
+            plan.warnings[0]
+        );
     }
 
     #[test]
@@ -1920,6 +1960,30 @@ mod tests {
             UPDATES,
             "primary key",
         );
+
+        let destructive_pk_drop_schema = json!({
+            "properties": {
+                "name": {"type": "string"},
+            }
+        });
+        let destructive_pk_drop_live = vec![
+            LiveColumn {
+                is_primary_key: true,
+                ..live("id", "integer")
+            },
+            live("name", "varchar"),
+            live("legacy_notes", "text"),
+        ];
+        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            assert_ir_legacy_parity_err(
+                "doc",
+                &destructive_pk_drop_schema,
+                &destructive_pk_drop_live,
+                backend,
+                DESTRUCTIVE,
+                "primary key",
+            );
+        }
 
         let destructive_schema = json!({
             "properties": {
