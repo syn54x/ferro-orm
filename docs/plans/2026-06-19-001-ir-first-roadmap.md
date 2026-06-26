@@ -489,8 +489,8 @@ Status: `Not started`
 
 Issue references:
 
-- `Epic:` _to be filed_
-- `Sub-issues:` _to be filed_
+- `Epic:` [#139](https://github.com/syn54x/ferro-orm/issues/139)
+- `Sub-issues:` [#140](https://github.com/syn54x/ferro-orm/issues/140), [#141](https://github.com/syn54x/ferro-orm/issues/141), [#142](https://github.com/syn54x/ferro-orm/issues/142), [#143](https://github.com/syn54x/ferro-orm/issues/143), [#144](https://github.com/syn54x/ferro-orm/issues/144)
 
 > Inserted as `8.5` (not renumbered) so existing Phase 9 issue references
 > (#107–#110) stay valid per the traceability/sync rules. Source:
@@ -712,7 +712,8 @@ Append updates as concise entries.
 - `2026-06-22` - Phase 6 working-branch implementation landed: introduced sessionized runtime API (`engines.session` / `Session`) and ambient session routing, moved transaction/identity-map hot-path state to session scope in Rust with compatibility fallback + deprecation warnings, added session lifecycle tests, and synchronized migration/guide/API/invariant docs.
 - `2026-06-22` - Phase 7 working-branch implementation landed: completed version-centric public migration guidance (`Migrating to v0.12.0`), added release checklist + changelog entries, centralized `v0.14.0` deprecation-target messaging across compatibility paths, added deprecated-path inventory tests, and validated full Rust/Python/docs/release verification matrix.
 - `2026-06-26` - Code-grounded architecture audit recorded at `docs/solutions/architecture-patterns/ir-first-lowering-consolidation-audit.md`. Finding: the schema/DDL domain is not yet single-sourced — runtime CREATE (`src/schema.rs`) keeps a private `CanonicalType` and consumes no IR; SchemaIR has two independent producers (Python `compile_schema_ir_payload` + Rust `schema_json_to_schema_ir`); the type system is encoded in ~5 parallel places. Corrected the overclaimed Phase 8 consolidation deliverable (`[x]` → `[~]`).
-- `2026-06-26` - Inserted **Phase 8.5** (lowering consolidation & single-source-of-truth closeout); gates Phase 9 shim removal. Numbered `8.5` (no renumbering) to preserve existing Phase 9 issue references (#107–#110). Phase 8.5 issues to be filed.
+- `2026-06-26` - Inserted **Phase 8.5** (lowering consolidation & single-source-of-truth closeout); gates Phase 9 shim removal. Numbered `8.5` (no renumbering) to preserve existing Phase 9 issue references (#107–#110).
+- `2026-06-26` - Phase 8.5 issues filed and linked: epic [#139](https://github.com/syn54x/ferro-orm/issues/139) with sub-issues [#140](https://github.com/syn54x/ferro-orm/issues/140), [#141](https://github.com/syn54x/ferro-orm/issues/141), [#142](https://github.com/syn54x/ferro-orm/issues/142), [#143](https://github.com/syn54x/ferro-orm/issues/143), [#144](https://github.com/syn54x/ferro-orm/issues/144). Audit captured in PR [#138](https://github.com/syn54x/ferro-orm/pull/138).
 
 ## Immediate next actions
 
