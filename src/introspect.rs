@@ -287,7 +287,7 @@ async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<
         SELECT cl.relname::text AS index_name,
                i.indisunique     AS is_unique,
                a.attname::text   AS column_name,
-               array_position(i.indkey, a.attnum) AS pos
+               array_position(i.indkey::smallint[], a.attnum) AS pos
         FROM pg_index i
         JOIN pg_class cl ON cl.oid = i.indexrelid
         JOIN pg_class t  ON t.oid  = i.indrelid
@@ -311,7 +311,7 @@ async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<
             continue;
         }
         let unique = row_bool(row, "is_unique");
-        let column = row_string(row, "column_name").unwrap_or_default();
+        let Some(column) = row_string(row, "column_name") else { continue };
         match out.last_mut() {
             Some(last) if last.name == name => last.columns.push(column),
             _ => out.push(LiveIndex { name, columns: vec![column], unique }),

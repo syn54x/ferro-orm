@@ -603,6 +603,8 @@ pub fn emit_sql_with_ir(
             MigrationOp::AddIndex { table, name, columns, unique } => {
                 result.statements.push(render_index_sql(table, name, columns, *unique, dialect));
             }
+            // `table` is intentionally unused: DROP INDEX is schema-scoped (not
+            // table-qualified) on both SQLite and Postgres, so only the index name is needed.
             MigrationOp::DropIndex { table: _, name } => {
                 result.statements.push(format!("DROP INDEX IF EXISTS \"{}\"", name));
             }
