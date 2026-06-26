@@ -8,6 +8,7 @@ from ferro import Model, connect
 from ferro._core import (
     _render_create_table_sql_for_test,
     _render_migration_sql_for_test,
+    _shadow_compare_migration_plan_for_test,
     _shadow_compare_query_plan_for_test,
 )
 from ferro.query.builder import _query_ir_payload_to_json
@@ -71,10 +72,30 @@ def _report_for_backend(dialect: str) -> dict:
         True,
         False,
     )
+    migration_compare = json.loads(
+        _shadow_compare_migration_plan_for_test(
+            "ShadowUser",
+            json.dumps(schema),
+            json.dumps(
+                [
+                    {
+                        "name": "id",
+                        "declared_type": "integer",
+                        "is_primary_key": True,
+                        "is_nullable": False,
+                    }
+                ]
+            ),
+            dialect,
+            True,
+            False,
+        )
+    )
     return {
         "query_compare": query_compare,
         "create_table": [create_table_sql, list(create_table_extras)],
         "migration": [list(migration_stmts), list(migration_warns)],
+        "migration_compare": migration_compare,
     }
 
 

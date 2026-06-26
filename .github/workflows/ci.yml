@@ -3,9 +3,8 @@ name: CI
 on:
   workflow_call:
   pull_request:
-    branches: [main, feat/ir-first]
   push:
-    branches: [main, feat/ir-first]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:

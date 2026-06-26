@@ -1,4 +1,4 @@
-"""Annotated-style companion to predicates.py (AGENTS.md I-8)."""
+"""Annotated-style companion to predicates.py (AGENTS.md I-7)."""
 
 import asyncio
 

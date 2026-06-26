@@ -1,13 +1,17 @@
-//! Schema IR diffing and coarse SQL emission for migration planning experiments.
+//! Schema IR diffing and SQL emission for migration planning.
 //!
-//! Compares two [`SchemaIrPayload`] snapshots and produces a [`MigrationPlan`]. Full typed
-//! `ADD COLUMN` / `ALTER COLUMN` DDL is still owned by the runtime auto-migrate path in
-//! `src/migrate.rs`; this crate expresses structural intent at the IR layer.
+//! Compares two [`SchemaIrPayload`] snapshots and produces a [`MigrationPlan`].
+//! [`emit_sql_with_ir`] lowers structural ops to executable backend-specific DDL.
 
+mod emit;
+
+use ferro_ddl_lowering::{schema_columns_storage_drift, Dialect};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// SQL dialect tag for [`emit_sql`] placeholder rendering.
+pub use emit::emit_sql_with_ir;
+
+/// SQL dialect tag for migration SQL emission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendDialect {
     /// SQLite 3.
@@ -16,10 +20,34 @@ pub enum BackendDialect {
     Postgres,
 }
 
+/// Executable SQL plus non-fatal warnings from [`emit_sql_with_ir`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EmissionResult {
+    /// DDL statements to execute in order.
+    pub statements: Vec<String>,
+    /// Human-readable warnings (backend limitations, skipped alters, …).
+    pub warnings: Vec<String>,
+}
+
+/// Hard failure during SQL emission (missing IR metadata, unsafe add, …).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmissionError {
+    /// Actionable error message.
+    pub message: String,
+}
+
+impl std::fmt::Display for EmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for EmissionError {}
+
 /// One structural change inferred from an IR diff.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MigrationOp {
-    /// A model exists in the new IR but not the old — table creation is delegated to the schema emitter.
+    /// A model exists in the new IR but not the old.
     AddTable {
         /// Table to create.
         table: String,
@@ -33,7 +61,7 @@ pub enum MigrationOp {
     AddColumn {
         /// Owning table.
         table: String,
-        /// Column to add (typed DDL planned elsewhere).
+        /// Column to add.
         column: String,
     },
     /// A column was removed from the model.
@@ -75,15 +103,10 @@ impl MigrationPlan {
     }
 }
 
-/// Render coarse SQL (or comments) for each operation in `plan`.
+/// Render placeholder SQL (or comments) for each operation in `plan`.
 ///
-/// # Arguments
-/// * `plan` — Operations produced by [`plan_from_ir`].
-/// * `dialect` — Target backend; affects comment text for unsupported alters on SQLite.
-///
-/// # Returns
-/// One SQL string (or explanatory comment line) per operation. `AddTable` / `AddColumn` /
-/// type-nullability alters are comments pointing callers at the full schema emitter.
+/// Legacy shim retained until runtime cutover ([#119](https://github.com/syn54x/ferro-orm/issues/119))
+/// wires [`emit_sql_with_ir`]. `DropTable` / `DropColumn` are executable; other ops emit comments.
 pub fn emit_sql(plan: &MigrationPlan, dialect: BackendDialect) -> Vec<String> {
     let mut sql = Vec::new();
     for operation in &plan.operations {
@@ -132,21 +155,15 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: BackendDialect) -> Vec<String> {
 }
 
 /// Diff two schema IR envelopes and produce a [`MigrationPlan`].
-///
-/// Compares tables by `table_name` and columns by name within shared tables. Does not
-/// diff indexes, FKs, or checks yet — only table/column presence and `db_type` / `nullable`.
-///
-/// # Arguments
-/// * `old_ir` — Baseline schema snapshot.
-/// * `new_ir` — Desired schema snapshot.
-///
-/// # Returns
-/// A plan with add/drop/alter operations. Never fails; structural ambiguity is expressed
-/// as operations, not errors.
 pub fn plan_from_ir(
     old_ir: &IrEnvelope<SchemaIrPayload>,
     new_ir: &IrEnvelope<SchemaIrPayload>,
+    dialect: BackendDialect,
 ) -> MigrationPlan {
+    let ddl_dialect = match dialect {
+        BackendDialect::Sqlite => Dialect::Sqlite,
+        BackendDialect::Postgres => Dialect::Postgres,
+    };
     let old_models = index_models(&old_ir.payload.models);
     let new_models = index_models(&new_ir.payload.models);
     let mut plan = MigrationPlan::default();
@@ -172,7 +189,7 @@ pub fn plan_from_ir(
         let Some(new_model) = new_models.get(*table) else {
             continue;
         };
-        diff_model_columns(*table, old_model, new_model, &mut plan);
+        diff_model_columns(*table, old_model, new_model, ddl_dialect, &mut plan);
     }
 
     plan
@@ -190,6 +207,7 @@ fn diff_model_columns(
     table: &str,
     old_model: &SchemaModel,
     new_model: &SchemaModel,
+    dialect: Dialect,
     plan: &mut MigrationPlan,
 ) {
     let old_cols: BTreeMap<&str, _> = old_model
@@ -226,7 +244,7 @@ fn diff_model_columns(
         let Some(new_col) = new_cols.get(*col) else {
             continue;
         };
-        if old_col.db_type != new_col.db_type {
+        if schema_columns_storage_drift(old_col, new_col, dialect) {
             plan.operations.push(MigrationOp::AlterColumnType {
                 table: table.to_string(),
                 column: (*col).to_string(),
@@ -242,97 +260,4 @@ fn diff_model_columns(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ferro_schema_ir::{
-        SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaUnique,
-    };
-
-    fn envelope(model: SchemaModel) -> IrEnvelope<SchemaIrPayload> {
-        IrEnvelope {
-            ir_kind: "schema".to_string(),
-            ir_version: 1,
-            payload: SchemaIrPayload {
-                dialect_agnostic: true,
-                models: vec![model],
-            },
-        }
-    }
-
-    fn schema_model(table: &str, cols: Vec<SchemaColumn>) -> SchemaModel {
-        SchemaModel {
-            model_name: table.to_string(),
-            table_name: table.to_string(),
-            columns: cols,
-            foreign_keys: Vec::<SchemaForeignKey>::new(),
-            indexes: Vec::<SchemaIndex>::new(),
-            uniques: Vec::<SchemaUnique>::new(),
-            checks: Vec::<SchemaCheck>::new(),
-        }
-    }
-
-    fn col(name: &str, db_type: &str, nullable: bool) -> SchemaColumn {
-        SchemaColumn {
-            name: name.to_string(),
-            logical_type: "string".to_string(),
-            db_type: db_type.to_string(),
-            db_type_explicit: None,
-            nullable,
-            primary_key: false,
-            autoincrement: false,
-            unique: false,
-            index: false,
-            default: None,
-            format: None,
-            enum_values: None,
-            enum_type_name: None,
-        }
-    }
-
-    #[test]
-    fn plan_from_ir_detects_add_drop_and_alter_ops() {
-        let old_ir = envelope(schema_model(
-            "doc",
-            vec![col("name", "text", false), col("legacy", "text", true)],
-        ));
-        let new_ir = envelope(schema_model(
-            "doc",
-            vec![col("name", "varchar(120)", true), col("status", "text", false)],
-        ));
-
-        let plan = plan_from_ir(&old_ir, &new_ir);
-        assert!(
-            plan.operations
-                .contains(&MigrationOp::AddColumn { table: "doc".to_string(), column: "status".to_string() })
-        );
-        assert!(
-            plan.operations
-                .contains(&MigrationOp::DropColumn { table: "doc".to_string(), column: "legacy".to_string() })
-        );
-        assert!(
-            plan.operations.contains(&MigrationOp::AlterColumnType {
-                table: "doc".to_string(),
-                column: "name".to_string()
-            })
-        );
-        assert!(
-            plan.operations.contains(&MigrationOp::AlterColumnNullability {
-                table: "doc".to_string(),
-                column: "name".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn emit_sql_renders_drop_column() {
-        let plan = MigrationPlan {
-            operations: vec![MigrationOp::DropColumn {
-                table: "doc".to_string(),
-                column: "legacy".to_string(),
-            }],
-            warnings: Vec::new(),
-        };
-        let sql = emit_sql(&plan, BackendDialect::Postgres);
-        assert_eq!(sql, vec!["ALTER TABLE \"doc\" DROP COLUMN \"legacy\"".to_string()]);
-    }
-}
+mod tests;

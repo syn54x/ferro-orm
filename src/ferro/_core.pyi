@@ -55,6 +55,17 @@ def _render_migration_sql_for_test(
     """
     ...
 
+def _shadow_compare_migration_plan_for_test(
+    name: str,
+    schema_json: str,
+    live_columns_json: str,
+    dialect: str,
+    updates: bool = True,
+    destructive: bool = False,
+) -> str:
+    """Test-only: compare IR-primary vs legacy migration planners."""
+    ...
+
 def _shadow_compare_query_plan_for_test(
     query_payload_json: str, dialect: str, operation: str = "select"
 ) -> str:

@@ -26,7 +26,9 @@ fn resolve_ref<'a>(
     col_info
 }
 
-fn property_json_type_and_format(col_info: &serde_json::Value) -> (Option<&str>, Option<&str>) {
+pub(crate) fn property_json_type_and_format(
+    col_info: &serde_json::Value,
+) -> (Option<&str>, Option<&str>) {
     let top_type = col_info.get("type").and_then(|t| t.as_str());
     let top_format = col_info.get("format").and_then(|f| f.as_str());
     if top_type.is_some() {
@@ -154,6 +156,33 @@ pub(crate) enum CanonicalType {
     Date,
     Time,
     Blob,
+}
+
+/// Map a resolved [`CanonicalType`] back to the canonical Ferro `db_type` token
+/// vocabulary used in SchemaIR and cross-emitter parity tests.
+pub(crate) fn canonical_to_db_type_token(canonical: CanonicalType, backend: SqlDialect) -> String {
+    match canonical {
+        CanonicalType::Integer => "int".to_string(),
+        CanonicalType::SmallInt => "smallint".to_string(),
+        CanonicalType::BigInt => "bigint".to_string(),
+        CanonicalType::Double => "double".to_string(),
+        CanonicalType::Decimal => "numeric".to_string(),
+        CanonicalType::Boolean => "boolean".to_string(),
+        CanonicalType::Json => "json".to_string(),
+        CanonicalType::Text => "text".to_string(),
+        CanonicalType::Varchar(None) => "varchar".to_string(),
+        CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
+        CanonicalType::Char(n) => match (backend, n) {
+            (SqlDialect::Sqlite, 32) => "uuid".to_string(),
+            _ => format!("char({n})"),
+        },
+        CanonicalType::Uuid => "uuid".to_string(),
+        CanonicalType::DateTime | CanonicalType::Timestamp => "timestamp".to_string(),
+        CanonicalType::TimestampTz => "timestamptz".to_string(),
+        CanonicalType::Date => "date".to_string(),
+        CanonicalType::Time => "time".to_string(),
+        CanonicalType::Blob => "bytea".to_string(),
+    }
 }
 
 pub(crate) fn apply_canonical_type(col_def: &mut ColumnDef, canonical: CanonicalType) {
@@ -478,6 +507,7 @@ pub(crate) struct ColumnPlan {
     pub col_def: ColumnDef,
     pub canonical: CanonicalType,
     pub is_primary_key: bool,
+    pub autoincrement: bool,
     pub is_nullable: bool,
     pub is_unique: bool,
     /// Post-create SQL owned by this column, in emission order:
@@ -505,10 +535,14 @@ pub(crate) fn build_column_plan(
 
     let is_primary_key =
         column_bool_metadata(raw_col_info, col_info, "primary_key").unwrap_or(false);
-    let is_auto = column_bool_metadata(raw_col_info, col_info, "autoincrement").unwrap_or(true);
+    let autoincrement = if is_primary_key {
+        column_bool_metadata(raw_col_info, col_info, "autoincrement").unwrap_or(true)
+    } else {
+        column_bool_metadata(raw_col_info, col_info, "autoincrement").unwrap_or(false)
+    };
     if is_primary_key {
         col_def.primary_key();
-        if is_auto {
+        if autoincrement {
             col_def.auto_increment();
         }
     }
@@ -581,6 +615,7 @@ pub(crate) fn build_column_plan(
         col_def,
         canonical,
         is_primary_key,
+        autoincrement,
         is_nullable,
         is_unique,
         index_sqls,

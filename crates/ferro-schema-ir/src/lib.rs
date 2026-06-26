@@ -81,6 +81,9 @@ pub struct SchemaColumn {
     /// Postgres native enum type name when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enum_type_name: Option<String>,
+    /// Live introspection only: column is a Postgres native enum UDT.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub postgres_native_enum: bool,
 }
 
 /// Foreign-key edge from `column` to `to_table.to_column`.
