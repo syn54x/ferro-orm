@@ -15,8 +15,8 @@
 
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
-    Dialect, db_check_constraint_name, information_schema_to_db_type_token,
-    schema_columns_storage_drift,
+    CanonicalType, Dialect, apply_canonical_type, canonical_to_db_type_token,
+    db_check_constraint_name, information_schema_to_db_type_token, schema_columns_storage_drift,
 };
 use ferro_migrate::{BackendDialect, MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
@@ -27,9 +27,8 @@ use crate::introspect::{
     LiveColumn, live_table_columns, quote_ident, sqlite_indexes_covering_column,
 };
 use crate::schema::{
-    CanonicalType, ColumnPlan, apply_canonical_type, build_column_plan,
-    canonical_to_db_type_token, internal_create_tables,
-    order_schemas_for_creation, property_json_type_and_format,
+    ColumnPlan, build_column_plan, internal_create_tables,
+    order_schemas_for_creation, property_json_type_and_format, sql_dialect_to_lowering,
 };
 use crate::state::{IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, engine_for_connection};
 use pyo3::prelude::*;
@@ -131,7 +130,7 @@ fn schema_json_to_schema_ir(
                 .and_then(|v| v.as_str());
             let db_type = db_type_explicit
                 .map(str::to_string)
-                .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, backend));
+                .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, sql_dialect_to_lowering(backend)));
             columns.push(SchemaColumn {
                 name: name.clone(),
                 logical_type: property_json_type_and_format(resolved)
@@ -772,7 +771,7 @@ fn plan_existing_column(
                 .or_else(|| resolved.get("db_type"))
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
-                .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, backend));
+                .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, sql_dialect_to_lowering(backend)));
             let live_db_type = information_schema_to_db_type_token(
                 &live.declared_type,
                 live.char_max_len,
