@@ -256,6 +256,9 @@ pub fn canonical_from_parts(
         ("string", Some("date-time")) => Ok(CanonicalType::TimestampTz),
         ("string", Some("date")) => Ok(CanonicalType::Date),
         ("string", Some("uuid")) => Ok(CanonicalType::Uuid),
+        // `format = "decimal"` is only ever emitted alongside a concrete logical
+        // type (see src/ferro/schema_metadata.py), so `(None, Some("decimal"))`
+        // never arises from a real model — this broad arm is safe.
         (_, Some("decimal")) => Ok(CanonicalType::Decimal),
         ("string", Some("binary")) => Ok(CanonicalType::Blob),
         ("integer", _) => Ok(CanonicalType::Integer),
@@ -553,6 +556,8 @@ mod tests {
         assert_eq!(canonical_to_db_type_token(CanonicalType::Char(32), Dialect::Sqlite), "uuid");
         assert_eq!(canonical_to_db_type_token(CanonicalType::Char(10), Dialect::Sqlite), "char(10)");
         assert_eq!(canonical_to_db_type_token(CanonicalType::TimestampTz, Dialect::Postgres), "timestamptz");
+        assert_eq!(canonical_to_db_type_token(CanonicalType::DateTime, Dialect::Postgres), "timestamp");
+        assert_eq!(canonical_to_db_type_token(CanonicalType::Char(32), Dialect::Postgres), "char(32)");
     }
 
     #[test]
