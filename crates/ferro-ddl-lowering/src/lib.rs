@@ -235,11 +235,17 @@ pub fn schema_columns_storage_drift(
         canonical_from_schema_column(old_col, dialect),
         canonical_from_schema_column(new_col, dialect),
     ) {
-        (Ok(old_c), Ok(new_c)) => old_c != new_c,
+        (Ok(old_c), Ok(new_c)) => {
+            // Compare by storage token, not raw canonical: on SQLite both `Uuid`
+            // and `Char(32)` map to "uuid" (and `DateTime`/`Timestamp` to
+            // "timestamp"), so a derived model column does not read as drifted
+            // against the token-round-tripped live column. Real changes
+            // (int → bigint) still differ. (See #141.)
+            canonical_to_db_type_token(old_c, dialect) != canonical_to_db_type_token(new_c, dialect)
+        }
         // Reached only when canonical resolution fails for both columns. At runtime
         // both sides come from producers that always populate Some(...), so this
         // Option comparison is behavior-equivalent to the old String comparison.
-        // (Will become load-bearing for None columns when #141 feeds the wire IR here.)
         _ => old_col.db_type != new_col.db_type,
     }
 }
@@ -528,6 +534,59 @@ mod tests {
             enum_type_name: None,
             postgres_native_enum: false,
         }
+    }
+
+    /// Build a SchemaColumn for drift tests with explicit logical_type, format and db_type.
+    fn col_with_db_type(
+        name: &str,
+        logical_type: &str,
+        format: Option<&str>,
+        db_type: Option<&str>,
+    ) -> SchemaColumn {
+        SchemaColumn {
+            name: name.to_string(),
+            logical_type: logical_type.to_string(),
+            db_type: db_type.map(str::to_string),
+            db_type_explicit: None,
+            nullable: true,
+            primary_key: false,
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            format: format.map(str::to_string),
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        }
+    }
+
+    #[test]
+    fn uuid_model_does_not_drift_against_char32_live_on_sqlite() {
+        // Live introspected `uuid_text` → db_type "uuid" → Char(32).
+        let live = col_with_db_type("id", "string", Some("uuid"), Some("uuid"));
+        // Model derived (post-#141 wire IR): db_type None, format "uuid" → Uuid.
+        let model = col_with_db_type("id", "string", Some("uuid"), None);
+        assert!(!schema_columns_storage_drift(&live, &model, Dialect::Sqlite));
+    }
+
+    #[test]
+    fn datetime_and_timestamp_are_storage_equivalent_on_sqlite() {
+        // On SQLite, "timestamp" token → DateTime and "timestamptz" token → DateTime;
+        // canonical_to_db_type_token maps DateTime → "timestamp" in both cases, so
+        // the token comparison merges them. (On Postgres these give distinct canonicals.)
+        let a = col_with_db_type("ts", "string", None, Some("timestamp"));
+        let b = col_with_db_type("ts", "string", None, Some("timestamptz"));
+        assert!(!schema_columns_storage_drift(&a, &b, Dialect::Sqlite));
+        // Cross-check: same tokens DO differ on Postgres (Timestamp vs TimestampTz).
+        assert!(schema_columns_storage_drift(&a, &b, Dialect::Postgres));
+    }
+
+    #[test]
+    fn int_to_bigint_still_drifts() {
+        let small = col_with_db_type("n", "integer", None, Some("int"));
+        let big = col_with_db_type("n", "integer", None, Some("bigint"));
+        assert!(schema_columns_storage_drift(&small, &big, Dialect::Sqlite));
     }
 
     #[test]
