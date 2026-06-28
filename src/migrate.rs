@@ -487,7 +487,7 @@ fn render_alter(stmt: &sea_query::TableAlterStatement, backend: SqlDialect) -> S
 /// default. These abort the migration ("fail loudly").
 pub fn plan_table_migration(
     table_lower: &str,
-    schema: &serde_json::Value,
+    declared: &IrEnvelope<SchemaIrPayload>,
     live: &[LiveColumn],
     live_indexes: &[LiveIndex],
     backend: SqlDialect,
@@ -498,8 +498,8 @@ pub fn plan_table_migration(
     }
 
     let old_ir = live_columns_to_schema_ir(table_lower, live, live_indexes, backend);
-    let new_ir = schema_json_to_schema_ir(table_lower, schema, backend);
-    let mut typed_plan = plan_from_ir(&old_ir, &new_ir, backend_dialect(backend));
+    let new_ir = declared;                                   // was: schema_json_to_schema_ir(...)
+    let mut typed_plan = plan_from_ir(&old_ir, new_ir, backend_dialect(backend));
 
     if !opts.destructive {
         typed_plan
@@ -535,7 +535,7 @@ pub fn plan_table_migration(
         operations: exec_ops,
         warnings: typed_plan.warnings,
     };
-    let emission = emit_sql_with_ir(&exec_plan, &old_ir, &new_ir, backend_dialect(backend))
+    let emission = emit_sql_with_ir(&exec_plan, &old_ir, new_ir, backend_dialect(backend))
         .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.message))?;
 
     plan.statements = emission.statements;
@@ -625,7 +625,8 @@ fn shadow_compare_migration_plan(
     }
     // Build the old and new IRs for the column-domain emission.
     let old_ir = live_columns_to_schema_ir(table_lower, live, live_indexes, backend);
-    let new_ir = schema_json_to_schema_ir(table_lower, schema, backend);
+    let declared = schema_json_to_schema_ir(table_lower, schema, backend);
+    let new_ir = &declared;
 
     let mut typed_plan = plan_from_ir(&old_ir, &new_ir, backend_dialect(backend));
 
@@ -1009,7 +1010,8 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
         };
         let live_indexes = live_table_indexes(&engine, &table_lower).await?;
 
-        let mut plan = plan_table_migration(&table_lower, &schema, &live, &live_indexes, backend, opts)?;
+        let declared = schema_json_to_schema_ir(&table_lower, &schema, backend);
+        let mut plan = plan_table_migration(&table_lower, &declared, &live, &live_indexes, backend, opts)?;
         if engine.is_shadow_runtime_enabled()
             && let Err(diff) =
                 shadow_compare_migration_plan(&table_lower, &schema, &live, &live_indexes, backend, opts)
@@ -1143,7 +1145,8 @@ pub fn _render_migration_sql_for_test(
 
     let table_lower = name.to_lowercase();
     let opts = MigrateOptions::laddered(updates, destructive);
-    let plan = plan_table_migration(&table_lower, &schema, &live, &live_indexes, backend, opts)?;
+    let declared = schema_json_to_schema_ir(&table_lower, &schema, backend);
+    let plan = plan_table_migration(&table_lower, &declared, &live, &live_indexes, backend, opts)?;
 
     let mut statements = plan.statements;
     for col_name in &plan.drop_columns {
@@ -1294,7 +1297,8 @@ mod tests {
         backend: SqlDialect,
         opts: MigrateOptions,
     ) -> MigrationPlan {
-        let ir = plan_table_migration(table, schema, live, live_indexes, backend, opts)
+        let declared = schema_json_to_schema_ir(table, schema, backend);
+        let ir = plan_table_migration(table, &declared, live, live_indexes, backend, opts)
             .unwrap_or_else(|e| panic!("IR planner failed for '{table}': {e}"));
         let legacy = plan_table_migration_legacy(table, schema, live, live_indexes, backend, opts)
             .unwrap_or_else(|e| panic!("legacy planner failed for '{table}': {e}"));
@@ -1372,7 +1376,8 @@ mod tests {
         opts: MigrateOptions,
         needle: &str,
     ) {
-        let ir_err = plan_table_migration(table, schema, live, live_indexes, backend, opts)
+        let declared = schema_json_to_schema_ir(table, schema, backend);
+        let ir_err = plan_table_migration(table, &declared, live, live_indexes, backend, opts)
             .expect_err("IR planner should fail");
         let legacy_err = plan_table_migration_legacy(table, schema, live, live_indexes, backend, opts)
             .expect_err("legacy planner should fail");
@@ -1504,8 +1509,9 @@ mod tests {
         }];
 
         for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            let declared = schema_json_to_schema_ir("doc", &schema, backend);
             let err =
-                plan_table_migration("doc", &schema, &live_cols, &[], backend, UPDATES).unwrap_err();
+                plan_table_migration("doc", &declared, &live_cols, &[], backend, UPDATES).unwrap_err();
             let message = err.to_string();
             assert!(message.contains("doc.created_at"), "{message}");
             assert!(message.contains("Alembic"), "{message}");
@@ -1521,7 +1527,8 @@ mod tests {
             }
         });
         let live_cols = vec![live("name", "varchar")];
-        let err = plan_table_migration("doc", &schema, &live_cols, &[], SqlDialect::Sqlite, UPDATES)
+        let declared = schema_json_to_schema_ir("doc", &schema, SqlDialect::Sqlite);
+        let err = plan_table_migration("doc", &declared, &live_cols, &[], SqlDialect::Sqlite, UPDATES)
             .unwrap_err();
         assert!(err.to_string().contains("primary key"), "{err}");
     }
