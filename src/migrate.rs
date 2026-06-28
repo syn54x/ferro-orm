@@ -1109,10 +1109,10 @@ pub fn migrate(
 /// unrecognized, or the diff contains an unsafe change.
 #[pyfunction]
 #[pyo3(name = "_render_migration_sql_for_test")]
-#[pyo3(signature = (name, schema_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new()))]
+#[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new()))]
 pub fn _render_migration_sql_for_test(
     name: String,
-    schema_json: String,
+    schema_ir_json: String,
     live_columns_json: String,
     dialect: String,
     updates: bool,
@@ -1129,8 +1129,8 @@ pub fn _render_migration_sql_for_test(
             )));
         }
     };
-    let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
+    let declared: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&schema_ir_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid schema_ir_json: {e}"))
     })?;
     let live: Vec<LiveColumn> = serde_json::from_str(&live_columns_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid live-columns JSON: {}", e))
@@ -1145,7 +1145,6 @@ pub fn _render_migration_sql_for_test(
 
     let table_lower = name.to_lowercase();
     let opts = MigrateOptions::laddered(updates, destructive);
-    let declared = schema_json_to_schema_ir(&table_lower, &schema, backend);
     let plan = plan_table_migration(&table_lower, &declared, &live, &live_indexes, backend, opts)?;
 
     let mut statements = plan.statements;
@@ -1170,11 +1169,13 @@ fn migration_plan_snapshot(plan: &MigrationPlan) -> serde_json::Value {
 /// Test-only: compare IR-primary vs legacy migration planners for shadow fixtures.
 ///
 /// Returns JSON with `matches`, `ir`, and `legacy` plan snapshots.
+/// `schema_ir_json` drives the IR planner; `schema_json` drives the legacy planner.
 #[pyfunction]
 #[pyo3(name = "_shadow_compare_migration_plan_for_test")]
-#[pyo3(signature = (name, schema_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new()))]
+#[pyo3(signature = (name, schema_ir_json, schema_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new()))]
 pub fn _shadow_compare_migration_plan_for_test(
     name: String,
+    schema_ir_json: String,
     schema_json: String,
     live_columns_json: String,
     dialect: String,
@@ -1192,6 +1193,9 @@ pub fn _shadow_compare_migration_plan_for_test(
             )));
         }
     };
+    let new_ir: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&schema_ir_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid schema_ir_json: {e}"))
+    })?;
     let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
     })?;
@@ -1211,7 +1215,6 @@ pub fn _shadow_compare_migration_plan_for_test(
 
     // Build column-domain IR plan (filter AddIndex/DropIndex) for parity comparison.
     let old_ir = live_columns_to_schema_ir(&table_lower, &live, &live_indexes, backend);
-    let new_ir = schema_json_to_schema_ir(&table_lower, &schema, backend);
     let mut typed_plan = plan_from_ir(&old_ir, &new_ir, backend_dialect(backend));
     if !opts.destructive {
         typed_plan
@@ -2039,13 +2042,15 @@ mod tests {
                 "id": {"type": "integer", "primary_key": true},
             }
         });
+        let ir = schema_json_to_schema_ir("doc", &schema, SqlDialect::Sqlite);
+        let ir_json = serde_json::to_string(&ir).unwrap();
         let live_json = json!([
             {"name": "id", "declared_type": "integer", "is_primary_key": true, "is_nullable": false},
             {"name": "stale", "declared_type": "varchar"},
         ]);
         let (statements, warnings) = _render_migration_sql_for_test(
             "Doc".to_string(),
-            schema.to_string(),
+            ir_json,
             live_json.to_string(),
             "sqlite".to_string(),
             true,

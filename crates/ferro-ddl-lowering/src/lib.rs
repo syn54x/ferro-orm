@@ -253,6 +253,11 @@ pub fn schema_columns_storage_drift(
 /// Resolve a model property's `(logical_type, format, db_type)` to a canonical
 /// type. A recognized `db_type` token wins; otherwise the logical-type + format
 /// cascade decides. An empty/unrecognized `db_type` falls through.
+///
+/// Accepts both raw JSON Schema type values (`"string"` + format) **and** the
+/// domain-specific `logical_type` tokens emitted by the Python SchemaIR compiler
+/// (`"datetime"`, `"date"`, `"time"`, `"uuid"`, `"json"`, `"decimal"`), so that
+/// compiled IR envelopes can be consumed directly by the migration planner.
 pub fn canonical_from_parts(
     logical_type: &str,
     format: Option<&str>,
@@ -263,6 +268,7 @@ pub fn canonical_from_parts(
         return Ok(canonical);
     }
     match (logical_type, format) {
+        // Raw JSON Schema types with format — produced by schema_json_to_schema_ir.
         ("string", Some("date-time")) => Ok(CanonicalType::TimestampTz),
         ("string", Some("date")) => Ok(CanonicalType::Date),
         ("string", Some("uuid")) => Ok(CanonicalType::Uuid),
@@ -271,6 +277,16 @@ pub fn canonical_from_parts(
         // never arises from a real model — this broad arm is safe.
         (_, Some("decimal")) => Ok(CanonicalType::Decimal),
         ("string", Some("binary")) => Ok(CanonicalType::Blob),
+        // Domain-specific logical_type tokens emitted by the Python SchemaIR
+        // compiler (compiler.py `_logical_type`). These are accepted alongside
+        // the raw JSON Schema types so compiled IR envelopes can be consumed.
+        ("datetime", _) => Ok(CanonicalType::TimestampTz),
+        ("date", _) => Ok(CanonicalType::Date),
+        ("time", _) => Ok(CanonicalType::Time),
+        ("uuid", _) => Ok(CanonicalType::Uuid),
+        ("json", _) => Ok(CanonicalType::Json),
+        ("decimal", _) => Ok(CanonicalType::Decimal),
+        // Raw JSON Schema primitive types.
         ("integer", _) => Ok(CanonicalType::Integer),
         ("string", _) => Ok(CanonicalType::Varchar(None)),
         ("number", _) => Ok(CanonicalType::Double),

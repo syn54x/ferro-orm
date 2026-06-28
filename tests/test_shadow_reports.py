@@ -11,7 +11,14 @@ from ferro._core import (
     _shadow_compare_migration_plan_for_test,
     _shadow_compare_query_plan_for_test,
 )
+from ferro.ir.compiler import compile_schema_ir_payload, wrap_schema_ir
 from ferro.query.builder import _query_ir_payload_to_json
+
+
+def _compile_schema_ir_json(schema: dict, name: str) -> str:
+    """Compile an ad-hoc schema dict into a SchemaIR envelope JSON string."""
+    payload = compile_schema_ir_payload(name, schema)
+    return json.dumps(wrap_schema_ir(payload))
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -55,19 +62,21 @@ def _report_for_backend(dialect: str) -> dict:
     create_table_sql, create_table_extras = _render_create_table_sql_for_test(
         "ShadowUser", json.dumps(schema), dialect
     )
+    _schema_ir_json = _compile_schema_ir_json(schema, "shadowuser")
+    _live_json = json.dumps(
+        [
+            {
+                "name": "id",
+                "declared_type": "integer",
+                "is_primary_key": True,
+                "is_nullable": False,
+            }
+        ]
+    )
     migration_stmts, migration_warns = _render_migration_sql_for_test(
         "ShadowUser",
-        json.dumps(schema),
-        json.dumps(
-            [
-                {
-                    "name": "id",
-                    "declared_type": "integer",
-                    "is_primary_key": True,
-                    "is_nullable": False,
-                }
-            ]
-        ),
+        _schema_ir_json,
+        _live_json,
         dialect,
         True,
         False,
@@ -75,17 +84,9 @@ def _report_for_backend(dialect: str) -> dict:
     migration_compare = json.loads(
         _shadow_compare_migration_plan_for_test(
             "ShadowUser",
+            _schema_ir_json,
             json.dumps(schema),
-            json.dumps(
-                [
-                    {
-                        "name": "id",
-                        "declared_type": "integer",
-                        "is_primary_key": True,
-                        "is_nullable": False,
-                    }
-                ]
-            ),
+            _live_json,
             dialect,
             True,
             False,
