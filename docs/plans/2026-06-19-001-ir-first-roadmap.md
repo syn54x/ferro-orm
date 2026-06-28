@@ -542,8 +542,16 @@ Issue references:
       `ferro-ddl-lowering` originals.
 - [ ] IR `db_type` is authoritative, or it is dropped for non-explicit columns
       (emitters must not silently re-derive a value that disagrees with the IR).
-- [ ] Runtime migrate IR populates composite indexes/uniques, or the scope cut is
-      documented with a tracked follow-up.
+- [ ] Auto-migrate **reconciles standalone Ferro-named indexes & uniques** (single
+      + composite) on existing tables: ADD missing always; DROP orphaned (Ferro-named,
+      gone from the model) under `migrate_destructive` — symmetric with column
+      add/drop. Requires new live index introspection (`live_table_indexes`) on
+      SQLite **and** Postgres; migrate-added indexes must byte-match what the create
+      path emits (AGENTS.md I-1). Inline single-column `UNIQUE` on existing columns
+      stays out of scope. _(Scope expanded 2026-06-26 from "populate the IR or
+      document the cut" — a user expects auto-migrate to add their indexes; see
+      [#144](https://github.com/syn54x/ferro-orm/issues/144). This is the largest 8.5
+      sub-issue.)_
 
 **Exit gate**
 - [ ] Exactly one `CanonicalType` and one SchemaIR producer remain in the tree
@@ -786,6 +794,7 @@ Append updates as concise entries.
 - `2026-06-26` - Inserted **Phase 8.5** (lowering consolidation & single-source-of-truth closeout); gates Phase 9 shim removal. Numbered `8.5` (no renumbering) to preserve existing Phase 9 issue references (#107–#110).
 - `2026-06-26` - Phase 8.5 issues filed and linked: epic [#139](https://github.com/syn54x/ferro-orm/issues/139) with sub-issues [#140](https://github.com/syn54x/ferro-orm/issues/140), [#141](https://github.com/syn54x/ferro-orm/issues/141), [#142](https://github.com/syn54x/ferro-orm/issues/142), [#143](https://github.com/syn54x/ferro-orm/issues/143), [#144](https://github.com/syn54x/ferro-orm/issues/144). Audit captured in PR [#138](https://github.com/syn54x/ferro-orm/pull/138).
 - `2026-06-26` - Inserted **Phase 8.6** (post-8.5 cross-crate / single-source cleanup backlog; does not gate Phase 9). Filed epic [#145](https://github.com/syn54x/ferro-orm/issues/145) with seed sub-issue [#146](https://github.com/syn54x/ferro-orm/issues/146) (unify the three dialect enums, surfaced during #140). Remaining 8.6 items to be filed by a read-only Rust duplication sweep planned after #140 lands.
+- `2026-06-26` - #140 and #143 merged to the Phase 8.5 integration branch. **#144 scope expanded** from "populate the IR or document the scope cut" to full auto-migrate index/unique reconciliation (ADD always, DROP under `migrate_destructive`, both backends, new live index introspection) — a user expects auto-migrate to add their indexes; now the largest 8.5 sub-issue. Roadmap deliverable + issue #144 updated to match.
 
 ## Immediate next actions
 
