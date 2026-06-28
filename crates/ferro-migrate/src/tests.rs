@@ -655,6 +655,44 @@ fn emit_sql_multi_op_ordering() {
 }
 
 #[test]
+fn plan_from_ir_adds_missing_index() {
+    let old = envelope(vec![schema_model("doc", vec![col("a", "text", true), col("b", "text", true)])]);
+    let mut nm = schema_model("doc", vec![col("a", "text", true), col("b", "text", true)]);
+    nm.indexes = vec![SchemaIndex { name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false }];
+    let new = envelope(vec![nm]);
+    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    assert!(plan.operations.contains(&MigrationOp::AddIndex {
+        table: "doc".into(), name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false
+    }));
+}
+
+#[test]
+fn plan_from_ir_drops_orphaned_index() {
+    let mut om = schema_model("doc", vec![col("a", "text", true)]);
+    om.indexes = vec![SchemaIndex { name: "idx_doc_a".into(), columns: vec!["a".into()], unique: false }];
+    let old = envelope(vec![om]);
+    let new = envelope(vec![schema_model("doc", vec![col("a", "text", true)])]); // no index
+    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    assert!(plan.operations.contains(&MigrationOp::DropIndex { table: "doc".into(), name: "idx_doc_a".into() }));
+}
+
+#[test]
+fn emit_add_index_matches_create_path() {
+    let plan = MigrationPlan { operations: vec![MigrationOp::AddIndex {
+        table: "doc".into(), name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false
+    }], warnings: vec![] };
+    let r = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Sqlite).unwrap();
+    assert_eq!(r.statements, vec!["CREATE INDEX IF NOT EXISTS \"idx_doc_a_b\" ON \"doc\" (\"a\", \"b\")".to_string()]);
+}
+
+#[test]
+fn emit_drop_index_renders_drop() {
+    let plan = MigrationPlan { operations: vec![MigrationOp::DropIndex { table: "doc".into(), name: "idx_doc_a".into() }], warnings: vec![] };
+    let r = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Postgres).unwrap();
+    assert_eq!(r.statements, vec!["DROP INDEX IF EXISTS \"idx_doc_a\"".to_string()]);
+}
+
+#[test]
 fn emit_sql_no_comment_placeholders_on_full_plan() {
     let old_ir = envelope(vec![schema_model(
         "doc",
@@ -672,4 +710,60 @@ fn emit_sql_no_comment_placeholders_on_full_plan() {
         let result = emit_sql_with_ir(&plan, &old_ir, &new_ir, dialect).unwrap();
         assert_no_comment_placeholders(&result.statements);
     }
+}
+
+// Regression: composite index whose columns are all newly added must NOT be skipped.
+// Before the fix, `all_columns_are_new` caused this AddIndex to be silently dropped.
+#[test]
+fn plan_from_ir_composite_all_new_columns_emits_add_index() {
+    let old = envelope(vec![schema_model("doc", vec![col("id", "int", false)])]);
+    let mut nm = schema_model(
+        "doc",
+        vec![col("id", "int", false), col("a", "text", true), col("b", "text", true)],
+    );
+    nm.indexes = vec![SchemaIndex {
+        name: "idx_doc_a_b".to_string(),
+        columns: vec!["a".to_string(), "b".to_string()],
+        unique: false,
+    }];
+    let new = envelope(vec![nm]);
+    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    assert!(
+        plan.operations.contains(&MigrationOp::AddIndex {
+            table: "doc".to_string(),
+            name: "idx_doc_a_b".to_string(),
+            columns: vec!["a".to_string(), "b".to_string()],
+            unique: false,
+        }),
+        "composite index over all-new columns must appear in plan; got: {:?}",
+        plan.operations
+    );
+}
+
+// Regression: single-column index on a newly added column IS correctly skipped
+// because emit_add_column emits the CREATE INDEX for that case.
+#[test]
+fn plan_from_ir_single_column_new_index_is_skipped() {
+    let old = envelope(vec![schema_model("doc", vec![col("id", "int", false)])]);
+    let mut nm = schema_model(
+        "doc",
+        vec![col("id", "int", false), col_with_flags("c", "text", true, false, true, None)],
+    );
+    nm.indexes = vec![SchemaIndex {
+        name: "idx_doc_c".to_string(),
+        columns: vec!["c".to_string()],
+        unique: false,
+    }];
+    let new = envelope(vec![nm]);
+    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    assert!(
+        !plan.operations.contains(&MigrationOp::AddIndex {
+            table: "doc".to_string(),
+            name: "idx_doc_c".to_string(),
+            columns: vec!["c".to_string()],
+            unique: false,
+        }),
+        "single-column index on a new column must NOT appear in plan (emit_add_column handles it); got: {:?}",
+        plan.operations
+    );
 }

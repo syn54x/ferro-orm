@@ -121,6 +121,23 @@ fn single_column_unique_is_inline(model: &SchemaModel, unique_columns: &[String]
         .any(|col| col.name == *col_name && col.unique)
 }
 
+/// The standalone indexes/uniques the create path emits as separate
+/// `CREATE [UNIQUE] INDEX` statements: every `model.indexes`, plus `model.uniques`
+/// that are not inline single-column uniques. Returned as (name, columns, unique).
+pub(crate) fn standalone_indexes(model: &SchemaModel) -> Vec<(String, Vec<String>, bool)> {
+    let mut out = Vec::new();
+    for index in &model.indexes {
+        out.push((index.name.clone(), index.columns.clone(), index.unique));
+    }
+    for unique in &model.uniques {
+        if single_column_unique_is_inline(model, &unique.columns) {
+            continue;
+        }
+        out.push((unique.name.clone(), unique.columns.clone(), true));
+    }
+    out
+}
+
 fn post_create_artifacts(
     model: &SchemaModel,
     dialect: BackendDialect,
@@ -129,27 +146,8 @@ fn post_create_artifacts(
     let mut statements = Vec::new();
     let mut warnings = Vec::new();
 
-    for index in &model.indexes {
-        statements.push(render_index_sql(
-            table_lower,
-            &index.name,
-            &index.columns,
-            index.unique,
-            dialect,
-        ));
-    }
-
-    for unique in &model.uniques {
-        if single_column_unique_is_inline(model, &unique.columns) {
-            continue;
-        }
-        statements.push(render_index_sql(
-            table_lower,
-            &unique.name,
-            &unique.columns,
-            true,
-            dialect,
-        ));
+    for (name, columns, unique) in standalone_indexes(model) {
+        statements.push(render_index_sql(table_lower, &name, &columns, unique, dialect));
     }
 
     for check in &model.checks {
@@ -601,6 +599,14 @@ pub fn emit_sql_with_ir(
                     emit_alter_column_nullability(table, column, old_col, new_col, dialect);
                 result.statements.extend(partial.statements);
                 result.warnings.extend(partial.warnings);
+            }
+            MigrationOp::AddIndex { table, name, columns, unique } => {
+                result.statements.push(render_index_sql(table, name, columns, *unique, dialect));
+            }
+            // `table` is intentionally unused: DROP INDEX is schema-scoped (not
+            // table-qualified) on both SQLite and Postgres, so only the index name is needed.
+            MigrationOp::DropIndex { table: _, name } => {
+                result.statements.push(format!("DROP INDEX IF EXISTS \"{}\"", name));
             }
         }
     }
