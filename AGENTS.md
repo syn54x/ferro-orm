@@ -287,3 +287,29 @@ What to do instead:
 If release tooling fails to capture a change, fix the release configuration or
 commit message conventions — do not patch `CHANGELOG.md` by hand in ordinary
 PRs.
+
+---
+
+## I-11: Explain technical concepts in plain language, example-first
+
+When explaining a concept, design, trade-off, or change to the maintainer, lead
+with plain language and a concrete, user-facing example — not internal function
+names and call graphs.
+
+Rules:
+
+- **Anchor on what the user sees.** Show a real model definition and the SQL (or
+  behavior) it produces, then explain the internal mechanics against that
+  anchor. "A `datetime` field becomes `timestamptz` — here's the `CREATE TABLE`"
+  beats "`canonical_from_parts` maps the logical type."
+- **Introduce jargon only after the plain version.** Function and type names are
+  precise back-references once the idea is clear — not the primary explanation.
+- **Use analogies for architecture.** "Two translation dictionaries that must
+  agree by hand" communicates a duplication smell faster than a module diagram.
+- **Show, don't just tell.** Prefer before/after diffs, rendered SQL, and
+  concrete values over abstract prose (complements the show-don't-tell habit
+  used in issue/PR explanations).
+
+This applies to brainstorming, design discussions, PR descriptions, issue
+comments, and any explanation directed at the maintainer. It governs how work is
+communicated, not what gets built.
