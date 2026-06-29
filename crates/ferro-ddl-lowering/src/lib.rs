@@ -268,6 +268,11 @@ pub fn canonical_from_parts(
         return Ok(canonical);
     }
     match (logical_type, format) {
+        // DEPRECATED (legacy JSON-Schema vocabulary): the Python SchemaIR compiler
+        // now emits domain `logical_type` tokens ("datetime"/"date"/"uuid") instead
+        // of "string"+format for these. Retained because the CREATE TABLE path still
+        // resolves columns via "string"+format. Remove once the create path consumes
+        // the Python SchemaIR logical_type vocabulary (create-path unification; #141 non-goal).
         // Raw JSON Schema types with format — produced by schema_json_to_schema_ir.
         ("string", Some("date-time")) => Ok(CanonicalType::TimestampTz),
         ("string", Some("date")) => Ok(CanonicalType::Date),
