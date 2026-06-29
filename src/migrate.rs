@@ -16,9 +16,7 @@
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
     CanonicalType, Dialect, apply_canonical_type, canonical_to_db_type_token,
-    composite_index_name, composite_unique_index_name, db_check_constraint_name,
     information_schema_to_db_type_token, schema_columns_storage_drift,
-    single_index_name, single_unique_index_name as ddl_single_unique_index_name,
 };
 use ferro_migrate::{BackendDialect, MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
@@ -31,7 +29,7 @@ use crate::introspect::{
 };
 use crate::schema::{
     ColumnPlan, build_column_plan, internal_create_tables,
-    order_schemas_for_creation, property_json_type_and_format, sql_dialect_to_lowering,
+    order_schemas_for_creation, sql_dialect_to_lowering,
 };
 use crate::state::{IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, engine_for_connection};
 use pyo3::prelude::*;
@@ -56,45 +54,6 @@ fn resolve_col_schema<'a>(
     raw_col
 }
 
-fn migrate_column_bool(
-    raw_col: &serde_json::Value,
-    resolved: &serde_json::Value,
-    key: &str,
-) -> Option<bool> {
-    raw_col
-        .get(key)
-        .or_else(|| resolved.get(key))
-        .and_then(|value| value.as_bool())
-}
-
-fn migrate_column_object<'a>(
-    raw_col: &'a serde_json::Value,
-    resolved: &'a serde_json::Value,
-    key: &str,
-) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
-    raw_col
-        .get(key)
-        .or_else(|| resolved.get(key))
-        .and_then(|value| value.as_object())
-}
-
-fn migrate_check_expression(col_name: &str, col_info: &serde_json::Value) -> Option<String> {
-    let values = col_info.get("enum").and_then(|v| v.as_array())?;
-    if values.is_empty() {
-        return None;
-    }
-    let rendered: Vec<String> = values
-        .iter()
-        .map(|v| match v {
-            serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            other => format!("'{}'", other.to_string().replace('\'', "''")),
-        })
-        .collect();
-    Some(format!("\"{}\" IN ({})", col_name, rendered.join(", ")))
-}
-
 fn schema_ir_column<'a>(
     envelope: &'a IrEnvelope<SchemaIrPayload>,
     table: &str,
@@ -115,134 +74,42 @@ fn backend_dialect(backend: SqlDialect) -> BackendDialect {
     }
 }
 
-fn schema_json_to_schema_ir(
-    table_lower: &str,
-    schema: &serde_json::Value,
-    backend: SqlDialect,
-) -> IrEnvelope<SchemaIrPayload> {
-    let mut columns = Vec::new();
-    let mut foreign_keys = Vec::new();
-    let mut checks = Vec::new();
-    let mut indexes: Vec<SchemaIndex> = Vec::new();
-    let mut uniques: Vec<SchemaUnique> = Vec::new();
-    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-        for (name, raw_col) in properties {
-            let resolved = resolve_col_schema(schema, raw_col);
-            let col_plan = build_column_plan(table_lower, name, raw_col, schema, backend);
-            let db_type_explicit = raw_col
-                .get("db_type")
-                .or_else(|| resolved.get("db_type"))
-                .and_then(|v| v.as_str());
-            let db_type = db_type_explicit
-                .map(str::to_string)
-                .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, sql_dialect_to_lowering(backend)));
-            columns.push(SchemaColumn {
-                name: name.clone(),
-                logical_type: property_json_type_and_format(resolved)
-                    .0
-                    .unwrap_or("unknown")
-                    .to_string(),
-                db_type: Some(db_type),
-                db_type_explicit: db_type_explicit.map(|_| true),
-                nullable: col_plan.is_nullable,
-                primary_key: col_plan.is_primary_key,
-                autoincrement: col_plan.autoincrement,
-                unique: col_plan.is_unique,
-                index: migrate_column_bool(raw_col, resolved, "index").unwrap_or(false),
-                default: resolved.get("default").cloned(),
-                format: resolved
-                    .get("format")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                enum_values: resolved.get("enum").and_then(|v| v.as_array()).cloned(),
-                enum_type_name: resolved
-                    .get("enum_type_name")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                postgres_native_enum: false,
-            });
-
-            if migrate_column_bool(raw_col, resolved, "index").unwrap_or(false) {
-                indexes.push(SchemaIndex {
-                    name: single_index_name(table_lower, name),
-                    columns: vec![name.clone()],
-                    unique: false,
-                });
-            }
-            if col_plan.is_unique {
-                uniques.push(SchemaUnique {
-                    name: ddl_single_unique_index_name(table_lower, name),
-                    columns: vec![name.clone()],
-                });
-            }
-
-            if let Some(fk_info) = migrate_column_object(raw_col, resolved, "foreign_key") {
-                let to_table = fk_info
-                    .get("to_table")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let on_delete = fk_info
-                    .get("on_delete")
-                    .and_then(|o| o.as_str())
-                    .map(str::to_string);
-                foreign_keys.push(SchemaForeignKey {
-                    column: name.clone(),
-                    to_table,
-                    to_column: fk_info
-                        .get("to_column")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("id")
-                        .to_string(),
-                    on_delete,
-                    name: None,
-                });
-            }
-
-            if migrate_column_bool(raw_col, resolved, "db_check").unwrap_or(false)
-                && let Some(expression) = migrate_check_expression(name, resolved)
-            {
-                checks.push(SchemaCheck {
-                    name: db_check_constraint_name(table_lower, name),
-                    expression,
-                });
-            }
-        }
+/// Push the Python-compiled SchemaIR modelset for the runtime migrate diff to
+/// consume. Called by the `connect`/`migrate` Python wrappers after the registry
+/// is complete and relationships are resolved.
+#[pyfunction]
+#[pyo3(name = "_set_schema_ir_modelset")]
+pub fn _set_schema_ir_modelset(json: String) -> PyResult<()> {
+    let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid schema_ir_modelset json: {e}"))
+    })?;
+    if envelope.ir_kind != "schema" {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "expected ir_kind 'schema', got '{}'", envelope.ir_kind
+        )));
     }
-    for group in schema.get("ferro_composite_indexes").and_then(|g| g.as_array()).into_iter().flatten() {
-        let cols: Vec<String> = group.as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default();
-        if cols.len() >= 2 {
-            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-            indexes.push(SchemaIndex { name: composite_index_name(table_lower, &refs), columns: cols, unique: false });
-        }
-    }
-    for group in schema.get("ferro_composite_uniques").and_then(|g| g.as_array()).into_iter().flatten() {
-        let cols: Vec<String> = group.as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default();
-        if cols.len() >= 2 {
-            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-            uniques.push(SchemaUnique { name: composite_unique_index_name(table_lower, &refs), columns: cols });
-        }
-    }
-    indexes.sort_by(|a, b| a.name.cmp(&b.name));
-    uniques.sort_by(|a, b| a.name.cmp(&b.name));
-    columns.sort_by(|a, b| a.name.cmp(&b.name));
+    *crate::state::SCHEMA_IR_MODELSET.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
+    })? = Some(envelope);
+    Ok(())
+}
 
-    IrEnvelope {
+/// Narrow the declared modelset to a single-model envelope for `table`,
+/// matching the shape `plan_table_migration` expects (old vs new are both
+/// single-model). Returns None if the model is absent from the modelset.
+fn declared_envelope_for(
+    modelset: &IrEnvelope<SchemaIrPayload>,
+    table: &str,
+) -> Option<IrEnvelope<SchemaIrPayload>> {
+    let model = modelset.payload.models.iter().find(|m| m.table_name == table)?;
+    Some(IrEnvelope {
         ir_kind: "schema".to_string(),
-        ir_version: 1,
+        ir_version: modelset.ir_version,
         payload: SchemaIrPayload {
-            dialect_agnostic: true,
-            models: vec![SchemaModel {
-                model_name: table_lower.to_string(),
-                table_name: table_lower.to_string(),
-                columns,
-                foreign_keys,
-                indexes,
-                uniques,
-                checks,
-            }],
+            dialect_agnostic: modelset.payload.dialect_agnostic,
+            models: vec![model.clone()],
         },
-    }
+    })
 }
 
 fn live_columns_to_schema_ir(
@@ -487,7 +354,7 @@ fn render_alter(stmt: &sea_query::TableAlterStatement, backend: SqlDialect) -> S
 /// default. These abort the migration ("fail loudly").
 pub fn plan_table_migration(
     table_lower: &str,
-    schema: &serde_json::Value,
+    declared: &IrEnvelope<SchemaIrPayload>,
     live: &[LiveColumn],
     live_indexes: &[LiveIndex],
     backend: SqlDialect,
@@ -498,8 +365,8 @@ pub fn plan_table_migration(
     }
 
     let old_ir = live_columns_to_schema_ir(table_lower, live, live_indexes, backend);
-    let new_ir = schema_json_to_schema_ir(table_lower, schema, backend);
-    let mut typed_plan = plan_from_ir(&old_ir, &new_ir, backend_dialect(backend));
+    let new_ir = declared;
+    let mut typed_plan = plan_from_ir(&old_ir, new_ir, backend_dialect(backend));
 
     if !opts.destructive {
         typed_plan
@@ -535,7 +402,7 @@ pub fn plan_table_migration(
         operations: exec_ops,
         warnings: typed_plan.warnings,
     };
-    let emission = emit_sql_with_ir(&exec_plan, &old_ir, &new_ir, backend_dialect(backend))
+    let emission = emit_sql_with_ir(&exec_plan, &old_ir, new_ir, backend_dialect(backend))
         .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.message))?;
 
     plan.statements = emission.statements;
@@ -614,6 +481,7 @@ fn plan_table_migration_legacy(
 
 fn shadow_compare_migration_plan(
     table_lower: &str,
+    declared: &IrEnvelope<SchemaIrPayload>,
     schema: &serde_json::Value,
     live: &[LiveColumn],
     live_indexes: &[LiveIndex],
@@ -625,9 +493,7 @@ fn shadow_compare_migration_plan(
     }
     // Build the old and new IRs for the column-domain emission.
     let old_ir = live_columns_to_schema_ir(table_lower, live, live_indexes, backend);
-    let new_ir = schema_json_to_schema_ir(table_lower, schema, backend);
-
-    let mut typed_plan = plan_from_ir(&old_ir, &new_ir, backend_dialect(backend));
+    let mut typed_plan = plan_from_ir(&old_ir, declared, backend_dialect(backend));
 
     if !opts.destructive {
         typed_plan
@@ -653,7 +519,7 @@ fn shadow_compare_migration_plan(
         operations: column_ops,
         warnings: typed_plan.warnings,
     };
-    let emission = emit_sql_with_ir(&column_plan, &old_ir, &new_ir, backend_dialect(backend))
+    let emission = emit_sql_with_ir(&column_plan, &old_ir, declared, backend_dialect(backend))
         .map_err(|e| e.message)?;
 
     let legacy = plan_table_migration_legacy(table_lower, schema, live, live_indexes, backend, opts)
@@ -996,6 +862,14 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
         })?;
         registry.clone()
     };
+    let modelset = {
+        let guard = crate::state::SCHEMA_IR_MODELSET.read().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
+        })?;
+        guard.clone().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+            "SchemaIR modelset not set — connect()/migrate() must push it before migrating"
+        ))?
+    };
     let backend = engine.backend();
 
     let mut warnings = Vec::new();
@@ -1009,10 +883,11 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
         };
         let live_indexes = live_table_indexes(&engine, &table_lower).await?;
 
-        let mut plan = plan_table_migration(&table_lower, &schema, &live, &live_indexes, backend, opts)?;
+        let Some(declared) = declared_envelope_for(&modelset, &table_lower) else { continue };
+        let mut plan = plan_table_migration(&table_lower, &declared, &live, &live_indexes, backend, opts)?;
         if engine.is_shadow_runtime_enabled()
             && let Err(diff) =
-                shadow_compare_migration_plan(&table_lower, &schema, &live, &live_indexes, backend, opts)
+                shadow_compare_migration_plan(&table_lower, &declared, &schema, &live, &live_indexes, backend, opts)
         {
             crate::log_debug(format!("⚠️ Ferro shadow runtime mismatch: {diff}"));
             if std::env::var("FERRO_SHADOW_RUNTIME_STRICT")
@@ -1107,10 +982,10 @@ pub fn migrate(
 /// unrecognized, or the diff contains an unsafe change.
 #[pyfunction]
 #[pyo3(name = "_render_migration_sql_for_test")]
-#[pyo3(signature = (name, schema_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new()))]
+#[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new()))]
 pub fn _render_migration_sql_for_test(
     name: String,
-    schema_json: String,
+    schema_ir_json: String,
     live_columns_json: String,
     dialect: String,
     updates: bool,
@@ -1127,8 +1002,8 @@ pub fn _render_migration_sql_for_test(
             )));
         }
     };
-    let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
+    let declared: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&schema_ir_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid schema_ir_json: {e}"))
     })?;
     let live: Vec<LiveColumn> = serde_json::from_str(&live_columns_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid live-columns JSON: {}", e))
@@ -1143,7 +1018,7 @@ pub fn _render_migration_sql_for_test(
 
     let table_lower = name.to_lowercase();
     let opts = MigrateOptions::laddered(updates, destructive);
-    let plan = plan_table_migration(&table_lower, &schema, &live, &live_indexes, backend, opts)?;
+    let plan = plan_table_migration(&table_lower, &declared, &live, &live_indexes, backend, opts)?;
 
     let mut statements = plan.statements;
     for col_name in &plan.drop_columns {
@@ -1167,11 +1042,13 @@ fn migration_plan_snapshot(plan: &MigrationPlan) -> serde_json::Value {
 /// Test-only: compare IR-primary vs legacy migration planners for shadow fixtures.
 ///
 /// Returns JSON with `matches`, `ir`, and `legacy` plan snapshots.
+/// `schema_ir_json` drives the IR planner; `schema_json` drives the legacy planner.
 #[pyfunction]
 #[pyo3(name = "_shadow_compare_migration_plan_for_test")]
-#[pyo3(signature = (name, schema_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new()))]
+#[pyo3(signature = (name, schema_ir_json, schema_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new()))]
 pub fn _shadow_compare_migration_plan_for_test(
     name: String,
+    schema_ir_json: String,
     schema_json: String,
     live_columns_json: String,
     dialect: String,
@@ -1189,6 +1066,9 @@ pub fn _shadow_compare_migration_plan_for_test(
             )));
         }
     };
+    let new_ir: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&schema_ir_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid schema_ir_json: {e}"))
+    })?;
     let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
     })?;
@@ -1208,7 +1088,6 @@ pub fn _shadow_compare_migration_plan_for_test(
 
     // Build column-domain IR plan (filter AddIndex/DropIndex) for parity comparison.
     let old_ir = live_columns_to_schema_ir(&table_lower, &live, &live_indexes, backend);
-    let new_ir = schema_json_to_schema_ir(&table_lower, &schema, backend);
     let mut typed_plan = plan_from_ir(&old_ir, &new_ir, backend_dialect(backend));
     if !opts.destructive {
         typed_plan
@@ -1254,7 +1133,185 @@ pub fn _shadow_compare_migration_plan_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferro_ddl_lowering::{
+        canonical_to_db_type_token, composite_index_name, composite_unique_index_name,
+        db_check_constraint_name, single_index_name,
+        single_unique_index_name as ddl_single_unique_index_name,
+    };
+    use crate::schema::property_json_type_and_format;
     use serde_json::json;
+
+    fn migrate_column_bool(
+        raw_col: &serde_json::Value,
+        resolved: &serde_json::Value,
+        key: &str,
+    ) -> Option<bool> {
+        raw_col
+            .get(key)
+            .or_else(|| resolved.get(key))
+            .and_then(|value| value.as_bool())
+    }
+
+    fn migrate_column_object<'a>(
+        raw_col: &'a serde_json::Value,
+        resolved: &'a serde_json::Value,
+        key: &str,
+    ) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+        raw_col
+            .get(key)
+            .or_else(|| resolved.get(key))
+            .and_then(|value| value.as_object())
+    }
+
+    fn migrate_check_expression(col_name: &str, col_info: &serde_json::Value) -> Option<String> {
+        let values = col_info.get("enum").and_then(|v| v.as_array())?;
+        if values.is_empty() {
+            return None;
+        }
+        let rendered: Vec<String> = values
+            .iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                other => format!("'{}'", other.to_string().replace('\'', "''")),
+            })
+            .collect();
+        Some(format!("\"{}\" IN ({})", col_name, rendered.join(", ")))
+    }
+
+    /// Test-only helper: convert a Ferro-enriched JSON schema into a single-model
+    /// `IrEnvelope<SchemaIrPayload>`. Production code now consumes the Python-compiled
+    /// modelset pushed via `_set_schema_ir_modelset`.
+    fn schema_json_to_schema_ir(
+        table_lower: &str,
+        schema: &serde_json::Value,
+        backend: SqlDialect,
+    ) -> IrEnvelope<SchemaIrPayload> {
+        let mut columns = Vec::new();
+        let mut foreign_keys = Vec::new();
+        let mut checks = Vec::new();
+        let mut indexes: Vec<SchemaIndex> = Vec::new();
+        let mut uniques: Vec<SchemaUnique> = Vec::new();
+        if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+            for (name, raw_col) in properties {
+                let resolved = resolve_col_schema(schema, raw_col);
+                let col_plan = build_column_plan(table_lower, name, raw_col, schema, backend);
+                let db_type_explicit = raw_col
+                    .get("db_type")
+                    .or_else(|| resolved.get("db_type"))
+                    .and_then(|v| v.as_str());
+                let db_type = db_type_explicit
+                    .map(str::to_string)
+                    .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, sql_dialect_to_lowering(backend)));
+                columns.push(SchemaColumn {
+                    name: name.clone(),
+                    logical_type: property_json_type_and_format(resolved)
+                        .0
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    db_type: Some(db_type),
+                    db_type_explicit: db_type_explicit.map(|_| true),
+                    nullable: col_plan.is_nullable,
+                    primary_key: col_plan.is_primary_key,
+                    autoincrement: col_plan.autoincrement,
+                    unique: col_plan.is_unique,
+                    index: migrate_column_bool(raw_col, resolved, "index").unwrap_or(false),
+                    default: resolved.get("default").cloned(),
+                    format: resolved
+                        .get("format")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    enum_values: resolved.get("enum").and_then(|v| v.as_array()).cloned(),
+                    enum_type_name: resolved
+                        .get("enum_type_name")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    postgres_native_enum: false,
+                });
+
+                if migrate_column_bool(raw_col, resolved, "index").unwrap_or(false) {
+                    indexes.push(SchemaIndex {
+                        name: single_index_name(table_lower, name),
+                        columns: vec![name.clone()],
+                        unique: false,
+                    });
+                }
+                if col_plan.is_unique {
+                    uniques.push(SchemaUnique {
+                        name: ddl_single_unique_index_name(table_lower, name),
+                        columns: vec![name.clone()],
+                    });
+                }
+
+                if let Some(fk_info) = migrate_column_object(raw_col, resolved, "foreign_key") {
+                    let to_table = fk_info
+                        .get("to_table")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let on_delete = fk_info
+                        .get("on_delete")
+                        .and_then(|o| o.as_str())
+                        .map(str::to_string);
+                    foreign_keys.push(SchemaForeignKey {
+                        column: name.clone(),
+                        to_table,
+                        to_column: fk_info
+                            .get("to_column")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("id")
+                            .to_string(),
+                        on_delete,
+                        name: None,
+                    });
+                }
+
+                if migrate_column_bool(raw_col, resolved, "db_check").unwrap_or(false)
+                    && let Some(expression) = migrate_check_expression(name, resolved)
+                {
+                    checks.push(SchemaCheck {
+                        name: db_check_constraint_name(table_lower, name),
+                        expression,
+                    });
+                }
+            }
+        }
+        for group in schema.get("ferro_composite_indexes").and_then(|g| g.as_array()).into_iter().flatten() {
+            let cols: Vec<String> = group.as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default();
+            if cols.len() >= 2 {
+                let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+                indexes.push(SchemaIndex { name: composite_index_name(table_lower, &refs), columns: cols, unique: false });
+            }
+        }
+        for group in schema.get("ferro_composite_uniques").and_then(|g| g.as_array()).into_iter().flatten() {
+            let cols: Vec<String> = group.as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default();
+            if cols.len() >= 2 {
+                let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+                uniques.push(SchemaUnique { name: composite_unique_index_name(table_lower, &refs), columns: cols });
+            }
+        }
+        indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        uniques.sort_by(|a, b| a.name.cmp(&b.name));
+        columns.sort_by(|a, b| a.name.cmp(&b.name));
+
+        IrEnvelope {
+            ir_kind: "schema".to_string(),
+            ir_version: 1,
+            payload: SchemaIrPayload {
+                dialect_agnostic: true,
+                models: vec![SchemaModel {
+                    model_name: table_lower.to_string(),
+                    table_name: table_lower.to_string(),
+                    columns,
+                    foreign_keys,
+                    indexes,
+                    uniques,
+                    checks,
+                }],
+            },
+        }
+    }
 
     const UPDATES: MigrateOptions = MigrateOptions {
         updates: true,
@@ -1294,7 +1351,8 @@ mod tests {
         backend: SqlDialect,
         opts: MigrateOptions,
     ) -> MigrationPlan {
-        let ir = plan_table_migration(table, schema, live, live_indexes, backend, opts)
+        let declared = schema_json_to_schema_ir(table, schema, backend);
+        let ir = plan_table_migration(table, &declared, live, live_indexes, backend, opts)
             .unwrap_or_else(|e| panic!("IR planner failed for '{table}': {e}"));
         let legacy = plan_table_migration_legacy(table, schema, live, live_indexes, backend, opts)
             .unwrap_or_else(|e| panic!("legacy planner failed for '{table}': {e}"));
@@ -1304,7 +1362,7 @@ mod tests {
             assert_eq!(ir.statements, legacy.statements, "statements mismatch on {table:?} ({backend:?})");
             assert_eq!(ir.drop_columns, legacy.drop_columns, "drop_columns mismatch on {table:?} ({backend:?})");
             assert_eq!(ir.warnings, legacy.warnings, "warnings mismatch on {table:?} ({backend:?})");
-            shadow_compare_migration_plan(table, schema, live, live_indexes, backend, opts)
+            shadow_compare_migration_plan(table, &declared, schema, live, live_indexes, backend, opts)
                 .unwrap_or_else(|diff| panic!("shadow compare failed: {diff}"));
             return ir;
         }
@@ -1347,7 +1405,7 @@ mod tests {
             emission.warnings, legacy.warnings,
             "warnings mismatch on {table:?} ({backend:?})"
         );
-        shadow_compare_migration_plan(table, schema, live, live_indexes, backend, opts)
+        shadow_compare_migration_plan(table, &declared, schema, live, live_indexes, backend, opts)
             .unwrap_or_else(|diff| panic!("shadow compare failed: {diff}"));
         ir
     }
@@ -1372,7 +1430,8 @@ mod tests {
         opts: MigrateOptions,
         needle: &str,
     ) {
-        let ir_err = plan_table_migration(table, schema, live, live_indexes, backend, opts)
+        let declared = schema_json_to_schema_ir(table, schema, backend);
+        let ir_err = plan_table_migration(table, &declared, live, live_indexes, backend, opts)
             .expect_err("IR planner should fail");
         let legacy_err = plan_table_migration_legacy(table, schema, live, live_indexes, backend, opts)
             .expect_err("legacy planner should fail");
@@ -1504,8 +1563,9 @@ mod tests {
         }];
 
         for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
+            let declared = schema_json_to_schema_ir("doc", &schema, backend);
             let err =
-                plan_table_migration("doc", &schema, &live_cols, &[], backend, UPDATES).unwrap_err();
+                plan_table_migration("doc", &declared, &live_cols, &[], backend, UPDATES).unwrap_err();
             let message = err.to_string();
             assert!(message.contains("doc.created_at"), "{message}");
             assert!(message.contains("Alembic"), "{message}");
@@ -1521,7 +1581,8 @@ mod tests {
             }
         });
         let live_cols = vec![live("name", "varchar")];
-        let err = plan_table_migration("doc", &schema, &live_cols, &[], SqlDialect::Sqlite, UPDATES)
+        let declared = schema_json_to_schema_ir("doc", &schema, SqlDialect::Sqlite);
+        let err = plan_table_migration("doc", &declared, &live_cols, &[], SqlDialect::Sqlite, UPDATES)
             .unwrap_err();
         assert!(err.to_string().contains("primary key"), "{err}");
     }
@@ -2032,13 +2093,15 @@ mod tests {
                 "id": {"type": "integer", "primary_key": true},
             }
         });
+        let ir = schema_json_to_schema_ir("doc", &schema, SqlDialect::Sqlite);
+        let ir_json = serde_json::to_string(&ir).unwrap();
         let live_json = json!([
             {"name": "id", "declared_type": "integer", "is_primary_key": true, "is_nullable": false},
             {"name": "stale", "declared_type": "varchar"},
         ]);
         let (statements, warnings) = _render_migration_sql_for_test(
             "Doc".to_string(),
-            schema.to_string(),
+            ir_json,
             live_json.to_string(),
             "sqlite".to_string(),
             true,

@@ -340,9 +340,7 @@ async def test_migrate_updates_not_null_without_default_fails_loudly(
 ):
     """A new NOT NULL field with no literal default cannot backfill existing
     rows; connecting must fail with an error naming the field."""
-    import json as _json
-
-    from ferro._core import register_model_schema
+    from datetime import datetime
 
     await ferro.connect(db_url)
     await execute(
@@ -350,22 +348,10 @@ async def test_migrate_updates_not_null_without_default_fails_loudly(
     )
     ferro.reset_engine()
 
-    register_model_schema(
-        "MigStrict",
-        _json.dumps(
-            {
-                "properties": {
-                    "id": {"type": "integer", "primary_key": True},
-                    "name": {"type": "string", "ferro_nullable": False},
-                    "created_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "ferro_nullable": False,
-                    },
-                }
-            }
-        ),
-    )
+    class MigStrict(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        created_at: datetime
 
     with pytest.raises(ValueError, match=r"migstrict\.created_at"):
         await ferro.connect(db_url, migrate_updates=True)
@@ -383,21 +369,9 @@ async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
     )
     ferro.reset_engine()
 
-    import json as _json
-
-    from ferro._core import register_model_schema
-
-    register_model_schema(
-        "MigDrift",
-        _json.dumps(
-            {
-                "properties": {
-                    "id": {"type": "integer", "primary_key": True},
-                    "count": {"type": "integer", "ferro_nullable": False},
-                }
-            }
-        ),
-    )
+    class MigDrift(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        count: int
 
     with pytest.warns(UserWarning, match=r"migdrift\.count.*Alembic"):
         await ferro.connect(db_url, migrate_updates=True)
@@ -527,10 +501,6 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
     """Postgres gets native ALTER COLUMN: type changes via USING cast (with
     existing data), SET NOT NULL, and no lingering server default after a
     backfilled NOT NULL add."""
-    import json as _json
-
-    from ferro._core import register_model_schema
-
     await ferro.connect(db_url)
     await execute(
         'CREATE TABLE "migpg" ("id" serial PRIMARY KEY, '
@@ -539,27 +509,16 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
     await execute('INSERT INTO "migpg" ("total", "note") VALUES (41, NULL)')
     ferro.reset_engine()
 
-    register_model_schema(
-        "MigPg",
-        _json.dumps(
-            {
-                "properties": {
-                    "id": {"type": "integer", "primary_key": True},
-                    "total": {
-                        "type": "integer",
-                        "db_type": "bigint",
-                        "ferro_nullable": False,
-                    },
-                    "note": {"type": "string", "ferro_nullable": True},
-                    "status": {
-                        "type": "string",
-                        "ferro_nullable": False,
-                        "default": "draft",
-                    },
-                }
-            }
-        ),
-    )
+    # Assignment style (defaults outside Annotated) sidesteps #155: under
+    # Python 3.14 / PEP 649, an assigned field plus an
+    # `Annotated[T, FerroField(default=...)]` sibling (like `status`) makes
+    # deferred-annotation evaluation fail; the metaclass swallows it and drops
+    # ALL annotations, so Pydantic then flags `id` as a non-annotated attribute.
+    class MigPg(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        total: int = ferro.Field(db_type="bigint")
+        note: str | None = None
+        status: str = ferro.Field(default="draft")
 
     await ferro.connect(db_url, migrate_updates=True)
 
@@ -847,4 +806,132 @@ async def test_index_reconcile_user_index_survives_auto_migrate(
     assert "idx_idxusermodel_m_n" in names_after_destructive
     assert "my_custom_idx" in names_after_destructive, (
         "user index must survive destructive auto-migrate"
+    )
+
+
+# ---------------------------------------------------------------------------
+# IR cutover — Python SchemaIR over FFI (issue #141 Task 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_uuid_pk_derived_second_pass_is_noop(db_url, db_backend, clean_registry):
+    """End-to-end Example-1 guard (issue #141 Task 4):
+    A model with a derived UUID primary key (default_factory=uuid4) connected via
+    migrate_updates twice must produce no DDL and no warning on the second pass.
+    This exercises the Python→Rust SchemaIR FFI path: the Rust runtime must
+    recognise the table as already up-to-date after the first migrate pass."""
+    import warnings as _warnings
+
+    class UuidPkItem(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        label: str
+
+    # First connect: creates the table (auto_migrate) and runs migrate_updates.
+    await ferro.connect(db_url, migrate_updates=True)
+    ferro.reset_engine()
+
+    # Second connect: same model, same schema — must be a complete no-op.
+    from ferro import clear_registry
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+    class UuidPkItem(Model):  # noqa: F811 — intentional re-declaration for second connect
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        label: str
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        await ferro.connect(db_url, migrate_updates=True)
+
+    ferro_warnings = [
+        w for w in caught if issubclass(w.category, UserWarning)
+        and "ferro auto-migrate" in str(w.message)
+    ]
+    assert ferro_warnings == [], (
+        f"Expected no ferro auto-migrate warnings on second pass; got: "
+        f"{[str(w.message) for w in ferro_warnings]}"
+    )
+
+    # Additionally verify that no DDL ran — the live `id` column must still carry
+    # the UUID storage type from the first pass (not a replacement type).
+    if db_backend == "sqlite":
+        columns = _sqlite_columns(db_url, "uuidpkitem")
+        id_type = columns["id"][2].lower()
+        assert "char" in id_type or "uuid" in id_type, (
+            f"Expected uuid/char storage type for `id` after second pass; got '{id_type}' "
+            "(a different type would mean DDL ran on the second pass)"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_uuid_pk_derived_drift_is_stable(db_url, db_backend, clean_registry):
+    """Drift check: a UUID PK model connected with migrate_updates multiple times
+    must not report any DDL drift. The storage-token comparison must see the
+    uuid_text / uuid declared type as stable after the first connect."""
+    import warnings as _warnings
+
+    class UuidDriftModel(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        name: str
+
+    # Bootstrap: create the table.
+    await ferro.connect(db_url, auto_migrate=True)
+    ferro.reset_engine()
+
+    # First migrate_updates pass — should apply nothing (fresh table).
+    from ferro import clear_registry
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+    class UuidDriftModel(Model):  # noqa: F811
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        name: str
+
+    with _warnings.catch_warnings(record=True) as caught_first:
+        _warnings.simplefilter("always")
+        await ferro.connect(db_url, migrate_updates=True)
+
+    ferro.reset_engine()
+
+    # Second migrate_updates pass — must be identical to the first (idempotent).
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
+
+    class UuidDriftModel(Model):  # noqa: F811
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        name: str
+
+    with _warnings.catch_warnings(record=True) as caught_second:
+        _warnings.simplefilter("always")
+        await ferro.connect(db_url, migrate_updates=True)
+
+    drift_warnings_first = [
+        w for w in caught_first
+        if issubclass(w.category, UserWarning) and "ferro auto-migrate" in str(w.message)
+    ]
+    drift_warnings_second = [
+        w for w in caught_second
+        if issubclass(w.category, UserWarning) and "ferro auto-migrate" in str(w.message)
+    ]
+
+    assert drift_warnings_first == [], (
+        f"UUID PK must not trigger drift warning on first migrate_updates: "
+        f"{[str(w.message) for w in drift_warnings_first]}"
+    )
+    assert drift_warnings_second == [], (
+        f"UUID PK must not trigger drift warning on second migrate_updates: "
+        f"{[str(w.message) for w in drift_warnings_second]}"
     )

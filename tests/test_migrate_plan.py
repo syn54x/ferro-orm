@@ -10,11 +10,18 @@ import json
 import pytest
 
 from ferro._core import _render_migration_sql_for_test
+from ferro.ir.compiler import compile_schema_ir_payload, wrap_schema_ir
+
+
+def _compile_schema_ir_json(schema: dict, name: str) -> str:
+    """Compile an ad-hoc schema dict into a SchemaIR envelope JSON string."""
+    payload = compile_schema_ir_payload(name, schema)
+    return json.dumps(wrap_schema_ir(payload))
 
 
 def render(schema, live, dialect, *, updates=True, destructive=False, name="Invoice"):
     return _render_migration_sql_for_test(
-        name, json.dumps(schema), json.dumps(live), dialect, updates, destructive
+        name, _compile_schema_ir_json(schema, name.lower()), json.dumps(live), dialect, updates, destructive
     )
 
 
@@ -264,7 +271,7 @@ def test_index_noop_emits_zero_ddl_when_index_already_present(dialect):
     (false-alarm class of bug, issue #144)."""
     stmts, warns = _render_migration_sql_for_test(
         "idxnoopmodel",
-        json.dumps(_NOOP_SCHEMA),
+        _compile_schema_ir_json(_NOOP_SCHEMA, "idxnoopmodel"),
         json.dumps(_NOOP_LIVE_COLUMNS),
         dialect,
         True,   # updates
@@ -277,3 +284,27 @@ def test_index_noop_emits_zero_ddl_when_index_already_present(dialect):
     assert warns == [], (
         f"[{dialect}] expected no warnings when index already present, got: {warns}"
     )
+
+
+@pytest.mark.parametrize("dialect", ["sqlite"])
+def test_derived_uuid_column_does_not_drift_when_consuming_python_ir(dialect):
+    """A derived uuid column (no explicit db_type) must produce no DDL and no warning
+    when the live column has type 'uuid_text' — the storage-token comparison path
+    (Task 1 fix) must handle the None db_type case correctly."""
+    schema_ir = json.dumps({
+        "ir_kind": "schema", "ir_version": 1,
+        "payload": {"dialect_agnostic": True, "models": [{
+            "model_name": "acct",
+            "table_name": "acct",
+            "columns": [{"name": "id", "logical_type": "uuid", "format": "uuid",
+                         "nullable": False, "primary_key": True,
+                         "autoincrement": False, "unique": False, "index": False,
+                         "default": None}],
+            "indexes": [], "uniques": [], "foreign_keys": [], "checks": [],
+        }]},
+    })
+    live = json.dumps([{"name": "id", "declared_type": "uuid_text",
+                        "is_nullable": False, "is_primary_key": True}])
+    stmts, warns = _render_migration_sql_for_test("acct", schema_ir, live, dialect)
+    assert stmts == [], f"unexpected DDL: {stmts}"
+    assert warns == [], f"unexpected drift warning: {warns}"
