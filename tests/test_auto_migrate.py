@@ -509,11 +509,15 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
     await execute('INSERT INTO "migpg" ("total", "note") VALUES (41, NULL)')
     ferro.reset_engine()
 
+    # Assignment style: an `int | None` PK overriding the base `id` field combined
+    # with multiple Annotated FerroField columns trips a Pydantic 2.12 /
+    # metaclass edge ("non-annotated attribute `id`"). Assignment style is
+    # equivalent and avoids it.
     class MigPg(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        total: Annotated[int, FerroField(db_type="bigint")]
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        total: int = ferro.Field(db_type="bigint")
         note: str | None = None
-        status: Annotated[str, FerroField(default="draft")]
+        status: str = ferro.Field(default="draft")
 
     await ferro.connect(db_url, migrate_updates=True)
 
