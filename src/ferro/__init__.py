@@ -14,7 +14,7 @@ from pydantic import Field as PydanticField
 
 from ._core import (
     clear_registry,
-    create_tables,
+    create_tables as _core_create_tables,
     evict_instance,
     migrate as _core_migrate,
     reset_engine,
@@ -132,6 +132,28 @@ async def connect(
         migrate_updates=migrate_updates,
         migrate_destructive=migrate_destructive,
     )
+
+
+async def create_tables(using=None):
+    """
+    Manually create tables for all registered models on a connected engine.
+
+    Compiles and pushes the current registry SchemaIR to the Rust runtime
+    before delegating to the Rust create entrypoint, so a model defined after
+    ``connect()`` (and thus absent from the connect-time snapshot) is still
+    created. The runtime emits each ``CREATE TABLE`` from this SchemaIR via the
+    shared emitter.
+
+    Args:
+        using: Named connection to create tables on, or None for the default.
+    """
+    import json as _json
+    from .ir.compiler import compile_registry_schema_ir
+    from .relations import resolve_relationships
+
+    resolve_relationships()
+    _set_schema_ir_modelset(_json.dumps(compile_registry_schema_ir()))
+    return await _core_create_tables(using=using)
 
 
 async def migrate(using=None, updates=True, destructive=False):

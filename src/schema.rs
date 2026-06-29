@@ -521,46 +521,54 @@ fn shadow_compare_create_table_sqls(
 /// # Errors
 /// Returns a `PyErr` if the SQL execution fails.
 pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
-    let schemas = {
-        let registry = MODEL_REGISTRY.read().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry")
+    // The runtime CREATE TABLE path is emitted from the Python-compiled SchemaIR
+    // via the shared `ferro_migrate` emitter (issue #153). The modelset must have
+    // been pushed by the `connect`/`create_tables` Python wrappers first — a
+    // missing modelset is a loud error, never a silent empty create.
+    let modelset = {
+        let guard = crate::state::SCHEMA_IR_MODELSET.read().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
         })?;
-        registry.clone()
+        guard.clone().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "SchemaIR modelset not set — connect()/create_tables() must push it before creating tables",
+            )
+        })?
     };
 
-    let backend = engine.backend();
+    let dialect = crate::migrate::backend_dialect(engine.backend());
 
-    for (name, schema) in order_schemas_for_creation(schemas) {
-        let (sql, index_sqls) = build_create_table_sqls(&name, &schema, backend);
-        if engine.is_shadow_runtime_enabled()
-            && let Err(diff) = shadow_compare_create_table_sqls(&name, &schema, backend)
-        {
-            crate::log_debug(format!("⚠️ Ferro shadow runtime mismatch: {diff}"));
-            if std::env::var("FERRO_SHADOW_RUNTIME_STRICT")
-                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-            {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(diff));
-            }
-        }
-
-        engine.execute_sql(&sql).await.map_err(|e| {
+    let model_refs: Vec<&ferro_schema_ir::SchemaModel> =
+        modelset.payload.models.iter().collect();
+    for model in ferro_migrate::order_models_for_create(&model_refs) {
+        let emission = ferro_migrate::render_create_table(model, dialect).map_err(|err| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "SQL Execution failed for '{}' table: {}",
-                name, e
+                "CREATE TABLE emission failed for '{}': {}",
+                model.table_name, err.message
             ))
         })?;
 
-        for index_sql in index_sqls {
-            engine.execute_sql(&index_sql).await.map_err(|e| {
+        engine.execute_sql(&emission.create_sql).await.map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "SQL Execution failed for '{}' table: {}",
+                model.table_name, e
+            ))
+        })?;
+
+        for post_sql in &emission.post_create_sqls {
+            engine.execute_sql(post_sql).await.map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "SQL Execution failed for '{}' index: {}",
-                    name, e
+                    model.table_name, e
                 ))
             })?;
         }
 
-        crate::log_debug(format!("✅ Ferro Engine: Table '{}' created", name));
+        for warning in &emission.warnings {
+            crate::emit_user_warning(warning);
+        }
+
+        crate::log_debug(format!("✅ Ferro Engine: Table '{}' created", model.table_name));
     }
 
     Ok(())
@@ -611,12 +619,15 @@ pub fn create_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_
 /// emitters agree on every `(canonical_token, dialect)` pair.
 ///
 /// `dialect` must be `"postgres"` or `"sqlite"`. Anything else raises
-/// `ValueError`. `schema_json` is a JSON string in the same shape that
-/// `register_model_schema` consumes.
+/// `ValueError`. `schema_json` is a SchemaIR *payload* JSON string of the shape
+/// `{"dialect_agnostic": bool, "models": [<SchemaModel>...]}` produced by
+/// `ferro.ir.compiler.compile_schema_ir_payload`. The model matching `name`
+/// (by `model_name`/`table_name`, falling back to the first) is rendered through
+/// the same `ferro_migrate::render_create_table` emitter the runtime uses.
 ///
 /// # Errors
-/// Returns a `PyErr` when the JSON cannot be parsed or the dialect is
-/// unrecognized.
+/// Returns a `PyErr` when the JSON cannot be parsed, the dialect is
+/// unrecognized, the payload has no models, or the emitter fails.
 #[pyfunction]
 #[pyo3(name = "_render_create_table_sql_for_test")]
 pub fn _render_create_table_sql_for_test(
@@ -624,9 +635,9 @@ pub fn _render_create_table_sql_for_test(
     schema_json: String,
     dialect: String,
 ) -> PyResult<(String, Vec<String>)> {
-    let backend = match dialect.as_str() {
-        "postgres" => SqlDialect::Postgres,
-        "sqlite" => SqlDialect::Sqlite,
+    let dialect = match dialect.as_str() {
+        "postgres" => ferro_migrate::BackendDialect::Postgres,
+        "sqlite" => ferro_migrate::BackendDialect::Sqlite,
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
@@ -634,10 +645,29 @@ pub fn _render_create_table_sql_for_test(
             )));
         }
     };
-    let schema: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
+    let payload: ferro_schema_ir::SchemaIrPayload = serde_json::from_str(&schema_json)
+        .map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR payload: {}", e))
+        })?;
+    let table_lower = name.to_lowercase();
+    let model = payload
+        .models
+        .iter()
+        .find(|m| m.model_name == name || m.table_name == table_lower)
+        .or_else(|| payload.models.first())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "SchemaIR payload for {:?} contains no models",
+                name
+            ))
+        })?;
+    let emission = ferro_migrate::render_create_table(model, dialect).map_err(|err| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "CREATE TABLE emission failed for '{}': {}",
+            model.table_name, err.message
+        ))
     })?;
-    Ok(build_create_table_sqls(&name, &schema, backend))
+    Ok((emission.create_sql, emission.post_create_sqls))
 }
 
 #[cfg(test)]
