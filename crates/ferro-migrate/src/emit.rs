@@ -201,7 +201,7 @@ fn post_create_artifacts(
                     "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK ({expression})",
                     table = table_lower,
                     name = check.name,
-                    expression = render_check_expression(&check.expression),
+                    expression = render_check_expression(&check.expression)?,
                 ));
             }
             BackendDialect::Sqlite => {
@@ -224,10 +224,18 @@ fn post_create_artifacts(
 /// emits `"<col>" IN (<values>)`. We re-quote the column reference at emit time
 /// rather than diverge the IR contract (whose unquoted form is asserted by
 /// `test_schema_ir_compiler_emits_db_check_expression_for_closed_domain`).
-fn render_check_expression(expression: &str) -> String {
+///
+/// Returns `Err(EmissionError)` for expressions that are not in the expected
+/// `<col> IN (<values>)` shape — the only shape the IR compiler produces.
+/// A structured shared renderer is deferred to Phase 9.
+fn render_check_expression(expression: &str) -> Result<String, EmissionError> {
     match expression.split_once(" IN (") {
-        Some((column, rest)) => format!("{} IN ({}", quote_ident(column), rest),
-        None => expression.to_string(),
+        Some((column, rest)) => Ok(format!("{} IN ({}", quote_ident(column), rest)),
+        None => Err(EmissionError {
+            message: format!(
+                "db_check expression does not match expected `<col> IN (<values>)` shape: {expression:?}"
+            ),
+        }),
     }
 }
 

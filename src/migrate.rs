@@ -1228,7 +1228,11 @@ mod tests {
                     db_type_explicit: db_type_explicit.map(|_| true),
                     nullable: col_plan.is_nullable,
                     primary_key: col_plan.is_primary_key,
-                    autoincrement: col_plan.autoincrement,
+                    autoincrement: if col_plan.is_primary_key {
+                        migrate_column_bool(raw_col, resolved, "autoincrement").unwrap_or(true)
+                    } else {
+                        migrate_column_bool(raw_col, resolved, "autoincrement").unwrap_or(false)
+                    },
                     unique: col_plan.is_unique,
                     index: migrate_column_bool(raw_col, resolved, "index").unwrap_or(false),
                     default: resolved.get("default").cloned(),

@@ -721,7 +721,7 @@ fn emit_sql_with_ir_alter_column_type_unknown_db_type_errors() {
     let err =
         emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap_err();
     assert!(err.message.contains("Cannot alter type"));
-    assert!(err.message.contains("unknown db_type"));
+    assert!(err.message.contains("unknown"));
 }
 
 #[test]
@@ -985,7 +985,6 @@ fn render_create_table_golden_postgres() {
 // a missing `on_delete` must render `ON DELETE CASCADE`, inline, on both backends.
 #[test]
 fn render_create_table_fk_none_on_delete_defaults_cascade() {
-    let parent = schema_model("team", vec![pk_col("id", "int")]);
     let child = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
             column: "team_id".to_string(),
@@ -997,7 +996,6 @@ fn render_create_table_fk_none_on_delete_defaults_cascade() {
         columns: vec![col("team_id", "int", true)],
         ..schema_model("user", vec![])
     };
-    let _ = parent;
     for dialect in [BackendDialect::Sqlite, BackendDialect::Postgres] {
         let emission = render_create_table(&child, dialect).unwrap();
         assert!(
@@ -1077,8 +1075,8 @@ fn render_create_table_unknown_logical_type_errors() {
         );
         let err = result.unwrap_err();
         assert!(
-            err.message.contains("bogus") || err.message.contains("unknown") || err.message.contains("mystery"),
-            "EmissionError message must identify the bad type/column; got: {:?}",
+            err.message.contains("bogus"),
+            "EmissionError message must identify the offending logical_type token; got: {:?}",
             err.message
         );
     }

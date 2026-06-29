@@ -5,10 +5,10 @@
 
 use crate::backend::EngineHandle;
 use crate::state::{MODEL_REGISTRY, SqlDialect, engine_for_connection};
-use ferro_ddl_lowering::{CanonicalType, Dialect, apply_canonical_type, canonical_from_parts};
+use ferro_ddl_lowering::{CanonicalType, Dialect, canonical_from_parts};
 use pyo3::prelude::*;
 use sea_query::{
-    Alias, ColumnDef, ForeignKeyAction, Index, PostgresQueryBuilder,
+    Alias, ForeignKeyAction, Index, PostgresQueryBuilder,
     SqliteQueryBuilder,
 };
 use std::collections::HashSet;
@@ -244,13 +244,8 @@ pub(crate) struct FkSpec {
 /// so CREATE TABLE and ALTER TABLE ADD COLUMN emit byte-identical column
 /// definitions (AGENTS.md § I-1).
 pub(crate) struct ColumnPlan {
-    /// CREATE-ready column definition: type, then PK/auto-increment, then
-    /// NOT NULL, then UNIQUE — applied in the exact order the CREATE TABLE
-    /// emitter has always used (spec order is part of the rendered SQL).
-    pub col_def: ColumnDef,
     pub canonical: CanonicalType,
     pub is_primary_key: bool,
-    pub autoincrement: bool,
     pub is_nullable: bool,
     pub is_unique: bool,
     /// Post-create SQL owned by this column, in emission order:
@@ -273,32 +268,12 @@ pub(crate) fn build_column_plan(
     let col_info = resolve_ref(schema, raw_col_info);
     let canonical = canonical_column_type(raw_col_info, col_info, backend);
 
-    let mut col_def = ColumnDef::new(Alias::new(col_name));
-    apply_canonical_type(&mut col_def, canonical);
-
     let is_primary_key =
         column_bool_metadata(raw_col_info, col_info, "primary_key").unwrap_or(false);
-    let autoincrement = if is_primary_key {
-        column_bool_metadata(raw_col_info, col_info, "autoincrement").unwrap_or(true)
-    } else {
-        column_bool_metadata(raw_col_info, col_info, "autoincrement").unwrap_or(false)
-    };
-    if is_primary_key {
-        col_def.primary_key();
-        if autoincrement {
-            col_def.auto_increment();
-        }
-    }
 
     let is_nullable = column_bool_metadata(raw_col_info, col_info, "ferro_nullable") != Some(false);
-    if !is_nullable {
-        col_def.not_null();
-    }
 
     let is_unique = column_bool_metadata(raw_col_info, col_info, "unique").unwrap_or(false);
-    if is_unique {
-        col_def.unique_key();
-    }
 
     let mut index_sqls = Vec::new();
     if column_bool_metadata(raw_col_info, col_info, "index").unwrap_or(false) {
@@ -355,10 +330,8 @@ pub(crate) fn build_column_plan(
         .cloned();
 
     ColumnPlan {
-        col_def,
         canonical,
         is_primary_key,
-        autoincrement,
         is_nullable,
         is_unique,
         index_sqls,
