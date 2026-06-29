@@ -509,10 +509,12 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
     await execute('INSERT INTO "migpg" ("total", "note") VALUES (41, NULL)')
     ferro.reset_engine()
 
-    # Assignment style: an `int | None` PK overriding the base `id` field combined
-    # with multiple Annotated FerroField columns trips a Pydantic 2.12 /
-    # metaclass edge ("non-annotated attribute `id`"). Assignment style is
-    # equivalent and avoids it.
+    # Assignment style avoids the metaclass edge in #155: a union-typed PK
+    # (`int | None`) overriding the base `id` field, written `= None`, is mis-seen
+    # by Pydantic 2.12 as "non-annotated" when the model ALSO declares a field as
+    # `Annotated[T, FerroField(default=...)]` (a default inside the Annotated, like
+    # `status` here). Either ingredient alone is fine; together they trip it.
+    # Moving defaults out of `Annotated` into the assignment sidesteps it.
     class MigPg(Model):
         id: int | None = ferro.Field(primary_key=True, default=None)
         total: int = ferro.Field(db_type="bigint")
