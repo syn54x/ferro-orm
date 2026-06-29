@@ -9,9 +9,25 @@ use ferro_ddl_lowering::{
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
-    Alias, ColumnDef, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table,
+    Alias, ColumnDef, ForeignKey, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table,
 };
 use std::collections::BTreeMap;
+
+/// A rendered `CREATE TABLE` plus its standalone post-create artifacts.
+///
+/// This is the single create-table emission shape used by the AddTable path.
+/// Foreign keys are folded INLINE into [`create_sql`](Self::create_sql) so the
+/// output is byte-identical to the runtime JSON path on both backends.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CreateTableEmission {
+    /// `CREATE TABLE` including inline anonymous FKs and inline single-column `UNIQUE`.
+    pub create_sql: String,
+    /// Standalone `CREATE [UNIQUE] INDEX` statements plus the Postgres `db_check`
+    /// `ALTER`. Never contains foreign keys (those are inline in `create_sql`).
+    pub post_create_sqls: Vec<String>,
+    /// Non-fatal warnings (e.g. the SQLite `db_check` elision).
+    pub warnings: Vec<String>,
+}
 
 fn lowering_dialect(dialect: BackendDialect) -> Dialect {
     match dialect {
@@ -50,7 +66,17 @@ fn find_column<'a>(
         })
 }
 
-fn render_create_table(model: &SchemaModel, dialect: BackendDialect) -> Result<String, EmissionError> {
+/// Render the full `CREATE TABLE` emission for one model, folding foreign keys
+/// INLINE so the output is byte-identical to the runtime JSON path on both
+/// backends. This is the single create-table emitter for the AddTable path.
+///
+/// # Errors
+/// Returns an [`EmissionError`] when a column's storage type cannot be resolved
+/// from its IR metadata.
+pub fn render_create_table(
+    model: &SchemaModel,
+    dialect: BackendDialect,
+) -> Result<CreateTableEmission, EmissionError> {
     let ld = lowering_dialect(dialect);
     let table_lower = model.table_name.as_str();
     let mut table_stmt = Table::create()
@@ -79,11 +105,29 @@ fn render_create_table(model: &SchemaModel, dialect: BackendDialect) -> Result<S
         table_stmt.col(&mut col_def);
     }
 
-    let sql = match dialect {
+    // Inline, anonymous foreign keys. The runtime defaults a missing `on_delete`
+    // to CASCADE (`fk_action_from_str(None) == Cascade`), preserved here.
+    for fk in &model.foreign_keys {
+        let action = fk_action_from_str(fk.on_delete.as_deref());
+        table_stmt.foreign_key(
+            ForeignKey::create()
+                .from(Alias::new(table_lower), Alias::new(&fk.column))
+                .to(Alias::new(&fk.to_table), Alias::new(&fk.to_column))
+                .on_delete(action),
+        );
+    }
+
+    let create_sql = match dialect {
         BackendDialect::Sqlite => table_stmt.build(SqliteQueryBuilder),
         BackendDialect::Postgres => table_stmt.build(PostgresQueryBuilder),
     };
-    Ok(sql)
+
+    let (post_create_sqls, warnings) = post_create_artifacts(model, dialect)?;
+    Ok(CreateTableEmission {
+        create_sql,
+        post_create_sqls,
+        warnings,
+    })
 }
 
 fn render_index_sql(
@@ -157,7 +201,7 @@ fn post_create_artifacts(
                     "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK ({expression})",
                     table = table_lower,
                     name = check.name,
-                    expression = check.expression,
+                    expression = render_check_expression(&check.expression),
                 ));
             }
             BackendDialect::Sqlite => {
@@ -172,32 +216,30 @@ fn post_create_artifacts(
     Ok((statements, warnings))
 }
 
-fn foreign_key_statements(
-    model: &SchemaModel,
-    dialect: BackendDialect,
-) -> Vec<String> {
-    let table_lower = model.table_name.as_str();
-    let mut statements = Vec::new();
-    for fk in &model.foreign_keys {
-        if dialect == BackendDialect::Postgres {
-            let on_delete = fk_action_from_str(fk.on_delete.as_deref());
-            statements.push(format!(
-                "ALTER TABLE {} ADD FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
-                quote_ident(table_lower),
-                quote_ident(&fk.column),
-                quote_ident(&fk.to_table),
-                quote_ident(&fk.to_column),
-                fk_action_sql(on_delete),
-            ));
-        }
+/// Render an IR `db_check` expression for emission, quoting the leading column
+/// identifier so it is byte-identical to the runtime JSON path.
+///
+/// The IR compiler emits the canonical form `<col> IN (<values>)` (unquoted
+/// column — see `ferro/ir/compiler.py::_checks_from_columns`). The runtime
+/// emits `"<col>" IN (<values>)`. We re-quote the column reference at emit time
+/// rather than diverge the IR contract (whose unquoted form is asserted by
+/// `test_schema_ir_compiler_emits_db_check_expression_for_closed_domain`).
+fn render_check_expression(expression: &str) -> String {
+    match expression.split_once(" IN (") {
+        Some((column, rest)) => format!("{} IN ({}", quote_ident(column), rest),
+        None => expression.to_string(),
     }
-    statements
 }
 
-fn order_add_table_models<'a>(
-    models: Vec<&'a SchemaModel>,
-) -> Vec<&'a SchemaModel> {
-    let mut remaining: Vec<&SchemaModel> = models;
+/// Order `AddTable` models so each table's FK targets are created before it.
+///
+/// A FK dependency on a table that is *not* part of this add set (already
+/// exists in the live DB) does not constrain ordering. Cycles fall through in
+/// arbitrary order — the inline FKs are anonymous, so a cyclic create still
+/// runs (SQLite is lenient; Postgres `CREATE TABLE` with a forward inline FK
+/// reference is the pre-existing behavior preserved here).
+pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a SchemaModel> {
+    let mut remaining: Vec<&SchemaModel> = models.to_vec();
     let mut ordered = Vec::new();
     let mut created = std::collections::HashSet::new();
 
@@ -239,26 +281,12 @@ fn emit_add_table_passes(
     dialect: BackendDialect,
     result: &mut EmissionResult,
 ) -> Result<(), EmissionError> {
-    let ordered = order_add_table_models(add_models);
+    let ordered = order_models_for_create(&add_models);
     for model in &ordered {
-        result.statements.push(render_create_table(model, dialect)?);
-        let (artifacts, warnings) = post_create_artifacts(model, dialect)?;
-        result.statements.extend(artifacts);
-        result.warnings.extend(warnings);
-    }
-    for model in &ordered {
-        if dialect == BackendDialect::Sqlite {
-            for fk in &model.foreign_keys {
-                result.warnings.push(format!(
-                    "Foreign key '{}.{}' -> '{}' is not emitted on SQLite (requires table rebuild).",
-                    model.table_name, fk.column, fk.to_table
-                ));
-            }
-        } else {
-            result
-                .statements
-                .extend(foreign_key_statements(model, dialect));
-        }
+        let emission = render_create_table(model, dialect)?;
+        result.statements.push(emission.create_sql);
+        result.statements.extend(emission.post_create_sqls);
+        result.warnings.extend(emission.warnings);
     }
     Ok(())
 }

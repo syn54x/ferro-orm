@@ -80,6 +80,151 @@ fn pk_col(name: &str, db_type: &str) -> SchemaColumn {
     }
 }
 
+/// Build a `SchemaColumn` mirroring the IR compiler's output for the golden
+/// fixture. `logical_type`/`format`/`db_type` must match what
+/// `compile_schema_ir_payload` actually produces (captured empirically).
+#[allow(clippy::too_many_arguments)]
+fn ir_col(
+    name: &str,
+    logical_type: &str,
+    format: Option<&str>,
+    nullable: bool,
+    unique: bool,
+    index: bool,
+) -> SchemaColumn {
+    SchemaColumn {
+        name: name.to_string(),
+        logical_type: logical_type.to_string(),
+        db_type: None,
+        db_type_explicit: None,
+        nullable,
+        primary_key: false,
+        autoincrement: false,
+        unique,
+        index,
+        default: None,
+        format: format.map(str::to_string),
+        enum_values: None,
+        enum_type_name: None,
+        postgres_native_enum: false,
+    }
+}
+
+/// The comprehensive create-path golden fixture: an `Organization` FK target
+/// and an `Account` table exercising every emitted artifact. Column order is
+/// alphabetical to mirror the IR compiler (which sorts properties by name).
+///
+/// Field values (logical_type, format, db_type, the index/unique/check names,
+/// FK metadata) were captured from `compile_schema_ir_payload` on the real
+/// Ferro models — see `.superpowers/sdd/capture_ground_truth.py`.
+fn create_path_golden_fixture() -> Vec<SchemaModel> {
+    // The IR emits Optional[int] PKs as nullable=true (the runtime drops NOT NULL
+    // for an autoincrement PK regardless); mirror that so the golden byte-matches.
+    let organization = schema_model(
+        "organization",
+        vec![
+            SchemaColumn {
+                primary_key: true,
+                autoincrement: true,
+                nullable: true,
+                ..ir_col("id", "integer", None, true, false, false)
+            },
+            col("name", "varchar", false),
+        ],
+    );
+
+    let role_col = SchemaColumn {
+        db_type: Some("text".to_string()),
+        db_type_explicit: Some(true),
+        enum_values: Some(vec![
+            serde_json::json!("admin"),
+            serde_json::json!("user"),
+        ]),
+        enum_type_name: Some("role".to_string()),
+        ..ir_col("role", "string", None, false, false, false)
+    };
+
+    let account = SchemaModel {
+        columns: vec![
+            ir_col("avatar", "binary", Some("binary"), false, false, false),
+            ir_col("balance", "decimal", Some("decimal"), false, false, false),
+            ir_col("birth_date", "date", Some("date"), false, false, false),
+            ir_col("created_at", "datetime", Some("date-time"), false, false, false),
+            ir_col("email", "string", None, false, false, true),
+            // PK id: nullable=true mirrors the IR (Optional[int] PK).
+            SchemaColumn {
+                primary_key: true,
+                autoincrement: true,
+                nullable: true,
+                ..ir_col("id", "integer", None, true, false, false)
+            },
+            ir_col("metadata_blob", "json", None, false, false, false),
+            ir_col("org_id", "integer", None, false, false, false),
+            ir_col("owner_id", "integer", None, false, false, false),
+            role_col,
+            ir_col("token", "uuid", Some("uuid"), false, false, false),
+            ir_col("username", "string", None, false, true, false),
+            ir_col("wake_time", "time", Some("time"), false, false, false),
+        ],
+        foreign_keys: vec![
+            SchemaForeignKey {
+                column: "org_id".to_string(),
+                to_table: "organization".to_string(),
+                to_column: "id".to_string(),
+                on_delete: Some("CASCADE".to_string()),
+                name: Some("fk_account_org_id_organization".to_string()),
+            },
+            SchemaForeignKey {
+                column: "owner_id".to_string(),
+                to_table: "organization".to_string(),
+                to_column: "id".to_string(),
+                on_delete: Some("RESTRICT".to_string()),
+                name: Some("fk_account_owner_id_organization".to_string()),
+            },
+        ],
+        indexes: vec![
+            SchemaIndex {
+                name: "idx_account_created_at_birth_date".to_string(),
+                columns: vec!["created_at".to_string(), "birth_date".to_string()],
+                unique: false,
+            },
+            SchemaIndex {
+                name: "idx_account_email".to_string(),
+                columns: vec!["email".to_string()],
+                unique: false,
+            },
+        ],
+        uniques: vec![
+            SchemaUnique {
+                name: "uq_account_username".to_string(),
+                columns: vec!["username".to_string()],
+            },
+            SchemaUnique {
+                name: "uq_account_username_email".to_string(),
+                columns: vec!["username".to_string(), "email".to_string()],
+            },
+        ],
+        checks: vec![SchemaCheck {
+            name: "ck_account_role".to_string(),
+            expression: "role IN ('admin', 'user')".to_string(),
+        }],
+        ..schema_model("account", vec![])
+    };
+
+    vec![organization, account]
+}
+
+// Ground truth captured from TODAY's runtime JSON path
+// (`ferro._core._render_create_table_sql_for_test`) — see
+// `.superpowers/sdd/capture_ground_truth.py`. The new IR-driven
+// `render_create_table` must match these byte-for-byte.
+const ORG_CREATE_SQLITE: &str =
+    "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" integer PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )";
+const ORG_CREATE_POSTGRES: &str =
+    "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" serial PRIMARY KEY, \"name\" varchar NOT NULL )";
+const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" real NOT NULL, \"birth_date\" date_text NOT NULL, \"created_at\" timestamp_with_timezone_text NOT NULL, \"email\" varchar NOT NULL, \"id\" integer PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" json_text NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid_text NOT NULL, \"username\" varchar NOT NULL UNIQUE, \"wake_time\" varchar NOT NULL, FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
+const ACCOUNT_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" bytea NOT NULL, \"balance\" decimal NOT NULL, \"birth_date\" date NOT NULL, \"created_at\" timestamp with time zone NOT NULL, \"email\" varchar NOT NULL, \"id\" serial PRIMARY KEY, \"metadata_blob\" json NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid NOT NULL, \"username\" varchar NOT NULL UNIQUE, \"wake_time\" varchar NOT NULL, FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
+
 fn assert_no_comment_placeholders(statements: &[String]) {
     for sql in statements {
         assert!(
@@ -638,20 +783,36 @@ fn emit_sql_multi_op_ordering() {
     };
     let result =
         emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap();
-    let create_positions: Vec<usize> = result
+    let create_positions: Vec<(usize, &String)> = result
         .statements
         .iter()
         .enumerate()
         .filter(|(_, s)| s.starts_with("CREATE TABLE"))
-        .map(|(i, _)| i)
         .collect();
     assert_eq!(create_positions.len(), 2);
-    let fk_pos = result
-        .statements
+
+    // Topo order: the FK target ("team") must be created before the dependent
+    // table ("user").
+    let team_pos = create_positions
         .iter()
-        .position(|s| s.contains("FOREIGN KEY"))
-        .expect("fk statement");
-    assert!(fk_pos > create_positions[1]);
+        .position(|(_, s)| s.contains("\"team\""))
+        .expect("team create");
+    let user_pos = create_positions
+        .iter()
+        .position(|(_, s)| s.contains("\"user\""))
+        .expect("user create");
+    assert!(team_pos < user_pos);
+
+    // The FK is now INLINE in the child's CREATE TABLE, not a separate statement.
+    let (_, user_create) = create_positions[user_pos];
+    assert!(
+        user_create.contains("FOREIGN KEY (\"team_id\") REFERENCES \"team\" (\"id\") ON DELETE CASCADE"),
+        "inline FK missing from user create: {user_create}"
+    );
+    assert!(
+        !result.statements.iter().any(|s| s.starts_with("ALTER TABLE") && s.contains("FOREIGN KEY")),
+        "FKs must be inline, not standalone ALTER statements"
+    );
 }
 
 #[test]
@@ -738,6 +899,115 @@ fn plan_from_ir_composite_all_new_columns_emits_add_index() {
         "composite index over all-new columns must appear in plan; got: {:?}",
         plan.operations
     );
+}
+
+// KTD-2/KTD-3 golden: `render_create_table` must be byte-identical to TODAY's
+// runtime JSON path (`build_create_table_sqls`) for the comprehensive fixture,
+// emitting FKs INLINE in the CREATE TABLE on BOTH backends.
+#[test]
+fn render_create_table_golden_sqlite() {
+    let models = create_path_golden_fixture();
+    let organization = &models[0];
+    let account = &models[1];
+
+    let org = render_create_table(organization, BackendDialect::Sqlite).unwrap();
+    assert_eq!(org.create_sql, ORG_CREATE_SQLITE);
+    assert!(org.post_create_sqls.is_empty());
+    assert!(org.warnings.is_empty());
+
+    let acct = render_create_table(account, BackendDialect::Sqlite).unwrap();
+    assert_eq!(acct.create_sql, ACCOUNT_CREATE_SQLITE);
+
+    // Post-create order is immaterial and not reconstructable (the IR sorts
+    // indexes/uniques by name, discarding declaration order) -> compare sorted.
+    let mut got = acct.post_create_sqls.clone();
+    got.sort();
+    let mut want = vec![
+        "CREATE INDEX IF NOT EXISTS \"idx_account_email\" ON \"account\" (\"email\")".to_string(),
+        "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_account_username_email\" ON \"account\" (\"username\", \"email\")".to_string(),
+        "CREATE INDEX IF NOT EXISTS \"idx_account_created_at_birth_date\" ON \"account\" (\"created_at\", \"birth_date\")".to_string(),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+
+    // SQLite elides the db_check CHECK and warns; no CHECK in any statement.
+    assert!(!acct.create_sql.contains("CHECK"));
+    assert!(!acct.post_create_sqls.iter().any(|s| s.contains("CHECK")));
+    assert!(
+        acct.warnings.iter().any(|w| w.contains("ck_account_role")),
+        "expected SQLite db_check elision warning, got: {:?}",
+        acct.warnings
+    );
+
+    // FKs are inline, not in post-create, and no SQLite FK-drop warning.
+    assert!(acct.create_sql.contains("FOREIGN KEY (\"org_id\")"));
+    assert!(!acct.post_create_sqls.iter().any(|s| s.contains("FOREIGN KEY")));
+    assert!(!acct.warnings.iter().any(|w| w.contains("Foreign key")));
+}
+
+#[test]
+fn render_create_table_golden_postgres() {
+    let models = create_path_golden_fixture();
+    let organization = &models[0];
+    let account = &models[1];
+
+    let org = render_create_table(organization, BackendDialect::Postgres).unwrap();
+    assert_eq!(org.create_sql, ORG_CREATE_POSTGRES);
+    assert!(org.post_create_sqls.is_empty());
+
+    let acct = render_create_table(account, BackendDialect::Postgres).unwrap();
+    assert_eq!(acct.create_sql, ACCOUNT_CREATE_POSTGRES);
+
+    let mut got = acct.post_create_sqls.clone();
+    got.sort();
+    let mut want = vec![
+        "CREATE INDEX IF NOT EXISTS \"idx_account_email\" ON \"account\" (\"email\")".to_string(),
+        "ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))".to_string(),
+        "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_account_username_email\" ON \"account\" (\"username\", \"email\")".to_string(),
+        "CREATE INDEX IF NOT EXISTS \"idx_account_created_at_birth_date\" ON \"account\" (\"created_at\", \"birth_date\")".to_string(),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+
+    // Postgres emits the db_check ALTER (quoted column, byte-matching runtime).
+    assert!(acct
+        .post_create_sqls
+        .iter()
+        .any(|s| s == "ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))"));
+    assert!(acct.warnings.is_empty(), "unexpected warnings: {:?}", acct.warnings);
+
+    // FKs inline, not in post-create.
+    assert!(acct.create_sql.contains("FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT"));
+    assert!(!acct.post_create_sqls.iter().any(|s| s.contains("FOREIGN KEY")));
+}
+
+// Verify the runtime's `CASCADE` default (`unwrap_or("CASCADE")`) is mirrored:
+// a missing `on_delete` must render `ON DELETE CASCADE`, inline, on both backends.
+#[test]
+fn render_create_table_fk_none_on_delete_defaults_cascade() {
+    let parent = schema_model("team", vec![pk_col("id", "int")]);
+    let child = SchemaModel {
+        foreign_keys: vec![SchemaForeignKey {
+            column: "team_id".to_string(),
+            to_table: "team".to_string(),
+            to_column: "id".to_string(),
+            on_delete: None,
+            name: None,
+        }],
+        columns: vec![col("team_id", "int", true)],
+        ..schema_model("user", vec![])
+    };
+    let _ = parent;
+    for dialect in [BackendDialect::Sqlite, BackendDialect::Postgres] {
+        let emission = render_create_table(&child, dialect).unwrap();
+        assert!(
+            emission.create_sql.contains(
+                "FOREIGN KEY (\"team_id\") REFERENCES \"team\" (\"id\") ON DELETE CASCADE"
+            ),
+            "None on_delete must default to CASCADE inline ({dialect:?}): {}",
+            emission.create_sql
+        );
+    }
 }
 
 // Regression: single-column index on a newly added column IS correctly skipped

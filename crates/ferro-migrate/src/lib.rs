@@ -9,7 +9,7 @@ use ferro_ddl_lowering::{schema_columns_storage_drift, Dialect};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use emit::emit_sql_with_ir;
+pub use emit::{emit_sql_with_ir, order_models_for_create, render_create_table, CreateTableEmission};
 
 /// SQL dialect tag for migration SQL emission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
