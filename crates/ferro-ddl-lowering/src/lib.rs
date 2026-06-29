@@ -270,10 +270,12 @@ pub fn canonical_from_parts(
     match (logical_type, format) {
         // DEPRECATED (legacy JSON-Schema vocabulary): the Python SchemaIR compiler
         // now emits domain `logical_type` tokens ("datetime"/"date"/"uuid") instead
-        // of "string"+format for these. Retained because the CREATE TABLE path still
-        // resolves columns via "string"+format. Remove once the create path consumes
-        // the Python SchemaIR logical_type vocabulary (create-path unification; #141 non-goal).
-        // Note: "time" does NOT appear here because the CREATE TABLE path has no
+        // of "string"+format for these. These arms are now reached ONLY by
+        // `plan_table_migration_legacy` (migrate.rs) via `build_column_plan` →
+        // `canonical_column_type` → `canonical_from_parts`. The JSON create-table
+        // emitter was removed in #153 (Phase 8.6). Removal of these arms is gated
+        // on the Phase 9 legacy-planner removal (#108).
+        // Note: "time" does NOT appear here because the legacy planner has no
         // ("string", "time") arm; it falls through to Varchar(None). See below.
         // Raw JSON Schema types with format — produced by schema_json_to_schema_ir.
         ("string", Some("date-time")) => Ok(CanonicalType::TimestampTz),

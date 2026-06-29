@@ -8,8 +8,8 @@ use crate::state::{MODEL_REGISTRY, SqlDialect, engine_for_connection};
 use ferro_ddl_lowering::{CanonicalType, Dialect, apply_canonical_type, canonical_from_parts};
 use pyo3::prelude::*;
 use sea_query::{
-    Alias, ColumnDef, ForeignKey, ForeignKeyAction, Index, PostgresQueryBuilder,
-    SqliteQueryBuilder, Table,
+    Alias, ColumnDef, ForeignKeyAction, Index, PostgresQueryBuilder,
+    SqliteQueryBuilder,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -132,7 +132,8 @@ pub(crate) fn order_schemas_for_creation(
 }
 
 
-/// Unique index name for `ferro_composite_uniques`; matches Python Alembic `_build_sa_table`.
+// retained for the Phase-9 legacy-parity fixture; production composite naming lives in ferro-ddl-lowering
+#[cfg(test)]
 fn composite_unique_index_name(table_lower: &str, col_names: &[&str]) -> String {
     let joined = col_names.join("_");
     let raw = format!("uq_{}_{}", table_lower, joined);
@@ -142,50 +143,8 @@ fn composite_unique_index_name(table_lower: &str, col_names: &[&str]) -> String 
     raw
 }
 
-fn append_composite_unique_index_sqls(
-    table_lower: &str,
-    schema: &serde_json::Value,
-    index_sqls: &mut Vec<String>,
-    backend: SqlDialect,
-) {
-    let Some(groups) = schema
-        .get("ferro_composite_uniques")
-        .and_then(|g| g.as_array())
-    else {
-        return;
-    };
-    for group in groups {
-        let cols: Vec<&str> = group
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
-            .unwrap_or_default();
-        if cols.len() < 2 {
-            crate::log_debug(format!(
-                "Skipping invalid ferro_composite_uniques group for table '{}': {}",
-                table_lower,
-                serde_json::to_string(group).unwrap_or_else(|_| "<json>".to_string())
-            ));
-            continue;
-        }
-        let idx_name = composite_unique_index_name(table_lower, &cols);
-        let mut stmt = Index::create()
-            .unique()
-            .name(&idx_name)
-            .table(Alias::new(table_lower))
-            .if_not_exists()
-            .to_owned();
-        for c in &cols {
-            stmt.col(Alias::new(*c));
-        }
-        let sql = match backend {
-            SqlDialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
-            SqlDialect::Postgres => stmt.to_string(PostgresQueryBuilder),
-        };
-        index_sqls.push(sql);
-    }
-}
-
-/// Non-unique index name for `ferro_composite_indexes`; matches Python Alembic `_build_sa_table`.
+// retained for the Phase-9 legacy-parity fixture; production composite naming lives in ferro-ddl-lowering
+#[cfg(test)]
 fn composite_index_name(table_lower: &str, col_names: &[&str]) -> String {
     let joined = col_names.join("_");
     let raw = format!("idx_{}_{}", table_lower, joined);
@@ -272,48 +231,6 @@ fn build_check_constraint_sql(
         col = col_name,
         values = values,
     ))
-}
-
-fn append_composite_index_sqls(
-    table_lower: &str,
-    schema: &serde_json::Value,
-    index_sqls: &mut Vec<String>,
-    backend: SqlDialect,
-) {
-    let Some(groups) = schema
-        .get("ferro_composite_indexes")
-        .and_then(|g| g.as_array())
-    else {
-        return;
-    };
-    for group in groups {
-        let cols: Vec<&str> = group
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
-            .unwrap_or_default();
-        if cols.len() < 2 {
-            crate::log_debug(format!(
-                "Skipping invalid ferro_composite_indexes group for table '{}': {}",
-                table_lower,
-                serde_json::to_string(group).unwrap_or_else(|_| "<json>".to_string())
-            ));
-            continue;
-        }
-        let idx_name = composite_index_name(table_lower, &cols);
-        let mut stmt = Index::create()
-            .name(&idx_name)
-            .table(Alias::new(table_lower))
-            .if_not_exists()
-            .to_owned();
-        for c in &cols {
-            stmt.col(Alias::new(*c));
-        }
-        let sql = match backend {
-            SqlDialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
-            SqlDialect::Postgres => stmt.to_string(PostgresQueryBuilder),
-        };
-        index_sqls.push(sql);
-    }
 }
 
 /// Foreign-key metadata for a column, resolved from the model schema.
@@ -448,69 +365,6 @@ pub(crate) fn build_column_plan(
         fk,
         literal_default,
     }
-}
-
-fn build_create_table_sqls(
-    name: &str,
-    schema: &serde_json::Value,
-    backend: SqlDialect,
-) -> (String, Vec<String>) {
-    let table_lower = name.to_lowercase();
-    let mut table_stmt = Table::create()
-        .table(Alias::new(&table_lower))
-        .if_not_exists()
-        .to_owned();
-
-    let mut index_sqls = Vec::new();
-
-    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-        for (col_name, raw_col_info) in properties {
-            let mut plan = build_column_plan(&table_lower, col_name, raw_col_info, schema, backend);
-
-            table_stmt.col(&mut plan.col_def);
-            index_sqls.append(&mut plan.index_sqls);
-
-            if let Some(fk) = &plan.fk {
-                let mut fk_stmt = ForeignKey::create();
-                fk_stmt
-                    .from(Alias::new(&table_lower), Alias::new(col_name))
-                    .to(Alias::new(&fk.to_table), Alias::new("id")) // CX Choice: Assume target PK is 'id' for now
-                    .on_delete(fk.on_delete);
-
-                table_stmt.foreign_key(&mut fk_stmt);
-            }
-        }
-    }
-
-    append_composite_unique_index_sqls(&table_lower, schema, &mut index_sqls, backend);
-    append_composite_index_sqls(&table_lower, schema, &mut index_sqls, backend);
-
-    let table_sql = match backend {
-        SqlDialect::Sqlite => table_stmt.build(SqliteQueryBuilder),
-        SqlDialect::Postgres => table_stmt.build(PostgresQueryBuilder),
-    };
-    (table_sql, index_sqls)
-}
-
-fn shadow_compare_create_table_sqls(
-    name: &str,
-    schema: &serde_json::Value,
-    backend: SqlDialect,
-) -> Result<(), String> {
-    let legacy = build_create_table_sqls(name, schema, backend);
-    let schema_roundtrip: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(schema).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    let shadow = build_create_table_sqls(name, &schema_roundtrip, backend);
-    if legacy == shadow {
-        return Ok(());
-    }
-    Err(format!(
-        "shadow create-table mismatch for '{}': legacy={} shadow={}",
-        name,
-        serde_json::to_string(&legacy).unwrap_or_else(|_| "<legacy>".to_string()),
-        serde_json::to_string(&shadow).unwrap_or_else(|_| "<shadow>".to_string()),
-    ))
 }
 
 /// Internal utility to create all registered tables in the database.
@@ -711,266 +565,6 @@ mod tests {
     }
 
     #[test]
-    fn test_append_composite_index_sqls_emits_non_unique() {
-        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
-            let schema = json!({"ferro_composite_indexes": [["a", "b"]]});
-            let mut sqls = Vec::new();
-            append_composite_index_sqls("t", &schema, &mut sqls, backend);
-            assert_eq!(sqls.len(), 1);
-            let sql_upper = sqls[0].to_uppercase();
-            assert!(sql_upper.contains("CREATE INDEX"));
-            assert!(!sql_upper.contains("CREATE UNIQUE INDEX"));
-        }
-    }
-
-    #[test]
-    fn test_append_composite_index_sqls_preserves_column_order() {
-        let schema = json!({"ferro_composite_indexes": [["y", "x"]]});
-        let mut sqls = Vec::new();
-        append_composite_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
-        let sql = &sqls[0];
-        let pos_y = sql.find("\"y\"").unwrap();
-        let pos_x = sql.find("\"x\"").unwrap();
-        assert!(pos_y < pos_x);
-    }
-
-    #[test]
-    fn test_append_composite_index_sqls_no_groups_is_noop() {
-        let schema = json!({"properties": {}});
-        let mut sqls = Vec::new();
-        append_composite_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
-        assert!(sqls.is_empty());
-    }
-
-    #[test]
-    fn test_composite_index_and_unique_can_share_table() {
-        let schema = json!({
-            "ferro_composite_uniques": [["u1", "u2"]],
-            "ferro_composite_indexes": [["i1", "i2"]]
-        });
-        let mut sqls = Vec::new();
-        append_composite_unique_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
-        append_composite_index_sqls("t", &schema, &mut sqls, SqlDialect::Sqlite);
-        assert_eq!(sqls.len(), 2);
-        let combined = sqls.join("\n").to_uppercase();
-        assert!(combined.contains("CREATE UNIQUE INDEX"));
-        assert!(combined.contains("CREATE INDEX"));
-        assert!(combined.contains("\"IDX_T_I1_I2\""));
-    }
-
-    // ------------------------------------------------------------------
-    // U4: db_type / db_check dispatch
-    // ------------------------------------------------------------------
-
-    fn col_sql(token: &str, json_type: &str, backend: SqlDialect) -> String {
-        let schema = json!({
-            "properties": {
-                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
-                "x": {"type": json_type, "db_type": token, "ferro_nullable": false},
-            }
-        });
-        let (sql, _) = build_create_table_sqls("t", &schema, backend);
-        sql.to_uppercase()
-    }
-
-    #[test]
-    fn test_db_type_text_emits_text_column() {
-        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
-            let sql = col_sql("text", "string", backend);
-            assert!(
-                sql.contains("TEXT"),
-                "missing TEXT for {:?}: {}",
-                backend,
-                sql
-            );
-        }
-    }
-
-    #[test]
-    fn test_db_type_bigint_postgres_emits_bigint() {
-        let sql = col_sql("bigint", "integer", SqlDialect::Postgres);
-        assert!(sql.contains("BIGINT"), "missing BIGINT: {}", sql);
-    }
-
-    #[test]
-    fn test_db_type_bigint_sqlite_emits_bigint_keyword() {
-        // SQLite still gets the BIGINT keyword; type affinity normalizes at
-        // runtime. Parity with the Alembic bridge (SA emits the same keyword).
-        let sql = col_sql("bigint", "integer", SqlDialect::Sqlite);
-        assert!(sql.contains("BIGINT"), "missing BIGINT keyword: {}", sql);
-    }
-
-    #[test]
-    fn test_db_type_smallint_postgres_emits_smallint() {
-        let sql = col_sql("smallint", "integer", SqlDialect::Postgres);
-        assert!(sql.contains("SMALLINT"), "missing SMALLINT: {}", sql);
-    }
-
-    #[test]
-    fn test_db_type_smallint_sqlite_emits_smallint_keyword() {
-        let sql = col_sql("smallint", "integer", SqlDialect::Sqlite);
-        assert!(
-            sql.contains("SMALLINT"),
-            "missing SMALLINT keyword: {}",
-            sql
-        );
-    }
-
-    #[test]
-    fn test_db_type_timestamptz_emits_with_time_zone() {
-        let sql = col_sql("timestamptz", "string", SqlDialect::Postgres);
-        assert!(
-            sql.contains("TIMESTAMP WITH TIME ZONE") || sql.contains("TIMESTAMPTZ"),
-            "missing tz timestamp: {}",
-            sql
-        );
-    }
-
-    #[test]
-    fn test_db_type_timestamp_emits_plain_timestamp() {
-        let sql = col_sql("timestamp", "string", SqlDialect::Postgres);
-        assert!(sql.contains("TIMESTAMP"), "missing TIMESTAMP: {}", sql);
-        assert!(
-            !sql.contains("WITH TIME ZONE") && !sql.contains("TIMESTAMPTZ"),
-            "leaked tz: {}",
-            sql
-        );
-    }
-
-    #[test]
-    fn test_db_type_varchar_n_emits_varchar_with_length() {
-        let sql = col_sql("varchar(255)", "string", SqlDialect::Postgres);
-        // sea-query Postgres builder renders VARCHAR(N) for string_len(N).
-        assert!(
-            sql.contains("VARCHAR(255)") || sql.contains("CHARACTER VARYING(255)"),
-            "missing varchar(255): {}",
-            sql
-        );
-    }
-
-    #[test]
-    fn test_db_type_overrides_json_format_branch() {
-        // string + format=date-time would normally emit timestamptz; with
-        // db_type='text' it must render TEXT instead.
-        let schema = json!({
-            "properties": {
-                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
-                "x": {"type": "string", "format": "date-time", "db_type": "text"},
-            }
-        });
-        let (sql, _) = build_create_table_sqls("t", &schema, SqlDialect::Postgres);
-        let upper = sql.to_uppercase();
-        assert!(upper.contains("TEXT"), "missing TEXT override: {}", sql);
-        assert!(
-            !upper.contains("TIMESTAMP"),
-            "default cascade leaked through: {}",
-            sql
-        );
-    }
-
-    #[test]
-    fn test_db_check_emits_named_constraint() {
-        let schema = json!({
-            "properties": {
-                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
-                "format": {
-                    "type": "string",
-                    "db_type": "text",
-                    "db_check": true,
-                    "enum": ["pdf", "json"]
-                }
-            }
-        });
-        let (_table_sql, post_sqls) = build_create_table_sqls("doc", &schema, SqlDialect::Postgres);
-        let joined = post_sqls.join("\n");
-        assert!(
-            joined.contains("ck_doc_format"),
-            "missing constraint name: {}",
-            joined
-        );
-        assert!(
-            joined.to_uppercase().contains("CHECK"),
-            "missing CHECK: {}",
-            joined
-        );
-        assert!(
-            joined.contains("'pdf'") && joined.contains("'json'"),
-            "missing values: {}",
-            joined
-        );
-    }
-
-    #[test]
-    fn test_db_check_with_int_values_unquoted() {
-        let schema = json!({
-            "properties": {
-                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
-                "priority": {
-                    "type": "integer",
-                    "db_type": "smallint",
-                    "db_check": true,
-                    "enum": [1, 2]
-                }
-            }
-        });
-        let (_table_sql, post_sqls) =
-            build_create_table_sqls("task", &schema, SqlDialect::Postgres);
-        let joined = post_sqls.join("\n");
-        assert!(
-            joined.contains("(1, 2)"),
-            "ints should be unquoted: {}",
-            joined
-        );
-        assert!(
-            !joined.contains("'1'"),
-            "ints should not be quoted: {}",
-            joined
-        );
-    }
-
-    #[test]
-    fn test_db_check_off_emits_no_constraint() {
-        let schema = json!({
-            "properties": {
-                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
-                "format": {"type": "string", "db_type": "text", "enum": ["pdf"]}
-            }
-        });
-        let (_table_sql, post_sqls) = build_create_table_sqls("doc", &schema, SqlDialect::Postgres);
-        assert!(
-            post_sqls.iter().all(|s| !s.contains("CHECK")),
-            "unexpected CHECK: {:?}",
-            post_sqls
-        );
-    }
-
-    #[test]
-    fn test_db_check_skipped_on_sqlite() {
-        // SQLite cannot ALTER TABLE ADD CONSTRAINT; db_check is Postgres-only
-        // in Phase 1 and the emitter elides it on SQLite rather than emitting
-        // SQL that would fail at execution time.
-        let schema = json!({
-            "properties": {
-                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
-                "format": {
-                    "type": "string",
-                    "db_type": "text",
-                    "db_check": true,
-                    "enum": ["pdf", "json"]
-                }
-            }
-        });
-        let (_table_sql, post_sqls) = build_create_table_sqls("doc", &schema, SqlDialect::Sqlite);
-        assert!(
-            post_sqls
-                .iter()
-                .all(|s| !s.to_uppercase().contains("CONSTRAINT")),
-            "SQLite must not emit ADD CONSTRAINT: {:?}",
-            post_sqls
-        );
-    }
-
-    #[test]
     fn test_db_check_constraint_name_short() {
         assert_eq!(db_check_constraint_name("doc", "format"), "ck_doc_format");
     }
@@ -1008,48 +602,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_foreign_key_column_with_index_flag_emits_create_index() {
-        let schema = json!({
-            "properties": {
-                "id": {
-                    "type": "integer",
-                    "primary_key": true,
-                    "autoincrement": true
-                },
-                "org_id": {
-                    "type": "integer",
-                    "ferro_nullable": false,
-                    "index": true,
-                    "foreign_key": {
-                        "to_table": "org",
-                        "on_delete": "CASCADE",
-                        "unique": false
-                    }
-                }
-            }
-        });
-
-        for backend in [SqlDialect::Sqlite, SqlDialect::Postgres] {
-            let (_table_sql, index_sqls) = build_create_table_sqls("project", &schema, backend);
-            let joined = index_sqls.join("\n").to_uppercase();
-            assert!(
-                joined.contains("CREATE INDEX"),
-                "expected CREATE INDEX for FK column with index=true, got {:?} ({:?})",
-                index_sqls,
-                backend
-            );
-            assert!(
-                joined.contains("IDX_PROJECT_ORG_ID"),
-                "expected idx_project_org_id index name, got {:?} ({:?})",
-                index_sqls,
-                backend
-            );
-            assert!(
-                !joined.contains("CREATE UNIQUE INDEX"),
-                "FK column with index=true (not unique=true) must not emit a unique index; got {:?}",
-                index_sqls
-            );
-        }
-    }
 }

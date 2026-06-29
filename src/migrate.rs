@@ -1194,7 +1194,9 @@ mod tests {
 
     /// Test-only helper: convert a Ferro-enriched JSON schema into a single-model
     /// `IrEnvelope<SchemaIrPayload>`. Production code now consumes the Python-compiled
-    /// modelset pushed via `_set_schema_ir_modelset`.
+    /// modelset pushed via `_set_schema_ir_modelset`. Retained as the
+    /// legacy-vs-IR parity fixture (`plan_with_ir_legacy_parity`) until Phase 9 (#108)
+    /// removes `plan_table_migration_legacy` alongside the legacy enriched-JSON planner.
     fn schema_json_to_schema_ir(
         table_lower: &str,
         schema: &serde_json::Value,
