@@ -273,3 +273,52 @@ def test_no_db_type_keeps_default_emitter_behavior():
     assert "INTEGER" in _extract_col_type(alembic_sql, "value")
     assert "INTEGER" in _extract_col_type(rust_sql, "value")
     assert "BIGINT" not in _extract_col_type(rust_sql, "value")
+
+
+# ---------------------------------------------------------------------------
+# Task 4 / issue #153: fail loud on unknown logical_type (regression pin).
+#
+# The Python SchemaIR compiler's `_logical_type` returns `"unknown"` only for
+# unresolvable types. Rust's `canonical_from_schema_column` returns Err for any
+# unrecognized logical_type, which is mapped to PyRuntimeError at the FFI
+# boundary. This test pins that the live surface raises rather than silently
+# falling back to varchar (the old #140 behaviour that was reversed).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dialect", ["postgres", "sqlite"])
+def test_unknown_logical_type_raises_at_ffi_boundary(dialect: str):
+    """An unknown logical_type with no db_type must raise, not silently degrade."""
+    payload = {
+        "dialect_agnostic": True,
+        "models": [
+            {
+                "model_name": "Widget",
+                "table_name": "widget",
+                "columns": [
+                    {
+                        "name": "mystery",
+                        "logical_type": "bogus",
+                        "nullable": True,
+                        "primary_key": False,
+                        "autoincrement": False,
+                        "unique": False,
+                        "index": False,
+                        "default": None,
+                        "format": None,
+                        "enum_values": None,
+                        "enum_type_name": None,
+                        "db_type": None,
+                        "db_type_explicit": None,
+                        "postgres_native_enum": False,
+                    }
+                ],
+                "foreign_keys": [],
+                "indexes": [],
+                "uniques": [],
+                "checks": [],
+            }
+        ],
+    }
+    with pytest.raises(RuntimeError):
+        _render_create_table_sql_for_test("Widget", json.dumps(payload), dialect)

@@ -1037,3 +1037,49 @@ fn plan_from_ir_single_column_new_index_is_skipped() {
         plan.operations
     );
 }
+
+// Pin the fail-loud behavior for an unknown logical_type with no db_type.
+//
+// The Python SchemaIR compiler's `_logical_type` returns `"unknown"` only for
+// types that cannot be resolved (unrecognized / None JSON Schema type). Rust's
+// `canonical_from_schema_column` → `canonical_from_parts` hits the final `_`
+// arm and returns `Err(...)`. This test pins that `render_create_table` surfaces
+// the error as `Err(EmissionError)` so a future regression cannot silently
+// reintroduce a `unwrap_or(Varchar)` fallback.
+//
+// This is an "already-green pin" — the behavior holds because
+// `canonical_from_parts` has no catch-all fallback; this test makes the
+// contract explicit and prevents regression.
+#[test]
+fn render_create_table_unknown_logical_type_errors() {
+    let col = SchemaColumn {
+        name: "mystery".to_string(),
+        logical_type: "bogus".to_string(),
+        db_type: None,
+        db_type_explicit: None,
+        nullable: true,
+        primary_key: false,
+        autoincrement: false,
+        unique: false,
+        index: false,
+        default: None,
+        format: None,
+        enum_values: None,
+        enum_type_name: None,
+        postgres_native_enum: false,
+    };
+    let model = schema_model("widget", vec![col]);
+    for dialect in [BackendDialect::Sqlite, BackendDialect::Postgres] {
+        let result = render_create_table(&model, dialect);
+        assert!(
+            result.is_err(),
+            "render_create_table must fail loud for unknown logical_type (dialect: {dialect:?})"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("bogus") || err.message.contains("unknown") || err.message.contains("mystery"),
+            "EmissionError message must identify the bad type/column; got: {:?}",
+            err.message
+        );
+    }
+}
