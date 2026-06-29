@@ -67,7 +67,7 @@ fn schema_ir_column<'a>(
         .and_then(|model| model.columns.iter().find(|col| col.name == column))
 }
 
-fn backend_dialect(backend: SqlDialect) -> BackendDialect {
+pub(crate) fn backend_dialect(backend: SqlDialect) -> BackendDialect {
     match backend {
         SqlDialect::Sqlite => BackendDialect::Sqlite,
         SqlDialect::Postgres => BackendDialect::Postgres,
@@ -91,6 +91,18 @@ pub fn _set_schema_ir_modelset(json: String) -> PyResult<()> {
     *crate::state::SCHEMA_IR_MODELSET.write().map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
     })? = Some(envelope);
+    Ok(())
+}
+
+/// Test-only helper: clear the pushed SchemaIR modelset so the fail-loud path
+/// in `internal_create_tables` / `internal_migrate` can be exercised from
+/// Python (a missing modelset must raise, never silently create nothing).
+#[pyfunction]
+#[pyo3(name = "_clear_schema_ir_modelset_for_test")]
+pub fn _clear_schema_ir_modelset_for_test() -> PyResult<()> {
+    *crate::state::SCHEMA_IR_MODELSET.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
+    })? = None;
     Ok(())
 }
 
@@ -1182,7 +1194,9 @@ mod tests {
 
     /// Test-only helper: convert a Ferro-enriched JSON schema into a single-model
     /// `IrEnvelope<SchemaIrPayload>`. Production code now consumes the Python-compiled
-    /// modelset pushed via `_set_schema_ir_modelset`.
+    /// modelset pushed via `_set_schema_ir_modelset`. Retained as the
+    /// legacy-vs-IR parity fixture (`plan_with_ir_legacy_parity`) until Phase 9 (#108)
+    /// removes `plan_table_migration_legacy` alongside the legacy enriched-JSON planner.
     fn schema_json_to_schema_ir(
         table_lower: &str,
         schema: &serde_json::Value,
@@ -1214,7 +1228,11 @@ mod tests {
                     db_type_explicit: db_type_explicit.map(|_| true),
                     nullable: col_plan.is_nullable,
                     primary_key: col_plan.is_primary_key,
-                    autoincrement: col_plan.autoincrement,
+                    autoincrement: if col_plan.is_primary_key {
+                        migrate_column_bool(raw_col, resolved, "autoincrement").unwrap_or(true)
+                    } else {
+                        migrate_column_bool(raw_col, resolved, "autoincrement").unwrap_or(false)
+                    },
                     unique: col_plan.is_unique,
                     index: migrate_column_bool(raw_col, resolved, "index").unwrap_or(false),
                     default: resolved.get("default").cloned(),

@@ -34,8 +34,12 @@ def _render_create_table_sql_for_test(
 ) -> tuple[str, list[str]]:
     """Test-only: render CREATE TABLE SQL + post-create fragments without executing.
 
-    Used by the cross-emitter parity test (U5). ``dialect`` is ``"postgres"`` or
-    ``"sqlite"``.
+    ``schema_json`` is a SchemaIR *payload* JSON string of the shape
+    ``{"dialect_agnostic": bool, "models": [<SchemaModel>...]}`` produced by
+    ``ferro.ir.compiler.compile_schema_ir_payload``; the model matching ``name``
+    (or the first) is rendered through the shared ``render_create_table`` emitter
+    the runtime uses. Used by the cross-emitter parity test (U5). ``dialect`` is
+    ``"postgres"`` or ``"sqlite"``.
     """
     ...
 
@@ -219,3 +223,4 @@ def set_default_connection(name: str) -> None: ...
 def clear_registry() -> None: ...
 def version() -> str: ...
 def _set_schema_ir_modelset(json: str) -> None: ...
+def _clear_schema_ir_modelset_for_test() -> None: ...

@@ -935,3 +935,63 @@ async def test_uuid_pk_derived_drift_is_stable(db_url, db_backend, clean_registr
         f"UUID PK must not trigger drift warning on second migrate_updates: "
         f"{[str(w.message) for w in drift_warnings_second]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (#153): create_tables() consumes the SchemaIR modelset and re-pushes
+# it at the Python boundary, so a model defined AFTER connect() is created.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_tables_pushes_modelset_for_model_defined_after_connect(
+    db_url, clean_registry
+):
+    """create_tables() must re-push the current registry SchemaIR so a model
+    declared *after* connect() (when the connect-time snapshot did not include
+    it) still gets created. Proves the standalone create path is not relying on
+    a stale connect-time modelset."""
+
+    # Connect first, with NO models registered yet — the connect-time modelset
+    # snapshot is empty.
+    await ferro.connect(db_url, auto_migrate=False)
+
+    # Now define a model AFTER connect().
+    class LateModel(Model):
+        id: int = Field(json_schema_extra={"primary_key": True})
+        label: str
+
+    # create_tables() must compile + push the up-to-date registry IR before the
+    # Rust create runs, otherwise this table never gets created.
+    await ferro.create_tables()
+
+    # If the table exists, an INSERT + SELECT round-trips cleanly.
+    row = await LateModel.create(id=1, label="hello")
+    assert row.id == 1
+    fetched = await LateModel.get(1)
+    assert fetched.label == "hello"
+
+
+@pytest.mark.asyncio
+async def test_create_tables_fails_loud_when_modelset_cleared(db_url, clean_registry):
+    """With the SchemaIR modelset deliberately cleared and the re-push bypassed,
+    the Rust create path must raise loudly rather than silently creating
+    nothing. Guards the fail-loud contract on the internal create entrypoint."""
+    # The raw, un-wrapped Rust pyfunction does NOT re-push the modelset.
+    from ferro._core import (
+        _clear_schema_ir_modelset_for_test,
+        create_tables as _raw_create_tables,
+    )
+
+    class GuardModel(Model):
+        id: int = Field(json_schema_extra={"primary_key": True})
+        name: str
+
+    await ferro.connect(db_url, auto_migrate=False)
+
+    # Clear the pushed modelset, then call the raw internal create (which does
+    # NOT re-push) to prove the Rust side fails loud on a missing modelset.
+    _clear_schema_ir_modelset_for_test()
+
+    with pytest.raises(RuntimeError, match="modelset not set"):
+        await _raw_create_tables()

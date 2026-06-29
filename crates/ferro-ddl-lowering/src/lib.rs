@@ -270,10 +270,12 @@ pub fn canonical_from_parts(
     match (logical_type, format) {
         // DEPRECATED (legacy JSON-Schema vocabulary): the Python SchemaIR compiler
         // now emits domain `logical_type` tokens ("datetime"/"date"/"uuid") instead
-        // of "string"+format for these. Retained because the CREATE TABLE path still
-        // resolves columns via "string"+format. Remove once the create path consumes
-        // the Python SchemaIR logical_type vocabulary (create-path unification; #141 non-goal).
-        // Note: "time" does NOT appear here because the CREATE TABLE path has no
+        // of "string"+format for these. These arms are now reached ONLY by
+        // `plan_table_migration_legacy` (migrate.rs) via `build_column_plan` →
+        // `canonical_column_type` → `canonical_from_parts`. The JSON create-table
+        // emitter was removed in #153 (Phase 8.6). Removal of these arms is gated
+        // on the Phase 9 legacy-planner removal (#108).
+        // Note: "time" does NOT appear here because the legacy planner has no
         // ("string", "time") arm; it falls through to Varchar(None). See below.
         // Raw JSON Schema types with format — produced by schema_json_to_schema_ir.
         ("string", Some("date-time")) => Ok(CanonicalType::TimestampTz),
@@ -288,6 +290,8 @@ pub fn canonical_from_parts(
         // compiler (compiler.py `_logical_type`). These are accepted alongside
         // the raw JSON Schema types so compiled IR envelopes can be consumed.
         // "datetime", "date", "uuid" have symmetric create-path counterparts.
+        // Domain token for bytes/binary fields (compiler.py _logical_type emits "binary").
+        ("binary", _) => Ok(CanonicalType::Blob),
         ("datetime", _) => Ok(CanonicalType::TimestampTz),
         ("date", _) => Ok(CanonicalType::Date),
         // "time" is the ASYMMETRIC case: schema.rs canonical_column_type has no
@@ -318,7 +322,7 @@ pub fn canonical_from_schema_column(
     dialect: Dialect,
 ) -> Result<CanonicalType, String> {
     canonical_from_parts(&col.logical_type, col.format.as_deref(), col.db_type.as_deref().unwrap_or(""), dialect)
-        .map_err(|_| format!("unknown db_type '{}' on column '{}'", col.db_type.as_deref().unwrap_or(""), col.name))
+        .map_err(|reason| format!("unresolvable type on column '{}': {reason}", col.name))
 }
 
 /// Single-column index name (`idx_<table>_<col>`).
@@ -543,6 +547,18 @@ mod tests {
         assert_eq!(
             information_schema_to_db_type_token("boolean", None, Dialect::Postgres),
             "boolean"
+        );
+    }
+
+    #[test]
+    fn binary_logical_type_resolves_to_blob() {
+        assert_eq!(
+            canonical_from_parts("binary", None, "", Dialect::Sqlite),
+            Ok(CanonicalType::Blob)
+        );
+        assert_eq!(
+            canonical_from_parts("binary", None, "", Dialect::Postgres),
+            Ok(CanonicalType::Blob)
         );
     }
 
