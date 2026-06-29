@@ -577,7 +577,7 @@ Status: `Not started`
 Issue references:
 
 - `Epic:` [#145](https://github.com/syn54x/ferro-orm/issues/145)
-- `Sub-issues:` [#146](https://github.com/syn54x/ferro-orm/issues/146) _(more to be filed by the duplication sweep)_
+- `Sub-issues:` [#146](https://github.com/syn54x/ferro-orm/issues/146) _(more to be filed by the duplication sweep)_, [#153](https://github.com/syn54x/ferro-orm/issues/153) _(create-path unification; delivered/in-PR 2026-06-29)_
 
 > Inserted as `8.6` (post-8.5 cleanup backlog). Does **not** gate Phase 9 — it
 > executes after the 8.5 consolidation lands. Source: cleanups surfaced during
@@ -622,6 +622,7 @@ Issue references:
 
 **Deliverables**
 - [ ] Legacy compatibility code paths removed (operator-style predicates, ambient session routing, private Alembic JSON helpers, **deprecated enriched-JSON migration planner** in `src/migrate.rs`).
+  - Includes removal of the deprecated `canonical_from_parts` `("string", Some(...))` arms and the `#[cfg(test)]` `schema_json_to_schema_ir` parity fixture — both fall with `plan_table_migration_legacy` and remain required by it until this phase. Re-homed here from #153 (create-path unification, Phase 8.6) which confirmed they are not needed by the create path.
 - [ ] Deprecated-compat test inventory removed (all `deprecated_operator_path` tests deleted or rewritten).
 - [ ] Final migration-guide cutover notes for `v0.14.0`.
 - [ ] Release checklist and changelog entries for shim removal.
@@ -795,6 +796,7 @@ Append updates as concise entries.
 - `2026-06-26` - Phase 8.5 issues filed and linked: epic [#139](https://github.com/syn54x/ferro-orm/issues/139) with sub-issues [#140](https://github.com/syn54x/ferro-orm/issues/140), [#141](https://github.com/syn54x/ferro-orm/issues/141), [#142](https://github.com/syn54x/ferro-orm/issues/142), [#143](https://github.com/syn54x/ferro-orm/issues/143), [#144](https://github.com/syn54x/ferro-orm/issues/144). Audit captured in PR [#138](https://github.com/syn54x/ferro-orm/pull/138).
 - `2026-06-26` - Inserted **Phase 8.6** (post-8.5 cross-crate / single-source cleanup backlog; does not gate Phase 9). Filed epic [#145](https://github.com/syn54x/ferro-orm/issues/145) with seed sub-issue [#146](https://github.com/syn54x/ferro-orm/issues/146) (unify the three dialect enums, surfaced during #140). Remaining 8.6 items to be filed by a read-only Rust duplication sweep planned after #140 lands.
 - `2026-06-26` - #140 and #143 merged to the Phase 8.5 integration branch. **#144 scope expanded** from "populate the IR or document the scope cut" to full auto-migrate index/unique reconciliation (ADD always, DROP under `migrate_destructive`, both backends, new live index introspection) — a user expects auto-migrate to add their indexes; now the largest 8.5 sub-issue. Roadmap deliverable + issue #144 updated to match.
+- `2026-06-29` - **Phase 8.6 #153 create-path unification** landed on `feat/ir-p8.6-153-create-path-ir` (PRs into integration `feat/ir-p8.6-cleanups`). The runtime CREATE path now consumes the Python SchemaIR via the shared `ferro-migrate` `render_create_table` emitter (inline FKs, byte-identical DDL), added a `binary` `logical_type` for `bytes`, fails loud on unknown column types, and removed the cutover-orphaned JSON create emitter (`build_create_table_sqls` + cluster). **Scope correction:** removal of the deprecated `canonical_from_parts` `("string", Some(...))` arms + the `#[cfg(test)]` `schema_json_to_schema_ir` is **re-homed to Phase 9 / #108** — they remain required by `plan_table_migration_legacy` (retained for shadow comparison until Phase 9), not by the create path. Migration impact `none`.
 
 ## Immediate next actions
 
