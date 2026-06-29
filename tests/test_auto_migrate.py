@@ -853,6 +853,16 @@ async def test_uuid_pk_derived_second_pass_is_noop(db_url, db_backend, clean_reg
         f"{[str(w.message) for w in ferro_warnings]}"
     )
 
+    # Additionally verify that no DDL ran — the live `id` column must still carry
+    # the UUID storage type from the first pass (not a replacement type).
+    if db_backend == "sqlite":
+        columns = _sqlite_columns(db_url, "uuidpkitem")
+        id_type = columns["id"][2].lower()
+        assert "char" in id_type or "uuid" in id_type, (
+            f"Expected uuid/char storage type for `id` after second pass; got '{id_type}' "
+            "(a different type would mean DDL ran on the second pass)"
+        )
+
 
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix

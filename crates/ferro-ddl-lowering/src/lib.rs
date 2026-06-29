@@ -273,6 +273,8 @@ pub fn canonical_from_parts(
         // of "string"+format for these. Retained because the CREATE TABLE path still
         // resolves columns via "string"+format. Remove once the create path consumes
         // the Python SchemaIR logical_type vocabulary (create-path unification; #141 non-goal).
+        // Note: "time" does NOT appear here because the CREATE TABLE path has no
+        // ("string", "time") arm; it falls through to Varchar(None). See below.
         // Raw JSON Schema types with format — produced by schema_json_to_schema_ir.
         ("string", Some("date-time")) => Ok(CanonicalType::TimestampTz),
         ("string", Some("date")) => Ok(CanonicalType::Date),
@@ -285,9 +287,15 @@ pub fn canonical_from_parts(
         // Domain-specific logical_type tokens emitted by the Python SchemaIR
         // compiler (compiler.py `_logical_type`). These are accepted alongside
         // the raw JSON Schema types so compiled IR envelopes can be consumed.
+        // "datetime", "date", "uuid" have symmetric create-path counterparts.
         ("datetime", _) => Ok(CanonicalType::TimestampTz),
         ("date", _) => Ok(CanonicalType::Date),
-        ("time", _) => Ok(CanonicalType::Time),
+        // "time" is the ASYMMETRIC case: schema.rs canonical_column_type has no
+        // ("string", "time") arm, so datetime.time fields are created as varchar
+        // on both SQLite and Postgres. Resolve to Varchar(None) here so the
+        // consume side agrees with the live column token ("varchar") and no
+        // spurious AlterColumnType / "use Alembic" warning fires. (#141 review.)
+        ("time", _) => Ok(CanonicalType::Varchar(None)),
         ("uuid", _) => Ok(CanonicalType::Uuid),
         ("json", _) => Ok(CanonicalType::Json),
         ("decimal", _) => Ok(CanonicalType::Decimal),
@@ -589,6 +597,37 @@ mod tests {
         // Model derived (post-#141 wire IR): db_type None, format "uuid" → Uuid.
         let model = col_with_db_type("id", "string", Some("uuid"), None);
         assert!(!schema_columns_storage_drift(&live, &model, Dialect::Sqlite));
+    }
+
+    /// Regression guard for the `"time"` phantom-drift false alarm (#141 review).
+    ///
+    /// The CREATE TABLE path (schema.rs `canonical_column_type`) has no
+    /// `("string", "time")` arm: it falls through to `json_type_to_canonical("string")`
+    /// → `Varchar(None)` → live column token `"varchar"`. The consume side must
+    /// resolve `logical_type = "time"` to the same canonical so no spurious
+    /// AlterColumnType fires on every startup for a `datetime.time` field.
+    #[test]
+    fn time_derived_does_not_drift_against_varchar_live_on_sqlite() {
+        // Live column: created as varchar (what the CREATE path emits for time).
+        let live = col_with_db_type("start_time", "string", None, Some("varchar"));
+        // Model column: Python SchemaIR compiler emits logical_type="time", db_type=None.
+        let model = col_with_db_type("start_time", "time", None, None);
+        assert!(
+            !schema_columns_storage_drift(&live, &model, Dialect::Sqlite),
+            "time logical_type must resolve to Varchar(None) to match the live varchar column"
+        );
+    }
+
+    #[test]
+    fn time_derived_does_not_drift_against_varchar_live_on_postgres() {
+        // Same parity check on Postgres: CREATE path also falls to Varchar(None)
+        // for a time field (no ("string", "time") arm in schema.rs).
+        let live = col_with_db_type("start_time", "string", None, Some("varchar"));
+        let model = col_with_db_type("start_time", "time", None, None);
+        assert!(
+            !schema_columns_storage_drift(&live, &model, Dialect::Postgres),
+            "time logical_type must resolve to Varchar(None) on Postgres as well"
+        );
     }
 
     #[test]
