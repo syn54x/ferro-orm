@@ -288,6 +288,8 @@ pub fn canonical_from_parts(
         // compiler (compiler.py `_logical_type`). These are accepted alongside
         // the raw JSON Schema types so compiled IR envelopes can be consumed.
         // "datetime", "date", "uuid" have symmetric create-path counterparts.
+        // Domain token for bytes/binary fields (compiler.py _logical_type emits "binary").
+        ("binary", _) => Ok(CanonicalType::Blob),
         ("datetime", _) => Ok(CanonicalType::TimestampTz),
         ("date", _) => Ok(CanonicalType::Date),
         // "time" is the ASYMMETRIC case: schema.rs canonical_column_type has no
@@ -543,6 +545,18 @@ mod tests {
         assert_eq!(
             information_schema_to_db_type_token("boolean", None, Dialect::Postgres),
             "boolean"
+        );
+    }
+
+    #[test]
+    fn binary_logical_type_resolves_to_blob() {
+        assert_eq!(
+            canonical_from_parts("binary", None, "", Dialect::Sqlite),
+            Ok(CanonicalType::Blob)
+        );
+        assert_eq!(
+            canonical_from_parts("binary", None, "", Dialect::Postgres),
+            Ok(CanonicalType::Blob)
         );
     }
 

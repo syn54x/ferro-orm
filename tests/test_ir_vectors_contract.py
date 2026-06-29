@@ -332,6 +332,20 @@ def test_compiler_omits_db_type_for_non_explicit_columns(clean_model_registry: N
     assert cols["code"]["db_type_explicit"] is True
 
 
+def test_compiler_bytes_field_emits_binary_logical_type(clean_model_registry: None) -> None:
+    from ferro import Model, Field, clear_registry
+    from ferro.schema_metadata import build_model_schema
+    from ferro.ir.compiler import compile_schema_ir_payload
+
+    clear_registry()
+    M = type("Blob", (Model,), {
+        "__annotations__": {"id": int | None, "contents": bytes},
+        "id": Field(default=None, primary_key=True),
+    })
+    cols = {c["name"]: c for c in compile_schema_ir_payload("Blob", build_model_schema(M))["models"][0]["columns"]}
+    assert cols["contents"]["logical_type"] == "binary", cols["contents"]
+
+
 def test_schema_ir_compiler_includes_join_table_models(clean_model_registry: None) -> None:
     from ferro.ir import compile_registry_schema_ir
     from ferro.relations import resolve_relationships

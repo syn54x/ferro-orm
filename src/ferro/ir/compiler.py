@@ -93,6 +93,8 @@ def _logical_type(col_info: dict[str, Any]) -> str:
             return "time"
         if field_format == "uuid":
             return "uuid"
+        if field_format == "binary":
+            return "binary"
         return "string"
     if field_type in {"object", "array"}:
         return "json"
