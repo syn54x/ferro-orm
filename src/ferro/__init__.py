@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic import Field as PydanticField
 
 from ._core import (
-    clear_registry,
+    clear_registry as _core_clear_registry,
     create_tables as _core_create_tables,
     evict_instance,
     migrate as _core_migrate,
@@ -43,6 +43,30 @@ if not _logger.handlers:
     _logger.setLevel(logging.INFO)
     # Prevent propagation to root logger to avoid duplicate messages
     _logger.propagate = False
+
+
+def clear_registry() -> None:
+    """Reset the compiled/registered schema state.
+
+    Delegates to the Rust core (which clears the Rust model registry and the
+    pushed SchemaIR modelset) and additionally clears the Python **join-table
+    registry**. That registry must be reset here because
+    ``connect``/``create_tables``/``migrate`` compile the *full* registry via
+    ``compile_registry_schema_ir()``: a join table left behind by a prior run
+    would be re-created with foreign keys to tables that no longer exist —
+    tolerated by SQLite but rejected by Postgres (``relation ... does not
+    exist``). (#153)
+
+    The Python model registry (``_MODEL_REGISTRY_PY``) is intentionally **not**
+    cleared here: clearing the Rust registry while keeping the declared Python
+    models is what allows cold re-hydration after ``reset_engine`` (see
+    ``tests/test_enum_cold_hydration.py``). Callers that want a full Python-side
+    reset clear ``_MODEL_REGISTRY_PY`` / ``_PENDING_RELATIONS`` themselves.
+    """
+    _core_clear_registry()
+    from .state import _JOIN_TABLE_REGISTRY
+
+    _JOIN_TABLE_REGISTRY.clear()
 
 
 class PoolConfig(BaseModel):

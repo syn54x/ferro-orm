@@ -149,12 +149,19 @@ def _column_ir(
     """Compile one schema property into a SchemaIR ``columns[]`` entry."""
     db_type_value = col_info.get("db_type")
     db_type_explicit = isinstance(db_type_value, str) and bool(db_type_value)
+    is_pk = bool(col_info.get("primary_key", False))
     column_ir = {
         "name": col_name,
         "logical_type": _logical_type(col_info),
         "nullable": _is_nullable(col_name, col_info, required_fields),
-        "primary_key": bool(col_info.get("primary_key", False)),
-        "autoincrement": bool(col_info.get("autoincrement", False)),
+        "primary_key": is_pk,
+        # A primary key auto-increments by default unless the field explicitly
+        # disables it (e.g. a uuid PK sets autoincrement=False). Mirrors the
+        # historical create-path default (build_column_plan used unwrap_or(true)
+        # for PK columns); without it, a PK declared without an explicit
+        # autoincrement (e.g. json_schema_extra={"primary_key": True}) renders as a
+        # plain INTEGER on Postgres with no SERIAL and fails inserts. (#153)
+        "autoincrement": bool(col_info.get("autoincrement", is_pk)),
         "unique": bool(col_info.get("unique", False)),
         "index": bool(col_info.get("index", False)),
         "default": col_info.get("default"),

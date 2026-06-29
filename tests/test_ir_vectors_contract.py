@@ -364,3 +364,62 @@ def test_schema_ir_compiler_includes_join_table_models(clean_model_registry: Non
     compiled = compile_registry_schema_ir()
     table_names = {model["table_name"] for model in compiled["payload"]["models"]}
     assert "tag_posts" in table_names
+
+
+def test_primary_key_autoincrements_by_default(clean_model_registry: None) -> None:
+    """A PK declared without an explicit autoincrement defaults to
+    autoincrement=True, matching the historical create path (so Postgres gets a
+    SERIAL/identity column rather than a plain INTEGER that fails NOT NULL on
+    insert). uuid PKs set autoincrement=False explicitly and are covered by the
+    uuid tests. (#153)
+    """
+    from ferro.ir.compiler import compile_schema_ir_payload
+    from ferro.schema_metadata import build_model_schema
+
+    class IntPk(Model):
+        id: int = Field(json_schema_extra={"primary_key": True})
+        name: str
+
+    cols = {
+        c["name"]: c
+        for c in compile_schema_ir_payload("IntPk", build_model_schema(IntPk))["models"][0]["columns"]
+    }
+    assert cols["id"]["primary_key"] is True
+    assert cols["id"]["autoincrement"] is True, cols["id"]
+
+
+def test_clear_registry_clears_join_table_registry(clean_model_registry: None) -> None:
+    """clear_registry() must clear the join-table registry, not only models.
+
+    connect/create_tables/migrate compile the full registry via
+    compile_registry_schema_ir(); a join table left behind by a prior run would
+    be re-created with foreign keys to tables that no longer exist — tolerated by
+    SQLite, rejected by Postgres (``relation ... does not exist``). (#153)
+    """
+    from ferro import state as ferro_state
+    from ferro.ir import compile_registry_schema_ir
+    from ferro.relations import resolve_relationships
+
+    class Tag(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        posts: Relation[list["Post"]] = ManyToMany(related_name="tags")
+
+    class Post(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str
+        tags: Relation[list["Tag"]] = BackRef()
+
+    resolve_relationships()
+    assert ferro_state._JOIN_TABLE_REGISTRY, "precondition: a join table is registered"
+
+    # Simulate a lean test cleanup that clears the declared models but (as the
+    # failing fixtures did) NOT the join-table registry directly. clear_registry
+    # must reset the join registry so a later full-registry compile can't
+    # resurrect a stale join table whose FK targets no longer exist.
+    clear_registry()
+    ferro_state._MODEL_REGISTRY_PY.clear()
+
+    assert ferro_state._JOIN_TABLE_REGISTRY == {}, "clear_registry must clear join tables"
+    table_names = {m["table_name"] for m in compile_registry_schema_ir()["payload"]["models"]}
+    assert "tag_posts" not in table_names, f"stale join table resurrected: {table_names}"
