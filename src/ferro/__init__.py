@@ -16,12 +16,13 @@ from ._core import (
     clear_registry,
     create_tables,
     evict_instance,
-    migrate,
+    migrate as _core_migrate,
     reset_engine,
     set_default_connection,
     version,
 )
 from ._core import (
+    _set_schema_ir_modelset,
     connect as _core_connect,
 )
 from .base import DbType, DbTypeToken, FerroField, FerroNullable, ForeignKey, varchar
@@ -112,9 +113,12 @@ async def connect(
     For schema changes beyond these (renames, primary-key changes, complex
     transforms), use the Alembic bridge — see ``docs/guide/migrations.md``.
     """
+    import json as _json
+    from .ir.compiler import compile_registry_schema_ir
     from .relations import resolve_relationships
 
     resolve_relationships()
+    _set_schema_ir_modelset(_json.dumps(compile_registry_schema_ir()))
 
     pool_config = pool or PoolConfig()
     await _core_connect(
@@ -128,6 +132,27 @@ async def connect(
         migrate_updates=migrate_updates,
         migrate_destructive=migrate_destructive,
     )
+
+
+async def migrate(using=None, updates=True, destructive=False):
+    """
+    Manually run the auto-migrate pass against a connected engine.
+
+    Compiles and pushes the current registry SchemaIR to the Rust runtime,
+    then delegates to the Rust migrate entrypoint.
+
+    Args:
+        using: Named connection to migrate, or None for the default.
+        updates: If True (default), add missing columns and reconcile type/nullability drift.
+        destructive: If True, also drop live columns absent from the model. Implies ``updates``.
+    """
+    import json as _json
+    from .ir.compiler import compile_registry_schema_ir
+    from .relations import resolve_relationships
+
+    resolve_relationships()
+    _set_schema_ir_modelset(_json.dumps(compile_registry_schema_ir()))
+    return await _core_migrate(using=using, updates=updates, destructive=destructive)
 
 
 __all__ = [

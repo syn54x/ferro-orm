@@ -16,7 +16,7 @@ mod schema;
 mod schema_bind;
 mod state;
 
-use crate::state::MODEL_REGISTRY;
+use crate::state::{MODEL_REGISTRY, SCHEMA_IR_MODELSET};
 use pyo3::prelude::*;
 
 /// Logs a debug message through Python's logging system.
@@ -68,18 +68,21 @@ fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Clears the global model registry.
+/// Clears the global model registry and resets the SchemaIR modelset.
 ///
 /// Primarily used for cleaning up state between tests.
 ///
 /// # Errors
-/// Returns a `PyErr` if the registry lock cannot be acquired.
+/// Returns a `PyErr` if either registry lock cannot be acquired.
 #[pyfunction]
 fn clear_registry() -> PyResult<()> {
     let mut registry = MODEL_REGISTRY
         .write()
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?;
     registry.clear();
+    *SCHEMA_IR_MODELSET
+        .write()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset"))? = None;
     Ok(())
 }
 
@@ -126,6 +129,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(schema::create_tables, m)?)?;
     m.add_function(wrap_pyfunction!(migrate::migrate, m)?)?;
+    m.add_function(wrap_pyfunction!(migrate::_set_schema_ir_modelset, m)?)?;
     m.add_function(wrap_pyfunction!(
         schema::_render_create_table_sql_for_test,
         m

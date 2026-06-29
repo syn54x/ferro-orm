@@ -5,6 +5,7 @@
 
 use crate::backend::{BackendKind, EngineConnection, EngineHandle};
 use dashmap::DashMap;
+use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use once_cell::sync::Lazy;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
@@ -18,6 +19,13 @@ pub type SqlDialect = BackendKind;
 /// Global registry mapping model names to their Pydantic-generated JSON schemas.
 pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, serde_json::Value>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Python-compiled SchemaIR modelset pushed by the `connect`/`migrate` wrappers.
+///
+/// Populated before `internal_migrate` runs so the runtime diff can consume the
+/// canonical Python domain IR instead of re-deriving it on the Rust side.
+pub static SCHEMA_IR_MODELSET: Lazy<RwLock<Option<IrEnvelope<SchemaIrPayload>>>> =
+    Lazy::new(|| RwLock::new(None));
 
 /// The global runtime engine, initialized via `connect()`.
 pub static ENGINE: Lazy<RwLock<Option<Arc<EngineHandle>>>> = Lazy::new(|| RwLock::new(None));

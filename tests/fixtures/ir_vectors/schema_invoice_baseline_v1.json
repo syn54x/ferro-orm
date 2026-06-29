@@ -15,7 +15,6 @@
             {
               "name": "id",
               "logical_type": "integer",
-              "db_type": "bigint",
               "nullable": false,
               "primary_key": true,
               "autoincrement": true,
@@ -27,7 +26,6 @@
             {
               "name": "number",
               "logical_type": "string",
-              "db_type": "varchar(64)",
               "nullable": false,
               "primary_key": false,
               "autoincrement": false,
@@ -39,7 +37,6 @@
             {
               "name": "customer_id",
               "logical_type": "integer",
-              "db_type": "bigint",
               "nullable": false,
               "primary_key": false,
               "autoincrement": false,
@@ -51,7 +48,6 @@
             {
               "name": "created_at",
               "logical_type": "datetime",
-              "db_type": "timestamptz",
               "nullable": false,
               "primary_key": false,
               "autoincrement": false,
@@ -73,19 +69,25 @@
           "indexes": [
             {
               "name": "idx_invoice_created_at",
-              "columns": ["created_at"],
+              "columns": [
+                "created_at"
+              ],
               "unique": false
             },
             {
               "name": "idx_invoice_customer_id",
-              "columns": ["customer_id"],
+              "columns": [
+                "customer_id"
+              ],
               "unique": false
             }
           ],
           "uniques": [
             {
               "name": "uq_invoice_number",
-              "columns": ["number"]
+              "columns": [
+                "number"
+              ]
             }
           ],
           "checks": [
