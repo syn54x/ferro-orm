@@ -592,7 +592,7 @@ Issue references:
 - [x] Unify the runtime CREATE TABLE path onto the Python SchemaIR (single
       declared-schema producer + single create-table emitter)
       ([#153](https://github.com/syn54x/ferro-orm/issues/153); merged via #157).
-- [ ] Unify the three dialect enums (`SqlDialect`/`BackendKind`,
+- [x] Unify the three dialect enums (`SqlDialect`/`BackendKind`,
       `ferro-ddl-lowering::Dialect`, `ferro-migrate::BackendDialect`) into one
       shared `Dialect` in a leaf crate; delete the per-seam translation helpers
       ([#146](https://github.com/syn54x/ferro-orm/issues/146)).
@@ -804,6 +804,7 @@ Append updates as concise entries.
 - `2026-06-26` - #140 and #143 merged to the Phase 8.5 integration branch. **#144 scope expanded** from "populate the IR or document the scope cut" to full auto-migrate index/unique reconciliation (ADD always, DROP under `migrate_destructive`, both backends, new live index introspection) — a user expects auto-migrate to add their indexes; now the largest 8.5 sub-issue. Roadmap deliverable + issue #144 updated to match.
 - `2026-06-29` - **Phase 8.6 #153 create-path unification** landed on `feat/ir-p8.6-153-create-path-ir` (PRs into integration `feat/ir-p8.6-cleanups`). The runtime CREATE path now consumes the Python SchemaIR via the shared `ferro-migrate` `render_create_table` emitter (inline FKs, byte-identical DDL), added a `binary` `logical_type` for `bytes`, fails loud on unknown column types, and removed the cutover-orphaned JSON create emitter (`build_create_table_sqls` + cluster). **Scope correction:** removal of the deprecated `canonical_from_parts` `("string", Some(...))` arms + the `#[cfg(test)]` `schema_json_to_schema_ir` is **re-homed to Phase 9 / #108** — they remain required by `plan_table_migration_legacy` (retained for shadow comparison until Phase 9), not by the create path. Migration impact `none`.
 - `2026-06-29` - **Phase 8.6 #153 merged to integration** `feat/ir-p8.6-cleanups` (PR #157, CI green incl. the Postgres matrix, which caught two real create-path bugs — PK autoincrement default + stale join-table registry — fixed before merge). #153 closed. Phase 8.6 status → `In progress`. Filed [#158](https://github.com/syn54x/ferro-orm/issues/158) (single check-renderer for `db_check`; drop the positional `render_check_expression` re-quoting #153 introduced) as a sub-issue under #145 — kept in 8.6 rather than deferred to Phase 9. Remaining 8.6 work: #146 (dialect enums), #154, #155, #158.
+- `2026-06-29` - **Phase 8.6 #146 dialect-enum unification** landed on `feat/ir-p8.6-146-dialect-enum` (PR targets integration `feat/ir-p8.6-cleanups`). One canonical `ferro_ddl_lowering::Dialect` replaces three parallel enums (`SqlDialect`/`BackendKind`, `ferro-ddl-lowering::Dialect`, `ferro-migrate::BackendDialect`); the three translator helpers (`sql_dialect_to_lowering`, `backend_dialect`, `lowering_dialect`) deleted; `from_url` relocated to free function `dialect_from_url`. SQLite matrix green; grep-gate clean; Postgres CI-deferred (no local Postgres in dev environment). Migration impact `none` — `Dialect`/`dialect_from_url` are internal Rust symbols, not part of the Python API. #146 closes on PR merge into `feat/ir-p8.6-cleanups`.
 
 ## Immediate next actions
 
