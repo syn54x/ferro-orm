@@ -12,10 +12,6 @@ use std::collections::{BTreeMap, BTreeSet};
 pub use emit::{emit_sql_with_ir, order_models_for_create, render_create_table, CreateTableEmission};
 pub use ferro_ddl_lowering::Dialect;
 
-// TRANSITIONAL (removed in #146 Task 5): keeps the main crate compiling while it is
-// migrated onto `Dialect`. The end state has no `BackendDialect`.
-pub type BackendDialect = Dialect;
-
 /// Executable SQL plus non-fatal warnings from [`emit_sql_with_ir`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EmissionResult {
