@@ -207,6 +207,8 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
         checks: vec![SchemaCheck {
             name: "ck_account_role".to_string(),
             expression: "role IN ('admin', 'user')".to_string(),
+            column: "role".to_string(),
+            values: vec!["'admin'".to_string(), "'user'".to_string()],
         }],
         ..schema_model("account", vec![])
     };
@@ -1080,4 +1082,47 @@ fn render_create_table_unknown_logical_type_errors() {
             err.message
         );
     }
+}
+
+#[test]
+fn render_check_body_quotes_column_and_joins_values() {
+    let check = SchemaCheck {
+        name: "ck_account_role".to_string(),
+        expression: String::new(),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string(), "'user'".to_string()],
+    };
+    assert_eq!(
+        ferro_ddl_lowering::render_check_body(&check),
+        "\"role\" IN ('admin', 'user')"
+    );
+}
+
+#[test]
+fn render_db_check_postgres_emits_quoted_alter_no_warning() {
+    let check = SchemaCheck {
+        name: "ck_account_role".to_string(),
+        expression: String::new(),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string(), "'user'".to_string()],
+    };
+    let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Postgres);
+    assert_eq!(
+        e.statement.as_deref(),
+        Some("ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))")
+    );
+    assert!(e.warning.is_none());
+}
+
+#[test]
+fn render_db_check_sqlite_elides_with_warning() {
+    let check = SchemaCheck {
+        name: "ck_account_role".to_string(),
+        expression: String::new(),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string(), "'user'".to_string()],
+    };
+    let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Sqlite);
+    assert!(e.statement.is_none());
+    assert!(e.warning.as_deref().unwrap().contains("ck_account_role"));
 }
