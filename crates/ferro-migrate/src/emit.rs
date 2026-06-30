@@ -1,11 +1,10 @@
 //! Executable SQL emission from IR-backed migration plans.
 
-use crate::{BackendDialect, EmissionError, EmissionResult, MigrationOp, MigrationPlan};
+use crate::{Dialect, EmissionError, EmissionResult, MigrationOp, MigrationPlan};
 use ferro_ddl_lowering::{
     self, apply_canonical_type, canonical_from_schema_column, db_check_constraint_name,
     fk_action_from_str, fk_action_sql, literal_default_value, pg_alter_type_target, quote_ident,
     single_index_name, single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
-    Dialect,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
@@ -27,13 +26,6 @@ pub struct CreateTableEmission {
     pub post_create_sqls: Vec<String>,
     /// Non-fatal warnings (e.g. the SQLite `db_check` elision).
     pub warnings: Vec<String>,
-}
-
-fn lowering_dialect(dialect: BackendDialect) -> Dialect {
-    match dialect {
-        BackendDialect::Sqlite => Dialect::Sqlite,
-        BackendDialect::Postgres => Dialect::Postgres,
-    }
 }
 
 fn index_models<'a>(models: &'a [SchemaModel]) -> BTreeMap<String, &'a SchemaModel> {
@@ -75,9 +67,9 @@ fn find_column<'a>(
 /// from its IR metadata.
 pub fn render_create_table(
     model: &SchemaModel,
-    dialect: BackendDialect,
+    dialect: Dialect,
 ) -> Result<CreateTableEmission, EmissionError> {
-    let ld = lowering_dialect(dialect);
+    let ld = dialect;
     let table_lower = model.table_name.as_str();
     let mut table_stmt = Table::create()
         .table(Alias::new(table_lower))
@@ -118,8 +110,8 @@ pub fn render_create_table(
     }
 
     let create_sql = match dialect {
-        BackendDialect::Sqlite => table_stmt.build(SqliteQueryBuilder),
-        BackendDialect::Postgres => table_stmt.build(PostgresQueryBuilder),
+        Dialect::Sqlite => table_stmt.build(SqliteQueryBuilder),
+        Dialect::Postgres => table_stmt.build(PostgresQueryBuilder),
     };
 
     let (post_create_sqls, warnings) = post_create_artifacts(model, dialect)?;
@@ -135,7 +127,7 @@ fn render_index_sql(
     name: &str,
     columns: &[String],
     unique: bool,
-    dialect: BackendDialect,
+    dialect: Dialect,
 ) -> String {
     let mut stmt = Index::create()
         .name(name)
@@ -149,8 +141,8 @@ fn render_index_sql(
         stmt.col(Alias::new(col));
     }
     match dialect {
-        BackendDialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
-        BackendDialect::Postgres => stmt.to_string(PostgresQueryBuilder),
+        Dialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
+        Dialect::Postgres => stmt.to_string(PostgresQueryBuilder),
     }
 }
 
@@ -184,7 +176,7 @@ pub(crate) fn standalone_indexes(model: &SchemaModel) -> Vec<(String, Vec<String
 
 fn post_create_artifacts(
     model: &SchemaModel,
-    dialect: BackendDialect,
+    dialect: Dialect,
 ) -> Result<(Vec<String>, Vec<String>), EmissionError> {
     let table_lower = model.table_name.as_str();
     let mut statements = Vec::new();
@@ -196,7 +188,7 @@ fn post_create_artifacts(
 
     for check in &model.checks {
         match dialect {
-            BackendDialect::Postgres => {
+            Dialect::Postgres => {
                 statements.push(format!(
                     "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK ({expression})",
                     table = table_lower,
@@ -204,7 +196,7 @@ fn post_create_artifacts(
                     expression = render_check_expression(&check.expression)?,
                 ));
             }
-            BackendDialect::Sqlite => {
+            Dialect::Sqlite => {
                 warnings.push(format!(
                     "Check constraint '{}' on table '{}' is not emitted on SQLite (requires table rebuild).",
                     check.name, table_lower
@@ -286,7 +278,7 @@ pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a Schema
 
 fn emit_add_table_passes(
     add_models: Vec<&SchemaModel>,
-    dialect: BackendDialect,
+    dialect: Dialect,
     result: &mut EmissionResult,
 ) -> Result<(), EmissionError> {
     let ordered = order_models_for_create(&add_models);
@@ -303,10 +295,10 @@ fn emit_add_column(
     table: &str,
     column: &str,
     model: &SchemaModel,
-    dialect: BackendDialect,
+    dialect: Dialect,
 ) -> Result<EmissionResult, EmissionError> {
     let col = find_column(model, column)?;
-    let ld = lowering_dialect(dialect);
+    let ld = dialect;
     let canonical = canonical_from_schema_column(col, ld).map_err(|message| EmissionError {
         message,
     })?;
@@ -339,7 +331,7 @@ fn emit_add_column(
         }
     };
 
-    let inline_unique = col.unique && dialect == BackendDialect::Postgres;
+    let inline_unique = col.unique && dialect == Dialect::Postgres;
     let mut col_def = ColumnDef::new(Alias::new(column));
     apply_canonical_type(&mut col_def, canonical);
     if !col.nullable {
@@ -359,11 +351,11 @@ fn emit_add_column(
 
     let mut result = EmissionResult::default();
     result.statements.push(match dialect {
-        BackendDialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
-        BackendDialect::Postgres => stmt.to_string(PostgresQueryBuilder),
+        Dialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
+        Dialect::Postgres => stmt.to_string(PostgresQueryBuilder),
     });
 
-    if backfill_default.is_some() && dialect == BackendDialect::Postgres {
+    if backfill_default.is_some() && dialect == Dialect::Postgres {
         result.statements.push(format!(
             "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
             quote_ident(table),
@@ -371,7 +363,7 @@ fn emit_add_column(
         ));
     }
 
-    if col.unique && dialect == BackendDialect::Sqlite {
+    if col.unique && dialect == Dialect::Sqlite {
         let index_name = single_unique_index_name(table, column);
         let index_stmt = Index::create()
             .unique()
@@ -402,7 +394,7 @@ fn emit_add_column(
 
     for check in &model.checks {
         if check.name == db_check_constraint_name(table, column) {
-            if dialect == BackendDialect::Postgres {
+            if dialect == Dialect::Postgres {
                 result.statements.push(format!(
                     "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK ({expression})",
                     name = check.name,
@@ -413,7 +405,7 @@ fn emit_add_column(
     }
 
     if let Some(fk) = model.foreign_keys.iter().find(|fk| fk.column == column) {
-        if dialect == BackendDialect::Postgres {
+        if dialect == Dialect::Postgres {
             let on_delete = fk_action_from_str(fk.on_delete.as_deref());
             result.statements.push(format!(
                 "ALTER TABLE {} ADD FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
@@ -442,13 +434,13 @@ fn emit_alter_column_type(
     column: &str,
     old_col: &SchemaColumn,
     new_col: &SchemaColumn,
-    dialect: BackendDialect,
+    dialect: Dialect,
 ) -> Result<EmissionResult, EmissionError> {
     let mut result = EmissionResult::default();
-    let ld = lowering_dialect(dialect);
+    let ld = dialect;
 
     match dialect {
-        BackendDialect::Postgres => {
+        Dialect::Postgres => {
             if old_col.postgres_native_enum {
                 return Ok(result);
             }
@@ -479,7 +471,7 @@ fn emit_alter_column_type(
                 target = target,
             ));
         }
-        BackendDialect::Sqlite => {
+        Dialect::Sqlite => {
             if old_col.primary_key || new_col.primary_key {
                 return Ok(result);
             }
@@ -512,7 +504,7 @@ fn emit_alter_column_nullability(
     column: &str,
     old_col: &SchemaColumn,
     new_col: &SchemaColumn,
-    dialect: BackendDialect,
+    dialect: Dialect,
 ) -> EmissionResult {
     let mut result = EmissionResult::default();
     if old_col.primary_key || new_col.primary_key {
@@ -520,7 +512,7 @@ fn emit_alter_column_nullability(
     }
 
     match dialect {
-        BackendDialect::Postgres => {
+        Dialect::Postgres => {
             if !new_col.nullable && old_col.nullable {
                 result.statements.push(format!(
                     "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
@@ -535,7 +527,7 @@ fn emit_alter_column_nullability(
                 ));
             }
         }
-        BackendDialect::Sqlite => {
+        Dialect::Sqlite => {
             if old_col.nullable != new_col.nullable {
                 result.warnings.push(format!(
                     "Column '{}.{}' is {} in the database but the model expects {}. SQLite \
@@ -565,7 +557,7 @@ pub fn emit_sql_with_ir(
     plan: &MigrationPlan,
     old_ir: &IrEnvelope<SchemaIrPayload>,
     new_ir: &IrEnvelope<SchemaIrPayload>,
-    dialect: BackendDialect,
+    dialect: Dialect,
 ) -> Result<EmissionResult, EmissionError> {
     let old_models = index_models(&old_ir.payload.models);
     let new_models = index_models(&new_ir.payload.models);
