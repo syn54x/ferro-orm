@@ -5,6 +5,7 @@ Tests the extracted helper methods in isolation to ensure correct behavior
 before and after refactoring.
 """
 
+import sys
 from typing import Annotated, ForwardRef, Union
 from unittest.mock import Mock
 
@@ -199,6 +200,25 @@ class TestResolveDeferredAnnotations:
         assert not any(
             "deferred annotations" in note
             for note in getattr(exc_info.value, "__notes__", [])
+        )
+
+
+def test_unevaluable_annotation_surfaces_real_error_not_misleading():
+    """#155: a model whose annotation cannot be evaluated must raise the real
+    cause, never Pydantic's misleading 'non-annotated attribute' error."""
+    with pytest.raises(TypeError) as exc_info:
+
+        class _Broken(Model):
+            id: Annotated[int, FerroField(primary_key=True)] = 0
+            status: Annotated[str, FerroField(default="draft")]  # invalid kwarg
+
+    msg = str(exc_info.value)
+    assert "default" in msg, "the real FerroField TypeError must surface"
+    assert "non-annotated attribute" not in msg, "must not be the misleading error"
+    if sys.version_info >= (3, 14):
+        # On 3.14 the broken annotation is deferred -> the fixed branch adds the note.
+        assert any(
+            "_Broken" in note for note in getattr(exc_info.value, "__notes__", [])
         )
 
 
