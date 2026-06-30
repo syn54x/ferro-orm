@@ -185,7 +185,8 @@ class TestResolveDeferredAnnotations:
             ModelMetaclass._resolve_deferred_annotations(namespace)
         notes = getattr(exc_info.value, "__notes__", [])
         assert any("Demo" in note for note in notes)
-        assert any("deferred annotations" in note for note in notes)
+        # key on the stable "ferro:" note prefix, not churn-prone prose
+        assert any("ferro:" in note for note in notes)
 
     def test_annotate_func_backref_error_still_short_circuits(self):
         """A BackRef[...] eval error must raise as-is, not via the #155 note path."""
@@ -198,7 +199,7 @@ class TestResolveDeferredAnnotations:
             ModelMetaclass._resolve_deferred_annotations(namespace)
         # short-circuit path adds no ferro note
         assert not any(
-            "deferred annotations" in note
+            "ferro:" in note
             for note in getattr(exc_info.value, "__notes__", [])
         )
 
