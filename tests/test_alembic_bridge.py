@@ -263,6 +263,15 @@ def test_build_sa_table_from_ir_renders_quoted_check_body():
     assert checks[0].name == "ck_account_role"
 
 
+def test_render_check_body_escapes_embedded_double_quote():
+    """_render_check_body must double-quote embedded `"` in column identifiers,
+    matching Rust quote_ident behaviour."""
+    from ferro.migrations.alembic import _render_check_body
+
+    result = _render_check_body('a"b', ["'x'"])
+    assert result == '"a""b" IN (\'x\')'
+
+
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):

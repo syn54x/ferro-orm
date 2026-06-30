@@ -39,8 +39,13 @@ def _ck_constraint_name(table_name: str, col_name: str) -> str:
 
 
 def _render_check_body(column: str, values: list[str]) -> str:
-    """Mirror of ferro_ddl_lowering::render_check_body (quote + join; escaping-free)."""
-    return f'"{column}" IN ({", ".join(values)})'
+    """Mirror of ferro_ddl_lowering::render_check_body (quote + join; escaping-free
+    for values, which arrive pre-rendered). The column identifier is quoted the same
+    way as Rust `quote_ident` (embedded `"` doubled) so the two renderers stay
+    byte-identical. (Ferro column names derive from Python attribute names and cannot
+    contain `"` today; this keeps the mirror correct regardless.)"""
+    escaped = column.replace('"', '""')
+    return f'"{escaped}" IN ({", ".join(values)})'
 
 
 def get_metadata() -> "sa.MetaData":
