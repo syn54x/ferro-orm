@@ -246,6 +246,23 @@ def test_explicit_foreign_key_shadow_id_no_duplicate_alembic_columns():
     assert fks[0].target_fullname == "tyshadowfkjobrole.id"
 
 
+def test_build_sa_table_from_ir_renders_quoted_check_body():
+    from ferro.migrations.alembic import _build_sa_table_from_ir
+
+    md = sa.MetaData()
+    model_ir = {
+        "table_name": "account",
+        "columns": [{"name": "role", "db_type": "text", "nullable": False}],
+        "checks": [{"name": "ck_account_role", "column": "role", "values": ["'admin'", "'user'"]}],
+    }
+    _build_sa_table_from_ir(md, model_ir)
+    table = md.tables["account"]
+    checks = [c for c in table.constraints if isinstance(c, sa.CheckConstraint)]
+    assert len(checks) == 1
+    assert str(checks[0].sqltext) == "\"role\" IN ('admin', 'user')"
+    assert checks[0].name == "ck_account_role"
+
+
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
