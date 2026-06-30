@@ -123,13 +123,15 @@ pub struct SchemaUnique {
     pub columns: Vec<String>,
 }
 
-/// `CHECK` constraint on one or more columns.
+/// `CHECK` constraint on one column (enum `<col> IN (...)` shape).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SchemaCheck {
     /// Canonical check name (`ck_<table>_<col>` for single-column checks).
     pub name: String,
-    /// SQL boolean expression inside the check.
-    pub expression: String,
+    /// The constrained column (structured — no longer parsed out of a string).
+    pub column: String,
+    /// Pre-rendered SQL literal tokens for the allowed values, e.g. `["'admin'", "'user'"]`.
+    pub values: Vec<String>,
 }
 
 /// Query IR: filter, sort, pagination, and optional M2M join context.

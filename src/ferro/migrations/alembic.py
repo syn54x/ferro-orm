@@ -38,6 +38,16 @@ def _ck_constraint_name(table_name: str, col_name: str) -> str:
     return name
 
 
+def _render_check_body(column: str, values: list[str]) -> str:
+    """Mirror of ferro_ddl_lowering::render_check_body (quote + join; escaping-free
+    for values, which arrive pre-rendered). The column identifier is quoted the same
+    way as Rust `quote_ident` (embedded `"` doubled) so the two renderers stay
+    byte-identical. (Ferro column names derive from Python attribute names and cannot
+    contain `"` today; this keeps the mirror correct regardless.)"""
+    escaped = column.replace('"', '""')
+    return f'"{escaped}" IN ({", ".join(values)})'
+
+
 def get_metadata() -> "sa.MetaData":
     """
     Generate a SQLAlchemy MetaData object representing all registered Ferro models.
@@ -115,13 +125,17 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
     for check in model_ir.get("checks") or []:
         if not isinstance(check, dict):
             continue
-        expression = check.get("expression")
         name = check.get("name")
-        if not isinstance(expression, str) or not expression:
-            continue
+        column = check.get("column")
+        values = check.get("values")
         if not isinstance(name, str) or not name:
             continue
-        table_args.append(sa.CheckConstraint(expression, name=name))
+        if not isinstance(column, str) or not column:
+            continue
+        if not isinstance(values, list) or not values:
+            continue
+        sqltext = _render_check_body(column, values)
+        table_args.append(sa.CheckConstraint(sqltext, name=name))
 
     for unique in model_ir.get("uniques") or []:
         if not isinstance(unique, dict):

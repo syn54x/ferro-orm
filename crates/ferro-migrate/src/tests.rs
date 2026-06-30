@@ -206,7 +206,8 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
         ],
         checks: vec![SchemaCheck {
             name: "ck_account_role".to_string(),
-            expression: "role IN ('admin', 'user')".to_string(),
+            column: "role".to_string(),
+            values: vec!["'admin'".to_string(), "'user'".to_string()],
         }],
         ..schema_model("account", vec![])
     };
@@ -1080,4 +1081,88 @@ fn render_create_table_unknown_logical_type_errors() {
             err.message
         );
     }
+}
+
+#[test]
+fn render_check_body_quotes_column_and_joins_values() {
+    let check = SchemaCheck {
+        name: "ck_account_role".to_string(),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string(), "'user'".to_string()],
+    };
+    assert_eq!(
+        ferro_ddl_lowering::render_check_body(&check),
+        "\"role\" IN ('admin', 'user')"
+    );
+}
+
+#[test]
+fn render_db_check_postgres_emits_quoted_alter_no_warning() {
+    let check = SchemaCheck {
+        name: "ck_account_role".to_string(),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string(), "'user'".to_string()],
+    };
+    let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Postgres);
+    assert_eq!(
+        e.statement.as_deref(),
+        Some("ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))")
+    );
+    assert!(e.warning.is_none());
+}
+
+#[test]
+fn render_db_check_sqlite_elides_with_warning() {
+    let check = SchemaCheck {
+        name: "ck_account_role".to_string(),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string(), "'user'".to_string()],
+    };
+    let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Sqlite);
+    assert!(e.statement.is_none());
+    assert!(e.warning.as_deref().unwrap().contains("ck_account_role"));
+}
+
+#[test]
+fn emit_sql_with_ir_add_column_db_check_postgres_quoted_and_sqlite_warns() {
+    // A model whose `role` column has a db_check enum constraint.
+    // The check name must equal test_db_check_constraint_name("account", "role")
+    // so the emit_add_column matching loop fires.
+    let mut model = schema_model("account", vec![ir_col("role", "string", None, true, false, false)]);
+    model.checks = vec![SchemaCheck {
+        name: test_db_check_constraint_name("account", "role"),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string(), "'user'".to_string()],
+    }];
+
+    let old_ir = envelope(vec![schema_model("account", vec![])]);
+    let new_ir = envelope(vec![model]);
+
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddColumn {
+            table: "account".to_string(),
+            column: "role".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let pg = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert!(
+        pg.statements.iter().any(|s| s
+            == "ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))"),
+        "Postgres ALTER path must emit quoted CHECK; got: {:?}",
+        pg.statements
+    );
+
+    let lite = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
+    assert!(
+        !lite.statements.iter().any(|s| s.contains("CHECK")),
+        "SQLite ALTER path must NOT emit a CHECK statement; got: {:?}",
+        lite.statements
+    );
+    assert!(
+        lite.warnings.iter().any(|w| w.contains("ck_account_role")),
+        "SQLite ALTER path must warn about ck_account_role; got: {:?}",
+        lite.warnings
+    );
 }
