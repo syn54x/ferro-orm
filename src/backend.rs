@@ -3,6 +3,7 @@
 //! [`EngineHandle`] is the per-connection runtime entry point. All SQL execution flows through
 //! it so pool refresh, identity-map policy, and shadow-runtime hooks stay centralized.
 
+use ferro_ddl_lowering::Dialect;
 use sqlx::ColumnIndex;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgPoolOptions;
@@ -11,24 +12,14 @@ use sqlx::{Column, Connection, PgPool, Postgres, Row, Sqlite, SqlitePool, ValueR
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-/// Ferro's currently supported runtime database backends.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum BackendKind {
-    #[default]
-    Sqlite,
-    Postgres,
-}
-
-impl BackendKind {
-    /// Classify the backend from a connection URL.
-    pub fn from_url(url: &str) -> Result<Self, UnsupportedDatabaseUrl> {
-        if url.starts_with("sqlite:") {
-            Ok(Self::Sqlite)
-        } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-            Ok(Self::Postgres)
-        } else {
-            Err(UnsupportedDatabaseUrl::from_url(url))
-        }
+/// Infer the SQL dialect / backend from a connection-URL scheme.
+pub fn dialect_from_url(url: &str) -> Result<Dialect, UnsupportedDatabaseUrl> {
+    if url.starts_with("sqlite:") {
+        Ok(Dialect::Sqlite)
+    } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        Ok(Dialect::Postgres)
+    } else {
+        Err(UnsupportedDatabaseUrl::from_url(url))
     }
 }
 
@@ -38,7 +29,7 @@ impl BackendKind {
 #[derive(Clone, Debug)]
 pub struct PoolSpec {
     /// Classified backend for pool construction.
-    pub backend: BackendKind,
+    pub backend: Dialect,
     /// Connection URL passed to SQLx (`sqlite:…`, `postgres://…`).
     pub url: String,
     /// Postgres `SET search_path` applied to every new connection
@@ -54,7 +45,7 @@ impl PoolSpec {
     /// Build a fresh pool from this spec.
     async fn build(&self) -> Result<BackendPool, sqlx::Error> {
         match self.backend {
-            BackendKind::Sqlite => {
+            Dialect::Sqlite => {
                 let pool = SqlitePoolOptions::new()
                     .max_connections(self.max_connections)
                     .min_connections(self.min_connections)
@@ -62,7 +53,7 @@ impl PoolSpec {
                     .await?;
                 Ok(BackendPool::Sqlite(Arc::new(pool)))
             }
-            BackendKind::Postgres => {
+            Dialect::Postgres => {
                 let mut pool_options = PgPoolOptions::new()
                     .max_connections(self.max_connections)
                     .min_connections(self.min_connections);
@@ -89,7 +80,7 @@ impl PoolSpec {
     /// pool would discard the database itself, so refresh must clear statement
     /// caches in place instead of rebuilding.
     fn is_ephemeral_sqlite(&self) -> bool {
-        if self.backend != BackendKind::Sqlite {
+        if self.backend != Dialect::Sqlite {
             return false;
         }
         let url = self.url.to_ascii_lowercase();
@@ -104,7 +95,7 @@ impl PoolSpec {
 /// handle observe the swap because they share the same slot.
 #[derive(Clone, Debug)]
 pub struct EngineHandle {
-    backend: BackendKind,
+    backend: Dialect,
     pool: Arc<RwLock<BackendPool>>,
     /// How to rebuild the pool. `None` for handles wrapped around an
     /// externally built pool (test-only constructors), which cannot refresh.
@@ -252,7 +243,7 @@ impl EngineHandle {
     #[cfg(test)]
     pub fn new_sqlite(pool: SqlitePool) -> Self {
         Self {
-            backend: BackendKind::Sqlite,
+            backend: Dialect::Sqlite,
             pool: Arc::new(RwLock::new(BackendPool::Sqlite(Arc::new(pool)))),
             spec: None,
             identity_map_enabled: true,
@@ -266,7 +257,7 @@ impl EngineHandle {
     #[cfg(test)]
     pub fn new_postgres(pool: PgPool) -> Self {
         Self {
-            backend: BackendKind::Postgres,
+            backend: Dialect::Postgres,
             pool: Arc::new(RwLock::new(BackendPool::Postgres(Arc::new(pool)))),
             spec: None,
             identity_map_enabled: true,
@@ -373,7 +364,7 @@ impl EngineHandle {
         self
     }
 
-    pub fn backend(&self) -> BackendKind {
+    pub fn backend(&self) -> Dialect {
         self.backend
     }
 
@@ -751,41 +742,42 @@ impl fmt::Display for UnsupportedDatabaseUrl {
 
 #[cfg(test)]
 mod tests {
-    use super::BackendKind;
     use super::EngineBindValue;
     use super::EngineHandle;
     use super::EngineValue;
     use super::PoolSpec;
+    use super::dialect_from_url;
+    use ferro_ddl_lowering::Dialect;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::sqlite::SqlitePoolOptions;
 
     #[test]
     fn classifies_sqlite_urls() {
         assert_eq!(
-            BackendKind::from_url("sqlite::memory:").unwrap(),
-            BackendKind::Sqlite
+            dialect_from_url("sqlite::memory:").unwrap(),
+            Dialect::Sqlite
         );
         assert_eq!(
-            BackendKind::from_url("sqlite:test.db?mode=rwc").unwrap(),
-            BackendKind::Sqlite
+            dialect_from_url("sqlite:test.db?mode=rwc").unwrap(),
+            Dialect::Sqlite
         );
     }
 
     #[test]
     fn classifies_postgres_urls() {
         assert_eq!(
-            BackendKind::from_url("postgres://user:pass@localhost/db").unwrap(),
-            BackendKind::Postgres
+            dialect_from_url("postgres://user:pass@localhost/db").unwrap(),
+            Dialect::Postgres
         );
         assert_eq!(
-            BackendKind::from_url("postgresql://user:pass@localhost/db").unwrap(),
-            BackendKind::Postgres
+            dialect_from_url("postgresql://user:pass@localhost/db").unwrap(),
+            Dialect::Postgres
         );
     }
 
     #[test]
     fn rejects_unsupported_schemes() {
-        let error = BackendKind::from_url("mysql://user:pass@localhost/db").unwrap_err();
+        let error = dialect_from_url("mysql://user:pass@localhost/db").unwrap_err();
         assert_eq!(
             error.to_string(),
             "Unsupported database URL scheme 'mysql'. Supported schemes: sqlite, postgres, postgresql"
@@ -802,7 +794,7 @@ mod tests {
 
         let engine = EngineHandle::new_sqlite(pool);
 
-        assert_eq!(engine.backend(), BackendKind::Sqlite);
+        assert_eq!(engine.backend(), Dialect::Sqlite);
         assert!(engine.sqlite_pool().is_some());
         assert!(engine.postgres_pool().is_none());
     }
@@ -816,7 +808,7 @@ mod tests {
 
         let engine = EngineHandle::new_postgres(pool);
 
-        assert_eq!(engine.backend(), BackendKind::Postgres);
+        assert_eq!(engine.backend(), Dialect::Postgres);
         assert!(engine.sqlite_pool().is_none());
         assert!(engine.postgres_pool().is_some());
     }
@@ -1130,7 +1122,7 @@ mod tests {
 
     fn file_backed_spec(path: &std::path::Path) -> PoolSpec {
         PoolSpec {
-            backend: BackendKind::Sqlite,
+            backend: Dialect::Sqlite,
             url: format!("sqlite://{}?mode=rwc", path.display()),
             search_path: None,
             max_connections: 2,
@@ -1189,7 +1181,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_pool_preserves_in_memory_database() {
         let spec = PoolSpec {
-            backend: BackendKind::Sqlite,
+            backend: Dialect::Sqlite,
             url: "sqlite::memory:".to_string(),
             search_path: None,
             max_connections: 1,

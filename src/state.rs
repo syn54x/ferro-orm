@@ -3,7 +3,7 @@
 //! This module holds the global connection pool, the model registry,
 //! and the Identity Map used for object tracking.
 
-use crate::backend::{BackendKind, EngineConnection, EngineHandle};
+use crate::backend::{EngineConnection, EngineHandle};
 use dashmap::DashMap;
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use once_cell::sync::Lazy;
@@ -13,8 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
-/// Backward-compatible name for query/DDL builder selection.
-pub type SqlDialect = BackendKind;
+pub(crate) use ferro_ddl_lowering::Dialect;
 
 /// Global registry mapping model names to their Pydantic-generated JSON schemas.
 pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, serde_json::Value>>> =

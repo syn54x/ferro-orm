@@ -3,7 +3,7 @@
 //! This module handles database connections, pool initialization,
 //! and engine resets.
 
-use crate::backend::{BackendKind, EngineHandle, PoolSpec};
+use crate::backend::{EngineHandle, PoolSpec, dialect_from_url};
 use crate::migrate::{MigrateOptions, internal_migrate};
 use crate::state::{
     CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, ENGINE, IDENTITY_MAP, SESSION_REGISTRY,
@@ -148,7 +148,7 @@ fn shadow_runtime_enabled_from_env() -> bool {
 
 async fn connect_engine_handle(
     connection_url: &str,
-    backend: BackendKind,
+    backend: crate::state::Dialect,
     search_path: Option<String>,
     max_connections: u32,
     min_connections: u32,
@@ -196,7 +196,7 @@ pub fn connect(
 ) -> PyResult<Bound<'_, PyAny>> {
     let (connection_url, search_path) = split_search_path(&url);
     let redacted_url = redact_connection_url(&connection_url);
-    let backend = BackendKind::from_url(&connection_url).map_err(|e| {
+    let backend = dialect_from_url(&connection_url).map_err(|e| {
         pyo3::exceptions::PyConnectionError::new_err(format!(
             "DB Connection failed for {}: {}",
             redacted_url, e
@@ -355,26 +355,26 @@ pub fn set_default_connection(name: String) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::connect_engine_handle;
-    use crate::backend::BackendKind;
+    use ferro_ddl_lowering::Dialect;
 
     #[tokio::test]
     async fn connect_engine_handle_uses_typed_sqlite_backend() {
-        let engine = connect_engine_handle("sqlite::memory:", BackendKind::Sqlite, None, 5, 0)
+        let engine = connect_engine_handle("sqlite::memory:", Dialect::Sqlite, None, 5, 0)
             .await
             .unwrap();
 
-        assert_eq!(engine.backend(), BackendKind::Sqlite);
+        assert_eq!(engine.backend(), Dialect::Sqlite);
         assert!(engine.sqlite_pool().is_some());
         assert!(engine.postgres_pool().is_none());
     }
 
     #[tokio::test]
     async fn connect_engine_handle_supports_sqlite_runtime_execution() {
-        let engine = connect_engine_handle("sqlite::memory:", BackendKind::Sqlite, None, 5, 0)
+        let engine = connect_engine_handle("sqlite::memory:", Dialect::Sqlite, None, 5, 0)
             .await
             .unwrap();
 
-        assert_eq!(engine.backend(), BackendKind::Sqlite);
+        assert_eq!(engine.backend(), Dialect::Sqlite);
         assert!(engine.sqlite_pool().is_some());
         assert_eq!(engine.execute_sql("SELECT 1").await.unwrap(), 0);
     }

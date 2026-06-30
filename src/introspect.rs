@@ -6,7 +6,7 @@
 //! populate a connection's statement cache (see `EngineHandle::execute_sql_unprepared`).
 
 use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue};
-use crate::state::SqlDialect;
+use crate::state::Dialect;
 use pyo3::prelude::*;
 
 fn serde_default_true() -> bool {
@@ -117,8 +117,8 @@ pub async fn live_table_columns(
     table: &str,
 ) -> PyResult<Option<Vec<LiveColumn>>> {
     let columns = match engine.backend() {
-        SqlDialect::Sqlite => sqlite_table_columns(engine, table).await?,
-        SqlDialect::Postgres => postgres_table_columns(engine, table).await?,
+        Dialect::Sqlite => sqlite_table_columns(engine, table).await?,
+        Dialect::Postgres => postgres_table_columns(engine, table).await?,
     };
     Ok(if columns.is_empty() {
         None
@@ -250,8 +250,8 @@ pub async fn sqlite_indexes_covering_column(
 /// Live standalone indexes Ferro owns on `table`, normalized across backends.
 pub async fn live_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveIndex>> {
     match engine.backend() {
-        SqlDialect::Sqlite => sqlite_table_indexes(engine, table).await,
-        SqlDialect::Postgres => postgres_table_indexes(engine, table).await,
+        Dialect::Sqlite => sqlite_table_indexes(engine, table).await,
+        Dialect::Postgres => postgres_table_indexes(engine, table).await,
     }
 }
 
@@ -323,11 +323,12 @@ async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{BackendKind, PoolSpec};
+    use crate::backend::PoolSpec;
+    use ferro_ddl_lowering::Dialect;
 
     async fn memory_engine() -> EngineHandle {
         EngineHandle::connect(PoolSpec {
-            backend: BackendKind::Sqlite,
+            backend: Dialect::Sqlite,
             url: "sqlite::memory:".to_string(),
             search_path: None,
             max_connections: 1,
