@@ -3,7 +3,7 @@
 //! Accepts legacy JSON query trees and canonical [`QueryIrPayload`] from `ferro_schema_ir`,
 //! then builds backend-aware filter SQL with typed null/UUID/enum binds via [`crate::codec`].
 
-use crate::state::SqlDialect;
+use crate::state::Dialect;
 use ferro_schema_ir::{
     QueryIrPayload, QueryNode as QueryIrNode, QueryOrderBy as QueryIrOrderBy, QueryValue,
 };
@@ -106,7 +106,7 @@ impl QueryDef {
     /// Returns `Err(String)` for malformed nodes or unsupported operators.
     pub fn to_condition_for_backend(
         &self,
-        backend: SqlDialect,
+        backend: Dialect,
     ) -> Result<Condition, String> {
         let mut condition = Condition::all();
         for node in &self.where_clause {
@@ -118,7 +118,7 @@ impl QueryDef {
     fn node_to_condition_for_backend(
         &self,
         node: &QueryNode,
-        backend: SqlDialect,
+        backend: Dialect,
     ) -> Result<Condition, String> {
         if node.is_compound {
             let left = node
@@ -281,7 +281,7 @@ impl QueryDef {
         col_name: &str,
         val: &Value,
         infer_uuid_without_schema: bool,
-        backend: SqlDialect,
+        backend: Dialect,
     ) -> SimpleExpr {
         crate::codec::query_bind_expr(
             &self.model_name,
@@ -540,7 +540,7 @@ fn query_value_semantic_string(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{QueryDef, QueryNode};
-    use crate::backend::BackendKind;
+    use crate::state::Dialect;
     use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
     use serde_json::json;
     use std::collections::HashMap;
@@ -600,7 +600,7 @@ mod tests {
         select
             .from(Alias::new("pending"))
             .cond_where(
-                q.to_condition_for_backend(BackendKind::Sqlite)
+                q.to_condition_for_backend(Dialect::Sqlite)
                     .expect("valid test query"),
             );
         let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
@@ -633,7 +633,7 @@ mod tests {
         select
             .from(Alias::new("pending"))
             .cond_where(
-                q.to_condition_for_backend(BackendKind::Sqlite)
+                q.to_condition_for_backend(Dialect::Sqlite)
                     .expect("valid test query"),
             );
         let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
@@ -652,7 +652,7 @@ mod tests {
             "widget_id",
             &json!(uuid_str),
             true,
-            BackendKind::Postgres,
+            Dialect::Postgres,
         );
         let postgres_sql = Query::select()
             .expr(postgres_rhs.clone())
@@ -677,7 +677,7 @@ mod tests {
             "widget_id",
             &json!(uuid_str),
             true,
-            BackendKind::Sqlite,
+            Dialect::Sqlite,
         );
         let sqlite_sql = Query::select()
             .expr(sqlite_rhs)
@@ -707,7 +707,7 @@ mod tests {
             "count",
             &serde_json::Value::Null,
             false,
-            BackendKind::Postgres,
+            Dialect::Postgres,
         );
 
         match extract_pg_rhs_value(rhs) {
@@ -732,7 +732,7 @@ mod tests {
             "active",
             &serde_json::Value::Null,
             false,
-            BackendKind::Postgres,
+            Dialect::Postgres,
         );
 
         match extract_pg_rhs_value(rhs) {
@@ -757,7 +757,7 @@ mod tests {
             "id",
             &serde_json::Value::Null,
             false,
-            BackendKind::Postgres,
+            Dialect::Postgres,
         );
 
         match extract_pg_rhs_value(rhs) {
@@ -782,7 +782,7 @@ mod tests {
             "blob",
             &json!("some-bytes"),
             false,
-            BackendKind::Postgres,
+            Dialect::Postgres,
         );
         let sql = Query::select()
             .expr(rhs.clone())
@@ -809,7 +809,7 @@ mod tests {
             "color",
             &json!("red"),
             false,
-            BackendKind::Postgres,
+            Dialect::Postgres,
         );
         let sql = Query::select().expr(rhs).to_string(PostgresQueryBuilder);
 
@@ -835,7 +835,7 @@ mod tests {
             "color",
             &json!("red"),
             false,
-            BackendKind::Postgres,
+            Dialect::Postgres,
         );
         let sql = Query::select().expr(rhs).to_string(PostgresQueryBuilder);
 
@@ -869,7 +869,7 @@ mod tests {
             "amount",
             &json!("12.34"),
             false,
-            BackendKind::Postgres,
+            Dialect::Postgres,
         );
         let sql = Query::select().expr(rhs).to_string(PostgresQueryBuilder);
 

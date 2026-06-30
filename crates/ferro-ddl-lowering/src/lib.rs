@@ -6,10 +6,12 @@
 use ferro_schema_ir::SchemaColumn;
 use sea_query::{ColumnDef, ForeignKeyAction};
 
-/// SQL dialect for lowering canonical types to rendered DDL.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The one SQL dialect / database backend Ferro targets. Selects both the
+/// rendered SQL dialect and, in the runtime crate, the connection driver.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dialect {
     /// SQLite 3.
+    #[default]
     Sqlite,
     /// PostgreSQL.
     Postgres,

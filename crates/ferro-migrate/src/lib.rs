@@ -5,20 +5,12 @@
 
 mod emit;
 
-use ferro_ddl_lowering::{schema_columns_storage_drift, Dialect};
+use ferro_ddl_lowering::schema_columns_storage_drift;
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use emit::{emit_sql_with_ir, order_models_for_create, render_create_table, CreateTableEmission};
-
-/// SQL dialect tag for migration SQL emission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackendDialect {
-    /// SQLite 3.
-    Sqlite,
-    /// PostgreSQL.
-    Postgres,
-}
+pub use ferro_ddl_lowering::Dialect;
 
 /// Executable SQL plus non-fatal warnings from [`emit_sql_with_ir`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -125,7 +117,7 @@ impl MigrationPlan {
 ///
 /// Legacy shim retained until runtime cutover ([#119](https://github.com/syn54x/ferro-orm/issues/119))
 /// wires [`emit_sql_with_ir`]. `DropTable` / `DropColumn` are executable; other ops emit comments.
-pub fn emit_sql(plan: &MigrationPlan, dialect: BackendDialect) -> Vec<String> {
+pub fn emit_sql(plan: &MigrationPlan, dialect: Dialect) -> Vec<String> {
     let mut sql = Vec::new();
     for operation in &plan.operations {
         match operation {
@@ -148,21 +140,21 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: BackendDialect) -> Vec<String> {
                 ));
             }
             MigrationOp::AlterColumnType { table, column } => match dialect {
-                BackendDialect::Postgres => sql.push(format!(
+                Dialect::Postgres => sql.push(format!(
                     "-- alter type for '{}.{}' resolved by backend planner",
                     table, column
                 )),
-                BackendDialect::Sqlite => sql.push(format!(
+                Dialect::Sqlite => sql.push(format!(
                     "-- sqlite cannot alter type in place for '{}.{}'",
                     table, column
                 )),
             },
             MigrationOp::AlterColumnNullability { table, column } => match dialect {
-                BackendDialect::Postgres => sql.push(format!(
+                Dialect::Postgres => sql.push(format!(
                     "-- alter nullability for '{}.{}' resolved by backend planner",
                     table, column
                 )),
-                BackendDialect::Sqlite => sql.push(format!(
+                Dialect::Sqlite => sql.push(format!(
                     "-- sqlite cannot alter nullability in place for '{}.{}'",
                     table, column
                 )),
@@ -182,12 +174,8 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: BackendDialect) -> Vec<String> {
 pub fn plan_from_ir(
     old_ir: &IrEnvelope<SchemaIrPayload>,
     new_ir: &IrEnvelope<SchemaIrPayload>,
-    dialect: BackendDialect,
+    dialect: Dialect,
 ) -> MigrationPlan {
-    let ddl_dialect = match dialect {
-        BackendDialect::Sqlite => Dialect::Sqlite,
-        BackendDialect::Postgres => Dialect::Postgres,
-    };
     let old_models = index_models(&old_ir.payload.models);
     let new_models = index_models(&new_ir.payload.models);
     let mut plan = MigrationPlan::default();
@@ -213,7 +201,7 @@ pub fn plan_from_ir(
         let Some(new_model) = new_models.get(*table) else {
             continue;
         };
-        diff_model_columns(*table, old_model, new_model, ddl_dialect, &mut plan);
+        diff_model_columns(*table, old_model, new_model, dialect, &mut plan);
         diff_model_indexes(*table, old_model, new_model, &mut plan);
     }
 
