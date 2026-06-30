@@ -203,7 +203,22 @@ class ModelMetaclass(type(BaseModel)):
                 except Exception as forward_error:
                     if "BackRef[...]" in str(forward_error):
                         raise forward_error
-                    pass
+                    # #155: was `pass` -> returned {} -> Pydantic then raised the
+                    # misleading "non-annotated attribute" on the first class-body
+                    # assignment. Surface the REAL cause (PEP 649 deferred-eval
+                    # failure) instead of silently dropping every annotation.
+                    model = (
+                        namespace.get("__qualname__")
+                        or namespace.get("__name__")
+                        or "<model>"
+                    )
+                    value_error.add_note(
+                        f"ferro: could not resolve deferred annotations for model "
+                        f"'{model}' (PEP 649 / Python 3.14). An annotation on this "
+                        f"model failed to evaluate; an attribute Pydantic may flag "
+                        f"as 'non-annotated' is a symptom, not the cause."
+                    )
+                    raise value_error
 
         return namespace.get("__annotations__", {})
 

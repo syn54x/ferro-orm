@@ -5,6 +5,7 @@ Tests the extracted helper methods in isolation to ensure correct behavior
 before and after refactoring.
 """
 
+import sys
 from typing import Annotated, ForwardRef, Union
 from unittest.mock import Mock
 
@@ -173,15 +174,53 @@ class TestResolveDeferredAnnotations:
         result = ModelMetaclass._resolve_deferred_annotations(namespace)
         assert "field" in result
 
-    def test_annotate_func_both_fail(self):
-        """Should return empty dict if both formats fail."""
+    def test_annotate_func_both_fail_reraises_real_error(self):
+        """Both formats failing must surface the real error, not swallow it (#155)."""
 
         def annotate_func(format_type):
             raise ValueError("Not supported")
 
-        namespace = {"__annotate_func__": annotate_func}
-        result = ModelMetaclass._resolve_deferred_annotations(namespace)
-        assert result == {}
+        namespace = {"__annotate_func__": annotate_func, "__qualname__": "Demo"}
+        with pytest.raises(ValueError, match="Not supported") as exc_info:
+            ModelMetaclass._resolve_deferred_annotations(namespace)
+        notes = getattr(exc_info.value, "__notes__", [])
+        assert any("Demo" in note for note in notes)
+        # key on the stable "ferro:" note prefix, not churn-prone prose
+        assert any("ferro:" in note for note in notes)
+
+    def test_annotate_func_backref_error_still_short_circuits(self):
+        """A BackRef[...] eval error must raise as-is, not via the #155 note path."""
+
+        def annotate_func(format_type):
+            raise TypeError("BackRef[...] is not a valid annotation")
+
+        namespace = {"__annotate_func__": annotate_func, "__qualname__": "Demo"}
+        with pytest.raises(TypeError, match=r"BackRef\[\.\.\.\]") as exc_info:
+            ModelMetaclass._resolve_deferred_annotations(namespace)
+        # short-circuit path adds no ferro note
+        assert not any(
+            "ferro:" in note
+            for note in getattr(exc_info.value, "__notes__", [])
+        )
+
+
+def test_unevaluable_annotation_surfaces_real_error_not_misleading():
+    """#155: a model whose annotation cannot be evaluated must raise the real
+    cause, never Pydantic's misleading 'non-annotated attribute' error."""
+    with pytest.raises(TypeError) as exc_info:
+
+        class _Broken(Model):
+            id: Annotated[int, FerroField(primary_key=True)] = 0
+            status: Annotated[str, FerroField(default="draft")]  # invalid kwarg
+
+    msg = str(exc_info.value)
+    assert "default" in msg, "the real FerroField TypeError must surface"
+    assert "non-annotated attribute" not in msg, "must not be the misleading error"
+    if sys.version_info >= (3, 14):
+        # On 3.14 the broken annotation is deferred -> the fixed branch adds the note.
+        assert any(
+            "_Broken" in note for note in getattr(exc_info.value, "__notes__", [])
+        )
 
 
 class TestInjectShadowFields:
