@@ -4,7 +4,8 @@ use crate::{Dialect, EmissionError, EmissionResult, MigrationOp, MigrationPlan};
 use ferro_ddl_lowering::{
     self, apply_canonical_type, canonical_from_schema_column, db_check_constraint_name,
     fk_action_from_str, fk_action_sql, literal_default_value, pg_alter_type_target, quote_ident,
-    single_index_name, single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
+    render_db_check, single_index_name, single_unique_index_name, sqlite_declared_type,
+    sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
@@ -187,49 +188,18 @@ fn post_create_artifacts(
     }
 
     for check in &model.checks {
-        match dialect {
-            Dialect::Postgres => {
-                statements.push(format!(
-                    "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK ({expression})",
-                    table = table_lower,
-                    name = check.name,
-                    expression = render_check_expression(&check.expression)?,
-                ));
-            }
-            Dialect::Sqlite => {
-                warnings.push(format!(
-                    "Check constraint '{}' on table '{}' is not emitted on SQLite (requires table rebuild).",
-                    check.name, table_lower
-                ));
-            }
+        let emission = render_db_check(table_lower, check, dialect);
+        if let Some(stmt) = emission.statement {
+            statements.push(stmt);
+        }
+        if let Some(warning) = emission.warning {
+            warnings.push(warning);
         }
     }
 
     Ok((statements, warnings))
 }
 
-/// Render an IR `db_check` expression for emission, quoting the leading column
-/// identifier so it is byte-identical to the runtime JSON path.
-///
-/// The IR compiler emits the canonical form `<col> IN (<values>)` (unquoted
-/// column — see `ferro/ir/compiler.py::_checks_from_columns`). The runtime
-/// emits `"<col>" IN (<values>)`. We re-quote the column reference at emit time
-/// rather than diverge the IR contract (whose unquoted form is asserted by
-/// `test_schema_ir_compiler_emits_db_check_expression_for_closed_domain`).
-///
-/// Returns `Err(EmissionError)` for expressions that are not in the expected
-/// `<col> IN (<values>)` shape — the only shape the IR compiler produces.
-/// A structured shared renderer is deferred to Phase 9.
-fn render_check_expression(expression: &str) -> Result<String, EmissionError> {
-    match expression.split_once(" IN (") {
-        Some((column, rest)) => Ok(format!("{} IN ({}", quote_ident(column), rest)),
-        None => Err(EmissionError {
-            message: format!(
-                "db_check expression does not match expected `<col> IN (<values>)` shape: {expression:?}"
-            ),
-        }),
-    }
-}
 
 /// Order `AddTable` models so each table's FK targets are created before it.
 ///
