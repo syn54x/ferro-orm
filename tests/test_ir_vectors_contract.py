@@ -310,12 +310,7 @@ def test_schema_ir_compiler_emits_db_check_expression_for_closed_domain(
     document = next(model for model in models if model["table_name"] == "document")
     checks = document["checks"]
     assert checks == [
-        {
-            "name": "ck_document_format",
-            "expression": "format IN ('pdf', 'json')",
-            "column": "format",
-            "values": ["'pdf'", "'json'"],
-        }
+        {"name": "ck_document_format", "column": "format", "values": ["'pdf'", "'json'"]}
     ]
 
 

@@ -234,7 +234,6 @@ def _checks_from_columns(table_name: str, columns: list[dict[str, Any]]) -> list
         checks.append(
             {
                 "name": f"ck_{table_name}_{col_name}",
-                "expression": f"{col_name} IN ({', '.join(rendered)})",
                 "column": col_name,
                 "values": rendered,
             }

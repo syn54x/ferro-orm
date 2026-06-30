@@ -1280,7 +1280,6 @@ mod tests {
                 {
                     checks.push(SchemaCheck {
                         name: db_check_constraint_name(table_lower, name),
-                        expression: format!("\"{}\" IN ({})", column, values.join(", ")),
                         column,
                         values,
                     });

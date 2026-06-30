@@ -206,7 +206,6 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
         ],
         checks: vec![SchemaCheck {
             name: "ck_account_role".to_string(),
-            expression: "role IN ('admin', 'user')".to_string(),
             column: "role".to_string(),
             values: vec!["'admin'".to_string(), "'user'".to_string()],
         }],
@@ -1088,7 +1087,6 @@ fn render_create_table_unknown_logical_type_errors() {
 fn render_check_body_quotes_column_and_joins_values() {
     let check = SchemaCheck {
         name: "ck_account_role".to_string(),
-        expression: String::new(),
         column: "role".to_string(),
         values: vec!["'admin'".to_string(), "'user'".to_string()],
     };
@@ -1102,7 +1100,6 @@ fn render_check_body_quotes_column_and_joins_values() {
 fn render_db_check_postgres_emits_quoted_alter_no_warning() {
     let check = SchemaCheck {
         name: "ck_account_role".to_string(),
-        expression: String::new(),
         column: "role".to_string(),
         values: vec!["'admin'".to_string(), "'user'".to_string()],
     };
@@ -1118,7 +1115,6 @@ fn render_db_check_postgres_emits_quoted_alter_no_warning() {
 fn render_db_check_sqlite_elides_with_warning() {
     let check = SchemaCheck {
         name: "ck_account_role".to_string(),
-        expression: String::new(),
         column: "role".to_string(),
         values: vec!["'admin'".to_string(), "'user'".to_string()],
     };
@@ -1135,7 +1131,6 @@ fn emit_sql_with_ir_add_column_db_check_postgres_quoted_and_sqlite_warns() {
     let mut model = schema_model("account", vec![ir_col("role", "string", None, true, false, false)]);
     model.checks = vec![SchemaCheck {
         name: test_db_check_constraint_name("account", "role"),
-        expression: "role IN ('admin', 'user')".to_string(),
         column: "role".to_string(),
         values: vec!["'admin'".to_string(), "'user'".to_string()],
     }];
