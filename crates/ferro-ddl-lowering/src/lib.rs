@@ -372,12 +372,14 @@ pub fn db_check_constraint_name(table_lower: &str, col_name: &str) -> String {
 
 /// The CHECK body for a `db_check` enum constraint — byte-identical across the
 /// CREATE and ALTER emitters (and mirrored, escaping-free, by the Alembic emitter).
-/// Quoting is double-quote on both backends; the check only ever emits on Postgres.
+/// Quoting is double-quote on both backends; the wrapping `ALTER ... ADD CONSTRAINT`
+/// is emitted only on Postgres (see `render_db_check`).
 pub fn render_check_body(check: &ferro_schema_ir::SchemaCheck) -> String {
     format!("{} IN ({})", quote_ident(&check.column), check.values.join(", "))
 }
 
 /// The outcome of emitting a `db_check` constraint for one dialect.
+#[derive(Debug)]
 pub struct CheckEmission {
     /// The `ALTER TABLE ... ADD CONSTRAINT ... CHECK (...)` statement (Postgres only).
     pub statement: Option<String>,

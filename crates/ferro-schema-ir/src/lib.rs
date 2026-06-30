@@ -128,10 +128,8 @@ pub struct SchemaUnique {
 pub struct SchemaCheck {
     /// Canonical check name (`ck_<table>_<col>` for single-column checks).
     pub name: String,
-    /// SQL boolean expression inside the check. REMOVED in #158 Task 6.
-    /// Defaulted during serde because the Python compiler no longer emits it;
-    /// omitted from serialization when empty so roundtrip fixtures stay stable.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// SQL boolean expression inside the check. Transitional — removed in #158 Task 6,
+    /// once every emitter consumes the structured `column`/`values` instead.
     pub expression: String,
     /// The constrained column (structured — no longer parsed out of a string).
     pub column: String,
