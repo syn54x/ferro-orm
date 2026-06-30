@@ -364,12 +364,12 @@ fn emit_add_column(
 
     for check in &model.checks {
         if check.name == db_check_constraint_name(table, column) {
-            if dialect == Dialect::Postgres {
-                result.statements.push(format!(
-                    "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK ({expression})",
-                    name = check.name,
-                    expression = check.expression,
-                ));
+            let emission = render_db_check(table, check, dialect);
+            if let Some(stmt) = emission.statement {
+                result.statements.push(stmt);
+            }
+            if let Some(warning) = emission.warning {
+                result.warnings.push(warning);
             }
         }
     }
