@@ -173,15 +173,33 @@ class TestResolveDeferredAnnotations:
         result = ModelMetaclass._resolve_deferred_annotations(namespace)
         assert "field" in result
 
-    def test_annotate_func_both_fail(self):
-        """Should return empty dict if both formats fail."""
+    def test_annotate_func_both_fail_reraises_real_error(self):
+        """Both formats failing must surface the real error, not swallow it (#155)."""
 
         def annotate_func(format_type):
             raise ValueError("Not supported")
 
-        namespace = {"__annotate_func__": annotate_func}
-        result = ModelMetaclass._resolve_deferred_annotations(namespace)
-        assert result == {}
+        namespace = {"__annotate_func__": annotate_func, "__qualname__": "Demo"}
+        with pytest.raises(ValueError, match="Not supported") as exc_info:
+            ModelMetaclass._resolve_deferred_annotations(namespace)
+        notes = getattr(exc_info.value, "__notes__", [])
+        assert any("Demo" in note for note in notes)
+        assert any("deferred annotations" in note for note in notes)
+
+    def test_annotate_func_backref_error_still_short_circuits(self):
+        """A BackRef[...] eval error must raise as-is, not via the #155 note path."""
+
+        def annotate_func(format_type):
+            raise TypeError("BackRef[...] is not a valid annotation")
+
+        namespace = {"__annotate_func__": annotate_func, "__qualname__": "Demo"}
+        with pytest.raises(TypeError, match=r"BackRef\[\.\.\.\]") as exc_info:
+            ModelMetaclass._resolve_deferred_annotations(namespace)
+        # short-circuit path adds no ferro note
+        assert not any(
+            "deferred annotations" in note
+            for note in getattr(exc_info.value, "__notes__", [])
+        )
 
 
 class TestInjectShadowFields:
