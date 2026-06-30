@@ -4,8 +4,8 @@
 //! table definitions and managing the model registry.
 
 use crate::backend::EngineHandle;
-use crate::state::{MODEL_REGISTRY, SqlDialect, engine_for_connection};
-use ferro_ddl_lowering::{CanonicalType, Dialect, canonical_from_parts};
+use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
+use ferro_ddl_lowering::{CanonicalType, canonical_from_parts};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, ForeignKeyAction, Index, PostgresQueryBuilder,
@@ -165,22 +165,13 @@ fn db_check_constraint_name(table_lower: &str, col_name: &str) -> String {
     raw
 }
 
-/// Translate the runtime backend tag to the lowering crate's dialect at the call seam.
-/// (Unifying these enums is tracked separately as #146 / Phase 8.6.)
-pub(crate) fn sql_dialect_to_lowering(backend: SqlDialect) -> Dialect {
-    match backend {
-        SqlDialect::Sqlite => Dialect::Sqlite,
-        SqlDialect::Postgres => Dialect::Postgres,
-    }
-}
-
 /// Resolve a model property to its backend-specific [`CanonicalType`] via the
 /// shared lowering crate. `db_type` (when set) wins; otherwise the Pydantic
 /// JSON type/format cascade decides; unknown types fall back to `varchar`.
 pub(crate) fn canonical_column_type(
     raw_col_info: &serde_json::Value,
     resolved_col_info: &serde_json::Value,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> CanonicalType {
     let db_type = raw_col_info
         .get("db_type")
@@ -188,7 +179,7 @@ pub(crate) fn canonical_column_type(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let (json_type, format) = property_json_type_and_format(resolved_col_info);
-    canonical_from_parts(json_type.unwrap_or(""), format, db_type, sql_dialect_to_lowering(backend))
+    canonical_from_parts(json_type.unwrap_or(""), format, db_type, backend)
         .unwrap_or(CanonicalType::Varchar(None))
 }
 
@@ -213,13 +204,13 @@ fn build_check_constraint_sql(
     table_lower: &str,
     col_name: &str,
     col_info: &serde_json::Value,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> Option<String> {
     // SQLite cannot ALTER TABLE ADD CONSTRAINT and adding a named CHECK
     // requires CREATE TABLE rebuild. db_check is a Postgres-first feature in
     // Phase 1; SQLite users opting in just see the constraint elided at
     // runtime. The parity test (U5) compares Postgres-side rendering.
-    if backend != SqlDialect::Postgres {
+    if backend != Dialect::Postgres {
         return None;
     }
     let values = render_check_values(col_info)?;
@@ -263,7 +254,7 @@ pub(crate) fn build_column_plan(
     col_name: &str,
     raw_col_info: &serde_json::Value,
     schema: &serde_json::Value,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> ColumnPlan {
     let col_info = resolve_ref(schema, raw_col_info);
     let canonical = canonical_column_type(raw_col_info, col_info, backend);
@@ -285,8 +276,8 @@ pub(crate) fn build_column_plan(
             .if_not_exists()
             .to_owned();
         let index_sql = match backend {
-            SqlDialect::Sqlite => index_stmt.to_string(SqliteQueryBuilder),
-            SqlDialect::Postgres => index_stmt.to_string(PostgresQueryBuilder),
+            Dialect::Sqlite => index_stmt.to_string(SqliteQueryBuilder),
+            Dialect::Postgres => index_stmt.to_string(PostgresQueryBuilder),
         };
         index_sqls.push(index_sql);
     }
@@ -363,7 +354,7 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
         })?
     };
 
-    let dialect = crate::migrate::backend_dialect(engine.backend());
+    let dialect = engine.backend();
 
     let model_refs: Vec<&ferro_schema_ir::SchemaModel> =
         modelset.payload.models.iter().collect();
@@ -463,8 +454,8 @@ pub fn _render_create_table_sql_for_test(
     dialect: String,
 ) -> PyResult<(String, Vec<String>)> {
     let dialect = match dialect.as_str() {
-        "postgres" => ferro_migrate::BackendDialect::Postgres,
-        "sqlite" => ferro_migrate::BackendDialect::Sqlite,
+        "postgres" => Dialect::Postgres,
+        "sqlite" => Dialect::Sqlite,
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
@@ -556,7 +547,7 @@ mod tests {
         // cascade decides, exactly as before the CanonicalType refactor.
         let raw = json!({"type": "integer", "db_type": "banana"});
         assert_eq!(
-            canonical_column_type(&raw, &raw, SqlDialect::Postgres),
+            canonical_column_type(&raw, &raw, Dialect::Postgres),
             CanonicalType::Integer
         );
     }
@@ -565,12 +556,12 @@ mod tests {
     fn canonical_column_type_unknown_and_missing_type_fall_back_to_varchar() {
         let unknown = serde_json::json!({ "type": "mystery" });
         assert_eq!(
-            canonical_column_type(&unknown, &unknown, SqlDialect::Postgres),
+            canonical_column_type(&unknown, &unknown, Dialect::Postgres),
             CanonicalType::Varchar(None)
         );
         let no_type = serde_json::json!({});
         assert_eq!(
-            canonical_column_type(&no_type, &no_type, SqlDialect::Sqlite),
+            canonical_column_type(&no_type, &no_type, Dialect::Sqlite),
             CanonicalType::Varchar(None)
         );
     }

@@ -5,7 +5,7 @@
 //! here so SQLite and Postgres stay observationally equivalent at the Python boundary.
 
 use crate::backend::{EngineRow, EngineValue};
-use crate::state::{MODEL_REGISTRY, RustValue, SqlDialect};
+use crate::state::{Dialect, MODEL_REGISTRY, RustValue};
 use sea_query::{Alias, Expr, SelectStatement, SimpleExpr, Value as SeaValue};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -158,10 +158,10 @@ pub fn apply_postgres_text_select_columns(
     table_name: &str,
     schema: &Value,
     pg_native_enum_columns: &HashSet<String>,
-    backend: SqlDialect,
+    backend: Dialect,
 ) {
     let tbl = Alias::new(table_name);
-    if backend != SqlDialect::Postgres {
+    if backend != Dialect::Postgres {
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     }
@@ -234,17 +234,17 @@ pub fn schema_bind_expr(
     enum_udt: &HashMap<String, String>,
     uuid_columns: &HashSet<String>,
     ts_cast: &HashMap<String, String>,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> pyo3::PyResult<SimpleExpr> {
     let col_info = schema_property(schema, col_name);
     let col_format = col_info.and_then(format);
     let col_json_type = col_info.and_then(json_type);
     let col_is_decimal = col_info.map(is_decimal).unwrap_or(false);
-    let is_uuid_pg = backend == SqlDialect::Postgres
+    let is_uuid_pg = backend == Dialect::Postgres
         && (uuid_columns.contains(col_name) || col_format == Some("uuid"));
 
     if let Value::String(s) = value
-        && backend == SqlDialect::Postgres
+        && backend == Dialect::Postgres
         && let Some(tn) = crate::schema_bind::native_postgres_enum_udt_name(col_name, enum_udt)
     {
         return Ok(crate::schema_bind::postgres_enum_string_rhs_expr(s, tn));
@@ -271,7 +271,7 @@ pub fn schema_bind_expr(
         .get(col_name)
         .map(|s| s.as_str())
         .or_else(|| temporal_cast_for_format(col_format));
-    if backend == SqlDialect::Postgres
+    if backend == Dialect::Postgres
         && let Some(cast) = temporal_cast
     {
         if value.is_null() {
@@ -286,7 +286,7 @@ pub fn schema_bind_expr(
 
     let expr = match value {
         value
-            if backend == SqlDialect::Postgres
+            if backend == Dialect::Postgres
                 && matches!(col_json_type, Some("object" | "array")) =>
         {
             if value.is_null() {
@@ -313,7 +313,7 @@ pub fn schema_bind_expr(
             Expr::value(SeaValue::Bytes(Some(Box::new(s.as_bytes().to_vec()))))
         }
         Value::String(s) if col_is_decimal => {
-            if backend == SqlDialect::Postgres {
+            if backend == Dialect::Postgres {
                 Expr::value(SeaValue::String(Some(Box::new(s.clone())))).cast_as("numeric")
             } else if let Ok(parsed) = s.parse::<f64>() {
                 Expr::value(SeaValue::Double(Some(parsed)))
@@ -331,19 +331,19 @@ pub fn schema_bind_expr(
             }
         }
         Value::String(s) => Expr::value(SeaValue::String(Some(Box::new(s.clone())))),
-        Value::Bool(b) if col_json_type == Some("boolean") && backend == SqlDialect::Sqlite => {
+        Value::Bool(b) if col_json_type == Some("boolean") && backend == Dialect::Sqlite => {
             Expr::value(SeaValue::BigInt(Some(if *b { 1 } else { 0 })))
         }
         Value::Bool(b) => Expr::value(SeaValue::Bool(Some(*b))),
         Value::Null => {
-            if col_is_decimal && backend == SqlDialect::Postgres {
+            if col_is_decimal && backend == Dialect::Postgres {
                 return Ok(Expr::value(SeaValue::String(None)).cast_as("numeric"));
             }
             let v = if col_format == Some("binary") {
                 SeaValue::Bytes(None)
             } else if col_is_decimal {
                 SeaValue::Double(None)
-            } else if backend == SqlDialect::Postgres && temporal_cast.is_some() {
+            } else if backend == Dialect::Postgres && temporal_cast.is_some() {
                 SeaValue::String(None)
             } else {
                 match col_json_type {
@@ -381,7 +381,7 @@ pub fn query_bind_expr(
     col_name: &str,
     val: &Value,
     infer_uuid_without_schema: bool,
-    backend: SqlDialect,
+    backend: Dialect,
     postgres_enum_udt: &HashMap<String, String>,
 ) -> SimpleExpr {
     let col_info = model_schema_property(model_name, col_name);
@@ -393,7 +393,7 @@ pub fn query_bind_expr(
         .unwrap_or(false);
 
     if let Value::String(s) = val {
-        if backend == SqlDialect::Postgres {
+        if backend == Dialect::Postgres {
             if let Some(tn) =
                 crate::schema_bind::native_postgres_enum_udt_name(col_name, postgres_enum_udt)
             {
@@ -423,7 +423,7 @@ pub fn query_bind_expr(
     }
 
     if val.is_null() {
-        if backend == SqlDialect::Postgres {
+        if backend == Dialect::Postgres {
             if col_is_uuid {
                 return Expr::value(SeaValue::Uuid(None));
             }
@@ -471,9 +471,9 @@ pub fn m2m_bind_expr(
     col_name: &str,
     value: SeaValue,
     uuid_columns: &HashSet<String>,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> SimpleExpr {
-    if backend == SqlDialect::Postgres && uuid_columns.contains(col_name) {
+    if backend == Dialect::Postgres && uuid_columns.contains(col_name) {
         if let SeaValue::String(Some(s)) = &value
             && let Ok(parsed) = uuid::Uuid::parse_str(s)
         {

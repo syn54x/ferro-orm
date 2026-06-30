@@ -245,7 +245,7 @@ fn plan_from_ir_detects_add_drop_and_alter_ops() {
         vec![col("name", "varchar(120)", true), col("status", "text", false)],
     )]);
 
-    let plan = plan_from_ir(&old_ir, &new_ir, BackendDialect::Sqlite);
+    let plan = plan_from_ir(&old_ir, &new_ir, Dialect::Sqlite);
     assert!(plan.operations.contains(&MigrationOp::AddColumn {
         table: "doc".to_string(),
         column: "status".to_string(),
@@ -268,7 +268,7 @@ fn plan_from_ir_detects_add_drop_and_alter_ops() {
 fn plan_from_ir_add_and_drop_table() {
     let old_ir = envelope(vec![schema_model("legacy", vec![col("id", "int", false)])]);
     let new_ir = envelope(vec![schema_model("fresh", vec![col("id", "int", false)])]);
-    let plan = plan_from_ir(&old_ir, &new_ir, BackendDialect::Sqlite);
+    let plan = plan_from_ir(&old_ir, &new_ir, Dialect::Sqlite);
     assert!(plan.operations.contains(&MigrationOp::AddTable {
         table: "fresh".to_string(),
     }));
@@ -286,7 +286,7 @@ fn emit_sql_renders_drop_column_postgres() {
         }],
         warnings: Vec::new(),
     };
-    let sql = emit_sql(&plan, BackendDialect::Postgres);
+    let sql = emit_sql(&plan, Dialect::Postgres);
     assert_eq!(
         sql,
         vec!["ALTER TABLE \"doc\" DROP COLUMN \"legacy\"".to_string()]
@@ -302,7 +302,7 @@ fn emit_sql_renders_drop_column_sqlite() {
         }],
         warnings: Vec::new(),
     };
-    let sql = emit_sql(&plan, BackendDialect::Sqlite);
+    let sql = emit_sql(&plan, Dialect::Sqlite);
     assert_eq!(
         sql,
         vec!["ALTER TABLE \"doc\" DROP COLUMN \"legacy\"".to_string()]
@@ -317,7 +317,7 @@ fn emit_sql_with_ir_drop_table_postgres() {
         }],
         warnings: Vec::new(),
     };
-    let result = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Postgres)
+    let result = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), Dialect::Postgres)
         .unwrap();
     assert_eq!(result.statements, vec!["DROP TABLE \"doc\"".to_string()]);
     assert_no_comment_placeholders(&result.statements);
@@ -331,7 +331,7 @@ fn emit_sql_with_ir_drop_table_sqlite() {
         }],
         warnings: Vec::new(),
     };
-    let result = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Sqlite)
+    let result = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), Dialect::Sqlite)
         .unwrap();
     assert_eq!(result.statements, vec!["DROP TABLE \"doc\"".to_string()]);
 }
@@ -353,7 +353,7 @@ fn emit_sql_with_ir_add_table_postgres() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, BackendDialect::Postgres).unwrap();
+        emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
     assert!(result.statements[0].contains("CREATE TABLE"));
     assert!(result.statements[0].contains("\"user\""));
     assert_no_comment_placeholders(&result.statements);
@@ -370,7 +370,7 @@ fn emit_sql_with_ir_add_table_sqlite() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, BackendDialect::Sqlite).unwrap();
+        emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.statements[0].starts_with("CREATE TABLE"));
 }
 
@@ -392,7 +392,7 @@ fn emit_sql_with_ir_add_table_unique_inline_sqlite() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, BackendDialect::Sqlite).unwrap();
+        emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, Dialect::Sqlite).unwrap();
     assert_eq!(result.statements.len(), 1);
     assert!(result.statements[0].contains("UNIQUE"));
     assert!(!result.statements.iter().any(|s| s.contains("CREATE UNIQUE INDEX")));
@@ -411,7 +411,7 @@ fn emit_sql_with_ir_add_column_nullable_postgres() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(result.statements.len(), 1);
     assert!(result.statements[0].contains("ADD COLUMN"));
     assert!(result.statements[0].contains("email"));
@@ -431,7 +431,7 @@ fn emit_sql_with_ir_add_column_nullable_sqlite() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Sqlite).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.statements[0].contains("ADD COLUMN"));
 }
 
@@ -454,7 +454,7 @@ fn emit_sql_with_ir_add_column_not_null_with_default_postgres() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(result.statements.len(), 2);
     assert!(result.statements[0].contains("NOT NULL"));
     assert!(result.statements[1].contains("DROP DEFAULT"));
@@ -476,7 +476,7 @@ fn emit_sql_with_ir_add_column_unique_sqlite() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Sqlite).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert_eq!(result.statements.len(), 2);
     assert!(result.statements[0].contains("ADD COLUMN"));
     assert!(result.statements[1].contains("CREATE UNIQUE INDEX"));
@@ -498,7 +498,7 @@ fn emit_sql_with_ir_add_column_indexed() {
         }],
         warnings: Vec::new(),
     };
-    for dialect in [BackendDialect::Sqlite, BackendDialect::Postgres] {
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
         let result = emit_sql_with_ir(&plan, &old_ir, &new_ir, dialect).unwrap();
         assert_eq!(result.statements.len(), 2);
         assert!(result.statements[1].contains("CREATE INDEX"));
@@ -530,7 +530,7 @@ fn emit_sql_with_ir_add_column_fk_postgres() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(result.statements.iter().any(|s| s.contains("FOREIGN KEY")));
 }
 
@@ -558,7 +558,7 @@ fn emit_sql_with_ir_add_column_fk_sqlite_warns() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Sqlite).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.warnings.iter().any(|w| w.contains("FOREIGN KEY")));
 }
 
@@ -577,7 +577,7 @@ fn emit_sql_with_ir_alter_column_type_postgres() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(result.statements.len(), 1);
     assert!(result.statements[0].contains("ALTER COLUMN"));
     assert!(result.statements[0].contains("TYPE"));
@@ -599,7 +599,7 @@ fn emit_sql_with_ir_alter_column_type_sqlite_warns_only() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Sqlite).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.statements.is_empty());
     assert!(result.warnings.iter().any(|w| w.contains("cannot change column types")));
 }
@@ -616,7 +616,7 @@ fn emit_sql_with_ir_alter_column_nullability_postgres() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(result.statements[0].contains("SET NOT NULL"));
 
     let plan_drop = MigrationPlan {
@@ -630,7 +630,7 @@ fn emit_sql_with_ir_alter_column_nullability_postgres() {
         &plan_drop,
         &new_ir,
         &old_ir,
-        BackendDialect::Postgres,
+        Dialect::Postgres,
     )
     .unwrap();
     assert!(result_drop.statements[0].contains("DROP NOT NULL"));
@@ -648,7 +648,7 @@ fn emit_sql_with_ir_alter_column_nullability_sqlite_warns_only() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Sqlite).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.statements.is_empty());
     assert!(result
         .warnings
@@ -668,7 +668,7 @@ fn emit_sql_with_ir_unsafe_not_null_add_errors() {
         }],
         warnings: Vec::new(),
     };
-    let err = emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap_err();
+    let err = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap_err();
     assert!(err.message.contains("NOT NULL"));
     assert!(err.message.contains("no literal default"));
 }
@@ -684,7 +684,7 @@ fn emit_sql_with_ir_drop_primary_key_column_errors() {
         }],
         warnings: Vec::new(),
     };
-    let err = emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap_err();
+    let err = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap_err();
     assert!(err.message.contains("primary key"));
 }
 
@@ -697,7 +697,7 @@ fn emit_sql_with_ir_add_table_missing_model_errors() {
         warnings: Vec::new(),
     };
     let err =
-        emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Postgres)
+        emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), Dialect::Postgres)
             .unwrap_err();
     assert!(err.message.contains("model 'missing' not found"));
 }
@@ -719,7 +719,7 @@ fn emit_sql_with_ir_alter_column_type_unknown_db_type_errors() {
         warnings: Vec::new(),
     };
     let err =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap_err();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap_err();
     assert!(err.message.contains("Cannot alter type"));
     assert!(err.message.contains("unknown"));
 }
@@ -782,7 +782,7 @@ fn emit_sql_multi_op_ordering() {
         warnings: Vec::new(),
     };
     let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, BackendDialect::Postgres).unwrap();
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     let create_positions: Vec<(usize, &String)> = result
         .statements
         .iter()
@@ -821,7 +821,7 @@ fn plan_from_ir_adds_missing_index() {
     let mut nm = schema_model("doc", vec![col("a", "text", true), col("b", "text", true)]);
     nm.indexes = vec![SchemaIndex { name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false }];
     let new = envelope(vec![nm]);
-    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    let plan = plan_from_ir(&old, &new, Dialect::Sqlite);
     assert!(plan.operations.contains(&MigrationOp::AddIndex {
         table: "doc".into(), name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false
     }));
@@ -833,7 +833,7 @@ fn plan_from_ir_drops_orphaned_index() {
     om.indexes = vec![SchemaIndex { name: "idx_doc_a".into(), columns: vec!["a".into()], unique: false }];
     let old = envelope(vec![om]);
     let new = envelope(vec![schema_model("doc", vec![col("a", "text", true)])]); // no index
-    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    let plan = plan_from_ir(&old, &new, Dialect::Sqlite);
     assert!(plan.operations.contains(&MigrationOp::DropIndex { table: "doc".into(), name: "idx_doc_a".into() }));
 }
 
@@ -842,14 +842,14 @@ fn emit_add_index_matches_create_path() {
     let plan = MigrationPlan { operations: vec![MigrationOp::AddIndex {
         table: "doc".into(), name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false
     }], warnings: vec![] };
-    let r = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Sqlite).unwrap();
+    let r = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), Dialect::Sqlite).unwrap();
     assert_eq!(r.statements, vec!["CREATE INDEX IF NOT EXISTS \"idx_doc_a_b\" ON \"doc\" (\"a\", \"b\")".to_string()]);
 }
 
 #[test]
 fn emit_drop_index_renders_drop() {
     let plan = MigrationPlan { operations: vec![MigrationOp::DropIndex { table: "doc".into(), name: "idx_doc_a".into() }], warnings: vec![] };
-    let r = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), BackendDialect::Postgres).unwrap();
+    let r = emit_sql_with_ir(&plan, &empty_envelope(), &empty_envelope(), Dialect::Postgres).unwrap();
     assert_eq!(r.statements, vec!["DROP INDEX IF EXISTS \"idx_doc_a\"".to_string()]);
 }
 
@@ -866,8 +866,8 @@ fn emit_sql_no_comment_placeholders_on_full_plan() {
             col("extra", "text", true),
         ],
     )]);
-    let plan = plan_from_ir(&old_ir, &new_ir, BackendDialect::Sqlite);
-    for dialect in [BackendDialect::Sqlite, BackendDialect::Postgres] {
+    let plan = plan_from_ir(&old_ir, &new_ir, Dialect::Sqlite);
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
         let result = emit_sql_with_ir(&plan, &old_ir, &new_ir, dialect).unwrap();
         assert_no_comment_placeholders(&result.statements);
     }
@@ -888,7 +888,7 @@ fn plan_from_ir_composite_all_new_columns_emits_add_index() {
         unique: false,
     }];
     let new = envelope(vec![nm]);
-    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    let plan = plan_from_ir(&old, &new, Dialect::Sqlite);
     assert!(
         plan.operations.contains(&MigrationOp::AddIndex {
             table: "doc".to_string(),
@@ -910,12 +910,12 @@ fn render_create_table_golden_sqlite() {
     let organization = &models[0];
     let account = &models[1];
 
-    let org = render_create_table(organization, BackendDialect::Sqlite).unwrap();
+    let org = render_create_table(organization, Dialect::Sqlite).unwrap();
     assert_eq!(org.create_sql, ORG_CREATE_SQLITE);
     assert!(org.post_create_sqls.is_empty());
     assert!(org.warnings.is_empty());
 
-    let acct = render_create_table(account, BackendDialect::Sqlite).unwrap();
+    let acct = render_create_table(account, Dialect::Sqlite).unwrap();
     assert_eq!(acct.create_sql, ACCOUNT_CREATE_SQLITE);
 
     // Post-create order is immaterial and not reconstructable (the IR sorts
@@ -951,11 +951,11 @@ fn render_create_table_golden_postgres() {
     let organization = &models[0];
     let account = &models[1];
 
-    let org = render_create_table(organization, BackendDialect::Postgres).unwrap();
+    let org = render_create_table(organization, Dialect::Postgres).unwrap();
     assert_eq!(org.create_sql, ORG_CREATE_POSTGRES);
     assert!(org.post_create_sqls.is_empty());
 
-    let acct = render_create_table(account, BackendDialect::Postgres).unwrap();
+    let acct = render_create_table(account, Dialect::Postgres).unwrap();
     assert_eq!(acct.create_sql, ACCOUNT_CREATE_POSTGRES);
 
     let mut got = acct.post_create_sqls.clone();
@@ -996,7 +996,7 @@ fn render_create_table_fk_none_on_delete_defaults_cascade() {
         columns: vec![col("team_id", "int", true)],
         ..schema_model("user", vec![])
     };
-    for dialect in [BackendDialect::Sqlite, BackendDialect::Postgres] {
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
         let emission = render_create_table(&child, dialect).unwrap();
         assert!(
             emission.create_sql.contains(
@@ -1023,7 +1023,7 @@ fn plan_from_ir_single_column_new_index_is_skipped() {
         unique: false,
     }];
     let new = envelope(vec![nm]);
-    let plan = plan_from_ir(&old, &new, BackendDialect::Sqlite);
+    let plan = plan_from_ir(&old, &new, Dialect::Sqlite);
     assert!(
         !plan.operations.contains(&MigrationOp::AddIndex {
             table: "doc".to_string(),
@@ -1067,7 +1067,7 @@ fn render_create_table_unknown_logical_type_errors() {
         postgres_native_enum: false,
     };
     let model = schema_model("widget", vec![col]);
-    for dialect in [BackendDialect::Sqlite, BackendDialect::Postgres] {
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
         let result = render_create_table(&model, dialect);
         assert!(
             result.is_err(),

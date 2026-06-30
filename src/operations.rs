@@ -4,11 +4,11 @@
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
 use crate::backend::{
-    BackendKind, EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind,
+    EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind,
 };
 use crate::query::{QueryDef, query_def_from_ir_payload};
 use crate::state::{
-    IDENTITY_MAP, MODEL_REGISTRY, SqlDialect, TRANSACTION_REGISTRY,
+    Dialect, IDENTITY_MAP, MODEL_REGISTRY, TRANSACTION_REGISTRY,
     TransactionConnection, TransactionHandle, connection_for_route, ensure_session_idle_for_close,
     engine_for_connection, register_session, session_state, unregister_session,
 };
@@ -80,7 +80,7 @@ fn active_route_for_operation(
     String,
     Arc<EngineHandle>,
     Option<TransactionConnection>,
-    BackendKind,
+    Dialect,
 )> {
     let tx_route = get_transaction_route(tx_id, session_id.as_deref())?;
     let session_connection = if let Some(ref sid) = session_id {
@@ -227,7 +227,7 @@ fn query_def_from_ir_json(query_ir_json: &str) -> PyResult<QueryDef> {
 
 fn query_condition_for_backend(
     query_def: &QueryDef,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> PyResult<Condition> {
     query_def
         .to_condition_for_backend(backend)
@@ -403,8 +403,8 @@ async fn postgres_catalog_rows(
 macro_rules! sea_query_build_for_backend {
     ($stmt:expr, $backend:expr) => {{
         match $backend {
-            crate::state::SqlDialect::Sqlite => $stmt.build(SqliteQueryBuilder),
-            crate::state::SqlDialect::Postgres => $stmt.build(PostgresQueryBuilder),
+            crate::state::Dialect::Sqlite => $stmt.build(SqliteQueryBuilder),
+            crate::state::Dialect::Postgres => $stmt.build(PostgresQueryBuilder),
         }
     }};
 }
@@ -412,8 +412,8 @@ macro_rules! sea_query_build_for_backend {
 macro_rules! sea_query_to_string_for_backend {
     ($stmt:expr, $backend:expr) => {{
         match $backend {
-            crate::state::SqlDialect::Sqlite => $stmt.to_string(SqliteQueryBuilder),
-            crate::state::SqlDialect::Postgres => $stmt.to_string(PostgresQueryBuilder),
+            crate::state::Dialect::Sqlite => $stmt.to_string(SqliteQueryBuilder),
+            crate::state::Dialect::Postgres => $stmt.to_string(PostgresQueryBuilder),
         }
     }};
 }
@@ -506,7 +506,7 @@ fn apply_postgres_text_select_columns(
     table_name: &str,
     schema: &serde_json::Value,
     pg_native_enum_columns: &HashSet<String>,
-    backend: SqlDialect,
+    backend: Dialect,
 ) {
     crate::codec::apply_postgres_text_select_columns(
         select,
@@ -522,9 +522,9 @@ async fn postgres_enum_udt_by_column(
     table_name: &str,
     engine: &EngineHandle,
     tx_conn: &Option<TransactionConnection>,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> PyResult<HashMap<String, String>> {
-    if backend != SqlDialect::Postgres {
+    if backend != Dialect::Postgres {
         return Ok(HashMap::new());
     }
 
@@ -558,9 +558,9 @@ async fn postgres_uuid_column_names(
     table_name: &str,
     engine: &EngineHandle,
     tx_conn: &Option<TransactionConnection>,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> PyResult<HashSet<String>> {
-    if backend != SqlDialect::Postgres {
+    if backend != Dialect::Postgres {
         return Ok(HashSet::new());
     }
 
@@ -589,9 +589,9 @@ async fn postgres_temporal_cast_by_column(
     table_name: &str,
     engine: &EngineHandle,
     tx_conn: &Option<TransactionConnection>,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> PyResult<HashMap<String, String>> {
-    if backend != SqlDialect::Postgres {
+    if backend != Dialect::Postgres {
         return Ok(HashMap::new());
     }
 
@@ -644,7 +644,7 @@ fn schema_value_expr(
     enum_udt: &HashMap<String, String>,
     uuid_columns: &HashSet<String>,
     ts_cast: &HashMap<String, String>,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> PyResult<SimpleExpr> {
     crate::codec::schema_bind_expr(
         schema,
@@ -669,7 +669,7 @@ fn backend_column_value_expr(
     col_name: &str,
     value: sea_query::Value,
     uuid_columns: &HashSet<String>,
-    backend: SqlDialect,
+    backend: Dialect,
 ) -> SimpleExpr {
     crate::codec::m2m_bind_expr(col_name, value, uuid_columns, backend)
 }
@@ -1322,7 +1322,7 @@ pub fn save_record(
                     insert_stmt.on_conflict(on_conflict);
                 }
             }
-            let needs_postgres_returning = backend == crate::state::SqlDialect::Postgres
+            let needs_postgres_returning = backend == crate::state::Dialect::Postgres
                 && pk_col.is_some()
                 && pk_is_auto
                 && !pk_provided;
@@ -2622,8 +2622,8 @@ pub fn _shadow_compare_query_plan_for_test(
     operation: String,
 ) -> PyResult<String> {
     let backend = match dialect.as_str() {
-        "postgres" => SqlDialect::Postgres,
-        "sqlite" => SqlDialect::Sqlite,
+        "postgres" => Dialect::Postgres,
+        "sqlite" => Dialect::Sqlite,
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
@@ -2700,7 +2700,7 @@ pub fn _shadow_compare_query_plan_for_test(
 #[cfg(test)]
 mod m2m_value_tests {
     use super::{backend_column_value_expr, python_to_sea_value};
-    use crate::state::SqlDialect;
+    use crate::state::Dialect;
     use pyo3::Python;
     use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
     use std::collections::HashSet;
@@ -2747,7 +2747,7 @@ mod m2m_value_tests {
 
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
         let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
-        let expr = backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
+        let expr = backend_column_value_expr("user_id", value, &uuid_cols, Dialect::Postgres);
 
         let sql = Query::select()
             .expr(expr.clone())
@@ -2769,7 +2769,7 @@ mod m2m_value_tests {
             "team_id",
             SeaValue::BigInt(Some(42)),
             &uuid_cols,
-            SqlDialect::Postgres,
+            Dialect::Postgres,
         );
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         // No CAST for plain integer FK
@@ -2783,7 +2783,7 @@ mod m2m_value_tests {
 
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
         let value = SeaValue::String(Some(Box::new(uuid_str.to_string())));
-        let expr = backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Sqlite);
+        let expr = backend_column_value_expr("user_id", value, &uuid_cols, Dialect::Sqlite);
 
         let sql = Query::select().expr(expr).to_string(SqliteQueryBuilder);
         assert!(!sql.contains("AS uuid"), "SQLite must not CAST: {sql}");
@@ -2799,7 +2799,7 @@ mod m2m_value_tests {
         uuid_cols.insert("user_id".to_string());
 
         let value = SeaValue::String(Some(Box::new("not-a-uuid".to_string())));
-        let expr = backend_column_value_expr("user_id", value, &uuid_cols, SqlDialect::Postgres);
+        let expr = backend_column_value_expr("user_id", value, &uuid_cols, Dialect::Postgres);
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("AS uuid"),
@@ -2811,7 +2811,7 @@ mod m2m_value_tests {
 #[cfg(test)]
 mod schema_value_expr_tests {
     use super::schema_value_expr;
-    use crate::state::SqlDialect;
+    use crate::state::Dialect;
     use sea_query::{Alias, PostgresQueryBuilder, Query, Value as SeaValue};
     use std::collections::{HashMap, HashSet};
 
@@ -2838,7 +2838,7 @@ mod schema_value_expr_tests {
             &enum_udt,
             &uuid_columns,
             &ts_cast,
-            SqlDialect::Postgres,
+            Dialect::Postgres,
         )?;
         let (sql, values) = Query::insert()
             .into_table(Alias::new(table))
@@ -3047,7 +3047,7 @@ mod schema_value_expr_tests {
                 &HashMap::new(),
                 &HashSet::new(),
                 &HashMap::new(),
-                SqlDialect::Postgres,
+                Dialect::Postgres,
             )
             .expect_err("invalid UUID should error");
 
@@ -3087,7 +3087,7 @@ mod schema_value_expr_tests {
             &HashMap::new(),
             &HashSet::new(),
             &ts_cast,
-            SqlDialect::Postgres,
+            Dialect::Postgres,
         )
         .unwrap();
         let (sql, _) = Query::insert()
@@ -3118,7 +3118,7 @@ mod schema_value_expr_tests {
             &HashMap::new(),
             &HashSet::new(),
             &HashMap::new(),
-            SqlDialect::Sqlite,
+            Dialect::Sqlite,
         )
         .unwrap();
         let (_, values) = Query::insert()
