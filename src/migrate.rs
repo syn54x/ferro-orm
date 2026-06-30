@@ -1165,7 +1165,7 @@ mod tests {
             .and_then(|value| value.as_object())
     }
 
-    fn migrate_check_expression(col_name: &str, col_info: &serde_json::Value) -> Option<String> {
+    fn migrate_check_expression(col_name: &str, col_info: &serde_json::Value) -> Option<(String, Vec<String>)> {
         let values = col_info.get("enum").and_then(|v| v.as_array())?;
         if values.is_empty() {
             return None;
@@ -1179,7 +1179,7 @@ mod tests {
                 other => format!("'{}'", other.to_string().replace('\'', "''")),
             })
             .collect();
-        Some(format!("\"{}\" IN ({})", col_name, rendered.join(", ")))
+        Some((col_name.to_string(), rendered))
     }
 
     /// Test-only helper: convert a Ferro-enriched JSON schema into a single-model
@@ -1276,11 +1276,12 @@ mod tests {
                 }
 
                 if migrate_column_bool(raw_col, resolved, "db_check").unwrap_or(false)
-                    && let Some(expression) = migrate_check_expression(name, resolved)
+                    && let Some((column, values)) = migrate_check_expression(name, resolved)
                 {
                     checks.push(SchemaCheck {
                         name: db_check_constraint_name(table_lower, name),
-                        expression,
+                        column,
+                        values,
                     });
                 }
             }

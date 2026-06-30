@@ -577,7 +577,7 @@ Status: `In progress`
 Issue references:
 
 - `Epic:` [#145](https://github.com/syn54x/ferro-orm/issues/145)
-- `Sub-issues:` [#146](https://github.com/syn54x/ferro-orm/issues/146) _(dialect enums)_, [#153](https://github.com/syn54x/ferro-orm/issues/153) _(create-path unification; **done**, merged via #157)_, [#154](https://github.com/syn54x/ferro-orm/issues/154) _(datetime→timestamptz coarseness)_, [#155](https://github.com/syn54x/ferro-orm/issues/155) _(py3.14 deferred annotations)_, [#158](https://github.com/syn54x/ferro-orm/issues/158) _(single db_check check-renderer)_
+- `Sub-issues:` [#146](https://github.com/syn54x/ferro-orm/issues/146) _(dialect enums; **done**)_, [#153](https://github.com/syn54x/ferro-orm/issues/153) _(create-path unification; **done**, merged via #157)_, [#154](https://github.com/syn54x/ferro-orm/issues/154) _(datetime→timestamptz coarseness)_, [#155](https://github.com/syn54x/ferro-orm/issues/155) _(py3.14 deferred annotations)_, [#158](https://github.com/syn54x/ferro-orm/issues/158) _(single db_check check-renderer; **done**)_
 
 > Inserted as `8.6` (post-8.5 cleanup backlog). Does **not** gate Phase 9 — it
 > executes after the 8.5 consolidation lands. Source: cleanups surfaced during
@@ -596,8 +596,13 @@ Issue references:
       `ferro-ddl-lowering::Dialect`, `ferro-migrate::BackendDialect`) into one
       shared `Dialect` in a leaf crate; delete the per-seam translation helpers
       ([#146](https://github.com/syn54x/ferro-orm/issues/146)).
-- [ ] Single check-renderer for `db_check` CHECK SQL; drop the positional
-      `render_check_expression` re-quoting added in #153
+- [x] Single check-renderer for `db_check` CHECK SQL: `SchemaCheck` is now
+      structured `{name, column, values}` (values are pre-rendered SQL literal
+      tokens); one `render_db_check` in `ferro_ddl_lowering` serves both the
+      runtime CREATE path and the `ferro-migrate` ALTER path; `render_check_expression`
+      (positional `split_once(" IN (")` re-quoting) deleted; ALTER path reconciled
+      from unquoted→quoted form and now emits a SQLite elision warning; Alembic
+      mirrors just the body in Python; CREATE output byte-identical
       ([#158](https://github.com/syn54x/ferro-orm/issues/158)).
 - [ ] _Additional items from a read-only Rust duplication sweep (planned after
       #140 lands): duplicated enums/types across crates, same-logic functions in
@@ -805,6 +810,7 @@ Append updates as concise entries.
 - `2026-06-29` - **Phase 8.6 #153 create-path unification** landed on `feat/ir-p8.6-153-create-path-ir` (PRs into integration `feat/ir-p8.6-cleanups`). The runtime CREATE path now consumes the Python SchemaIR via the shared `ferro-migrate` `render_create_table` emitter (inline FKs, byte-identical DDL), added a `binary` `logical_type` for `bytes`, fails loud on unknown column types, and removed the cutover-orphaned JSON create emitter (`build_create_table_sqls` + cluster). **Scope correction:** removal of the deprecated `canonical_from_parts` `("string", Some(...))` arms + the `#[cfg(test)]` `schema_json_to_schema_ir` is **re-homed to Phase 9 / #108** — they remain required by `plan_table_migration_legacy` (retained for shadow comparison until Phase 9), not by the create path. Migration impact `none`.
 - `2026-06-29` - **Phase 8.6 #153 merged to integration** `feat/ir-p8.6-cleanups` (PR #157, CI green incl. the Postgres matrix, which caught two real create-path bugs — PK autoincrement default + stale join-table registry — fixed before merge). #153 closed. Phase 8.6 status → `In progress`. Filed [#158](https://github.com/syn54x/ferro-orm/issues/158) (single check-renderer for `db_check`; drop the positional `render_check_expression` re-quoting #153 introduced) as a sub-issue under #145 — kept in 8.6 rather than deferred to Phase 9. Remaining 8.6 work: #146 (dialect enums), #154, #155, #158.
 - `2026-06-29` - **Phase 8.6 #146 dialect-enum unification** landed on `feat/ir-p8.6-146-dialect-enum` (PR targets integration `feat/ir-p8.6-cleanups`). One canonical `ferro_ddl_lowering::Dialect` replaces three parallel enums (`SqlDialect`/`BackendKind`, `ferro-ddl-lowering::Dialect`, `ferro-migrate::BackendDialect`); the three translator helpers (`sql_dialect_to_lowering`, `backend_dialect`, `lowering_dialect`) deleted; `from_url` relocated to free function `dialect_from_url`. SQLite matrix green; grep-gate clean; Postgres CI-deferred (no local Postgres in dev environment). Migration impact `none` — `Dialect`/`dialect_from_url` are internal Rust symbols, not part of the Python API. #146 closes on PR merge into `feat/ir-p8.6-cleanups`.
+- `2026-06-30` - **Phase 8.6 #158 single check-renderer** landed on `feat/ir-p8.6-158-check-renderer` (PR targets integration `feat/ir-p8.6-cleanups`). `SchemaCheck` is now structured `{name, column, values}` (values are pre-rendered SQL literal tokens; value-escaping stays single-sourced in the Python compiler). One `render_db_check` in `ferro_ddl_lowering` serves both the runtime CREATE path and the `ferro-migrate` ALTER path; Alembic mirrors just the body via Python `_render_check_body`. `render_check_expression` (the positional `split_once(" IN (")` re-quoting from #153) is deleted. Behavior: CREATE output byte-identical (golden green); ALTER path reconciled from unquoted→quoted form (now matches CREATE) and emits a SQLite elision warning instead of silently dropping; Alembic empty-diff re-verified green. Migration impact `none` — internal architecture only; runtime CREATE DDL byte-identical; ALTER/Alembic converge to the canonical quoted form. #145 is now 3/5 sub-issues complete (#146, #153, #158 done; #154, #155 remain).
 
 ## Immediate next actions
 

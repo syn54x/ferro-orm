@@ -370,6 +370,45 @@ pub fn db_check_constraint_name(table_lower: &str, col_name: &str) -> String {
     raw
 }
 
+/// The CHECK body for a `db_check` enum constraint — byte-identical across the
+/// CREATE and ALTER emitters (and mirrored, escaping-free, by the Alembic emitter).
+/// Quoting is double-quote on both backends; the wrapping `ALTER ... ADD CONSTRAINT`
+/// is emitted only on Postgres (see `render_db_check`).
+pub fn render_check_body(check: &ferro_schema_ir::SchemaCheck) -> String {
+    format!("{} IN ({})", quote_ident(&check.column), check.values.join(", "))
+}
+
+/// The outcome of emitting a `db_check` constraint for one dialect.
+#[derive(Debug)]
+pub struct CheckEmission {
+    /// The `ALTER TABLE ... ADD CONSTRAINT ... CHECK (...)` statement (Postgres only).
+    pub statement: Option<String>,
+    /// The SQLite elision warning (SQLite only).
+    pub warning: Option<String>,
+}
+
+/// Single source for db_check emission: wrapper + dialect decision + body.
+/// Postgres emits the ALTER; SQLite elides with a warning (no silent drop).
+pub fn render_db_check(table: &str, check: &ferro_schema_ir::SchemaCheck, dialect: Dialect) -> CheckEmission {
+    match dialect {
+        Dialect::Postgres => CheckEmission {
+            statement: Some(format!(
+                "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{}\" CHECK ({})",
+                check.name,
+                render_check_body(check),
+            )),
+            warning: None,
+        },
+        Dialect::Sqlite => CheckEmission {
+            statement: None,
+            warning: Some(format!(
+                "Check constraint '{}' on table '{}' is not emitted on SQLite (requires table rebuild).",
+                check.name, table
+            )),
+        },
+    }
+}
+
 /// Postgres `ALTER COLUMN ... TYPE` target spelling.
 pub fn pg_alter_type_target(canonical: CanonicalType) -> String {
     match canonical {

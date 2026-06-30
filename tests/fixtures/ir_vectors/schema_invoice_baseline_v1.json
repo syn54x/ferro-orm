@@ -93,7 +93,8 @@
           "checks": [
             {
               "name": "ck_invoice_number",
-              "expression": "length(number) > 0"
+              "column": "number",
+              "values": ["'A'", "'B'"]
             }
           ]
         }
