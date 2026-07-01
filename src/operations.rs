@@ -2038,7 +2038,9 @@ pub fn delete_filtered(
 /// Args:
 ///     name (str): Model class name.
 ///     query_ir_json (str): Serialized Query IR envelope JSON.
-///     values_json (str): JSON object of column → value assignments.
+///     updates (dict): Per-column value map; ``bytes`` values are bound
+///         directly (non-UTF-8 safe), all other values are routed through
+///         the schema casting authority.
 ///     tx_id (str | None): Optional active transaction.
 ///     using (str | None): Connection override.
 ///     session_id (str | None): Session-scoped routing when set.
@@ -2047,27 +2049,20 @@ pub fn delete_filtered(
 ///     int: Rows updated. Clears the identity map for the model when enabled.
 ///
 /// # Errors
-/// `PyValueError` for invalid values JSON; `PyRuntimeError` on execute failure.
+/// `PyTypeError` for unbindable column values; `PyRuntimeError` on execute failure.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, update_json, tx_id=None, using=None, session_id=None))]
-pub fn update_filtered(
-    py: Python<'_>,
+#[pyo3(signature = (name, query_ir_json, updates, tx_id=None, using=None, session_id=None))]
+pub fn update_filtered<'py>(
+    py: Python<'py>,
     name: String,
     query_ir_json: String,
-    update_json: String,
+    updates: Bound<'py, pyo3::types::PyDict>,
     tx_id: Option<String>,
     using: Option<String>,
     session_id: Option<String>,
-) -> PyResult<Bound<'_, PyAny>> {
+) -> PyResult<Bound<'py, PyAny>> {
     let mut query_def = query_def_from_ir_json(&query_ir_json)?;
-
-    let update_values: serde_json::Value = serde_json::from_str(&update_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid update JSON: {}", e))
-    })?;
-
-    let update_map = update_values.as_object().cloned().ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err("Update values must be a JSON object")
-    })?;
+    let update_inputs = bind_inputs_from_py(&updates)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
@@ -2091,14 +2086,14 @@ pub fn update_filtered(
                 .table(Alias::new(&table_name))
                 .cond_where(query_condition_for_backend(&query_def, backend)?)
                 .to_owned();
-            for (key, value) in update_map {
+            for (key, input) in &update_inputs {
                 update.value(
-                    Alias::new(&key),
-                    schema_value_expr(
+                    Alias::new(key),
+                    bind_input_to_expr(
                         schema,
                         &table_name,
-                        &key,
-                        &value,
+                        key,
+                        input,
                         &enum_udt,
                         &uuid_columns,
                         &ts_cast,

@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING, Any, Generic, Type, TypeVar, overload
 
+from .._bind_payload import update_bind_payload
 from .._deprecations import (
     IR_FIRST_DEPRECATION_REMOVE_IN,
     IR_FIRST_DEPRECATION_SINCE,
@@ -312,14 +313,11 @@ class Query(Generic[T]):
             "offset": self._offset,
             "m2m": None,
         }
-        from pydantic_core import to_json
-
         tx_id, using, session_id = self._transaction_or_using()
-        # Use pydantic_core.to_json to handle Decimals, UUIDs, etc. in kwargs
         return await update_filtered(
             self.model_cls.__name__,
             _query_ir_payload_to_json(query_def),
-            to_json(fields).decode(),
+            update_bind_payload(fields),
             tx_id,
             using,
             session_id=session_id,

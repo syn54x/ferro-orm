@@ -88,3 +88,45 @@ async def test_save_preserves_rich_types(db_url):
     assert got.tags == ["a", "b"]
     assert got.note is None
     assert got.when == when
+
+
+@pytest.mark.parametrize(
+    "payload",
+    BINARY_VECTORS,
+    ids=["png-magic", "pdf-magic", "all-bytes", "utf8-bytes", "empty"],
+)
+@pytest.mark.asyncio
+async def test_update_roundtrips_binary(db_url, payload):
+    class UpdDoc(Model):
+        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        name: str = ""
+        data: bytes = b""
+
+    await ferro.connect(db_url, auto_migrate=True)
+
+    doc = UpdDoc(id=uuid4(), name="x", data=b"seed")
+    await doc.save()
+    n = await UpdDoc.where(lambda d: d.name == "x").update(data=payload)
+    assert n == 1
+    got = (await UpdDoc.where(lambda d: d.name == "x").all())[0].data
+    assert isinstance(got, bytes)
+    assert got == payload
+
+
+@pytest.mark.asyncio
+async def test_update_preserves_rich_types(db_url):
+    class UpdRec(Model):
+        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        amount: decimal.Decimal = decimal.Decimal("0")
+        count: int = 0
+
+    await ferro.connect(db_url, auto_migrate=True)
+
+    rid = uuid4()
+    await UpdRec(id=rid, amount=decimal.Decimal("1.00"), count=1).save()
+    await UpdRec.where(lambda r: r.id == rid).update(
+        amount=decimal.Decimal("99.99"), count=42
+    )
+    got = (await UpdRec.all())[0]
+    assert got.amount == decimal.Decimal("99.99")
+    assert got.count == 42

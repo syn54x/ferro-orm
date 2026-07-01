@@ -144,7 +144,7 @@ async def delete_filtered(
 async def update_filtered(
     name: str,
     query_ir_json: str,
-    update_json: str,
+    updates: dict[str, Any],
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
     session_id: Optional[str] = None,
