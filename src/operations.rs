@@ -2360,15 +2360,6 @@ fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
     }
 }
 
-/// Convert a Python primitive into an [`EngineBindValue`] for raw SQL bind parameters.
-///
-/// The Python wrapper (`src/ferro/raw.py:_marshal`) is responsible for richer
-/// types (UUID, datetime, Decimal, Enum, dict, list); this helper accepts only the
-/// primitive set and raises `TypeError` for anything else as a defensive guard.
-///
-/// Order matters: in Python, `bool` is a subtype of `int`, so we must check `bool`
-/// before `i64` or `True`/`False` would round-trip as `1`/`0`.
-///
 /// A per-column bind value for the schema-guided write path: either a
 /// JSON-canonicalized value (routed through the unchanged `schema_bind_expr`
 /// casting authority) or raw bytes (bound directly, so non-UTF-8 binary
@@ -2499,6 +2490,15 @@ fn bind_input_to_expr(
     }
 }
 
+/// Convert a Python primitive into an [`EngineBindValue`] for raw SQL bind parameters.
+///
+/// The Python wrapper (`src/ferro/raw.py:_marshal`) is responsible for richer
+/// types (UUID, datetime, Decimal, Enum, dict, list); this helper accepts only the
+/// primitive set and raises `TypeError` for anything else as a defensive guard.
+///
+/// Order matters: in Python, `bool` is a subtype of `int`, so we must check `bool`
+/// before `i64` or `True`/`False` would round-trip as `1`/`0`.
+///
 /// **Raw-SQL boundary.** This is the documented exception to Ferro's typed-null
 /// architectural rule (R3). The raw-SQL bind path has no schema or column-type
 /// context -- the user supplies pre-built SQL text and bare Python values --
