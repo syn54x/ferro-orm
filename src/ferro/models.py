@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from ._bind_payload import save_bind_payload
 from ._core import (
     begin_transaction,
     commit_transaction,
@@ -236,7 +237,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         )
         new_id = await save_record(
             self.__class__.__name__,
-            self.model_dump_json(),
+            save_bind_payload(self),
             tx_id,
             operation_using,
             session_id=session_id,

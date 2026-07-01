@@ -1210,42 +1210,37 @@ pub fn fetch_one<'py>(
 ///
 /// Args:
 ///     name (str): The model name.
-///     data (str): Serialized JSON data of the model instance.
+///     data (dict[str, Any]): Per-column value map for the model instance.
+///         ``bytes``/``bytearray`` values are preserved verbatim; all other
+///         values are routed through the schema-guided casting authority.
 ///
 /// # Errors
-/// Returns a `PyErr` if the engine is not initialized or if the save fails.
+/// Returns a `PyErr` if the engine is not initialized, the model is not
+/// registered, or a column value cannot be bound.
 #[pyfunction]
 #[pyo3(signature = (name, data, tx_id=None, using=None, session_id=None))]
-pub fn save_record(
-    py: Python<'_>,
+pub fn save_record<'py>(
+    py: Python<'py>,
     name: String,
-    data: String,
+    data: Bound<'py, pyo3::types::PyDict>,
     tx_id: Option<String>,
     using: Option<String>,
     session_id: Option<String>,
-) -> PyResult<Bound<'_, PyAny>> {
+) -> PyResult<Bound<'py, PyAny>> {
+    let bind_inputs = bind_inputs_from_py(&data)?; // GIL held here, before the async move
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_connection_name, engine, tx_conn, backend) =
             active_route_for_operation(tx_id, using, session_id.clone())?;
 
-        // ... schema and record logic ...
-        let (schema, record_obj) = {
+        let schema = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
                 pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
             })?;
-            let schema = registry.get(&name).cloned().ok_or_else(|| {
+            registry.get(&name).cloned().ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-            })?;
-            let record: serde_json::Value = serde_json::from_str(&data).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e))
-            })?;
-            let record_obj = record.as_object().cloned().ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err("Record must be an object")
-            })?;
-            (schema, record_obj)
+            })?
         };
 
-        // ... (keep current sql generation logic) ...
         let mut pk_col = None;
         let mut pk_is_auto = true;
         if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
@@ -1275,24 +1270,20 @@ pub fn save_record(
             let mut columns = Vec::new();
             let mut values = Vec::new();
             let mut pk_provided = false;
-            for (key, value) in &record_obj {
-                let is_pk = if let Some(ref pk) = pk_col {
-                    key == pk
-                } else {
-                    false
-                };
-                if is_pk && pk_is_auto && value.is_null() {
+            for (key, input) in &bind_inputs {
+                let is_pk = pk_col.as_deref() == Some(key.as_str());
+                if is_pk && pk_is_auto && input.is_json_null() {
                     continue;
                 }
-                if is_pk && !value.is_null() {
+                if is_pk && !input.is_json_null() {
                     pk_provided = true;
                 }
                 columns.push(Alias::new(key));
-                values.push(schema_value_expr(
+                values.push(bind_input_to_expr(
                     &schema,
                     &table_name,
                     key,
-                    value,
+                    input,
                     &enum_udt,
                     &uuid_columns,
                     &ts_cast,
@@ -2397,6 +2388,136 @@ fn python_to_sea_value(val: Bound<'_, PyAny>) -> PyResult<sea_query::Value> {
 /// Order matters: in Python, `bool` is a subtype of `int`, so we must check `bool`
 /// before `i64` or `True`/`False` would round-trip as `1`/`0`.
 ///
+/// A per-column bind value for the schema-guided write path: either a
+/// JSON-canonicalized value (routed through the unchanged `schema_bind_expr`
+/// casting authority) or raw bytes (bound directly, so non-UTF-8 binary
+/// survives).
+#[derive(Debug)]
+enum BindInput {
+    Json(serde_json::Value),
+    Bytes(Vec<u8>),
+}
+
+impl BindInput {
+    fn is_json_null(&self) -> bool {
+        matches!(self, BindInput::Json(serde_json::Value::Null))
+    }
+}
+
+/// Convert a JSON-safe Python value (scalar or nested container) into a
+/// `serde_json::Value`. `bytes` are handled by `bind_input_from_py` *before*
+/// this is called; anything else that is not JSON-representable is rejected
+/// with a clear `TypeError` (the Ferro-level error floor — AGENTS.md I-3, no
+/// `unwrap`/`expect`).
+fn py_to_json_value(value: &Bound<'_, PyAny>, col: &str) -> PyResult<serde_json::Value> {
+    use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
+
+    if value.is_none() {
+        return Ok(serde_json::Value::Null);
+    }
+    // bool BEFORE int: in Python bool is a subtype of int.
+    if let Ok(b) = value.downcast::<PyBool>() {
+        return Ok(serde_json::Value::Bool(b.is_true()));
+    }
+    if let Ok(i) = value.downcast::<PyInt>() {
+        if let Ok(n) = i.extract::<i64>() {
+            return Ok(serde_json::Value::from(n));
+        }
+        if let Ok(n) = i.extract::<u64>() {
+            return Ok(serde_json::Value::from(n));
+        }
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Integer out of range for column '{col}'"
+        )));
+    }
+    if let Ok(f) = value.downcast::<PyFloat>() {
+        let n = f.extract::<f64>()?;
+        return serde_json::Number::from_f64(n)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Non-finite float (NaN/Inf) for column '{col}'"
+                ))
+            });
+    }
+    if let Ok(s) = value.downcast::<PyString>() {
+        return Ok(serde_json::Value::String(s.extract::<String>()?));
+    }
+    if let Ok(list) = value.downcast::<PyList>() {
+        let mut arr = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            arr.push(py_to_json_value(&item, col)?);
+        }
+        return Ok(serde_json::Value::Array(arr));
+    }
+    if let Ok(dict) = value.downcast::<PyDict>() {
+        let mut map = serde_json::Map::new();
+        for (k, v) in dict.iter() {
+            let key: String = k.extract().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Non-string key in JSON value for column '{col}'"
+                ))
+            })?;
+            map.insert(key, py_to_json_value(&v, col)?);
+        }
+        return Ok(serde_json::Value::Object(map));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "Cannot bind value {} for column '{col}' (unsupported type). \
+         Supported: str, int, float, bool, bytes, None, and JSON-safe dict/list.",
+        value.repr()?
+    )))
+}
+
+/// Marshal a single Python column value into a `BindInput`.
+/// `bytes`/`bytearray` are preserved verbatim; everything else is JSON-canonicalized.
+fn bind_input_from_py(value: &Bound<'_, PyAny>, col: &str) -> PyResult<BindInput> {
+    use pyo3::types::{PyByteArray, PyBytes};
+
+    if let Ok(b) = value.downcast::<PyBytes>() {
+        return Ok(BindInput::Bytes(b.as_bytes().to_vec()));
+    }
+    if let Ok(b) = value.downcast::<PyByteArray>() {
+        return Ok(BindInput::Bytes(b.to_vec()));
+    }
+    Ok(BindInput::Json(py_to_json_value(value, col)?))
+}
+
+/// Extract a Python row dict into an ordered column→`BindInput` list.
+fn bind_inputs_from_py(map: &Bound<'_, pyo3::types::PyDict>) -> PyResult<Vec<(String, BindInput)>> {
+    let mut out = Vec::with_capacity(map.len());
+    for (k, v) in map.iter() {
+        let key: String = k.extract().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err("Record keys must be strings")
+        })?;
+        let input = bind_input_from_py(&v, &key)?;
+        out.push((key, input));
+    }
+    Ok(out)
+}
+
+/// Route a `BindInput` to a SeaQuery expression: raw bytes bind directly to
+/// `SeaValue::Bytes`; everything else flows through the unchanged casting
+/// authority (`schema_bind_expr`).
+#[allow(clippy::too_many_arguments)]
+fn bind_input_to_expr(
+    schema: &serde_json::Value,
+    table_name: &str,
+    col_name: &str,
+    input: &BindInput,
+    enum_udt: &HashMap<String, String>,
+    uuid_columns: &HashSet<String>,
+    ts_cast: &HashMap<String, String>,
+    backend: Dialect,
+) -> PyResult<SimpleExpr> {
+    match input {
+        BindInput::Bytes(b) => Ok(Expr::value(SeaValue::Bytes(Some(Box::new(b.clone()))))),
+        BindInput::Json(v) => crate::codec::schema_bind_expr(
+            schema, table_name, col_name, v, enum_udt, uuid_columns, ts_cast, backend,
+        ),
+    }
+}
+
 /// **Raw-SQL boundary.** This is the documented exception to Ferro's typed-null
 /// architectural rule (R3). The raw-SQL bind path has no schema or column-type
 /// context -- the user supplies pre-built SQL text and bare Python values --
@@ -2699,11 +2820,14 @@ pub fn _shadow_compare_query_plan_for_test(
 
 #[cfg(test)]
 mod m2m_value_tests {
-    use super::{backend_column_value_expr, python_to_sea_value};
+    use super::{
+        backend_column_value_expr, bind_input_from_py, bind_input_to_expr, py_to_json_value,
+        python_to_sea_value, BindInput,
+    };
     use crate::state::Dialect;
     use pyo3::Python;
     use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn extract_pg_value(expr: sea_query::SimpleExpr) -> SeaValue {
         let (_, values) = Query::insert()
@@ -2805,6 +2929,75 @@ mod m2m_value_tests {
             sql.contains("AS uuid"),
             "fallback CAST expected for unparseable UUID: {sql}"
         );
+    }
+
+    #[test]
+    fn py_to_json_value_maps_json_scalars_and_containers() {
+        Python::attach(|py| {
+            use pyo3::types::{PyDict, PyDictMethods, PyList};
+            use pyo3::IntoPyObject;
+
+            let i = 42i64.into_pyobject(py).unwrap().into_any();
+            assert_eq!(py_to_json_value(&i, "c").unwrap(), serde_json::json!(42));
+
+            let b = pyo3::types::PyBool::new(py, true).to_owned().into_any();
+            assert_eq!(py_to_json_value(&b, "c").unwrap(), serde_json::json!(true));
+
+            let s = "hi".into_pyobject(py).unwrap().into_any();
+            assert_eq!(py_to_json_value(&s, "c").unwrap(), serde_json::json!("hi"));
+
+            let list = PyList::new(py, [1i64, 2, 3]).unwrap().into_any();
+            assert_eq!(py_to_json_value(&list, "c").unwrap(), serde_json::json!([1, 2, 3]));
+
+            let dict = PyDict::new(py);
+            dict.set_item("w", 10i64).unwrap();
+            let d = dict.into_any();
+            assert_eq!(py_to_json_value(&d, "c").unwrap(), serde_json::json!({"w": 10}));
+        });
+    }
+
+    #[test]
+    fn py_to_json_value_rejects_unsupported_type() {
+        Python::attach(|py| {
+            let set = pyo3::types::PySet::empty(py).unwrap().into_any();
+            let err = py_to_json_value(&set, "mycol").expect_err("set must be rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("mycol"), "msg: {}", err);
+        });
+    }
+
+    #[test]
+    fn bind_input_from_py_preserves_non_utf8_bytes() {
+        Python::attach(|py| {
+            let raw = vec![0x89u8, 0x00, 0xff, 0xfe];
+            let obj = pyo3::types::PyBytes::new(py, &raw).into_any();
+            match bind_input_from_py(&obj, "data").unwrap() {
+                BindInput::Bytes(b) => assert_eq!(b, raw),
+                other => panic!("expected Bytes, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn bind_input_to_expr_binds_bytes_to_sea_bytes() {
+        use sea_query::{Alias, Query, SqliteQueryBuilder};
+        let schema = serde_json::json!({
+            "properties": { "data": { "type": "string", "format": "binary" } }
+        });
+        let input = BindInput::Bytes(vec![0x89, 0x00, 0xff]);
+        let expr = bind_input_to_expr(
+            &schema, "doc", "data", &input,
+            &HashMap::new(), &HashSet::new(), &HashMap::new(), Dialect::Sqlite,
+        ).unwrap();
+        let (_, values) = Query::insert()
+            .into_table(Alias::new("doc"))
+            .columns([Alias::new("data")])
+            .values_panic([expr])
+            .build(SqliteQueryBuilder);
+        match values.0.into_iter().next().unwrap() {
+            SeaValue::Bytes(Some(b)) => assert_eq!(*b, vec![0x89, 0x00, 0xff]),
+            other => panic!("expected SeaValue::Bytes, got {other:?}"),
+        }
     }
 }
 

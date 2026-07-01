@@ -115,7 +115,7 @@ async def fetch_one(
 ) -> Any | None: ...
 async def save_record(
     name: str,
-    data: str,
+    data: dict[str, Any],
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
     session_id: Optional[str] = None,
