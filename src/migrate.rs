@@ -15,8 +15,9 @@
 
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
-    CanonicalType, Dialect, apply_canonical_type, canonical_to_db_type_token,
-    information_schema_to_db_type_token, schema_columns_storage_drift,
+    CanonicalType, Dialect, apply_canonical_type, canonical_from_schema_column,
+    canonical_to_db_type_token, information_schema_to_db_type_token, is_timestamp_tz_conversion,
+    schema_columns_storage_drift, timestamp_tz_conversion_warning,
 };
 use ferro_migrate::{MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
@@ -728,13 +729,27 @@ fn plan_existing_column(
             if !live.is_enum_udt
                 && schema_columns_storage_drift(&live_col, &model_col, dialect)
             {
-                let target = pg_alter_type_target(col_plan.canonical);
-                plan.statements.push(format!(
-                    "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",
-                    table = quote_ident(table_lower),
-                    col = quote_ident(col_name),
-                    target = target,
-                ));
+                let old_canonical = canonical_from_schema_column(&live_col, dialect);
+                match old_canonical {
+                    Ok(old_c) if is_timestamp_tz_conversion(old_c, col_plan.canonical) => {
+                        plan.warnings.push(timestamp_tz_conversion_warning(
+                            table_lower,
+                            col_name,
+                            live_col.db_type.as_deref().unwrap_or(""),
+                            &pg_alter_type_target(col_plan.canonical),
+                            &canonical_to_db_type_token(old_c, dialect),
+                        ));
+                    }
+                    _ => {
+                        let target = pg_alter_type_target(col_plan.canonical);
+                        plan.statements.push(format!(
+                            "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",
+                            table = quote_ident(table_lower),
+                            col = quote_ident(col_name),
+                            target = target,
+                        ));
+                    }
+                }
             }
             if !col_plan.is_nullable && live.is_nullable {
                 plan.statements.push(format!(

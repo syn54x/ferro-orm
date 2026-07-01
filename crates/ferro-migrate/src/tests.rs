@@ -902,6 +902,53 @@ fn plan_from_ir_composite_all_new_columns_emits_add_index() {
     );
 }
 
+#[test]
+fn emit_alter_type_refuses_timestamp_to_timestamptz_on_postgres() {
+    // Live column is naive `timestamp`; the model maps `datetime` -> timestamptz.
+    let old_ir = envelope(vec![schema_model(
+        "event",
+        vec![col("occurred_at", "timestamp", false)],
+    )]);
+    let new_ir = envelope(vec![schema_model(
+        "event",
+        vec![ir_col("occurred_at", "datetime", None, false, false, false)],
+    )]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AlterColumnType {
+            table: "event".to_string(),
+            column: "occurred_at".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let result = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert!(
+        result.statements.is_empty(),
+        "expected no ALTER statement, got {:?}",
+        result.statements
+    );
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("occurred_at"));
+    assert!(result.warnings[0].contains("db_type"));
+    assert!(result.warnings[0].contains("Alembic"));
+}
+
+#[test]
+fn emit_alter_type_still_alters_int_to_bigint_on_postgres() {
+    let old_ir = envelope(vec![schema_model("m", vec![col("n", "int", false)])]);
+    let new_ir = envelope(vec![schema_model("m", vec![col("n", "bigint", false)])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AlterColumnType {
+            table: "m".to_string(),
+            column: "n".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let result = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(result.statements.len(), 1);
+    assert!(result.statements[0].contains("ALTER COLUMN"));
+    assert!(result.warnings.is_empty());
+}
+
 // KTD-2/KTD-3 golden: `render_create_table` must be byte-identical to TODAY's
 // runtime JSON path (`build_create_table_sqls`) for the comprehensive fixture,
 // emitting FKs INLINE in the CREATE TABLE on BOTH backends.

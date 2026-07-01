@@ -49,6 +49,18 @@ def utcnow() -> datetime:
 
 Avoid naive `datetime.now()` — it captures the server's local clock, which makes values ambiguous and breaks comparisons across hosts and DST changes. Keep storage in UTC and convert to the user's timezone only at the display layer.
 
+### Naive vs timezone-aware columns
+
+A `datetime` field maps to Postgres `timestamptz` (SQLite stores both the same
+way). If you point a model at a pre-existing plain `timestamp` (no time zone)
+column, Ferro will **not** silently convert it — auto-migrate warns and leaves the
+column untouched, because a `timestamp` → `timestamptz` cast reinterprets stored
+values under the connection's timezone and can shift your data.
+
+- To keep the column naive, declare the field with `db_type="timestamp"`.
+- To convert it intentionally, run a reviewed migration (Alembic) with an explicit
+  source timezone, e.g. `USING occurred_at AT TIME ZONE 'UTC'`.
+
 ## See Also
 
 - [Models & Fields guide](../guide/models-and-fields.md) — field defaults and `default_factory`
