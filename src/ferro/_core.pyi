@@ -115,14 +115,14 @@ async def fetch_one(
 ) -> Any | None: ...
 async def save_record(
     name: str,
-    data: str,
+    data: dict[str, Any],
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> int | None: ...
 async def save_bulk_records(
     name: str,
-    data_list_json: str,
+    rows: list[dict[str, Any]],
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -144,7 +144,7 @@ async def delete_filtered(
 async def update_filtered(
     name: str,
     query_ir_json: str,
-    update_json: str,
+    updates: dict[str, Any],
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
     session_id: Optional[str] = None,
