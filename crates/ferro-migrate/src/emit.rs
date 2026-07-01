@@ -2,10 +2,10 @@
 
 use crate::{Dialect, EmissionError, EmissionResult, MigrationOp, MigrationPlan};
 use ferro_ddl_lowering::{
-    self, apply_canonical_type, canonical_from_schema_column, db_check_constraint_name,
-    fk_action_from_str, fk_action_sql, literal_default_value, pg_alter_type_target, quote_ident,
-    render_db_check, single_index_name, single_unique_index_name, sqlite_declared_type,
-    sqlite_type_storage_drift,
+    self, apply_canonical_type, canonical_from_schema_column, canonical_to_db_type_token,
+    db_check_constraint_name, fk_action_from_str, fk_action_sql, is_timestamp_tz_conversion,
+    literal_default_value, pg_alter_type_target, quote_ident, render_db_check, single_index_name,
+    single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
@@ -433,6 +433,29 @@ fn emit_alter_column_type(
                     ),
                 }
             })?;
+            let old_canonical = canonical_from_schema_column(old_col, ld).map_err(|message| {
+                EmissionError {
+                    message: format!(
+                        "Cannot alter type for '{}.{}': {}",
+                        table, column, message
+                    ),
+                }
+            })?;
+            if is_timestamp_tz_conversion(old_canonical, new_canonical) {
+                result.warnings.push(format!(
+                    "Column '{table}.{column}' is '{old}' in the database but the model maps \
+                     `datetime` to '{new}'. Ferro will not auto-convert it — a \
+                     timestamp/timestamptz cast reinterprets existing values under the \
+                     connection's timezone and can silently shift your data. To keep the column \
+                     as-is, annotate the field with db_type=\"{keep}\". To convert it \
+                     intentionally, use a reviewed migration (Alembic) with an explicit source \
+                     timezone.",
+                    old = old_col.db_type.as_deref().unwrap_or(""),
+                    new = pg_alter_type_target(new_canonical),
+                    keep = canonical_to_db_type_token(old_canonical, ld),
+                ));
+                return Ok(result);
+            }
             let target = pg_alter_type_target(new_canonical);
             result.statements.push(format!(
                 "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",
