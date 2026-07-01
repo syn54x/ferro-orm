@@ -432,6 +432,39 @@ pub fn pg_alter_type_target(canonical: CanonicalType) -> String {
     }
 }
 
+/// A `timestamp` ⇄ `timestamptz` change. Casting between them silently
+/// reinterprets stored values under the session `TimeZone`, so auto-migrate
+/// refuses it on Postgres (warn + skip) instead of executing it. `DateTime`
+/// is the naive side (it lowers to the same `"timestamp"` token as `Timestamp`).
+pub fn is_timestamp_tz_conversion(old: CanonicalType, new: CanonicalType) -> bool {
+    use CanonicalType::*;
+    matches!(
+        (old, new),
+        (Timestamp | DateTime, TimestampTz) | (TimestampTz, Timestamp | DateTime)
+    )
+}
+
+/// The single-source warning for a refused `timestamp`⇄`timestamptz` auto-migrate
+/// conversion on Postgres. Emitted identically by the IR emitter and the legacy
+/// migrate planner so the shadow comparator sees matching plans.
+pub fn timestamp_tz_conversion_warning(
+    table: &str,
+    column: &str,
+    old_db_type: &str,
+    new_target: &str,
+    keep_db_type: &str,
+) -> String {
+    format!(
+        "Column '{table}.{column}' is '{old_db_type}' in the database but the model maps \
+         `datetime` to '{new_target}'. Ferro will not auto-convert it — a \
+         timestamp/timestamptz cast reinterprets existing values under the \
+         connection's timezone and can silently shift your data. To keep the column \
+         as-is, annotate the field with db_type=\"{keep_db_type}\". To convert it \
+         intentionally, use a reviewed migration (Alembic) with an explicit source \
+         timezone."
+    )
+}
+
 /// SQLite declared-type string for a canonical type (parity-pinned).
 pub fn sqlite_declared_type(canonical: CanonicalType) -> String {
     match canonical {
@@ -749,5 +782,33 @@ mod tests {
         assert_eq!(canonical_from_parts("integer", None, "", Dialect::Sqlite), Ok(CanonicalType::Integer));
         // unknown is an error (CREATE path maps this to Varchar at its call site)
         assert!(canonical_from_parts("mystery", None, "", Dialect::Postgres).is_err());
+    }
+
+    #[test]
+    fn timestamp_tz_conversion_warning_names_column_db_type_and_alembic() {
+        let w = timestamp_tz_conversion_warning(
+            "event", "occurred_at", "timestamp", "timestamptz", "timestamp",
+        );
+        let col = w.find("event.occurred_at").expect("names the column");
+        let dbt = w.find("db_type").expect("names db_type");
+        let alembic = w.find("Alembic").expect("names Alembic");
+        assert!(col < dbt && dbt < alembic, "tokens must appear in order: {w}");
+    }
+
+    #[test]
+    fn is_timestamp_tz_conversion_matches_only_the_reinterpreting_pair() {
+        use CanonicalType::*;
+        // The reinterpreting pair, both directions (DateTime is the naive alias).
+        assert!(is_timestamp_tz_conversion(Timestamp, TimestampTz));
+        assert!(is_timestamp_tz_conversion(TimestampTz, Timestamp));
+        assert!(is_timestamp_tz_conversion(DateTime, TimestampTz));
+        assert!(is_timestamp_tz_conversion(TimestampTz, DateTime));
+        // Not a tz reinterpretation.
+        assert!(!is_timestamp_tz_conversion(Integer, BigInt));
+        assert!(!is_timestamp_tz_conversion(Varchar(None), Integer));
+        assert!(!is_timestamp_tz_conversion(Timestamp, Timestamp));
+        assert!(!is_timestamp_tz_conversion(TimestampTz, TimestampTz));
+        assert!(!is_timestamp_tz_conversion(Date, TimestampTz));
+        assert!(!is_timestamp_tz_conversion(Timestamp, Date));
     }
 }

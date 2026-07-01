@@ -382,6 +382,110 @@ async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
     ), "no DDL may run for SQLite type drift"
 
 
+def _pg_live_type(base_url: str, schema: str, table: str, column: str) -> str:
+    import psycopg
+
+    with psycopg.connect(base_url, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+            (schema, table, column),
+        ).fetchone()
+    return row[0] if row else "<absent>"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_pg_datetime_over_external_naive_timestamp_warns_and_skips(
+    db_url, postgres_base_url, db_schema_name, clean_registry
+):
+    """An external plain `timestamp` column + a `datetime` model must NOT be
+    silently rewritten to `timestamptz`; auto-migrate warns and leaves it. (#154)"""
+    import datetime as dt
+
+    await ferro.connect(db_url)
+    await execute(
+        'CREATE TABLE "event" '
+        '("id" serial PRIMARY KEY, "occurred_at" timestamp NOT NULL)'
+    )
+    ferro.reset_engine()
+
+    class Event(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        occurred_at: dt.datetime
+
+    with pytest.warns(UserWarning, match=r"event\.occurred_at.*db_type.*Alembic"):
+        await ferro.connect(db_url, migrate_updates=True)
+
+    # The external column is untouched — no silent reinterpretation.
+    assert (
+        _pg_live_type(postgres_base_url, db_schema_name, "event", "occurred_at")
+        == "timestamp without time zone"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_pg_datetime_db_type_override_keeps_naive_no_drift(
+    db_url, postgres_base_url, db_schema_name, clean_registry
+):
+    """The escape hatch: db_type="timestamp" over an external naive column
+    produces no drift, no warning, and no rewrite. (#154)"""
+    import datetime as dt
+    import warnings as _warnings
+
+    await ferro.connect(db_url)
+    await execute(
+        'CREATE TABLE "event2" '
+        '("id" serial PRIMARY KEY, "occurred_at" timestamp NOT NULL)'
+    )
+    ferro.reset_engine()
+
+    class Event2(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        occurred_at: Annotated[dt.datetime, FerroField(db_type="timestamp")]
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error", UserWarning)  # any drift warning -> failure
+        await ferro.connect(db_url, migrate_updates=True)
+
+    assert (
+        _pg_live_type(postgres_base_url, db_schema_name, "event2", "occurred_at")
+        == "timestamp without time zone"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_pg_ferro_created_timestamptz_no_drift(
+    db_url, postgres_base_url, db_schema_name, clean_registry
+):
+    """Control: a Ferro-created (timestamptz) column reconnects with no drift
+    and no warning — Ferro-managed date-time columns are unaffected. (#154)"""
+    import datetime as dt
+    import warnings as _warnings
+
+    class Event3(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        occurred_at: dt.datetime
+
+    await ferro.connect(db_url, auto_migrate=True)  # Ferro creates it -> timestamptz
+    assert (
+        _pg_live_type(postgres_base_url, db_schema_name, "event3", "occurred_at")
+        == "timestamp with time zone"
+    )
+    ferro.reset_engine()
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error", UserWarning)
+        await ferro.connect(db_url, migrate_updates=True)
+
+    assert (
+        _pg_live_type(postgres_base_url, db_schema_name, "event3", "occurred_at")
+        == "timestamp with time zone"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_migrate_destructive_drops_removed_columns(
