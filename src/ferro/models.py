@@ -553,11 +553,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         if not instances:
             return 0
-        # Use mode="json" to ensure Decimals, UUIDs, etc. are serialized correctly
-        data = [i.model_dump(mode="json") for i in instances]
+        data = [save_bind_payload(i) for i in instances]
         tx_id, using, session_id = _transaction_or_using(using, session)
         return await save_bulk_records(
-            cls.__name__, json.dumps(data), tx_id, using, session_id=session_id
+            cls.__name__, data, tx_id, using, session_id=session_id
         )
 
     @classmethod

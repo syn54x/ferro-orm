@@ -130,3 +130,35 @@ async def test_update_preserves_rich_types(db_url):
     got = (await UpdRec.all())[0]
     assert got.amount == decimal.Decimal("99.99")
     assert got.count == 42
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_roundtrips_binary(db_url):
+    class BulkDoc(Model):
+        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        data: bytes = b""
+
+    await ferro.connect(db_url, auto_migrate=True)
+
+    docs = [BulkDoc(id=uuid4(), data=v) for v in BINARY_VECTORS]
+    n = await BulkDoc.bulk_create(docs)
+    assert n == len(BINARY_VECTORS)
+
+    stored = {bytes(d.data) for d in await BulkDoc.all()}
+    assert stored == {bytes(v) for v in BINARY_VECTORS}
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_preserves_rich_types(db_url):
+    class BulkRec(Model):
+        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        amount: decimal.Decimal = decimal.Decimal("0")
+
+    await ferro.connect(db_url, auto_migrate=True)
+
+    await BulkRec.bulk_create([
+        BulkRec(id=uuid4(), amount=decimal.Decimal("1.11")),
+        BulkRec(id=uuid4(), amount=decimal.Decimal("2.22")),
+    ])
+    amounts = sorted(r.amount for r in await BulkRec.all())
+    assert amounts == [decimal.Decimal("1.11"), decimal.Decimal("2.22")]

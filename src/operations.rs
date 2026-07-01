@@ -1384,7 +1384,8 @@ pub fn save_record<'py>(
 ///
 /// Args:
 ///     name (str): Model class name.
-///     data_list_json (str): JSON array of record objects (column → value).
+///     rows (list[dict[str, Any]]): Per-row column→value maps. Bytes columns are
+///         preserved verbatim; all other values flow through the typed codec path.
 ///     tx_id (str | None): Optional active transaction.
 ///     using (str | None): Connection override.
 ///     session_id (str | None): Session-scoped routing when set.
@@ -1393,17 +1394,21 @@ pub fn save_record<'py>(
 ///     int: Number of rows inserted.
 ///
 /// # Errors
-/// `PyValueError` for invalid JSON; `PyRuntimeError` on registry/execute failures.
+/// `PyRuntimeError` on registry/execute failures; `PyTypeError` for unbindable values.
 #[pyfunction]
-#[pyo3(signature = (name, data_list_json, tx_id=None, using=None, session_id=None))]
-pub fn save_bulk_records(
-    py: Python<'_>,
+#[pyo3(signature = (name, rows, tx_id=None, using=None, session_id=None))]
+pub fn save_bulk_records<'py>(
+    py: Python<'py>,
     name: String,
-    data_list_json: String,
+    rows: Vec<Bound<'py, pyo3::types::PyDict>>,
     tx_id: Option<String>,
     using: Option<String>,
     session_id: Option<String>,
-) -> PyResult<Bound<'_, PyAny>> {
+) -> PyResult<Bound<'py, PyAny>> {
+    let record_inputs: Vec<Vec<(String, BindInput)>> = rows
+        .iter()
+        .map(bind_inputs_from_py)
+        .collect::<PyResult<_>>()?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_connection_name, engine, tx_conn, backend) =
             active_route_for_operation(tx_id, using, session_id.clone())?;
@@ -1420,12 +1425,7 @@ pub fn save_bulk_records(
             })?
         };
 
-        let records: Vec<serde_json::Value> =
-            serde_json::from_str(&data_list_json).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("Invalid bulk record JSON: {}", e))
-            })?;
-
-        if records.is_empty() {
+        if record_inputs.is_empty() {
             return Ok(0);
         }
 
@@ -1460,41 +1460,27 @@ pub fn save_bulk_records(
                 .into_table(Alias::new(&table_name))
                 .to_owned();
 
-            let mut column_names = Vec::new();
-            for (i, record) in records.iter().enumerate() {
-                let record_obj = record.as_object().ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err("Each record must be a JSON object")
-                })?;
-
-                let mut row_values = Vec::new();
-                if i == 0 {
-                    for (key, value) in record_obj {
-                        let is_pk = if let Some(ref pk) = pk_col {
-                            key == pk
-                        } else {
-                            false
-                        };
-                        if is_pk && pk_is_auto && value.is_null() {
-                            continue;
-                        }
-                        column_names.push(Alias::new(key));
-                    }
-                    insert_stmt.columns(column_names.clone());
+            // Columns come from the first row's order (skip a null auto-pk).
+            let mut column_names: Vec<String> = Vec::new();
+            for (key, input) in &record_inputs[0] {
+                let is_pk = pk_col.as_deref() == Some(key.as_str());
+                if is_pk && pk_is_auto && input.is_json_null() {
+                    continue;
                 }
+                column_names.push(key.clone());
+            }
+            insert_stmt.columns(column_names.iter().map(|c| Alias::new(c)));
 
-                for key in &column_names {
-                    let value = record_obj
-                        .get(key.to_string().as_str())
-                        .unwrap_or(&serde_json::Value::Null);
-                    row_values.push(schema_value_expr(
-                        &schema,
-                        &table_name,
-                        key.to_string().as_str(),
-                        value,
-                        &enum_udt,
-                        &uuid_columns,
-                        &ts_cast,
-                        backend,
+            let null_input = BindInput::Json(serde_json::Value::Null);
+            for row in &record_inputs {
+                let lookup: std::collections::HashMap<&str, &BindInput> =
+                    row.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                let mut row_values = Vec::with_capacity(column_names.len());
+                for col in &column_names {
+                    let input = lookup.get(col.as_str()).copied().unwrap_or(&null_input);
+                    row_values.push(bind_input_to_expr(
+                        &schema, &table_name, col, input,
+                        &enum_udt, &uuid_columns, &ts_cast, backend,
                     )?);
                 }
                 insert_stmt.values(row_values).map_err(|e| {

@@ -122,7 +122,7 @@ async def save_record(
 ) -> int | None: ...
 async def save_bulk_records(
     name: str,
-    data_list_json: str,
+    rows: list[dict[str, Any]],
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
     session_id: Optional[str] = None,
