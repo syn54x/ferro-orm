@@ -162,3 +162,27 @@ async def test_bulk_create_preserves_rich_types(db_url):
     ])
     amounts = sorted(r.amount for r in await BulkRec.all())
     assert amounts == [decimal.Decimal("1.11"), decimal.Decimal("2.22")]
+
+
+@pytest.mark.asyncio
+async def test_update_unbindable_value_raises_clear_typeerror(db_url):
+    class FloorDoc(Model):
+        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        name: str = ""
+
+    await ferro.connect(db_url, auto_migrate=True)
+
+    rid = uuid4()
+    await FloorDoc(id=rid, name="x").save()
+
+    import pydantic_core
+
+    # Use an object() — genuinely unbindable (pydantic_core.to_json rejects it with
+    # PydanticSerializationError; a raw set is silently coerced to a list by to_json
+    # and would not trigger the error floor).
+    with pytest.raises((TypeError, pydantic_core.PydanticSerializationError)) as exc:
+        await FloorDoc.where(lambda d: d.id == rid).update(name=object())
+    # Whichever layer rejects it, the message must not be an opaque deep-DB error.
+    # pydantic_core says "Unable to serialize unknown type" — clear, not a DB error.
+    msg = str(exc.value).lower()
+    assert "serialize" in msg or "type" in msg or "name" in msg
