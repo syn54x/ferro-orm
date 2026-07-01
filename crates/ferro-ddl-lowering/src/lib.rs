@@ -432,6 +432,18 @@ pub fn pg_alter_type_target(canonical: CanonicalType) -> String {
     }
 }
 
+/// A `timestamp` ⇄ `timestamptz` change. Casting between them silently
+/// reinterprets stored values under the session `TimeZone`, so auto-migrate
+/// refuses it on Postgres (warn + skip) instead of executing it. `DateTime`
+/// is the naive side (it lowers to the same `"timestamp"` token as `Timestamp`).
+pub fn is_timestamp_tz_conversion(old: CanonicalType, new: CanonicalType) -> bool {
+    use CanonicalType::*;
+    matches!(
+        (old, new),
+        (Timestamp | DateTime, TimestampTz) | (TimestampTz, Timestamp | DateTime)
+    )
+}
+
 /// SQLite declared-type string for a canonical type (parity-pinned).
 pub fn sqlite_declared_type(canonical: CanonicalType) -> String {
     match canonical {
@@ -749,5 +761,22 @@ mod tests {
         assert_eq!(canonical_from_parts("integer", None, "", Dialect::Sqlite), Ok(CanonicalType::Integer));
         // unknown is an error (CREATE path maps this to Varchar at its call site)
         assert!(canonical_from_parts("mystery", None, "", Dialect::Postgres).is_err());
+    }
+
+    #[test]
+    fn is_timestamp_tz_conversion_matches_only_the_reinterpreting_pair() {
+        use CanonicalType::*;
+        // The reinterpreting pair, both directions (DateTime is the naive alias).
+        assert!(is_timestamp_tz_conversion(Timestamp, TimestampTz));
+        assert!(is_timestamp_tz_conversion(TimestampTz, Timestamp));
+        assert!(is_timestamp_tz_conversion(DateTime, TimestampTz));
+        assert!(is_timestamp_tz_conversion(TimestampTz, DateTime));
+        // Not a tz reinterpretation.
+        assert!(!is_timestamp_tz_conversion(Integer, BigInt));
+        assert!(!is_timestamp_tz_conversion(Varchar(None), Integer));
+        assert!(!is_timestamp_tz_conversion(Timestamp, Timestamp));
+        assert!(!is_timestamp_tz_conversion(TimestampTz, TimestampTz));
+        assert!(!is_timestamp_tz_conversion(Date, TimestampTz));
+        assert!(!is_timestamp_tz_conversion(Timestamp, Date));
     }
 }
