@@ -174,7 +174,7 @@ finally gets its runtime consumer.
 
 **Sub-tasks**
 
-- [ ] **C1 — Per-model `ColumnCodec` plan.**
+- [x] **C1 — Per-model `ColumnCodec` plan.**
       At registration, compile SchemaIR into `Vec<ColumnCodec>` per model — one
       authoritative enum (`Int/SmallInt/BigInt/Float/Bool/Str/Bytes/Uuid/
       DateTime/Date/Time/Decimal/Json/Enum{values, storage}`), consumed by
@@ -217,8 +217,8 @@ finally gets its runtime consumer.
 
 - [ ] Zero catalog queries on steady-state CRUD (verified by a statement-count
       test against a live PG).
-- [ ] No JSON-schema shape/pattern inference anywhere in `codec.rs`.
-- [ ] F5 repro model round-trips as `str` on both backends.
+- [x] No JSON-schema shape/pattern inference anywhere in `codec.rs`.
+- [x] F5 repro model round-trips as `str` on both backends.
 - [ ] Benchmarks recorded in-repo; full matrix green.
 
 ---
