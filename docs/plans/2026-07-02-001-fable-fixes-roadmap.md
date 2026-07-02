@@ -108,7 +108,7 @@ backend where it can actually fail.
 
 **Sub-tasks**
 
-- [ ] **B1 — Decide the canonical derived mappings.**
+- [x] **B1 — Decide the canonical derived mappings.**
       Design note (docs/solutions/patterns/) settling: plain `datetime` →
       `timestamptz` (runtime is correct; naive-by-default is the classic ORM
       mistake — Alembic bridge moves to `sa.DateTime(timezone=True)`), and the
@@ -117,7 +117,7 @@ backend where it can actually fail.
       deleted, not special-cased. Migration impact: **breaking** for schemas
       created by the divergent emitter — needs explicit guide entries and a
       drift story for existing DBs.
-- [ ] **B2 — One derived-type decision table, one consumer per side.**
+- [x] **B2 — One derived-type decision table, one consumer per side.**
       `ferro-ddl-lowering::canonical_from_parts` becomes the sole authority for
       `(logical_type, format) → storage`. The Alembic bridge derives
       `_sa_type_from_ir_column` from it mechanically: either a `_core` FFI
@@ -125,19 +125,19 @@ backend where it can actually fail.
       Python maps to SA types 1:1, or a generated vector file asserted
       exhaustively (every pair, both dialects) — not a hand-maintained second
       dictionary pinned by sampled tests.
-- [ ] **B3 — Single-source artifact naming.**
+- [x] **B3 — Single-source artifact naming.**
       `ir/compiler.py`'s `_single_index_name` / `_single_unique_name` /
       `_composite_*` / `_fk_name` stop being reimplementations: expose the
       `ferro-ddl-lowering` helpers through `_core` and call them from the
       compiler. Fixes the live drift: Python's single-unique/index/fk names
       have **no 63-char truncation guard**, Rust's do — >63-char identifiers
       currently get different names per path.
-- [ ] **B4 — Make IR `foreign_keys[].name` honored or delete it.**
+- [x] **B4 — Make IR `foreign_keys[].name` honored or delete it.**
       Today no emitter uses it (runtime FKs are anonymous inline; Alembic's are
       unnamed) — the audit's finding-#4 pattern reborn. Either both emitters
       emit the named constraint (unlocks the AGENTS.md "planned" `fk_`/`pk_`
       rows) or the field is dropped from SchemaIR v1.
-- [ ] **B5 — I-1 sentinel on the Postgres matrix with a full-type fixture.**
+- [x] **B5 — I-1 sentinel on the Postgres matrix with a full-type fixture.**
       `test_alembic_autogen_against_rust_migrated_db_is_idempotent` loses
       `sqlite_only`; the fixture model gains `Enum`, `datetime`, `date`,
       `time`, `UUID`, `Decimal`, `bytes`, and JSON fields. Existing filters
@@ -146,17 +146,17 @@ backend where it can actually fail.
       divergence (docs/solutions/issues/sa-vs-rust-unique-constraint-shape.md)
       gets fixed here (Option A: Rust emits named `uq_` constraints), not
       re-filtered.
-- [ ] **B6 — Delete the remaining hand-mirrors.**
+- [x] **B6 — Delete the remaining hand-mirrors.**
       `alembic.py::_render_check_body` (mirror of
       `ferro_ddl_lowering::render_check_body`) and `_db_type_to_sa_type`'s
       duplicated vocabulary collapse into the B2 mechanism.
 
 **Exit gate**
 
-- [ ] Grep-verified: no Python-side reimplementation of naming or derived-type
+- [x] Grep-verified: no Python-side reimplementation of naming or derived-type
       lowering (parity tests demote to regression sentinels over shared code —
       the IR-P8.5 exit-gate language, now true for the derived domain too).
-- [ ] Postgres sentinel green with the full-type fixture and zero filters
+- [x] Postgres sentinel green with the full-type fixture and zero filters
       hiding type-family diffs.
 
 ---
