@@ -74,6 +74,11 @@ pub struct QueryDef {
     /// Python query JSON payload.
     #[serde(skip)]
     pub postgres_enum_udt: HashMap<String, String>,
+    /// The queried model's registration (schema + codec plan), resolved once
+    /// per query from `MODEL_REGISTRY` — no per-value registry locks. `None`
+    /// when the model is not registered (fallback generic binds).
+    #[serde(skip)]
+    pub registration: Option<std::sync::Arc<crate::state::RegisteredModel>>,
 }
 
 /// Canonical semantic fingerprint of a query for shadow-runtime parity checks.
@@ -284,7 +289,7 @@ impl QueryDef {
         backend: Dialect,
     ) -> SimpleExpr {
         crate::codec::query_bind_expr(
-            &self.model_name,
+            self.registration.as_ref().map(|m| &m.codec_plan),
             col_name,
             val,
             infer_uuid_without_schema,
@@ -377,6 +382,10 @@ pub fn query_def_from_ir_payload(payload: QueryIrPayload) -> Result<QueryDef, St
             .map_err(|e| format!("invalid QueryIR m2m payload: {e}"))?,
         None => None,
     };
+    let registration = crate::state::MODEL_REGISTRY
+        .read()
+        .ok()
+        .and_then(|registry| registry.get(&payload.model_name).cloned());
     Ok(QueryDef {
         model_name: payload.model_name,
         where_clause: payload
@@ -402,6 +411,7 @@ pub fn query_def_from_ir_payload(payload: QueryIrPayload) -> Result<QueryDef, St
         offset: payload.offset,
         m2m,
         postgres_enum_udt: HashMap::new(),
+        registration,
     })
 }
 
@@ -546,6 +556,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn empty_query_def(model_name: &str) -> QueryDef {
+        let registration = crate::state::MODEL_REGISTRY
+            .read()
+            .ok()
+            .and_then(|registry| registry.get(model_name).cloned());
         QueryDef {
             model_name: model_name.to_string(),
             where_clause: Vec::new(),
@@ -554,6 +568,7 @@ mod tests {
             offset: None,
             m2m: None,
             postgres_enum_udt: HashMap::new(),
+            registration,
         }
     }
 
@@ -595,6 +610,7 @@ mod tests {
             offset: None,
             m2m: None,
             postgres_enum_udt: HashMap::new(),
+            registration: None,
         };
         let mut select = Query::select();
         select
@@ -628,6 +644,7 @@ mod tests {
             offset: None,
             m2m: None,
             postgres_enum_udt: HashMap::new(),
+            registration: None,
         };
         let mut select = Query::select();
         select
@@ -695,11 +712,11 @@ mod tests {
         // nullable integer column "count" so model_column lookups succeed.
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetIntNull".to_string(),
-            json!({
+            crate::state::RegisteredModel::new(json!({
                 "properties": {
                     "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
                 }
-            }),
+            })),
         );
         let query_def = empty_query_def("WidgetIntNull");
 
@@ -720,11 +737,11 @@ mod tests {
     fn null_rhs_emits_typed_bool_null_for_bool_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetBoolNull".to_string(),
-            json!({
+            crate::state::RegisteredModel::new(json!({
                 "properties": {
                     "active": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
                 }
-            }),
+            })),
         );
         let query_def = empty_query_def("WidgetBoolNull");
 
@@ -745,11 +762,11 @@ mod tests {
     fn null_rhs_emits_typed_uuid_null_for_uuid_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetUuidNull".to_string(),
-            json!({
+            crate::state::RegisteredModel::new(json!({
                 "properties": {
                     "id": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "null"}]}
                 }
-            }),
+            })),
         );
         let query_def = empty_query_def("WidgetUuidNull");
 
@@ -770,11 +787,11 @@ mod tests {
     fn binary_rhs_emits_typed_bytes_no_cast() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetBinary".to_string(),
-            json!({
+            crate::state::RegisteredModel::new(json!({
                 "properties": {
                     "blob": {"type": "string", "format": "binary"}
                 }
-            }),
+            })),
         );
         let query_def = empty_query_def("WidgetBinary");
 
@@ -823,11 +840,11 @@ mod tests {
     fn enum_rhs_skips_cast_without_native_enum_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetTextColor".to_string(),
-            json!({
+            crate::state::RegisteredModel::new(json!({
                 "properties": {
                     "color": {"enum_type_name": "color", "db_type": "text"}
                 }
-            }),
+            })),
         );
         let query_def = empty_query_def("WidgetTextColor");
 
@@ -852,16 +869,20 @@ mod tests {
         // Decimal still uses CAST AS numeric on Postgres.
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetDecimal".to_string(),
-            json!({
+            crate::state::RegisteredModel::new(json!({
                 "properties": {
                     "amount": {
+                        // The enriched shape registration emits for Decimal
+                        // annotations; the pattern alone must NOT make a
+                        // column decimal (F5).
                         "anyOf": [
                             {"type": "number"},
                             {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"}
-                        ]
+                        ],
+                        "format": "decimal"
                     }
                 }
-            }),
+            })),
         );
         let query_def = empty_query_def("WidgetDecimal");
 

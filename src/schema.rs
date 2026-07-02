@@ -96,9 +96,10 @@ fn schema_dependencies(schema: &serde_json::Value) -> Vec<String> {
 }
 
 pub(crate) fn order_schemas_for_creation(
-    schemas: std::collections::HashMap<String, serde_json::Value>,
-) -> Vec<(String, serde_json::Value)> {
-    let mut remaining: Vec<(String, serde_json::Value)> = schemas.into_iter().collect();
+    schemas: std::collections::HashMap<String, std::sync::Arc<crate::state::RegisteredModel>>,
+) -> Vec<(String, std::sync::Arc<crate::state::RegisteredModel>)> {
+    let mut remaining: Vec<(String, std::sync::Arc<crate::state::RegisteredModel>)> =
+        schemas.into_iter().collect();
     remaining.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut ordered = Vec::with_capacity(remaining.len());
@@ -113,7 +114,7 @@ pub(crate) fn order_schemas_for_creation(
         let mut index = 0;
 
         while index < remaining.len() {
-            let deps = schema_dependencies(&remaining[index].1);
+            let deps = schema_dependencies(&remaining[index].1.schema);
             if deps
                 .iter()
                 .all(|dep| created.contains(dep) || !available_names.contains(dep))
@@ -448,7 +449,7 @@ pub fn register_model_schema(name: String, schema: String) -> PyResult<()> {
         .write()
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?;
 
-    registry.insert(name.clone(), parsed_schema);
+    registry.insert(name.clone(), crate::state::RegisteredModel::new(parsed_schema));
     crate::log_debug(format!("⚙️  Ferro Engine: Map generated for '{}'", name));
     Ok(())
 }

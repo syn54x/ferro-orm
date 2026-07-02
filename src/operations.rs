@@ -351,7 +351,8 @@ fn engine_value_to_rust_value(
     schema: &serde_json::Value,
     col_name: &str,
 ) -> crate::state::RustValue {
-    crate::codec::decode_engine_value(value, schema, col_name)
+    let plan = crate::codec_plan::ModelCodecPlan::compile(schema);
+    crate::codec::decode_engine_value(value, &plan, col_name)
 }
 
 /// One parsed row: the primary-key value (when present) plus all column values.
@@ -359,10 +360,10 @@ type ParsedRow = crate::codec::ParsedRow;
 
 fn typed_rows_to_parsed_data(
     rows: Vec<EngineRow>,
-    schema: &serde_json::Value,
+    model: &crate::state::RegisteredModel,
     pk_col: Option<&str>,
 ) -> Vec<ParsedRow> {
-    crate::codec::typed_rows_to_parsed_data(rows, schema, pk_col)
+    crate::codec::typed_rows_to_parsed_data(rows, &model.codec_plan, pk_col)
 }
 
 fn engine_row_string(row: &EngineRow, column_name: &str) -> Option<String> {
@@ -541,14 +542,14 @@ fn maybe_compare_shadow_query_artifacts(
 fn apply_postgres_text_select_columns(
     select: &mut sea_query::SelectStatement,
     table_name: &str,
-    schema: &serde_json::Value,
+    model: &crate::state::RegisteredModel,
     pg_native_enum_columns: &HashSet<String>,
     backend: Dialect,
 ) {
     crate::codec::apply_postgres_text_select_columns(
         select,
         table_name,
-        schema,
+        &model.codec_plan,
         pg_native_enum_columns,
         backend,
     );
@@ -674,7 +675,7 @@ async fn postgres_temporal_cast_by_column(
 /// `cast_as("uuid")` wrapping. See `docs/solutions/patterns/typed-null-binds.md`.
 #[allow(clippy::too_many_arguments)]
 fn schema_value_expr(
-    schema: &serde_json::Value,
+    model: &crate::state::RegisteredModel,
     table_name: &str,
     col_name: &str,
     value: &serde_json::Value,
@@ -684,7 +685,7 @@ fn schema_value_expr(
     backend: Dialect,
 ) -> PyResult<SimpleExpr> {
     crate::codec::schema_bind_expr(
-        schema,
+        &model.codec_plan,
         table_name,
         col_name,
         value,
@@ -968,7 +969,7 @@ pub fn fetch_all<'py>(
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
             })?;
             let mut pk = None;
-            if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
                     if col_info
                         .get("primary_key")
@@ -1116,7 +1117,7 @@ pub fn fetch_one<'py>(
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
             })?;
             let mut pk = None;
-            if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
                     if col_info
                         .get("primary_key")
@@ -1220,7 +1221,7 @@ pub fn fetch_one<'py>(
 /// Returns `(sql, bind_values, needs_postgres_returning)`.
 #[allow(clippy::too_many_arguments)]
 fn build_save_sql(
-    schema: &serde_json::Value,
+    model: &crate::state::RegisteredModel,
     table_name: &str,
     bind_inputs: &[(String, BindInput)],
     pk_col: Option<&str>,
@@ -1244,7 +1245,7 @@ fn build_save_sql(
         }
         columns.push(Alias::new(key));
         values.push(bind_input_to_expr(
-            schema,
+            model,
             table_name,
             key,
             input,
@@ -1299,7 +1300,7 @@ enum UpdateByPkSql {
 
 #[allow(clippy::too_many_arguments)]
 fn build_update_by_pk_sql(
-    schema: &serde_json::Value,
+    model: &crate::state::RegisteredModel,
     table_name: &str,
     bind_inputs: &[(String, BindInput)],
     pk_col: Option<&str>,
@@ -1323,7 +1324,7 @@ fn build_update_by_pk_sql(
             ))
         })?;
     let pk_expr = bind_input_to_expr(
-        schema,
+        model,
         table_name,
         pk,
         &pk_input.1,
@@ -1344,7 +1345,7 @@ fn build_update_by_pk_sql(
         update_stmt.value(
             Alias::new(key),
             bind_input_to_expr(
-                schema,
+                model,
                 table_name,
                 key,
                 input,
@@ -1415,7 +1416,7 @@ pub fn save_record<'py>(
 
         let mut pk_col = None;
         let mut pk_is_auto = true;
-        if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+        if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
             for (col_name, col_info) in properties {
                 if col_info
                     .get("primary_key")
@@ -1541,7 +1542,7 @@ pub fn update_record<'py>(
         };
 
         let mut pk_col = None;
-        if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+        if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
             for (col_name, col_info) in properties {
                 if col_info
                     .get("primary_key")
@@ -1656,7 +1657,7 @@ pub fn save_bulk_records<'py>(
 
         let mut pk_col = None;
         let mut pk_is_auto = true;
-        if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+        if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
             for (col_name, col_info) in properties {
                 let is_pk = col_info
                     .get("primary_key")
@@ -1772,7 +1773,7 @@ pub fn fetch_filtered<'py>(
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
             })?;
             let mut pk = None;
-            if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
                     if col_info
                         .get("primary_key")
@@ -1965,7 +1966,7 @@ pub fn count_filtered(
                     pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
                 })?;
                 let mut pk = None;
-                if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+                if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                     for (col_name, col_info) in properties {
                         if col_info
                             .get("primary_key")
@@ -2124,7 +2125,7 @@ pub fn delete_record(
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
             })?;
             let mut pk = None;
-            if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
                     if col_info
                         .get("primary_key")
@@ -2677,7 +2678,7 @@ fn bind_inputs_from_py(map: &Bound<'_, pyo3::types::PyDict>) -> PyResult<Vec<(St
 /// authority (`schema_bind_expr`).
 #[allow(clippy::too_many_arguments)]
 fn bind_input_to_expr(
-    schema: &serde_json::Value,
+    model: &crate::state::RegisteredModel,
     table_name: &str,
     col_name: &str,
     input: &BindInput,
@@ -2689,7 +2690,7 @@ fn bind_input_to_expr(
     match input {
         BindInput::Bytes(b) => Ok(Expr::value(SeaValue::Bytes(Some(Box::new(b.clone()))))),
         BindInput::Json(v) => crate::codec::schema_bind_expr(
-            schema, table_name, col_name, v, enum_udt, uuid_columns, ts_cast, backend,
+            &model.codec_plan, table_name, col_name, v, enum_udt, uuid_columns, ts_cast, backend,
         ),
     }
 }
@@ -3164,8 +3165,9 @@ mod m2m_value_tests {
             "properties": { "data": { "type": "string", "format": "binary" } }
         });
         let input = BindInput::Bytes(vec![0x89, 0x00, 0xff]);
+        let model = crate::state::RegisteredModel::new(schema);
         let expr = bind_input_to_expr(
-            &schema, "doc", "data", &input,
+            &model, "doc", "data", &input,
             &HashMap::new(), &HashSet::new(), &HashMap::new(), Dialect::Sqlite,
         ).unwrap();
         let (_, values) = Query::insert()
@@ -3202,8 +3204,9 @@ mod schema_value_expr_tests {
     ) -> pyo3::PyResult<(String, sea_query::Values)> {
         let enum_udt = HashMap::new();
         let ts_cast = HashMap::new();
+        let model = crate::state::RegisteredModel::new(schema.clone());
         let expr = schema_value_expr(
-            schema,
+            &model,
             table,
             col,
             value,
@@ -3309,13 +3312,18 @@ mod schema_value_expr_tests {
 
     #[test]
     fn emits_typed_null_for_decimal_column() {
+        // Decimal columns are recognized by the enriched `format: "decimal"`
+        // (what registration always emits for Decimal annotations) — never by
+        // sniffing the string pattern (F5).
         let schema = serde_json::json!({
             "properties": {
                 "amount": {
                     "anyOf": [
+                        {"type": "number"},
                         {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"},
                         {"type": "null"}
-                    ]
+                    ],
+                    "format": "decimal"
                 }
             }
         });
@@ -3412,7 +3420,7 @@ mod schema_value_expr_tests {
             let _ = py;
 
             let err = schema_value_expr(
-                &schema,
+                &crate::state::RegisteredModel::new(schema.clone()),
                 "thing",
                 "id",
                 &serde_json::Value::String("not-a-uuid".to_string()),
@@ -3452,7 +3460,7 @@ mod schema_value_expr_tests {
         ts_cast.insert("created_at".to_string(), "timestamptz".to_string());
 
         let expr = schema_value_expr(
-            &schema,
+            &crate::state::RegisteredModel::new(schema.clone()),
             "thing",
             "created_at",
             &serde_json::Value::Null,
@@ -3483,7 +3491,7 @@ mod schema_value_expr_tests {
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
 
         let expr = schema_value_expr(
-            &schema,
+            &crate::state::RegisteredModel::new(schema.clone()),
             "thing",
             "id",
             &serde_json::Value::String(uuid_str.to_string()),
@@ -3916,7 +3924,7 @@ mod save_mode_sql_tests {
         backend: Dialect,
     ) -> (String, sea_query::Values, bool) {
         build_save_sql(
-            &widget_schema(),
+            &crate::state::RegisteredModel::new(widget_schema()),
             "widget",
             inputs,
             Some("id"),
@@ -3937,7 +3945,7 @@ mod save_mode_sql_tests {
         backend: Dialect,
     ) -> super::PyResult<UpdateByPkSql> {
         build_update_by_pk_sql(
-            schema,
+            &crate::state::RegisteredModel::new(schema.clone()),
             "widget",
             inputs,
             pk_col,
