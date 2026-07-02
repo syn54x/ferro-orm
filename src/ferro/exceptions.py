@@ -31,9 +31,10 @@ class FerroError(Exception):
     Attributes:
         driver_message: Original message from the database driver, when the
             error originated in the database. ``None`` otherwise.
-        sqlstate: Five-character SQLSTATE code (e.g. ``"23505"``) when the
-            backend reports one. ``None`` otherwise (SQLite reports extended
-            result codes for some errors, Postgres reports SQLSTATE).
+        sqlstate: Backend error code as reported by the driver: the
+            five-character SQLSTATE (e.g. ``"23505"``) on Postgres, the
+            extended result code (e.g. ``"2067"``) on SQLite. ``None`` when
+            the driver reports none.
         constraint: Name of the violated constraint when the backend reports
             it (Postgres does; SQLite does not). ``None`` otherwise.
     """

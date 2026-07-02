@@ -149,5 +149,9 @@ paths you exercise:
 uv run pytest -W error::DeprecationWarning
 ```
 
-A clean run means your codebase is ready for `v0.14.0`, where these
-compatibility shims are removed.
+A clean run means you are off the deprecated surfaces removed in `v0.14.0`.
+
+Note that `v0.14.0` also changes the behavior of the mutation surface itself —
+`create()` and `save()` no longer upsert, and `limit()`/`offset()` on mutating
+queries raise. Those changes are behavioral (no deprecation warning can catch
+them), so work through [Migrating to v0.14.0](migrating-to-v0-14-0.md) as well.

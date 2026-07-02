@@ -24,15 +24,17 @@ from ferro import UniqueViolationError
 try:
     await User(email="taylor@example.com").save()
 except UniqueViolationError as exc:
-    print(exc.sqlstate)      # "23505" on Postgres, None on SQLite
+    print(exc.sqlstate)      # SQLSTATE "23505" on Postgres, result code "2067" on SQLite
     print(exc.constraint)    # violated constraint name (Postgres only)
     print(exc.driver_message)  # original driver text, for logs
 ```
 
 `ModelDoesNotExist` is raised by primary-key lookups like `Model.get(pk)` when
-no row matches; use `Model.get_or_none(pk)` if you prefer `None` over an
-exception. It remains a `LookupError`, so pre-existing `except LookupError`
-handlers keep working.
+no row matches — use `Model.get_or_none(pk)` if you prefer `None` over an
+exception — and by `save()` on a persisted instance whose row no longer exists
+(see [Saving: INSERT or UPDATE](../guide/mutations.md#saving-insert-or-update)).
+It remains a `LookupError`, so pre-existing `except LookupError` handlers keep
+working.
 
 ::: ferro.FerroError
 
