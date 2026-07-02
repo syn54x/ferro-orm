@@ -380,7 +380,7 @@ fold into whichever epic touches the same file when convenient.
 - [ ] **G5 — `RustValue::into_py_any` module-handle caching.**
       Intern `datetime`/`uuid`/`decimal`/`json` handles instead of
       `py.import` per value. Micro; measure under FF-C's benchmarks.
-- [ ] **G6 — Idempotent check-constraint emission in Postgres auto_migrate.**
+- [x] **G6 — Idempotent check-constraint emission in Postgres auto_migrate.**
       `db_check=True` fields emit their check constraint via a non-idempotent
       `ALTER TABLE ... ADD CONSTRAINT` in `post_create_sqls`
       (`ferro_ddl_lowering::render_db_check`, Postgres arm), sitting alongside
@@ -400,7 +400,7 @@ fold into whichever epic touches the same file when convenient.
 - [ ] Slot-guard test that fails when a fake slot is injected; `cargo llvm-lines`
       (or LOC) shows `operations.rs` duplication removed; PG migration
       interrupted mid-plan leaves the schema unchanged.
-- [ ] Second `connect(auto_migrate=True)` against an already-migrated Postgres
+- [x] Second `connect(auto_migrate=True)` against an already-migrated Postgres
       schema with a `db_check` model succeeds.
 
 ---

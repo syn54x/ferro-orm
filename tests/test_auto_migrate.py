@@ -1186,3 +1186,46 @@ async def test_create_tables_fails_loud_when_modelset_cleared(db_url, clean_regi
 
     with pytest.raises(RuntimeError, match="modelset not set"):
         await _raw_create_tables()
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_db_check_reconnect_is_idempotent(db_url):
+    """G6 (#176): a `db_check=True` column emits a Postgres CHECK via a
+    post-create `ALTER TABLE ... ADD CONSTRAINT`. That ALTER used to be
+    non-idempotent, so a second `connect(auto_migrate=True)` against an
+    already-migrated schema failed with `constraint "ck_..." already exists`.
+
+    The emission is now guarded by an idempotent DO-block, so re-connecting
+    is a no-op. Connect twice against the same schema; the second call must
+    succeed and the constraint must exist exactly once.
+    """
+    from enum import StrEnum
+
+    from ferro import Field as FerroField
+    from ferro import clear_registry, connect, reset_engine
+    from ferro.raw import fetch_all
+    from ferro.state import _MODEL_REGISTRY_PY
+
+    reset_engine()
+    clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+
+    class DocStatus(StrEnum):
+        PENDING = "pending"
+        APPROVED = "approved"
+
+    class ReconnectDoc(Model):
+        id: int | None = FerroField(default=None, primary_key=True)
+        status: DocStatus = FerroField(db_type="text", db_check=True)
+
+    # First connect creates the table + CHECK constraint.
+    await connect(db_url, auto_migrate=True)
+    # Second connect re-runs the create path against the existing schema —
+    # this raised OperationalError before the idempotency fix.
+    await connect(db_url, auto_migrate=True)
+
+    rows = await fetch_all(
+        "SELECT conname FROM pg_constraint WHERE conname = 'ck_reconnectdoc_status'"
+    )
+    assert len(rows) == 1, f"expected exactly one CHECK constraint, got: {rows}"

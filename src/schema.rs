@@ -5,7 +5,8 @@
 
 use crate::backend::EngineHandle;
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
-use ferro_ddl_lowering::{CanonicalType, canonical_from_parts};
+use ferro_ddl_lowering::{CanonicalType, canonical_from_parts, render_db_check};
+use ferro_schema_ir::SchemaCheck;
 use pyo3::prelude::*;
 use sea_query::{
     Alias, ForeignKeyAction, Index, PostgresQueryBuilder,
@@ -183,7 +184,10 @@ pub(crate) fn canonical_column_type(
         .unwrap_or(CanonicalType::Varchar(None))
 }
 
-fn render_check_values(col_info: &serde_json::Value) -> Option<String> {
+/// Pre-rendered SQL literal tokens for a db_check column's allowed values,
+/// e.g. `["'admin'", "'user'"]`. Shape matches [`SchemaCheck::values`] so this
+/// legacy JSON path can feed the same emitter as the IR path.
+fn render_check_values(col_info: &serde_json::Value) -> Option<Vec<String>> {
     let values = col_info.get("enum").and_then(|v| v.as_array())?;
     if values.is_empty() {
         return None;
@@ -197,7 +201,7 @@ fn render_check_values(col_info: &serde_json::Value) -> Option<String> {
             other => format!("'{}'", other.to_string().replace('\'', "''")),
         })
         .collect();
-    Some(rendered.join(", "))
+    Some(rendered)
 }
 
 fn build_check_constraint_sql(
@@ -210,18 +214,18 @@ fn build_check_constraint_sql(
     // requires CREATE TABLE rebuild. db_check is a Postgres-first feature in
     // Phase 1; SQLite users opting in just see the constraint elided at
     // runtime. The parity test (U5) compares Postgres-side rendering.
-    if backend != Dialect::Postgres {
-        return None;
-    }
+    //
+    // Delegate the actual wrapper to `render_db_check` — the single source
+    // shared with the IR emitter — so this legacy JSON path stays byte-identical
+    // (including the idempotent DO-block guard) and the shadow comparator sees
+    // matching plans.
     let values = render_check_values(col_info)?;
-    let ck_name = db_check_constraint_name(table_lower, col_name);
-    Some(format!(
-        "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK (\"{col}\" IN ({values}))",
-        table = table_lower,
-        name = ck_name,
-        col = col_name,
-        values = values,
-    ))
+    let check = SchemaCheck {
+        name: db_check_constraint_name(table_lower, col_name),
+        column: col_name.to_string(),
+        values,
+    };
+    render_db_check(table_lower, &check, backend).statement
 }
 
 /// Foreign-key metadata for a column, resolved from the model schema.
@@ -283,9 +287,11 @@ pub(crate) fn build_column_plan(
     }
 
     // db_check=True -> single-column CHECK constraint named ck_<table>_<col>.
-    // Emitted as a post-create ALTER TABLE so the name flows through
-    // identically on both backends. SQLite cannot execute ADD CONSTRAINT;
-    // users opting in to db_check are expected to be on Postgres for Phase 1.
+    // Emitted (via the shared `render_db_check`) as a post-create ALTER TABLE
+    // wrapped in an idempotent DO-block guard, so the name flows through
+    // identically on both backends and a re-run is a no-op. SQLite cannot
+    // execute ADD CONSTRAINT; users opting in to db_check are expected to be on
+    // Postgres for Phase 1.
     let db_check = column_bool_metadata(raw_col_info, col_info, "db_check").unwrap_or(false);
     if db_check
         && let Some(ck_sql) = build_check_constraint_sql(table_lower, col_name, col_info, backend)
