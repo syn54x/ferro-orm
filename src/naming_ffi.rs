@@ -1,10 +1,12 @@
-//! FFI surface for the single-sourced DDL artifact-name builders.
+//! FFI surface for the single-sourced DDL decision tables: artifact-name
+//! builders (FF-B B3) and derived-type storage resolution (FF-B B2).
 //!
 //! The Python IR compiler (`src/ferro/ir/compiler.py`) and the Alembic bridge
-//! consume these instead of re-implementing the formats — the name rules and
-//! their 63-char truncation guards live only in `ferro-ddl-lowering`
-//! (AGENTS.md § I-1; FF-B B3).
+//! consume these instead of re-implementing the rules — name formats, their
+//! 63-char truncation guards, and the `(logical_type, format, db_type, enum)`
+//! → storage decision live only in `ferro-ddl-lowering` (AGENTS.md § I-1).
 
+use ferro_ddl_lowering::{Dialect, ResolvedStorage};
 use pyo3::prelude::*;
 
 #[pyfunction]
@@ -37,4 +39,54 @@ pub fn _ddl_check_constraint_name(table: String, column: String) -> String {
 #[pyfunction]
 pub fn _ddl_fk_name(table: String, column: String, to_table: String) -> String {
     ferro_ddl_lowering::fk_name(&table, &column, &to_table)
+}
+
+/// Resolve one IR column's storage decision. `column_ir_json` is a single
+/// SchemaIR column object (as produced by `compile_schema_ir_payload`);
+/// `dialect` is `"postgres"` or `"sqlite"`. Returns JSON:
+/// `{"kind": "scalar", "token": "<db_type token>"}` or
+/// `{"kind": "pg_enum", "name": "<type name>", "labels": ["...", ...]}`.
+/// Unknown logical types raise `RuntimeError` — never a silent varchar fallback.
+#[pyfunction]
+pub fn _resolve_storage_type(column_ir_json: String, dialect: String) -> PyResult<String> {
+    let dialect = match dialect.as_str() {
+        "postgres" => Dialect::Postgres,
+        "sqlite" => Dialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
+                other
+            )));
+        }
+    };
+    let col: ferro_schema_ir::SchemaColumn =
+        serde_json::from_str(&column_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR column: {}", e))
+        })?;
+    let storage = ferro_ddl_lowering::resolve_column_storage(&col, dialect)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let payload = match storage {
+        ResolvedStorage::Scalar(canonical) => serde_json::json!({
+            "kind": "scalar",
+            "token": ferro_ddl_lowering::canonical_to_db_type_token(canonical, dialect),
+        }),
+        ResolvedStorage::PgEnum { type_name, labels } => serde_json::json!({
+            "kind": "pg_enum",
+            "name": type_name,
+            "labels": labels,
+        }),
+    };
+    Ok(payload.to_string())
+}
+
+/// Render the shared `db_check` CHECK body (`"col" IN (v1, v2, ...)`) —
+/// byte-identical to the Rust emitters. `values` arrive pre-rendered (quoted)
+/// from the IR compiler.
+#[pyfunction]
+pub fn _render_check_body(column: String, values: Vec<String>) -> String {
+    ferro_ddl_lowering::render_check_body(&ferro_schema_ir::SchemaCheck {
+        name: String::new(),
+        column,
+        values,
+    })
 }

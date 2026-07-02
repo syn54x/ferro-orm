@@ -6,8 +6,8 @@
 use crate::backend::EngineHandle;
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
 use ferro_ddl_lowering::{
-    CanonicalType, canonical_from_parts, db_check_constraint_name, render_db_check,
-    single_index_name,
+    CanonicalType, ResolvedStorage, canonical_from_parts, db_check_constraint_name,
+    db_type_token_to_canonical, enum_label_strings, render_db_check, single_index_name,
 };
 use ferro_schema_ir::SchemaCheck;
 use pyo3::prelude::*;
@@ -157,6 +157,56 @@ pub(crate) fn canonical_column_type(
         .unwrap_or(CanonicalType::Varchar(None))
 }
 
+/// Resolve a model property's full storage decision from the enriched JSON
+/// schema — the legacy-planner counterpart of the IR path's
+/// `resolve_column_storage` (FF-B B2): an explicit `db_type` wins, then
+/// `enum` values select native Postgres enum storage (varchar(max label len)
+/// on SQLite, matching SQLAlchemy), then the scalar cascade decides.
+pub(crate) fn resolve_column_storage_json(
+    col_name: &str,
+    raw_col_info: &serde_json::Value,
+    resolved_col_info: &serde_json::Value,
+    backend: Dialect,
+) -> ResolvedStorage {
+    let db_type = raw_col_info
+        .get("db_type")
+        .or_else(|| resolved_col_info.get("db_type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if let Some(canonical) = db_type_token_to_canonical(db_type, backend) {
+        return ResolvedStorage::Scalar(canonical);
+    }
+    let enum_values = resolved_col_info
+        .get("enum")
+        .or_else(|| raw_col_info.get("enum"))
+        .and_then(|v| v.as_array())
+        .filter(|v| !v.is_empty());
+    if let Some(values) = enum_values {
+        let labels = enum_label_strings(values);
+        return match backend {
+            Dialect::Postgres => {
+                let type_name = raw_col_info
+                    .get("enum_type_name")
+                    .or_else(|| resolved_col_info.get("enum_type_name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(col_name)
+                    .to_string();
+                ResolvedStorage::PgEnum { type_name, labels }
+            }
+            Dialect::Sqlite => {
+                let max_len = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+                let max_len = u32::try_from(max_len).unwrap_or(u32::MAX);
+                ResolvedStorage::Scalar(CanonicalType::Varchar(if max_len == 0 {
+                    None
+                } else {
+                    Some(max_len)
+                }))
+            }
+        };
+    }
+    ResolvedStorage::Scalar(canonical_column_type(raw_col_info, resolved_col_info, backend))
+}
+
 /// Pre-rendered SQL literal tokens for a db_check column's allowed values,
 /// e.g. `["'admin'", "'user'"]`. Shape matches [`SchemaCheck::values`] so this
 /// legacy JSON path can feed the same emitter as the IR path.
@@ -212,7 +262,7 @@ pub(crate) struct FkSpec {
 /// so CREATE TABLE and ALTER TABLE ADD COLUMN emit byte-identical column
 /// definitions (AGENTS.md § I-1).
 pub(crate) struct ColumnPlan {
-    pub canonical: CanonicalType,
+    pub storage: ResolvedStorage,
     pub is_primary_key: bool,
     pub is_nullable: bool,
     pub is_unique: bool,
@@ -234,7 +284,7 @@ pub(crate) fn build_column_plan(
     backend: Dialect,
 ) -> ColumnPlan {
     let col_info = resolve_ref(schema, raw_col_info);
-    let canonical = canonical_column_type(raw_col_info, col_info, backend);
+    let storage = resolve_column_storage_json(col_name, raw_col_info, col_info, backend);
 
     let is_primary_key =
         column_bool_metadata(raw_col_info, col_info, "primary_key").unwrap_or(false);
@@ -300,7 +350,7 @@ pub(crate) fn build_column_plan(
         .cloned();
 
     ColumnPlan {
-        canonical,
+        storage,
         is_primary_key,
         is_nullable,
         is_unique,
@@ -344,6 +394,15 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
                 model.table_name, err.message
             ))
         })?;
+
+        for pre_sql in &emission.pre_create_sqls {
+            engine.execute_sql_unprepared(pre_sql).await.map_err(|e| {
+                crate::errors::map_db_error(
+                    &format!("SQL Execution failed for '{}' enum type", model.table_name),
+                    e,
+                )
+            })?;
+        }
 
         engine.execute_sql(&emission.create_sql).await.map_err(|e| {
             crate::errors::map_db_error(
@@ -431,7 +490,7 @@ pub fn _render_create_table_sql_for_test(
     name: String,
     schema_json: String,
     dialect: String,
-) -> PyResult<(String, Vec<String>)> {
+) -> PyResult<(String, Vec<String>, Vec<String>)> {
     let dialect = match dialect.as_str() {
         "postgres" => Dialect::Postgres,
         "sqlite" => Dialect::Sqlite,
@@ -464,7 +523,11 @@ pub fn _render_create_table_sql_for_test(
             model.table_name, err.message
         ))
     })?;
-    Ok((emission.create_sql, emission.post_create_sqls))
+    Ok((
+        emission.create_sql,
+        emission.post_create_sqls,
+        emission.pre_create_sqls,
+    ))
 }
 
 #[cfg(test)]

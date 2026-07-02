@@ -232,8 +232,8 @@ const ORG_CREATE_SQLITE: &str =
     "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" integer PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )";
 const ORG_CREATE_POSTGRES: &str =
     "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" serial PRIMARY KEY, \"name\" varchar NOT NULL )";
-const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" real NOT NULL, \"birth_date\" date_text NOT NULL, \"created_at\" timestamp_with_timezone_text NOT NULL, \"email\" varchar NOT NULL, \"id\" integer PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" json_text NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid_text NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" varchar NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
-const ACCOUNT_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" bytea NOT NULL, \"balance\" decimal NOT NULL, \"birth_date\" date NOT NULL, \"created_at\" timestamp with time zone NOT NULL, \"email\" varchar NOT NULL, \"id\" serial PRIMARY KEY, \"metadata_blob\" json NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" varchar NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
+const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" real NOT NULL, \"birth_date\" date_text NOT NULL, \"created_at\" timestamp_with_timezone_text NOT NULL, \"email\" varchar NOT NULL, \"id\" integer PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" json_text NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid_text NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" time_text NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
+const ACCOUNT_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" bytea NOT NULL, \"balance\" decimal NOT NULL, \"birth_date\" date NOT NULL, \"created_at\" timestamp with time zone NOT NULL, \"email\" varchar NOT NULL, \"id\" serial PRIMARY KEY, \"metadata_blob\" json NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" time NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
 
 fn assert_no_comment_placeholders(statements: &[String]) {
     for sql in statements {
@@ -1079,6 +1079,204 @@ fn render_create_table_golden_postgres() {
     // FKs inline, named, not in post-create.
     assert!(acct.create_sql.contains("CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT"));
     assert!(!acct.post_create_sqls.iter().any(|s| s.contains("FOREIGN KEY")));
+}
+
+/// The pinned CREATE TYPE guard for the golden enum fixture.
+const PG_CREATE_TYPE_STATUS: &str = "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t \
+     JOIN pg_namespace n ON n.oid = t.typnamespace \
+     WHERE t.typname = 'status' AND n.nspname = current_schema()) THEN \
+     CREATE TYPE \"status\" AS ENUM ('draft', 'archived'); \
+     END IF; END $$";
+
+fn enum_fixture_model() -> SchemaModel {
+    let status_col = SchemaColumn {
+        enum_values: Some(vec![
+            serde_json::json!("draft"),
+            serde_json::json!("archived"),
+        ]),
+        enum_type_name: Some("status".to_string()),
+        db_type: None,
+        ..col("status", "text", false)
+    };
+    schema_model("ticket", vec![pk_col("id", "int"), status_col])
+}
+
+// FF-B B2: enum columns (no explicit db_type) lower to a native Postgres enum
+// — an idempotent CREATE TYPE guard in pre-create plus a column typed as the
+// enum — and to varchar(max label len) on SQLite, matching what SQLAlchemy
+// renders for sa.Enum on each backend.
+#[test]
+fn render_create_table_enum_native_on_postgres() {
+    let model = enum_fixture_model();
+    let emission = render_create_table(&model, Dialect::Postgres).unwrap();
+    assert_eq!(emission.pre_create_sqls, vec![PG_CREATE_TYPE_STATUS.to_string()]);
+    assert!(
+        emission
+            .create_sql
+            .contains("\"status\" status NOT NULL"),
+        "column must be typed as the enum: {}",
+        emission.create_sql
+    );
+}
+
+#[test]
+fn render_create_table_enum_varchar_on_sqlite() {
+    let model = enum_fixture_model();
+    let emission = render_create_table(&model, Dialect::Sqlite).unwrap();
+    assert!(emission.pre_create_sqls.is_empty());
+    assert!(
+        emission
+            .create_sql
+            .contains("\"status\" varchar(8) NOT NULL"),
+        "sa.Enum renders VARCHAR(max label len) on SQLite: {}",
+        emission.create_sql
+    );
+}
+
+#[test]
+fn emit_add_table_dedupes_create_type_across_columns() {
+    // Two columns sharing one enum type must emit exactly one CREATE TYPE guard.
+    let status = |name: &str| SchemaColumn {
+        enum_values: Some(vec![
+            serde_json::json!("draft"),
+            serde_json::json!("archived"),
+        ]),
+        enum_type_name: Some("status".to_string()),
+        db_type: None,
+        ..col(name, "text", false)
+    };
+    let model = schema_model(
+        "ticket",
+        vec![pk_col("id", "int"), status("state_a"), status("state_b")],
+    );
+    let new_ir = envelope(vec![model]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddTable {
+            table: "ticket".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let result =
+        emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
+    let create_types: Vec<&String> = result
+        .statements
+        .iter()
+        .filter(|s| s.contains("CREATE TYPE"))
+        .collect();
+    assert_eq!(create_types.len(), 1, "{:?}", result.statements);
+    // And the guard precedes the CREATE TABLE.
+    let type_pos = result.statements.iter().position(|s| s.contains("CREATE TYPE"));
+    let table_pos = result.statements.iter().position(|s| s.starts_with("CREATE TABLE"));
+    assert!(type_pos < table_pos);
+}
+
+#[test]
+fn emit_add_column_enum_postgres_creates_type_then_column() {
+    // Nullable so the add needs no backfill default.
+    let mut model = enum_fixture_model();
+    for c in &mut model.columns {
+        if c.name == "status" {
+            c.nullable = true;
+        }
+    }
+    let old_ir = envelope(vec![schema_model("ticket", vec![pk_col("id", "int")])]);
+    let new_ir = envelope(vec![model]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddColumn {
+            table: "ticket".to_string(),
+            column: "status".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let result =
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(result.statements[0], PG_CREATE_TYPE_STATUS);
+    assert!(
+        result.statements[1].contains("ADD COLUMN \"status\" status"),
+        "{:?}",
+        result.statements
+    );
+
+    let sqlite = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
+    assert!(
+        sqlite.statements[0].contains("ADD COLUMN \"status\" varchar(8)"),
+        "{:?}",
+        sqlite.statements
+    );
+    assert!(!sqlite.statements.iter().any(|s| s.contains("CREATE TYPE")));
+}
+
+#[test]
+fn emit_alter_refuses_varchar_to_enum_and_varchar_to_time() {
+    // Live varchar columns (old lowering) targeted at native enum / time are
+    // REFUSED: warning, no ALTER (the #154 pattern generalized).
+    let live_enum_col = col("status", "varchar", false);
+    let live_time_col = col("wake_time", "varchar", false);
+    let model = SchemaModel {
+        columns: vec![
+            pk_col("id", "int"),
+            SchemaColumn {
+                enum_values: Some(vec![serde_json::json!("draft")]),
+                enum_type_name: Some("status".to_string()),
+                db_type: None,
+                ..col("status", "text", false)
+            },
+            ir_col("wake_time", "time", Some("time"), false, false, false),
+        ],
+        ..schema_model("ticket", vec![])
+    };
+    let old_ir = envelope(vec![schema_model(
+        "ticket",
+        vec![pk_col("id", "int"), live_enum_col, live_time_col],
+    )]);
+    let new_ir = envelope(vec![model]);
+    let plan = MigrationPlan {
+        operations: vec![
+            MigrationOp::AlterColumnType {
+                table: "ticket".to_string(),
+                column: "status".to_string(),
+            },
+            MigrationOp::AlterColumnType {
+                table: "ticket".to_string(),
+                column: "wake_time".to_string(),
+            },
+        ],
+        warnings: Vec::new(),
+    };
+    let result =
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert!(result.statements.is_empty(), "{:?}", result.statements);
+    assert_eq!(result.warnings.len(), 2, "{:?}", result.warnings);
+    assert!(result.warnings[0].contains("ticket.status"), "{}", result.warnings[0]);
+    assert!(result.warnings[0].contains("USING"), "{}", result.warnings[0]);
+    assert!(result.warnings[1].contains("ticket.wake_time"), "{}", result.warnings[1]);
+}
+
+#[test]
+fn emit_alter_native_enum_live_is_noop() {
+    let live = SchemaColumn {
+        postgres_native_enum: true,
+        ..col("status", "varchar", false)
+    };
+    let model_col = SchemaColumn {
+        enum_values: Some(vec![serde_json::json!("draft")]),
+        enum_type_name: Some("status".to_string()),
+        db_type: None,
+        ..col("status", "text", false)
+    };
+    let old_ir = envelope(vec![schema_model("ticket", vec![live])]);
+    let new_ir = envelope(vec![schema_model("ticket", vec![model_col])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AlterColumnType {
+            table: "ticket".to_string(),
+            column: "status".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let result =
+        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert!(result.statements.is_empty());
+    assert!(result.warnings.is_empty());
 }
 
 // Verify the runtime's `CASCADE` default (`unwrap_or("CASCADE")`) is mirrored:

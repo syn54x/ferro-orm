@@ -15,10 +15,11 @@
 
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
-    Dialect, apply_canonical_type, canonical_from_schema_column, canonical_to_db_type_token,
-    fk_action_sql, fk_name, information_schema_to_db_type_token, is_timestamp_tz_conversion,
-    pg_alter_type_target, schema_columns_storage_drift, single_unique_index_name,
-    sqlite_declared_type, sqlite_type_storage_drift, timestamp_tz_conversion_warning,
+    Dialect, ResolvedStorage, apply_canonical_type, canonical_from_schema_column,
+    canonical_to_db_type_token, fk_action_sql, fk_name, information_schema_to_db_type_token,
+    pg_alter_type_target, refused_conversion, refused_conversion_warning,
+    render_pg_enum_create_type, single_unique_index_name, sqlite_declared_type,
+    sqlite_type_storage_drift,
 };
 use ferro_migrate::{MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
@@ -341,8 +342,6 @@ fn plan_table_migration_legacy(
                         table_lower,
                         col_name,
                         &col_plan,
-                        raw_col_info,
-                        schema,
                         live_col,
                         backend,
                         &mut plan,
@@ -473,7 +472,16 @@ fn plan_missing_column(
     };
 
     let mut col_def = ColumnDef::new(Alias::new(col_name));
-    apply_canonical_type(&mut col_def, col_plan.canonical);
+    match &col_plan.storage {
+        ResolvedStorage::Scalar(canonical) => apply_canonical_type(&mut col_def, *canonical),
+        ResolvedStorage::PgEnum { type_name, labels } => {
+            // The enum type must exist first (idempotent guard), byte-matching
+            // the IR emitter (shadow comparator).
+            plan.statements
+                .push(render_pg_enum_create_type(type_name, labels));
+            col_def.custom(Alias::new(type_name));
+        }
+    }
     if !col_plan.is_nullable {
         col_def.not_null();
     }
@@ -580,8 +588,6 @@ fn plan_existing_column(
     table_lower: &str,
     col_name: &str,
     col_plan: &ColumnPlan,
-    raw_col_info: &serde_json::Value,
-    schema: &serde_json::Value,
     live: &LiveColumn,
     backend: Dialect,
     plan: &mut MigrationPlan,
@@ -594,45 +600,67 @@ fn plan_existing_column(
     match backend {
         Dialect::Postgres => {
             let dialect = Dialect::Postgres;
-            let resolved = resolve_col_schema(schema, raw_col_info);
-            let model_db_type = raw_col_info
-                .get("db_type")
-                .or_else(|| resolved.get("db_type"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, backend));
             let live_db_type = information_schema_to_db_type_token(
                 &live.declared_type,
                 live.char_max_len,
                 dialect,
             );
-            let live_col = schema_column_for_drift(col_name, live_db_type, live.is_nullable, false);
-            let model_col =
-                schema_column_for_drift(col_name, model_db_type, col_plan.is_nullable, false);
-            // Native enum columns only exist via Alembic; leave them to it.
-            if !live.is_enum_udt
-                && schema_columns_storage_drift(&live_col, &model_col, dialect)
-            {
-                let old_canonical = canonical_from_schema_column(&live_col, dialect);
-                match old_canonical {
-                    Ok(old_c) if is_timestamp_tz_conversion(old_c, col_plan.canonical) => {
-                        plan.warnings.push(timestamp_tz_conversion_warning(
-                            table_lower,
-                            col_name,
-                            live_col.db_type.as_deref().unwrap_or(""),
-                            &pg_alter_type_target(col_plan.canonical),
-                            &canonical_to_db_type_token(old_c, dialect),
-                        ));
-                    }
-                    _ => {
-                        let target = pg_alter_type_target(col_plan.canonical);
-                        plan.statements.push(format!(
-                            "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",
-                            table = quote_ident(table_lower),
-                            col = quote_ident(col_name),
-                            target = target,
-                        ));
-                    }
+            let mut live_col =
+                schema_column_for_drift(col_name, live_db_type, live.is_nullable, false);
+            live_col.postgres_native_enum = live.is_enum_udt;
+            // A live native-enum column is never auto-reconciled (matching
+            // enum model = no-op; anything else is Alembic territory) —
+            // byte-matching the IR emitter's guard.
+            let storage_drift = match &col_plan.storage {
+                ResolvedStorage::PgEnum { .. } => !live.is_enum_udt,
+                // Token round-trip on the live side, mirroring
+                // `schema_columns_storage_drift`'s scalar arm.
+                ResolvedStorage::Scalar(model_c) => {
+                    !live.is_enum_udt
+                        && match canonical_from_schema_column(&live_col, dialect) {
+                            Ok(live_c) => {
+                                canonical_to_db_type_token(live_c, dialect)
+                                    != canonical_to_db_type_token(*model_c, dialect)
+                            }
+                            Err(_) => true,
+                        }
+                }
+            };
+            if storage_drift {
+                // Refusal rails (#154 generalized): warn + skip, never a
+                // silent ALTER. Identical warning bytes to the IR emitter.
+                if let Some(kind) = refused_conversion(&live_col, &col_plan.storage, dialect) {
+                    let old_db_type = live_col.db_type.clone().unwrap_or_default();
+                    let (new_target, keep_db_type) = match &col_plan.storage {
+                        ResolvedStorage::PgEnum { type_name, .. } => {
+                            (type_name.clone(), old_db_type.clone())
+                        }
+                        ResolvedStorage::Scalar(model_c) => {
+                            let old_c = canonical_from_schema_column(&live_col, dialect);
+                            (
+                                pg_alter_type_target(*model_c),
+                                old_c
+                                    .map(|c| canonical_to_db_type_token(c, dialect))
+                                    .unwrap_or_else(|_| old_db_type.clone()),
+                            )
+                        }
+                    };
+                    plan.warnings.push(refused_conversion_warning(
+                        kind,
+                        table_lower,
+                        col_name,
+                        &old_db_type,
+                        &new_target,
+                        &keep_db_type,
+                    ));
+                } else if let ResolvedStorage::Scalar(model_c) = &col_plan.storage {
+                    let target = pg_alter_type_target(*model_c);
+                    plan.statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",
+                        table = quote_ident(table_lower),
+                        col = quote_ident(col_name),
+                        target = target,
+                    ));
                 }
             }
             if !col_plan.is_nullable && live.is_nullable {
@@ -655,8 +683,13 @@ fn plan_existing_column(
                 live.char_max_len,
                 Dialect::Sqlite,
             );
-            let expected = sqlite_declared_type(col_plan.canonical);
-            if sqlite_type_storage_drift(&live_db_type, col_plan.canonical) {
+            // On SQLite every storage resolves to a scalar (enums lower to
+            // varchar(max label len) there).
+            let ResolvedStorage::Scalar(model_c) = &col_plan.storage else {
+                return;
+            };
+            let expected = sqlite_declared_type(*model_c);
+            if sqlite_type_storage_drift(&live_db_type, *model_c) {
                 plan.warnings.push(format!(
                     "Column '{}.{}' is declared '{}' in the database but the model expects \
                      '{}'. SQLite cannot change column types in place; use Alembic to \
@@ -1113,16 +1146,24 @@ mod tests {
                     .get("db_type")
                     .or_else(|| resolved.get("db_type"))
                     .and_then(|v| v.as_str());
-                let db_type = db_type_explicit
-                    .map(str::to_string)
-                    .unwrap_or_else(|| canonical_to_db_type_token(col_plan.canonical, backend));
+                // Mirror the Python compiler: db_type carries the explicit
+                // token or the derived scalar token; native-enum columns
+                // leave it unset (the enum metadata IS the storage decision).
+                let db_type = db_type_explicit.map(str::to_string).or_else(|| {
+                    match &col_plan.storage {
+                        ResolvedStorage::Scalar(canonical) => {
+                            Some(canonical_to_db_type_token(*canonical, backend))
+                        }
+                        ResolvedStorage::PgEnum { .. } => None,
+                    }
+                });
                 columns.push(SchemaColumn {
                     name: name.clone(),
                     logical_type: property_json_type_and_format(resolved)
                         .0
                         .unwrap_or("unknown")
                         .to_string(),
-                    db_type: Some(db_type),
+                    db_type,
                     db_type_explicit: db_type_explicit.map(|_| true),
                     nullable: col_plan.is_nullable,
                     primary_key: col_plan.is_primary_key,
@@ -1673,6 +1714,134 @@ mod tests {
                 .contains(&"ALTER TABLE \"doc\" ALTER COLUMN \"b\" DROP NOT NULL".to_string()),
             "{:?}",
             plan.statements
+        );
+    }
+
+    #[test]
+    fn enum_column_add_creates_type_then_column_on_pg_and_varchar_on_sqlite() {
+        // FF-B B2: a native-enum model column added to an existing table emits
+        // the idempotent CREATE TYPE guard then the enum-typed ADD COLUMN on
+        // Postgres, and varchar(max label len) on SQLite — identically from
+        // both planner paths.
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "status": {
+                    "type": "string",
+                    "enum": ["draft", "archived"],
+                    "enum_type_name": "status",
+                    "ferro_nullable": true,
+                },
+            }
+        });
+        let live_cols = vec![LiveColumn {
+            is_primary_key: true,
+            ..live("id", "integer")
+        }];
+
+        let plan = plan_with_ir_legacy_parity(
+            "ticket",
+            &schema,
+            &live_cols,
+            &[],
+            Dialect::Postgres,
+            UPDATES,
+        );
+        assert_eq!(plan.statements.len(), 2, "{:?}", plan.statements);
+        assert!(
+            plan.statements[0].contains("CREATE TYPE \"status\" AS ENUM ('draft', 'archived')"),
+            "{}",
+            plan.statements[0]
+        );
+        assert!(
+            plan.statements[1].contains("ADD COLUMN \"status\" status"),
+            "{}",
+            plan.statements[1]
+        );
+
+        let plan =
+            plan_with_ir_legacy_parity("ticket", &schema, &live_cols, &[], Dialect::Sqlite, UPDATES);
+        assert_eq!(plan.statements.len(), 1, "{:?}", plan.statements);
+        assert!(
+            plan.statements[0].contains("ADD COLUMN \"status\" varchar(8)"),
+            "{}",
+            plan.statements[0]
+        );
+    }
+
+    #[test]
+    fn enum_model_against_live_varchar_is_refused_on_pg() {
+        // A varchar column from the old lowering, now modeled as an enum:
+        // warn + skip (never a silent ALTER), identically from both paths.
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "status": {
+                    "type": "string",
+                    "enum": ["draft", "archived"],
+                    "enum_type_name": "status",
+                    "ferro_nullable": false,
+                },
+            }
+        });
+        let live_cols = vec![
+            LiveColumn {
+                is_primary_key: true,
+                ..live("id", "integer")
+            },
+            LiveColumn {
+                is_nullable: false,
+                ..live("status", "character varying")
+            },
+        ];
+        let plan = plan_with_ir_legacy_parity(
+            "ticket",
+            &schema,
+            &live_cols,
+            &[],
+            Dialect::Postgres,
+            UPDATES,
+        );
+        assert!(plan.statements.is_empty(), "{:?}", plan.statements);
+        assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+        assert!(plan.warnings[0].contains("ticket.status"), "{}", plan.warnings[0]);
+        assert!(plan.warnings[0].contains("USING"), "{}", plan.warnings[0]);
+    }
+
+    #[test]
+    fn time_model_against_live_varchar_is_refused_on_pg() {
+        // datetime.time now lowers to `time`; a live varchar column from the
+        // old lowering is refused (warn + skip), identically from both paths.
+        let schema = json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true},
+                "opens_at": {"type": "string", "format": "time", "ferro_nullable": false},
+            }
+        });
+        let live_cols = vec![
+            LiveColumn {
+                is_primary_key: true,
+                ..live("id", "integer")
+            },
+            LiveColumn {
+                is_nullable: false,
+                ..live("opens_at", "character varying")
+            },
+        ];
+        let plan = plan_with_ir_legacy_parity(
+            "shift",
+            &schema,
+            &live_cols,
+            &[],
+            Dialect::Postgres,
+            UPDATES,
+        );
+        assert!(plan.statements.is_empty(), "{:?}", plan.statements);
+        assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+        assert!(
+            plan.warnings[0].contains("shift.opens_at"),
+            "{}",
+            plan.warnings[0]
         );
     }
 

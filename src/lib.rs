@@ -155,6 +155,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_composite_unique_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_check_constraint_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_fk_name, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_resolve_storage_type, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_render_check_body, m)?)?;
 
     Ok(())
 }

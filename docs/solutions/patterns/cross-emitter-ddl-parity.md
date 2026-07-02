@@ -33,12 +33,13 @@ because Ferro generates the names explicitly through `composite_index_name`.
 
 ## Takeaway
 
-**Every DDL emitter must use the same names for the same artifacts.** The
-canonical names live in two places and they MUST agree:
-
-- Python: `_FERRO_NAMING_CONVENTION` in `src/ferro/migrations/alembic.py`.
-- Rust: hard-coded `format!()` strings in `src/schema.rs` and the `composite_*_name`
-  helpers.
+**Every DDL emitter must use the same names for the same artifacts.** Since
+FF-B (B3), the canonical name builders live in ONE place —
+`crates/ferro-ddl-lowering/src/lib.rs` — and Python consumes them over FFI
+(`_core._ddl_*`); the IR compiler and the Alembic bridge carry the resulting
+names through the IR rather than re-deriving them. Derived column *types* are
+equally single-sourced via `resolve_column_storage` (see
+`derived-type-and-naming-decision-table.md`).
 
 The current canonical conventions:
 
@@ -46,10 +47,10 @@ The current canonical conventions:
 | --------------------------- | ------------------------------------------ |
 | Single-column index         | `idx_<table>_<col>`                        |
 | Composite index             | `idx_<table>_<col1>_<col2>...`             |
-| Single-column unique        | `uq_<table>_<col>`                         |
+| Single-column unique        | `uq_<table>_<col>` (standalone unique index) |
 | Composite unique            | `uq_<table>_<col1>_<col2>...`              |
 | Single-column `db_check`    | `ck_<table>_<col>`                         |
-| Foreign key (when named)    | `fk_<table>_<col>_<reftable>` *(planned)*  |
+| Foreign key                 | `fk_<table>_<col>_<reftable>` (always named) |
 | Primary key (when named)    | `pk_<table>` *(planned)*                   |
 
 Canonical column-type vocabulary (`db_type` tokens) is also load-bearing: both
