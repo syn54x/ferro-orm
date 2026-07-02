@@ -3,10 +3,10 @@
 use crate::{Dialect, EmissionError, EmissionResult, MigrationOp, MigrationPlan};
 use ferro_ddl_lowering::{
     self, apply_canonical_type, canonical_from_schema_column, canonical_to_db_type_token,
-    db_check_constraint_name, fk_action_from_str, fk_action_sql, is_timestamp_tz_conversion,
-    literal_default_value, pg_alter_type_target, quote_ident, render_db_check, single_index_name,
-    single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
-    timestamp_tz_conversion_warning,
+    db_check_constraint_name, fk_action_from_str, fk_action_sql, fk_name,
+    is_timestamp_tz_conversion, literal_default_value, pg_alter_type_target, quote_ident,
+    render_db_check, single_index_name, single_unique_index_name, sqlite_declared_type,
+    sqlite_type_storage_drift, timestamp_tz_conversion_warning,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
@@ -21,13 +21,47 @@ use std::collections::BTreeMap;
 /// output is byte-identical to the runtime JSON path on both backends.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CreateTableEmission {
-    /// `CREATE TABLE` including inline anonymous FKs and inline single-column `UNIQUE`.
+    /// `CREATE TABLE` including inline NAMED FKs (`CONSTRAINT "fk_..."`).
+    /// Single-column uniques are NOT inline — they are named `uq_` unique
+    /// indexes in [`post_create_sqls`](Self::post_create_sqls) (FF-B B4/D1).
     pub create_sql: String,
     /// Standalone `CREATE [UNIQUE] INDEX` statements plus the Postgres `db_check`
     /// `ALTER`. Never contains foreign keys (those are inline in `create_sql`).
     pub post_create_sqls: Vec<String>,
     /// Non-fatal warnings (e.g. the SQLite `db_check` elision).
     pub warnings: Vec<String>,
+}
+
+/// The FK constraint name for one IR foreign key: the compiler-provided
+/// `SchemaForeignKey.name` when set, else the shared `fk_name` convention.
+fn fk_constraint_name(table_lower: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> String {
+    fk.name
+        .clone()
+        .unwrap_or_else(|| fk_name(table_lower, &fk.column, &fk.to_table))
+}
+
+/// sea-query's SQLite builder drops the constraint name of an inline FK in
+/// CREATE TABLE mode (its Postgres builder honors it). Insert the
+/// `CONSTRAINT "fk_..." ` prefix deterministically: we control both the
+/// anchor bytes (rendered by the same builder) and the emission order, and
+/// each FK's anchor is unique within the statement (one FK per column).
+/// Pinned by the create-table goldens.
+fn name_sqlite_inline_fks(create_sql: String, model: &SchemaModel) -> String {
+    let mut sql = create_sql;
+    for fk in &model.foreign_keys {
+        let anchor = format!(
+            "FOREIGN KEY ({}) REFERENCES {}",
+            quote_ident(&fk.column),
+            quote_ident(&fk.to_table)
+        );
+        let named = format!(
+            "CONSTRAINT {} {}",
+            quote_ident(&fk_constraint_name(&model.table_name, fk)),
+            anchor
+        );
+        sql = sql.replacen(&anchor, &named, 1);
+    }
+    sql
 }
 
 fn index_models<'a>(models: &'a [SchemaModel]) -> BTreeMap<String, &'a SchemaModel> {
@@ -93,18 +127,19 @@ pub fn render_create_table(
         if !col.nullable {
             col_def.not_null();
         }
-        if col.unique {
-            col_def.unique_key();
-        }
+        // Single-column uniques are NOT inline: they are emitted as standalone
+        // named `uq_` unique indexes (see `standalone_indexes`), the one shape
+        // fresh-create, the SQLite ALTER path, and Alembic reflection all share.
         table_stmt.col(&mut col_def);
     }
 
-    // Inline, anonymous foreign keys. The runtime defaults a missing `on_delete`
+    // Inline, NAMED foreign keys. The runtime defaults a missing `on_delete`
     // to CASCADE (`fk_action_from_str(None) == Cascade`), preserved here.
     for fk in &model.foreign_keys {
         let action = fk_action_from_str(fk.on_delete.as_deref());
         table_stmt.foreign_key(
             ForeignKey::create()
+                .name(&fk_constraint_name(table_lower, fk))
                 .from(Alias::new(table_lower), Alias::new(&fk.column))
                 .to(Alias::new(&fk.to_table), Alias::new(&fk.to_column))
                 .on_delete(action),
@@ -112,7 +147,7 @@ pub fn render_create_table(
     }
 
     let create_sql = match dialect {
-        Dialect::Sqlite => table_stmt.build(SqliteQueryBuilder),
+        Dialect::Sqlite => name_sqlite_inline_fks(table_stmt.build(SqliteQueryBuilder), model),
         Dialect::Postgres => table_stmt.build(PostgresQueryBuilder),
     };
 
@@ -148,29 +183,16 @@ fn render_index_sql(
     }
 }
 
-fn single_column_unique_is_inline(model: &SchemaModel, unique_columns: &[String]) -> bool {
-    if unique_columns.len() != 1 {
-        return false;
-    }
-    let col_name = &unique_columns[0];
-    model
-        .columns
-        .iter()
-        .any(|col| col.name == *col_name && col.unique)
-}
-
 /// The standalone indexes/uniques the create path emits as separate
-/// `CREATE [UNIQUE] INDEX` statements: every `model.indexes`, plus `model.uniques`
-/// that are not inline single-column uniques. Returned as (name, columns, unique).
+/// `CREATE [UNIQUE] INDEX` statements: every `model.indexes` and every
+/// `model.uniques` (single-column uniques included — nothing is inline).
+/// Returned as (name, columns, unique).
 pub(crate) fn standalone_indexes(model: &SchemaModel) -> Vec<(String, Vec<String>, bool)> {
     let mut out = Vec::new();
     for index in &model.indexes {
         out.push((index.name.clone(), index.columns.clone(), index.unique));
     }
     for unique in &model.uniques {
-        if single_column_unique_is_inline(model, &unique.columns) {
-            continue;
-        }
         out.push((unique.name.clone(), unique.columns.clone(), true));
     }
     out
@@ -302,14 +324,10 @@ fn emit_add_column(
         }
     };
 
-    let inline_unique = col.unique && dialect == Dialect::Postgres;
     let mut col_def = ColumnDef::new(Alias::new(column));
     apply_canonical_type(&mut col_def, canonical);
     if !col.nullable {
         col_def.not_null();
-    }
-    if inline_unique {
-        col_def.unique_key();
     }
     if let Some(default_value) = &backfill_default {
         col_def.default(default_value.clone());
@@ -334,22 +352,15 @@ fn emit_add_column(
         ));
     }
 
-    if col.unique && dialect == Dialect::Sqlite {
-        let index_name = single_unique_index_name(table, column);
-        let index_stmt = Index::create()
-            .unique()
-            .name(&index_name)
-            .table(Alias::new(table))
-            .col(Alias::new(column))
-            .if_not_exists()
-            .to_owned();
-        result
-            .statements
-            .push(index_stmt.to_string(SqliteQueryBuilder));
-        result.warnings.push(format!(
-            "Added unique column '{}.{}' as a unique index '{}' (SQLite cannot add an \
-             inline UNIQUE constraint to an existing table).",
-            table, column, index_name
+    // The canonical single-column unique shape on both dialects: the same
+    // standalone named `uq_` unique index fresh-create emits (FF-B B4/D1).
+    if col.unique {
+        result.statements.push(render_index_sql(
+            table,
+            &single_unique_index_name(table, column),
+            &[column.to_string()],
+            true,
+            dialect,
         ));
     }
 
@@ -379,8 +390,9 @@ fn emit_add_column(
         if dialect == Dialect::Postgres {
             let on_delete = fk_action_from_str(fk.on_delete.as_deref());
             result.statements.push(format!(
-                "ALTER TABLE {} ADD FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
+                "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
                 quote_ident(table),
+                quote_ident(&fk_constraint_name(table, fk)),
                 quote_ident(column),
                 quote_ident(&fk.to_table),
                 quote_ident(&fk.to_column),

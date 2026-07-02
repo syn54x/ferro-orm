@@ -9,6 +9,7 @@ except ImportError:
     sa = None
 
 from .._annotation_utils import _VARCHAR_RE
+from .._core import _ddl_fk_name
 from .._deprecations import (
     IR_FIRST_DEPRECATION_REMOVE_IN,
     IR_FIRST_DEPRECATION_SINCE,
@@ -19,11 +20,10 @@ from ..ir import compile_registry_schema_ir
 from ..schema_metadata import build_model_schema
 from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 
-#: SQLAlchemy ``naming_convention`` keeping Alembic autogen output identical to
-#: the Rust runtime DDL emitter (``src/schema.rs``). Single-column indexes use
-#: ``idx_<table>_<col>`` in both paths, matching the existing
-#: ``ferro_composite_indexes`` convention. See the cross-emitter DDL parity
-#: invariant in ``AGENTS.md``.
+#: SQLAlchemy ``naming_convention`` mirroring the Rust emitter's names. The
+#: live IR bridge names every artifact explicitly (from the IR, which carries
+#: the single-sourced ``ferro-ddl-lowering`` names over FFI), so this is only
+#: load-bearing for the deprecated ``_build_sa_table`` path below.
 _FERRO_NAMING_CONVENTION = {
     "ix": "idx_%(table_name)s_%(column_0_name)s",
     "ck": "ck_%(table_name)s_%(column_0_name)s",
@@ -109,13 +109,14 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
         if not isinstance(col_name, str) or not col_name:
             continue
         sa_type = _sa_type_from_ir_column(col_name, col)
+        # No unique=/index= column flags: single-column uniques and indexes are
+        # explicit named artifacts below (the IR `uniques[]`/`indexes[]` carry
+        # the shared `uq_`/`idx_` names), matching the Rust emitter's shapes.
         kwargs = {
             "primary_key": bool(col.get("primary_key", False)),
             "nullable": bool(col.get("nullable", True))
             if not bool(col.get("primary_key", False))
             else False,
-            "unique": bool(col.get("unique", False)),
-            "index": bool(col.get("index", False)),
         }
         columns.append(sa.Column(col_name, sa_type, **kwargs))
         columns_by_name[col_name] = columns[-1]
@@ -137,6 +138,11 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
         sqltext = _render_check_body(column, values)
         table_args.append(sa.CheckConstraint(sqltext, name=name))
 
+    # Every `uniques[]` entry — single-column included — is a standalone named
+    # unique index, the one shape the Rust emitter, the SQLite ALTER path, and
+    # reflection all share (FF-B B4/D1). A UniqueConstraint would reflect as a
+    # different structural shape and produce phantom diffs.
+    unique_index_args: list[tuple[str, list[str]]] = []
     for unique in model_ir.get("uniques") or []:
         if not isinstance(unique, dict):
             continue
@@ -146,14 +152,9 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
             continue
         if not all(isinstance(c, str) and c for c in cols):
             continue
-        if len(cols) == 1:
-            column_name = cols[0]
-            if bool(model_ir_column_flag(model_ir, column_name, "unique")):
-                continue
-        if isinstance(name, str) and name:
-            table_args.append(sa.UniqueConstraint(*cols, name=name))
-        else:
-            table_args.append(sa.UniqueConstraint(*cols))
+        if not isinstance(name, str) or not name:
+            continue
+        unique_index_args.append((name, cols))
 
     table = sa.Table(table_name, metadata, *table_args)
 
@@ -170,13 +171,25 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
         if not isinstance(to_column, str) or not to_column:
             continue
         on_delete = fk.get("on_delete")
-        column = table.columns[col_name]
-        column.append_foreign_key(
-            sa.ForeignKey(
-                f"{to_table}.{to_column}",
+        fk_ir_name = fk.get("name")
+        constraint_name = (
+            fk_ir_name
+            if isinstance(fk_ir_name, str) and fk_ir_name
+            else _ddl_fk_name(table_name, col_name, to_table)
+        )
+        table.append_constraint(
+            sa.ForeignKeyConstraint(
+                [col_name],
+                [f"{to_table}.{to_column}"],
+                name=constraint_name,
                 ondelete=on_delete if isinstance(on_delete, str) else None,
             )
         )
+
+    for name, cols in unique_index_args:
+        if not all(c in table.columns for c in cols):
+            continue
+        sa.Index(name, *(table.columns[c] for c in cols), unique=True)
 
     for index in model_ir.get("indexes") or []:
         if not isinstance(index, dict):
@@ -190,10 +203,6 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
             continue
         if not all(isinstance(c, str) and c in table.columns for c in cols):
             continue
-        if len(cols) == 1:
-            column_name = cols[0]
-            if bool(model_ir_column_flag(model_ir, column_name, "index")):
-                continue
         sa.Index(name, *(table.columns[c] for c in cols), unique=unique)
 
 

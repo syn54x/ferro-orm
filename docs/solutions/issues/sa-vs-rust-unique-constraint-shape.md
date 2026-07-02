@@ -9,8 +9,20 @@ related_files:
 related_issues: [32]
 related_prs: [36]
 captured: 2026-04-28
-status: tracked
+status: resolved
+resolved: 2026-07-02
 ---
+
+> **Resolved by FF-B B4 ("Option A refined").** Both emitters now render every
+> single-column unique as a standalone named `uq_<table>_<col>` **unique
+> index** — the Rust emitter dropped `col_def.unique_key()` and the Alembic
+> bridge emits explicit `sa.Index(name, col, unique=True)` instead of
+> `Column(unique=True)`. (An index rather than a table-level constraint
+> because sea-query's create API and SQLite's ALTER path can only ever produce
+> the index shape — see
+> `docs/solutions/patterns/derived-type-and-naming-decision-table.md`.)
+> The `_is_redundant_single_column_unique` filter is deleted. Kept for the
+> historical analysis below.
 
 ## Problem
 

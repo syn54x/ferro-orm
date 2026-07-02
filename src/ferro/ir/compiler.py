@@ -12,6 +12,14 @@ import json
 from typing import Any
 
 from .. import state as ferro_state
+from .._core import (
+    _ddl_check_constraint_name,
+    _ddl_composite_index_name,
+    _ddl_composite_unique_name,
+    _ddl_fk_name,
+    _ddl_single_index_name,
+    _ddl_single_unique_name,
+)
 from ..schema_metadata import build_model_schema
 from ..state import (
     _JOIN_TABLE_REGISTRY,
@@ -179,35 +187,35 @@ def _column_ir(
     return column_ir
 
 
+# Artifact names come from the single-source builders in ferro-ddl-lowering
+# (via _core FFI) — including the 63-char truncation guards the old hand-rolled
+# single-column helpers lacked. Do not re-implement name formats here
+# (AGENTS.md § I-1; FF-B B3).
+
+
 def _fk_name(table_name: str, col_name: str, to_table: str) -> str:
-    """Build canonical foreign-key name for SchemaIR metadata."""
-    return f"fk_{table_name}_{col_name}_{to_table}"
+    """Canonical foreign-key constraint name (shared Rust builder)."""
+    return _ddl_fk_name(table_name, col_name, to_table)
 
 
 def _single_index_name(table_name: str, col_name: str) -> str:
-    """Build canonical single-column index name."""
-    return f"idx_{table_name}_{col_name}"
+    """Canonical single-column index name (shared Rust builder)."""
+    return _ddl_single_index_name(table_name, col_name)
 
 
 def _single_unique_name(table_name: str, col_name: str) -> str:
-    """Build canonical single-column unique-constraint name."""
-    return f"uq_{table_name}_{col_name}"
+    """Canonical single-column unique name (shared Rust builder)."""
+    return _ddl_single_unique_name(table_name, col_name)
 
 
 def _composite_index_name(table_name: str, columns: list[str]) -> str:
-    """Build canonical composite index name."""
-    raw = f"idx_{table_name}_{'_'.join(columns)}"
-    if len(raw) > 63:
-        return f"{raw[:59]}_idx"
-    return raw
+    """Canonical composite index name (shared Rust builder)."""
+    return _ddl_composite_index_name(table_name, columns)
 
 
 def _composite_unique_name(table_name: str, columns: list[str]) -> str:
-    """Build canonical composite unique-constraint name."""
-    raw = f"uq_{table_name}_{'_'.join(columns)}"
-    if len(raw) > 63:
-        return f"{raw[:60]}_uq"
-    return raw
+    """Canonical composite unique name (shared Rust builder)."""
+    return _ddl_composite_unique_name(table_name, columns)
 
 
 def _checks_from_columns(table_name: str, columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -233,7 +241,7 @@ def _checks_from_columns(table_name: str, columns: list[dict[str, Any]]) -> list
                 rendered.append(f"'{escaped}'")
         checks.append(
             {
-                "name": f"ck_{table_name}_{col_name}",
+                "name": _ddl_check_constraint_name(table_name, col_name),
                 "column": col_name,
                 "values": rendered,
             }

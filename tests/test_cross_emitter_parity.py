@@ -123,25 +123,6 @@ def _is_pk_nullable_relaxation(op_tuple, metadata: sa.MetaData) -> bool:
     return bool(column.primary_key)
 
 
-def _is_redundant_single_column_unique(op_tuple) -> bool:
-    """``add_constraint UniqueConstraint(col)`` on a single column.
-
-    Pre-existing divergence (tracked in
-    ``docs/solutions/issues/sa-vs-rust-unique-constraint-shape.md``):
-    SA renders ``Column(..., unique=True)`` as a separate ``UniqueConstraint``
-    object on the table. The Rust emitter writes the ``UNIQUE`` keyword
-    inline on the column. The emitted SQL is equivalent, but SA's reflector
-    only finds a column-level uniqueness flag in the live DB and reports the
-    standalone ``UniqueConstraint`` as missing.
-    """
-    if op_tuple[0] != "add_constraint":
-        return False
-    constraint = op_tuple[1]
-    if not isinstance(constraint, sa.UniqueConstraint):
-        return False
-    return len(list(constraint.columns)) == 1
-
-
 def _flatten_diff(diff: list) -> list:
     """``compare_metadata`` returns a mix of bare op tuples and sublists.
 
@@ -168,7 +149,6 @@ def _ignore_unreliable_alembic_diffs(diff: list, metadata: sa.MetaData) -> list:
         op
         for op in _flatten_diff(diff)
         if not _is_pk_nullable_relaxation(op, metadata)
-        and not _is_redundant_single_column_unique(op)
     ]
 
 

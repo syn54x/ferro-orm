@@ -353,12 +353,14 @@ def test_uniques_and_indexes_coexist():
 
     metadata = get_metadata()
     table = metadata.tables["both"]
-    ucs = [c for c in table.constraints if isinstance(c, sa.UniqueConstraint)]
+    # Composite uniques are named unique indexes, matching the Rust emitter
+    # shape (FF-B B4/D1).
+    uq_idxs = [i for i in table.indexes if i.unique]
     idxs = [i for i in table.indexes if not i.unique]
-    assert any({c.key for c in uc.columns} == {"u1", "u2"} for uc in ucs)
+    assert any({c.key for c in uq.columns} == {"u1", "u2"} for uq in uq_idxs)
     assert any({c.key for c in i.columns} == {"i1", "i2"} for i in idxs)
-    all_names = {uc.name for uc in ucs} | {i.name for i in idxs}
-    assert len(all_names) == len(ucs) + len(idxs)
+    all_names = {uq.name for uq in uq_idxs} | {i.name for i in idxs}
+    assert len(all_names) == len(uq_idxs) + len(idxs)
 
 
 def test_coexists_with_single_column_field_index():

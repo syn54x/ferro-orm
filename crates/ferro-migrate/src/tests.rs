@@ -232,8 +232,8 @@ const ORG_CREATE_SQLITE: &str =
     "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" integer PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )";
 const ORG_CREATE_POSTGRES: &str =
     "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" serial PRIMARY KEY, \"name\" varchar NOT NULL )";
-const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" real NOT NULL, \"birth_date\" date_text NOT NULL, \"created_at\" timestamp_with_timezone_text NOT NULL, \"email\" varchar NOT NULL, \"id\" integer PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" json_text NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid_text NOT NULL, \"username\" varchar NOT NULL UNIQUE, \"wake_time\" varchar NOT NULL, FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
-const ACCOUNT_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" bytea NOT NULL, \"balance\" decimal NOT NULL, \"birth_date\" date NOT NULL, \"created_at\" timestamp with time zone NOT NULL, \"email\" varchar NOT NULL, \"id\" serial PRIMARY KEY, \"metadata_blob\" json NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid NOT NULL, \"username\" varchar NOT NULL UNIQUE, \"wake_time\" varchar NOT NULL, FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
+const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" real NOT NULL, \"birth_date\" date_text NOT NULL, \"created_at\" timestamp_with_timezone_text NOT NULL, \"email\" varchar NOT NULL, \"id\" integer PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" json_text NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid_text NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" varchar NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
+const ACCOUNT_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" bytea NOT NULL, \"balance\" decimal NOT NULL, \"birth_date\" date NOT NULL, \"created_at\" timestamp with time zone NOT NULL, \"email\" varchar NOT NULL, \"id\" serial PRIMARY KEY, \"metadata_blob\" json NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" varchar NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
 
 fn assert_no_comment_placeholders(statements: &[String]) {
     for sql in statements {
@@ -385,7 +385,10 @@ fn emit_sql_with_ir_add_table_sqlite() {
 }
 
 #[test]
-fn emit_sql_with_ir_add_table_unique_inline_sqlite() {
+fn emit_sql_with_ir_add_table_single_unique_is_standalone_named_index() {
+    // FF-B B4/D1: single-column uniques are standalone named `uq_` unique
+    // indexes on both dialects — the one shape fresh-create, the SQLite ALTER
+    // path, and Alembic reflection can all agree on. No inline column UNIQUE.
     let model = SchemaModel {
         columns: vec![col_with_flags("email", "text", true, true, false, None)],
         uniques: vec![SchemaUnique {
@@ -401,11 +404,20 @@ fn emit_sql_with_ir_add_table_unique_inline_sqlite() {
         }],
         warnings: Vec::new(),
     };
-    let result =
-        emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, Dialect::Sqlite).unwrap();
-    assert_eq!(result.statements.len(), 1);
-    assert!(result.statements[0].contains("UNIQUE"));
-    assert!(!result.statements.iter().any(|s| s.contains("CREATE UNIQUE INDEX")));
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let result =
+            emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, dialect).unwrap();
+        assert_eq!(result.statements.len(), 2, "{dialect:?}: {:?}", result.statements);
+        assert!(
+            !result.statements[0].contains("UNIQUE"),
+            "{dialect:?}: no inline UNIQUE in create: {}",
+            result.statements[0]
+        );
+        assert_eq!(
+            result.statements[1],
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_user_email\" ON \"user\" (\"email\")"
+        );
+    }
 }
 
 #[test]
@@ -471,7 +483,10 @@ fn emit_sql_with_ir_add_column_not_null_with_default_postgres() {
 }
 
 #[test]
-fn emit_sql_with_ir_add_column_unique_sqlite() {
+fn emit_sql_with_ir_add_column_unique_is_standalone_named_index() {
+    // FF-B B4/D1: adding a unique column emits the same standalone named
+    // `uq_` index shape as fresh create, on both dialects, with no warning
+    // (the shape is canonical now, not a SQLite compromise).
     let model = schema_model(
         "user",
         vec![col_with_flags("email", "text", true, true, false, None)],
@@ -485,12 +500,25 @@ fn emit_sql_with_ir_add_column_unique_sqlite() {
         }],
         warnings: Vec::new(),
     };
-    let result =
-        emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
-    assert_eq!(result.statements.len(), 2);
-    assert!(result.statements[0].contains("ADD COLUMN"));
-    assert!(result.statements[1].contains("CREATE UNIQUE INDEX"));
-    assert!(result.warnings.iter().any(|w| w.contains("unique index")));
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let result = emit_sql_with_ir(&plan, &old_ir, &new_ir, dialect).unwrap();
+        assert_eq!(result.statements.len(), 2, "{dialect:?}: {:?}", result.statements);
+        assert!(result.statements[0].contains("ADD COLUMN"));
+        assert!(
+            !result.statements[0].contains("UNIQUE"),
+            "{dialect:?}: no inline UNIQUE on ADD COLUMN: {}",
+            result.statements[0]
+        );
+        assert_eq!(
+            result.statements[1],
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_user_email\" ON \"user\" (\"email\")"
+        );
+        assert!(
+            result.warnings.is_empty(),
+            "{dialect:?}: unexpected warnings: {:?}",
+            result.warnings
+        );
+    }
 }
 
 #[test]
@@ -541,7 +569,14 @@ fn emit_sql_with_ir_add_column_fk_postgres() {
     };
     let result =
         emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
-    assert!(result.statements.iter().any(|s| s.contains("FOREIGN KEY")));
+    // FF-B B4: the added FK carries its IR name via ADD CONSTRAINT.
+    assert!(
+        result.statements.iter().any(|s| s
+            == "ALTER TABLE \"user\" ADD CONSTRAINT \"fk_user_team_id_team\" FOREIGN KEY \
+                (\"team_id\") REFERENCES \"team\" (\"id\") ON DELETE CASCADE"),
+        "named ADD CONSTRAINT missing: {:?}",
+        result.statements
+    );
 }
 
 #[test]
@@ -813,11 +848,14 @@ fn emit_sql_multi_op_ordering() {
         .expect("user create");
     assert!(team_pos < user_pos);
 
-    // The FK is now INLINE in the child's CREATE TABLE, not a separate statement.
+    // The FK is INLINE in the child's CREATE TABLE, named via the shared
+    // fk_name fallback (the fixture sets name: None).
     let (_, user_create) = create_positions[user_pos];
     assert!(
-        user_create.contains("FOREIGN KEY (\"team_id\") REFERENCES \"team\" (\"id\") ON DELETE CASCADE"),
-        "inline FK missing from user create: {user_create}"
+        user_create.contains(
+            "CONSTRAINT \"fk_user_team_id_team\" FOREIGN KEY (\"team_id\") REFERENCES \"team\" (\"id\") ON DELETE CASCADE"
+        ),
+        "named inline FK missing from user create: {user_create}"
     );
     assert!(
         !result.statements.iter().any(|s| s.starts_with("ALTER TABLE") && s.contains("FOREIGN KEY")),
@@ -981,6 +1019,7 @@ fn render_create_table_golden_sqlite() {
     got.sort();
     let mut want = vec![
         "CREATE INDEX IF NOT EXISTS \"idx_account_email\" ON \"account\" (\"email\")".to_string(),
+        "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_account_username\" ON \"account\" (\"username\")".to_string(),
         "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_account_username_email\" ON \"account\" (\"username\", \"email\")".to_string(),
         "CREATE INDEX IF NOT EXISTS \"idx_account_created_at_birth_date\" ON \"account\" (\"created_at\", \"birth_date\")".to_string(),
     ];
@@ -996,8 +1035,10 @@ fn render_create_table_golden_sqlite() {
         acct.warnings
     );
 
-    // FKs are inline, not in post-create, and no SQLite FK-drop warning.
-    assert!(acct.create_sql.contains("FOREIGN KEY (\"org_id\")"));
+    // FKs are inline, named, not in post-create, and no SQLite FK-drop warning.
+    assert!(acct
+        .create_sql
+        .contains("CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\")"));
     assert!(!acct.post_create_sqls.iter().any(|s| s.contains("FOREIGN KEY")));
     assert!(!acct.warnings.iter().any(|w| w.contains("Foreign key")));
 }
@@ -1020,6 +1061,7 @@ fn render_create_table_golden_postgres() {
     let mut want = vec![
         "CREATE INDEX IF NOT EXISTS \"idx_account_email\" ON \"account\" (\"email\")".to_string(),
         PG_DB_CHECK_ACCOUNT_ROLE.to_string(),
+        "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_account_username\" ON \"account\" (\"username\")".to_string(),
         "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_account_username_email\" ON \"account\" (\"username\", \"email\")".to_string(),
         "CREATE INDEX IF NOT EXISTS \"idx_account_created_at_birth_date\" ON \"account\" (\"created_at\", \"birth_date\")".to_string(),
     ];
@@ -1034,8 +1076,8 @@ fn render_create_table_golden_postgres() {
         .any(|s| s == PG_DB_CHECK_ACCOUNT_ROLE));
     assert!(acct.warnings.is_empty(), "unexpected warnings: {:?}", acct.warnings);
 
-    // FKs inline, not in post-create.
-    assert!(acct.create_sql.contains("FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT"));
+    // FKs inline, named, not in post-create.
+    assert!(acct.create_sql.contains("CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT"));
     assert!(!acct.post_create_sqls.iter().any(|s| s.contains("FOREIGN KEY")));
 }
 
@@ -1058,9 +1100,9 @@ fn render_create_table_fk_none_on_delete_defaults_cascade() {
         let emission = render_create_table(&child, dialect).unwrap();
         assert!(
             emission.create_sql.contains(
-                "FOREIGN KEY (\"team_id\") REFERENCES \"team\" (\"id\") ON DELETE CASCADE"
+                "CONSTRAINT \"fk_user_team_id_team\" FOREIGN KEY (\"team_id\") REFERENCES \"team\" (\"id\") ON DELETE CASCADE"
             ),
-            "None on_delete must default to CASCADE inline ({dialect:?}): {}",
+            "None on_delete must default to CASCADE inline with the fallback fk_ name ({dialect:?}): {}",
             emission.create_sql
         );
     }
