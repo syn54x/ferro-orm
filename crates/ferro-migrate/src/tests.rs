@@ -9,6 +9,15 @@ use ferro_schema_ir::{
     SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaUnique,
 };
 
+/// The single expected Postgres db_check emission for `account.role IN ('admin','user')`.
+/// The bare `ALTER TABLE ... ADD CONSTRAINT` is wrapped in an idempotent DO-block
+/// guard (G6, #176) so a re-run against an already-migrated schema is a no-op; the
+/// CHECK body stays byte-identical to what the Alembic emitter mirrors.
+const PG_DB_CHECK_ACCOUNT_ROLE: &str = "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint \
+     WHERE conname = 'ck_account_role' AND conrelid = '\"account\"'::regclass) THEN \
+     ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" \
+     CHECK (\"role\" IN ('admin', 'user')); END IF; END $$";
+
 fn envelope(models: Vec<SchemaModel>) -> IrEnvelope<SchemaIrPayload> {
     IrEnvelope {
         ir_kind: "schema".to_string(),
@@ -1010,18 +1019,19 @@ fn render_create_table_golden_postgres() {
     got.sort();
     let mut want = vec![
         "CREATE INDEX IF NOT EXISTS \"idx_account_email\" ON \"account\" (\"email\")".to_string(),
-        "ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))".to_string(),
+        PG_DB_CHECK_ACCOUNT_ROLE.to_string(),
         "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_account_username_email\" ON \"account\" (\"username\", \"email\")".to_string(),
         "CREATE INDEX IF NOT EXISTS \"idx_account_created_at_birth_date\" ON \"account\" (\"created_at\", \"birth_date\")".to_string(),
     ];
     want.sort();
     assert_eq!(got, want);
 
-    // Postgres emits the db_check ALTER (quoted column, byte-matching runtime).
+    // Postgres emits the db_check ALTER (quoted column, byte-matching runtime),
+    // wrapped in the idempotent DO-block guard (G6, #176).
     assert!(acct
         .post_create_sqls
         .iter()
-        .any(|s| s == "ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))"));
+        .any(|s| s == PG_DB_CHECK_ACCOUNT_ROLE));
     assert!(acct.warnings.is_empty(), "unexpected warnings: {:?}", acct.warnings);
 
     // FKs inline, not in post-create.
@@ -1151,10 +1161,7 @@ fn render_db_check_postgres_emits_quoted_alter_no_warning() {
         values: vec!["'admin'".to_string(), "'user'".to_string()],
     };
     let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Postgres);
-    assert_eq!(
-        e.statement.as_deref(),
-        Some("ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))")
-    );
+    assert_eq!(e.statement.as_deref(), Some(PG_DB_CHECK_ACCOUNT_ROLE));
     assert!(e.warning.is_none());
 }
 
@@ -1195,9 +1202,8 @@ fn emit_sql_with_ir_add_column_db_check_postgres_quoted_and_sqlite_warns() {
 
     let pg = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(
-        pg.statements.iter().any(|s| s
-            == "ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))"),
-        "Postgres ALTER path must emit quoted CHECK; got: {:?}",
+        pg.statements.iter().any(|s| s == PG_DB_CHECK_ACCOUNT_ROLE),
+        "Postgres ALTER path must emit idempotent, quoted CHECK; got: {:?}",
         pg.statements
     );
 

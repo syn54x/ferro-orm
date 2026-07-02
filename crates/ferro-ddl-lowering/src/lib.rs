@@ -391,13 +391,28 @@ pub struct CheckEmission {
 
 /// Single source for db_check emission: wrapper + dialect decision + body.
 /// Postgres emits the ALTER; SQLite elides with a warning (no silent drop).
+///
+/// The Postgres emission is idempotent: the `ALTER TABLE ... ADD CONSTRAINT` is
+/// guarded by a `DO $$ ... IF NOT EXISTS (pg_constraint) ...` block so a second
+/// `connect(auto_migrate=True)` against an already-migrated schema is a no-op
+/// rather than a hard `constraint "..." already exists` failure. Postgres has no
+/// `ADD CONSTRAINT IF NOT EXISTS`, so the guard checks `pg_constraint` first — it
+/// only *adds when absent* (it does not swallow an "already exists" error). The
+/// CHECK body from [`render_check_body`] is embedded byte-identically inside the
+/// guard, preserving the cross-emitter parity the Alembic mirror depends on.
 pub fn render_db_check(table: &str, check: &ferro_schema_ir::SchemaCheck, dialect: Dialect) -> CheckEmission {
     match dialect {
         Dialect::Postgres => CheckEmission {
             statement: Some(format!(
-                "ALTER TABLE \"{table}\" ADD CONSTRAINT \"{}\" CHECK ({})",
-                check.name,
-                render_check_body(check),
+                "DO $$ BEGIN \
+                 IF NOT EXISTS (SELECT 1 FROM pg_constraint \
+                 WHERE conname = '{conname}' AND conrelid = '\"{table}\"'::regclass) THEN \
+                 ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK ({body}); \
+                 END IF; END $$",
+                conname = check.name.replace('\'', "''"),
+                table = table,
+                name = check.name,
+                body = render_check_body(check),
             )),
             warning: None,
         },
@@ -871,5 +886,44 @@ mod tests {
         assert!(!is_timestamp_tz_conversion(TimestampTz, TimestampTz));
         assert!(!is_timestamp_tz_conversion(Date, TimestampTz));
         assert!(!is_timestamp_tz_conversion(Timestamp, Date));
+    }
+
+    fn sample_check() -> ferro_schema_ir::SchemaCheck {
+        ferro_schema_ir::SchemaCheck {
+            name: "ck_account_role".to_string(),
+            column: "role".to_string(),
+            values: vec!["'admin'".to_string(), "'user'".to_string()],
+        }
+    }
+
+    #[test]
+    fn render_db_check_postgres_is_idempotent_and_wraps_the_bare_alter() {
+        let e = render_db_check("account", &sample_check(), Dialect::Postgres);
+        // The idempotent guard: only ADD CONSTRAINT when pg_constraint lacks it,
+        // so a re-run against an already-migrated schema is a no-op (G6, #176).
+        assert_eq!(
+            e.statement.as_deref(),
+            Some(
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint \
+                 WHERE conname = 'ck_account_role' AND conrelid = '\"account\"'::regclass) THEN \
+                 ALTER TABLE \"account\" ADD CONSTRAINT \"ck_account_role\" \
+                 CHECK (\"role\" IN ('admin', 'user')); END IF; END $$"
+            )
+        );
+        assert!(e.warning.is_none());
+        // The CHECK body is embedded byte-identically (cross-emitter parity).
+        assert!(
+            e.statement
+                .as_deref()
+                .unwrap()
+                .contains(&render_check_body(&sample_check()))
+        );
+    }
+
+    #[test]
+    fn render_db_check_sqlite_still_elides_with_warning() {
+        let e = render_db_check("account", &sample_check(), Dialect::Sqlite);
+        assert!(e.statement.is_none());
+        assert!(e.warning.as_deref().unwrap().contains("ck_account_role"));
     }
 }
