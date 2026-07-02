@@ -380,12 +380,28 @@ fold into whichever epic touches the same file when convenient.
 - [ ] **G5 — `RustValue::into_py_any` module-handle caching.**
       Intern `datetime`/`uuid`/`decimal`/`json` handles instead of
       `py.import` per value. Micro; measure under FF-C's benchmarks.
+- [ ] **G6 — Idempotent check-constraint emission in Postgres auto_migrate.**
+      `db_check=True` fields emit their check constraint via a non-idempotent
+      `ALTER TABLE ... ADD CONSTRAINT` in `post_create_sqls`
+      (`ferro_ddl_lowering::render_db_check`, Postgres arm), sitting alongside
+      the idempotent `CREATE TABLE IF NOT EXISTS`. A second
+      `connect(auto_migrate=True)` against an already-migrated schema (e.g. an
+      app restart) fails with `constraint "ck_..." ... already exists`.
+      Discovered incidentally during FF-A/A2 validation
+      ([#176](https://github.com/syn54x/ferro-orm/issues/176)). Fix by making
+      emission idempotent — a guarded `DO $$ ... IF NOT EXISTS` block or a
+      `pg_constraint` existence check during the create pass, mirroring how
+      live introspection already checks — not by swallowing the error (I-6).
+      Migration impact: **none** (internal migration-path fix; a
+      previously-failing second `connect()` now succeeds).
 
 **Exit gate**
 
 - [ ] Slot-guard test that fails when a fake slot is injected; `cargo llvm-lines`
       (or LOC) shows `operations.rs` duplication removed; PG migration
       interrupted mid-plan leaves the schema unchanged.
+- [ ] Second `connect(auto_migrate=True)` against an already-migrated Postgres
+      schema with a `db_check` model succeeds.
 
 ---
 
