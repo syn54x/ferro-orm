@@ -26,7 +26,18 @@ from ._core import (
     connect as _core_connect,
 )
 from .base import DbType, DbTypeToken, FerroField, FerroNullable, ForeignKey, varchar
-from .exceptions import ModelDoesNotExist
+from .exceptions import (
+    CheckViolationError,
+    DataError,
+    FerroError,
+    ForeignKeyViolationError,
+    IntegrityError,
+    InterfaceError,
+    ModelDoesNotExist,
+    NotNullViolationError,
+    OperationalError,
+    UniqueViolationError,
+)
 from .fields import BackRef, Field, ManyToMany
 from .models import Model, transaction
 from .query import Relation
@@ -205,6 +216,15 @@ __all__ = [
     "connect",
     "PoolConfig",
     "Model",
+    "FerroError",
+    "InterfaceError",
+    "OperationalError",
+    "DataError",
+    "IntegrityError",
+    "UniqueViolationError",
+    "ForeignKeyViolationError",
+    "NotNullViolationError",
+    "CheckViolationError",
     "ModelDoesNotExist",
     "DbType",
     "DbTypeToken",

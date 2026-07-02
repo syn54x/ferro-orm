@@ -496,7 +496,7 @@ async def test_unqualified_operation_requires_default_connection(tmp_path):
 
     await ferro.connect(f"sqlite:{db_file}?mode=rwc", name="app")
 
-    with pytest.raises(RuntimeError, match="No default connection selected"):
+    with pytest.raises(ferro.InterfaceError, match="No default connection selected"):
         await ferro.execute("SELECT 1")
 
 

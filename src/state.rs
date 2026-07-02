@@ -65,7 +65,7 @@ pub fn connection_for_route(using: Option<String>) -> PyResult<(String, Arc<Engi
                 .get(&connection_name)
                 .cloned()
                 .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    crate::errors::interface_error(format!(
                         "Default connection '{}' is not registered",
                         connection_name
                     ))
@@ -87,14 +87,12 @@ pub fn connection_for_route(using: Option<String>) -> PyResult<(String, Arc<Engi
             .is_some();
 
         if has_connections && !has_default {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            return Err(crate::errors::interface_error(
                 "No default connection selected",
             ));
         }
 
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "Engine not initialized",
-        ));
+        return Err(crate::errors::interface_error("Engine not initialized"));
     };
 
     if connection_name.is_empty()
@@ -117,7 +115,7 @@ pub fn connection_for_route(using: Option<String>) -> PyResult<(String, Arc<Engi
         .cloned()
         .map(|engine| (connection_name.clone(), engine))
         .ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!(
+            crate::errors::interface_error(format!(
                 "Connection '{}' is not registered",
                 connection_name
             ))

@@ -433,13 +433,14 @@ async def test_marshal_bool_before_int_order(db_url):
 
 
 @pytest.mark.asyncio
-async def test_invalid_sql_raises_runtimeerror_with_db_message(db_url):
+async def test_invalid_sql_raises_operational_error_with_db_message(db_url):
     """T8.1: driver error text appears in the surfaced exception."""
-    from ferro import execute
+    from ferro import OperationalError, execute
 
     await connect(db_url)
-    with pytest.raises(RuntimeError, match="Raw SQL execute failed"):
+    with pytest.raises(OperationalError, match="Raw SQL execute failed") as excinfo:
         await execute("THIS IS NOT VALID SQL")
+    assert excinfo.value.driver_message is not None
 
 
 @pytest.mark.asyncio
