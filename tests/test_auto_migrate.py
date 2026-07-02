@@ -676,8 +676,9 @@ async def test_added_indexed_and_unique_columns_get_their_indexes(
     )
     ferro.reset_engine()
 
-    with pytest.warns(UserWarning, match="uq_migindexed_slug"):
-        await ferro.connect(db_url, migrate_updates=True)
+    # The uq_ index is the canonical unique shape on both dialects since
+    # FF-B B4/D1 — no SQLite-compromise warning is emitted anymore.
+    await ferro.connect(db_url, migrate_updates=True)
 
     index_names = _sqlite_index_names(db_url, "migindexed")
     assert "idx_migindexed_status" in index_names

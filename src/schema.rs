@@ -5,7 +5,10 @@
 
 use crate::backend::EngineHandle;
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
-use ferro_ddl_lowering::{CanonicalType, canonical_from_parts, render_db_check};
+use ferro_ddl_lowering::{
+    CanonicalType, canonical_from_parts, db_check_constraint_name, render_db_check,
+    single_index_name,
+};
 use ferro_schema_ir::SchemaCheck;
 use pyo3::prelude::*;
 use sea_query::{
@@ -133,38 +136,8 @@ pub(crate) fn order_schemas_for_creation(
 }
 
 
-// retained for the Phase-9 legacy-parity fixture; production composite naming lives in ferro-ddl-lowering
-#[cfg(test)]
-fn composite_unique_index_name(table_lower: &str, col_names: &[&str]) -> String {
-    let joined = col_names.join("_");
-    let raw = format!("uq_{}_{}", table_lower, joined);
-    if raw.chars().count() > 63 {
-        return format!("{}_uq", raw.chars().take(60).collect::<String>());
-    }
-    raw
-}
-
-// retained for the Phase-9 legacy-parity fixture; production composite naming lives in ferro-ddl-lowering
-#[cfg(test)]
-fn composite_index_name(table_lower: &str, col_names: &[&str]) -> String {
-    let joined = col_names.join("_");
-    let raw = format!("idx_{}_{}", table_lower, joined);
-    if raw.chars().count() > 63 {
-        return format!("{}_idx", raw.chars().take(59).collect::<String>());
-    }
-    raw
-}
-
-/// Check-constraint name for a single-column `db_check`; matches the Python
-/// Alembic helper `_ck_constraint_name` in `src/ferro/migrations/alembic.py`.
-/// See AGENTS.md § I-1 (cross-emitter DDL parity).
-fn db_check_constraint_name(table_lower: &str, col_name: &str) -> String {
-    let raw = format!("ck_{}_{}", table_lower, col_name);
-    if raw.chars().count() > 63 {
-        return format!("{}_ck", raw.chars().take(60).collect::<String>());
-    }
-    raw
-}
+// Artifact naming (idx_/uq_/ck_/fk_ builders and their 63-char guards) is
+// single-sourced in `ferro-ddl-lowering` (FF-B B3) and imported at the top.
 
 /// Resolve a model property to its backend-specific [`CanonicalType`] via the
 /// shared lowering crate. `db_type` (when set) wins; otherwise the Pydantic
@@ -272,7 +245,7 @@ pub(crate) fn build_column_plan(
 
     let mut index_sqls = Vec::new();
     if column_bool_metadata(raw_col_info, col_info, "index").unwrap_or(false) {
-        let index_name = format!("idx_{}_{}", table_lower, col_name);
+        let index_name = single_index_name(table_lower, col_name);
         let index_stmt = Index::create()
             .name(&index_name)
             .table(Alias::new(table_lower))
@@ -497,6 +470,7 @@ pub fn _render_create_table_sql_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferro_ddl_lowering::composite_index_name;
     use serde_json::json;
 
     #[test]

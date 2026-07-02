@@ -11,6 +11,7 @@ mod errors;
 mod hydration;
 mod introspect;
 mod migrate;
+mod naming_ffi;
 mod operations;
 mod query;
 mod schema;
@@ -148,6 +149,12 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         migrate::_render_migration_sql_for_test,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_index_name, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_unique_name, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_ddl_composite_index_name, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_ddl_composite_unique_name, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_ddl_check_constraint_name, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_ddl_fk_name, m)?)?;
 
     Ok(())
 }

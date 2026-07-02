@@ -1011,6 +1011,28 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_type_classes_group_storage_equivalent_spellings() {
+        for (a, b) in [
+            ("DATETIME", "timestamp_with_timezone_text"),
+            ("DATE", "date_text"),
+            ("uuid_text", "char(32)"),
+            ("JSON", "json_text"),
+            ("NUMERIC", "real"),
+            ("BOOLEAN", "integer"),
+            ("BIGINT", "integer"),
+            ("VARCHAR(3)", "varchar"),
+        ] {
+            assert_eq!(
+                sqlite_type_class(a),
+                sqlite_type_class(b),
+                "{a} and {b} should be storage-equivalent"
+            );
+        }
+        assert_ne!(sqlite_type_class("integer"), sqlite_type_class("varchar"));
+        assert_ne!(sqlite_type_class("blob"), sqlite_type_class("text"));
+    }
+
+    #[test]
     fn fk_name_matches_i1_convention() {
         assert_eq!(
             fk_name("account", "org_id", "organization"),

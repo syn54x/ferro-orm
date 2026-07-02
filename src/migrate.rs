@@ -15,9 +15,10 @@
 
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
-    CanonicalType, Dialect, apply_canonical_type, canonical_from_schema_column,
-    canonical_to_db_type_token, information_schema_to_db_type_token, is_timestamp_tz_conversion,
-    schema_columns_storage_drift, timestamp_tz_conversion_warning,
+    Dialect, apply_canonical_type, canonical_from_schema_column, canonical_to_db_type_token,
+    fk_action_sql, fk_name, information_schema_to_db_type_token, is_timestamp_tz_conversion,
+    pg_alter_type_target, schema_columns_storage_drift, single_unique_index_name,
+    sqlite_declared_type, sqlite_type_storage_drift, timestamp_tz_conversion_warning,
 };
 use ferro_migrate::{MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
@@ -34,9 +35,7 @@ use crate::schema::{
 };
 use crate::state::{IDENTITY_MAP, MODEL_REGISTRY, engine_for_connection};
 use pyo3::prelude::*;
-use sea_query::{
-    Alias, ColumnDef, ForeignKeyAction, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table,
-};
+use sea_query::{Alias, ColumnDef, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -215,117 +214,10 @@ impl MigrationPlan {
     }
 }
 
-/// The DDL spelling used in `ALTER TABLE ... ALTER COLUMN ... TYPE <x> USING <col>::<x>`.
-fn pg_alter_type_target(canonical: CanonicalType) -> String {
-    match canonical {
-        CanonicalType::Integer => "integer".to_string(),
-        CanonicalType::SmallInt => "smallint".to_string(),
-        CanonicalType::BigInt => "bigint".to_string(),
-        CanonicalType::Double => "double precision".to_string(),
-        CanonicalType::Decimal => "numeric".to_string(),
-        CanonicalType::Boolean => "boolean".to_string(),
-        CanonicalType::Json => "json".to_string(),
-        CanonicalType::Text => "text".to_string(),
-        CanonicalType::Varchar(None) => "varchar".to_string(),
-        CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
-        CanonicalType::Char(n) => format!("char({n})"),
-        CanonicalType::Uuid => "uuid".to_string(),
-        CanonicalType::DateTime | CanonicalType::Timestamp => "timestamp".to_string(),
-        CanonicalType::TimestampTz => "timestamptz".to_string(),
-        CanonicalType::Date => "date".to_string(),
-        CanonicalType::Time => "time".to_string(),
-        CanonicalType::Blob => "bytea".to_string(),
-    }
-}
-
-/// The declared-type string sea-query's SQLite builder renders for each
-/// canonical type (pinned by the cross-emitter parity tests).
-fn sqlite_declared_type(canonical: CanonicalType) -> String {
-    match canonical {
-        CanonicalType::Integer => "integer".to_string(),
-        CanonicalType::SmallInt => "smallint".to_string(),
-        CanonicalType::BigInt => "bigint".to_string(),
-        CanonicalType::Double => "double".to_string(),
-        CanonicalType::Decimal => "real".to_string(),
-        CanonicalType::Boolean => "boolean".to_string(),
-        CanonicalType::Json => "json_text".to_string(),
-        CanonicalType::Text => "text".to_string(),
-        CanonicalType::Varchar(None) => "varchar".to_string(),
-        CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
-        CanonicalType::Char(n) => format!("char({n})"),
-        CanonicalType::Uuid => "uuid_text".to_string(),
-        CanonicalType::DateTime | CanonicalType::Timestamp => "datetime_text".to_string(),
-        CanonicalType::TimestampTz => "timestamp_with_timezone_text".to_string(),
-        CanonicalType::Date => "date_text".to_string(),
-        CanonicalType::Time => "time_text".to_string(),
-        CanonicalType::Blob => "blob".to_string(),
-    }
-}
-
-/// Storage-semantics class of a declared SQLite type. SQLite is dynamically
-/// typed: many declared-type spellings are storage-equivalent (its type
-/// affinity rules), so drift warnings fire only when the *class* changes —
-/// e.g. `integer` vs `varchar` — not for cosmetic spelling differences like
-/// `DATETIME` (Alembic) vs `datetime_text` (sea-query).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SqliteTypeClass {
-    Integer,
-    Text,
-    Blob,
-    Real,
-    Numeric,
-    Temporal,
-}
-
-fn sqlite_type_class(declared: &str) -> SqliteTypeClass {
-    let declared = declared.to_ascii_lowercase();
-    // ISO-text temporal spellings from both emitters (DATE, DATETIME,
-    // TIMESTAMP, date_text, timestamp_with_timezone_text, ...).
-    if declared.contains("date") || declared.contains("time") {
-        return SqliteTypeClass::Temporal;
-    }
-    if declared.contains("json") {
-        return SqliteTypeClass::Text;
-    }
-    if declared.contains("bool") || declared.contains("int") {
-        return SqliteTypeClass::Integer;
-    }
-    if declared.contains("char") || declared.contains("clob") || declared.contains("text") {
-        return SqliteTypeClass::Text;
-    }
-    if declared.is_empty() || declared.contains("blob") {
-        return SqliteTypeClass::Blob;
-    }
-    if declared.contains("real")
-        || declared.contains("floa")
-        || declared.contains("doub")
-        || declared.contains("num")
-        || declared.contains("dec")
-    {
-        return SqliteTypeClass::Real;
-    }
-    SqliteTypeClass::Numeric
-}
-
-/// Single-column unique index name with the 63-char Postgres-identifier
-/// guard; matches the composite `uq_` convention (AGENTS.md § I-1).
-fn single_unique_index_name(table_lower: &str, col_name: &str) -> String {
-    let raw = format!("uq_{}_{}", table_lower, col_name);
-    if raw.chars().count() > 63 {
-        return format!("{}_uq", raw.chars().take(60).collect::<String>());
-    }
-    raw
-}
-
-fn fk_action_sql(action: ForeignKeyAction) -> &'static str {
-    match action {
-        ForeignKeyAction::Restrict => "RESTRICT",
-        ForeignKeyAction::SetNull => "SET NULL",
-        ForeignKeyAction::SetDefault => "SET DEFAULT",
-        ForeignKeyAction::NoAction => "NO ACTION",
-        ForeignKeyAction::Cascade => "CASCADE",
-    }
-}
+// The type-target spellings (`pg_alter_type_target`, `sqlite_declared_type`),
+// the SQLite type-affinity comparison (`sqlite_type_storage_drift`), the
+// `uq_`/`fk_` name builders, and `fk_action_sql` are single-sourced in
+// `ferro-ddl-lowering` (FF-B B3) and imported above.
 
 /// Convert a JSON-schema scalar default into a sea-query literal usable to
 /// backfill a NOT NULL column add. Non-scalars (and `null`) are not usable.
@@ -580,17 +472,10 @@ fn plan_missing_column(
         }
     };
 
-    // SQLite's ADD COLUMN cannot take a UNIQUE constraint; an explicit unique
-    // index provides the same guarantee.
-    let inline_unique = col_plan.is_unique && backend == Dialect::Postgres;
-
     let mut col_def = ColumnDef::new(Alias::new(col_name));
     apply_canonical_type(&mut col_def, col_plan.canonical);
     if !col_plan.is_nullable {
         col_def.not_null();
-    }
-    if inline_unique {
-        col_def.unique_key();
     }
     if let Some(default_value) = &backfill_default {
         col_def.default(default_value.clone());
@@ -614,22 +499,20 @@ fn plan_missing_column(
         ));
     }
 
-    if col_plan.is_unique && backend == Dialect::Sqlite {
-        let index_name = single_unique_index_name(table_lower, col_name);
+    // The canonical single-column unique shape on both dialects: the same
+    // standalone named `uq_` unique index CREATE TABLE emits (FF-B B4/D1).
+    if col_plan.is_unique {
         let index_stmt = Index::create()
             .unique()
-            .name(&index_name)
+            .name(single_unique_index_name(table_lower, col_name))
             .table(Alias::new(table_lower))
             .col(Alias::new(col_name))
             .if_not_exists()
             .to_owned();
-        plan.statements
-            .push(index_stmt.to_string(SqliteQueryBuilder));
-        plan.warnings.push(format!(
-            "Added unique column '{}.{}' as a unique index '{}' (SQLite cannot add an \
-             inline UNIQUE constraint to an existing table).",
-            table_lower, col_name, index_name
-        ));
+        plan.statements.push(match backend {
+            Dialect::Sqlite => index_stmt.to_string(SqliteQueryBuilder),
+            Dialect::Postgres => index_stmt.to_string(PostgresQueryBuilder),
+        });
     }
 
     // Single-column index and db_check constraint, exactly as CREATE TABLE
@@ -639,11 +522,12 @@ fn plan_missing_column(
     if let Some(fk) = &col_plan.fk {
         match backend {
             Dialect::Postgres => {
-                // Unnamed, so Postgres assigns "<table>_<col>_fkey" — the same
-                // name an inline FK from CREATE TABLE receives.
+                // Named with the shared fk_ convention — the same constraint
+                // name an inline FK from CREATE TABLE receives (FF-B B4).
                 plan.statements.push(format!(
-                    "ALTER TABLE {} ADD FOREIGN KEY ({}) REFERENCES {} (\"id\") ON DELETE {}",
+                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (\"id\") ON DELETE {}",
                     quote_ident(table_lower),
+                    quote_ident(&fk_name(table_lower, col_name, &fk.to_table)),
                     quote_ident(col_name),
                     quote_ident(&fk.to_table),
                     fk_action_sql(fk.on_delete)
@@ -772,7 +656,7 @@ fn plan_existing_column(
                 Dialect::Sqlite,
             );
             let expected = sqlite_declared_type(col_plan.canonical);
-            if sqlite_type_class(&live_db_type) != sqlite_type_class(&expected) {
+            if sqlite_type_storage_drift(&live_db_type, col_plan.canonical) {
                 plan.warnings.push(format!(
                     "Column '{}.{}' is declared '{}' in the database but the model expects \
                      '{}'. SQLite cannot change column types in place; use Alembic to \
@@ -1621,7 +1505,10 @@ mod tests {
     }
 
     #[test]
-    fn unique_column_add_strips_inline_unique_on_sqlite() {
+    fn unique_column_add_emits_standalone_named_unique_index() {
+        // FF-B B4/D1: the canonical single-column unique shape on BOTH dialects
+        // is the standalone named `uq_` unique index — no inline UNIQUE, no
+        // SQLite-compromise warning.
         let schema = json!({
             "properties": {
                 "id": {"type": "integer", "primary_key": true},
@@ -1633,27 +1520,25 @@ mod tests {
             ..live("id", "integer")
         }];
 
-        let plan =
-            plan_with_ir_legacy_parity("doc", &schema, &live_cols, &[], Dialect::Sqlite, UPDATES);
-        assert!(
-            !plan.statements[0].to_uppercase().contains("UNIQUE"),
-            "inline UNIQUE must be stripped on SQLite: {}",
-            plan.statements[0]
-        );
-        assert!(
-            plan.statements[1].contains("CREATE UNIQUE INDEX IF NOT EXISTS \"uq_doc_slug\""),
-            "{}",
-            plan.statements[1]
-        );
-        assert_eq!(plan.warnings.len(), 1);
-
-        let plan = plan_with_ir_legacy_parity("doc", &schema, &live_cols, &[], Dialect::Postgres, UPDATES);
-        assert!(
-            plan.statements[0].to_uppercase().contains("UNIQUE"),
-            "Postgres keeps the inline UNIQUE: {}",
-            plan.statements[0]
-        );
-        assert!(plan.warnings.is_empty());
+        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+            let plan =
+                plan_with_ir_legacy_parity("doc", &schema, &live_cols, &[], dialect, UPDATES);
+            assert!(
+                !plan.statements[0].to_uppercase().contains("UNIQUE"),
+                "no inline UNIQUE on ADD COLUMN ({dialect:?}): {}",
+                plan.statements[0]
+            );
+            assert_eq!(
+                plan.statements[1],
+                "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_doc_slug\" ON \"doc\" (\"slug\")",
+                "{dialect:?}"
+            );
+            assert!(
+                plan.warnings.is_empty(),
+                "{dialect:?}: unexpected warnings: {:?}",
+                plan.warnings
+            );
+        }
     }
 
     #[test]
@@ -1703,9 +1588,10 @@ mod tests {
             UPDATES,
         );
         assert_eq!(plan.statements.len(), 2, "{:?}", plan.statements);
+        // FF-B B4: the added FK carries the shared fk_ constraint name.
         assert_eq!(
             plan.statements[1],
-            "ALTER TABLE \"invoice\" ADD FOREIGN KEY (\"client_id\") REFERENCES \"client\" (\"id\") ON DELETE CASCADE"
+            "ALTER TABLE \"invoice\" ADD CONSTRAINT \"fk_invoice_client_id_client\" FOREIGN KEY (\"client_id\") REFERENCES \"client\" (\"id\") ON DELETE CASCADE"
         );
 
         let plan =
@@ -2097,27 +1983,9 @@ mod tests {
         assert!(opts.destructive);
     }
 
-    #[test]
-    fn sqlite_type_classes_group_storage_equivalent_spellings() {
-        for (a, b) in [
-            ("DATETIME", "timestamp_with_timezone_text"),
-            ("DATE", "date_text"),
-            ("uuid_text", "char(32)"),
-            ("JSON", "json_text"),
-            ("NUMERIC", "real"),
-            ("BOOLEAN", "integer"),
-            ("BIGINT", "integer"),
-            ("VARCHAR(3)", "varchar"),
-        ] {
-            assert_eq!(
-                sqlite_type_class(a),
-                sqlite_type_class(b),
-                "{a} and {b} should be storage-equivalent"
-            );
-        }
-        assert_ne!(sqlite_type_class("integer"), sqlite_type_class("varchar"));
-        assert_ne!(sqlite_type_class("blob"), sqlite_type_class("text"));
-    }
+    // sqlite_type_class grouping is pinned in ferro-ddl-lowering
+    // (`sqlite_type_classes_group_storage_equivalent_spellings`), where the
+    // helper lives since FF-B B3.
 
     #[test]
     fn render_helper_outputs_drop_statements() {

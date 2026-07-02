@@ -47,8 +47,11 @@ def cleanup_registry():
     _JOIN_TABLE_REGISTRY.clear()
 
 
-def _unique_constraints(table: sa.Table) -> list[sa.UniqueConstraint]:
-    return [c for c in table.constraints if isinstance(c, sa.UniqueConstraint)]
+def _unique_constraints(table: sa.Table) -> list[sa.Index]:
+    """The table's unique artifacts. Since FF-B B4/D1 the bridge renders every
+    unique — composite included — as a named unique ``sa.Index`` (the same
+    shape the Rust emitter creates), not a ``UniqueConstraint``."""
+    return [i for i in table.indexes if i.unique]
 
 
 def test_composite_unique_unknown_column_raises():
@@ -110,7 +113,7 @@ async def test_m2m_duplicate_link_rejected(db_url):
 
 
 def test_alembic_metadata_has_unique_constraints():
-    """get_metadata() must expose UniqueConstraint for composite user model and M2M join."""
+    """get_metadata() must expose named unique indexes for composite user model and M2M join."""
 
     class PairRow(Model):
         __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
@@ -135,13 +138,13 @@ def test_alembic_metadata_has_unique_constraints():
 
     pair_table = metadata.tables["pairrow"]
     pair_ucs = _unique_constraints(pair_table)
-    assert pair_ucs, "expected at least one UniqueConstraint on pairrow"
+    assert pair_ucs, "expected at least one unique index on pairrow"
     col_names = {tuple(sorted(c.key for c in uc.columns)) for uc in pair_ucs}
     assert ("alpha_id", "beta_id") in col_names
 
     join_table = metadata.tables["actor_movies"]
     join_ucs = _unique_constraints(join_table)
-    assert join_ucs, "expected UniqueConstraint on M2M join table"
+    assert join_ucs, "expected a unique index on the M2M join table"
     join_col_sets = {tuple(sorted(c.key for c in uc.columns)) for uc in join_ucs}
     assert ("actor_id", "movie_id") in join_col_sets
 
@@ -289,7 +292,7 @@ async def test_composite_unique_truncated_name_matches_postgres_catalog(
 
 
 def test_composite_unique_multiple_groups_in_metadata_and_sqlite():
-    """Two disjoint composite groups should yield two UniqueConstraint objects."""
+    """Two disjoint composite groups should yield two named unique indexes."""
 
     class MultiGroup(Model):
         __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (

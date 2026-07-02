@@ -88,8 +88,7 @@ def test_index_and_unique_diff():
         key: str
 
     meta_v1 = get_metadata()
-    assert meta_v1.tables["settings"].c.key.unique is False
-    assert meta_v1.tables["settings"].c.key.index is False
+    assert meta_v1.tables["settings"].indexes == set()
 
     from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
@@ -102,9 +101,11 @@ def test_index_and_unique_diff():
         id: Annotated[int, FerroField(primary_key=True)]
         key: Annotated[str, FerroField(unique=True, index=True)]
 
+    # Uniques and indexes are explicit named artifacts (the shapes the Rust
+    # emitter renders), not column flags.
     meta_v2 = get_metadata()
-    assert meta_v2.tables["settings"].c.key.unique is True
-    assert meta_v2.tables["settings"].c.key.index is True
+    index_names = {idx.name: idx.unique for idx in meta_v2.tables["settings"].indexes}
+    assert index_names == {"uq_settings_key": True, "idx_settings_key": False}
 
 
 def test_enum_generates_with_name():
@@ -211,8 +212,8 @@ def test_foreign_key_index_emits_single_column_index():
     metadata = get_metadata()
     project_table = metadata.tables["project"]
 
-    assert project_table.c.org_id.index is True
-    assert project_table.c.org_id.unique is False
+    index_names = {idx.name: idx.unique for idx in project_table.indexes}
+    assert index_names == {"idx_project_org_id": False}
 
 
 def test_foreign_key_unique_implies_index_warns():
@@ -233,8 +234,9 @@ def test_foreign_key_unique_implies_index_warns():
     metadata = get_metadata()
     profile_table = metadata.tables["profile"]
 
-    assert profile_table.c.user_id.unique is True
-    assert profile_table.c.user_id.index is False
+    # Only the unique artifact survives; the redundant index is dropped.
+    index_names = {idx.name: idx.unique for idx in profile_table.indexes}
+    assert index_names == {"uq_profile_user_id": True}
 
 
 def test_foreign_key_index_default_false():
@@ -250,7 +252,7 @@ def test_foreign_key_index_default_false():
     metadata = get_metadata()
     project_table = metadata.tables["project"]
 
-    assert project_table.c.org_id.index is False
+    assert project_table.indexes == set()
 
 
 def test_foreign_key_index_with_nullable_fk():
@@ -273,7 +275,8 @@ def test_foreign_key_index_with_nullable_fk():
     metadata = get_metadata()
     project_table = metadata.tables["project"]
 
-    assert project_table.c.org_id.index is True
+    index_names = {idx.name for idx in project_table.indexes}
+    assert index_names == {"idx_project_org_id"}
     assert project_table.c.org_id.nullable is True
 
 

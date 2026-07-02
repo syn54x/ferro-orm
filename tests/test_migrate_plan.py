@@ -88,18 +88,17 @@ class TestAddColumn:
         with pytest.raises(ValueError, match=r"invoice\.id.*primary key"):
             render(schema, live, "sqlite")
 
-    def test_unique_column_strips_inline_unique_on_sqlite(self):
+    def test_unique_column_add_is_standalone_named_index_on_both_dialects(self):
+        # FF-B B4/D1: the standalone named uq_ index is the canonical unique
+        # shape on both dialects; no inline UNIQUE, no compromise warning.
         schema = schema_with({"slug": {"type": "string", "unique": True}})
-        stmts, warns = render(schema, PK_ONLY_LIVE, "sqlite")
-        assert stmts == [
-            'ALTER TABLE "invoice" ADD COLUMN "slug" varchar',
-            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_invoice_slug" ON "invoice" ("slug")',
-        ]
-        assert len(warns) == 1 and "uq_invoice_slug" in warns[0]
-
-        stmts, warns = render(schema, PK_ONLY_LIVE, "postgres")
-        assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "slug" varchar UNIQUE']
-        assert warns == []
+        for dialect in ("sqlite", "postgres"):
+            stmts, warns = render(schema, PK_ONLY_LIVE, dialect)
+            assert stmts == [
+                'ALTER TABLE "invoice" ADD COLUMN "slug" varchar',
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_invoice_slug" ON "invoice" ("slug")',
+            ], dialect
+            assert warns == [], dialect
 
     def test_indexed_column_add_emits_create_index(self):
         schema = schema_with({"kind": {"type": "string", "index": True}})
@@ -122,7 +121,8 @@ class TestAddColumn:
         stmts, warns = render(schema, PK_ONLY_LIVE, "postgres")
         assert stmts == [
             'ALTER TABLE "invoice" ADD COLUMN "client_id" integer',
-            'ALTER TABLE "invoice" ADD FOREIGN KEY ("client_id") REFERENCES "client" ("id")'
+            'ALTER TABLE "invoice" ADD CONSTRAINT "fk_invoice_client_id_client"'
+            ' FOREIGN KEY ("client_id") REFERENCES "client" ("id")'
             " ON DELETE CASCADE",
         ]
         assert warns == []

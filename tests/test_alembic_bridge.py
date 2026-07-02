@@ -54,8 +54,9 @@ def test_metadata_translation():
     user_table = metadata.tables["user"]
     assert isinstance(user_table.c.id.type, sa.Integer)
     assert user_table.c.id.primary_key
-    assert user_table.c.username.unique
-    assert user_table.c.username.index
+    # Uniques/indexes are explicit named artifacts, not column flags (FF-B B4).
+    index_names = {idx.name: idx.unique for idx in user_table.indexes}
+    assert index_names == {"uq_user_username": True, "idx_user_username": False}
     assert isinstance(user_table.c.is_active.type, sa.Boolean)
 
     # Assert Post table
@@ -63,7 +64,11 @@ def test_metadata_translation():
     post_table = metadata.tables["post"]
     assert post_table.c.author_id is not None
 
-    # Check Foreign Key
+    # Check Foreign Key: a table-level named constraint (FF-B B4).
+    fk_constraint = next(
+        c for c in post_table.constraints if isinstance(c, sa.ForeignKeyConstraint)
+    )
+    assert fk_constraint.name == "fk_post_author_id_user"
     fk = list(post_table.c.author_id.foreign_keys)[0]
     assert fk.target_fullname == "user.id"
     assert fk.ondelete == "CASCADE"
@@ -110,7 +115,8 @@ def test_foreign_key_unique_true_propagates_to_shadow_column():
 
     metadata = get_metadata()
     child_table = metadata.tables["child"]
-    assert child_table.columns["parent_id"].unique is True
+    unique_indexes = {idx.name for idx in child_table.indexes if idx.unique}
+    assert "uq_child_parent_id" in unique_indexes
 
 
 def test_m2m_translation():
