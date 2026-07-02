@@ -241,6 +241,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             tx_id,
             operation_using,
             session_id=session_id,
+            mode="upsert",
         )
 
         pk_val = None

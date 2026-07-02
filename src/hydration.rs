@@ -36,7 +36,8 @@ fn set_pydantic_hydration_slots<'py>(
 /// Hydrate a model instance from pre-decoded column values.
 ///
 /// Allocates via `cls.__new__(cls)`, writes fields into `__dict__`, sets
-/// `__ferro_connection_name`, and initializes Pydantic tracking slots.
+/// `__ferro_connection_name` and the `__ferro_persisted` marker, and
+/// initializes Pydantic tracking slots.
 ///
 /// # Arguments
 /// * `py` — Active Python interpreter token.
@@ -64,6 +65,9 @@ pub fn hydrate_model_instance<'py>(
         pyo3::intern!(py, "__ferro_connection_name"),
         connection_name,
     )?;
+    // Hydrated instances are persistent by definition: `Model.save()` reads
+    // this marker to choose UPDATE ... WHERE pk = ? over INSERT (FF-A A4).
+    dict.set_item(pyo3::intern!(py, "__ferro_persisted"), true)?;
     let fields_set = pyo3::types::PySet::empty(py)?;
 
     for (col_name, val) in fields {

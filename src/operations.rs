@@ -249,6 +249,28 @@ fn reject_pagination_on_mutation(query_def: &QueryDef, operation: &str) -> PyRes
     Ok(())
 }
 
+/// Persistence strategy for `save_record` (FF-A A3/A4).
+///
+/// `Insert` renders a plain INSERT — a duplicate primary key or unique value
+/// surfaces as a database error (mapped to `UniqueViolationError`). `Upsert`
+/// renders `INSERT ... ON CONFLICT (pk) DO UPDATE` and is only reachable from
+/// the explicit upsert surface (`Model.upsert()` / `save(on_conflict="update")`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SaveMode {
+    Insert,
+    Upsert,
+}
+
+fn parse_save_mode(mode: &str) -> PyResult<SaveMode> {
+    match mode {
+        "insert" => Ok(SaveMode::Insert),
+        "upsert" => Ok(SaveMode::Upsert),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "save_record mode must be 'insert' or 'upsert', got {other:?}"
+        ))),
+    }
+}
+
 /// Map SeaQuery `Value` variants to `EngineBindValue`.
 ///
 /// Typed `None` variants are preserved as `Null(NullKind::T)` so the bind
@@ -1188,21 +1210,185 @@ pub fn fetch_one<'py>(
     })
 }
 
+/// Render the INSERT statement for `save_record`.
+///
+/// `SaveMode::Insert` renders a plain INSERT; `SaveMode::Upsert` adds
+/// `ON CONFLICT (pk) DO UPDATE` over the non-PK columns when a conflict
+/// target exists (an explicit PK value, or a non-autoincrement PK). An
+/// autoincrement PK left null is omitted from the column list either way.
+///
+/// Returns `(sql, bind_values, needs_postgres_returning)`.
+#[allow(clippy::too_many_arguments)]
+fn build_save_sql(
+    schema: &serde_json::Value,
+    table_name: &str,
+    bind_inputs: &[(String, BindInput)],
+    pk_col: Option<&str>,
+    pk_is_auto: bool,
+    mode: SaveMode,
+    backend: Dialect,
+    enum_udt: &HashMap<String, String>,
+    uuid_columns: &HashSet<String>,
+    ts_cast: &HashMap<String, String>,
+) -> PyResult<(String, sea_query::Values, bool)> {
+    let mut columns = Vec::new();
+    let mut values = Vec::new();
+    let mut pk_provided = false;
+    for (key, input) in bind_inputs {
+        let is_pk = pk_col == Some(key.as_str());
+        if is_pk && pk_is_auto && input.is_json_null() {
+            continue;
+        }
+        if is_pk && !input.is_json_null() {
+            pk_provided = true;
+        }
+        columns.push(Alias::new(key));
+        values.push(bind_input_to_expr(
+            schema,
+            table_name,
+            key,
+            input,
+            enum_udt,
+            uuid_columns,
+            ts_cast,
+            backend,
+        )?);
+    }
+    let mut insert_stmt = InsertStatement::new()
+        .into_table(Alias::new(table_name))
+        .columns(columns.clone())
+        .values(values)
+        .map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid INSERT values: {e}"))
+        })?
+        .to_owned();
+    if mode == SaveMode::Upsert
+        && let Some(pk) = pk_col
+        && (pk_provided || !pk_is_auto)
+    {
+        let mut on_conflict = OnConflict::column(Alias::new(pk));
+        let mut update_cols = Vec::new();
+        for col in &columns {
+            if col.to_string() != pk {
+                update_cols.push(col.clone());
+            }
+        }
+        if !update_cols.is_empty() {
+            on_conflict.update_columns(update_cols);
+            insert_stmt.on_conflict(on_conflict);
+        }
+    }
+    let needs_postgres_returning =
+        backend == Dialect::Postgres && pk_col.is_some() && pk_is_auto && !pk_provided;
+    let (mut sql, values) = sea_query_build_for_backend!(insert_stmt, backend);
+    if needs_postgres_returning && let Some(pk) = pk_col {
+        sql.push_str(&format!(" RETURNING \"{}\"", pk));
+    }
+    Ok((sql, values, needs_postgres_returning))
+}
+
+/// SQL plan for `update_record`: either a real UPDATE, or — for models whose
+/// only column is the primary key — an existence check that preserves the
+/// rows-matched contract (0 means the row is gone) without rendering an
+/// `UPDATE ... SET` with an empty assignment list, which is invalid SQL.
+#[derive(Debug)]
+enum UpdateByPkSql {
+    Update(String, sea_query::Values),
+    ExistenceCheck(String, sea_query::Values),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_update_by_pk_sql(
+    schema: &serde_json::Value,
+    table_name: &str,
+    bind_inputs: &[(String, BindInput)],
+    pk_col: Option<&str>,
+    backend: Dialect,
+    enum_udt: &HashMap<String, String>,
+    uuid_columns: &HashSet<String>,
+    ts_cast: &HashMap<String, String>,
+) -> PyResult<UpdateByPkSql> {
+    let pk = pk_col.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "Model for table '{table_name}' has no primary key; cannot UPDATE by primary key"
+        ))
+    })?;
+    let pk_input = bind_inputs
+        .iter()
+        .find(|(key, _)| key.as_str() == pk)
+        .filter(|(_, input)| !input.is_json_null())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Cannot UPDATE '{table_name}' without a primary key value"
+            ))
+        })?;
+    let pk_expr = bind_input_to_expr(
+        schema,
+        table_name,
+        pk,
+        &pk_input.1,
+        enum_udt,
+        uuid_columns,
+        ts_cast,
+        backend,
+    )?;
+
+    let mut update_stmt = UpdateStatement::new()
+        .table(Alias::new(table_name))
+        .to_owned();
+    let mut set_count = 0usize;
+    for (key, input) in bind_inputs {
+        if key.as_str() == pk {
+            continue;
+        }
+        update_stmt.value(
+            Alias::new(key),
+            bind_input_to_expr(
+                schema,
+                table_name,
+                key,
+                input,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )?,
+        );
+        set_count += 1;
+    }
+    if set_count == 0 {
+        let select = Query::select()
+            .expr(Expr::cust("COUNT(*)"))
+            .from(Alias::new(table_name))
+            .and_where(Expr::col(Alias::new(pk)).eq(pk_expr))
+            .to_owned();
+        let (sql, values) = sea_query_build_for_backend!(select, backend);
+        return Ok(UpdateByPkSql::ExistenceCheck(sql, values));
+    }
+    update_stmt.and_where(Expr::col(Alias::new(pk)).eq(pk_expr));
+    let (sql, values) = sea_query_build_for_backend!(update_stmt, backend);
+    Ok(UpdateByPkSql::Update(sql, values))
+}
+
 /// Persists a model's data to the database.
 ///
-/// Implements an upsert (INSERT ... ON CONFLICT DO UPDATE) strategy.
+/// `mode` selects the persistence strategy: `"insert"` (default) renders a
+/// plain INSERT — a duplicate primary key or unique value raises
+/// `UniqueViolationError` — while `"upsert"` renders
+/// `INSERT ... ON CONFLICT (pk) DO UPDATE` for the explicit upsert surface.
 ///
 /// Args:
 ///     name (str): The model name.
 ///     data (dict[str, Any]): Per-column value map for the model instance.
 ///         ``bytes``/``bytearray`` values are preserved verbatim; all other
 ///         values are routed through the schema-guided casting authority.
+///     mode (str): `"insert"` or `"upsert"`.
 ///
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized, the model is not
-/// registered, or a column value cannot be bound.
+/// registered, the mode is unknown, or a column value cannot be bound.
 #[pyfunction]
-#[pyo3(signature = (name, data, tx_id=None, using=None, session_id=None))]
+#[pyo3(signature = (name, data, tx_id=None, using=None, session_id=None, mode="insert"))]
 pub fn save_record<'py>(
     py: Python<'py>,
     name: String,
@@ -1210,8 +1396,10 @@ pub fn save_record<'py>(
     tx_id: Option<String>,
     using: Option<String>,
     session_id: Option<String>,
+    mode: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_inputs = bind_inputs_from_py(&data)?; // GIL held here, before the async move
+    let mode = parse_save_mode(mode)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_connection_name, engine, tx_conn, backend) =
             active_route_for_operation(tx_id, using, session_id.clone())?;
@@ -1250,63 +1438,18 @@ pub fn save_record<'py>(
             postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
         let ts_cast =
             postgres_temporal_cast_by_column(&table_name, &engine, &tx_conn, backend).await?;
-        let (sql, bind_values, needs_postgres_returning) = {
-            let mut columns = Vec::new();
-            let mut values = Vec::new();
-            let mut pk_provided = false;
-            for (key, input) in &bind_inputs {
-                let is_pk = pk_col.as_deref() == Some(key.as_str());
-                if is_pk && pk_is_auto && input.is_json_null() {
-                    continue;
-                }
-                if is_pk && !input.is_json_null() {
-                    pk_provided = true;
-                }
-                columns.push(Alias::new(key));
-                values.push(bind_input_to_expr(
-                    &schema,
-                    &table_name,
-                    key,
-                    input,
-                    &enum_udt,
-                    &uuid_columns,
-                    &ts_cast,
-                    backend,
-                )?);
-            }
-            let mut insert_stmt = InsertStatement::new()
-                .into_table(Alias::new(&table_name))
-                .columns(columns.clone())
-                .values(values)
-                .map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!("invalid INSERT values: {e}"))
-                })?
-                .to_owned();
-            if let Some(pk) = pk_col.as_ref()
-                && (pk_provided || !pk_is_auto)
-            {
-                let mut on_conflict = OnConflict::column(Alias::new(pk));
-                let mut update_cols = Vec::new();
-                for col in &columns {
-                    if col.to_string() != *pk {
-                        update_cols.push(col.clone());
-                    }
-                }
-                if !update_cols.is_empty() {
-                    on_conflict.update_columns(update_cols);
-                    insert_stmt.on_conflict(on_conflict);
-                }
-            }
-            let needs_postgres_returning = backend == crate::state::Dialect::Postgres
-                && pk_col.is_some()
-                && pk_is_auto
-                && !pk_provided;
-            let (mut sql, values) = sea_query_build_for_backend!(insert_stmt, backend);
-            if needs_postgres_returning && let Some(pk) = pk_col.as_ref() {
-                sql.push_str(&format!(" RETURNING \"{}\"", pk));
-            }
-            (sql, values, needs_postgres_returning)
-        };
+        let (sql, bind_values, needs_postgres_returning) = build_save_sql(
+            &schema,
+            &table_name,
+            &bind_inputs,
+            pk_col.as_deref(),
+            pk_is_auto,
+            mode,
+            backend,
+            &enum_udt,
+            &uuid_columns,
+            &ts_cast,
+        )?;
 
         match tx_conn {
             Some(conn_arc) => {
@@ -1351,6 +1494,112 @@ pub fn save_record<'py>(
                         .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
                     Ok(exec_res.last_insert_id)
                 }
+            }
+        }
+    })
+}
+
+/// UPDATE one row by primary key: `UPDATE <table> SET <non-pk cols> WHERE <pk> = ?`.
+///
+/// Args:
+///     name (str): The model name.
+///     data (dict[str, Any]): Per-column value map for the model instance,
+///         including the primary key (used for the WHERE filter, never SET).
+///
+/// Returns:
+///     int: Rows matched. 0 means no row with that primary key exists any
+///     more — the Python layer raises `ModelDoesNotExist`. For models whose
+///     only column is the primary key there is nothing to SET; an existence
+///     check runs instead so the 0-means-gone contract holds.
+///
+/// # Errors
+/// `PyValueError` when the model has no primary key or the primary-key value
+/// is missing/null; `PyRuntimeError` on registry failures; typed
+/// `ferro.exceptions` subclasses on database errors.
+#[pyfunction]
+#[pyo3(signature = (name, data, tx_id=None, using=None, session_id=None))]
+pub fn update_record<'py>(
+    py: Python<'py>,
+    name: String,
+    data: Bound<'py, pyo3::types::PyDict>,
+    tx_id: Option<String>,
+    using: Option<String>,
+    session_id: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let bind_inputs = bind_inputs_from_py(&data)?; // GIL held here, before the async move
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let (_connection_name, engine, tx_conn, backend) =
+            active_route_for_operation(tx_id, using, session_id.clone())?;
+
+        let schema = {
+            let registry = MODEL_REGISTRY.read().map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
+            })?;
+            registry.get(&name).cloned().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+            })?
+        };
+
+        let mut pk_col = None;
+        if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+            for (col_name, col_info) in properties {
+                if col_info
+                    .get("primary_key")
+                    .and_then(|pk| pk.as_bool())
+                    .unwrap_or(false)
+                {
+                    pk_col = Some(col_name.clone());
+                    break;
+                }
+            }
+        }
+
+        let table_name = name.to_lowercase();
+        let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        let uuid_columns =
+            postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
+        let ts_cast =
+            postgres_temporal_cast_by_column(&table_name, &engine, &tx_conn, backend).await?;
+
+        let plan = build_update_by_pk_sql(
+            &schema,
+            &table_name,
+            &bind_inputs,
+            pk_col.as_deref(),
+            backend,
+            &enum_udt,
+            &uuid_columns,
+            &ts_cast,
+        )?;
+
+        match plan {
+            UpdateByPkSql::Update(sql, bind_values) => {
+                let rows_affected =
+                    execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+                        .await
+                        .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
+                Ok(rows_affected)
+            }
+            UpdateByPkSql::ExistenceCheck(sql, bind_values) => {
+                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+                let rows = match tx_conn {
+                    Some(conn_arc) => {
+                        let mut conn = conn_arc.lock().await;
+                        conn.fetch_all_sql_with_binds(&sql, &engine_bind_values)
+                            .await
+                            .map_err(|e| crate::errors::map_db_error("Update failed", e))?
+                    }
+                    None => engine
+                        .fetch_all_sql_with_binds(&sql, &engine_bind_values)
+                        .await
+                        .map_err(|e| crate::errors::map_db_error("Update failed", e))?,
+                };
+                let count = rows
+                    .first()
+                    .and_then(|row| row.values.first())
+                    .and_then(|(_, value)| value.as_i64())
+                    .unwrap_or(0);
+                Ok(count.max(0) as u64)
             }
         }
     })
@@ -3632,6 +3881,244 @@ mod mutation_pagination_guard_tests {
                 msg.contains("update") && msg.contains("offset"),
                 "message should name the operation and offset: {msg}"
             );
+        });
+    }
+}
+
+#[cfg(test)]
+mod save_mode_sql_tests {
+    use super::{
+        build_save_sql, build_update_by_pk_sql, parse_save_mode, BindInput, SaveMode,
+        UpdateByPkSql,
+    };
+    use crate::state::Dialect;
+    use std::collections::{HashMap, HashSet};
+
+    fn widget_schema() -> serde_json::Value {
+        serde_json::json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
+                "name": {"type": "string"}
+            }
+        })
+    }
+
+    fn widget_inputs(id: serde_json::Value, name: &str) -> Vec<(String, BindInput)> {
+        vec![
+            ("id".to_string(), BindInput::Json(id)),
+            ("name".to_string(), BindInput::Json(serde_json::json!(name))),
+        ]
+    }
+
+    fn build_save(
+        inputs: &[(String, BindInput)],
+        pk_is_auto: bool,
+        mode: SaveMode,
+        backend: Dialect,
+    ) -> (String, sea_query::Values, bool) {
+        build_save_sql(
+            &widget_schema(),
+            "widget",
+            inputs,
+            Some("id"),
+            pk_is_auto,
+            mode,
+            backend,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        )
+        .expect("build_save_sql should succeed")
+    }
+
+    fn build_update(
+        schema: &serde_json::Value,
+        inputs: &[(String, BindInput)],
+        pk_col: Option<&str>,
+        backend: Dialect,
+    ) -> super::PyResult<UpdateByPkSql> {
+        build_update_by_pk_sql(
+            schema,
+            "widget",
+            inputs,
+            pk_col,
+            backend,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn parse_save_mode_accepts_insert_and_upsert() {
+        assert_eq!(parse_save_mode("insert").unwrap(), SaveMode::Insert);
+        assert_eq!(parse_save_mode("upsert").unwrap(), SaveMode::Upsert);
+    }
+
+    #[test]
+    fn parse_save_mode_rejects_unknown_mode_with_pyvalueerror() {
+        pyo3::Python::attach(|py| {
+            let err = parse_save_mode("update").expect_err("unknown mode must be rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("insert") && msg.contains("upsert") && msg.contains("update"),
+                "message should name the accepted modes and the offender: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn insert_mode_renders_no_on_conflict_even_with_pk_provided() {
+        for backend in [Dialect::Sqlite, Dialect::Postgres] {
+            let (sql, _, _) = build_save(
+                &widget_inputs(serde_json::json!(1), "a"),
+                true,
+                SaveMode::Insert,
+                backend,
+            );
+            assert!(
+                !sql.contains("ON CONFLICT"),
+                "insert mode must render a plain INSERT on {backend:?}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn upsert_mode_renders_on_conflict_do_update_when_pk_provided() {
+        for backend in [Dialect::Sqlite, Dialect::Postgres] {
+            let (sql, _, _) = build_save(
+                &widget_inputs(serde_json::json!(1), "a"),
+                true,
+                SaveMode::Upsert,
+                backend,
+            );
+            let conflict_clause = sql
+                .split("ON CONFLICT")
+                .nth(1)
+                .unwrap_or_else(|| panic!("upsert with provided PK must ON CONFLICT on {backend:?}: {sql}"));
+            assert!(
+                conflict_clause.contains("\"name\""),
+                "non-PK column must be in the update list on {backend:?}: {sql}"
+            );
+            assert!(
+                !conflict_clause.contains("\"id\" ="),
+                "PK must not be reassigned in the update list on {backend:?}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn upsert_mode_without_pk_on_auto_pk_is_plain_insert() {
+        let (sql, _, _) = build_save(
+            &widget_inputs(serde_json::Value::Null, "a"),
+            true,
+            SaveMode::Upsert,
+            Dialect::Sqlite,
+        );
+        assert!(
+            !sql.contains("ON CONFLICT"),
+            "unset auto PK has nothing to conflict on: {sql}"
+        );
+        assert!(
+            !sql.contains("\"id\""),
+            "unset auto PK must be omitted from the column list: {sql}"
+        );
+    }
+
+    #[test]
+    fn insert_mode_preserves_postgres_returning_for_auto_pk() {
+        let (sql, _, needs_returning) = build_save(
+            &widget_inputs(serde_json::Value::Null, "a"),
+            true,
+            SaveMode::Insert,
+            Dialect::Postgres,
+        );
+        assert!(needs_returning, "auto PK left unset needs RETURNING on postgres");
+        assert!(sql.contains("RETURNING \"id\""), "sql: {sql}");
+
+        let (sql, _, needs_returning) = build_save(
+            &widget_inputs(serde_json::Value::Null, "a"),
+            true,
+            SaveMode::Insert,
+            Dialect::Sqlite,
+        );
+        assert!(!needs_returning, "sqlite uses last_insert_id, not RETURNING");
+        assert!(!sql.contains("RETURNING"), "sql: {sql}");
+    }
+
+    #[test]
+    fn update_by_pk_sets_non_pk_columns_and_filters_on_pk() {
+        let result = build_update(
+            &widget_schema(),
+            &widget_inputs(serde_json::json!(1), "a"),
+            Some("id"),
+            Dialect::Sqlite,
+        )
+        .expect("update build should succeed");
+        let UpdateByPkSql::Update(sql, values) = result else {
+            panic!("expected an UPDATE statement");
+        };
+        assert_eq!(sql, "UPDATE \"widget\" SET \"name\" = ? WHERE \"id\" = ?");
+        assert_eq!(values.0.len(), 2, "one SET bind + one WHERE bind");
+
+        let result = build_update(
+            &widget_schema(),
+            &widget_inputs(serde_json::json!(1), "a"),
+            Some("id"),
+            Dialect::Postgres,
+        )
+        .expect("update build should succeed");
+        let UpdateByPkSql::Update(sql, _) = result else {
+            panic!("expected an UPDATE statement");
+        };
+        assert_eq!(sql, "UPDATE \"widget\" SET \"name\" = $1 WHERE \"id\" = $2");
+    }
+
+    #[test]
+    fn update_by_pk_requires_pk_value() {
+        pyo3::Python::attach(|py| {
+            let err = build_update(
+                &widget_schema(),
+                &widget_inputs(serde_json::Value::Null, "a"),
+                Some("id"),
+                Dialect::Sqlite,
+            )
+            .expect_err("null PK value must be rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("primary key"), "msg: {err}");
+        });
+    }
+
+    #[test]
+    fn update_by_pk_on_pk_only_model_renders_existence_check() {
+        let schema = serde_json::json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true, "autoincrement": false}
+            }
+        });
+        let inputs = vec![("id".to_string(), BindInput::Json(serde_json::json!(7)))];
+        let result = build_update(&schema, &inputs, Some("id"), Dialect::Sqlite)
+            .expect("pk-only build should succeed");
+        let UpdateByPkSql::ExistenceCheck(sql, values) = result else {
+            panic!("expected an existence check for a PK-only model");
+        };
+        assert!(
+            sql.starts_with("SELECT COUNT(") && sql.contains("WHERE \"id\" = ?"),
+            "sql: {sql}"
+        );
+        assert_eq!(values.0.len(), 1);
+    }
+
+    #[test]
+    fn update_by_pk_without_pk_column_errors() {
+        pyo3::Python::attach(|py| {
+            let schema = serde_json::json!({"properties": {"name": {"type": "string"}}});
+            let inputs = vec![("name".to_string(), BindInput::Json(serde_json::json!("a")))];
+            let err = build_update(&schema, &inputs, None, Dialect::Sqlite)
+                .expect_err("a model without a PK cannot be updated by PK");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("primary key"), "msg: {err}");
         });
     }
 }
