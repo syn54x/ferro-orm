@@ -329,9 +329,24 @@ pub fn canonical_from_schema_column(
         .map_err(|reason| format!("unresolvable type on column '{}': {reason}", col.name))
 }
 
-/// Single-column index name (`idx_<table>_<col>`).
+/// Single-column index name (`idx_<table>_<col>`) with 63-char guard.
 pub fn single_index_name(table_lower: &str, col_name: &str) -> String {
-    format!("idx_{table_lower}_{col_name}")
+    let raw = format!("idx_{table_lower}_{col_name}");
+    if raw.chars().count() > 63 {
+        return format!("{}_idx", raw.chars().take(59).collect::<String>());
+    }
+    raw
+}
+
+/// Foreign-key constraint name (`fk_<table>_<col>_<to_table>`) with 63-char guard.
+/// Single source for both emitters (AGENTS.md § I-1); the IR compiler sets
+/// `SchemaForeignKey.name` with this and both emitters render it.
+pub fn fk_name(table_lower: &str, col_name: &str, to_table: &str) -> String {
+    let raw = format!("fk_{table_lower}_{col_name}_{to_table}");
+    if raw.chars().count() > 63 {
+        return format!("{}_fk", raw.chars().take(60).collect::<String>());
+    }
+    raw
 }
 
 /// Single-column unique name with 63-char guard.
@@ -480,6 +495,74 @@ pub fn timestamp_tz_conversion_warning(
          intentionally, use a reviewed migration (Alembic) with an explicit source \
          timezone."
     )
+}
+
+/// A storage conversion auto-migrate refuses to execute (warn + skip, never a
+/// silent ALTER). Each variant is a cast that can reinterpret or destroy stored
+/// values, so it is left to a reviewed migration. `TimestampTz` is the original
+/// #154 case; the other variants extend the same policy to the FF-B derived-type
+/// changes (varchar-stored enums / times created by the old lowering).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusedConversion {
+    /// `timestamp` ⇄ `timestamptz` (reinterprets under the session TimeZone).
+    TimestampTz,
+    /// live `varchar`/`text` → native Postgres enum type.
+    VarcharToPgEnum,
+    /// live `varchar`/`text` → `time` (old lowering stored `datetime.time` as varchar).
+    VarcharToTime,
+}
+
+/// Detect a refused conversion between two scalar canonical storages.
+/// (`VarcharToPgEnum` involves a non-scalar target and is detected where enum
+/// resolution happens; it has no arm here.)
+pub fn refused_scalar_conversion(
+    old: CanonicalType,
+    new: CanonicalType,
+) -> Option<RefusedConversion> {
+    use CanonicalType::*;
+    if is_timestamp_tz_conversion(old, new) {
+        return Some(RefusedConversion::TimestampTz);
+    }
+    if matches!((old, new), (Varchar(_) | Text, Time)) {
+        return Some(RefusedConversion::VarcharToTime);
+    }
+    None
+}
+
+/// The single-source warning for any refused auto-migrate conversion. Emitted
+/// identically by the IR emitter and the legacy migrate planner so the shadow
+/// comparator sees matching plans. The `TimestampTz` arm returns the exact
+/// legacy #154 text (already pinned by tests on both planner paths).
+pub fn refused_conversion_warning(
+    kind: RefusedConversion,
+    table: &str,
+    column: &str,
+    old_db_type: &str,
+    new_target: &str,
+    keep_db_type: &str,
+) -> String {
+    match kind {
+        RefusedConversion::TimestampTz => {
+            timestamp_tz_conversion_warning(table, column, old_db_type, new_target, keep_db_type)
+        }
+        RefusedConversion::VarcharToPgEnum => format!(
+            "Column '{table}.{column}' is '{old_db_type}' in the database but the model maps \
+             this Enum field to the native Postgres enum type '{new_target}'. Ferro will not \
+             auto-convert it — stored values outside the enum's labels would make the cast \
+             fail mid-migration. To keep the column as-is, annotate the field with \
+             db_type=\"{keep_db_type}\". To convert it intentionally, use a reviewed \
+             migration (Alembic) that creates the type and casts with \
+             USING \"{column}\"::\"{new_target}\"."
+        ),
+        RefusedConversion::VarcharToTime => format!(
+            "Column '{table}.{column}' is '{old_db_type}' in the database but the model maps \
+             `datetime.time` to '{new_target}'. Ferro will not auto-convert it — stored text \
+             that does not parse as a time would make the cast fail mid-migration. To keep \
+             the column as-is, annotate the field with db_type=\"{keep_db_type}\". To convert \
+             it intentionally, use a reviewed migration (Alembic) with an explicit \
+             USING cast."
+        ),
+    }
 }
 
 /// SQLite declared-type string for a canonical type (parity-pinned).
@@ -925,5 +1008,143 @@ mod tests {
         let e = render_db_check("account", &sample_check(), Dialect::Sqlite);
         assert!(e.statement.is_none());
         assert!(e.warning.as_deref().unwrap().contains("ck_account_role"));
+    }
+
+    #[test]
+    fn fk_name_matches_i1_convention() {
+        assert_eq!(
+            fk_name("account", "org_id", "organization"),
+            "fk_account_org_id_organization"
+        );
+    }
+
+    #[test]
+    fn fk_name_guards_identifiers_over_63_chars() {
+        let table = "a".repeat(30);
+        let col = "b".repeat(30);
+        let to = "c".repeat(30);
+        let raw = format!("fk_{table}_{col}_{to}");
+        let name = fk_name(&table, &col, &to);
+        assert_eq!(name.chars().count(), 63);
+        assert_eq!(
+            name,
+            format!("{}_fk", raw.chars().take(60).collect::<String>())
+        );
+    }
+
+    #[test]
+    fn fk_name_guard_counts_chars_not_bytes() {
+        // Multibyte identifiers must be truncated by char count, not byte offset
+        // (a byte-offset slice would panic mid-codepoint).
+        let table = "é".repeat(70);
+        let name = fk_name(&table, "col", "other");
+        assert_eq!(name.chars().count(), 63);
+        assert!(name.ends_with("_fk"));
+    }
+
+    #[test]
+    fn single_index_name_guards_identifiers_over_63_chars() {
+        // Short names unchanged (pinned above in naming_helpers_match_i1_conventions).
+        assert_eq!(single_index_name("user", "email"), "idx_user_email");
+        let table = "t".repeat(40);
+        let col = "c".repeat(30);
+        let raw = format!("idx_{table}_{col}");
+        let name = single_index_name(&table, &col);
+        assert_eq!(name.chars().count(), 63);
+        assert_eq!(
+            name,
+            format!("{}_idx", raw.chars().take(59).collect::<String>())
+        );
+    }
+
+    #[test]
+    fn refused_scalar_conversion_detects_tz_and_time_pairs() {
+        use CanonicalType::*;
+        assert_eq!(
+            refused_scalar_conversion(Timestamp, TimestampTz),
+            Some(RefusedConversion::TimestampTz)
+        );
+        assert_eq!(
+            refused_scalar_conversion(TimestampTz, DateTime),
+            Some(RefusedConversion::TimestampTz)
+        );
+        // Old lowering stored `datetime.time` fields as varchar; the model now
+        // targets `time`. Refused: the cast can fail or reinterpret stored text.
+        assert_eq!(
+            refused_scalar_conversion(Varchar(None), Time),
+            Some(RefusedConversion::VarcharToTime)
+        );
+        assert_eq!(
+            refused_scalar_conversion(Text, Time),
+            Some(RefusedConversion::VarcharToTime)
+        );
+        // Ordinary widenings and unrelated pairs are not refusals.
+        assert_eq!(refused_scalar_conversion(Integer, BigInt), None);
+        assert_eq!(refused_scalar_conversion(Time, Varchar(None)), None);
+        assert_eq!(refused_scalar_conversion(Varchar(None), Text), None);
+    }
+
+    #[test]
+    fn refused_conversion_warning_tz_matches_the_shadow_pinned_text() {
+        // The TimestampTz arm must return the exact legacy warning bytes — the
+        // shadow comparator asserts warning equality between planner paths.
+        let via_kind = refused_conversion_warning(
+            RefusedConversion::TimestampTz,
+            "event",
+            "occurred_at",
+            "timestamp",
+            "timestamptz",
+            "timestamp",
+        );
+        let direct = timestamp_tz_conversion_warning(
+            "event",
+            "occurred_at",
+            "timestamp",
+            "timestamptz",
+            "timestamp",
+        );
+        assert_eq!(via_kind, direct);
+    }
+
+    #[test]
+    fn refused_conversion_warning_enum_names_column_db_type_and_alembic() {
+        let w = refused_conversion_warning(
+            RefusedConversion::VarcharToPgEnum,
+            "account",
+            "role",
+            "varchar",
+            "role",
+            "varchar",
+        );
+        let col = w.find("account.role").expect("names the column");
+        let dbt = w.find("db_type").expect("names db_type");
+        let alembic = w.find("Alembic").expect("names Alembic");
+        assert!(
+            col < dbt && dbt < alembic,
+            "tokens must appear in order: {w}"
+        );
+        assert!(
+            w.contains("USING"),
+            "enum recipe points at a USING cast: {w}"
+        );
+    }
+
+    #[test]
+    fn refused_conversion_warning_time_names_column_db_type_and_alembic() {
+        let w = refused_conversion_warning(
+            RefusedConversion::VarcharToTime,
+            "shift",
+            "opens_at",
+            "varchar",
+            "time",
+            "varchar",
+        );
+        let col = w.find("shift.opens_at").expect("names the column");
+        let dbt = w.find("db_type").expect("names db_type");
+        let alembic = w.find("Alembic").expect("names Alembic");
+        assert!(
+            col < dbt && dbt < alembic,
+            "tokens must appear in order: {w}"
+        );
     }
 }
