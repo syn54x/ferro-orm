@@ -43,7 +43,7 @@ A Ferro model is a Pydantic model — annotated fields become columns, and defau
 --8<-- "docs/examples/quickstart.py:create"
 ```
 
-- `Model.create(...)` validates the data, inserts one row, and returns the instance with its database-assigned `id` populated. Notice you can pass a model instance (`author=alice`) for the foreign key.
+- `Model.create(...)` validates the data, inserts one row, and returns the instance with its database-assigned `id` populated. Notice you can pass a model instance (`author=alice`) for the foreign key. It never overwrites an existing row — a duplicate raises [`UniqueViolationError`](../api/exceptions.md).
 - `Model.bulk_create([...])` inserts many rows in a single statement — use it whenever you're loading more than a handful of rows. Here we set `author_id` directly instead of passing the instance.
 
 ## Query
@@ -76,7 +76,7 @@ Two directions, two idioms:
 --8<-- "docs/examples/quickstart.py:update-delete"
 ```
 
-- For a single instance: mutate attributes, then `await post.save()`.
+- For a single instance: mutate attributes, then `await post.save()`. `save()` UPDATEs an instance that came from the database and INSERTs one that never did — see [Mutations](../guide/mutations.md#saving-insert-or-update).
 - For many rows: chain `.update(field=value)` or `.delete()` onto a `where()` query. Both return the number of affected rows.
 
 ## Wrap It in a Transaction

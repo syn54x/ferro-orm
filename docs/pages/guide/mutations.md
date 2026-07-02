@@ -2,6 +2,14 @@
 
 Creating, updating, and deleting records. All mutations are executed by the Rust engine, and all of them participate in an active [transaction](transactions.md) automatically.
 
+Ferro's write surface is three verbs with three distinct intents — none of them ever silently does more work than you asked for:
+
+| Verb | Intent | On a primary-key / unique conflict |
+| --- | --- | --- |
+| `Model.create(**fields)` | Insert a new row | Raises [`UniqueViolationError`](../api/exceptions.md) |
+| `instance.save()` | Persist *this* instance | INSERT if never persisted, otherwise UPDATE by primary key |
+| `Model.upsert(**fields)` | Insert **or** replace by primary key | Updates the existing row |
+
 ## Creating Records
 
 ### create
@@ -11,6 +19,14 @@ Creating, updating, and deleting records. All mutations are executed by the Rust
 ```python
 --8<-- "docs/examples/quickstart.py:create"
 ```
+
+`create()` is a plain INSERT — it never updates an existing row. A duplicate primary key or unique value raises [`UniqueViolationError`](../api/exceptions.md), and the existing row is left untouched:
+
+```python
+--8<-- "docs/examples/mutations.py:create-strict"
+```
+
+Reach for [`upsert()`](#upsert) when you want insert-or-update semantics.
 
 Pass related instances directly (`author=alice`) or set the shadow foreign-key column (`author_id=alice.id`) — see [Relationships](relationships.md). Pydantic validation runs when each instance is constructed, so invalid data raises *before* the database is touched.
 
@@ -54,6 +70,39 @@ article = await Article.create(title="Hello")
 # article.draft is True, article.created_at is set
 ```
 
+## Saving: INSERT or UPDATE
+
+Every instance is either **transient** (constructed with `Model(...)` and never persisted) or **persisted** (fetched from the database, or successfully saved). `save()` uses that state to decide what to do:
+
+- a transient instance is **INSERTed** — a duplicate primary key or unique value raises `UniqueViolationError`, exactly like `create()`;
+- a persisted instance is **UPDATEd** by primary key (`UPDATE ... WHERE pk = ?`).
+
+```python
+--8<-- "docs/examples/mutations.py:save-insert-update"
+```
+
+`instance.delete()` returns the instance to transient, so a subsequent `save()` INSERTs a new row. `refresh()` keeps it persisted.
+
+If the row behind a persisted instance no longer exists — deleted by another writer, or you mutated the primary-key field before saving — the UPDATE matches nothing and `save()` raises `ModelDoesNotExist` rather than silently resurrecting the row.
+
+!!! note "Copies share persistence state"
+    `model_copy()` copies persistence state: saving a copy of a persisted instance UPDATEs the **same row**. To clone a row, construct a fresh instance instead. See [Identity Map](../concepts/identity-map.md) for how instances are tracked per connection.
+
+## Upsert
+
+`Model.upsert(**fields)` inserts the row, or updates the existing row when the **primary key** conflicts:
+
+```python
+--8<-- "docs/examples/mutations.py:upsert"
+```
+
+Things to know:
+
+- The conflict target is the primary key only. A conflict on some *other* unique column still raises `UniqueViolationError`.
+- The whole row is written on update — fields you leave unset are written with their defaults, they do not preserve the stored values (see the `name` field above).
+- With an autoincrement primary key left unset there is nothing to conflict on, so the call degrades to a plain INSERT.
+- `upsert()` is sugar for the primitive `instance.save(on_conflict="update")`, which applies insert-or-update semantics to an instance you already hold, regardless of its persistence state.
+
 ## Get-or-Create
 
 `get_or_create(defaults={...}, **filters)` looks up a row by exact-match filters and creates it when missing. It returns an `(instance, created)` tuple; `defaults` are applied **only** on the create path:
@@ -71,21 +120,9 @@ article = await Article.create(title="Hello")
 ```
 
 !!! note "Concurrency"
-    Both helpers are a read followed by a write, not a single atomic upsert. Under concurrent writers, two processes can race past the lookup; a unique constraint on the filter columns turns that race into an integrity error you can handle.
+    Both helpers are a read followed by a write, not a single atomic upsert. Under concurrent writers, two processes can race past the lookup; with a unique constraint on the filter columns the loser's INSERT raises [`UniqueViolationError`](../api/exceptions.md) — catch it and retry the get. For an atomic insert-or-update keyed on the primary key, use [`upsert()`](#upsert).
 
-## Updating
-
-### Instance save()
-
-Mutate fields on an instance and persist with `save()`:
-
-```python
-user = await User.get(1)
-user.email = "new@example.com"
-await user.save()
-```
-
-### Batch updates
+## Batch Updates
 
 Update many rows in one statement — no instances are loaded — and delete the same way. `update(**values)` and `delete()` are query terminals that return the affected row count:
 
@@ -95,6 +132,14 @@ Update many rows in one statement — no instances are loaded — and delete the
 
 !!! warning "Batch updates bypass in-memory instances"
     A `where(...).update(...)` writes directly to the database. Instances you already hold (including identity-mapped ones) are **not** mutated — call `refresh()` on them if you need the new values.
+
+### No limit/offset on mutations
+
+Portable SQL has no `DELETE ... LIMIT` or `UPDATE ... LIMIT`, so calling `update()` or `delete()` on a query with `limit()` or `offset()` set raises `ValueError` instead of silently mutating every matching row. To mutate a bounded subset, fetch primary keys first and mutate by primary-key set:
+
+```python
+--8<-- "docs/examples/mutations.py:mutation-guard"
+```
 
 ## Refreshing from the Database
 
@@ -115,10 +160,20 @@ user = await User.get_or_none(42)
 if user is not None:
     await user.delete()
 
-removed = await User.where(lambda t: t.archived == True).delete()  # noqa: E712
+removed = await User.where(lambda user: user.archived == True).delete()  # noqa: E712
 ```
 
 Deleting a parent row triggers the `on_delete` behavior of any foreign keys pointing at it — `CASCADE` by default. See [Delete Behavior](relationships.md#delete-behavior) before deleting rows with children.
+
+## Handling Database Errors
+
+Every database failure raises a typed exception from the DBAPI-shaped tree rooted at `FerroError` — you never need to match on driver message text. Constraint violations are subclasses of `IntegrityError`, and the original driver detail is preserved as attributes:
+
+```python
+--8<-- "docs/examples/mutations.py:handling-errors"
+```
+
+See the [Exceptions API reference](../api/exceptions.md) for the full hierarchy.
 
 ## Bulk Operations and the Identity Map
 
@@ -128,7 +183,7 @@ By default Ferro keeps a per-connection [identity map](../concepts/identity-map.
 
 ```python
 inserted = await User.bulk_create([User(name="a", age=1), User(name="b", age=2)])
-fresh = await User.where(lambda t: t.name.in_(["a", "b"])).all()
+fresh = await User.where(lambda user: user.name.in_(["a", "b"])).all()
 ```
 
 ## Not Yet Supported
@@ -139,6 +194,7 @@ fresh = await User.where(lambda t: t.name.in_(["a", "b"])).all()
 ## See Also
 
 - [Queries](queries.md) — fetching and filtering data
+- [Exceptions](../api/exceptions.md) — the typed error hierarchy
 - [Transactions](transactions.md) — grouping mutations atomically
 - [Relationships](relationships.md) — creating related records, cascade rules
 - [Identity Map](../concepts/identity-map.md) — instance caching semantics

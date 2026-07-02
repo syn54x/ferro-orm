@@ -79,18 +79,18 @@ These are behavioral changes to the public API — they must land before 1.0.
       (`Model.upsert(...)` or `save(on_conflict="update")`) for the users who
       relied on the old behavior. Migration impact: **breaking**; migration
       guide entry required.
-- [ ] **A5 — Docs & migration guide.**
+- [x] **A5 — Docs & migration guide.**
       Mutations guide, exceptions API page, and
       `ir-first-migration-guide.md` entries for A1/A3/A4. Both declaration
       styles per I-7 where models appear; lambda predicates per I-8.
 
 **Exit gate**
 
-- [ ] `Query.limit(...).delete()` / `.update()` raise; no mutating payload
+- [x] `Query.limit(...).delete()` / `.update()` raise; no mutating payload
       carries limit/offset.
 - [x] `create()` on an existing PK raises `UniqueViolationError` on both
       backends; upsert path exists and is tested.
-- [ ] Full matrix green with exception types asserted (no string matching on
+- [x] Full matrix green with exception types asserted (no string matching on
       driver messages anywhere in tests).
 
 ---

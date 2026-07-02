@@ -140,7 +140,7 @@ async with session_factory() as session:
 user = await User.create(username="alice", email="alice@example.com")
 ```
 
-There is no unit of work to flush: `create()` inserts immediately and returns the instance with its primary key set. Ferro also covers the common session idioms directly: `bulk_create([...])` for batch inserts, `get_or_create(...)` and `update_or_create(...)` for upsert-style flows, and `instance.refresh()` to re-read from the database (the rough analog of `session.refresh`).
+There is no unit of work to flush: `create()` inserts immediately and returns the instance with its primary key set. Ferro also covers the common session idioms directly: `bulk_create([...])` for batch inserts, `get_or_create(...)` and `update_or_create(...)` for upsert-style flows, `upsert(...)` for a true insert-or-update on the primary key (the analog of a PostgreSQL `ON CONFLICT DO UPDATE`), and `instance.refresh()` to re-read from the database (the rough analog of `session.refresh`).
 
 ## Relationships
 
