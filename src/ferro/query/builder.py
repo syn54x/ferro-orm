@@ -231,6 +231,30 @@ class Query(Generic[T]):
         self._offset = value
         return self
 
+    def _mutating_query_def(self, operation: str) -> dict[str, Any]:
+        """Build the QueryIR payload for a mutating operation (update/delete).
+
+        Mutating payloads never carry ``limit``/``offset`` keys: portable SQL
+        has no ``UPDATE/DELETE ... LIMIT``, so pagination on a mutation is
+        rejected loudly instead of being silently ignored.
+
+        Raises:
+            ValueError: If ``limit()`` or ``offset()`` was set on this query.
+        """
+        if self._limit is not None or self._offset is not None:
+            raise ValueError(
+                f"{operation}() does not support limit/offset: portable SQL has "
+                f"no {operation.upper()} ... LIMIT. Remove the .limit()/.offset() "
+                f"call, or fetch primary keys first and {operation} by "
+                "primary-key set."
+            )
+        return {
+            "model_name": self.model_cls.__name__,
+            "where": [node.to_ir_dict() for node in self.where_clause],
+            "order_by": [],
+            "m2m": None,
+        }
+
     async def all(self) -> list[T]:
         """Return all model instances that match the current query
 
@@ -300,19 +324,15 @@ class Query(Generic[T]):
         Returns:
             The number of records updated.
 
+        Raises:
+            ValueError: If ``limit()`` or ``offset()`` was set on this query.
+
         Examples:
             >>> updated = await User.where(lambda user: user.id == 1).update(name="Taylor")
             >>> isinstance(updated, int)
             True
         """
-        query_def = {
-            "model_name": self.model_cls.__name__,
-            "where": [node.to_ir_dict() for node in self.where_clause],
-            "order_by": [],
-            "limit": self._limit,
-            "offset": self._offset,
-            "m2m": None,
-        }
+        query_def = self._mutating_query_def("update")
         tx_id, using, session_id = self._transaction_or_using()
         return await update_filtered(
             self.model_cls.__name__,
@@ -348,19 +368,15 @@ class Query(Generic[T]):
         Returns:
             The number of records deleted.
 
+        Raises:
+            ValueError: If ``limit()`` or ``offset()`` was set on this query.
+
         Examples:
             >>> deleted = await User.where(lambda user: user.disabled == True).delete()  # noqa: E712
             >>> isinstance(deleted, int)
             True
         """
-        query_def = {
-            "model_name": self.model_cls.__name__,
-            "where": [node.to_ir_dict() for node in self.where_clause],
-            "order_by": [],
-            "limit": self._limit,
-            "offset": self._offset,
-            "m2m": None,
-        }
+        query_def = self._mutating_query_def("delete")
         tx_id, using, session_id = self._transaction_or_using()
         return await delete_filtered(
             self.model_cls.__name__,

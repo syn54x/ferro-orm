@@ -51,7 +51,7 @@ These are behavioral changes to the public API — they must land before 1.0.
 
 **Sub-tasks**
 
-- [ ] **A1 — Reject `limit`/`offset` on mutating queries.**
+- [x] **A1 — Reject `limit`/`offset` on mutating queries.**
       `Query.update()` / `Query.delete()` raise `ValueError` when `_limit` or
       `_offset` is set (portable SQL has no `DELETE ... LIMIT`; failing loud is
       the long-term design, not a placeholder for implementing it). Remove

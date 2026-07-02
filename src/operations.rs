@@ -234,6 +234,21 @@ fn query_condition_for_backend(
         .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
+/// Reject `limit`/`offset` on mutating operations (FF-A A1, #171).
+///
+/// Portable SQL has no `UPDATE/DELETE ... LIMIT`. The Python builder raises
+/// before serializing and omits the keys from mutating payloads; this
+/// boundary guard keeps the contract from regressing via any other caller.
+fn reject_pagination_on_mutation(query_def: &QueryDef, operation: &str) -> PyResult<()> {
+    if query_def.limit.is_some() || query_def.offset.is_some() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{operation}() does not support limit/offset: portable SQL has no {} ... LIMIT",
+            operation.to_uppercase()
+        )));
+    }
+    Ok(())
+}
+
 /// Map SeaQuery `Value` variants to `EngineBindValue`.
 ///
 /// Typed `None` variants are preserved as `Null(NullKind::T)` so the bind
@@ -1929,6 +1944,7 @@ pub fn delete_filtered(
     session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut query_def = query_def_from_ir_json(&query_ir_json)?;
+    reject_pagination_on_mutation(&query_def, "delete")?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
@@ -1994,6 +2010,7 @@ pub fn update_filtered<'py>(
     session_id: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut query_def = query_def_from_ir_json(&query_ir_json)?;
+    reject_pagination_on_mutation(&query_def, "update")?;
     let update_inputs = bind_inputs_from_py(&updates)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -3545,5 +3562,76 @@ mod engine_value_to_rust_value_tests {
         assert!(
             matches!(out, RustValue::Json(v) if v.get("k").and_then(|x| x.as_str()) == Some("v"))
         );
+    }
+}
+
+#[cfg(test)]
+mod mutation_pagination_guard_tests {
+    use super::{query_def_from_ir_json, reject_pagination_on_mutation};
+
+    fn envelope_without_pagination_keys() -> String {
+        serde_json::json!({
+            "ir_kind": "query",
+            "ir_version": 1,
+            "payload": {
+                "model_name": "Widget",
+                "where": [{
+                    "node_kind": "leaf",
+                    "operator": "==",
+                    "column": "name",
+                    "value": {"kind": "string", "value": "a"}
+                }],
+                "order_by": [],
+                "m2m": null
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn query_ir_without_pagination_keys_parses_to_none() {
+        let query_def = query_def_from_ir_json(&envelope_without_pagination_keys())
+            .expect("mutating payloads omit limit/offset keys; parsing must succeed");
+        assert_eq!(query_def.limit, None);
+        assert_eq!(query_def.offset, None);
+    }
+
+    #[test]
+    fn guard_allows_mutation_without_pagination() {
+        let query_def = query_def_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        assert!(reject_pagination_on_mutation(&query_def, "delete").is_ok());
+        assert!(reject_pagination_on_mutation(&query_def, "update").is_ok());
+    }
+
+    #[test]
+    fn guard_rejects_limit_with_pyvalueerror() {
+        let mut query_def = query_def_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        query_def.limit = Some(5);
+        pyo3::Python::attach(|py| {
+            let err = reject_pagination_on_mutation(&query_def, "delete")
+                .expect_err("limit on a mutating query must be rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("delete") && msg.contains("limit"),
+                "message should name the operation and limit: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn guard_rejects_offset_with_pyvalueerror() {
+        let mut query_def = query_def_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        query_def.offset = Some(2);
+        pyo3::Python::attach(|py| {
+            let err = reject_pagination_on_mutation(&query_def, "update")
+                .expect_err("offset on a mutating query must be rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("update") && msg.contains("offset"),
+                "message should name the operation and offset: {msg}"
+            );
+        });
     }
 }
