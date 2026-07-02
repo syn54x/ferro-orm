@@ -6,6 +6,7 @@
 
 mod backend;
 mod codec;
+mod codec_plan;
 mod connection;
 mod errors;
 mod hydration;

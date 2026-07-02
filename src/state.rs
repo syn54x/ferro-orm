@@ -15,8 +15,27 @@ use tokio::sync::Mutex;
 
 pub(crate) use ferro_ddl_lowering::Dialect;
 
-/// Global registry mapping model names to their Pydantic-generated JSON schemas.
-pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, serde_json::Value>>> =
+/// One registered model: its Pydantic-generated JSON schema plus the codec
+/// plan compiled from it (FF-C C1). Schema and plan live in one value so a
+/// re-registration (the schema epoch) can never leave a stale plan behind.
+#[derive(Debug)]
+pub struct RegisteredModel {
+    /// The enriched Pydantic JSON schema as pushed from Python.
+    pub schema: serde_json::Value,
+    /// Per-column codec decisions, compiled once at registration.
+    pub codec_plan: crate::codec_plan::ModelCodecPlan,
+}
+
+impl RegisteredModel {
+    /// Compile the codec plan and wrap the registration for the registry.
+    pub fn new(schema: serde_json::Value) -> Arc<Self> {
+        let codec_plan = crate::codec_plan::ModelCodecPlan::compile(&schema);
+        Arc::new(RegisteredModel { schema, codec_plan })
+    }
+}
+
+/// Global registry mapping model names to their registration (schema + codec plan).
+pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, Arc<RegisteredModel>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Python-compiled SchemaIR modelset pushed by the `connect`/`migrate` wrappers.

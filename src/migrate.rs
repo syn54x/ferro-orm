@@ -817,7 +817,8 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
     let mut warnings = Vec::new();
     let mut ddl_ran = false;
 
-    for (name, schema) in order_schemas_for_creation(schemas) {
+    for (name, model) in order_schemas_for_creation(schemas) {
+        let schema = &model.schema;
         let table_lower = name.to_lowercase();
         let Some(live) = live_table_columns(&engine, &table_lower).await? else {
             // Freshly created (or otherwise absent) tables have nothing to diff.

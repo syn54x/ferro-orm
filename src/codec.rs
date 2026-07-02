@@ -1,11 +1,17 @@
-//! Schema-driven value encoding and decoding between JSON, SeaQuery, and [`RustValue`].
+//! Plan-driven value encoding and decoding between JSON, SeaQuery, and [`RustValue`].
 //!
 //! Centralizes bind-expression construction for INSERT/UPDATE/query paths and row decoding
 //! after GIL-free fetch. Postgres-specific casts (UUID, enum UDT, temporal, JSON text) live
 //! here so SQLite and Postgres stay observationally equivalent at the Python boundary.
+//!
+//! Every per-column type decision comes from the model's compiled
+//! [`ModelCodecPlan`] (FF-C C1) — built once per model per schema epoch at
+//! registration from the FF-B storage decision table. No JSON-schema shape or
+//! pattern inference happens here.
 
 use crate::backend::{EngineRow, EngineValue};
-use crate::state::{Dialect, MODEL_REGISTRY, RustValue};
+use crate::codec_plan::{ColumnCodec, ModelCodecPlan, codec_needs_pg_text_projection};
+use crate::state::{Dialect, RustValue};
 use sea_query::{Alias, Expr, SelectStatement, SimpleExpr, Value as SeaValue};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -13,187 +19,67 @@ use std::collections::{HashMap, HashSet};
 /// One ORM row after GIL-free decode: optional stringified PK plus column values.
 pub type ParsedRow = (Option<String>, Vec<(String, RustValue)>);
 
-fn json_type(col_info: &Value) -> Option<&str> {
-    col_info.get("type").and_then(|t| t.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let s = t.get("type")?.as_str()?;
-                    if s == "null" { None } else { Some(s) }
-                })
-            })
-    })
-}
-
-fn format(col_info: &Value) -> Option<&str> {
-    col_info.get("format").and_then(|f| f.as_str()).or_else(|| {
-        col_info
-            .get("anyOf")
-            .and_then(|a| a.as_array())
-            .and_then(|types| {
-                types.iter().find_map(|t| {
-                    let ty = t.get("type")?.as_str()?;
-                    if ty == "null" {
-                        None
-                    } else {
-                        t.get("format").and_then(|f| f.as_str())
-                    }
-                })
-            })
-    })
-}
-
-fn pattern_looks_decimal(pattern: &str) -> bool {
-    if !pattern.contains("\\d") {
-        return false;
-    }
-    let mut escaped = false;
-    for ch in pattern.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch.is_ascii_alphabetic() {
-            return false;
-        }
-    }
-    true
-}
-
-fn is_decimal(col_info: &Value) -> bool {
-    if col_info.get("db_type").and_then(Value::as_str) == Some("numeric") {
-        return true;
-    }
-    if col_info.get("type").and_then(Value::as_str) == Some("string")
-        && col_info
-            .get("pattern")
-            .and_then(Value::as_str)
-            .map(pattern_looks_decimal)
-            .unwrap_or(false)
-    {
-        return true;
-    }
-    col_info
-        .get("anyOf")
-        .and_then(Value::as_array)
-        .map(|types| {
-            let has_patterned_string = types.iter().any(|t| {
-                t.get("type").and_then(Value::as_str) == Some("string")
-                    && t
-                        .get("pattern")
-                        .and_then(Value::as_str)
-                        .map(pattern_looks_decimal)
-                        .unwrap_or(false)
-            });
-            let has_only_decimal_compatible_types = types.iter().all(|t| {
-                matches!(
-                    t.get("type").and_then(Value::as_str),
-                    Some("string" | "number" | "null")
-                )
-            });
-            has_patterned_string && has_only_decimal_compatible_types
-        })
-        .unwrap_or(false)
-}
-
-fn is_enum(col_info: &Value) -> bool {
-    col_info.get("enum").and_then(|e| e.as_array()).is_some()
-}
-
-fn resolve_ref<'a>(schema: &'a Value, col_info: &'a Value) -> &'a Value {
-    if let Some(ref_path) = col_info.get("$ref").and_then(|r| r.as_str())
-        && let Some(def_name) = ref_path.strip_prefix("#/$defs/")
-        && let Some(def) = schema.get("$defs").and_then(|defs| defs.get(def_name))
-    {
-        return def;
-    }
-    col_info
-}
-
-fn schema_property<'a>(schema: &'a Value, col_name: &str) -> Option<&'a Value> {
-    schema
-        .get("properties")
-        .and_then(|p| p.get(col_name))
-        .map(|prop| resolve_ref(schema, prop))
-}
-
-fn temporal_cast_for_format(fmt: Option<&str>) -> Option<&'static str> {
-    match fmt {
-        Some("date-time") => Some("timestamptz"),
-        Some("date") => Some("date"),
-        Some("time") => Some("time"),
+/// Postgres `CAST` target for temporal codecs (`None` for everything else).
+fn temporal_cast_for_codec(codec: Option<&ColumnCodec>) -> Option<&'static str> {
+    match codec {
+        Some(ColumnCodec::DateTime) => Some("timestamptz"),
+        Some(ColumnCodec::Date) => Some("date"),
+        Some(ColumnCodec::Time) => Some("time"),
         _ => None,
     }
 }
 
-fn model_schema_property(model_name: &str, col_name: &str) -> Option<Value> {
-    let registry = MODEL_REGISTRY.read().ok()?;
-    let schema = registry.get(model_name)?;
-    let col_info = schema
-        .get("properties")
-        .and_then(|p| p.get(col_name))
-        .map(|prop| resolve_ref(schema, prop))?;
-    Some(col_info.clone())
+/// Whether the codec is integer-valued for bind purposes: the int family plus
+/// enums whose member values are integers (`IntEnum`).
+fn codec_is_integer(codec: Option<&ColumnCodec>) -> bool {
+    match codec {
+        Some(ColumnCodec::Int | ColumnCodec::SmallInt | ColumnCodec::BigInt) => true,
+        Some(ColumnCodec::Enum { int_valued, .. }) => *int_valued,
+        _ => false,
+    }
 }
 
 /// Expand a `SELECT` column list on Postgres so text-like columns hydrate identically to SQLite.
 ///
 /// UUID, temporal, decimal, JSON, enum, and native enum UDT columns are wrapped in
 /// `CAST(... AS text)` in the projection. Other backends receive `SELECT *`.
+/// Which columns need the cast is decided by the compiled plan (plus the live
+/// native-enum catalog set); emitting the cast at all goes away in C3.
 ///
 /// # Arguments
 /// * `select` — SeaQuery select under construction (mutated in place).
 /// * `table_name` — Physical table name for column qualification.
-/// * `schema` — Model JSON schema (`properties` map).
+/// * `plan` — Compiled codec plan for the model.
 /// * `pg_native_enum_columns` — Columns whose live type is `typtype = 'e'` in `pg_catalog`.
 /// * `backend` — Active dialect; no-op expansion when not Postgres.
 pub fn apply_postgres_text_select_columns(
     select: &mut SelectStatement,
     table_name: &str,
-    schema: &Value,
+    plan: &ModelCodecPlan,
     pg_native_enum_columns: &HashSet<String>,
     backend: Dialect,
 ) {
     let tbl = Alias::new(table_name);
-    if backend != Dialect::Postgres {
+    if backend != Dialect::Postgres || plan.is_empty() {
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     }
-    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
-        select.column((tbl.clone(), sea_query::Asterisk));
-        return;
-    };
-    let need_text_from_schema = properties.values().any(|col_info| {
-        let resolved = resolve_ref(schema, col_info);
-        matches!(
-            format(resolved),
-            Some("uuid" | "date-time" | "date" | "decimal")
-        ) || matches!(json_type(resolved), Some("object" | "array"))
-            || is_enum(resolved)
-    });
-    let need_text_from_native_enum = properties
-        .keys()
+    let need_text_from_native_enum = plan
+        .ordered_columns()
+        .iter()
         .any(|k| pg_native_enum_columns.contains(k.as_str()));
-    if !need_text_from_schema && !need_text_from_native_enum {
+    if !plan.pg_text_projection && !need_text_from_native_enum {
         select.column((tbl.clone(), sea_query::Asterisk));
         return;
     }
-    for (col_name, col_info) in properties {
+    for col_name in plan.ordered_columns() {
         let col_iden = Alias::new(col_name.as_str());
-        let col_info = resolve_ref(schema, col_info);
-        if matches!(
-            format(col_info),
-            Some("uuid" | "date-time" | "date" | "decimal")
-        ) || matches!(json_type(col_info), Some("object" | "array"))
-            || is_enum(col_info)
-            || pg_native_enum_columns.contains(col_name.as_str())
-        {
+        let needs_cast = plan
+            .codec(col_name)
+            .map(codec_needs_pg_text_projection)
+            .unwrap_or(false)
+            || pg_native_enum_columns.contains(col_name.as_str());
+        if needs_cast {
             let expr = Expr::cast_as(
                 Expr::col((tbl.clone(), col_iden.clone())),
                 Alias::new("text"),
@@ -207,11 +93,12 @@ pub fn apply_postgres_text_select_columns(
 
 /// Build a typed SeaQuery RHS expression for INSERT/UPDATE from JSON field values.
 ///
-/// Uses model schema metadata plus live Postgres catalog hints (`enum_udt`, `uuid_columns`,
-/// `ts_cast`) to emit OID-correct binds. See `docs/solutions/patterns/typed-null-binds.md`.
+/// Uses the compiled codec plan plus live Postgres catalog hints (`enum_udt`,
+/// `uuid_columns`, `ts_cast`) to emit OID-correct binds. See
+/// `docs/solutions/patterns/typed-null-binds.md`.
 ///
 /// # Arguments
-/// * `schema` — Full model JSON schema.
+/// * `plan` — Compiled codec plan for the model.
 /// * `table_name` — Table name (for UUID parse error messages).
 /// * `col_name` — Target column.
 /// * `value` — JSON value from the Python layer (`null` for SQL `NULL`).
@@ -227,7 +114,7 @@ pub fn apply_postgres_text_select_columns(
 /// Returns `PyValueError` when a Postgres UUID string fails to parse.
 #[allow(clippy::too_many_arguments)]
 pub fn schema_bind_expr(
-    schema: &Value,
+    plan: &ModelCodecPlan,
     table_name: &str,
     col_name: &str,
     value: &Value,
@@ -236,12 +123,9 @@ pub fn schema_bind_expr(
     ts_cast: &HashMap<String, String>,
     backend: Dialect,
 ) -> pyo3::PyResult<SimpleExpr> {
-    let col_info = schema_property(schema, col_name);
-    let col_format = col_info.and_then(format);
-    let col_json_type = col_info.and_then(json_type);
-    let col_is_decimal = col_info.map(is_decimal).unwrap_or(false);
+    let codec = plan.codec(col_name);
     let is_uuid_pg = backend == Dialect::Postgres
-        && (uuid_columns.contains(col_name) || col_format == Some("uuid"));
+        && (uuid_columns.contains(col_name) || matches!(codec, Some(ColumnCodec::Uuid)));
 
     if backend == Dialect::Postgres
         && let Some(tn) = crate::schema_bind::native_postgres_enum_udt_name(col_name, enum_udt)
@@ -287,7 +171,7 @@ pub fn schema_bind_expr(
     let temporal_cast = ts_cast
         .get(col_name)
         .map(|s| s.as_str())
-        .or_else(|| temporal_cast_for_format(col_format));
+        .or_else(|| temporal_cast_for_codec(codec));
     if backend == Dialect::Postgres
         && let Some(cast) = temporal_cast
     {
@@ -303,8 +187,7 @@ pub fn schema_bind_expr(
 
     let expr = match value {
         value
-            if backend == Dialect::Postgres
-                && matches!(col_json_type, Some("object" | "array")) =>
+            if backend == Dialect::Postgres && matches!(codec, Some(ColumnCodec::Json)) =>
         {
             if value.is_null() {
                 Expr::value(SeaValue::String(None)).cast_as("json")
@@ -312,24 +195,24 @@ pub fn schema_bind_expr(
                 Expr::value(SeaValue::String(Some(Box::new(value.to_string())))).cast_as("json")
             }
         }
-        Value::String(s) if col_json_type == Some("integer") => {
+        Value::String(s) if codec_is_integer(codec) => {
             if let Ok(parsed) = s.parse::<i64>() {
                 Expr::value(SeaValue::BigInt(Some(parsed)))
             } else {
                 Expr::value(SeaValue::String(Some(Box::new(s.clone()))))
             }
         }
-        Value::String(s) if col_json_type == Some("number") => {
+        Value::String(s) if matches!(codec, Some(ColumnCodec::Float)) => {
             if let Ok(parsed) = s.parse::<f64>() {
                 Expr::value(SeaValue::Double(Some(parsed)))
             } else {
                 Expr::value(SeaValue::String(Some(Box::new(s.clone()))))
             }
         }
-        Value::String(s) if col_format == Some("binary") => {
+        Value::String(s) if matches!(codec, Some(ColumnCodec::Bytes)) => {
             Expr::value(SeaValue::Bytes(Some(Box::new(s.as_bytes().to_vec()))))
         }
-        Value::String(s) if col_is_decimal => {
+        Value::String(s) if matches!(codec, Some(ColumnCodec::Decimal)) => {
             if backend == Dialect::Postgres {
                 Expr::value(SeaValue::String(Some(Box::new(s.clone())))).cast_as("numeric")
             } else if let Ok(parsed) = s.parse::<f64>() {
@@ -348,34 +231,34 @@ pub fn schema_bind_expr(
             }
         }
         Value::String(s) => Expr::value(SeaValue::String(Some(Box::new(s.clone())))),
-        Value::Bool(b) if col_json_type == Some("boolean") && backend == Dialect::Sqlite => {
+        Value::Bool(b)
+            if matches!(codec, Some(ColumnCodec::Bool)) && backend == Dialect::Sqlite =>
+        {
             Expr::value(SeaValue::BigInt(Some(if *b { 1 } else { 0 })))
         }
         Value::Bool(b) => Expr::value(SeaValue::Bool(Some(*b))),
         Value::Null => {
-            if col_is_decimal && backend == Dialect::Postgres {
+            if matches!(codec, Some(ColumnCodec::Decimal)) && backend == Dialect::Postgres {
                 return Ok(Expr::value(SeaValue::String(None)).cast_as("numeric"));
             }
-            let v = if col_format == Some("binary") {
-                SeaValue::Bytes(None)
-            } else if col_is_decimal {
-                SeaValue::Double(None)
-            } else if backend == Dialect::Postgres && temporal_cast.is_some() {
-                SeaValue::String(None)
-            } else {
-                match col_json_type {
-                    Some("integer") => SeaValue::BigInt(None),
-                    Some("number") => SeaValue::Double(None),
-                    Some("boolean") => SeaValue::Bool(None),
-                    Some("string") => SeaValue::String(None),
-                    _ => SeaValue::String(None),
-                }
-            };
-            Expr::value(v)
+            Expr::value(typed_null_for_codec(codec))
         }
         _ => Expr::value(SeaValue::String(Some(Box::new(value.to_string())))),
     };
     Ok(expr)
+}
+
+/// Typed SeaQuery `NULL` for a codec so `Option::<T>::None` reaches the wire
+/// with the right OID on strict-typing backends.
+fn typed_null_for_codec(codec: Option<&ColumnCodec>) -> SeaValue {
+    match codec {
+        Some(ColumnCodec::Bytes) => SeaValue::Bytes(None),
+        Some(ColumnCodec::Decimal) => SeaValue::Double(None),
+        Some(ColumnCodec::Float) => SeaValue::Double(None),
+        Some(ColumnCodec::Bool) => SeaValue::Bool(None),
+        codec if codec_is_integer(codec) => SeaValue::BigInt(None),
+        _ => SeaValue::String(None),
+    }
 }
 
 /// Build a typed SeaQuery RHS for WHERE-clause predicates.
@@ -384,30 +267,26 @@ pub fn schema_bind_expr(
 /// (not schema `enum_type_name`) so auto-migrated TEXT enum columns keep text binds.
 ///
 /// # Arguments
-/// * `model_name` — Model class name for registry schema lookup.
+/// * `plan` — Compiled codec plan (`None` when the model is not registered).
 /// * `col_name` — Filtered column.
 /// * `val` — JSON RHS from the query IR.
-/// * `infer_uuid_without_schema` — When true, parse UUID strings even if schema lacks `format: uuid`.
+/// * `infer_uuid_without_schema` — When true, parse UUID strings even if the plan lacks the column.
 /// * `backend` — Active SQL dialect.
 /// * `postgres_enum_udt` — Native enum UDT names from `pg_catalog`.
 ///
 /// # Returns
 /// A SeaQuery expression for the predicate RHS.
 pub fn query_bind_expr(
-    model_name: &str,
+    plan: Option<&ModelCodecPlan>,
     col_name: &str,
     val: &Value,
     infer_uuid_without_schema: bool,
     backend: Dialect,
     postgres_enum_udt: &HashMap<String, String>,
 ) -> SimpleExpr {
-    let col_info = model_schema_property(model_name, col_name);
-    let col_format = col_info.as_ref().and_then(format);
-    let col_is_decimal = col_info.as_ref().map(is_decimal).unwrap_or(false);
-    let col_is_uuid = col_info
-        .as_ref()
-        .map(|c| json_type(c) == Some("string") && format(c) == Some("uuid"))
-        .unwrap_or(false);
+    let codec = plan.and_then(|p| p.codec(col_name));
+    let col_is_uuid = matches!(codec, Some(ColumnCodec::Uuid));
+    let col_is_decimal = matches!(codec, Some(ColumnCodec::Decimal));
 
     if let Value::String(s) = val {
         if backend == Dialect::Postgres {
@@ -423,10 +302,10 @@ pub fn query_bind_expr(
                 return Expr::value(SeaValue::Uuid(Some(Box::new(parsed))));
             }
 
-            if let Some(cast) = temporal_cast_for_format(col_format) {
+            if let Some(cast) = temporal_cast_for_codec(codec) {
                 return Expr::value(SeaValue::String(Some(Box::new(s.clone())))).cast_as(cast);
             }
-            if col_format == Some("binary") {
+            if matches!(codec, Some(ColumnCodec::Bytes)) {
                 return Expr::value(SeaValue::Bytes(Some(Box::new(s.as_bytes().to_vec()))));
             }
             if col_is_decimal {
@@ -444,7 +323,7 @@ pub fn query_bind_expr(
             if col_is_uuid {
                 return Expr::value(SeaValue::Uuid(None));
             }
-            if let Some(cast) = temporal_cast_for_format(col_format) {
+            if let Some(cast) = temporal_cast_for_codec(codec) {
                 return Expr::value(SeaValue::String(None)).cast_as(cast);
             }
             if col_is_decimal {
@@ -457,18 +336,10 @@ pub fn query_bind_expr(
         if col_is_decimal {
             return Expr::value(SeaValue::Double(None));
         }
-        if col_format == Some("binary") {
+        if matches!(codec, Some(ColumnCodec::Bytes)) {
             return Expr::value(SeaValue::Bytes(None));
         }
-        let col_json_type = col_info.as_ref().and_then(json_type);
-        let typed_null = match col_json_type {
-            Some("integer") => SeaValue::BigInt(None),
-            Some("number") => SeaValue::Double(None),
-            Some("boolean") => SeaValue::Bool(None),
-            Some("string") => SeaValue::String(None),
-            _ => SeaValue::String(None),
-        };
-        return Expr::value(typed_null);
+        return Expr::value(typed_null_for_codec(codec));
     }
 
     Expr::value(json_value_to_sea_value(val))
@@ -501,10 +372,10 @@ pub fn m2m_bind_expr(
     Expr::value(value)
 }
 
-/// Coerce a JSON literal into a SeaQuery `Value` without schema context.
+/// Coerce a JSON literal into a SeaQuery `Value` without column context.
 ///
 /// Used as the fallback arm of [`query_bind_expr`] for non-null primitives.
-/// JSON `null` maps to `String(None)` (untyped null) — prefer schema-aware paths for NULL.
+/// JSON `null` maps to `String(None)` (untyped null) — prefer plan-aware paths for NULL.
 ///
 /// # Arguments
 /// * `value` — JSON value from the query IR.
@@ -529,29 +400,24 @@ pub fn json_value_to_sea_value(value: &Value) -> SeaValue {
     }
 }
 
-/// Decode one [`EngineValue`] into a [`RustValue`] using model column metadata.
+/// Decode one [`EngineValue`] into a [`RustValue`] using the compiled codec plan.
 ///
 /// Applies decimal, binary, boolean-as-integer (SQLite), UUID, temporal, and JSON rules
-/// before the generic scalar mapping.
+/// before the generic scalar mapping. Columns outside the plan (joined/m2m
+/// columns) take the generic mapping. `Time` deliberately decodes as a plain
+/// string in C1 — pinned to pre-plan behavior; C3 revisits.
 ///
 /// # Arguments
 /// * `value` — Wire value from SQLx fetch.
-/// * `schema` — Model JSON schema.
+/// * `plan` — Compiled codec plan for the model.
 /// * `col_name` — Column being decoded.
 ///
 /// # Returns
 /// Rust-native value ready for [`RustValue::into_py_any`].
-pub fn decode_engine_value(value: EngineValue, schema: &Value, col_name: &str) -> RustValue {
-    let prop = schema
-        .get("properties")
-        .and_then(|p| p.get(col_name))
-        .map(|col_info| resolve_ref(schema, col_info));
+pub fn decode_engine_value(value: EngineValue, plan: &ModelCodecPlan, col_name: &str) -> RustValue {
+    let codec = plan.codec(col_name);
 
-    let col_format = prop.and_then(format);
-    let col_is_decimal = prop.map(is_decimal).unwrap_or(false);
-    let col_json_type = prop.and_then(json_type);
-
-    if col_is_decimal {
+    if matches!(codec, Some(ColumnCodec::Decimal)) {
         return match value {
             EngineValue::I64(v) => RustValue::Decimal(v.to_string()),
             EngineValue::F64(v) => RustValue::Decimal(v.to_string()),
@@ -560,7 +426,7 @@ pub fn decode_engine_value(value: EngineValue, schema: &Value, col_name: &str) -
         };
     }
 
-    if col_format == Some("binary") {
+    if matches!(codec, Some(ColumnCodec::Bytes)) {
         return match value {
             EngineValue::Bytes(v) => RustValue::Blob(v),
             EngineValue::String(v) => RustValue::Blob(v.into_bytes()),
@@ -569,15 +435,15 @@ pub fn decode_engine_value(value: EngineValue, schema: &Value, col_name: &str) -
     }
 
     match value {
-        EngineValue::I64(v) if col_json_type == Some("boolean") => RustValue::Bool(v != 0),
+        EngineValue::I64(v) if matches!(codec, Some(ColumnCodec::Bool)) => RustValue::Bool(v != 0),
         EngineValue::I64(v) => RustValue::BigInt(v),
         EngineValue::F64(v) => RustValue::Double(v),
         EngineValue::Bytes(v) => RustValue::Blob(v),
-        EngineValue::String(v) => match (col_json_type, col_format) {
-            (_, Some("date-time")) => RustValue::DateTime(v),
-            (_, Some("date")) => RustValue::Date(v),
-            (_, Some("uuid")) => RustValue::Uuid(v),
-            (Some("object"), _) | (Some("array"), _) => {
+        EngineValue::String(v) => match codec {
+            Some(ColumnCodec::DateTime) => RustValue::DateTime(v),
+            Some(ColumnCodec::Date) => RustValue::Date(v),
+            Some(ColumnCodec::Uuid) => RustValue::Uuid(v),
+            Some(ColumnCodec::Json) => {
                 if let Ok(json_val) = serde_json::from_str(&v) {
                     RustValue::Json(json_val)
                 } else {
@@ -595,14 +461,14 @@ pub fn decode_engine_value(value: EngineValue, schema: &Value, col_name: &str) -
 ///
 /// # Arguments
 /// * `rows` — Raw rows from the engine.
-/// * `schema` — Model JSON schema for per-column decoding.
+/// * `plan` — Compiled codec plan for per-column decoding.
 /// * `pk_col` — Primary key column name when known (extracts stringified PK per row).
 ///
 /// # Returns
 /// One `(pk, fields)` tuple per input row.
 pub fn typed_rows_to_parsed_data(
     rows: Vec<EngineRow>,
-    schema: &Value,
+    plan: &ModelCodecPlan,
     pk_col: Option<&str>,
 ) -> Vec<ParsedRow> {
     rows.into_iter()
@@ -618,7 +484,7 @@ pub fn typed_rows_to_parsed_data(
                         _ => None,
                     };
                 }
-                let value = decode_engine_value(value, schema, &col_name);
+                let value = decode_engine_value(value, plan, &col_name);
                 fields.push((col_name, value));
             }
 
