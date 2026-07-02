@@ -68,11 +68,11 @@ These are behavioral changes to the public API — they must land before 1.0.
       instead of `PyRuntimeError(format!(...))` across all of `operations.rs` /
       `migrate.rs`. Original driver message preserved on the exception.
       Migration impact: **minor** (RuntimeError → subclass; document).
-- [ ] **A3 — `create()` is a real INSERT.**
+- [x] **A3 — `create()` is a real INSERT.**
       Drop `ON CONFLICT DO UPDATE` from the `create()` path; a duplicate PK or
       unique violation raises `UniqueViolationError` (depends on A2).
       Migration impact: **breaking** (previously clobbered the existing row).
-- [ ] **A4 — `save()` distinguishes INSERT from UPDATE; upsert becomes explicit.**
+- [x] **A4 — `save()` distinguishes INSERT from UPDATE; upsert becomes explicit.**
       Track persistence state explicitly on the instance (today it is implicit
       in the identity map / `__ferro_connection_name`): transient → INSERT,
       persistent → `UPDATE ... WHERE pk = ?`. Add a named upsert surface
@@ -88,7 +88,7 @@ These are behavioral changes to the public API — they must land before 1.0.
 
 - [ ] `Query.limit(...).delete()` / `.update()` raise; no mutating payload
       carries limit/offset.
-- [ ] `create()` on an existing PK raises `UniqueViolationError` on both
+- [x] `create()` on an existing PK raises `UniqueViolationError` on both
       backends; upsert path exists and is tested.
 - [ ] Full matrix green with exception types asserted (no string matching on
       driver messages anywhere in tests).
