@@ -382,6 +382,91 @@ async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
     ), "no DDL may run for SQLite type drift"
 
 
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_sqlite_bytes_field_does_not_false_positive_blob_drift(
+    db_url, clean_registry
+):
+    """A fresh model with a `bytes` field creates a BLOB column; auto-migrate must
+    NOT warn that it is 'declared text but the model expects blob'. The model and
+    the DB agree. (#165)"""
+    import warnings
+
+    class Document(Model):
+        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        name: str = ""
+        data: bytes = b""
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        await ferro.connect(db_url, migrate_updates=True)
+
+    blob_warnings = [
+        str(w.message) for w in caught if "blob" in str(w.message).lower()
+    ]
+    assert not blob_warnings, f"spurious BLOB drift warning(s): {blob_warnings}"
+
+    # The column really is a BLOB — the fix did not mask a real difference.
+    columns = _sqlite_columns(db_url, "document")
+    assert columns["data"][2].lower() == "blob"
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_sqlite_genuine_text_to_blob_diff_still_warns(
+    db_url, clean_registry
+):
+    """Control: a pre-existing TEXT column adopted by a `bytes` model is a REAL
+    difference and must still warn — the fix only silences blob==blob. (#165)"""
+    await ferro.connect(db_url)
+    await execute(
+        'CREATE TABLE "attachment" '
+        '("id" integer PRIMARY KEY AUTOINCREMENT, "payload" text NOT NULL)'
+    )
+    ferro.reset_engine()
+
+    class Attachment(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        payload: bytes = b""
+
+    with pytest.warns(UserWarning, match=r"attachment\.payload.*expects 'blob'"):
+        await ferro.connect(db_url, migrate_updates=True)
+
+    # No DDL runs for SQLite type drift — the column is left as declared.
+    columns = _sqlite_columns(db_url, "attachment")
+    assert columns["payload"][2].lower() == "text"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_pg_bytes_field_bytea_no_drift(
+    db_url, postgres_base_url, db_schema_name, clean_registry
+):
+    """Mirror-image control: on Postgres a `bytes` field maps to `bytea`, which
+    already round-trips through introspection — no warning, no drift, ever. (#165)"""
+    import warnings
+
+    class DocPg(Model):
+        id: Annotated[UUID | None, FerroField(primary_key=True)] = None
+        name: str = ""
+        data: bytes = b""
+
+    await ferro.connect(db_url, migrate_updates=True)  # creates docpg -> bytea
+    ferro.reset_engine()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        await ferro.connect(db_url, migrate_updates=True)  # reconnect: must be quiet
+    blob_warnings = [
+        str(w.message) for w in caught if "blob" in str(w.message).lower()
+    ]
+    assert not blob_warnings, f"unexpected BLOB drift warning(s): {blob_warnings}"
+
+    assert (
+        _pg_live_type(postgres_base_url, db_schema_name, "docpg", "data") == "bytea"
+    )
+
+
 def _pg_live_type(base_url: str, schema: str, table: str, column: str) -> str:
     import psycopg
 

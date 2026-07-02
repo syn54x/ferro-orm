@@ -140,6 +140,7 @@ pub fn db_type_token_to_canonical(token: &str, dialect: Dialect) -> Option<Canon
         "numeric" => Some(CanonicalType::Decimal),
         "json" => Some(CanonicalType::Json),
         "bytea" => Some(CanonicalType::Blob),
+        "blob" => Some(CanonicalType::Blob),
         "varchar" => Some(CanonicalType::Varchar(None)),
         other => parse_varchar_token(other)
             .map(|n| CanonicalType::Varchar(Some(n)))
@@ -191,6 +192,7 @@ pub fn information_schema_to_db_type_token(
         "numeric" => "numeric",
         "json" | "jsonb" => "json",
         "bytea" => "bytea",
+        "blob" => "blob",
         "text" => "text",
         "integer" => "int",
         "smallint" => "smallint",
@@ -622,6 +624,10 @@ mod tests {
             information_schema_to_db_type_token("boolean", None, Dialect::Postgres),
             "boolean"
         );
+        assert_eq!(
+            information_schema_to_db_type_token("BLOB", None, Dialect::Sqlite),
+            "blob"
+        );
     }
 
     #[test]
@@ -730,6 +736,61 @@ mod tests {
         assert!(!schema_columns_storage_drift(&a, &b, Dialect::Sqlite));
         // Cross-check: same tokens DO differ on Postgres (Timestamp vs TimestampTz).
         assert!(schema_columns_storage_drift(&a, &b, Dialect::Postgres));
+    }
+
+    #[test]
+    fn db_type_token_to_canonical_resolves_blob() {
+        assert_eq!(
+            db_type_token_to_canonical("blob", Dialect::Sqlite),
+            Some(CanonicalType::Blob)
+        );
+        assert_eq!(
+            db_type_token_to_canonical("blob", Dialect::Postgres),
+            Some(CanonicalType::Blob)
+        );
+    }
+
+    /// The one cross-consumer guard: the token a live SQLite BLOB normalizes to
+    /// must satisfy BOTH planner consumers at once — `db_type_token_to_canonical`
+    /// (the IR planner) resolves it to `Blob`, AND `sqlite_type_class` (the legacy
+    /// planner's SQLite arm) classes it the same as the model's declared blob.
+    /// This is why the token is "blob", not the canonical "bytea": `sqlite_type_class`
+    /// only recognizes Blob for strings containing "blob". (#165)
+    #[test]
+    fn live_sqlite_blob_round_trips_through_both_consumers() {
+        let token = information_schema_to_db_type_token("BLOB", None, Dialect::Sqlite);
+        // IR-path consumer.
+        assert_eq!(
+            db_type_token_to_canonical(&token, Dialect::Sqlite),
+            Some(CanonicalType::Blob)
+        );
+        // Legacy-path consumer: same class as the model's declared blob type.
+        assert_eq!(
+            sqlite_type_class(&token),
+            sqlite_type_class(&sqlite_declared_type(CanonicalType::Blob))
+        );
+    }
+
+    /// A live BLOB column must NOT drift against a `binary` (bytes) model column,
+    /// while a genuine text↔blob difference still drifts. (#165)
+    #[test]
+    fn blob_model_does_not_drift_against_live_blob_on_sqlite() {
+        // Live column: introspected via the real normalizer, logical_type "unknown".
+        let live_token = information_schema_to_db_type_token("BLOB", None, Dialect::Sqlite);
+        let live = col_with_db_type("data", "unknown", None, Some(&live_token));
+        // Model column: Python SchemaIR compiler emits logical_type "binary", db_type None.
+        let model = col_with_db_type("data", "binary", None, None);
+        assert!(
+            !schema_columns_storage_drift(&live, &model, Dialect::Sqlite),
+            "a live BLOB column must not read as drifted against a bytes model"
+        );
+
+        // Genuine diff preserved: a live TEXT column vs the same bytes model DOES drift.
+        let live_text = col_with_db_type("data", "unknown", None, Some("text"));
+        assert!(
+            schema_columns_storage_drift(&live_text, &model, Dialect::Sqlite),
+            "a real text→blob difference must still be detected"
+        );
     }
 
     #[test]
