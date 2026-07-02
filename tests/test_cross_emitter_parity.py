@@ -176,8 +176,17 @@ async def test_alembic_autogen_against_rust_migrated_db_is_idempotent(
     else:
         # The per-test schema is carried in a Ferro-specific URL param; the
         # plain SQLAlchemy engine needs the base URL plus an explicit
-        # search_path (mirrors test_schema_constraints.py).
-        sync_url = postgres_base_url.replace("postgres://", "postgresql+psycopg://", 1)
+        # search_path (mirrors test_schema_constraints.py). Force the psycopg
+        # (v3) driver regardless of the incoming scheme — the base URL is
+        # ``postgresql://`` from pytest-postgresql but ``postgres://`` from a
+        # ``FERRO_POSTGRES_URL`` env override, and SQLAlchemy's bare
+        # ``postgresql://`` defaults to psycopg2, which Ferro does not ship.
+        for scheme in ("postgresql://", "postgres://"):
+            if postgres_base_url.startswith(scheme):
+                sync_url = "postgresql+psycopg://" + postgres_base_url[len(scheme) :]
+                break
+        else:
+            sync_url = postgres_base_url
         engine = sa.create_engine(sync_url)
         search_path_schema = db_schema_name
 
