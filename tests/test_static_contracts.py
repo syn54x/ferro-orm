@@ -38,3 +38,94 @@ def test_mutating_query_methods_cannot_carry_pagination():
         assert "_mutating_query_def" in attributes, (
             f"Query.{method_name}() must build its payload via _mutating_query_def"
         )
+
+
+def _models_module_tree() -> ast.Module:
+    source = Path("src/ferro/models.py").read_text(encoding="utf-8")
+    return ast.parse(source)
+
+
+def _class_def(tree: ast.Module, class_name: str) -> ast.ClassDef:
+    return next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+
+
+def _method_def(cls: ast.ClassDef, method_name: str) -> ast.AsyncFunctionDef:
+    return next(
+        node
+        for node in cls.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == method_name
+    )
+
+
+def _called_name(call: ast.Call) -> str | None:
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    return None
+
+
+def test_create_paths_never_pass_on_conflict():
+    """create() stays a plain INSERT: no create-family path may reach the
+    upsert surface (FF-A A3)."""
+    tree = _models_module_tree()
+    model_cls = _class_def(tree, "Model")
+    connection_cls = _class_def(tree, "ModelConnection")
+    methods = [
+        _method_def(model_cls, "create"),
+        _method_def(model_cls, "get_or_create"),
+        _method_def(model_cls, "update_or_create"),
+        _method_def(connection_cls, "create"),
+    ]
+    for method in methods:
+        for node in ast.walk(method):
+            if not isinstance(node, ast.Call):
+                continue
+            if _called_name(node) not in ("save", "create"):
+                continue
+            keywords = {kw.arg for kw in node.keywords}
+            assert "on_conflict" not in keywords, (
+                f"{method.name}() must not pass on_conflict; create paths are "
+                "plain INSERTs (FF-A A3)"
+            )
+
+
+def test_save_dispatches_by_persistence_state():
+    """save() routes transient instances to INSERT, persisted ones to UPDATE,
+    and only the explicit on_conflict surface to upsert (FF-A A4)."""
+    tree = _models_module_tree()
+    save = _method_def(_class_def(tree, "Model"), "save")
+    called = {
+        _called_name(node) for node in ast.walk(save) if isinstance(node, ast.Call)
+    }
+    assert "update_record" in called, "save() must UPDATE persisted instances"
+    assert "save_record" in called
+    assert "_is_persisted" in called, "save() must dispatch on persistence state"
+
+    for node in ast.walk(save):
+        if not (isinstance(node, ast.Call) and _called_name(node) == "save_record"):
+            continue
+        mode_kw = next((kw for kw in node.keywords if kw.arg == "mode"), None)
+        assert mode_kw is not None, "save_record calls must pass an explicit mode"
+        assert isinstance(mode_kw.value, ast.Constant)
+        assert mode_kw.value.value in ("insert", "upsert")
+
+
+def test_bulk_create_payload_has_no_conflict_handling():
+    """bulk_create stays a plain multi-row INSERT."""
+    tree = _models_module_tree()
+    bulk_create = _method_def(_class_def(tree, "Model"), "bulk_create")
+    for node in ast.walk(bulk_create):
+        if not (
+            isinstance(node, ast.Call) and _called_name(node) == "save_bulk_records"
+        ):
+            continue
+        keywords = {kw.arg for kw in node.keywords}
+        assert (
+            "mode" not in keywords and "on_conflict" not in keywords
+        ), "bulk_create must not grow conflict handling implicitly"

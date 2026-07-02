@@ -119,7 +119,15 @@ async def save_record(
     tx_id: Optional[str] = None,
     using: Optional[str] = None,
     session_id: Optional[str] = None,
+    mode: str = "insert",
 ) -> int | None: ...
+async def update_record(
+    name: str,
+    data: dict[str, Any],
+    tx_id: Optional[str] = None,
+    using: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> int: ...
 async def save_bulk_records(
     name: str,
     rows: list[dict[str, Any]],

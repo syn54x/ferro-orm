@@ -114,7 +114,10 @@ class CheckViolationError(IntegrityError):
 
 
 class ModelDoesNotExist(FerroError, LookupError):
-    """Raised when :meth:`~ferro.models.Model.get` finds no row for the primary key."""
+    """Raised when :meth:`~ferro.models.Model.get` finds no row for the primary
+    key, and when :meth:`~ferro.models.Model.save` on a persisted instance
+    matches no row (the row was deleted underneath, or the primary key was
+    mutated before saving)."""
 
     model: type
     pk: Any

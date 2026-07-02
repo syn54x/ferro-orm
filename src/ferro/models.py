@@ -7,6 +7,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    Literal,
     Self,
     overload,
 )
@@ -28,6 +29,7 @@ from ._core import (
     save_bulk_records,
     save_record,
     transaction_connection_name,
+    update_record,
 )
 from .base import ForeignKey, foreign_key_allows_none
 from .exceptions import ModelDoesNotExist
@@ -42,6 +44,20 @@ from .state import (
 
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
+_FERRO_PERSISTED_ATTR = "__ferro_persisted"
+
+
+def _is_persisted(instance: object) -> bool:
+    """True when the instance is known to have a row in the database.
+
+    Set by Rust hydration (`hydrate_model_instance`) and by a successful
+    ``save()``; cleared by ``delete()``. Absent means transient (FF-A A4).
+    """
+    return bool(instance.__dict__.get(_FERRO_PERSISTED_ATTR, False))
+
+
+def _set_persisted(instance: object, value: bool) -> None:
+    object.__setattr__(instance, _FERRO_PERSISTED_ATTR, value)
 
 
 def _field_eq(field_name: str, value: Any) -> Predicate[Any]:
@@ -221,27 +237,89 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return self
 
     async def save(
-        self, *, using: str | None = None, session: "Session | None" = None
+        self,
+        *,
+        using: str | None = None,
+        session: "Session | None" = None,
+        on_conflict: Literal["update"] | None = None,
     ) -> None:
-        """Persist the current model instance
+        """Persist the current model instance.
 
-        Returns:
-            None
+        A transient instance (constructed with ``Model(...)`` and never saved)
+        is INSERTed — a duplicate primary key or unique value raises
+        :class:`~ferro.exceptions.UniqueViolationError`. A persistent instance
+        (fetched from the database, or previously saved) is UPDATEd by primary
+        key. Pass ``on_conflict="update"`` for insert-or-update semantics
+        regardless of persistence state (the primitive behind
+        :meth:`upsert`).
+
+        Note that ``model_copy()`` copies persistence state: saving a copy of
+        a persisted instance updates the same row. The UPDATE targets the
+        instance's *current* primary-key value, so mutating the PK of a
+        persisted instance before ``save()`` matches no row and raises. A row
+        inserted inside a rolled-back transaction leaves the instance marked
+        persisted; a later ``save()`` raises ``ModelDoesNotExist``.
+
+        Args:
+            using: Connection name override.
+            session: Session scope for the operation.
+            on_conflict: ``None`` (default) or ``"update"`` to upsert.
+
+        Raises:
+            UniqueViolationError: A duplicate primary key or unique value on
+                INSERT.
+            ModelDoesNotExist: The row behind a persisted instance no longer
+                exists (deleted underneath, or the PK was mutated).
+            ValueError: ``on_conflict`` is not ``None`` or ``"update"``, or a
+                persisted instance has no primary-key value.
 
         Examples:
             >>> user = User(name="Taylor")
             >>> await user.save()
         """
+        if on_conflict not in (None, "update"):
+            raise ValueError(
+                f'on_conflict must be None or "update", got {on_conflict!r}'
+            )
         tx_id, operation_using, identity_using, session_id = _instance_transaction_route(
             self, using, session
         )
-        new_id = await save_record(
-            self.__class__.__name__,
-            save_bind_payload(self),
-            tx_id,
-            operation_using,
-            session_id=session_id,
-        )
+        new_id = None
+        if on_conflict == "update":
+            new_id = await save_record(
+                self.__class__.__name__,
+                save_bind_payload(self),
+                tx_id,
+                operation_using,
+                session_id=session_id,
+                mode="upsert",
+            )
+        elif _is_persisted(self):
+            pk_field_name = self.__class__._primary_key_field_name()
+            pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
+            if pk_val is None:
+                raise ValueError(
+                    f"Cannot UPDATE a persisted {self.__class__.__name__} "
+                    "without a primary key value"
+                )
+            rows_affected = await update_record(
+                self.__class__.__name__,
+                save_bind_payload(self),
+                tx_id,
+                operation_using,
+                session_id=session_id,
+            )
+            if rows_affected == 0:
+                raise ModelDoesNotExist(self.__class__, pk_val)
+        else:
+            new_id = await save_record(
+                self.__class__.__name__,
+                save_bind_payload(self),
+                tx_id,
+                operation_using,
+                session_id=session_id,
+                mode="insert",
+            )
 
         pk_val = None
         pk_field_name = None
@@ -273,6 +351,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 session_id=session_id,
             )
             _set_instance_origin(self, identity_using)
+        _set_persisted(self, True)
 
     async def delete(
         self, *, using: str | None = None, session: "Session | None" = None
@@ -304,6 +383,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             evict_instance(
                 name, str(pk_val), identity_using, session_id=session_id
             )
+            # The instance is transient again: a later save() re-INSERTs.
+            _set_persisted(self, False)
 
     @classmethod
     def _primary_key_field_name(cls) -> str | None:
@@ -444,6 +525,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             name, str(pk_val), self, identity_using, session_id=session_id
         )
         _set_instance_origin(self, identity_using)
+        _set_persisted(self, True)
         self.__class__._fix_types(self)
 
     @overload
@@ -515,11 +597,18 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     async def create(cls, *, session: "Session | None" = None, **fields) -> Self:
         """Create and persist a new model instance
 
+        ``create()`` is a plain INSERT: it never updates an existing row.
+
         Args:
             **fields: Field values to construct the model.
 
         Returns:
             The newly created and persisted model instance.
+
+        Raises:
+            UniqueViolationError: A row with the same primary key or unique
+                value already exists — use :meth:`upsert` for
+                insert-or-update semantics.
 
         Examples:
             >>> user = await User.create(name="Taylor")
@@ -528,6 +617,29 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         instance = cls(**fields)
         await instance.save(session=session)
+        return instance
+
+    @classmethod
+    async def upsert(cls, *, session: "Session | None" = None, **fields) -> Self:
+        """Insert the row, or update the existing row on primary-key conflict.
+
+        Equivalent to ``cls(**fields).save(on_conflict="update")``. With an
+        autoincrement primary key left unset there is no conflict target, so
+        this degrades to a plain INSERT.
+
+        Args:
+            **fields: Field values to construct the model.
+
+        Returns:
+            The persisted model instance.
+
+        Examples:
+            >>> user = await User.upsert(id=1, name="Taylor")
+            >>> isinstance(user, User)
+            True
+        """
+        instance = cls(**fields)
+        await instance.save(session=session, on_conflict="update")
         return instance
 
     @classmethod
@@ -637,8 +749,20 @@ class ModelConnection[M: Model]:
         self._connection_name: str = connection_name
 
     async def create(self, **fields: Any) -> M:
+        """Create and persist a new instance on this connection.
+
+        A plain INSERT — a duplicate primary key or unique value raises
+        :class:`~ferro.exceptions.UniqueViolationError`; use :meth:`upsert`
+        for insert-or-update semantics.
+        """
         instance = self.model_cls(**fields)
         await instance.save(using=self._connection_name)
+        return instance
+
+    async def upsert(self, **fields: Any) -> M:
+        """Insert the row on this connection, or update it on PK conflict."""
+        instance = self.model_cls(**fields)
+        await instance.save(using=self._connection_name, on_conflict="update")
         return instance
 
     async def all(self) -> list[M]:
