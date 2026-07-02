@@ -367,18 +367,18 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
         })?;
 
         engine.execute_sql(&emission.create_sql).await.map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "SQL Execution failed for '{}' table: {}",
-                model.table_name, e
-            ))
+            crate::errors::map_db_error(
+                &format!("SQL Execution failed for '{}' table", model.table_name),
+                e,
+            )
         })?;
 
         for post_sql in &emission.post_create_sqls {
             engine.execute_sql(post_sql).await.map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "SQL Execution failed for '{}' index: {}",
-                    model.table_name, e
-                ))
+                crate::errors::map_db_error(
+                    &format!("SQL Execution failed for '{}' index", model.table_name),
+                    e,
+                )
             })?;
         }
 

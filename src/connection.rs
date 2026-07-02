@@ -197,7 +197,7 @@ pub fn connect(
     let (connection_url, search_path) = split_search_path(&url);
     let redacted_url = redact_connection_url(&connection_url);
     let backend = dialect_from_url(&connection_url).map_err(|e| {
-        pyo3::exceptions::PyConnectionError::new_err(format!(
+        crate::errors::interface_error(format!(
             "DB Connection failed for {}: {}",
             redacted_url, e
         ))
@@ -240,10 +240,7 @@ pub fn connect(
         )
         .await
         .map_err(|e| {
-            pyo3::exceptions::PyConnectionError::new_err(format!(
-                "DB Connection failed for {}: {}",
-                redacted_url, e
-            ))
+            crate::errors::map_db_error(&format!("DB Connection failed for {}", redacted_url), e)
         })?
         .with_identity_map_enabled(identity_map)
         .with_shadow_runtime_enabled(shadow_runtime_enabled_from_env());

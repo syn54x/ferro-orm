@@ -380,20 +380,20 @@ async fn postgres_catalog_rows(
             conn.fetch_all_sql_with_binds(sql, &values)
                 .await
                 .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to inspect {} for '{}': {}",
-                        label, table_name, e
-                    ))
+                    crate::errors::map_db_error(
+                        &format!("Failed to inspect {} for '{}'", label, table_name),
+                        e,
+                    )
                 })?
         }
         None => engine
             .fetch_all_sql_with_binds(sql, &values)
             .await
             .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to inspect {} for '{}': {}",
-                    label, table_name, e
-                ))
+                crate::errors::map_db_error(
+                    &format!("Failed to inspect {} for '{}'", label, table_name),
+                    e,
+                )
             })?,
     };
 
@@ -714,12 +714,7 @@ pub fn begin_transaction(
             let savepoint_name = format!("sp_{}", tx_id.replace('-', "_"));
             execute_transaction_sql(&conn, &format!("SAVEPOINT {savepoint_name}"))
                 .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to create SAVEPOINT: {}",
-                        e
-                    ))
-                })?;
+                .map_err(|e| crate::errors::map_db_error("Failed to create SAVEPOINT", e))?;
 
             tx_insert(
                 session_id.as_deref(),
@@ -733,9 +728,10 @@ pub fn begin_transaction(
                 session_id.clone(),
             )
             .map(|(name, engine, _, _)| (name, engine))?;
-            let conn = engine.begin_transaction_connection().await.map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to BEGIN: {}", e))
-            })?;
+            let conn = engine
+                .begin_transaction_connection()
+                .await
+                .map_err(|e| crate::errors::map_db_error("Failed to BEGIN", e))?;
 
             tx_insert(
                 session_id.as_deref(),
@@ -776,18 +772,11 @@ pub fn commit_transaction(
                 &format!("RELEASE SAVEPOINT {savepoint_name}"),
             )
             .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to RELEASE SAVEPOINT: {}",
-                    e
-                ))
-            })?;
+            .map_err(|e| crate::errors::map_db_error("Failed to RELEASE SAVEPOINT", e))?;
         } else {
             execute_transaction_sql(&tx_handle.conn, "COMMIT")
                 .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to COMMIT: {}", e))
-                })?;
+                .map_err(|e| crate::errors::map_db_error("Failed to COMMIT", e))?;
         }
 
         Ok(())
@@ -841,29 +830,17 @@ pub fn rollback_transaction(
                 &format!("ROLLBACK TO SAVEPOINT {savepoint_name}"),
             )
             .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to ROLLBACK TO SAVEPOINT: {}",
-                    e
-                ))
-            })?;
+            .map_err(|e| crate::errors::map_db_error("Failed to ROLLBACK TO SAVEPOINT", e))?;
             execute_transaction_sql(
                 &tx_handle.conn,
                 &format!("RELEASE SAVEPOINT {savepoint_name}"),
             )
             .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to RELEASE SAVEPOINT: {}",
-                    e
-                ))
-            })?;
+            .map_err(|e| crate::errors::map_db_error("Failed to RELEASE SAVEPOINT", e))?;
         } else {
             execute_transaction_sql(&tx_handle.conn, "ROLLBACK")
                 .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to ROLLBACK: {}", e))
-                })?;
+                .map_err(|e| crate::errors::map_db_error("Failed to ROLLBACK", e))?;
         }
 
         identity_map_clear(session_id.as_deref())?;
@@ -984,18 +961,14 @@ pub fn fetch_all<'py>(
                 let rows = conn
                     .fetch_all_sql_with_binds(&sql, &[])
                     .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
-                    })?;
+                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
                 typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
             }
             None => {
                 let rows = engine
                     .fetch_all_sql_with_binds(&sql, &[])
                     .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
-                    })?;
+                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
                 typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
             }
         };
@@ -1156,9 +1129,7 @@ pub fn fetch_one<'py>(
                 let rows = conn
                     .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                     .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
-                    })?;
+                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
                 typed_rows_to_parsed_data(rows, &schema_for_decode, None)
                     .into_iter()
                     .next()
@@ -1169,9 +1140,7 @@ pub fn fetch_one<'py>(
                 let rows = engine
                     .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                     .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
-                    })?;
+                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
                 typed_rows_to_parsed_data(rows, &schema_for_decode, None)
                     .into_iter()
                     .next()
@@ -1332,9 +1301,7 @@ pub fn save_record<'py>(
                     let rows = conn
                         .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                         .await
-                        .map_err(|e| {
-                            pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
-                        })?;
+                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
                     let id = rows
                         .first()
                         .and_then(|row| row.values.first())
@@ -1345,9 +1312,7 @@ pub fn save_record<'py>(
                     let exec_res = conn
                         .execute_sql_with_binds_result(&sql, &engine_bind_values)
                         .await
-                        .map_err(|e| {
-                            pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
-                        })?;
+                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
                     Ok(exec_res.last_insert_id)
                 }
             }
@@ -1357,9 +1322,7 @@ pub fn save_record<'py>(
                     let rows = engine
                         .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                         .await
-                        .map_err(|e| {
-                            pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
-                        })?;
+                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
                     let id = rows
                         .first()
                         .and_then(|row| row.values.first())
@@ -1370,9 +1333,7 @@ pub fn save_record<'py>(
                     let exec_res = engine
                         .execute_sql_with_binds_result(&sql, &engine_bind_values)
                         .await
-                        .map_err(|e| {
-                            pyo3::exceptions::PyRuntimeError::new_err(format!("Save failed: {}", e))
-                        })?;
+                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
                     Ok(exec_res.last_insert_id)
                 }
             }
@@ -1499,10 +1460,7 @@ pub fn save_bulk_records<'py>(
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
                 .await
                 .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Bulk save failed for '{}': {}",
-                        name, e
-                    ))
+                    crate::errors::map_db_error(&format!("Bulk save failed for '{}'", name), e)
                 })?;
 
         Ok(rows_affected)
@@ -1631,9 +1589,7 @@ pub fn fetch_filtered<'py>(
                 let rows = conn
                     .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                     .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
-                    })?;
+                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
                 typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
             }
             None => {
@@ -1641,9 +1597,7 @@ pub fn fetch_filtered<'py>(
                 let rows = engine
                     .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                     .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("Fetch failed: {}", e))
-                    })?;
+                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
                 typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
             }
         };
@@ -1797,9 +1751,7 @@ pub fn count_filtered(
                 let rows = conn
                     .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                     .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("Count failed: {}", e))
-                    })?;
+                    .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
                 rows.first()
                     .and_then(|row| row.values.first())
                     .and_then(|(_, value)| value.as_i64())
@@ -1809,9 +1761,7 @@ pub fn count_filtered(
                 let rows = engine
                     .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                     .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("Count failed: {}", e))
-                    })?;
+                    .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
                 rows.first()
                     .and_then(|row| row.values.first())
                     .and_then(|(_, value)| value.as_i64())
@@ -1948,9 +1898,7 @@ pub fn delete_record(
 
         execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
             .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e))
-            })?;
+            .map_err(|e| crate::errors::map_db_error("Delete failed", e))?;
 
         Ok(true)
     })
@@ -2006,9 +1954,7 @@ pub fn delete_filtered(
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
                 .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Delete failed: {}", e))
-                })?;
+                .map_err(|e| crate::errors::map_db_error("Delete failed", e))?;
 
         // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
         if engine.is_identity_map_enabled() {
@@ -2099,9 +2045,7 @@ pub fn update_filtered<'py>(
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
                 .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Update failed: {}", e))
-                })?;
+                .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
 
         // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
         if engine.is_identity_map_enabled() {
@@ -2182,9 +2126,7 @@ pub fn add_m2m_links<'py>(
 
         execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
             .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Add M2M links failed: {}", e))
-            })?;
+            .map_err(|e| crate::errors::map_db_error("Add M2M links failed", e))?;
 
         Ok(())
     })
@@ -2258,9 +2200,7 @@ pub fn remove_m2m_links<'py>(
 
         execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
             .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Remove M2M links failed: {}", e))
-            })?;
+            .map_err(|e| crate::errors::map_db_error("Remove M2M links failed", e))?;
 
         Ok(())
     })
@@ -2320,9 +2260,7 @@ pub fn clear_m2m_links<'py>(
 
         execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
             .await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Clear M2M links failed: {}", e))
-            })?;
+            .map_err(|e| crate::errors::map_db_error("Clear M2M links failed", e))?;
 
         Ok(())
     })
@@ -2597,9 +2535,7 @@ pub fn raw_execute<'py>(
                 engine.execute_sql_with_binds(&sql, &bind_values).await
             }
         }
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL execute failed: {e}"))
-        })?;
+        .map_err(|e| crate::errors::map_db_error("Raw SQL execute failed", e))?;
 
         Ok(rows_affected as i64)
     })
@@ -2637,9 +2573,7 @@ pub fn raw_fetch_all<'py>(
                 engine.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
         }
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL fetch_all failed: {e}"))
-        })?;
+        .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_all failed", e))?;
 
         Python::attach(|py| {
             let out = pyo3::types::PyList::empty(py);
@@ -2692,9 +2626,7 @@ pub fn raw_fetch_one<'py>(
                 engine.fetch_all_sql_with_binds(&sql, &bind_values).await
             }
         }
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Raw SQL fetch_one failed: {e}"))
-        })?;
+        .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_one failed", e))?;
 
         Python::attach(|py| match rows.into_iter().next() {
             Some(row) => Ok(engine_row_to_pydict(py, row)?.into_any().unbind()),

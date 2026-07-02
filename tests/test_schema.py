@@ -35,7 +35,7 @@ async def test_create_tables_success(db_url):
 async def test_create_tables_no_connection():
     """Test that create_tables raises an error if no connection exists."""
     ferro.reset_engine()
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(ferro.InterfaceError) as excinfo:
         await ferro.create_tables()
     assert "Engine not initialized" in str(excinfo.value)
 

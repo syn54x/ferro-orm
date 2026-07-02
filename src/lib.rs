@@ -7,6 +7,7 @@
 mod backend;
 mod codec;
 mod connection;
+mod errors;
 mod hydration;
 mod introspect;
 mod migrate;

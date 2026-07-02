@@ -151,6 +151,14 @@ Runtime migration IR cutover (target: `v0.13.0`).
 - **Internal change:** `auto_migrate` executes `ferro-migrate` `SchemaIR(old,new)` plans as the primary path. The legacy enriched-JSON diff walk in `src/migrate.rs` is **deprecated** and kept for shadow comparison until Phase 9 removal.
 - **Parity requirement:** IR planner output must match the legacy planner, `create_tables`, and Alembic for the `auto_migrate` capability matrix (AGENTS.md I-1).
 
+### Fable Fixes — FF-A (mutation-surface correctness & typed errors)
+
+Roadmap: `docs/plans/2026-07-02-001-fable-fixes-roadmap.md`, epic [#170](https://github.com/syn54x/ferro-orm/issues/170).
+
+| Issue | Change | Impact | User action | Notes |
+| --- | --- | --- | --- | --- |
+| [#172](https://github.com/syn54x/ferro-orm/issues/172) | Database failures now raise a typed DBAPI-shaped hierarchy from `ferro.exceptions` (`FerroError` → `InterfaceError` / `OperationalError` / `DataError` / `IntegrityError` → `UniqueViolationError` / `ForeignKeyViolationError` / `NotNullViolationError` / `CheckViolationError`) instead of bare `RuntimeError` / `ValueError` / `ConnectionError`; driver message, SQLSTATE, and constraint name preserved as attributes | minor | Broad `except RuntimeError` handlers around ORM/raw operations move to `except ferro.FerroError` (or a specific subclass); `connect()` failure handlers move from `except ConnectionError` to `except ferro.OperationalError` (server/environment) / `ferro.InterfaceError` (bad scheme or configuration); routing errors (unknown connection name, no default selected, engine not initialized) are now `ferro.InterfaceError` | `ModelDoesNotExist` is unchanged for callers: it joins the tree as `FerroError` + `LookupError`. Internal invariants (lock poisoning, unregistered models) remain `RuntimeError` |
+
 ### Phase 9
 
 Compatibility cutover and shim removal (target: `v0.14.0`).

@@ -834,11 +834,14 @@ async fn execute_drop_column(
         for index in &indexes {
             let sql = format!("DROP INDEX IF EXISTS {}", quote_ident(&index.name));
             engine.execute_sql_unprepared(&sql).await.map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Auto-migrate failed dropping index '{}' (required to drop column \
-                     '{}.{}'): {}",
-                    index.name, table_lower, col_name, e
-                ))
+                crate::errors::map_db_error(
+                    &format!(
+                        "Auto-migrate failed dropping index '{}' (required to drop column \
+                         '{}.{}')",
+                        index.name, table_lower, col_name
+                    ),
+                    e,
+                )
             })?;
         }
     }
@@ -849,11 +852,14 @@ async fn execute_drop_column(
         quote_ident(col_name)
     );
     engine.execute_sql_unprepared(&sql).await.map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "Cannot drop column '{}.{}': {}. Columns referenced by constraints, foreign \
-             keys, triggers, or views must be migrated with Alembic.",
-            table_lower, col_name, e
-        ))
+        crate::errors::map_db_error(
+            &format!(
+                "Cannot drop column '{}.{}' (columns referenced by constraints, foreign \
+                 keys, triggers, or views must be migrated with Alembic)",
+                table_lower, col_name
+            ),
+            e,
+        )
     })?;
     Ok(())
 }
@@ -921,10 +927,13 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
 
         for sql in &plan.statements {
             engine.execute_sql_unprepared(sql).await.map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Auto-migrate DDL failed for table '{}': {} (statement: {})",
-                    table_lower, e, sql
-                ))
+                crate::errors::map_db_error(
+                    &format!(
+                        "Auto-migrate DDL failed for table '{}' (statement: {})",
+                        table_lower, sql
+                    ),
+                    e,
+                )
             })?;
             ddl_ran = true;
         }
@@ -944,10 +953,10 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
 
     if ddl_ran {
         engine.refresh_pool().await.map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Auto-migrate applied DDL but failed to refresh the connection pool: {}",
-                e
-            ))
+            crate::errors::map_db_error(
+                "Auto-migrate applied DDL but failed to refresh the connection pool",
+                e,
+            )
         })?;
         // Identity-mapped instances were hydrated against the pre-migration
         // schema (e.g. a row loaded before a column add lacks the new field).

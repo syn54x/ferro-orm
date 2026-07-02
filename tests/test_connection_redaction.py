@@ -8,7 +8,7 @@ import ferro
 async def test_connection_error_redacts_secret_query_params(tmp_path):
     """Connection errors should give context without exposing secret query values."""
     db_file = tmp_path / "app.db"
-    with pytest.raises(ConnectionError) as excinfo:
+    with pytest.raises(ferro.InterfaceError) as excinfo:
         await ferro.connect(
             f"sqlite:{db_file}?mode=rwc&password=supersecret&apikey=topsecret",
             name="app",
@@ -25,7 +25,7 @@ async def test_connection_error_redacts_secret_query_params(tmp_path):
 @pytest.mark.asyncio
 async def test_connection_error_redacts_postgres_userinfo_and_tokens():
     """Postgres-style DSNs should redact password userinfo and token query params."""
-    with pytest.raises(ConnectionError) as excinfo:
+    with pytest.raises(ferro.InterfaceError) as excinfo:
         await ferro.connect(
             "postgres+srv://app_user:supersecret@example.invalid/app?access_token=topsecret",
             name="app",

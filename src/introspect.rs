@@ -105,9 +105,10 @@ pub(crate) fn quote_ident(name: &str) -> String {
 }
 
 fn introspection_error(context: &str, table: &str, err: sqlx::Error) -> PyErr {
-    pyo3::exceptions::PyRuntimeError::new_err(format!(
-        "Schema introspection failed ({context} for table '{table}'): {err}"
-    ))
+    crate::errors::map_db_error(
+        &format!("Schema introspection failed ({context} for table '{table}')"),
+        err,
+    )
 }
 
 /// Read the live columns of `table`. Returns `None` when the table does not

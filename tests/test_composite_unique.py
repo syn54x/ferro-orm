@@ -12,6 +12,7 @@ from ferro import (
     ManyToMany,
     Model,
     Relation,
+    UniqueViolationError,
     clear_registry,
     connect,
     reset_engine,
@@ -81,11 +82,8 @@ async def test_composite_unique_enforced_on_user_model(db_url):
     await connect(db_url, auto_migrate=True)
 
     await PairRow(alpha_id=1, beta_id=2).save()
-    with pytest.raises(RuntimeError, match="Save failed") as excinfo:
+    with pytest.raises(UniqueViolationError, match="Save failed"):
         await PairRow(alpha_id=1, beta_id=2).save()
-
-    msg = str(excinfo.value)
-    assert "unique" in msg.lower()
 
 
 @pytest.mark.asyncio
@@ -107,10 +105,8 @@ async def test_m2m_duplicate_link_rejected(db_url):
     actor = await Actor.create(name="Alice")
     movie = await Movie.create(title="Matrix")
     await actor.movies.add(movie)
-    with pytest.raises(RuntimeError, match="Add M2M links failed") as excinfo:
+    with pytest.raises(UniqueViolationError, match="Add M2M links failed"):
         await actor.movies.add(movie)
-    msg = str(excinfo.value)
-    assert "unique" in msg.lower()
 
 
 def test_alembic_metadata_has_unique_constraints():
