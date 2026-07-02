@@ -38,21 +38,32 @@ shared code — nothing re-implements the rules.
 `db_type` (explicit) always wins, via `db_type_token_to_canonical`. Otherwise
 `(logical_type, format)` decides:
 
-| `(logical_type, format)`        | Canonical storage | Postgres           | SQLite declared type            |
-| ------------------------------- | ----------------- | ------------------ | ------------------------------- |
-| `("string", "date-time")`       | `TimestampTz`     | `timestamptz`      | `timestamp_with_timezone_text`  |
-| `("datetime", _)`               | `TimestampTz`     | `timestamptz`      | `timestamp_with_timezone_text`  |
-| `("string", "date")` / `("date", _)` | `Date`       | `date`             | `date_text`                     |
-| `("time", _)`                   | `Time` *(FF-B: was `Varchar`)* | `time` | `time_text`                     |
-| `("string", "uuid")` / `("uuid", _)` | `Uuid`       | `uuid`             | `uuid_text`                     |
-| `(_, "decimal")` / `("decimal", _)` | `Decimal`     | `numeric`          | `real`                          |
-| `("string", "binary")` / `("binary", _)` | `Blob`   | `bytea`            | `blob`                          |
-| `("json" \| "object" \| "array", _)` | `Json`       | `json`             | `json_text`                     |
-| `("integer", _)`                | `Integer`         | `integer`          | `integer`                       |
-| `("number", _)`                 | `Double`          | `double precision` | `double`                        |
-| `("boolean", _)`                | `Integer` (SQLite) / `Boolean` (PG) | `boolean` | `integer`             |
-| `("string", _)`                 | `Varchar(None)`   | `varchar`          | `varchar`                       |
+| `(logical_type, format)`        | Canonical storage | Postgres           | SQLite declared type |
+| ------------------------------- | ----------------- | ------------------ | -------------------- |
+| `("string", "date-time")`       | `TimestampTz`     | `timestamptz`      | `DATETIME`           |
+| `("datetime", _)`               | `TimestampTz`     | `timestamptz`      | `DATETIME`           |
+| `("string", "date")` / `("date", _)` | `Date`       | `date`             | `DATE`               |
+| `("time", _)` / `("string", "time")` | `Time` *(FF-B: was `Varchar`)* | `time` | `TIME`     |
+| `("string", "uuid")` / `("uuid", _)` | `Uuid`       | `uuid`             | `CHAR(32)`           |
+| `(_, "decimal")` / `("decimal", _)` | `Decimal`     | `numeric`          | `NUMERIC`            |
+| `("string", "binary")` / `("binary", _)` | `Blob`   | `bytea`            | `blob`               |
+| `("json" \| "object" \| "array", _)` | `Json`       | `json`             | `JSON`               |
+| `("integer", _)`                | `Integer`         | `integer`          | `integer`            |
+| `("number", _)`                 | `Double`          | `double precision` | `double`             |
+| `("boolean", _)`                | `Integer` (SQLite) / `Boolean` (PG) | `boolean` | `integer`  |
+| `("string", _)`                 | `Varchar(None)`   | `varchar`          | `varchar`            |
 | unknown                         | error at the FFI boundary — never a silent varchar fallback |
+
+The SQLite declared spellings are **SQLAlchemy's** (FF-B B5): sea-query's
+`*_text` defaults (`timestamp_with_timezone_text`, `uuid_text`, `json_text`,
+`date_text`, `time_text`, `real` for decimal) reflected as bare `TEXT`/`REAL`
+under SQLAlchemy and produced phantom `modify_type` diffs in the sentinel.
+SQLite's type affinity makes the storage classes identical either way, so
+existing databases keep working (the affinity-class comparison in
+`sqlite_type_storage_drift` treats both spellings as equivalent). PK columns
+also carry an explicit `NOT NULL` — SQLite's PRAGMA otherwise reports an
+`INTEGER PRIMARY KEY` as nullable, which read back as a phantom nullability
+diff; the IR compiler clamps PK `nullable` to `false` accordingly.
 
 **Enum fields** (IR `enum_values` present, no explicit `db_type`) are not a
 scalar row: on **Postgres** they lower to a **native enum type** named

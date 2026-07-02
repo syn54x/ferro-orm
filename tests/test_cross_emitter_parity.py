@@ -21,6 +21,10 @@ introspection precision (filter that op kind out of the diff with a clear
 comment).
 """
 
+import datetime
+import decimal
+import uuid
+from enum import StrEnum
 from typing import Annotated, ClassVar
 
 import pytest
@@ -58,8 +62,14 @@ def cleanup():
     _JOIN_TABLE_REGISTRY.clear()
 
 
+class OrgRole(StrEnum):
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
 def _build_fixture_models() -> None:
-    """Define a model graph that exercises every cross-emitter artifact.
+    """Define a model graph that exercises every cross-emitter artifact,
+    including the full derived-type family (FF-B B5).
 
     Defined inside a helper so the cleanup fixture can clear the registry
     cleanly between runs without leaving dangling class references.
@@ -69,6 +79,15 @@ def _build_fixture_models() -> None:
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: Annotated[str, FerroField(index=True)]
         slug: Annotated[str, FerroField(unique=True)]
+        role: OrgRole  # native PG enum / varchar(max label len) on SQLite
+        created_at: datetime.datetime  # timestamptz
+        founded: datetime.date  # date
+        opens_at: datetime.time  # time
+        token: uuid.UUID  # uuid
+        balance: decimal.Decimal  # numeric
+        avatar: bytes  # bytea/blob
+        settings: dict  # json
+        score: float  # double precision
         members: Relation[list["Member"]] = BackRef()
         projects: Relation[list["Project"]] = BackRef()
 
@@ -76,6 +95,10 @@ def _build_fixture_models() -> None:
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         email: Annotated[str, FerroField(unique=True)]
         org: Annotated[Org, ForeignKey(related_name="members", index=True)]
+
+        __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("email", "org_id"),
+        )
 
     class Project(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -88,39 +111,6 @@ def _build_fixture_models() -> None:
 
     # Reference the names so static analyzers don't strip the bodies.
     return Org, Member, Project
-
-
-def _is_pk_nullable_relaxation(op_tuple, metadata: sa.MetaData) -> bool:
-    """``modify_nullable`` flagged on a primary-key column.
-
-    Pre-existing divergence (tracked in
-    ``docs/solutions/issues/sa-pk-column-nullable-divergence.md``):
-    Ferro's SA bridge maps ``Annotated[int | None, FerroField(primary_key=True)]``
-    to ``Column(primary_key=True, nullable=True)``. Rust emits ``NOT NULL``,
-    which matches SQL semantics (PK columns are always NOT NULL). Alembic
-    introspects the DB as ``nullable=False`` and the metadata as
-    ``nullable=True`` and proposes a relaxation that would never actually run.
-    """
-    if op_tuple[0] != "modify_nullable":
-        return False
-    (
-        _,
-        _schema,
-        table_name,
-        column_name,
-        _info,
-        new_nullable,
-        existing_nullable,
-    ) = op_tuple
-    if not (new_nullable is True and existing_nullable is False):
-        return False
-    table = metadata.tables.get(table_name)
-    if table is None:
-        return False
-    column = table.c.get(column_name)
-    if column is None:
-        return False
-    return bool(column.primary_key)
 
 
 def _flatten_diff(diff: list) -> list:
@@ -139,35 +129,38 @@ def _flatten_diff(diff: list) -> list:
 
 
 def _ignore_unreliable_alembic_diffs(diff: list, metadata: sa.MetaData) -> list:
-    """Filter the narrow set of pre-existing divergences with tracked issues.
+    """Filter pre-existing divergences with tracked issues.
 
-    Every entry here MUST cite a tracked issue under
-    ``docs/solutions/issues/`` and explain why the diff is known-equivalent
-    SQL rather than real cross-emitter drift. Do not add filters silently.
+    ZERO filters since FF-B B5 — the function stays as the policy anchor: any
+    future entry MUST cite a tracked issue under ``docs/solutions/issues/``
+    and explain why the diff is known-equivalent SQL rather than real
+    cross-emitter drift. Do not add filters silently; fix the emitters.
     """
-    return [
-        op
-        for op in _flatten_diff(diff)
-        if not _is_pk_nullable_relaxation(op, metadata)
-    ]
+    del metadata  # kept in the signature for future filters
+    return _flatten_diff(diff)
 
 
 @pytest.mark.asyncio
-@pytest.mark.sqlite_only
-async def test_alembic_autogen_against_rust_migrated_db_is_idempotent(db_url):
+async def test_alembic_autogen_against_rust_migrated_db_is_idempotent(
+    db_url, postgres_base_url, db_schema_name
+):
     """Schema-drift sentinel: Alembic must see a Rust-migrated DB as up-to-date.
 
     This is the canonical guard on the cross-emitter DDL parity invariant
-    (I-1 in AGENTS.md). If the two emitters disagree about any schema
-    artifact - index name, type, nullability, constraint name, default - this
-    test fails with a non-empty diff describing the disagreement.
+    (I-1 in AGENTS.md), running on the FULL backend matrix (FF-B B5) — the
+    derived-type divergences it guards (native enums, timestamptz) can only
+    fail on Postgres. If the two emitters disagree about any schema artifact
+    - index name, type, nullability, constraint name, default - this test
+    fails with a non-empty diff describing the disagreement, with ZERO
+    filters hiding type-family diffs.
 
     The fixture model deliberately covers:
-    - Single-column ``FerroField(index=True)``
-    - Single-column ``FerroField(unique=True)``
+    - The full derived-type family: Enum, datetime, date, time, UUID,
+      Decimal, bytes, JSON, float
+    - Single-column ``FerroField(index=True)`` / ``FerroField(unique=True)``
     - Shadow-column ``ForeignKey(index=True)`` (the issue-32 surface)
     - ``ForeignKey`` without ``index=True`` (default, no extra index)
-    - ``__ferro_composite_indexes__`` (multi-column index)
+    - ``__ferro_composite_indexes__`` and ``__ferro_composite_uniques__``
     - Mixed FK target (Org is referenced from two distinct tables)
     """
     _build_fixture_models()
@@ -178,13 +171,20 @@ async def test_alembic_autogen_against_rust_migrated_db_is_idempotent(db_url):
 
     if db_url.startswith("sqlite:"):
         db_path = db_url.replace("sqlite:", "", 1).split("?")[0]
-        sync_url = f"sqlite:///{db_path}"
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        search_path_schema = None
     else:
-        sync_url = db_url
+        # The per-test schema is carried in a Ferro-specific URL param; the
+        # plain SQLAlchemy engine needs the base URL plus an explicit
+        # search_path (mirrors test_schema_constraints.py).
+        sync_url = postgres_base_url.replace("postgres://", "postgresql+psycopg://", 1)
+        engine = sa.create_engine(sync_url)
+        search_path_schema = db_schema_name
 
-    engine = sa.create_engine(sync_url)
     try:
         with engine.connect() as conn:
+            if search_path_schema is not None:
+                conn.execute(sa.text(f'SET search_path TO "{search_path_schema}"'))
             ctx = MigrationContext.configure(
                 conn,
                 opts={"compare_type": True, "compare_server_default": True},

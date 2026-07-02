@@ -1,6 +1,6 @@
 {
   "create_table": [
-    "CREATE TABLE IF NOT EXISTS \"shadowuser\" ( \"age\" integer, \"id\" serial PRIMARY KEY, \"name\" varchar )",
+    "CREATE TABLE IF NOT EXISTS \"shadowuser\" ( \"age\" integer, \"id\" serial PRIMARY KEY NOT NULL, \"name\" varchar )",
     []
   ],
   "migration": [
