@@ -59,7 +59,7 @@ These are behavioral changes to the public API — they must land before 1.0.
       contract cannot regress. Tests: builder-level raise + static contract on
       the mutating payload shape. *(F1 — the review's most severe finding.)*
       Migration impact: **breaking** (previously silently ignored).
-- [ ] **A2 — Typed exception hierarchy.**
+- [x] **A2 — Typed exception hierarchy.**
       `ferro.exceptions` grows a DBAPI-shaped tree
       (`FerroError` → `OperationalError`, `IntegrityError` →
       `UniqueViolationError` / `ForeignKeyViolationError` /
