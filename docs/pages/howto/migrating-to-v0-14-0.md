@@ -136,6 +136,89 @@ Database failures now raise a DBAPI-shaped hierarchy rooted at
 or `ferro.InterfaceError` (bad scheme or configuration) instead of
 `ConnectionError`.
 
+## Schema-emission changes
+
+v0.14.0 also unifies how the Rust runtime emitter and the Alembic bridge derive
+column types and artifact names — one decision table, consumed by both (see
+`docs/solutions/patterns/derived-type-and-naming-decision-table.md`). Three
+storage defaults change for *derived* types (fields with no explicit
+`db_type`). **Auto-migrate never rewrites an existing column silently**: where
+your database was bootstrapped by an older emitter, Ferro warns and skips, and
+you choose between the keep-recipe and the convert-recipe below.
+
+### 5. Plain `datetime` fields are timezone-aware (`timestamptz`)
+
+The Alembic bridge previously mapped a plain `datetime.datetime` field to a
+timezone-naive `DateTime`; the runtime already used `timestamptz`. Both now
+emit `timestamptz`. If your schema has naive `timestamp` columns (bootstrapped
+via Alembic), auto-migrate refuses the conversion and warns.
+
+=== "Keep the column naive"
+
+    ```python
+    class Event(Ferro):
+        occurred_at: datetime.datetime = FerroField(db_type="timestamp")
+    ```
+
+=== "Convert intentionally (reviewed Alembic migration)"
+
+    ```sql
+    ALTER TABLE event
+        ALTER COLUMN occurred_at TYPE timestamptz
+        USING occurred_at AT TIME ZONE 'UTC';  -- your source timezone
+    ```
+
+### 6. Enum fields default to native Postgres enum types
+
+The runtime emitter previously stored Enum fields as `varchar`; the Alembic
+bridge already emitted a native enum type. Both now emit the native type
+(created idempotently; on SQLite the column is `varchar(<max label length>)`,
+matching SQLAlchemy). If your schema has varchar enum columns (bootstrapped by
+the runtime), auto-migrate refuses the conversion and warns.
+
+=== "Keep varchar storage"
+
+    ```python
+    class Account(Ferro):
+        role: Role = FerroField(db_type="varchar", db_check=True)
+    ```
+
+=== "Convert intentionally (reviewed Alembic migration)"
+
+    ```sql
+    CREATE TYPE role AS ENUM ('admin', 'member');
+    ALTER TABLE account
+        ALTER COLUMN role TYPE role USING role::role;
+    ```
+
+### 7. `datetime.time` fields store as `time`
+
+The runtime emitter previously stored `datetime.time` fields as `varchar` (the
+bridge already said `TIME`). Both now emit `time`. Existing varchar columns:
+auto-migrate refuses the conversion and warns — keep with
+`db_type="varchar"`, or convert with a reviewed migration using an explicit
+`USING` cast.
+
+### 8. Constraint and index names are single-sourced
+
+- **Foreign keys are now named** (`fk_<table>_<col>_<to_table>`) in the DDL of
+  both emitters. Existing databases need **no action**: Alembic autogenerate
+  compares foreign keys by signature, not name, and auto-migrate never alters
+  existing foreign keys.
+- **Single-column uniques become named unique indexes** (`uq_<table>_<col>`),
+  the same shape composite uniques always had. On an existing database
+  auto-migrate adds the named index (`CREATE UNIQUE INDEX IF NOT EXISTS` —
+  additive and idempotent); the old inline artifact (e.g. `account_email_key`
+  on Postgres) remains as a redundant duplicate until you drop it:
+
+    ```sql
+    ALTER TABLE account DROP CONSTRAINT account_email_key;
+    ```
+
+- Identifiers longer than 63 characters now truncate deterministically on both
+  emitters (previously only some name kinds guarded, and PostgreSQL truncated
+  the rest silently).
+
 ## Changed surfaces at a glance
 
 | Surface | v0.13 behavior | v0.14 behavior | Migration |
@@ -145,6 +228,11 @@ or `ferro.InterfaceError` (bad scheme or configuration) instead of
 | `instance.save()` after the row was deleted | Silently re-inserted | Raises `ModelDoesNotExist` | Catch and re-`create()` if intended |
 | `Query.limit(...).update()/.delete()` | Pagination silently ignored | Raises `ValueError` | Fetch PKs, mutate by PK set |
 | Database failures | `RuntimeError(...)` with driver text | Typed `FerroError` subclasses | Catch by type, not message |
+| Plain `datetime` field (Alembic bridge) | Naive `timestamp` | `timestamptz` | Keep via `db_type="timestamp"`, or convert with `USING ... AT TIME ZONE` |
+| Enum field (runtime emitter) | `varchar` | Native PG enum type | Keep via `db_type="varchar"`, or convert with `USING col::<enum>` |
+| `datetime.time` field (runtime emitter) | `varchar` | `time` | Keep via `db_type="varchar"`, or convert with `USING` |
+| FK constraints | Anonymous | Named `fk_<table>_<col>_<to_table>` | None (names not compared) |
+| Single-column unique | Inline column `UNIQUE` | Named `uq_<table>_<col>` unique index | Optional: drop the old inline constraint |
 
 ## What about the deprecated v0.12 surfaces?
 
