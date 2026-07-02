@@ -3888,8 +3888,7 @@ mod mutation_pagination_guard_tests {
 #[cfg(test)]
 mod save_mode_sql_tests {
     use super::{
-        build_save_sql, build_update_by_pk_sql, parse_save_mode, BindInput, SaveMode,
-        UpdateByPkSql,
+        BindInput, SaveMode, UpdateByPkSql, build_save_sql, build_update_by_pk_sql, parse_save_mode,
     };
     use crate::state::Dialect;
     use std::collections::{HashMap, HashSet};
@@ -3993,10 +3992,9 @@ mod save_mode_sql_tests {
                 SaveMode::Upsert,
                 backend,
             );
-            let conflict_clause = sql
-                .split("ON CONFLICT")
-                .nth(1)
-                .unwrap_or_else(|| panic!("upsert with provided PK must ON CONFLICT on {backend:?}: {sql}"));
+            let conflict_clause = sql.split("ON CONFLICT").nth(1).unwrap_or_else(|| {
+                panic!("upsert with provided PK must ON CONFLICT on {backend:?}: {sql}")
+            });
             assert!(
                 conflict_clause.contains("\"name\""),
                 "non-PK column must be in the update list on {backend:?}: {sql}"
@@ -4034,7 +4032,10 @@ mod save_mode_sql_tests {
             SaveMode::Insert,
             Dialect::Postgres,
         );
-        assert!(needs_returning, "auto PK left unset needs RETURNING on postgres");
+        assert!(
+            needs_returning,
+            "auto PK left unset needs RETURNING on postgres"
+        );
         assert!(sql.contains("RETURNING \"id\""), "sql: {sql}");
 
         let (sql, _, needs_returning) = build_save(
@@ -4043,7 +4044,10 @@ mod save_mode_sql_tests {
             SaveMode::Insert,
             Dialect::Sqlite,
         );
-        assert!(!needs_returning, "sqlite uses last_insert_id, not RETURNING");
+        assert!(
+            !needs_returning,
+            "sqlite uses last_insert_id, not RETURNING"
+        );
         assert!(!sql.contains("RETURNING"), "sql: {sql}");
     }
 

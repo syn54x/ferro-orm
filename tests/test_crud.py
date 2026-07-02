@@ -35,7 +35,10 @@ async def test_model_save_update_record(db_url):
     await user.save()
     user.username = "updated_name"
     await user.save()
-    assert True
+
+    users = await CrudUser.all()
+    assert len(users) == 1
+    assert users[0].username == "updated_name"
 
 
 @pytest.mark.asyncio
@@ -59,8 +62,8 @@ async def test_model_all_fetching(db_url):
 
 
 @pytest.mark.asyncio
-async def test_upsert_does_not_duplicate(db_url):
-    """Test that saving a model with an existing ID updates it rather than inserting a new one."""
+async def test_upsert_updates_existing_row_without_duplicate(db_url):
+    """Plain save() of a duplicate PK raises; the explicit upsert() updates (FF-A A3/A4)."""
 
     class CrudUser(Model):
         id: int = Field(default=None, json_schema_extra={"primary_key": True})
@@ -72,13 +75,17 @@ async def test_upsert_does_not_duplicate(db_url):
     await user.save()
     users_before = await CrudUser.all()
     assert len(users_before) == 1
-    user_dup = CrudUser(id=42, username="updated", email="original@example.com")
-    await user_dup.save()
+
+    with pytest.raises(ferro.UniqueViolationError):
+        await CrudUser(id=42, username="updated", email="original@example.com").save()
+
+    await CrudUser.upsert(id=42, username="updated", email="original@example.com")
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
     fetched = await CrudUser.get(42)
     assert fetched is not None
     assert fetched.username == "updated"
+    assert len(await CrudUser.all()) == 1
 
 
 @pytest.mark.asyncio
