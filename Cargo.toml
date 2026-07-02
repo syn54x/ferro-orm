@@ -8,7 +8,7 @@ members = [
 
 [package]
 name = "ferro"
-version = "0.12.3"
+version = "0.13.0"
 edition = "2024"
 
 [lib]

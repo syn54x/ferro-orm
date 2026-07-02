@@ -1,6 +1,93 @@
 # CHANGELOG
 
 
+## v0.13.0 (2026-07-02)
+
+### Bug Fixes
+
+- **ir-p8.6**: Datetime/timestamptz coarseness — stop silent Postgres column reinterpretation (#154)
+  ([#167](https://github.com/syn54x/ferro-orm/pull/167),
+  [`7182a57`](https://github.com/syn54x/ferro-orm/commit/7182a5744900abe7ed50915edbca7d5184b2c535))
+
+- **ir-p8.6**: Stop false-positive BLOB drift warning on SQLite (#165)
+  ([#168](https://github.com/syn54x/ferro-orm/pull/168),
+  [`d554ac4`](https://github.com/syn54x/ferro-orm/commit/d554ac4558286106bcb0908baec9fa3d49a2781d))
+
+- **ir-p8.6**: Surface real PEP 649 deferred-annotation error (#155)
+  ([#163](https://github.com/syn54x/ferro-orm/pull/163),
+  [`00976e7`](https://github.com/syn54x/ferro-orm/commit/00976e748d86246b8be47230229d19516d8bb3c0))
+
+### Documentation
+
+- Use model-named lambda predicates in examples
+  ([#132](https://github.com/syn54x/ferro-orm/pull/132),
+  [`420ca6e`](https://github.com/syn54x/ferro-orm/commit/420ca6e1cb4a90d1acc556a83373c9da99b22bb3))
+
+- **agents**: Add I-11 — explain concepts plainly, example-first
+  ([`efc7ef5`](https://github.com/syn54x/ferro-orm/commit/efc7ef5678e2f6efacaa3a6e84c0575b0cdef51c))
+
+- **ir-first**: Add Phase 8.6 post-8.5 cleanup backlog (epic #145)
+  ([#147](https://github.com/syn54x/ferro-orm/pull/147),
+  [`e57b74b`](https://github.com/syn54x/ferro-orm/commit/e57b74b397bd51ebc4809f25d57536896540b9de))
+
+- **ir-first**: Expand #144 scope — auto-migrate index/unique reconciliation
+  ([#150](https://github.com/syn54x/ferro-orm/pull/150),
+  [`fdbac40`](https://github.com/syn54x/ferro-orm/commit/fdbac4003e9bd25fdc3f3cb0012c5dd9d562ee68))
+
+- **ir-first**: Lowering-consolidation audit + Phase 8.5
+  ([#138](https://github.com/syn54x/ferro-orm/pull/138),
+  [`c6ce53c`](https://github.com/syn54x/ferro-orm/commit/c6ce53c2409a1fd20a40c1de58d42e1e3d2e1344))
+
+- **ir-p8.6**: Add #153 create-path IR unification spec
+  ([`be4bb99`](https://github.com/syn54x/ferro-orm/commit/be4bb99b90e6d02a6e01bfc5807a7cb178055862))
+
+- **ir-p8.6**: Add #153 create-path unification implementation plan
+  ([`de3c427`](https://github.com/syn54x/ferro-orm/commit/de3c42794de821d8e47eb5ca94b582f8199992df))
+
+- **ir-p8.6**: Sync roadmap — #153 merged, file #158 (db_check check-renderer)
+  ([`62c80fa`](https://github.com/syn54x/ferro-orm/commit/62c80fa3fe7ac456169d280f3ee8795feac32a8c))
+
+- **ir-p8.6**: Sync roadmap — #154 merged (datetime/timestamptz warn-and-skip); #145 now 6/7
+  ([`31dbbb6`](https://github.com/syn54x/ferro-orm/commit/31dbbb6c0f1d3afa0ed452ed9ae34441df69c501))
+
+- **ir-p8.6**: Sync roadmap — #162 merged (typed save/update bind), file #165
+  ([`5ca76a1`](https://github.com/syn54x/ferro-orm/commit/5ca76a1e177f4847ded4fb19402841a9988b62d1))
+
+- **ir-p8.6**: Sync roadmap — #165 merged (BLOB introspection); #145 complete 7/7, Phase 8.6 wrapped
+  ([`1dbb278`](https://github.com/syn54x/ferro-orm/commit/1dbb27864881d77a68d5026ab5a9bb07f142c3c5))
+
+- **rust**: Add detailed docstrings for all public APIs
+  ([#130](https://github.com/syn54x/ferro-orm/pull/130),
+  [`8d5a951`](https://github.com/syn54x/ferro-orm/commit/8d5a95162568eef215ba03524a31b657df87e8c6))
+
+### Features
+
+- Ir cutover ([#137](https://github.com/syn54x/ferro-orm/pull/137),
+  [`0509c2a`](https://github.com/syn54x/ferro-orm/commit/0509c2a35b0f0200492143a52563146359550129))
+
+- **ir-p8.6**: Route save/update/bulk value bind through the typed codec path (#162)
+  ([#166](https://github.com/syn54x/ferro-orm/pull/166),
+  [`486e68c`](https://github.com/syn54x/ferro-orm/commit/486e68c110c03356fa579051849b44e8f4eae751))
+
+### Refactoring
+
+- Lowering consolidation & single-source-of-truth closeout (#139)
+  ([#156](https://github.com/syn54x/ferro-orm/pull/156),
+  [`f76bec9`](https://github.com/syn54x/ferro-orm/commit/f76bec93651bc9741bea85171da927ddb8864a1a))
+
+- Unify the CREATE TABLE path onto the Python SchemaIR (#153)
+  ([#157](https://github.com/syn54x/ferro-orm/pull/157),
+  [`c9ce7b0`](https://github.com/syn54x/ferro-orm/commit/c9ce7b093fde350da8a1653cf7c42f522e0523b2))
+
+- Unify the three dialect enums into one shared Dialect (#146)
+  ([#159](https://github.com/syn54x/ferro-orm/pull/159),
+  [`4b0dfe6`](https://github.com/syn54x/ferro-orm/commit/4b0dfe6b9eca1a2a63631a54504c629f42f7c5e1))
+
+- **ir-p8.6**: Single check-renderer for db_check (#158)
+  ([#161](https://github.com/syn54x/ferro-orm/pull/161),
+  [`c04df1c`](https://github.com/syn54x/ferro-orm/commit/c04df1ce5aa4505f737864944855ff4170a4d350))
+
+
 ## v0.12.3 (2026-06-24)
 
 ### Bug Fixes
