@@ -31,9 +31,10 @@ from ferro.schema_metadata import build_model_schema
 
 def _render_create_table_via_ir(
     name: str, model_cls: type[Model], dialect_name: str
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     """Compile ``model_cls`` to a SchemaIR payload and render the runtime CREATE
-    TABLE through the shared emitter (the same path the runtime uses)."""
+    TABLE through the shared emitter (the same path the runtime uses).
+    Returns ``(create_sql, post_create_sqls, pre_create_sqls)``."""
     schema = build_model_schema(model_cls)
     payload = compile_schema_ir_payload(name, schema)
     return _render_create_table_sql_for_test(name, json.dumps(payload), dialect_name)
@@ -154,7 +155,7 @@ def _render_alembic_sql(model_cls: type[Model], dialect_name: str) -> str:
 
 
 def _render_rust_sql(model_cls: type[Model], dialect_name: str) -> str:
-    table_sql, _ = _render_create_table_via_ir(
+    table_sql, _, _ = _render_create_table_via_ir(
         model_cls.__name__, model_cls, dialect_name
     )
     return table_sql
@@ -198,6 +199,113 @@ def test_column_type_parity_across_emitters(
 
 
 # ---------------------------------------------------------------------------
+# FF-B B2: derived-type parity — fields with NO db_type lower through the one
+# decision table (`resolve_column_storage`); both emitters must agree on the
+# rendered type keyword per dialect. Cases where the two emitters use
+# storage-equivalent but differently-spelled types (bool/decimal on some
+# dialects, datetime/uuid on SQLite's *_text declared types) are covered by
+# the reflection-based sentinel in test_cross_emitter_parity.py instead.
+# ---------------------------------------------------------------------------
+
+
+class TicketStatus(StrEnum):
+    DRAFT = "draft"
+    ARCHIVED = "archived"
+
+
+_DERIVED_CASES = [
+    pytest.param(str, {"postgres": "VARCHAR", "sqlite": "VARCHAR"}, id="derived-str"),
+    pytest.param(int, {"postgres": "INTEGER", "sqlite": "INTEGER"}, id="derived-int"),
+    pytest.param(
+        float,
+        {"postgres": "DOUBLE PRECISION", "sqlite": "DOUBLE"},
+        id="derived-float",
+    ),
+    pytest.param(
+        dt.datetime,
+        {"postgres": "TIMESTAMP WITH TIME ZONE"},
+        id="derived-datetime-pg",
+    ),
+    pytest.param(dt.date, {"postgres": "DATE", "sqlite": "DATE"}, id="derived-date"),
+    pytest.param(dt.time, {"postgres": "TIME", "sqlite": "TIME"}, id="derived-time"),
+    pytest.param(UUID, {"postgres": "UUID"}, id="derived-uuid-pg"),
+    pytest.param(bytes, {"postgres": "BYTEA", "sqlite": "BLOB"}, id="derived-bytes"),
+    pytest.param(dict, {"postgres": "JSON", "sqlite": "JSON"}, id="derived-json"),
+    # sea-query renders `bool`, SA renders `BOOLEAN` — BOOL is the shared stem.
+    pytest.param(bool, {"postgres": "BOOL"}, id="derived-bool-pg"),
+    pytest.param(
+        TicketStatus,
+        {"postgres": "TICKETSTATUS", "sqlite": "VARCHAR(8)"},
+        id="derived-enum",
+    ),
+]
+
+
+@pytest.mark.parametrize("dialect", ["postgres", "sqlite"])
+@pytest.mark.parametrize("annotation,expected", _DERIVED_CASES)
+def test_derived_type_parity_across_emitters(
+    annotation: type, expected: dict[str, str], dialect: str
+):
+    """Plain annotations (no db_type) lower identically through both emitters."""
+    if dialect not in expected:
+        pytest.skip(
+            "storage-equivalent but differently-spelled on this dialect; "
+            "covered by the reflection sentinel"
+        )
+
+    namespace = {
+        "__annotations__": {"id": int | None, "x": annotation},
+        "id": Field(default=None, primary_key=True),
+    }
+    Model_x = type("DerivedParityModel", (Model,), namespace)
+
+    alembic_sql = _render_alembic_sql(Model_x, dialect)
+    rust_sql = _render_rust_sql(Model_x, dialect)
+
+    alembic_type = _extract_col_type(alembic_sql, "x")
+    rust_type = _extract_col_type(rust_sql, "x")
+
+    expected_keyword = expected[dialect]
+    assert expected_keyword in alembic_type, (
+        f"Alembic ({dialect}) missing {expected_keyword!r} for {annotation!r}; "
+        f"got {alembic_type!r}\nFull SQL: {alembic_sql}"
+    )
+    assert expected_keyword in rust_type, (
+        f"Rust ({dialect}) missing {expected_keyword!r} for {annotation!r}; "
+        f"got {rust_type!r}\nFull SQL: {rust_sql}"
+    )
+
+
+def test_enum_native_type_created_before_table_on_postgres():
+    """The Rust emitter pre-creates the native enum type (idempotent guard) and
+    types the column as the enum, matching the bridge's sa.Enum name."""
+
+    class Ticket(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        status: TicketStatus
+
+    create_sql, _, pre_create = _render_create_table_via_ir(
+        "Ticket", Ticket, "postgres"
+    )
+    assert len(pre_create) == 1, pre_create
+    assert "CREATE TYPE \"ticketstatus\" AS ENUM ('draft', 'archived')" in pre_create[0]
+    assert "pg_type" in pre_create[0], "guard must be idempotent"
+    assert '"status" ticketstatus' in create_sql, create_sql
+
+    # Bridge side: named sa.Enum with the same type name.
+    table = get_metadata().tables["ticket"]
+    assert isinstance(table.c.status.type, sa.Enum)
+    assert table.c.status.type.name == "ticketstatus"
+
+    # SQLite: no pre-create, varchar(max label len) on the Rust side.
+    create_sqlite, _, pre_sqlite = _render_create_table_via_ir(
+        "Ticket", Ticket, "sqlite"
+    )
+    assert pre_sqlite == []
+    assert '"status" varchar(8)' in create_sqlite, create_sqlite
+
+
+# ---------------------------------------------------------------------------
 # db_check constraint name parity (Postgres only -- SQLite elides db_check)
 # ---------------------------------------------------------------------------
 
@@ -214,7 +322,7 @@ def test_db_check_constraint_name_parity_strenum():
     assert len(sa_checks) == 1
     sa_name = sa_checks[0].name
 
-    _, rust_post = _render_create_table_via_ir("Doc", Doc, "postgres")
+    _, rust_post, _ = _render_create_table_via_ir("Doc", Doc, "postgres")
     assert any("ck_doc_format" in s for s in rust_post), (
         f"Rust emitter missing ck_doc_format in {rust_post!r}"
     )
@@ -233,7 +341,7 @@ def test_db_check_constraint_name_parity_intenum():
     sa_name = sa_checks[0].name
     assert sa_name == "ck_task_priority"
 
-    _, rust_post = _render_create_table_via_ir("Task", Task, "postgres")
+    _, rust_post, _ = _render_create_table_via_ir("Task", Task, "postgres")
     assert any(sa_name in s for s in rust_post)
 
 
@@ -250,7 +358,7 @@ def test_db_check_elided_on_sqlite_in_both_emitters():
         id: int | None = Field(default=None, primary_key=True)
         format: _Format = Field(db_type="text", db_check=True)
 
-    _, rust_post = _render_create_table_via_ir("Doc", Doc, "sqlite")
+    _, rust_post, _ = _render_create_table_via_ir("Doc", Doc, "sqlite")
     assert all("CONSTRAINT" not in s.upper() for s in rust_post)
 
 

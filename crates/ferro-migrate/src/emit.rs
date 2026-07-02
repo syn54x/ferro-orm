@@ -2,11 +2,12 @@
 
 use crate::{Dialect, EmissionError, EmissionResult, MigrationOp, MigrationPlan};
 use ferro_ddl_lowering::{
-    self, apply_canonical_type, canonical_from_schema_column, canonical_to_db_type_token,
-    db_check_constraint_name, fk_action_from_str, fk_action_sql, fk_name,
-    is_timestamp_tz_conversion, literal_default_value, pg_alter_type_target, quote_ident,
-    render_db_check, single_index_name, single_unique_index_name, sqlite_declared_type,
-    sqlite_type_storage_drift, timestamp_tz_conversion_warning,
+    self, ResolvedStorage, apply_canonical_type, canonical_from_schema_column,
+    canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
+    fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
+    refused_conversion_warning, render_db_check, render_pg_enum_create_type,
+    resolve_column_storage, single_index_name, single_unique_index_name, sqlite_declared_type,
+    sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
@@ -21,6 +22,10 @@ use std::collections::BTreeMap;
 /// output is byte-identical to the runtime JSON path on both backends.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CreateTableEmission {
+    /// Statements that must run BEFORE `create_sql`: the idempotent
+    /// `CREATE TYPE ... AS ENUM` guards for native Postgres enum columns
+    /// (FF-B B2). Empty on SQLite.
+    pub pre_create_sqls: Vec<String>,
     /// `CREATE TABLE` including inline NAMED FKs (`CONSTRAINT "fk_..."`).
     /// Single-column uniques are NOT inline — they are named `uq_` unique
     /// indexes in [`post_create_sqls`](Self::post_create_sqls) (FF-B B4/D1).
@@ -30,6 +35,17 @@ pub struct CreateTableEmission {
     pub post_create_sqls: Vec<String>,
     /// Non-fatal warnings (e.g. the SQLite `db_check` elision).
     pub warnings: Vec<String>,
+}
+
+/// Apply a resolved storage to a sea-query [`ColumnDef`]. Enum columns render
+/// as the bare (unquoted) type name, byte-matching SQLAlchemy's spelling.
+fn apply_resolved_storage(col_def: &mut ColumnDef, storage: &ResolvedStorage) {
+    match storage {
+        ResolvedStorage::Scalar(canonical) => apply_canonical_type(col_def, *canonical),
+        ResolvedStorage::PgEnum { type_name, .. } => {
+            col_def.custom(Alias::new(type_name));
+        }
+    }
 }
 
 /// The FK constraint name for one IR foreign key: the compiler-provided
@@ -112,12 +128,19 @@ pub fn render_create_table(
         .if_not_exists()
         .to_owned();
 
+    let mut pre_create_sqls: Vec<String> = Vec::new();
     for col in &model.columns {
-        let canonical = canonical_from_schema_column(col, ld).map_err(|message| EmissionError {
+        let storage = resolve_column_storage(col, ld).map_err(|message| EmissionError {
             message,
         })?;
+        if let ResolvedStorage::PgEnum { type_name, labels } = &storage {
+            let guard = render_pg_enum_create_type(type_name, labels);
+            if !pre_create_sqls.contains(&guard) {
+                pre_create_sqls.push(guard);
+            }
+        }
         let mut col_def = ColumnDef::new(Alias::new(&col.name));
-        apply_canonical_type(&mut col_def, canonical);
+        apply_resolved_storage(&mut col_def, &storage);
         if col.primary_key {
             col_def.primary_key();
             if col.autoincrement {
@@ -153,6 +176,7 @@ pub fn render_create_table(
 
     let (post_create_sqls, warnings) = post_create_artifacts(model, dialect)?;
     Ok(CreateTableEmission {
+        pre_create_sqls,
         create_sql,
         post_create_sqls,
         warnings,
@@ -275,8 +299,17 @@ fn emit_add_table_passes(
     result: &mut EmissionResult,
 ) -> Result<(), EmissionError> {
     let ordered = order_models_for_create(&add_models);
+    // Enum types can be shared across models in one add set; emit each
+    // idempotent CREATE TYPE guard once.
+    let mut emitted_type_guards: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for model in &ordered {
         let emission = render_create_table(model, dialect)?;
+        for guard in emission.pre_create_sqls {
+            if emitted_type_guards.insert(guard.clone()) {
+                result.statements.push(guard);
+            }
+        }
         result.statements.push(emission.create_sql);
         result.statements.extend(emission.post_create_sqls);
         result.warnings.extend(emission.warnings);
@@ -292,7 +325,7 @@ fn emit_add_column(
 ) -> Result<EmissionResult, EmissionError> {
     let col = find_column(model, column)?;
     let ld = dialect;
-    let canonical = canonical_from_schema_column(col, ld).map_err(|message| EmissionError {
+    let storage = resolve_column_storage(col, ld).map_err(|message| EmissionError {
         message,
     })?;
 
@@ -325,7 +358,7 @@ fn emit_add_column(
     };
 
     let mut col_def = ColumnDef::new(Alias::new(column));
-    apply_canonical_type(&mut col_def, canonical);
+    apply_resolved_storage(&mut col_def, &storage);
     if !col.nullable {
         col_def.not_null();
     }
@@ -339,6 +372,12 @@ fn emit_add_column(
         .to_owned();
 
     let mut result = EmissionResult::default();
+    // A native-enum column needs its type to exist first (idempotent guard).
+    if let ResolvedStorage::PgEnum { type_name, labels } = &storage {
+        result
+            .statements
+            .push(render_pg_enum_create_type(type_name, labels));
+    }
     result.statements.push(match dialect {
         Dialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
         Dialect::Postgres => stmt.to_string(PostgresQueryBuilder),
@@ -424,21 +463,17 @@ fn emit_alter_column_type(
 
     match dialect {
         Dialect::Postgres => {
+            // A live native-enum column is never auto-reconciled, whatever the
+            // model says: enum-to-anything casts (and label changes) are
+            // reviewed-migration territory. A matching enum model is a no-op;
+            // a scalar model against a live enum is left to Alembic.
             if old_col.postgres_native_enum {
-                return Ok(result);
-            }
-            if new_col.enum_type_name.is_some() {
-                result.warnings.push(format!(
-                    "Column '{}.{}' uses a native Postgres enum type; type reconciliation \
-                     is deferred to Alembic.",
-                    table, column
-                ));
                 return Ok(result);
             }
             if old_col.primary_key || new_col.primary_key {
                 return Ok(result);
             }
-            let new_canonical = canonical_from_schema_column(new_col, ld).map_err(|message| {
+            let new_storage = resolve_column_storage(new_col, ld).map_err(|message| {
                 EmissionError {
                     message: format!(
                         "Cannot alter type for '{}.{}': {}",
@@ -446,24 +481,46 @@ fn emit_alter_column_type(
                     ),
                 }
             })?;
-            let old_canonical = canonical_from_schema_column(old_col, ld).map_err(|message| {
-                EmissionError {
-                    message: format!(
-                        "Cannot alter type for '{}.{}': {}",
-                        table, column, message
-                    ),
-                }
-            })?;
-            if is_timestamp_tz_conversion(old_canonical, new_canonical) {
-                result.warnings.push(timestamp_tz_conversion_warning(
+            // Refusal rails (#154 generalized): a conversion that could
+            // reinterpret or destroy stored values warns and skips — never a
+            // silent ALTER (FF-B B1/B2).
+            if let Some(kind) = refused_conversion(old_col, &new_storage, ld) {
+                let old_db_type = old_col.db_type.clone().unwrap_or_default();
+                let (new_target, keep_db_type) = match &new_storage {
+                    ResolvedStorage::PgEnum { type_name, .. } => {
+                        (type_name.clone(), old_db_type.clone())
+                    }
+                    ResolvedStorage::Scalar(new_c) => {
+                        let old_canonical = canonical_from_schema_column(old_col, ld)
+                            .map_err(|message| EmissionError {
+                                message: format!(
+                                    "Cannot alter type for '{}.{}': {}",
+                                    table, column, message
+                                ),
+                            })?;
+                        (
+                            pg_alter_type_target(*new_c),
+                            canonical_to_db_type_token(old_canonical, ld),
+                        )
+                    }
+                };
+                result.warnings.push(refused_conversion_warning(
+                    kind,
                     table,
                     column,
-                    old_col.db_type.as_deref().unwrap_or(""),
-                    &pg_alter_type_target(new_canonical),
-                    &canonical_to_db_type_token(old_canonical, ld),
+                    &old_db_type,
+                    &new_target,
+                    &keep_db_type,
                 ));
                 return Ok(result);
             }
+            let new_canonical = match new_storage {
+                ResolvedStorage::Scalar(canonical) => canonical,
+                // Live column already IS the native enum (otherwise the rail
+                // above refused): nothing to alter. Label additions/renames
+                // are reviewed-migration territory.
+                ResolvedStorage::PgEnum { .. } => return Ok(result),
+            };
             let target = pg_alter_type_target(new_canonical);
             result.statements.push(format!(
                 "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",

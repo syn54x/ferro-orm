@@ -27,13 +27,15 @@ For a single model, every emitter must agree on:
 
 1. **Table name** — already handled by `model_name.lower()`.
 2. **Column names** — including shadow `*_id` columns from `ForeignKey`.
-3. **Column types** — pydantic JSON schema → SQL type mapping must be one
-   function (or two functions whose outputs are tested for parity). This
-   includes the canonical `db_type` vocabulary (`text`, `varchar(N)`,
-   `smallint`, `int`, `bigint`, `uuid`, `timestamp`, `timestamptz`, `date`,
-   `time`) — duplicated in `_db_type_to_sa_type` (Python) and
-   `db_type_token_to_canonical` (Rust), pinned by
-   `tests/test_db_type_cross_emitter_parity.py`.
+3. **Column types** — decided by ONE function:
+   `ferro_ddl_lowering::resolve_column_storage` (explicit `db_type` token →
+   native-enum resolution → the `canonical_from_parts` cascade). The Alembic
+   bridge consumes it mechanically over FFI (`_core._resolve_storage_type`)
+   and `_db_type_to_sa_type` is only the SA *rendering* of the shared token
+   vocabulary — never a second decision table. Pinned exhaustively by
+   `tests/test_db_type_cross_emitter_parity.py` (every token and every
+   derived annotation × both dialects). See
+   `docs/solutions/patterns/derived-type-and-naming-decision-table.md`.
 4. **Index names** — `idx_<table>_<col>` for single-column indexes,
    `idx_<table>_<col1>_<col2>...` for composite indexes.
 5. **Unique constraint names** — `uq_<table>_<col>` for single-column,

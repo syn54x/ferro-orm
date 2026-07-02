@@ -1,4 +1,5 @@
 import enum
+import json
 import types
 import warnings
 from typing import Annotated, Any, Dict, Union, get_args, get_origin
@@ -9,7 +10,7 @@ except ImportError:
     sa = None
 
 from .._annotation_utils import _VARCHAR_RE
-from .._core import _ddl_fk_name
+from .._core import _ddl_fk_name, _render_check_body, _resolve_storage_type
 from .._deprecations import (
     IR_FIRST_DEPRECATION_REMOVE_IN,
     IR_FIRST_DEPRECATION_SINCE,
@@ -36,16 +37,6 @@ def _ck_constraint_name(table_name: str, col_name: str) -> str:
     if len(name) > 63:
         name = name[:60] + "_ck"
     return name
-
-
-def _render_check_body(column: str, values: list[str]) -> str:
-    """Mirror of ferro_ddl_lowering::render_check_body (quote + join; escaping-free
-    for values, which arrive pre-rendered). The column identifier is quoted the same
-    way as Rust `quote_ident` (embedded `"` doubled) so the two renderers stay
-    byte-identical. (Ferro column names derive from Python attribute names and cannot
-    contain `"` today; this keeps the mirror correct regardless.)"""
-    escaped = column.replace('"', '""')
-    return f'"{escaped}" IN ({", ".join(values)})'
 
 
 def get_metadata() -> "sa.MetaData":
@@ -217,52 +208,41 @@ def model_ir_column_flag(model_ir: Dict[str, Any], column_name: str, flag: str) 
 
 
 def _sa_type_from_ir_column(col_name: str, col: Dict[str, Any]) -> "sa.types.TypeEngine":
-    db_type_explicit = bool(col.get("db_type_explicit", False))
-    db_type = col.get("db_type")
-    if db_type_explicit and isinstance(db_type, str):
-        mapped = _db_type_to_sa_type(db_type)
-        if mapped is not None:
-            return mapped
+    """Mechanical consumer of the shared derived-type decision table (FF-B B2).
 
-    enum_values = col.get("enum_values")
-    enum_type_name = col.get("enum_type_name")
-    if isinstance(enum_values, list) and enum_values:
-        labels = [str(v) for v in enum_values]
-        enum_name = (
-            enum_type_name
-            if isinstance(enum_type_name, str) and enum_type_name
-            else col_name
+    The storage decision — explicit ``db_type`` wins, then enum values select
+    native enum storage, then the ``(logical_type, format)`` cascade — is made
+    by ``ferro_ddl_lowering::resolve_column_storage`` over FFI; this function
+    only maps the resolved token/enum onto SQLAlchemy types. The dialect is
+    fixed to ``"postgres"`` (the richer vocabulary): SQLAlchemy applies its own
+    per-dialect lowering, which matches the Rust emitter's dialect splits
+    (pinned by tests/test_db_type_cross_emitter_parity.py).
+    """
+    # SchemaColumn's non-Option fields must be present for deserialization;
+    # defaults cover callers that pass minimal column dicts.
+    column_ir = {
+        "logical_type": "unknown",
+        "nullable": True,
+        "primary_key": False,
+        "autoincrement": False,
+        "unique": False,
+        "index": False,
+        "default": None,
+        "format": None,
+        "postgres_native_enum": False,
+        **col,
+        "name": col_name,
+    }
+    resolved = json.loads(_resolve_storage_type(json.dumps(column_ir), "postgres"))
+    if resolved["kind"] == "pg_enum":
+        return sa.Enum(*resolved["labels"], name=resolved["name"])
+    mapped = _db_type_to_sa_type(resolved["token"])
+    if mapped is None:
+        raise RuntimeError(
+            f"resolve_column_storage returned unmapped token {resolved['token']!r} "
+            f"for column {col_name!r} — extend _db_type_to_sa_type (see AGENTS.md I-1)"
         )
-        return sa.Enum(*labels, name=enum_name)
-
-    logical_type = col.get("logical_type")
-    if logical_type == "boolean":
-        return sa.Boolean()
-    if logical_type == "integer":
-        return sa.Integer()
-    if logical_type == "number":
-        return sa.Float()
-    if logical_type == "decimal":
-        return sa.Numeric()
-    if logical_type == "string":
-        return sa.String()
-    if logical_type == "json":
-        return sa.JSON()
-    if logical_type in {"datetime", "date", "time", "uuid"}:
-        if logical_type == "datetime":
-            return sa.DateTime()
-        if logical_type == "date":
-            return sa.Date()
-        if logical_type == "time":
-            return sa.Time()
-        return sa.Uuid() if hasattr(sa, "Uuid") else sa.String(36)
-
-    if isinstance(db_type, str):
-        mapped = _db_type_to_sa_type(db_type)
-        if mapped is not None:
-            return mapped
-
-    return sa.String()
+    return mapped
 
 
 def _resolve_ref(schema: Dict[str, Any], col_info: Dict[str, Any]) -> Dict[str, Any]:
@@ -455,9 +435,12 @@ def _build_sa_table(
     sa.Table(table_name, metadata, *table_args)
 
 
-#: Canonical ``db_type`` token -> SA type. Duplicated on the Rust side in
-#: ``src/schema.rs`` and pinned by the parity test (see U5). When adding a new
-#: token, update both emitters in the same change. See AGENTS.md § I-1.
+#: SQLAlchemy RENDERING of the shared ``db_type`` token vocabulary. This is
+#: not a second decision table: which token a column gets is decided by
+#: ``ferro_ddl_lowering::resolve_column_storage``/``canonical_to_db_type_token``
+#: (consumed over FFI in ``_sa_type_from_ir_column``); this function only maps
+#: each token 1:1 onto an SA type. Exhaustiveness over the full vocabulary is
+#: pinned by tests/test_db_type_cross_emitter_parity.py. See AGENTS.md § I-1.
 def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
     """Return the SA type for a canonical ``db_type`` token, or ``None`` if
     unrecognized. Validation at class-definition time (see metaclass) means an
@@ -483,10 +466,27 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
         return sa.Date()
     if token == "time":
         return sa.Time()
+    if token == "boolean":
+        return sa.Boolean()
+    if token == "double":
+        return sa.Double()
+    if token == "numeric":
+        return sa.Numeric()
+    if token == "json":
+        return sa.JSON()
+    if token in {"bytea", "blob"}:
+        return sa.LargeBinary()
+    if token == "varchar":
+        return sa.String()
 
     match = _VARCHAR_RE.match(token)
     if match is not None:
         return sa.String(length=int(match.group(1)))
+    if token.startswith("char(") and token.endswith(")"):
+        try:
+            return sa.CHAR(int(token[5:-1]))
+        except ValueError:
+            return None
     return None
 
 

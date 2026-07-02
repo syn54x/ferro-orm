@@ -243,11 +243,28 @@ pub fn schema_bind_expr(
     let is_uuid_pg = backend == Dialect::Postgres
         && (uuid_columns.contains(col_name) || col_format == Some("uuid"));
 
-    if let Value::String(s) = value
-        && backend == Dialect::Postgres
+    if backend == Dialect::Postgres
         && let Some(tn) = crate::schema_bind::native_postgres_enum_udt_name(col_name, enum_udt)
     {
-        return Ok(crate::schema_bind::postgres_enum_string_rhs_expr(s, tn));
+        match value {
+            Value::String(s) => {
+                return Ok(crate::schema_bind::postgres_enum_string_rhs_expr(s, tn));
+            }
+            // Nullable enum column: an untyped NULL binds as text, which a
+            // prepared INSERT rejects against the enum column — cast it.
+            Value::Null => {
+                return Ok(Expr::value(SeaValue::String(None)).cast_as(Alias::new(tn)));
+            }
+            // IntEnum members arrive as JSON numbers; the native enum's labels
+            // are their stringified values ("1", "2", ...).
+            Value::Number(n) => {
+                return Ok(crate::schema_bind::postgres_enum_string_rhs_expr(
+                    &n.to_string(),
+                    tn,
+                ));
+            }
+            _ => {}
+        }
     }
 
     if is_uuid_pg {

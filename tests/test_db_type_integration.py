@@ -349,11 +349,12 @@ async def test_db_check_rejects_invalid_value_on_insert(
 async def test_default_strenum_without_db_type_runtime_ddl_and_round_trip(
     db_url, postgres_base_url, db_schema_name
 ):
-    """Regression: StrEnum without db_type still works end-to-end via auto_migrate.
+    """StrEnum without db_type stores as a native PG enum end-to-end (FF-B B2).
 
-    The Rust runtime emitter stores enum values in a string column (varchar/text),
-    not as a native PostgreSQL ENUM type. Native enum DDL is an Alembic-bridge
-    concern — see ``test_alembic_db_type.py::test_default_enum_still_renders_named_sa_enum``.
+    The Rust runtime emitter now creates the named enum type (idempotently)
+    and types the column with it — matching the Alembic bridge's ``sa.Enum``,
+    which has always been the default-storage contract (the metaclass rejects
+    ``db_check`` without ``db_type`` as "redundant on native enum storage").
     """
 
     class NativeEnumDoc(Model):
@@ -365,16 +366,13 @@ async def test_default_strenum_without_db_type_runtime_ddl_and_round_trip(
     data_type, udt_name = _postgres_column(
         postgres_base_url, db_schema_name, "nativeenumdoc", "format"
     )
-    assert udt_name in ("varchar", "text") or data_type in (
-        "character varying",
-        "text",
-    ), (
-        f"Rust auto_migrate should use string storage for default StrEnum, "
+    assert data_type == "USER-DEFINED" and udt_name == "_fileformat", (
+        f"Rust auto_migrate should use native enum storage for default StrEnum, "
         f"got data_type={data_type!r} udt_name={udt_name!r}"
     )
     enum_types = _postgres_enum_types(postgres_base_url, db_schema_name)
-    assert "fileformat" not in enum_types, (
-        "auto_migrate should not create a native PG enum type without db_type"
+    assert "_fileformat" in enum_types, (
+        "auto_migrate should create the native PG enum type for a default enum"
     )
 
     row = await NativeEnumDoc.create(format=_FileFormat.JSON)

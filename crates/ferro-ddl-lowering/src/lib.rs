@@ -230,11 +230,20 @@ pub fn information_schema_to_db_type_token(
 }
 
 /// Whether two [`SchemaColumn`] snapshots differ in resolved storage type.
+///
+/// `old_col` is the live/introspected side, `new_col` the model side. When the
+/// model resolves to a native Postgres enum, drift is decided by whether the
+/// live column already IS a native enum (`postgres_native_enum` from
+/// introspection) — a matching live enum is a no-op; a live scalar (the old
+/// varchar lowering) is drift, which the emitters then REFUSE (warn + skip).
 pub fn schema_columns_storage_drift(
     old_col: &SchemaColumn,
     new_col: &SchemaColumn,
     dialect: Dialect,
 ) -> bool {
+    if let Ok(ResolvedStorage::PgEnum { .. }) = resolve_column_storage(new_col, dialect) {
+        return !old_col.postgres_native_enum;
+    }
     match (
         canonical_from_schema_column(old_col, dialect),
         canonical_from_schema_column(new_col, dialect),
@@ -298,12 +307,11 @@ pub fn canonical_from_parts(
         ("binary", _) => Ok(CanonicalType::Blob),
         ("datetime", _) => Ok(CanonicalType::TimestampTz),
         ("date", _) => Ok(CanonicalType::Date),
-        // "time" is the ASYMMETRIC case: schema.rs canonical_column_type has no
-        // ("string", "time") arm, so datetime.time fields are created as varchar
-        // on both SQLite and Postgres. Resolve to Varchar(None) here so the
-        // consume side agrees with the live column token ("varchar") and no
-        // spurious AlterColumnType / "use Alembic" warning fires. (#141 review.)
-        ("time", _) => Ok(CanonicalType::Varchar(None)),
+        // FF-B B2: `datetime.time` stores as `time` on both dialects (the #141
+        // varchar asymmetry is resolved the other way). Legacy varchar-stored
+        // columns surface as drift and are REFUSED at emission
+        // (`RefusedConversion::VarcharToTime`) — never silently altered.
+        ("time", _) | ("string", Some("time")) => Ok(CanonicalType::Time),
         ("uuid", _) => Ok(CanonicalType::Uuid),
         ("json", _) => Ok(CanonicalType::Json),
         ("decimal", _) => Ok(CanonicalType::Decimal),
@@ -327,6 +335,126 @@ pub fn canonical_from_schema_column(
 ) -> Result<CanonicalType, String> {
     canonical_from_parts(&col.logical_type, col.format.as_deref(), col.db_type.as_deref().unwrap_or(""), dialect)
         .map_err(|reason| format!("unresolvable type on column '{}': {reason}", col.name))
+}
+
+/// A column's fully resolved storage: either a scalar [`CanonicalType`] or a
+/// native Postgres enum type. This is THE derived-type decision table for
+/// every emitter (FF-B B2) — the Alembic bridge consumes it mechanically over
+/// FFI, so no Python code re-derives storage from `(logical_type, format)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedStorage {
+    /// An ordinary scalar column type.
+    Scalar(CanonicalType),
+    /// A native Postgres enum: `CREATE TYPE <type_name> AS ENUM (<labels>)`,
+    /// column typed as `<type_name>`. Postgres dialect only — on SQLite enum
+    /// columns resolve to `Scalar(Varchar(max label length))`, matching what
+    /// SQLAlchemy renders for `sa.Enum`.
+    PgEnum {
+        type_name: String,
+        labels: Vec<String>,
+    },
+}
+
+/// Stringify enum label values exactly as the Alembic bridge does (`str(v)` on
+/// each member value): strings as-is, numbers via their decimal spelling,
+/// booleans Python-style. Pinned by the int-enum bridge tests
+/// (`test_standard_enum_generates_with_name`: labels `{"1", "2", "3"}`).
+pub fn enum_label_strings(values: &[serde_json::Value]) -> Vec<String> {
+    values
+        .iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(true) => "True".to_string(),
+            serde_json::Value::Bool(false) => "False".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+/// Resolve a [`SchemaColumn`] to its storage decision. An EXPLICIT `db_type`
+/// token wins (the user's override; `db_type_explicit` marks it); otherwise
+/// `enum_values` selects native enum storage; otherwise the
+/// [`canonical_from_parts`] cascade decides — where a non-explicit `db_type`
+/// (live introspected columns; derived tokens) still resolves the scalar.
+pub fn resolve_column_storage(
+    col: &SchemaColumn,
+    dialect: Dialect,
+) -> Result<ResolvedStorage, String> {
+    if col.db_type_explicit.unwrap_or(false)
+        && let Some(canonical) =
+            db_type_token_to_canonical(col.db_type.as_deref().unwrap_or(""), dialect)
+    {
+        return Ok(ResolvedStorage::Scalar(canonical));
+    }
+    if let Some(values) = col.enum_values.as_ref().filter(|v| !v.is_empty()) {
+        let labels = enum_label_strings(values);
+        return Ok(match dialect {
+            Dialect::Postgres => ResolvedStorage::PgEnum {
+                type_name: col
+                    .enum_type_name
+                    .clone()
+                    .unwrap_or_else(|| col.name.clone()),
+                labels,
+            },
+            Dialect::Sqlite => {
+                let max_len = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+                let max_len = u32::try_from(max_len).unwrap_or(u32::MAX);
+                ResolvedStorage::Scalar(CanonicalType::Varchar(if max_len == 0 {
+                    None
+                } else {
+                    Some(max_len)
+                }))
+            }
+        });
+    }
+    canonical_from_schema_column(col, dialect).map(ResolvedStorage::Scalar)
+}
+
+/// The idempotent `CREATE TYPE ... AS ENUM` guard for a native Postgres enum.
+/// Same DO-block pattern as [`render_db_check`]: it only *adds when absent*
+/// (schema-scoped via `current_schema()`), so a second boot against an
+/// already-migrated schema is a no-op. `DROP TYPE`/label cleanup is explicitly
+/// out of scope — emission is additive; removals belong in reviewed migrations.
+pub fn render_pg_enum_create_type(type_name: &str, labels: &[String]) -> String {
+    let rendered_labels: Vec<String> = labels
+        .iter()
+        .map(|l| format!("'{}'", l.replace('\'', "''")))
+        .collect();
+    format!(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t \
+         JOIN pg_namespace n ON n.oid = t.typnamespace \
+         WHERE t.typname = '{typname}' AND n.nspname = current_schema()) THEN \
+         CREATE TYPE {quoted} AS ENUM ({labels}); \
+         END IF; END $$",
+        typname = type_name.replace('\'', "''"),
+        quoted = quote_ident(type_name),
+        labels = rendered_labels.join(", "),
+    )
+}
+
+/// Detect a refused conversion from a live column to a resolved storage
+/// target. Extends [`refused_scalar_conversion`] with the native-enum case:
+/// a live non-enum (varchar/text) column targeted at a native Postgres enum
+/// is refused; a live native-enum column is already at the target (no-op).
+pub fn refused_conversion(
+    old_col: &SchemaColumn,
+    new_storage: &ResolvedStorage,
+    dialect: Dialect,
+) -> Option<RefusedConversion> {
+    match new_storage {
+        ResolvedStorage::PgEnum { .. } => {
+            if old_col.postgres_native_enum {
+                None
+            } else {
+                Some(RefusedConversion::VarcharToPgEnum)
+            }
+        }
+        ResolvedStorage::Scalar(new_c) => {
+            let old_c = canonical_from_schema_column(old_col, dialect).ok()?;
+            refused_scalar_conversion(old_c, *new_c)
+        }
+    }
 }
 
 /// Single-column index name (`idx_<table>_<col>`) with 63-char guard.
@@ -793,35 +921,28 @@ mod tests {
         assert!(!schema_columns_storage_drift(&live, &model, Dialect::Sqlite));
     }
 
-    /// Regression guard for the `"time"` phantom-drift false alarm (#141 review).
-    ///
-    /// The CREATE TABLE path (schema.rs `canonical_column_type`) has no
-    /// `("string", "time")` arm: it falls through to `json_type_to_canonical("string")`
-    /// → `Varchar(None)` → live column token `"varchar"`. The consume side must
-    /// resolve `logical_type = "time"` to the same canonical so no spurious
-    /// AlterColumnType fires on every startup for a `datetime.time` field.
+    /// Since FF-B B2, `datetime.time` fields store as `time` on both dialects
+    /// (resolving the #141 asymmetry the other way): a live varchar column
+    /// from the old lowering now reads as drift — and the conversion is
+    /// REFUSED at emission (`RefusedConversion::VarcharToTime`), never a
+    /// silent ALTER. A live `time` column does not drift.
     #[test]
-    fn time_derived_does_not_drift_against_varchar_live_on_sqlite() {
-        // Live column: created as varchar (what the CREATE path emits for time).
-        let live = col_with_db_type("start_time", "string", None, Some("varchar"));
-        // Model column: Python SchemaIR compiler emits logical_type="time", db_type=None.
+    fn time_model_drifts_against_legacy_varchar_live_and_matches_time_live() {
+        let live_varchar = col_with_db_type("start_time", "string", None, Some("varchar"));
         let model = col_with_db_type("start_time", "time", None, None);
-        assert!(
-            !schema_columns_storage_drift(&live, &model, Dialect::Sqlite),
-            "time logical_type must resolve to Varchar(None) to match the live varchar column"
-        );
-    }
-
-    #[test]
-    fn time_derived_does_not_drift_against_varchar_live_on_postgres() {
-        // Same parity check on Postgres: CREATE path also falls to Varchar(None)
-        // for a time field (no ("string", "time") arm in schema.rs).
-        let live = col_with_db_type("start_time", "string", None, Some("varchar"));
-        let model = col_with_db_type("start_time", "time", None, None);
-        assert!(
-            !schema_columns_storage_drift(&live, &model, Dialect::Postgres),
-            "time logical_type must resolve to Varchar(None) on Postgres as well"
-        );
+        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+            assert!(
+                schema_columns_storage_drift(&live_varchar, &model, dialect),
+                "legacy varchar-stored time must surface as drift ({dialect:?})"
+            );
+        }
+        let live_time = col_with_db_type("start_time", "unknown", None, Some("time"));
+        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+            assert!(
+                !schema_columns_storage_drift(&live_time, &model, dialect),
+                "a live time column matches a time model ({dialect:?})"
+            );
+        }
     }
 
     #[test]
@@ -1076,6 +1197,187 @@ mod tests {
         assert_eq!(
             name,
             format!("{}_idx", raw.chars().take(59).collect::<String>())
+        );
+    }
+
+    fn enum_col(name: &str, type_name: Option<&str>, values: Vec<serde_json::Value>) -> SchemaColumn {
+        SchemaColumn {
+            enum_values: Some(values),
+            enum_type_name: type_name.map(str::to_string),
+            ..col_with_db_type(name, "string", None, None)
+        }
+    }
+
+    #[test]
+    fn resolve_column_storage_explicit_db_type_wins_over_enum() {
+        let mut col = enum_col("role", Some("role"), vec![serde_json::json!("admin")]);
+        col.db_type = Some("text".to_string());
+        col.db_type_explicit = Some(true);
+        assert_eq!(
+            resolve_column_storage(&col, Dialect::Postgres),
+            Ok(ResolvedStorage::Scalar(CanonicalType::Text))
+        );
+        // A NON-explicit db_type (e.g. a token back-filled by an adapter from
+        // the old varchar lowering) must NOT mask enum resolution.
+        col.db_type = Some("varchar".to_string());
+        col.db_type_explicit = None;
+        assert!(matches!(
+            resolve_column_storage(&col, Dialect::Postgres),
+            Ok(ResolvedStorage::PgEnum { .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_column_storage_enum_is_native_pg_type() {
+        let col = enum_col(
+            "status",
+            Some("status"),
+            vec![serde_json::json!("draft"), serde_json::json!("active")],
+        );
+        assert_eq!(
+            resolve_column_storage(&col, Dialect::Postgres),
+            Ok(ResolvedStorage::PgEnum {
+                type_name: "status".to_string(),
+                labels: vec!["draft".to_string(), "active".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_column_storage_enum_type_name_falls_back_to_column_name() {
+        let col = enum_col("status", None, vec![serde_json::json!("draft")]);
+        match resolve_column_storage(&col, Dialect::Postgres) {
+            Ok(ResolvedStorage::PgEnum { type_name, .. }) => assert_eq!(type_name, "status"),
+            other => panic!("expected PgEnum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_column_storage_int_enum_labels_are_stringified() {
+        // Pinned by the already-shipped bridge behavior
+        // (test_standard_enum_generates_with_name: labels {"1","2","3"}).
+        let col = enum_col(
+            "priority",
+            Some("priority"),
+            vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)],
+        );
+        match resolve_column_storage(&col, Dialect::Postgres) {
+            Ok(ResolvedStorage::PgEnum { labels, .. }) => {
+                assert_eq!(labels, vec!["1", "2", "3"]);
+            }
+            other => panic!("expected PgEnum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_column_storage_enum_on_sqlite_is_varchar_max_label_len() {
+        // Byte-matches what SQLAlchemy renders for sa.Enum on SQLite:
+        // VARCHAR(<longest label length>).
+        let col = enum_col(
+            "status",
+            Some("status"),
+            vec![serde_json::json!("draft"), serde_json::json!("archived")],
+        );
+        assert_eq!(
+            resolve_column_storage(&col, Dialect::Sqlite),
+            Ok(ResolvedStorage::Scalar(CanonicalType::Varchar(Some(8))))
+        );
+    }
+
+    #[test]
+    fn resolve_column_storage_scalars_follow_canonical_from_parts() {
+        let dt = col_with_db_type("created_at", "datetime", Some("date-time"), None);
+        assert_eq!(
+            resolve_column_storage(&dt, Dialect::Postgres),
+            Ok(ResolvedStorage::Scalar(CanonicalType::TimestampTz))
+        );
+        let unknown = col_with_db_type("x", "mystery", None, None);
+        assert!(resolve_column_storage(&unknown, Dialect::Postgres).is_err());
+    }
+
+    #[test]
+    fn time_logical_type_resolves_to_time_on_both_dialects() {
+        // FF-B B2 (D3): `datetime.time` fields store as `time`, resolving the
+        // #141 asymmetry (previously Varchar so the consume side agreed with
+        // the old varchar-emitting create path).
+        assert_eq!(
+            canonical_from_parts("time", None, "", Dialect::Sqlite),
+            Ok(CanonicalType::Time)
+        );
+        assert_eq!(
+            canonical_from_parts("time", None, "", Dialect::Postgres),
+            Ok(CanonicalType::Time)
+        );
+        // The raw JSON-Schema spelling used by the legacy planner path.
+        assert_eq!(
+            canonical_from_parts("string", Some("time"), "", Dialect::Postgres),
+            Ok(CanonicalType::Time)
+        );
+    }
+
+    #[test]
+    fn render_pg_enum_create_type_is_idempotent_and_pinned() {
+        let sql = render_pg_enum_create_type(
+            "status",
+            &["draft".to_string(), "active".to_string()],
+        );
+        assert_eq!(
+            sql,
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t \
+             JOIN pg_namespace n ON n.oid = t.typnamespace \
+             WHERE t.typname = 'status' AND n.nspname = current_schema()) THEN \
+             CREATE TYPE \"status\" AS ENUM ('draft', 'active'); \
+             END IF; END $$"
+        );
+    }
+
+    #[test]
+    fn render_pg_enum_create_type_escapes_quotes() {
+        let sql = render_pg_enum_create_type("od'd", &["it's".to_string()]);
+        assert!(sql.contains("t.typname = 'od''d'"), "{sql}");
+        assert!(sql.contains("AS ENUM ('it''s')"), "{sql}");
+    }
+
+    #[test]
+    fn refused_conversion_detects_varchar_to_pg_enum() {
+        let live = col_with_db_type("role", "unknown", None, Some("varchar"));
+        let target = ResolvedStorage::PgEnum {
+            type_name: "role".to_string(),
+            labels: vec!["admin".to_string()],
+        };
+        assert_eq!(
+            refused_conversion(&live, &target, Dialect::Postgres),
+            Some(RefusedConversion::VarcharToPgEnum)
+        );
+        // A live native-enum column is NOT a refusal (same storage; no-op).
+        let mut native = col_with_db_type("role", "unknown", None, Some("varchar"));
+        native.postgres_native_enum = true;
+        assert_eq!(refused_conversion(&native, &target, Dialect::Postgres), None);
+        // Scalar targets delegate to the scalar rail.
+        let live_ts = col_with_db_type("at", "unknown", None, Some("timestamp"));
+        assert_eq!(
+            refused_conversion(
+                &live_ts,
+                &ResolvedStorage::Scalar(CanonicalType::TimestampTz),
+                Dialect::Postgres
+            ),
+            Some(RefusedConversion::TimestampTz)
+        );
+    }
+
+    #[test]
+    fn enum_model_drifts_against_live_varchar_but_not_native_enum() {
+        let live_varchar = col_with_db_type("role", "unknown", None, Some("varchar"));
+        let model = enum_col("role", Some("role"), vec![serde_json::json!("admin")]);
+        assert!(
+            schema_columns_storage_drift(&live_varchar, &model, Dialect::Postgres),
+            "varchar-stored enum must surface as drift (refused at emission)"
+        );
+        let mut live_native = col_with_db_type("role", "unknown", None, Some("varchar"));
+        live_native.postgres_native_enum = true;
+        assert!(
+            !schema_columns_storage_drift(&live_native, &model, Dialect::Postgres),
+            "a live native-enum column matches an enum model — second boot is a no-op"
         );
     }
 

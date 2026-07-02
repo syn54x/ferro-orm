@@ -31,8 +31,10 @@ async def migrate(
 
 def _render_create_table_sql_for_test(
     name: str, schema_json: str, dialect: str
-) -> tuple[str, list[str]]:
-    """Test-only: render CREATE TABLE SQL + post-create fragments without executing.
+) -> tuple[str, list[str], list[str]]:
+    """Test-only: render CREATE TABLE SQL + post-create + pre-create fragments
+    (``(create_sql, post_create_sqls, pre_create_sqls)``) without executing.
+    Pre-create carries the idempotent native-enum ``CREATE TYPE`` guards.
 
     ``schema_json`` is a SchemaIR *payload* JSON string of the shape
     ``{"dialect_agnostic": bool, "models": [<SchemaModel>...]}`` produced by
@@ -241,3 +243,16 @@ def _ddl_composite_index_name(table: str, columns: list[str]) -> str: ...
 def _ddl_composite_unique_name(table: str, columns: list[str]) -> str: ...
 def _ddl_check_constraint_name(table: str, column: str) -> str: ...
 def _ddl_fk_name(table: str, column: str, to_table: str) -> str: ...
+
+def _resolve_storage_type(column_ir_json: str, dialect: str) -> str:
+    """Resolve one SchemaIR column's storage decision via ferro-ddl-lowering.
+
+    Returns JSON: ``{"kind": "scalar", "token": "<db_type token>"}`` or
+    ``{"kind": "pg_enum", "name": "<type name>", "labels": [...]}``.
+    Unknown logical types raise ``RuntimeError`` (never a silent varchar).
+    """
+    ...
+
+def _render_check_body(column: str, values: list[str]) -> str:
+    """The shared db_check CHECK body, byte-identical to the Rust emitters."""
+    ...

@@ -59,7 +59,7 @@ def _report_for_backend(dialect: str) -> dict:
     query_compare = json.loads(
         _shadow_compare_query_plan_for_test(query_json, dialect, "select")
     )
-    create_table_sql, create_table_extras = _render_create_table_sql_for_test(
+    create_table_sql, create_table_extras, _pre_create = _render_create_table_sql_for_test(
         "ShadowUser", json.dumps(compile_schema_ir_payload("ShadowUser", schema)), dialect
     )
     _schema_ir_json = _compile_schema_ir_json(schema, "shadowuser")
