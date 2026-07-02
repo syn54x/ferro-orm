@@ -9,3 +9,6 @@ docs:
 
 test *ARGS:
     uv run pytest --db-backends=sqlite,postgres {{ARGS}}
+
+bench *ARGS:
+    uv run python -m benchmarks.run {{ARGS}}

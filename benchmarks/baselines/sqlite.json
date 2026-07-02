@@ -1,0 +1,49 @@
+{
+  "benchmarks": {
+    "bulk_save": {
+      "mean_ms": 221.7548440094106,
+      "median_ms": 221.4729170082137,
+      "min_ms": 220.64062498975545,
+      "n": 8,
+      "p95_ms": 223.35558396298438,
+      "rows": 10000,
+      "stdev_ms": 0.8960294958933418
+    },
+    "fetch_10000_identity_off": {
+      "mean_ms": 271.8375902002056,
+      "median_ms": 271.24443696811795,
+      "min_ms": 266.449874965474,
+      "n": 30,
+      "p95_ms": 277.1654580719769,
+      "rows": 10000,
+      "stdev_ms": 3.047871791171487
+    },
+    "fetch_10000_identity_on": {
+      "mean_ms": 175.64869583196318,
+      "median_ms": 175.53445848170668,
+      "min_ms": 174.02187502011657,
+      "n": 30,
+      "p95_ms": 176.9996250513941,
+      "rows": 10000,
+      "stdev_ms": 0.9337145812562601
+    },
+    "single_save": {
+      "mean_ms": 0.35855210735462606,
+      "median_ms": 0.3517500008456409,
+      "min_ms": 0.31791708897799253,
+      "n": 100,
+      "p95_ms": 0.4023750079795718,
+      "rows": 1,
+      "stdev_ms": 0.03532271957579324
+    }
+  },
+  "meta": {
+    "backend": "sqlite",
+    "generated_at": "2026-07-02T22:29:44+00:00",
+    "note": "Wall-clock ms. Machine-specific; compare same-machine runs only.",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "python": "3.14.5",
+    "rows": 10000,
+    "seed": 1234
+  }
+}

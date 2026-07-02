@@ -1,0 +1,49 @@
+{
+  "benchmarks": {
+    "bulk_save": {
+      "mean_ms": 387.507312654634,
+      "median_ms": 389.5133335608989,
+      "min_ms": 364.61825005244464,
+      "n": 8,
+      "p95_ms": 399.0427920361981,
+      "rows": 10000,
+      "stdev_ms": 10.560156248841137
+    },
+    "fetch_10000_identity_off": {
+      "mean_ms": 287.3585860012099,
+      "median_ms": 285.91304150177166,
+      "min_ms": 283.37641595862806,
+      "n": 30,
+      "p95_ms": 292.72716608829796,
+      "rows": 10000,
+      "stdev_ms": 3.9899757994622176
+    },
+    "fetch_10000_identity_on": {
+      "mean_ms": 189.35828615600863,
+      "median_ms": 189.4699584809132,
+      "min_ms": 187.52899998798966,
+      "n": 30,
+      "p95_ms": 190.47379202675074,
+      "rows": 10000,
+      "stdev_ms": 0.7979450732007062
+    },
+    "single_save": {
+      "mean_ms": 1.7114295321516693,
+      "median_ms": 1.7078330274671316,
+      "min_ms": 1.2648329138755798,
+      "n": 100,
+      "p95_ms": 2.06791702657938,
+      "rows": 1,
+      "stdev_ms": 0.22644750383971446
+    }
+  },
+  "meta": {
+    "backend": "postgres",
+    "generated_at": "2026-07-02T22:29:44+00:00",
+    "note": "Wall-clock ms. Machine-specific; compare same-machine runs only.",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "python": "3.14.5",
+    "rows": 10000,
+    "seed": 1234
+  }
+}
