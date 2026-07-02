@@ -39,6 +39,38 @@ pub enum CanonicalType {
     Blob,
 }
 
+/// Apply a canonical type to a sea-query [`ColumnDef`], dialect-aware.
+///
+/// On SQLite the temporal/uuid/json/decimal families use SQLAlchemy's declared
+/// spellings (`DATETIME`, `DATE`, `TIME`, `CHAR(32)`, `JSON`, `NUMERIC`)
+/// instead of sea-query's `*_text` defaults, so a Ferro-created database
+/// reflects identically to an Alembic-created one (I-1; FF-B B5). SQLite's
+/// type affinity makes the storage classes identical either way.
+pub fn apply_canonical_type_for(
+    col_def: &mut ColumnDef,
+    canonical: CanonicalType,
+    dialect: Dialect,
+) {
+    if dialect == Dialect::Sqlite {
+        let sa_spelling = match canonical {
+            CanonicalType::DateTime | CanonicalType::Timestamp | CanonicalType::TimestampTz => {
+                Some("DATETIME")
+            }
+            CanonicalType::Date => Some("DATE"),
+            CanonicalType::Time => Some("TIME"),
+            CanonicalType::Uuid => Some("CHAR(32)"),
+            CanonicalType::Json => Some("JSON"),
+            CanonicalType::Decimal => Some("NUMERIC"),
+            _ => None,
+        };
+        if let Some(spelling) = sa_spelling {
+            col_def.custom(sea_query::Alias::new(spelling));
+            return;
+        }
+    }
+    apply_canonical_type(col_def, canonical);
+}
+
 /// Apply a canonical type to a sea-query [`ColumnDef`].
 pub fn apply_canonical_type(col_def: &mut ColumnDef, canonical: CanonicalType) {
     match canonical {
@@ -693,25 +725,28 @@ pub fn refused_conversion_warning(
     }
 }
 
-/// SQLite declared-type string for a canonical type (parity-pinned).
+/// SQLite declared-type string for a canonical type (parity-pinned; matches
+/// what [`apply_canonical_type_for`] renders on SQLite — SQLAlchemy-compatible
+/// spellings since FF-B B5).
 pub fn sqlite_declared_type(canonical: CanonicalType) -> String {
     match canonical {
         CanonicalType::Integer => "integer".to_string(),
         CanonicalType::SmallInt => "smallint".to_string(),
         CanonicalType::BigInt => "bigint".to_string(),
         CanonicalType::Double => "double".to_string(),
-        CanonicalType::Decimal => "real".to_string(),
+        CanonicalType::Decimal => "NUMERIC".to_string(),
         CanonicalType::Boolean => "boolean".to_string(),
-        CanonicalType::Json => "json_text".to_string(),
+        CanonicalType::Json => "JSON".to_string(),
         CanonicalType::Text => "text".to_string(),
         CanonicalType::Varchar(None) => "varchar".to_string(),
         CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
         CanonicalType::Char(n) => format!("char({n})"),
-        CanonicalType::Uuid => "uuid_text".to_string(),
-        CanonicalType::DateTime | CanonicalType::Timestamp => "datetime_text".to_string(),
-        CanonicalType::TimestampTz => "timestamp_with_timezone_text".to_string(),
-        CanonicalType::Date => "date_text".to_string(),
-        CanonicalType::Time => "time_text".to_string(),
+        CanonicalType::Uuid => "CHAR(32)".to_string(),
+        CanonicalType::DateTime | CanonicalType::Timestamp | CanonicalType::TimestampTz => {
+            "DATETIME".to_string()
+        }
+        CanonicalType::Date => "DATE".to_string(),
+        CanonicalType::Time => "TIME".to_string(),
         CanonicalType::Blob => "blob".to_string(),
     }
 }

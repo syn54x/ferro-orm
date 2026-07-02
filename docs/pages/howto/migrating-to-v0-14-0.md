@@ -218,6 +218,13 @@ auto-migrate refuses the conversion and warns — keep with
 - Identifiers longer than 63 characters now truncate deterministically on both
   emitters (previously only some name kinds guarded, and PostgreSQL truncated
   the rest silently).
+- **SQLite declared types now use SQLAlchemy's spellings** (`DATETIME`,
+  `DATE`, `TIME`, `CHAR(32)`, `JSON`, `NUMERIC` instead of sea-query's
+  `timestamp_with_timezone_text`-style names), and primary-key columns carry
+  an explicit `NOT NULL`. Existing SQLite databases need **no action** —
+  SQLite's type affinity makes the storage identical, and auto-migrate's
+  affinity-class comparison treats both spellings as equivalent. Only newly
+  created tables show the new spellings.
 
 ## Changed surfaces at a glance
 

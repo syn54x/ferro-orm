@@ -128,14 +128,14 @@ async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_ur
     columns = {row[1]: row for row in rows}
     assert columns["uuidactor_id"][2].upper() in {
         "UUID",
-        "UUID_TEXT",
+        "CHAR(32)",
         "TEXT",
         "CHAR",
         "VARCHAR",
     }
     assert columns["uuidmovie_id"][2].upper() in {
         "UUID",
-        "UUID_TEXT",
+        "CHAR(32)",
         "TEXT",
         "CHAR",
         "VARCHAR",

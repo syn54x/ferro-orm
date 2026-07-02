@@ -45,7 +45,7 @@ class TestAddColumn:
             {"paid_date": {"type": "string", "db_type": "date", "ferro_nullable": True}}
         )
         stmts, warns = render(schema, PK_ONLY_LIVE, "sqlite")
-        assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "paid_date" date_text']
+        assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "paid_date" DATE']
         assert warns == []
 
         stmts, warns = render(schema, PK_ONLY_LIVE, "postgres")

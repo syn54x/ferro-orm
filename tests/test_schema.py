@@ -116,6 +116,6 @@ async def test_auto_migrate_runtime_ddl_uses_logical_decimal_and_json_types(db_u
     conn.close()
 
     types_by_column = {row[1]: row[2].upper() for row in rows}
-    assert types_by_column["price"] == "REAL"
-    assert types_by_column["metadata"] == "JSON_TEXT"
-    assert types_by_column["tags"] == "JSON_TEXT"
+    assert types_by_column["price"] == "NUMERIC"
+    assert types_by_column["metadata"] == "JSON"
+    assert types_by_column["tags"] == "JSON"

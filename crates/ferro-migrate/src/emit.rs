@@ -2,7 +2,7 @@
 
 use crate::{Dialect, EmissionError, EmissionResult, MigrationOp, MigrationPlan};
 use ferro_ddl_lowering::{
-    self, ResolvedStorage, apply_canonical_type, canonical_from_schema_column,
+    self, ResolvedStorage, apply_canonical_type_for, canonical_from_schema_column,
     canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
     fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
     refused_conversion_warning, render_db_check, render_pg_enum_create_type,
@@ -39,9 +39,11 @@ pub struct CreateTableEmission {
 
 /// Apply a resolved storage to a sea-query [`ColumnDef`]. Enum columns render
 /// as the bare (unquoted) type name, byte-matching SQLAlchemy's spelling.
-fn apply_resolved_storage(col_def: &mut ColumnDef, storage: &ResolvedStorage) {
+fn apply_resolved_storage(col_def: &mut ColumnDef, storage: &ResolvedStorage, dialect: Dialect) {
     match storage {
-        ResolvedStorage::Scalar(canonical) => apply_canonical_type(col_def, *canonical),
+        ResolvedStorage::Scalar(canonical) => {
+            apply_canonical_type_for(col_def, *canonical, dialect)
+        }
         ResolvedStorage::PgEnum { type_name, .. } => {
             col_def.custom(Alias::new(type_name));
         }
@@ -130,9 +132,8 @@ pub fn render_create_table(
 
     let mut pre_create_sqls: Vec<String> = Vec::new();
     for col in &model.columns {
-        let storage = resolve_column_storage(col, ld).map_err(|message| EmissionError {
-            message,
-        })?;
+        let storage =
+            resolve_column_storage(col, ld).map_err(|message| EmissionError { message })?;
         if let ResolvedStorage::PgEnum { type_name, labels } = &storage {
             let guard = render_pg_enum_create_type(type_name, labels);
             if !pre_create_sqls.contains(&guard) {
@@ -140,13 +141,17 @@ pub fn render_create_table(
             }
         }
         let mut col_def = ColumnDef::new(Alias::new(&col.name));
-        apply_resolved_storage(&mut col_def, &storage);
+        apply_resolved_storage(&mut col_def, &storage, ld);
         if col.primary_key {
             col_def.primary_key();
             if col.autoincrement {
                 col_def.auto_increment();
             }
         }
+        // PK columns get an explicit NOT NULL (the compiler clamps their IR
+        // nullability to false): Postgres implies it anyway, but SQLite's
+        // PRAGMA reports an INTEGER PRIMARY KEY as nullable without the
+        // keyword, which reads back as a phantom nullability diff (FF-B B5).
         if !col.nullable {
             col_def.not_null();
         }
@@ -358,7 +363,7 @@ fn emit_add_column(
     };
 
     let mut col_def = ColumnDef::new(Alias::new(column));
-    apply_resolved_storage(&mut col_def, &storage);
+    apply_resolved_storage(&mut col_def, &storage, ld);
     if !col.nullable {
         col_def.not_null();
     }
@@ -473,14 +478,10 @@ fn emit_alter_column_type(
             if old_col.primary_key || new_col.primary_key {
                 return Ok(result);
             }
-            let new_storage = resolve_column_storage(new_col, ld).map_err(|message| {
-                EmissionError {
-                    message: format!(
-                        "Cannot alter type for '{}.{}': {}",
-                        table, column, message
-                    ),
-                }
-            })?;
+            let new_storage =
+                resolve_column_storage(new_col, ld).map_err(|message| EmissionError {
+                    message: format!("Cannot alter type for '{}.{}': {}", table, column, message),
+                })?;
             // Refusal rails (#154 generalized): a conversion that could
             // reinterpret or destroy stored values warns and skips — never a
             // silent ALTER (FF-B B1/B2).
@@ -491,12 +492,14 @@ fn emit_alter_column_type(
                         (type_name.clone(), old_db_type.clone())
                     }
                     ResolvedStorage::Scalar(new_c) => {
-                        let old_canonical = canonical_from_schema_column(old_col, ld)
-                            .map_err(|message| EmissionError {
-                                message: format!(
-                                    "Cannot alter type for '{}.{}': {}",
-                                    table, column, message
-                                ),
+                        let old_canonical =
+                            canonical_from_schema_column(old_col, ld).map_err(|message| {
+                                EmissionError {
+                                    message: format!(
+                                        "Cannot alter type for '{}.{}': {}",
+                                        table, column, message
+                                    ),
+                                }
                             })?;
                         (
                             pg_alter_type_target(*new_c),

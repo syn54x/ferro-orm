@@ -9,8 +9,17 @@ related_files:
 related_issues: [32]
 related_prs: [36]
 captured: 2026-04-28
-status: tracked
+status: resolved
+resolved: 2026-07-02
 ---
+
+> **Resolved by FF-B B5.** The IR compiler now clamps PK columns to
+> `nullable: false` (`src/ferro/ir/compiler.py::_column_ir` — PK columns are
+> NOT NULL by SQL semantics; the Optional annotation only serves the
+> autoincrement-default ergonomics), and the Rust emitter emits an explicit
+> `NOT NULL` on PK columns so SQLite's PRAGMA reflection agrees too. The
+> `_is_pk_nullable_relaxation` sentinel filter is deleted. Kept for the
+> historical analysis below.
 
 ## Problem
 

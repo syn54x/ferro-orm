@@ -15,7 +15,7 @@
 
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
-    Dialect, ResolvedStorage, apply_canonical_type, canonical_from_schema_column,
+    Dialect, ResolvedStorage, apply_canonical_type_for, canonical_from_schema_column,
     canonical_to_db_type_token, fk_action_sql, fk_name, information_schema_to_db_type_token,
     pg_alter_type_target, refused_conversion, refused_conversion_warning,
     render_pg_enum_create_type, single_unique_index_name, sqlite_declared_type,
@@ -473,7 +473,9 @@ fn plan_missing_column(
 
     let mut col_def = ColumnDef::new(Alias::new(col_name));
     match &col_plan.storage {
-        ResolvedStorage::Scalar(canonical) => apply_canonical_type(&mut col_def, *canonical),
+        ResolvedStorage::Scalar(canonical) => {
+            apply_canonical_type_for(&mut col_def, *canonical, backend)
+        }
         ResolvedStorage::PgEnum { type_name, labels } => {
             // The enum type must exist first (idempotent guard), byte-matching
             // the IR emitter (shadow comparator).
@@ -1453,9 +1455,10 @@ mod tests {
         ];
         let plan =
             plan_with_ir_legacy_parity("invoice", &schema, &live_cols, &[], Dialect::Sqlite, UPDATES);
-        // db_type "date" renders date_text on SQLite — identical to CREATE TABLE.
+        // db_type "date" renders the SQLAlchemy-compatible DATE spelling on
+        // SQLite (FF-B B5) — identical to CREATE TABLE.
         assert!(
-            plan.statements[0].contains("date_text"),
+            plan.statements[0].contains("\"paid_date\" DATE"),
             "{}",
             plan.statements[0]
         );

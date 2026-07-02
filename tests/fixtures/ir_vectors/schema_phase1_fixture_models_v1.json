@@ -26,7 +26,7 @@
             {
               "name": "id",
               "logical_type": "integer",
-              "nullable": true,
+              "nullable": false,
               "primary_key": true,
               "autoincrement": true,
               "unique": false,
@@ -70,6 +70,13 @@
               "columns": [
                 "email"
               ]
+            },
+            {
+              "name": "uq_member_email_org_id",
+              "columns": [
+                "email",
+                "org_id"
+              ]
             }
           ],
           "checks": []
@@ -79,9 +86,53 @@
           "table_name": "org",
           "columns": [
             {
+              "name": "avatar",
+              "logical_type": "binary",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": "binary"
+            },
+            {
+              "name": "balance",
+              "logical_type": "decimal",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": "decimal"
+            },
+            {
+              "name": "created_at",
+              "logical_type": "datetime",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": "date-time"
+            },
+            {
+              "name": "founded",
+              "logical_type": "date",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": "date"
+            },
+            {
               "name": "id",
               "logical_type": "integer",
-              "nullable": true,
+              "nullable": false,
               "primary_key": true,
               "autoincrement": true,
               "unique": false,
@@ -101,6 +152,55 @@
               "format": null
             },
             {
+              "name": "opens_at",
+              "logical_type": "time",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": "time"
+            },
+            {
+              "name": "role",
+              "logical_type": "string",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null,
+              "enum_values": [
+                "admin",
+                "member"
+              ],
+              "enum_type_name": "orgrole"
+            },
+            {
+              "name": "score",
+              "logical_type": "number",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "settings",
+              "logical_type": "json",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
               "name": "slug",
               "logical_type": "string",
               "nullable": false,
@@ -110,6 +210,17 @@
               "index": false,
               "default": null,
               "format": null
+            },
+            {
+              "name": "token",
+              "logical_type": "uuid",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": "uuid"
             }
           ],
           "foreign_keys": [],
@@ -139,7 +250,7 @@
             {
               "name": "id",
               "logical_type": "integer",
-              "nullable": true,
+              "nullable": false,
               "primary_key": true,
               "autoincrement": true,
               "unique": false,
@@ -202,5 +313,5 @@
       ]
     }
   },
-  "fingerprint": "aafcfe76d373bbce78092eb728456ddc7ff1d6a6f3ac647514e210bc84af143e"
+  "fingerprint": "6549a096b589c7412286720ede7921b38bb1976642e778815fd52ecaec7f72b8"
 }

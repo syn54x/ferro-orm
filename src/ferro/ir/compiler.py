@@ -161,7 +161,11 @@ def _column_ir(
     column_ir = {
         "name": col_name,
         "logical_type": _logical_type(col_info),
-        "nullable": _is_nullable(col_name, col_info, required_fields),
+        # PK columns are NOT NULL by SQL semantics regardless of an Optional
+        # annotation (used only for the autoincrement-default ergonomics);
+        # clamping here keeps the IR truthful so the Alembic bridge and the
+        # Rust emitter agree without per-consumer special cases (FF-B B5).
+        "nullable": False if is_pk else _is_nullable(col_name, col_info, required_fields),
         "primary_key": is_pk,
         # A primary key auto-increments by default unless the field explicitly
         # disables it (e.g. a uuid PK sets autoincrement=False). Mirrors the

@@ -127,16 +127,16 @@ fn ir_col(
 /// FK metadata) were captured from `compile_schema_ir_payload` on the real
 /// Ferro models — see `.superpowers/sdd/capture_ground_truth.py`.
 fn create_path_golden_fixture() -> Vec<SchemaModel> {
-    // The IR emits Optional[int] PKs as nullable=true (the runtime drops NOT NULL
-    // for an autoincrement PK regardless); mirror that so the golden byte-matches.
+    // The compiler clamps PK nullability to false (FF-B B5); the emitter skips
+    // NOT NULL on PK columns either way, so the golden bytes are unchanged.
     let organization = schema_model(
         "organization",
         vec![
             SchemaColumn {
                 primary_key: true,
                 autoincrement: true,
-                nullable: true,
-                ..ir_col("id", "integer", None, true, false, false)
+                nullable: false,
+                ..ir_col("id", "integer", None, false, false, false)
             },
             col("name", "varchar", false),
         ],
@@ -160,12 +160,11 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
             ir_col("birth_date", "date", Some("date"), false, false, false),
             ir_col("created_at", "datetime", Some("date-time"), false, false, false),
             ir_col("email", "string", None, false, false, true),
-            // PK id: nullable=true mirrors the IR (Optional[int] PK).
             SchemaColumn {
                 primary_key: true,
                 autoincrement: true,
-                nullable: true,
-                ..ir_col("id", "integer", None, true, false, false)
+                nullable: false,
+                ..ir_col("id", "integer", None, false, false, false)
             },
             ir_col("metadata_blob", "json", None, false, false, false),
             ir_col("org_id", "integer", None, false, false, false),
@@ -229,11 +228,11 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
 // `.superpowers/sdd/capture_ground_truth.py`. The new IR-driven
 // `render_create_table` must match these byte-for-byte.
 const ORG_CREATE_SQLITE: &str =
-    "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" integer PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )";
+    "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )";
 const ORG_CREATE_POSTGRES: &str =
-    "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" serial PRIMARY KEY, \"name\" varchar NOT NULL )";
-const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" real NOT NULL, \"birth_date\" date_text NOT NULL, \"created_at\" timestamp_with_timezone_text NOT NULL, \"email\" varchar NOT NULL, \"id\" integer PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" json_text NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid_text NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" time_text NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
-const ACCOUNT_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" bytea NOT NULL, \"balance\" decimal NOT NULL, \"birth_date\" date NOT NULL, \"created_at\" timestamp with time zone NOT NULL, \"email\" varchar NOT NULL, \"id\" serial PRIMARY KEY, \"metadata_blob\" json NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" time NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
+    "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" serial PRIMARY KEY NOT NULL, \"name\" varchar NOT NULL )";
+const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" NUMERIC NOT NULL, \"birth_date\" DATE NOT NULL, \"created_at\" DATETIME NOT NULL, \"email\" varchar NOT NULL, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" JSON NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" CHAR(32) NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" TIME NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
+const ACCOUNT_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" bytea NOT NULL, \"balance\" decimal NOT NULL, \"birth_date\" date NOT NULL, \"created_at\" timestamp with time zone NOT NULL, \"email\" varchar NOT NULL, \"id\" serial PRIMARY KEY NOT NULL, \"metadata_blob\" json NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" time NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
 
 fn assert_no_comment_placeholders(statements: &[String]) {
     for sql in statements {
@@ -796,7 +795,8 @@ fn emit_sql_canonical_db_type_spelling() {
     use ferro_ddl_lowering::{db_type_token_to_canonical, sqlite_declared_type, CanonicalType, Dialect};
     let canonical = db_type_token_to_canonical("date", Dialect::Sqlite).unwrap();
     assert_eq!(canonical, CanonicalType::Date);
-    assert_eq!(sqlite_declared_type(canonical), "date_text");
+    // SQLAlchemy-compatible SQLite spelling (FF-B B5).
+    assert_eq!(sqlite_declared_type(canonical), "DATE");
 }
 
 #[test]
