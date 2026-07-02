@@ -205,10 +205,13 @@ finally gets its runtime consumer.
       directly (registry holds the enum class or Python converts via a single
       plan-driven hook). Removes the partial-coverage, `except Exception: pass`
       Python post-pass from every fetch (I-6).
-- [ ] **C5 — Benchmarks.**
+- [x] **C5 — Benchmarks.**
       A small pinned benchmark suite (save, filtered fetch ×10k rows, both
       backends) run before/after C1–C3 so the "high-performance core" claim is
       measured, and future regressions on the hot path are visible.
+      Landed in `benchmarks/` (single/bulk save + filtered fetch ×10k, SQLite +
+      Postgres, rich-type fixture; `just bench` runner, checked-in per-backend
+      baselines, `benchmarks/compare.py` for before/after deltas).
 
 **Exit gate**
 
