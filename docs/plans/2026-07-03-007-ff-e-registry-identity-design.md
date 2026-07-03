@@ -62,6 +62,19 @@ encode this contract explicitly: same-identity redefinition is allowed and
 the second definition wins; a companion test asserts two distinct models →
 one table is a definition-time error naming both.
 
+**Test-suite consequence (part of this change, not incidental fallout):**
+the suite currently never isolates the global registry — function-local test
+models accumulate in `_MODEL_REGISTRY_PY` for the whole session, so dozens of
+same-named local models (28 `Doc`s, 11 `User`s, …) would collide at
+definition once detection lands. The per-file snapshot/restore fixtures some
+files already carry become a **global autouse fixture in `tests/conftest.py`**
+(snapshot/restore `_MODEL_REGISTRY_PY`, `_PENDING_RELATIONS`,
+`_JOIN_TABLE_REGISTRY`), which preserves module-scope models (they are in
+the baseline snapshot) while function-local models no longer leak across
+tests. The three module-scope duplicate names across test files (`User`,
+`Post`, `Product`) are renamed — they are exactly the F9 silent-clobber
+pattern the epic exists to make loud.
+
 Additionally, `resolve_relationships` raises if a computed M2M join-table
 name collides with a registered model's table (derived-name edge; loud
 beats a silent wrong-table CREATE).
