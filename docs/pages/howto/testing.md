@@ -12,7 +12,7 @@ Put two fixtures in your `conftest.py`:
 
 How this works:
 
-- **`db`** connects to a fresh in-memory SQLite database for each test. `auto_migrate=True` creates tables for every registered model, so there is no schema setup to maintain. On teardown, [`reset_engine()`](../api/connection.md) closes the pool and clears the identity map, guaranteeing no state leaks between tests.
+- **`db`** connects to a fresh in-memory SQLite database for each test and holds an [`engines.session()`](../guide/connections.md#sessions-recommended) open around the test body, so ORM calls inside the test resolve against that session without extra boilerplate. `auto_migrate=True` creates tables for every registered model, so there is no schema setup to maintain. On teardown, [`reset_engine()`](../api/connection.md) closes the pool and clears the identity map, guaranteeing no state leaks between tests.
 - **`db_transaction`** layers a [`transaction()`](../guide/transactions.md) on top. Everything inside the test shares one connection, which gives you connection affinity for the duration of the test. Use it when a test mixes ORM calls with raw SQL that must observe the same uncommitted state.
 
 Since each test gets its own database, most tests only need `db`.
@@ -138,7 +138,7 @@ import uuid
 
 import pytest
 
-from ferro import connect, execute, reset_engine
+from ferro import connect, engines, execute, reset_engine
 
 POSTGRES_URL = "postgresql://localhost:5432/app_test"
 
@@ -149,14 +149,16 @@ async def pg_db():
 
     # Create the schema with a throwaway connection
     await connect(POSTGRES_URL)
-    await execute(f'CREATE SCHEMA "{schema}"')
+    async with engines.session():
+        await execute(f'CREATE SCHEMA "{schema}"')
     reset_engine()
 
     # Reconnect with the schema as the search path
     await connect(f"{POSTGRES_URL}?ferro_search_path={schema}", auto_migrate=True)
-    yield
+    async with engines.session():
+        yield
 
-    await execute(f'DROP SCHEMA "{schema}" CASCADE')
+        await execute(f'DROP SCHEMA "{schema}" CASCADE')
     reset_engine()
 ```
 

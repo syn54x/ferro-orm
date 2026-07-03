@@ -6,14 +6,15 @@ This file is snippeted into the docs; it is not meant to be executed directly.
 # --8<-- [start:fixtures]
 import pytest
 
-from ferro import connect, reset_engine, transaction
+from ferro import connect, engines, reset_engine, transaction
 
 
 @pytest.fixture
 async def db():
     """Fresh in-memory database per test."""
     await connect("sqlite::memory:", auto_migrate=True)
-    yield
+    async with engines.session():
+        yield
     reset_engine()
 
 

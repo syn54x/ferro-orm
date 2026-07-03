@@ -22,7 +22,7 @@ Without an identity map, two queries that return the same row give you two disco
 === "Assignment"
 
     ```python
-    from ferro import Field, Model, connect
+    from ferro import Field, Model, connect, engines
 
 
     class User(Model):
@@ -33,17 +33,19 @@ Without an identity map, two queries that return the same row give you two disco
 
     await connect("sqlite::memory:", auto_migrate=True)
 
-    created = await User.create(username="alice", email="alice@example.com")
-    fetched = await User.get(created.id)
-    filtered = await User.where(lambda t: t.username == "alice").first()
+    async with engines.session():
 
-    # One row, one instance.
-    assert fetched is created
-    assert filtered is created
+        created = await User.create(username="alice", email="alice@example.com")
+        fetched = await User.get(created.id)
+        filtered = await User.where(lambda t: t.username == "alice").first()
 
-    # A change made through any reference is visible through all of them.
-    fetched.email = "new@example.com"
-    assert created.email == "new@example.com"
+        # One row, one instance.
+        assert fetched is created
+        assert filtered is created
+
+        # A change made through any reference is visible through all of them.
+        fetched.email = "new@example.com"
+        assert created.email == "new@example.com"
     ```
 
 === "Annotated"
@@ -51,7 +53,7 @@ Without an identity map, two queries that return the same row give you two disco
     ```python
     from typing import Annotated
 
-    from ferro import Field, Model, connect
+    from ferro import Field, Model, connect, engines
 
 
     class User(Model):
@@ -62,17 +64,19 @@ Without an identity map, two queries that return the same row give you two disco
 
     await connect("sqlite::memory:", auto_migrate=True)
 
-    created = await User.create(username="alice", email="alice@example.com")
-    fetched = await User.get(created.id)
-    filtered = await User.where(lambda t: t.username == "alice").first()
+    async with engines.session():
 
-    # One row, one instance.
-    assert fetched is created
-    assert filtered is created
+        created = await User.create(username="alice", email="alice@example.com")
+        fetched = await User.get(created.id)
+        filtered = await User.where(lambda t: t.username == "alice").first()
 
-    # A change made through any reference is visible through all of them.
-    fetched.email = "new@example.com"
-    assert created.email == "new@example.com"
+        # One row, one instance.
+        assert fetched is created
+        assert filtered is created
+
+        # A change made through any reference is visible through all of them.
+        fetched.email = "new@example.com"
+        assert created.email == "new@example.com"
     ```
 
 This guarantee holds within one process and one connection. It does **not** synchronize across processes — if another process (or another tool entirely) updates the database, your cached instance is stale until you refresh or evict it.
@@ -134,13 +138,14 @@ Because the map persists for the lifetime of a connection, tests that share a pr
 ```python
 import pytest
 
-from ferro import connect, reset_engine
+from ferro import connect, engines, reset_engine
 
 
 @pytest.fixture
 async def db():
     await connect("sqlite::memory:", auto_migrate=True)
-    yield
+    async with engines.session():
+        yield
     reset_engine()
 ```
 
