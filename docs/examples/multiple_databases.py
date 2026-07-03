@@ -21,12 +21,12 @@ async def main() -> None:
     async with engines.session():
         # Writes go to the default ("app") connection unless routed
         await Metric.create(name="signups", value=1)
-
-        # Route reads and writes to a named connection with .using()
-        await Metric.using("analytics").create(name="page_views", value=100)
-
         app_metrics = await Metric.all()
-        analytics_metrics = await Metric.using("analytics").all()
+
+    # Route reads and writes to a named connection with .using() — this
+    # doesn't need a session; a `using=` call is its own explicit route
+    await Metric.using("analytics").create(name="page_views", value=100)
+    analytics_metrics = await Metric.using("analytics").all()
     # --8<-- [end:routing]
     assert len(app_metrics) == 1
     assert len(analytics_metrics) == 1

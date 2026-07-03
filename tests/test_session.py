@@ -44,11 +44,9 @@ async def test_session_query_api_routes_to_bound_connection(tmp_path):
     assert fetched is not None
     assert fetched.label == "analytics"
 
-    with pytest.warns(
-        DeprecationWarning, match="Implicit default-connection routing.*v0\\.14\\.0"
-    ):
-        default_rows = await SessionMarker.all()
-    assert default_rows == []
+    # No ambient session and no explicit `using=`/`session=`: no route (D4).
+    with pytest.raises(RuntimeError, match="No database route"):
+        await SessionMarker.all()
 
 
 @pytest.mark.asyncio
@@ -115,22 +113,16 @@ async def test_unnamed_session_binds_default_connection(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_legacy_unqualified_operation_warns(tmp_path):
+async def test_unqualified_operation_without_session_raises(tmp_path):
+    """No ambient session, no `using=`/`session=`: no route (D4)."""
     app_db = tmp_path / "app.db"
     await ferro.connect(f"sqlite:{app_db}?mode=rwc", name="app", default=True)
     await ferro.create_tables()
 
-    with pytest.warns(
-        DeprecationWarning, match="Implicit default-connection routing.*v0\\.14\\.0"
-    ):
-        created = await SessionMarker.create(id=10, label="legacy")
-    with pytest.warns(
-        DeprecationWarning, match="Implicit default-connection routing.*v0\\.14\\.0"
-    ):
-        loaded = await SessionMarker.get(10)
-
-    assert created.id == 10
-    assert loaded.label == "legacy"
+    with pytest.raises(RuntimeError, match="No database route"):
+        await SessionMarker.create(id=10, label="legacy")
+    with pytest.raises(RuntimeError, match="No database route"):
+        await SessionMarker.get(10)
 
 
 @pytest.mark.asyncio
@@ -337,6 +329,10 @@ async def test_same_context_outer_close_after_inner_cross_context_close_raises(
 
 @pytest.mark.asyncio
 async def test_stale_ambient_with_using_still_raises_session_closed(tmp_path):
+    """A closed ambient session still blocks operations whose `using=`
+    matches its connection — the D4 conflict check only fires on a
+    mismatch, so a matching `using=` reaches the closed-session guard.
+    """
     app_db = tmp_path / "app.db"
     analytics_db = tmp_path / "analytics.db"
 
@@ -354,7 +350,7 @@ async def test_stale_ambient_with_using_still_raises_session_closed(tmp_path):
     await asyncio.create_task(close_session())
 
     with pytest.raises(RuntimeError, match="Session is closed.*Open a new session"):
-        await SessionMarker.all(using="analytics")
+        await SessionMarker.all(using="app")
 
 
 @pytest.mark.asyncio

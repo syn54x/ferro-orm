@@ -68,9 +68,7 @@ def _field_eq(field_name: str, value: Any) -> Predicate[Any]:
 def _transaction_or_using(
     using: str | None, session: "Session | None"
 ) -> tuple[str | None, str | None, str | None]:
-    return resolve_operation_scope(
-        using=using, session=session, allow_legacy_default=True
-    )
+    return resolve_operation_scope(using=using, session=session)
 
 
 def _instance_transaction_route(
@@ -80,13 +78,14 @@ def _instance_transaction_route(
     if using is not None and origin is not None and using != origin:
         raise ValueError("Instance is already bound to a different connection")
 
-    tx_id, route_using, session_id = _transaction_or_using(using, session)
+    # Origin is the instance's implicit route (FF-D D4): it participates in
+    # session-conflict checks instead of silently bypassing the session.
+    tx_id, route_using, session_id = _transaction_or_using(using or origin, session)
     if tx_id is not None:
         tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
         return tx_id, route_using, origin or tx_connection, session_id
 
-    effective_using = route_using or origin
-    return None, effective_using, effective_using, session_id
+    return None, route_using, route_using, session_id
 
 
 def _instance_origin(instance: object) -> str | None:
@@ -126,7 +125,7 @@ async def transaction(using: str | None = None, *, session: "Session | None" = N
     from .raw import Transaction
 
     parent_tx_id, effective_using, session_id = resolve_transaction_scope(
-        using=using, session=session, allow_legacy_default=True
+        using=using, session=session
     )
     tx_id = await begin_transaction(parent_tx_id, effective_using, session_id=session_id)
     connection_name = transaction_connection_name(tx_id, session_id=session_id)

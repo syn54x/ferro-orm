@@ -6,7 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Annotated
 
-from ferro import Field, Model, connect
+from ferro import Field, Model, connect, engines
 
 
 def utcnow() -> datetime:
@@ -36,12 +36,13 @@ class Note(TimestampMixin, Model):
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
-    note = await Note.create(text="first draft")
-    original = note.updated_at
+    async with engines.session():
+        note = await Note.create(text="first draft")
+        original = note.updated_at
 
-    note.text = "second draft"
-    await note.save()
-    assert note.updated_at > original
+        note.text = "second draft"
+        await note.save()
+        assert note.updated_at > original
 
     print("timestamps_annotated example ran successfully")
 

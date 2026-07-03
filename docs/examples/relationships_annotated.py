@@ -9,7 +9,7 @@ are always assignments.
 import asyncio
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation, connect
+from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation, connect, engines
 
 
 # --8<-- [start:one-to-many]
@@ -80,26 +80,27 @@ class Document(Model):
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
-    team = await Team.create(name="Rustaceans")
-    player = await Player.create(name="Ferris", team=team)
-    assert (await player.team).id == team.id
+    async with engines.session():
+        team = await Team.create(name="Rustaceans")
+        player = await Player.create(name="Ferris", team=team)
+        assert (await player.team).id == team.id
 
-    user = await User.create(username="alice")
-    await Profile.create(bio="Pythonista", user=user)
-    assert (await user.profile).bio == "Pythonista"
+        user = await User.create(username="alice")
+        await Profile.create(bio="Pythonista", user=user)
+        assert (await user.profile).bio == "Pythonista"
 
-    sam = await Student.create(name="Sam")
-    rust101 = await Course.create(title="Rust 101")
-    await sam.courses.add(rust101)
-    assert len(await sam.courses.all()) == 1
+        sam = await Student.create(name="Sam")
+        rust101 = await Course.create(title="Rust 101")
+        await sam.courses.add(rust101)
+        assert len(await sam.courses.all()) == 1
 
-    boss = await Employee.create(name="Grace")
-    dev = await Employee.create(name="Linus", manager=boss)
-    assert (await dev.manager).name == "Grace"
+        boss = await Employee.create(name="Grace")
+        dev = await Employee.create(name="Linus", manager=boss)
+        assert (await dev.manager).name == "Grace"
 
-    lib = await Library.create(name="Main")
-    await Document.create(title="Charter", library=lib)
-    assert len(await lib.documents.all()) == 1
+        lib = await Library.create(name="Main")
+        await Document.create(title="Charter", library=lib)
+        assert len(await lib.documents.all()) == 1
 
     print("relationships_annotated example ran successfully")
 

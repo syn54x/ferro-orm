@@ -5,7 +5,7 @@ import asyncio
 # --8<-- [start:model]
 from datetime import UTC, datetime
 
-from ferro import Field, Model, connect
+from ferro import Field, Model, connect, engines
 
 
 def utcnow() -> datetime:
@@ -35,16 +35,17 @@ class Note(TimestampMixin, Model):
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
-    # --8<-- [start:usage]
-    note = await Note.create(text="first draft")
-    original = note.updated_at
+    async with engines.session():
+        # --8<-- [start:usage]
+        note = await Note.create(text="first draft")
+        original = note.updated_at
 
-    note.text = "second draft"
-    await note.save()
+        note.text = "second draft"
+        await note.save()
 
-    assert note.updated_at > original
-    assert note.created_at <= note.updated_at
-    # --8<-- [end:usage]
+        assert note.updated_at > original
+        assert note.created_at <= note.updated_at
+        # --8<-- [end:usage]
 
     print("timestamps example ran successfully")
 

@@ -3,7 +3,7 @@
 import asyncio
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation, connect
+from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation, connect, engines
 
 
 # --8<-- [start:one-to-many]
@@ -74,52 +74,53 @@ class Document(Model):
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
-    # --8<-- [start:one-to-many-usage]
-    team = await Team.create(name="Rustaceans")
-    crab = await Player.create(name="Ferris", team=team)
+    async with engines.session():
+        # --8<-- [start:one-to-many-usage]
+        team = await Team.create(name="Rustaceans")
+        crab = await Player.create(name="Ferris", team=team)
 
-    # Forward: awaiting the FK field loads the related instance
-    assert (await crab.team).name == "Rustaceans"
+        # Forward: awaiting the FK field loads the related instance
+        assert (await crab.team).name == "Rustaceans"
 
-    # The shadow column is available for direct reads and filters
-    assert crab.team_id == team.id
+        # The shadow column is available for direct reads and filters
+        assert crab.team_id == team.id
 
-    # Reverse: the BackRef is a chainable query
-    roster = await team.members.order_by(Player.name).all()
-    # --8<-- [end:one-to-many-usage]
-    assert len(roster) == 1
+        # Reverse: the BackRef is a chainable query
+        roster = await team.members.order_by(Player.name).all()
+        # --8<-- [end:one-to-many-usage]
+        assert len(roster) == 1
 
-    # --8<-- [start:one-to-one-usage]
-    user = await User.create(username="alice")
-    await Profile.create(bio="Pythonista", user=user)
+        # --8<-- [start:one-to-one-usage]
+        user = await User.create(username="alice")
+        await Profile.create(bio="Pythonista", user=user)
 
-    profile = await user.profile  # single instance, not a list
-    # --8<-- [end:one-to-one-usage]
-    assert profile.bio == "Pythonista"
+        profile = await user.profile  # single instance, not a list
+        # --8<-- [end:one-to-one-usage]
+        assert profile.bio == "Pythonista"
 
-    # --8<-- [start:m2m-usage]
-    sam = await Student.create(name="Sam")
-    rust101 = await Course.create(title="Rust 101")
-    python201 = await Course.create(title="Python 201")
+        # --8<-- [start:m2m-usage]
+        sam = await Student.create(name="Sam")
+        rust101 = await Course.create(title="Rust 101")
+        python201 = await Course.create(title="Python 201")
 
-    await sam.courses.add(rust101, python201)
-    assert len(await sam.courses.all()) == 2
+        await sam.courses.add(rust101, python201)
+        assert len(await sam.courses.all()) == 2
 
-    # The reverse side works the same way
-    assert len(await rust101.students.all()) == 1
+        # The reverse side works the same way
+        assert len(await rust101.students.all()) == 1
 
-    await sam.courses.remove(python201)
-    await sam.courses.clear()
-    # --8<-- [end:m2m-usage]
-    assert len(await sam.courses.all()) == 0
+        await sam.courses.remove(python201)
+        await sam.courses.clear()
+        # --8<-- [end:m2m-usage]
+        assert len(await sam.courses.all()) == 0
 
-    # --8<-- [start:self-referential-usage]
-    boss = await Employee.create(name="Grace")
-    dev = await Employee.create(name="Linus", manager=boss)
+        # --8<-- [start:self-referential-usage]
+        boss = await Employee.create(name="Grace")
+        dev = await Employee.create(name="Linus", manager=boss)
 
-    assert (await dev.manager).name == "Grace"
-    assert len(await boss.reports.all()) == 1
-    # --8<-- [end:self-referential-usage]
+        assert (await dev.manager).name == "Grace"
+        assert len(await boss.reports.all()) == 1
+        # --8<-- [end:self-referential-usage]
 
     print("relationships example ran successfully")
 

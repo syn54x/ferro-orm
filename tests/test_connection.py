@@ -134,12 +134,13 @@ async def test_model_using_routes_create_and_query_to_named_connection(tmp_path)
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    async with ferro.engines.session():
-        created = await ConnectionRouteMarker.using("service").create(id=42)
-        rows = await ConnectionRouteMarker.using("service").all()
+    # `using=` is its own explicit route — no session needed (D4).
+    created = await ConnectionRouteMarker.using("service").create(id=42)
+    rows = await ConnectionRouteMarker.using("service").all()
 
-        assert created.id == 42
-        assert [row.id for row in rows] == [42]
+    assert created.id == 42
+    assert [row.id for row in rows] == [42]
+    async with ferro.engines.session():
         assert await ConnectionRouteMarker.all() == []
 
 
@@ -157,24 +158,27 @@ async def test_model_using_routes_query_mutations_to_named_connection(tmp_path):
 
     async with ferro.engines.session():
         await ConnectionRouteMarker.create(id=100, label="app")
-        await ConnectionRouteMarker.using("service").create(id=1, label="service")
-        await ConnectionRouteMarker.using("service").create(id=2, label="service-delete")
 
-        service_query = ConnectionRouteMarker.using("service")
+    # `using=` is its own explicit route — no session needed (D4).
+    await ConnectionRouteMarker.using("service").create(id=1, label="service")
+    await ConnectionRouteMarker.using("service").create(id=2, label="service-delete")
 
-        assert await service_query.select().count() == 2
-        assert await service_query.where(ConnectionRouteMarker.label == "service").exists()
+    service_query = ConnectionRouteMarker.using("service")
 
-        updated = await service_query.where(ConnectionRouteMarker.id == 1).update(
-            label="service-updated"
-        )
-        deleted = await service_query.where(ConnectionRouteMarker.id == 2).delete()
+    assert await service_query.select().count() == 2
+    assert await service_query.where(ConnectionRouteMarker.label == "service").exists()
 
-        assert updated == 1
-        assert deleted == 1
-        assert [(row.id, row.label) for row in await service_query.all()] == [
-            (1, "service-updated")
-        ]
+    updated = await service_query.where(ConnectionRouteMarker.id == 1).update(
+        label="service-updated"
+    )
+    deleted = await service_query.where(ConnectionRouteMarker.id == 2).delete()
+
+    assert updated == 1
+    assert deleted == 1
+    assert [(row.id, row.label) for row in await service_query.all()] == [
+        (1, "service-updated")
+    ]
+    async with ferro.engines.session():
         assert [(row.id, row.label) for row in await ConnectionRouteMarker.all()] == [
             (100, "app")
         ]
@@ -194,31 +198,32 @@ async def test_model_using_routes_helper_writes_to_named_connection(tmp_path):
 
     service_model = ConnectionRouteMarker.using("service")
 
-    async with ferro.engines.session():
-        inserted = await service_model.bulk_create(
-            [ConnectionRouteMarker(id=10, label="bulk")]
-        )
-        created_row, created = await service_model.get_or_create(
-            defaults={"label": "created"}, id=11
-        )
-        updated_row, updated_created = await service_model.update_or_create(
-            defaults={"label": "updated"}, id=10
-        )
+    # `using=` is its own explicit route — no session needed (D4).
+    inserted = await service_model.bulk_create(
+        [ConnectionRouteMarker(id=10, label="bulk")]
+    )
+    created_row, created = await service_model.get_or_create(
+        defaults={"label": "created"}, id=11
+    )
+    updated_row, updated_created = await service_model.update_or_create(
+        defaults={"label": "updated"}, id=10
+    )
 
-        assert inserted == 1
-        assert created is True
-        assert created_row.label == "created"
-        assert updated_created is False
-        assert updated_row.label == "updated"
-        assert [
-            (row.id, row.label)
-            for row in await service_model.select()
-            .order_by(ConnectionRouteMarker.id)
-            .all()
-        ] == [
-            (10, "updated"),
-            (11, "created"),
-        ]
+    assert inserted == 1
+    assert created is True
+    assert created_row.label == "created"
+    assert updated_created is False
+    assert updated_row.label == "updated"
+    assert [
+        (row.id, row.label)
+        for row in await service_model.select()
+        .order_by(ConnectionRouteMarker.id)
+        .all()
+    ] == [
+        (10, "updated"),
+        (11, "created"),
+    ]
+    async with ferro.engines.session():
         assert await ConnectionRouteMarker.all() == []
 
 
@@ -517,7 +522,7 @@ async def test_unqualified_operation_requires_default_connection(tmp_path):
 
     await ferro.connect(f"sqlite:{db_file}?mode=rwc", name="app")
 
-    with pytest.raises(ferro.InterfaceError, match="No default connection selected"):
+    with pytest.raises(RuntimeError, match="No database route"):
         await ferro.execute("SELECT 1")
 
 

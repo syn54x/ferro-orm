@@ -71,9 +71,7 @@ def _check_sql(sql: str) -> None:
 def _transaction_or_using(
     using: str | None, session: Any | None
 ) -> tuple[str | None, str | None, str | None]:
-    return resolve_operation_scope(
-        using=using, session=session, allow_legacy_default=True
-    )
+    return resolve_operation_scope(using=using, session=session)
 
 
 async def execute(

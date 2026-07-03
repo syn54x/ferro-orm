@@ -344,11 +344,15 @@ async def test_model_connection_upsert(tmp_path):
         await ferro.create_tables(using="service")
 
         await ConnUpsertMarker.create(id=1, label="app")
-        await ConnUpsertMarker.using("service").create(id=1, label="service")
 
-        await ConnUpsertMarker.using("service").upsert(id=1, label="service-v2")
+        # `using="service"` conflicts with the ambient "app" session (D4);
+        # a nested `engines.session("service")` gives it a matching ambient.
+        async with ferro.engines.session("service"):
+            await ConnUpsertMarker.using("service").create(id=1, label="service")
+            await ConnUpsertMarker.using("service").upsert(id=1, label="service-v2")
 
         app_row = await ConnUpsertMarker.get(1)
-        service_row = await ConnUpsertMarker.using("service").get(1)
+        async with ferro.engines.session("service"):
+            service_row = await ConnUpsertMarker.using("service").get(1)
         assert app_row.label == "app"
         assert service_row.label == "service-v2"

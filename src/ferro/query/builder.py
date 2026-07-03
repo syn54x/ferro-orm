@@ -112,9 +112,7 @@ class Query(Generic[T]):
     def _transaction_or_using(self) -> tuple[str | None, str | None, str | None]:
         from ..state import resolve_operation_scope
 
-        return resolve_operation_scope(
-            using=self._using, session=self._session, allow_legacy_default=True
-        )
+        return resolve_operation_scope(using=self._using, session=self._session)
 
     def _m2m(
         self, join_table: str, source_col: str, target_col: str, source_id: Any
