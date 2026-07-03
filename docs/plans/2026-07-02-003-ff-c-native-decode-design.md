@@ -90,8 +90,14 @@ six call sites are deleted. No Python objects enter the static Rust registry
    every fetch path; SELECT SQL contains no `CAST(... AS text)`.
 3. Shadow-strict rerun where touched (`FERRO_SHADOW_RUNTIME=1` +
    `FERRO_SHADOW_RUNTIME_STRICT=1`).
-4. CodecIR `wire_kinds` tokens updated to the native truth where they change,
-   golden vector regenerated in the same commit (it pins the runtime table).
+4. CodecIR `wire_kinds` tokens stay unchanged (settled during
+   implementation): the vocabulary is shared by bind and fetch rules, and the
+   bind wire is still text + `CAST` on Postgres — the `*_text` tokens keep
+   describing the bind side and the SQLite fetch side truthfully. The fetch
+   side's `python_kind` contract was already the native shape
+   (`datetime.time`, `enum.Enum`) and is now actually delivered. Splitting
+   bind/fetch wire vocabularies becomes relevant only if the bind path goes
+   native (future work).
 
 ## Out of scope
 
