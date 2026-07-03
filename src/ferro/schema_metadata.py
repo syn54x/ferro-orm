@@ -66,10 +66,21 @@ def _annotation_is_decimal(hint: Any) -> bool:
 
 
 def _target_table_name(target: Any) -> str:
+    from .state import resolve_model_reference
+
     if isinstance(target, ForwardRef):
-        return target.__forward_arg__.lower()
+        target = target.__forward_arg__
     if isinstance(target, str):
+        model = resolve_model_reference(target, default=None)
+        if model is not None:
+            return model.__ferro_table__
+        # Provisional first-pass fallback for a not-yet-defined forward ref:
+        # resolve_relationships' second pass (loud since FF-E E4) re-registers
+        # with the target's real table before any DDL consumer runs.
         return target.lower()
+    table = getattr(target, "__ferro_table__", None)
+    if isinstance(table, str):
+        return table
     if hasattr(target, "__name__"):
         return target.__name__.lower()
     return str(target).lower()

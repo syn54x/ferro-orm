@@ -65,22 +65,24 @@ def resolve_relationships():
                 ),
             )
         elif isinstance(rel, ManyToManyRelation):
+            source_model = _MODEL_REGISTRY_PY[model_name]
+            source_table = source_model.__ferro_table__
+            target_table = target_model.__ferro_table__
+
             # Resolve join table
             if not rel.through:
-                # Default join table name: alphabetized model names
-                # Actually, we should probably just use source_model_field_name
-                # or similar to avoid confusion.
-                join_table = f"{model_name.lower()}_{field_name}"
+                # Default join table name: source table + field name.
+                join_table = f"{source_table}_{field_name}"
             else:
                 join_table = rel.through
 
-            source_col = f"{model_name.lower()}_id"
-            target_col = f"{target_model.__name__.lower()}_id"
+            source_col = f"{source_table}_id"
+            target_col = f"{target_table}_id"
 
             # Inject M2M descriptors into BOTH sides
             # Source -> Target
             setattr(
-                _MODEL_REGISTRY_PY[model_name],
+                source_model,
                 field_name,
                 RelationshipDescriptor(
                     target_model_name=target_model.__name__,
@@ -107,7 +109,7 @@ def resolve_relationships():
 
             # 4. Register Join Table schema with Rust
             source_schema = schema_fragment_for_pk(
-                pk_python_type_for_model(_MODEL_REGISTRY_PY[model_name])
+                pk_python_type_for_model(source_model)
             )
             target_schema = schema_fragment_for_pk(
                 pk_python_type_for_model(target_model)
@@ -118,7 +120,7 @@ def resolve_relationships():
                         **source_schema,
                         "ferro_nullable": False,
                         "foreign_key": {
-                            "to_table": model_name.lower(),
+                            "to_table": source_table,
                             "on_delete": "CASCADE",
                         },
                     },
@@ -126,7 +128,7 @@ def resolve_relationships():
                         **target_schema,
                         "ferro_nullable": False,
                         "foreign_key": {
-                            "to_table": target_model.__name__.lower(),
+                            "to_table": target_table,
                             "on_delete": "CASCADE",
                         },
                     },

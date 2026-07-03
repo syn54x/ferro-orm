@@ -9,7 +9,7 @@ Alembic bridge renders named FK constraints and standalone named unique
 indexes — the artifact shapes both emitters share.
 """
 
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, ForwardRef
 
 import pytest
 import sqlalchemy as sa
@@ -204,3 +204,112 @@ def test_metadata_single_column_index_is_named_index():
     assert member.c.org_id.index is not True
     # Nothing in the table uses SQLAlchemy's default ix_ prefix.
     assert not any(str(n).startswith("ix_") for n in index_names)
+
+
+def test_relation_to_custom_table_model_points_at_configured_table():
+    """FF-E E2 exit gate: FK to_table follows the target's __ferro_table__."""
+
+    class OrgTeam(Model):
+        __ferro_table__: ClassVar[str] = "org_teams"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        players: Relation[list["TeamPlayer"]] = BackRef()
+
+    class TeamPlayer(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        team: Annotated[OrgTeam, ForeignKey(related_name="players")]
+
+    envelope = compile_registry_schema_ir()
+    player = next(
+        m for m in envelope["payload"]["models"] if m["table_name"] == "teamplayer"
+    )
+    (fk,) = player["foreign_keys"]
+    assert fk["to_table"] == "org_teams"
+    assert fk["name"] == _ddl_fk_name("teamplayer", "team_id", "org_teams")
+
+    metadata = get_metadata()
+    fk_constraints = [
+        c
+        for c in metadata.tables["teamplayer"].constraints
+        if isinstance(c, sa.ForeignKeyConstraint)
+    ]
+    (fk_element,) = fk_constraints[0].elements
+    assert fk_element.target_fullname == "org_teams.id"
+
+
+def test_m2m_join_artifacts_follow_custom_table_names():
+    """FF-E E2 exit gate: default join table/columns derive from table names."""
+    from ferro import ManyToMany
+    from ferro.relations import resolve_relationships
+    from ferro.state import _JOIN_TABLE_REGISTRY
+
+    class WikiPage(Model):
+        __ferro_table__: ClassVar[str] = "wiki_pages"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        tags: Relation[list["WikiTag"]] = ManyToMany(related_name="pages")
+
+    class WikiTag(Model):
+        __ferro_table__: ClassVar[str] = "wiki_tags"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        pages: Relation[list[WikiPage]] = BackRef()
+
+    resolve_relationships()
+
+    assert "wiki_pages_tags" in _JOIN_TABLE_REGISTRY
+    join_schema = _JOIN_TABLE_REGISTRY["wiki_pages_tags"]
+    props = join_schema["properties"]
+    assert set(props) == {"wiki_pages_id", "wiki_tags_id"}
+    assert props["wiki_pages_id"]["foreign_key"]["to_table"] == "wiki_pages"
+    assert props["wiki_tags_id"]["foreign_key"]["to_table"] == "wiki_tags"
+
+
+def test_forward_declared_fk_to_custom_table_model_resolves_configured_table():
+    """FF-E E2: a string/ForwardRef FK target's to_table follows the target's
+    __ferro_table__ — both while the reference is still an unresolved string
+    (registry lookup via resolve_model_reference) and after
+    resolve_relationships binds it (the schema DDL consumes)."""
+    from ferro.relations import resolve_relationships
+
+    class FwdArticle(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        author: Annotated["FwdWriter", ForeignKey(related_name="articles")]
+
+    class FwdWriter(Model):
+        __ferro_table__: ClassVar[str] = "staff_writers"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        articles: Relation[list[FwdArticle]] = BackRef()
+
+    def _article_fk():
+        envelope = compile_registry_schema_ir()
+        article = next(
+            m for m in envelope["payload"]["models"] if m["table_name"] == "fwdarticle"
+        )
+        (fk,) = article["foreign_keys"]
+        return fk
+
+    # Pre-resolution: metadata.to is still the string/ForwardRef, but the
+    # target IS registered — _target_table_name's string branch must resolve
+    # it through resolve_model_reference, not lowercase the class name.
+    raw_to = FwdArticle.ferro_relations["author"].to
+    assert isinstance(raw_to, (str, ForwardRef))
+    fk = _article_fk()
+    assert fk["to_table"] == "staff_writers"
+    assert fk["name"] == _ddl_fk_name("fwdarticle", "author_id", "staff_writers")
+
+    # Post-resolution (what DDL consumes): same configured table.
+    resolve_relationships()
+    fk = _article_fk()
+    assert fk["to_table"] == "staff_writers"
+    assert fk["name"] == _ddl_fk_name("fwdarticle", "author_id", "staff_writers")
+
+
+def test_target_table_name_unresolvable_string_falls_back_to_lowercase():
+    """An unregistered forward-ref string keeps the provisional .lower()
+    fallback; resolve_relationships' loud second pass (FF-E E4) re-registers
+    with the real table before any DDL consumer runs."""
+    from ferro.schema_metadata import _target_table_name
+
+    assert _target_table_name("NotRegisteredAnywhere") == "notregisteredanywhere"
+    assert (
+        _target_table_name(ForwardRef("NotRegisteredAnywhere"))
+        == "notregisteredanywhere"
+    )
