@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from pydantic import Field
 
-from ferro import Model, connect
+from ferro import Model, connect, engines
 from ferro._core import (
     _render_create_table_sql_for_test,
     _render_migration_sql_for_test,
@@ -118,17 +118,19 @@ async def test_shadow_runtime_strict_has_no_mismatch(monkeypatch: pytest.MonkeyP
         age: int
 
     await connect(db_url, auto_migrate=True)
-    await ShadowRuntimeUser(id=1, name="alice", age=22).save()
-    await ShadowRuntimeUser(id=2, name="bob", age=17).save()
+    async with engines.session():
 
-    rows = await ShadowRuntimeUser.where(lambda t: t.age >= 18).all()
-    assert [row.name for row in rows] == ["alice"]
+        await ShadowRuntimeUser(id=1, name="alice", age=22).save()
+        await ShadowRuntimeUser(id=2, name="bob", age=17).save()
 
-    count = await ShadowRuntimeUser.where(lambda t: t.age >= 18).count()
-    assert count == 1
+        rows = await ShadowRuntimeUser.where(lambda t: t.age >= 18).all()
+        assert [row.name for row in rows] == ["alice"]
 
-    updated = await ShadowRuntimeUser.where(lambda t: t.name == "alice").update(age=23)
-    assert updated == 1
+        count = await ShadowRuntimeUser.where(lambda t: t.age >= 18).count()
+        assert count == 1
 
-    deleted = await ShadowRuntimeUser.where(lambda t: t.name == "bob").delete()
-    assert deleted == 1
+        updated = await ShadowRuntimeUser.where(lambda t: t.name == "alice").update(age=23)
+        assert updated == 1
+
+        deleted = await ShadowRuntimeUser.where(lambda t: t.name == "bob").delete()
+        assert deleted == 1

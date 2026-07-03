@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from ferro import Field, Model, connect
+from ferro import Field, Model, connect, engines
 from ferro.raw import fetch_all
 
 
@@ -32,23 +32,24 @@ async def test_str_field_with_numeric_pattern_round_trips_as_str(db_url):
         year_code: str = Field(pattern=r"^\d{4}$")
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    row = await Vehicle.create(year_code="2024")
-    assert type(row.year_code) is str
+        row = await Vehicle.create(year_code="2024")
+        assert type(row.year_code) is str
 
-    fetched = await Vehicle.get(row.id)
-    assert fetched is not None
-    assert type(fetched.year_code) is str
-    assert fetched.year_code == "2024"
+        fetched = await Vehicle.get(row.id)
+        assert fetched is not None
+        assert type(fetched.year_code) is str
+        assert fetched.year_code == "2024"
 
-    # The stored value must be the exact string — not an f64 round-trip
-    # ('2024.0') and not a numeric-cast rewrite.
-    raw = await fetch_all("SELECT year_code FROM vehicle")
-    assert raw == [{"year_code": "2024"}]
+        # The stored value must be the exact string — not an f64 round-trip
+        # ('2024.0') and not a numeric-cast rewrite.
+        raw = await fetch_all("SELECT year_code FROM vehicle")
+        assert raw == [{"year_code": "2024"}]
 
-    filtered = await Vehicle.where(lambda v: v.year_code == "2024").all()
-    assert len(filtered) == 1
-    assert type(filtered[0].year_code) is str
+        filtered = await Vehicle.where(lambda v: v.year_code == "2024").all()
+        assert len(filtered) == 1
+        assert type(filtered[0].year_code) is str
 
 
 @pytest.mark.backend_matrix
@@ -61,19 +62,20 @@ async def test_nullable_str_field_with_leading_zero_pattern_value(db_url):
         serial: str | None = Field(default=None, pattern=r"^\d{6}$")
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    row = await Part.create(serial="007207")
-    fetched = await Part.get(row.id)
-    assert fetched is not None
-    assert type(fetched.serial) is str
-    assert fetched.serial == "007207"
+        row = await Part.create(serial="007207")
+        fetched = await Part.get(row.id)
+        assert fetched is not None
+        assert type(fetched.serial) is str
+        assert fetched.serial == "007207"
 
-    # `get` can serve the identity-mapped instance; the stored value is the
-    # honest witness. Leading zeros must survive (no f64 round-trip).
-    raw = await fetch_all("SELECT serial FROM part WHERE serial IS NOT NULL")
-    assert raw == [{"serial": "007207"}]
+        # `get` can serve the identity-mapped instance; the stored value is the
+        # honest witness. Leading zeros must survive (no f64 round-trip).
+        raw = await fetch_all("SELECT serial FROM part WHERE serial IS NOT NULL")
+        assert raw == [{"serial": "007207"}]
 
-    empty = await Part.create()
-    refetched = await Part.get(empty.id)
-    assert refetched is not None
-    assert refetched.serial is None
+        empty = await Part.create()
+        refetched = await Part.get(empty.id)
+        assert refetched is not None
+        assert refetched.serial is None

@@ -1,6 +1,6 @@
 import pytest
 from typing import Annotated
-from ferro import Model, connect, FerroField
+from ferro import Model, connect, FerroField, engines
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -14,23 +14,24 @@ async def test_instance_delete(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    user = DeletableUser(username="delete_me")
-    await user.save()
-    user_id = user.id
+        user = DeletableUser(username="delete_me")
+        await user.save()
+        user_id = user.id
 
-    # Verify it exists
-    fetched = await DeletableUser.get(user_id)
-    assert fetched is not None
+        # Verify it exists
+        fetched = await DeletableUser.get(user_id)
+        assert fetched is not None
 
-    # Delete
-    await user.delete()
+        # Delete
+        await user.delete()
 
-    # Verify it's gone from DB
-    assert await DeletableUser.get_or_none(user_id) is None
+        # Verify it's gone from DB
+        assert await DeletableUser.get_or_none(user_id) is None
 
-    # Verify it's gone from Identity Map (fetching again should return None)
-    # Note: the 'user' object still exists in Python memory, but it's disconnected from the DB.
+        # Verify it's gone from Identity Map (fetching again should return None)
+        # Note: the 'user' object still exists in Python memory, but it's disconnected from the DB.
 
 
 @pytest.mark.asyncio
@@ -42,25 +43,26 @@ async def test_query_delete(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    await DeletableUser(username="keep_1").save()
-    await DeletableUser(username="delete_1").save()
-    await DeletableUser(username="delete_2").save()
-    await DeletableUser(username="keep_2").save()
+        await DeletableUser(username="keep_1").save()
+        await DeletableUser(username="delete_1").save()
+        await DeletableUser(username="delete_2").save()
+        await DeletableUser(username="keep_2").save()
 
-    # Delete matching
-    deleted_count = await DeletableUser.where(
-        DeletableUser.username == "delete_1"
-    ).delete()
-    deleted_count += await DeletableUser.where(
-        DeletableUser.username == "delete_2"
-    ).delete()
-    assert deleted_count == 2
+        # Delete matching
+        deleted_count = await DeletableUser.where(
+            DeletableUser.username == "delete_1"
+        ).delete()
+        deleted_count += await DeletableUser.where(
+            DeletableUser.username == "delete_2"
+        ).delete()
+        assert deleted_count == 2
 
-    # Verify results
-    remaining = await DeletableUser.all()
-    assert len(remaining) == 2
-    assert all("keep" in u.username for u in remaining)
+        # Verify results
+        remaining = await DeletableUser.all()
+        assert len(remaining) == 2
+        assert all("keep" in u.username for u in remaining)
 
 
 @pytest.mark.asyncio
@@ -72,16 +74,17 @@ async def test_delete_evicts_identity_map(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    user = DeletableUser(username="evict_me")
-    await user.save()
-    user_id = user.id
+        user = DeletableUser(username="evict_me")
+        await user.save()
+        user_id = user.id
 
-    # Ensure it's in IM
-    assert await DeletableUser.get(user_id) is user
+        # Ensure it's in IM
+        assert await DeletableUser.get(user_id) is user
 
-    # Delete via query
-    await DeletableUser.where(DeletableUser.id == user_id).delete()
+        # Delete via query
+        await DeletableUser.where(DeletableUser.id == user_id).delete()
 
-    # A fresh 'get' should NOT return the old 'user' object (it should be None)
-    assert await DeletableUser.get_or_none(user_id) is None
+        # A fresh 'get' should NOT return the old 'user' object (it should be None)
+        assert await DeletableUser.get_or_none(user_id) is None

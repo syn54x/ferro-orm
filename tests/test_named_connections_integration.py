@@ -73,35 +73,38 @@ async def test_named_connections_smoke_matrix_sqlite(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    app_row = await NamedSmokeMarker.create(id=1, label="app")
-    service_row = await NamedSmokeMarker.using("service").create(id=1, label="service")
+    async with ferro.engines.session():
 
-    assert app_row is not service_row
-    assert (await NamedSmokeMarker.get(1)).label == "app"
-    assert (await NamedSmokeMarker.using("service").get(1)).label == "service"
+        app_row = await NamedSmokeMarker.create(id=1, label="app")
+        service_row = await NamedSmokeMarker.using("service").create(id=1, label="service")
 
-    async with ferro.transaction(using="service"):
-        await ferro.execute(
-            "UPDATE namedsmokemarker SET label = ? WHERE id = ?",
-            "service-tx",
+        assert app_row is not service_row
+        assert (await NamedSmokeMarker.get(1)).label == "app"
+        assert (await NamedSmokeMarker.using("service").get(1)).label == "service"
+
+        async with ferro.transaction(using="service") as tx:
+            await tx.execute(
+                "UPDATE namedsmokemarker SET label = ? WHERE id = ?",
+                "service-tx",
+                1,
+            )
+
+        assert (await NamedSmokeMarker.get(1)).label == "app"
+        raw_service = await ferro.fetch_one(
+            "SELECT label FROM namedsmokemarker WHERE id = ?",
             1,
+            using="service",
         )
+        assert raw_service == {"label": "service-tx"}
+        async with ferro.engines.session("service"):
+            await service_row.refresh()
+        assert service_row.label == "service-tx"
 
-    assert (await NamedSmokeMarker.get(1)).label == "app"
-    raw_service = await ferro.fetch_one(
-        "SELECT label FROM namedsmokemarker WHERE id = ?",
-        1,
-        using="service",
-    )
-    assert raw_service == {"label": "service-tx"}
-    await service_row.refresh()
-    assert service_row.label == "service-tx"
+        from ferro._core import delete_record
 
-    from ferro._core import delete_record
-
-    assert await delete_record("NamedSmokeMarker", "1", using="service") is True
-    assert await NamedSmokeMarker.get(1) is app_row
-    assert await NamedSmokeMarker.using("service").get_or_none(1) is None
+        assert await delete_record("NamedSmokeMarker", "1", using="service") is True
+        assert await NamedSmokeMarker.get(1) is app_row
+        assert await NamedSmokeMarker.using("service").get_or_none(1) is None
 
 
 @pytest.mark.asyncio

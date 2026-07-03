@@ -4,6 +4,7 @@ from typing import Annotated
 from ferro import (
     Model,
     connect,
+    engines,
     FerroField,
     ForeignKey,
     BackRef,
@@ -40,26 +41,27 @@ async def test_one_to_one_relationship(db_url):
         user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    # 1. Create User and Profile
-    alice = await User.create(username="alice")
-    p1 = await Profile.create(bio="Alice's Bio", user=alice)
+        # 1. Create User and Profile
+        alice = await User.create(username="alice")
+        p1 = await Profile.create(bio="Alice's Bio", user=alice)
 
-    # 2. Verify reverse lookup (1:1 should return object directly)
-    # Note: RelationshipDescriptor returns query.first() which is a coroutine
-    alice_profile = await alice.profile
-    assert alice_profile is not None
-    assert alice_profile.bio == "Alice's Bio"
-    assert alice_profile.id == p1.id
+        # 2. Verify reverse lookup (1:1 should return object directly)
+        # Note: RelationshipDescriptor returns query.first() which is a coroutine
+        alice_profile = await alice.profile
+        assert alice_profile is not None
+        assert alice_profile.bio == "Alice's Bio"
+        assert alice_profile.id == p1.id
 
-    # 3. Verify forward lookup (already working)
-    p1_user = await p1.user
-    assert p1_user.username == "alice"
+        # 3. Verify forward lookup (already working)
+        p1_user = await p1.user
+        assert p1_user.username == "alice"
 
-    # 4. Verify Uniqueness Enforcement
-    with pytest.raises(Exception):
-        # Should fail because alice already has a profile
-        await Profile.create(bio="Another bio", user=alice)
+        # 4. Verify Uniqueness Enforcement
+        with pytest.raises(Exception):
+            # Should fail because alice already has a profile
+            await Profile.create(bio="Another bio", user=alice)
 
 
 @pytest.mark.asyncio

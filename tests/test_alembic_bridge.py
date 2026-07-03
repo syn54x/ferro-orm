@@ -283,7 +283,7 @@ def test_render_check_body_escapes_embedded_double_quote():
 async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
     """Runtime migrate + ORM must treat explicit ``*_id`` as the single FK column."""
 
-    from ferro import connect
+    from ferro import connect, engines
 
     class TyRoundJobRole(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -297,17 +297,18 @@ async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
         job_role_id: int | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    role = await TyRoundJobRole.create(name="ic")
-    card = await TyRoundScorecard.create(title="card-a", job_role=role)
-    assert card.job_role_id == role.id
+        role = await TyRoundJobRole.create(name="ic")
+        card = await TyRoundScorecard.create(title="card-a", job_role=role)
+        assert card.job_role_id == role.id
 
-    by_attr = await TyRoundScorecard.where(
-        TyRoundScorecard.job_role_id == role.id
-    ).first()
-    assert by_attr is not None and by_attr.id == card.id
+        by_attr = await TyRoundScorecard.where(
+            TyRoundScorecard.job_role_id == role.id
+        ).first()
+        assert by_attr is not None and by_attr.id == card.id
 
-    by_lambda = await TyRoundScorecard.where(
-        lambda s: s.job_role_id == role.id
-    ).first()
-    assert by_lambda is not None and by_lambda.id == card.id
+        by_lambda = await TyRoundScorecard.where(
+            lambda s: s.job_role_id == role.id
+        ).first()
+        assert by_lambda is not None and by_lambda.id == card.id

@@ -2,7 +2,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import FerroField, Field, Model, connect
+from ferro import FerroField, Field, Model, connect, engines
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -26,9 +26,11 @@ async def test_ferro_field_wrapper_sets_metadata_and_pydantic_schema(db_url):
     assert schema["properties"]["email"]["description"] == "Email address"
 
     await connect(db_url, auto_migrate=True)
-    user = WrappedUser(email="one@example.com")
-    await user.save()
-    assert user.id is not None
+    async with engines.session():
+
+        user = WrappedUser(email="one@example.com")
+        await user.save()
+        assert user.id is not None
 
 
 def test_assignment_and_annotation_field_patterns_equivalent_ferro_metadata():
@@ -74,9 +76,11 @@ async def test_annotation_field_pattern_persists_like_assignment(db_url):
     assert schema["properties"]["email"]["description"] == "Login email"
 
     await connect(db_url, auto_migrate=True)
-    user = AnnotatedUser(email="ann@example.com")
-    await user.save()
-    assert user.id is not None
+    async with engines.session():
+
+        user = AnnotatedUser(email="ann@example.com")
+        await user.save()
+        assert user.id is not None
 
 
 @pytest.mark.asyncio
@@ -86,11 +90,13 @@ async def test_optional_patterned_string_roundtrip(db_url):
         code: str | None = Field(default=None, pattern=r"^SKU-[0-9]+$")
 
     await connect(db_url, auto_migrate=True)
-    item = await WrappedInventory.create(code="SKU-123")
-    fetched = await WrappedInventory.get(item.id)
+    async with engines.session():
 
-    assert fetched is not None
-    assert fetched.code == "SKU-123"
+        item = await WrappedInventory.create(code="SKU-123")
+        fetched = await WrappedInventory.get(item.id)
+
+        assert fetched is not None
+        assert fetched.code == "SKU-123"
 
 
 def test_annotated_and_wrapped_ferro_field_conflict_raises():
