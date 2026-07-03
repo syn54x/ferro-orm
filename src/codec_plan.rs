@@ -561,12 +561,18 @@ mod tests {
     #[test]
     fn reregistration_rebuilds_plan() {
         let name = "EpochModel".to_string();
-        let first = crate::state::RegisteredModel::new(json!({
-            "properties": {"v": {"type": "integer"}}
-        }));
-        let second = crate::state::RegisteredModel::new(json!({
-            "properties": {"v": {"type": "string"}}
-        }));
+        let first = crate::state::RegisteredModel::new(
+            json!({
+                "properties": {"v": {"type": "integer"}}
+            }),
+            "epochmodel".to_string(),
+        );
+        let second = crate::state::RegisteredModel::new(
+            json!({
+                "properties": {"v": {"type": "string"}}
+            }),
+            "epochmodel".to_string(),
+        );
         {
             let mut registry = crate::state::MODEL_REGISTRY.write().unwrap();
             registry.insert(name.clone(), first);

@@ -160,6 +160,38 @@ def test_metadata_single_column_unique_is_named_unique_index():
     assert single_uqs == []
 
 
+def test_custom_table_name_round_trips_both_emitters():
+    """FF-E E2 exit gate: __ferro_table__ flows into the IR and both emitters."""
+    import json
+
+    from ferro._core import _render_create_table_sql_for_test
+
+    class BillingAccount(Model):
+        __ferro_table__: ClassVar[str] = "billing_accounts"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        email: Annotated[str, FerroField(unique=True)]
+
+    envelope = compile_registry_schema_ir()
+    model = next(
+        m for m in envelope["payload"]["models"] if m["table_name"] == "billing_accounts"
+    )
+    assert _ddl_single_unique_name("billing_accounts", "email") in {
+        u["name"] for u in model["uniques"]
+    }
+
+    payload_json = json.dumps(envelope["payload"])
+    for dialect in ("sqlite", "postgres"):
+        create_sql, _post, _pre = _render_create_table_sql_for_test(
+            "billing_accounts", payload_json, dialect
+        )
+        assert '"billing_accounts"' in create_sql, (dialect, create_sql)
+        assert '"billingaccount"' not in create_sql
+
+    metadata = get_metadata()
+    assert "billing_accounts" in metadata.tables
+    assert "billingaccount" not in metadata.tables
+
+
 def test_metadata_single_column_index_is_named_index():
     """Single-column indexes are explicit named `idx_` sa.Index objects, not
     `Column(index=True)` flags (which would use SA's `ix_` naming)."""

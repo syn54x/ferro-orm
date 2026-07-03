@@ -600,7 +600,7 @@ class ModelMetaclass(type(BaseModel)):
 
             if schema:
                 setattr(cls, "__ferro_schema__", schema)
-                register_model_schema(name, json.dumps(schema))
+                register_model_schema(name, json.dumps(schema), cls.__ferro_table__)
                 compile_model_schema_ir(name, cls)
                 compile_registry_schema_ir()
         except Exception as e:

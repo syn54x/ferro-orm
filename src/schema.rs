@@ -108,7 +108,7 @@ pub(crate) fn order_schemas_for_creation(
     while !remaining.is_empty() {
         let available_names: HashSet<String> = remaining
             .iter()
-            .map(|(name, _)| name.to_lowercase())
+            .map(|(_, model)| model.table_name.clone())
             .collect();
         let mut progress = false;
         let mut index = 0;
@@ -120,7 +120,8 @@ pub(crate) fn order_schemas_for_creation(
                 .all(|dep| created.contains(dep) || !available_names.contains(dep))
             {
                 let item = remaining.remove(index);
-                created.insert(item.0.to_lowercase());
+                let table = item.1.table_name.clone();
+                created.insert(table);
                 ordered.push(item);
                 progress = true;
             } else {
@@ -439,17 +440,25 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
 /// # Errors
 /// Returns a `PyErr` if the schema is invalid or if the registry is locked.
 #[pyfunction]
-#[pyo3(signature = (name, schema))]
-pub fn register_model_schema(name: String, schema: String) -> PyResult<()> {
+#[pyo3(signature = (name, schema, table_name))]
+pub fn register_model_schema(name: String, schema: String, table_name: String) -> PyResult<()> {
     let parsed_schema: serde_json::Value = serde_json::from_str(&schema).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
     })?;
+    if table_name.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "table_name must be a non-empty string",
+        ));
+    }
 
     let mut registry = MODEL_REGISTRY
         .write()
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?;
 
-    registry.insert(name.clone(), crate::state::RegisteredModel::new(parsed_schema));
+    registry.insert(
+        name.clone(),
+        crate::state::RegisteredModel::new(parsed_schema, table_name),
+    );
     crate::log_debug(format!("⚙️  Ferro Engine: Map generated for '{}'", name));
     Ok(())
 }

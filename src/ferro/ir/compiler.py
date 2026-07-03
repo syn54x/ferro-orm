@@ -390,7 +390,11 @@ def compile_model_schema_ir(model_name: str, model_cls: type[Any]) -> dict[str, 
         The compiled SchemaIR envelope for ``model_cls``.
     """
     schema = build_model_schema(model_cls)
-    payload = compile_schema_ir_payload(model_name, schema)
+    payload = compile_schema_ir_payload(
+        model_name,
+        schema,
+        table_name=getattr(model_cls, "__ferro_table__", None),
+    )
     envelope = wrap_schema_ir(payload)
     _SCHEMA_IR_BY_MODEL[model_name] = envelope
     _SCHEMA_IR_FINGERPRINT_BY_MODEL[model_name] = _fingerprint(envelope)

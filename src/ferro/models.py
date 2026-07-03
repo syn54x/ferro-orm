@@ -208,7 +208,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if schema is not None:
             from ._core import register_model_schema
 
-            register_model_schema(cls.__name__, json.dumps(schema))
+            register_model_schema(
+                cls.__name__, json.dumps(schema), cls.__ferro_table__
+            )
 
     model_config = ConfigDict(
         from_attributes=True,
