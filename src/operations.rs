@@ -434,6 +434,7 @@ async fn postgres_catalog_rows(
     table_name: &str,
     label: &str,
 ) -> PyResult<Vec<EngineRow>> {
+    engine.record_catalog_query();
     let values = [EngineBindValue::String(table_name.to_string())];
     let rows = match tx_conn {
         Some(conn_arc) => {
@@ -2900,6 +2901,28 @@ pub fn raw_fetch_one<'py>(
 ///
 /// # Errors
 /// `PyValueError` for unknown dialect or unparseable JSON.
+/// Lifetime catalog-introspection query count for a connection's engine.
+///
+/// Test-only instrument for the FF-C C2 exit gate: steady-state CRUD must
+/// issue zero catalog queries. Counts every execution in
+/// `postgres_catalog_rows` — the single choke point for catalog SQL.
+///
+/// Args:
+///     using (str | None): Connection override; defaults to the active default.
+///
+/// Returns:
+///     int: Catalog queries issued by the engine since connect.
+///
+/// # Errors
+/// `PyRuntimeError` if no engine is connected.
+#[pyfunction]
+#[pyo3(name = "_catalog_query_count_for_test")]
+#[pyo3(signature = (using=None))]
+pub fn _catalog_query_count_for_test(using: Option<String>) -> PyResult<u64> {
+    let (_, engine, _, _) = active_route_for_operation(None, using, None)?;
+    Ok(engine.catalog_query_count())
+}
+
 #[pyfunction]
 #[pyo3(name = "_shadow_compare_query_plan_for_test")]
 #[pyo3(signature = (query_payload_json, dialect, operation="select".to_string()))]

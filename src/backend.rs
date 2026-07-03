@@ -10,6 +10,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Column, Connection, PgPool, Postgres, Row, Sqlite, SqlitePool, ValueRef};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Infer the SQL dialect / backend from a connection-URL scheme.
@@ -104,6 +105,10 @@ pub struct EngineHandle {
     identity_map_enabled: bool,
     /// Enables internal IR shadow-planner comparisons at runtime.
     shadow_runtime_enabled: bool,
+    /// Lifetime count of catalog-introspection queries this engine has issued.
+    /// Shared across clones (like `pool`) so the statement-count exit gate for
+    /// FF-C C2 can be asserted from tests via `_catalog_query_count_for_test`.
+    catalog_queries: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Debug)]
@@ -255,6 +260,7 @@ impl EngineHandle {
             spec: Some(spec),
             identity_map_enabled: true,
             shadow_runtime_enabled: false,
+            catalog_queries: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -269,6 +275,7 @@ impl EngineHandle {
             spec: None,
             identity_map_enabled: true,
             shadow_runtime_enabled: false,
+            catalog_queries: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -283,6 +290,7 @@ impl EngineHandle {
             spec: None,
             identity_map_enabled: true,
             shadow_runtime_enabled: false,
+            catalog_queries: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -387,6 +395,18 @@ impl EngineHandle {
 
     pub fn backend(&self) -> Dialect {
         self.backend
+    }
+
+    /// Record one catalog-introspection round-trip (called at the single
+    /// choke point that executes catalog SQL).
+    pub fn record_catalog_query(&self) {
+        self.catalog_queries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Lifetime catalog-introspection query count for this engine.
+    #[must_use]
+    pub fn catalog_query_count(&self) -> u64 {
+        self.catalog_queries.load(Ordering::Relaxed)
     }
 
     #[allow(dead_code)]

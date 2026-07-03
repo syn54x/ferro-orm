@@ -127,6 +127,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         operations::_shadow_compare_query_plan_for_test,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        operations::_catalog_query_count_for_test,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(connection::reset_engine, m)?)?;
     m.add_function(wrap_pyfunction!(connection::set_default_connection, m)?)?;
     m.add_function(wrap_pyfunction!(clear_registry, m)?)?;
