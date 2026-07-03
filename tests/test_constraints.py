@@ -1,6 +1,6 @@
 import pytest
 from typing import Annotated
-from ferro import Model, UniqueViolationError, connect, FerroField
+from ferro import Model, UniqueViolationError, connect, FerroField, engines
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -14,13 +14,14 @@ async def test_unique_constraint(db_url):
         email: Annotated[str, FerroField(unique=True)]
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    # Save first user
-    await UniqueUser(email="test@example.com").save()
-
-    # Attempt to save second user with same email should fail
-    with pytest.raises(UniqueViolationError):
+        # Save first user
         await UniqueUser(email="test@example.com").save()
+
+        # Attempt to save second user with same email should fail
+        with pytest.raises(UniqueViolationError):
+            await UniqueUser(email="test@example.com").save()
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 import pytest
 import uuid
 from typing import Annotated
-from ferro import Model, connect, FerroField
+from ferro import Model, connect, FerroField, engines
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -17,16 +17,17 @@ async def test_autoincrement_id_retrieval(db_url):
         name: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    user = AutoUser(name="taylor")
-    assert user.id is None
+        user = AutoUser(name="taylor")
+        assert user.id is None
 
-    await user.save()
+        await user.save()
 
-    # The ID should have been updated on the instance
-    assert user.id is not None
-    assert isinstance(user.id, int)
-    assert user.id > 0
+        # The ID should have been updated on the instance
+        assert user.id is not None
+        assert isinstance(user.id, int)
+        assert user.id > 0
 
 
 @pytest.mark.asyncio
@@ -40,16 +41,17 @@ async def test_manual_id_no_autoincrement(db_url):
         name: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    user = ManualUser(id=999, name="jeff")
-    await user.save()
+        user = ManualUser(id=999, name="jeff")
+        await user.save()
 
-    assert user.id == 999
+        assert user.id == 999
 
-    # Verify it actually persisted with that ID
-    fetched = await ManualUser.get(999)
-    assert fetched is not None
-    assert fetched.name == "jeff"
+        # Verify it actually persisted with that ID
+        fetched = await ManualUser.get(999)
+        assert fetched is not None
+        assert fetched.name == "jeff"
 
 
 @pytest.mark.asyncio
@@ -63,12 +65,13 @@ async def test_string_primary_key(db_url):
         user_id: int
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    token = str(uuid.uuid4())
-    s = Session(token=token, user_id=1)
-    await s.save()
+        token = str(uuid.uuid4())
+        s = Session(token=token, user_id=1)
+        await s.save()
 
-    assert s.token == token
-    fetched = await Session.get(token)
-    assert fetched is not None
-    assert fetched.user_id == 1
+        assert s.token == token
+        fetched = await Session.get(token)
+        assert fetched is not None
+        assert fetched.user_id == 1

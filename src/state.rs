@@ -10,6 +10,7 @@ use once_cell::sync::Lazy;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
@@ -155,6 +156,43 @@ pub fn engine_for_connection(using: Option<String>) -> PyResult<Arc<EngineHandle
     connection_for_route(using).map(|(_, engine)| engine)
 }
 
+/// Opaque, immutable route for one operation (FF-D D3).
+///
+/// Resolved exactly once in Python's `resolve_operation_scope` /
+/// `resolve_transaction_scope` and passed by value through every FFI
+/// operation. `connection_name` is non-optional: the removed ambient-default
+/// path is unrepresentable, not an error branch.
+#[pyclass(frozen, module = "ferro._core")]
+pub struct RouteHandle {
+    pub tx_id: Option<String>,
+    pub connection_name: String,
+    pub session_id: Option<String>,
+}
+
+#[pymethods]
+impl RouteHandle {
+    #[new]
+    #[pyo3(signature = (connection_name, tx_id=None, session_id=None))]
+    fn new(connection_name: String, tx_id: Option<String>, session_id: Option<String>) -> Self {
+        Self { tx_id, connection_name, session_id }
+    }
+
+    #[getter]
+    fn connection_name(&self) -> &str {
+        &self.connection_name
+    }
+
+    #[getter]
+    fn tx_id(&self) -> Option<&str> {
+        self.tx_id.as_deref()
+    }
+
+    #[getter]
+    fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+}
+
 /// Active transaction handle (root `BEGIN` or nested `SAVEPOINT`).
 #[derive(Clone)]
 pub struct TransactionHandle {
@@ -206,32 +244,36 @@ impl TransactionHandle {
 /// Maps Transaction ID -> backend connection plus optional savepoint.
 pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> = Lazy::new(DashMap::new);
 
-/// Identity Map used for object tracking and deduplication.
-///
-/// Maps `(ConnectionName, ModelName, PrimaryKeyValue)` to a live Python object.
-pub static IDENTITY_MAP: Lazy<DashMap<(String, String, String), Py<PyAny>>> =
-    Lazy::new(DashMap::new);
-
 /// Session-scoped runtime state for Phase 6 sessionized execution.
 ///
 /// A session pins connection routing and keeps transactional/identity state local
 /// to that session so concurrent sessions do not bleed mutable runtime state.
+///
+/// The pinned connection name itself is *not* stored here: before FF-D D3 it
+/// backed an ambient ("ask the session what its connection is") fallback in
+/// `active_engine_for_connection`. That fallback is gone — Python's
+/// `resolve_operation_scope`/`resolve_transaction_scope` resolve the session's
+/// connection once and bake it into the `RouteHandle`, so Rust only ever sees
+/// an already-resolved `connection_name` and never re-derives it from the
+/// session.
 pub struct SessionState {
-    /// Connection pinned for the lifetime of this session.
-    pub connection_name: String,
     /// Transactions opened within this session (isolated from global registry).
     pub transaction_registry: DashMap<String, TransactionHandle>,
-    /// Session-local identity map (isolated from global [`IDENTITY_MAP`]).
+    /// Session-local identity map — the *only* identity map (FF-D D2:
+    /// sessionless operations cache nothing); values are `weakref.ref`
+    /// objects (FF-D D1).
     pub identity_map: DashMap<(String, String, String), Py<PyAny>>,
+    /// Amortized-sweep op counter for `identity_map`.
+    pub identity_ops: AtomicUsize,
 }
 
 impl SessionState {
-    /// Allocate empty session state for `connection_name`.
-    pub fn new(connection_name: String) -> Self {
+    /// Allocate empty session state.
+    pub fn new() -> Self {
         Self {
-            connection_name,
             transaction_registry: DashMap::new(),
             identity_map: DashMap::new(),
+            identity_ops: AtomicUsize::new(0),
         }
     }
 }
@@ -239,16 +281,13 @@ impl SessionState {
 /// Global registry of active sessions.
 pub static SESSION_REGISTRY: Lazy<DashMap<String, Arc<SessionState>>> = Lazy::new(DashMap::new);
 
-/// Register a new session bound to `connection_name`.
-///
-/// # Arguments
-/// * `connection_name` — Registered connection to pin for the session.
+/// Register a new session.
 ///
 /// # Returns
 /// Opaque session UUID string for subsequent operations.
-pub fn register_session(connection_name: String) -> String {
+pub fn register_session() -> String {
     let session_id = uuid::Uuid::new_v4().to_string();
-    SESSION_REGISTRY.insert(session_id.clone(), Arc::new(SessionState::new(connection_name)));
+    SESSION_REGISTRY.insert(session_id.clone(), Arc::new(SessionState::new()));
     session_id
 }
 
@@ -396,7 +435,7 @@ mod session_close_tests {
 
     #[tokio::test]
     async fn close_guard_uses_transaction_registry_emptiness() {
-        let session_id = register_session("default".to_string());
+        let session_id = register_session();
 
         let pool = SqlitePoolOptions::new()
             .max_connections(1)

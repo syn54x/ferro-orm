@@ -4,7 +4,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import FerroField, Model, connect
+from ferro import FerroField, Model, connect, engines
 
 
 class PaginationGuardItem(Model):
@@ -65,17 +65,18 @@ async def test_failed_paginated_mutation_touches_no_rows(db_url):
         label: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    for label in ("a", "b", "c"):
-        await GuardedRow(label=label).save()
+        for label in ("a", "b", "c"):
+            await GuardedRow(label=label).save()
 
-    with pytest.raises(ValueError):
-        await GuardedRow.where(lambda row: row.id > 0).limit(1).delete()
-    with pytest.raises(ValueError):
-        await GuardedRow.where(lambda row: row.id > 0).offset(1).update(label="x")
+        with pytest.raises(ValueError):
+            await GuardedRow.where(lambda row: row.id > 0).limit(1).delete()
+        with pytest.raises(ValueError):
+            await GuardedRow.where(lambda row: row.id > 0).offset(1).update(label="x")
 
-    rows = await GuardedRow.where(lambda row: row.id > 0).order_by("label").all()
-    assert [row.label for row in rows] == ["a", "b", "c"]
+        rows = await GuardedRow.where(lambda row: row.id > 0).order_by("label").all()
+        assert [row.label for row in rows] == ["a", "b", "c"]
 
 
 @pytest.mark.backend_matrix
@@ -86,12 +87,13 @@ async def test_first_then_delete_on_same_query_still_allowed(db_url):
         label: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    await FirstThenDelete(label="only").save()
+        await FirstThenDelete(label="only").save()
 
-    query = FirstThenDelete.where(lambda row: row.label == "only")
-    found = await query.first()
-    assert found is not None
+        query = FirstThenDelete.where(lambda row: row.label == "only")
+        found = await query.first()
+        assert found is not None
 
-    deleted = await query.delete()
-    assert deleted == 1
+        deleted = await query.delete()
+        assert deleted == 1

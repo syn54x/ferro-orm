@@ -6,8 +6,7 @@
 use crate::backend::{EngineHandle, PoolSpec, dialect_from_url};
 use crate::migrate::{MigrateOptions, internal_migrate};
 use crate::state::{
-    CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, ENGINE, IDENTITY_MAP, SESSION_REGISTRY,
-    TRANSACTION_REGISTRY,
+    CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, ENGINE, SESSION_REGISTRY, TRANSACTION_REGISTRY,
 };
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -290,7 +289,8 @@ pub fn connect(
     })
 }
 
-/// Shuts down the global engine and clears the Identity Map.
+/// Shuts down the global engine and tears down all sessions (and their
+/// session-scoped identity maps).
 ///
 /// This is useful for testing environments to ensure isolation
 /// between test runs.
@@ -312,8 +312,9 @@ pub fn reset_engine() -> PyResult<()> {
     *DEFAULT_CONNECTION_NAME.write().map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Default Connection")
     })? = None;
-    IDENTITY_MAP.clear();
     TRANSACTION_REGISTRY.clear();
+    // Tears down every session's identity map with it (FF-D D2: identity
+    // maps are session-scoped only).
     SESSION_REGISTRY.clear();
     Ok(())
 }

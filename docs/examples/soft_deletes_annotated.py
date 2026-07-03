@@ -6,7 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Annotated
 
-from ferro import Field, Model, connect
+from ferro import Field, Model, connect, engines
 from ferro.query import Query
 
 
@@ -43,13 +43,14 @@ class Invoice(SoftDeleteMixin, Model):
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
-    invoice = await Invoice.create(number="INV-001")
-    await invoice.soft_delete()
-    assert await Invoice.active().count() == 0
-    assert await Invoice.select().count() == 1
+    async with engines.session():
+        invoice = await Invoice.create(number="INV-001")
+        await invoice.soft_delete()
+        assert await Invoice.active().count() == 0
+        assert await Invoice.select().count() == 1
 
-    await invoice.restore()
-    assert await Invoice.active().count() == 1
+        await invoice.restore()
+        assert await Invoice.active().count() == 1
 
     print("soft_deletes_annotated example ran successfully")
 

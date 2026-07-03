@@ -101,29 +101,30 @@ async def test_uuid_fk_create_get_dump(db_url):
         parent: Annotated[UuidIssueParent, ForeignKey(related_name="children")]
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    parent = await UuidIssueParent.create(name="p")
-    child = await UuidIssueChild.create(parent=parent)
+        parent = await UuidIssueParent.create(name="p")
+        child = await UuidIssueChild.create(parent=parent)
 
-    fetched = await UuidIssueChild.get(child.id)
-    assert fetched.parent_id == parent.id
+        fetched = await UuidIssueChild.get(child.id)
+        assert fetched.parent_id == parent.id
 
-    by_shadow = await UuidIssueChild.where(
-        UuidIssueChild.parent_id == parent.id
-    ).first()
-    assert by_shadow is not None
-    assert by_shadow.id == child.id
+        by_shadow = await UuidIssueChild.where(
+            UuidIssueChild.parent_id == parent.id
+        ).first()
+        assert by_shadow is not None
+        assert by_shadow.id == child.id
 
-    for dumper in (fetched.model_dump, fetched.model_dump_json):
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            dumper()
-        unexpected = [
-            x
-            for x in w
-            if x.category.__name__ == "PydanticSerializationUnexpectedValue"
-        ]
-        assert not unexpected
+        for dumper in (fetched.model_dump, fetched.model_dump_json):
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                dumper()
+            unexpected = [
+                x
+                for x in w
+                if x.category.__name__ == "PydanticSerializationUnexpectedValue"
+            ]
+            assert not unexpected
 
 
 @pytest.mark.asyncio
@@ -142,11 +143,12 @@ async def test_uuid_fk_forward_ref_child_declared_first(db_url):
         children: Relation[list[UuidFrwChild]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    parent = await UuidFrwParent.create(name="p")
-    child = await UuidFrwChild.create(parent=parent)
-    fetched = await UuidFrwChild.get(child.id)
-    assert fetched.parent_id == parent.id
+        parent = await UuidFrwParent.create(name="p")
+        child = await UuidFrwChild.create(parent=parent)
+        fetched = await UuidFrwChild.get(child.id)
+        assert fetched.parent_id == parent.id
 
 
 def test_uuid_child_model_validate_accepts_string_parent_id():
@@ -209,19 +211,20 @@ async def test_uuid_fk_save_after_reparenting(db_url):
         parent: Annotated[UuidMutParent, ForeignKey(related_name="kids")]
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    parent_a = await UuidMutParent.create(name="a")
-    parent_b = await UuidMutParent.create(name="b")
-    child = await UuidMutChild.create(label="row", parent=parent_a)
-    assert child.parent_id == parent_a.id
+        parent_a = await UuidMutParent.create(name="a")
+        parent_b = await UuidMutParent.create(name="b")
+        child = await UuidMutChild.create(label="row", parent=parent_a)
+        assert child.parent_id == parent_a.id
 
-    child.parent_id = parent_b.id
-    await child.save()
+        child.parent_id = parent_b.id
+        await child.save()
 
-    refetched = await UuidMutChild.get(child.id)
-    assert refetched is not None
-    assert refetched.parent_id == parent_b.id
-    assert refetched.label == "row"
+        refetched = await UuidMutChild.get(child.id)
+        assert refetched is not None
+        assert refetched.parent_id == parent_b.id
+        assert refetched.label == "row"
 
 
 @pytest.mark.asyncio
@@ -241,22 +244,23 @@ async def test_uuid_fk_bulk_create(db_url):
         parent: Annotated[UuidBulkParent, ForeignKey(related_name="items")]
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    px = await UuidBulkParent.create(name="x")
-    py = await UuidBulkParent.create(name="y")
+        px = await UuidBulkParent.create(name="x")
+        py = await UuidBulkParent.create(name="y")
 
-    rows = [
-        UuidBulkItem(sku="1", parent_id=px.id),
-        UuidBulkItem(sku="2", parent_id=py.id),
-        UuidBulkItem(sku="3", parent_id=px.id),
-    ]
-    inserted = await UuidBulkItem.bulk_create(rows)
-    assert inserted == 3
+        rows = [
+            UuidBulkItem(sku="1", parent_id=px.id),
+            UuidBulkItem(sku="2", parent_id=py.id),
+            UuidBulkItem(sku="3", parent_id=px.id),
+        ]
+        inserted = await UuidBulkItem.bulk_create(rows)
+        assert inserted == 3
 
-    all_items = await UuidBulkItem.all()
-    assert len(all_items) == 3
-    by_sku = {item.sku: item for item in all_items}
-    # Hydration may return UUID or TEXT from SQLite; compare normalized strings.
-    assert str(by_sku["1"].parent_id) == str(px.id)
-    assert str(by_sku["2"].parent_id) == str(py.id)
-    assert str(by_sku["3"].parent_id) == str(px.id)
+        all_items = await UuidBulkItem.all()
+        assert len(all_items) == 3
+        by_sku = {item.sku: item for item in all_items}
+        # Hydration may return UUID or TEXT from SQLite; compare normalized strings.
+        assert str(by_sku["1"].parent_id) == str(px.id)
+        assert str(by_sku["2"].parent_id) == str(py.id)
+        assert str(by_sku["3"].parent_id) == str(px.id)

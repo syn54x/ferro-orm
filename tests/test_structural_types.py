@@ -6,6 +6,7 @@ from typing import Annotated, Dict, List
 
 from pydantic import BaseModel, Field
 
+import ferro
 from ferro import Model, connect, FerroField
 
 pytestmark = pytest.mark.backend_matrix
@@ -38,47 +39,48 @@ async def test_structural_types_roundtrip(db_url):
         balance: Decimal
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    uid = uuid.uuid4()
-    raw_data = b"hello world"
-    balance = Decimal("123.456")
+        uid = uuid.uuid4()
+        raw_data = b"hello world"
+        balance = Decimal("123.456")
 
-    item = await ComplexModel.create(
-        user_id=uid,
-        metadata={"key": "value"},
-        tags=["a", "b"],
-        role=UserRole.ADMIN,
-        data=raw_data,
-        balance=balance,
-    )
-    item_id = item.id
+        item = await ComplexModel.create(
+            user_id=uid,
+            metadata={"key": "value"},
+            tags=["a", "b"],
+            role=UserRole.ADMIN,
+            data=raw_data,
+            balance=balance,
+        )
+        item_id = item.id
 
-    # Force eviction from Identity Map to test database hydration
-    from ferro import evict_instance
+        # Force eviction from Identity Map to test database hydration
+        from ferro import evict_instance
 
-    evict_instance("ComplexModel", str(item_id))
+        evict_instance("ComplexModel", str(item_id))
 
-    fetched = await ComplexModel.get(item_id)
-    assert fetched is not None
+        fetched = await ComplexModel.get(item_id)
+        assert fetched is not None
 
-    # Assertions
-    assert isinstance(fetched.user_id, uuid.UUID)
-    assert fetched.user_id == uid
+        # Assertions
+        assert isinstance(fetched.user_id, uuid.UUID)
+        assert fetched.user_id == uid
 
-    assert isinstance(fetched.metadata, dict)
-    assert fetched.metadata == {"key": "value"}
+        assert isinstance(fetched.metadata, dict)
+        assert fetched.metadata == {"key": "value"}
 
-    assert isinstance(fetched.tags, list)
-    assert fetched.tags == ["a", "b"]
+        assert isinstance(fetched.tags, list)
+        assert fetched.tags == ["a", "b"]
 
-    assert isinstance(fetched.role, UserRole)
-    assert fetched.role == UserRole.ADMIN
+        assert isinstance(fetched.role, UserRole)
+        assert fetched.role == UserRole.ADMIN
 
-    assert isinstance(fetched.data, bytes)
-    assert fetched.data == raw_data
+        assert isinstance(fetched.data, bytes)
+        assert fetched.data == raw_data
 
-    assert isinstance(fetched.balance, Decimal)
-    assert fetched.balance == balance
+        assert isinstance(fetched.balance, Decimal)
+        assert fetched.balance == balance
 
 
 @pytest.mark.asyncio
@@ -94,30 +96,31 @@ async def test_json_column_list_of_nested_pydantic_models_roundtrip(db_url):
         items: list[JsonListItem] = Field(default_factory=list)
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    empty = await JsonListParent.create(items=[])
-    from ferro import evict_instance
+        empty = await JsonListParent.create(items=[])
+        from ferro import evict_instance
 
-    evict_instance("JsonListParent", str(empty.id))
-    fetched_empty = await JsonListParent.get(empty.id)
-    assert fetched_empty is not None
-    assert fetched_empty.items == []
+        evict_instance("JsonListParent", str(empty.id))
+        fetched_empty = await JsonListParent.get(empty.id)
+        assert fetched_empty is not None
+        assert fetched_empty.items == []
 
-    payload = [
-        JsonListItem(field_a="x", field_b=1),
-        JsonListItem(field_a="y", field_b=2),
-    ]
-    row = await JsonListParent.create(items=payload)
-    assert all(isinstance(it, JsonListItem) for it in row.items)
-    evict_instance("JsonListParent", str(row.id))
-    fetched = await JsonListParent.get(row.id)
-    assert fetched is not None
-    assert isinstance(fetched.items, list)
-    assert len(fetched.items) == 2
-    assert all(isinstance(it, dict) for it in fetched.items)
-    assert fetched.items == [p.model_dump() for p in payload]
-    revived = [JsonListItem.model_validate(it) for it in fetched.items]
-    assert revived == payload
+        payload = [
+            JsonListItem(field_a="x", field_b=1),
+            JsonListItem(field_a="y", field_b=2),
+        ]
+        row = await JsonListParent.create(items=payload)
+        assert all(isinstance(it, JsonListItem) for it in row.items)
+        evict_instance("JsonListParent", str(row.id))
+        fetched = await JsonListParent.get(row.id)
+        assert fetched is not None
+        assert isinstance(fetched.items, list)
+        assert len(fetched.items) == 2
+        assert all(isinstance(it, dict) for it in fetched.items)
+        assert fetched.items == [p.model_dump() for p in payload]
+        revived = [JsonListItem.model_validate(it) for it in fetched.items]
+        assert revived == payload
 
 
 @pytest.mark.asyncio
@@ -130,22 +133,23 @@ async def test_structural_filtering(db_url):
         balance: Decimal
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    uid1 = uuid.uuid4()
-    uid2 = uuid.uuid4()
+        uid1 = uuid.uuid4()
+        uid2 = uuid.uuid4()
 
-    await ComplexModel.create(user_id=uid1, balance=Decimal("10.0"))
-    await ComplexModel.create(user_id=uid2, balance=Decimal("20.0"))
+        await ComplexModel.create(user_id=uid1, balance=Decimal("10.0"))
+        await ComplexModel.create(user_id=uid2, balance=Decimal("20.0"))
 
-    # Filter by UUID
-    res = await ComplexModel.where(ComplexModel.user_id == uid1).first()
-    assert res is not None
-    assert res.user_id == uid1
+        # Filter by UUID
+        res = await ComplexModel.where(ComplexModel.user_id == uid1).first()
+        assert res is not None
+        assert res.user_id == uid1
 
-    # Filter by Decimal
-    res = await ComplexModel.where(ComplexModel.balance > Decimal("15.0")).first()
-    assert res is not None
-    assert res.balance == Decimal("20.0")
+        # Filter by Decimal
+        res = await ComplexModel.where(ComplexModel.balance > Decimal("15.0")).first()
+        assert res is not None
+        assert res.balance == Decimal("20.0")
 
 
 @pytest.mark.asyncio
@@ -157,17 +161,18 @@ async def test_uuid_in_filter_serializes_collection_values(db_url):
         user_id: uuid.UUID
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    uid1 = uuid.uuid4()
-    uid2 = uuid.uuid4()
-    uid3 = uuid.uuid4()
+        uid1 = uuid.uuid4()
+        uid2 = uuid.uuid4()
+        uid3 = uuid.uuid4()
 
-    await ComplexModel.create(user_id=uid1)
-    await ComplexModel.create(user_id=uid2)
-    await ComplexModel.create(user_id=uid3)
+        await ComplexModel.create(user_id=uid1)
+        await ComplexModel.create(user_id=uid2)
+        await ComplexModel.create(user_id=uid3)
 
-    results = await ComplexModel.where(ComplexModel.user_id << [uid1, uid3]).all()
-    assert {row.user_id for row in results} == {uid1, uid3}
+        results = await ComplexModel.where(ComplexModel.user_id << [uid1, uid3]).all()
+        assert {row.user_id for row in results} == {uid1, uid3}
 
 
 @pytest.mark.asyncio
@@ -180,25 +185,26 @@ async def test_uuid_filter_serializes_for_update_and_delete_queries(db_url):
         label: str
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    uid1 = uuid.uuid4()
-    uid2 = uuid.uuid4()
-    await UuidMutationModel.create(run_id=uid1, label="old")
-    await UuidMutationModel.create(run_id=uid2, label="keep")
+        uid1 = uuid.uuid4()
+        uid2 = uuid.uuid4()
+        await UuidMutationModel.create(run_id=uid1, label="old")
+        await UuidMutationModel.create(run_id=uid2, label="keep")
 
-    updated = await UuidMutationModel.where(
-        UuidMutationModel.run_id == uid1
-    ).update(label="new")
-    assert updated == 1
+        updated = await UuidMutationModel.where(
+            UuidMutationModel.run_id == uid1
+        ).update(label="new")
+        assert updated == 1
 
-    fetched = await UuidMutationModel.where(UuidMutationModel.run_id == uid1).first()
-    assert fetched is not None
-    assert fetched.label == "new"
+        fetched = await UuidMutationModel.where(UuidMutationModel.run_id == uid1).first()
+        assert fetched is not None
+        assert fetched.label == "new"
 
-    deleted = await UuidMutationModel.where(UuidMutationModel.run_id == uid1).delete()
-    assert deleted == 1
-    remaining = await UuidMutationModel.all()
-    assert [row.run_id for row in remaining] == [uid2]
+        deleted = await UuidMutationModel.where(UuidMutationModel.run_id == uid1).delete()
+        assert deleted == 1
+        remaining = await UuidMutationModel.all()
+        assert [row.run_id for row in remaining] == [uid2]
 
 
 @pytest.mark.asyncio
@@ -213,31 +219,32 @@ async def test_postgres_json_and_decimal_updates_keep_typed_hydration(db_url):
         balance: Decimal
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    row = await PgTypedMutation.create(
-        metadata={"old": "value"},
-        tags=["a"],
-        balance=Decimal("1.50"),
-    )
+        row = await PgTypedMutation.create(
+            metadata={"old": "value"},
+            tags=["a"],
+            balance=Decimal("1.50"),
+        )
 
-    updated = await PgTypedMutation.where(PgTypedMutation.id == row.id).update(
-        metadata={"new": "value"},
-        tags=["b", "c"],
-        balance=Decimal("2.75"),
-    )
-    assert updated == 1
+        updated = await PgTypedMutation.where(PgTypedMutation.id == row.id).update(
+            metadata={"new": "value"},
+            tags=["b", "c"],
+            balance=Decimal("2.75"),
+        )
+        assert updated == 1
 
-    fetched = await PgTypedMutation.get(row.id)
-    assert fetched is not None
-    assert fetched.metadata == {"new": "value"}
-    assert fetched.tags == ["b", "c"]
-    assert fetched.balance == Decimal("2.75")
+        fetched = await PgTypedMutation.get(row.id)
+        assert fetched is not None
+        assert fetched.metadata == {"new": "value"}
+        assert fetched.tags == ["b", "c"]
+        assert fetched.balance == Decimal("2.75")
 
-    filtered = await PgTypedMutation.where(
-        PgTypedMutation.balance > Decimal("2.00")
-    ).first()
-    assert filtered is not None
-    assert filtered.id == row.id
+        filtered = await PgTypedMutation.where(
+            PgTypedMutation.balance > Decimal("2.00")
+        ).first()
+        assert filtered is not None
+        assert filtered.id == row.id
 
 
 @pytest.mark.asyncio
@@ -270,10 +277,11 @@ async def test_native_postgres_enum_column_decodes_via_text_cast(
         conn.commit()
 
     await connect(db_url)
+    async with ferro.engines.session():
 
-    fetched = await Transcript.get(1)
-    assert fetched is not None
-    assert fetched.format == TranscriptFormat.PDF
+        fetched = await Transcript.get(1)
+        assert fetched is not None
+        assert fetched.format == TranscriptFormat.PDF
 
 
 @pytest.mark.asyncio
@@ -306,13 +314,14 @@ async def test_native_postgres_enum_where_lambda_count(db_url, postgres_base_url
         conn.commit()
 
     await connect(db_url, auto_migrate=False)
+    async with ferro.engines.session():
 
-    count = await Widget.where(lambda w, c=Color.RED: w.color == c).count()
-    assert count == 1
+        count = await Widget.where(lambda w, c=Color.RED: w.color == c).count()
+        assert count == 1
 
-    rows = await Widget.where(lambda w: w.color != Color.BLUE).all()
-    assert len(rows) == 1
-    assert rows[0].color == Color.RED
+        rows = await Widget.where(lambda w: w.color != Color.BLUE).all()
+        assert len(rows) == 1
+        assert rows[0].color == Color.RED
 
 
 @pytest.mark.asyncio
@@ -345,12 +354,13 @@ async def test_native_postgres_enum_plain_str_column(
         )
 
     await connect(db_url, auto_migrate=False)
+    async with ferro.engines.session():
 
-    row = await StrFieldEnumModel.create(status="active")
-    fetched = await StrFieldEnumModel.get(row.id)
+        row = await StrFieldEnumModel.create(status="active")
+        fetched = await StrFieldEnumModel.get(row.id)
 
-    assert fetched is not None
-    assert fetched.status == "active"
+        assert fetched is not None
+        assert fetched.status == "active"
 
 
 @pytest.mark.asyncio
@@ -379,15 +389,16 @@ async def test_native_uuid_null_inserts(
         conn.commit()
 
     await connect(db_url, auto_migrate=False)
+    async with ferro.engines.session():
 
-    row = await UuidRun.create()
-    assert row.id is not None
-    assert row.run_id is None
-    u = uuid.uuid4()
-    row2 = await UuidRun.create(run_id=u)
-    f2 = await UuidRun.get(row2.id)
-    assert f2 is not None
-    assert f2.run_id == u
+        row = await UuidRun.create()
+        assert row.id is not None
+        assert row.run_id is None
+        u = uuid.uuid4()
+        row2 = await UuidRun.create(run_id=u)
+        f2 = await UuidRun.get(row2.id)
+        assert f2 is not None
+        assert f2.run_id == u
 
 
 @pytest.mark.asyncio
@@ -418,11 +429,12 @@ async def test_native_timestamp_without_time_zone_null_and_value(
         conn.commit()
 
     await connect(db_url, auto_migrate=False)
+    async with ferro.engines.session():
 
-    row = await RowWithTs.create()
-    assert row.scrubbed_at is None
-    d = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
-    row2 = await RowWithTs.create(scrubbed_at=d)
-    f2 = await RowWithTs.get(row2.id)
-    assert f2 is not None
-    assert f2.scrubbed_at is not None
+        row = await RowWithTs.create()
+        assert row.scrubbed_at is None
+        d = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
+        row2 = await RowWithTs.create(scrubbed_at=d)
+        f2 = await RowWithTs.get(row2.id)
+        assert f2 is not None
+        assert f2.scrubbed_at is not None

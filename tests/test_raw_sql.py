@@ -2,7 +2,7 @@
 
 import pytest
 
-from ferro import connect
+from ferro import connect, engines
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -27,13 +27,20 @@ def _ph(db_url: str, n: int = 1) -> str:
 @pytest.mark.asyncio
 async def test_raw_execute_ffi_smoke(db_url):
     """Task 2 smoke: ferro._core.raw_execute is callable and creates a table."""
-    from ferro._core import raw_execute
+    from ferro._core import RouteHandle, raw_execute
 
     await connect(db_url)
-    rows_affected = await raw_execute(
-        "CREATE TABLE raw_smoke (id INTEGER PRIMARY KEY)", [], None
-    )
-    assert isinstance(rows_affected, int)
+    async with engines.session() as session:
+        # FF-D D3: raw_execute takes a single resolved RouteHandle rather than
+        # a tx_id/using/session_id triple. This low-level smoke test builds
+        # one directly instead of going through resolve_operation_scope.
+        route = RouteHandle(
+            connection_name=session.connection_name, session_id=session.session_id
+        )
+        rows_affected = await raw_execute(
+            "CREATE TABLE raw_smoke (id INTEGER PRIMARY KEY)", [], route
+        )
+        assert isinstance(rows_affected, int)
 
 
 @pytest.mark.asyncio
@@ -42,10 +49,11 @@ async def test_top_level_execute_outside_tx_creates_table(db_url):
     from ferro import execute
 
     await connect(db_url)
-    rows_affected = await execute(
-        "CREATE TABLE t3_users (id INTEGER PRIMARY KEY, name TEXT)"
-    )
-    assert isinstance(rows_affected, int)
+    async with engines.session():
+        rows_affected = await execute(
+            "CREATE TABLE t3_users (id INTEGER PRIMARY KEY, name TEXT)"
+        )
+        assert isinstance(rows_affected, int)
 
 
 @pytest.mark.asyncio
@@ -54,9 +62,10 @@ async def test_top_level_execute_returns_rows_affected(db_url):
     from ferro import execute
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t3b ({_id_pk(db_url)}, n INTEGER)")
-    inserted = await execute("INSERT INTO t3b (n) VALUES (1), (2), (3)")
-    assert inserted == 3
+    async with engines.session():
+        await execute(f"CREATE TABLE t3b ({_id_pk(db_url)}, n INTEGER)")
+        inserted = await execute("INSERT INTO t3b (n) VALUES (1), (2), (3)")
+        assert inserted == 3
 
 
 @pytest.mark.asyncio
@@ -65,13 +74,14 @@ async def test_top_level_execute_binds_scalars(db_url):
     from ferro import execute
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t3c ({_id_pk(db_url)}, name TEXT, n INTEGER)")
-    inserted = await execute(
-        f"INSERT INTO t3c (n, name) VALUES ({_ph(db_url, 1)}, {_ph(db_url, 2)})",
-        7,
-        "alice",
-    )
-    assert inserted == 1
+    async with engines.session():
+        await execute(f"CREATE TABLE t3c ({_id_pk(db_url)}, name TEXT, n INTEGER)")
+        inserted = await execute(
+            f"INSERT INTO t3c (n, name) VALUES ({_ph(db_url, 1)}, {_ph(db_url, 2)})",
+            7,
+            "alice",
+        )
+        assert inserted == 1
 
 
 @pytest.mark.asyncio
@@ -80,10 +90,11 @@ async def test_empty_sql_raises_valueerror(db_url):
     from ferro import execute
 
     await connect(db_url)
-    with pytest.raises(ValueError, match="non-empty"):
-        await execute("")
-    with pytest.raises(ValueError, match="non-empty"):
-        await execute("   \n\t")
+    async with engines.session():
+        with pytest.raises(ValueError, match="non-empty"):
+            await execute("")
+        with pytest.raises(ValueError, match="non-empty"):
+            await execute("   \n\t")
 
 
 @pytest.mark.asyncio
@@ -94,12 +105,13 @@ async def test_unsupported_bind_type_raises_typeerror(db_url):
     from ferro import execute
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t3d ({_id_pk(db_url)}, p TEXT)")
-    with pytest.raises(TypeError, match="PosixPath|Path"):
-        await execute(
-            f"INSERT INTO t3d (p) VALUES ({_ph(db_url)})",
-            pathlib.Path("/tmp"),
-        )
+    async with engines.session():
+        await execute(f"CREATE TABLE t3d ({_id_pk(db_url)}, p TEXT)")
+        with pytest.raises(TypeError, match="PosixPath|Path"):
+            await execute(
+                f"INSERT INTO t3d (p) VALUES ({_ph(db_url)})",
+                pathlib.Path("/tmp"),
+            )
 
 
 @pytest.mark.asyncio
@@ -108,14 +120,15 @@ async def test_top_level_execute_picks_up_active_tx_commit(db_url):
     from ferro import execute, fetch_one, transaction
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t4 ({_id_pk(db_url)}, n INTEGER)")
+    async with engines.session():
+        await execute(f"CREATE TABLE t4 ({_id_pk(db_url)}, n INTEGER)")
 
-    async with transaction():
-        await execute(f"INSERT INTO t4 (n) VALUES ({_ph(db_url)})", 1)
-        await execute(f"INSERT INTO t4 (n) VALUES ({_ph(db_url)})", 2)
+        async with transaction():
+            await execute(f"INSERT INTO t4 (n) VALUES ({_ph(db_url)})", 1)
+            await execute(f"INSERT INTO t4 (n) VALUES ({_ph(db_url)})", 2)
 
-    row = await fetch_one("SELECT COUNT(*) AS c FROM t4")
-    assert row is not None and row["c"] == 2
+        row = await fetch_one("SELECT COUNT(*) AS c FROM t4")
+        assert row is not None and row["c"] == 2
 
 
 @pytest.mark.asyncio
@@ -124,15 +137,16 @@ async def test_top_level_execute_rolls_back_on_exception(db_url):
     from ferro import execute, fetch_one, transaction
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t4b ({_id_pk(db_url)}, n INTEGER)")
+    async with engines.session():
+        await execute(f"CREATE TABLE t4b ({_id_pk(db_url)}, n INTEGER)")
 
-    with pytest.raises(RuntimeError, match="boom"):
-        async with transaction():
-            await execute(f"INSERT INTO t4b (n) VALUES ({_ph(db_url)})", 99)
-            raise RuntimeError("boom")
+        with pytest.raises(RuntimeError, match="boom"):
+            async with transaction():
+                await execute(f"INSERT INTO t4b (n) VALUES ({_ph(db_url)})", 99)
+                raise RuntimeError("boom")
 
-    row = await fetch_one("SELECT COUNT(*) AS c FROM t4b")
-    assert row is not None and row["c"] == 0
+        row = await fetch_one("SELECT COUNT(*) AS c FROM t4b")
+        assert row is not None and row["c"] == 0
 
 
 @pytest.mark.asyncio
@@ -141,12 +155,13 @@ async def test_tx_execute_runs_on_tx_connection(db_url):
     from ferro import execute, transaction
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t5 ({_id_pk(db_url)}, n INTEGER)")
+    async with engines.session():
+        await execute(f"CREATE TABLE t5 ({_id_pk(db_url)}, n INTEGER)")
 
-    async with transaction() as tx:
-        await tx.execute(f"INSERT INTO t5 (n) VALUES ({_ph(db_url)})", 42)
-        row = await tx.fetch_one("SELECT n FROM t5 ORDER BY id DESC LIMIT 1")
-        assert row is not None and row["n"] == 42
+        async with transaction() as tx:
+            await tx.execute(f"INSERT INTO t5 (n) VALUES ({_ph(db_url)})", 42)
+            row = await tx.fetch_one("SELECT n FROM t5 ORDER BY id DESC LIMIT 1")
+            assert row is not None and row["n"] == 42
 
 
 @pytest.mark.asyncio
@@ -155,15 +170,16 @@ async def test_tx_handle_after_exit_raises(db_url):
     from ferro import execute, transaction
 
     await connect(db_url)
-    await execute("CREATE TABLE t5b (id INTEGER PRIMARY KEY)")
+    async with engines.session():
+        await execute("CREATE TABLE t5b (id INTEGER PRIMARY KEY)")
 
-    captured = None
-    async with transaction() as tx:
-        captured = tx
+        captured = None
+        async with transaction() as tx:
+            captured = tx
 
-    assert captured is not None
-    with pytest.raises(RuntimeError, match="closed"):
-        await captured.execute("SELECT 1")
+        assert captured is not None
+        with pytest.raises(RuntimeError, match="closed"):
+            await captured.execute("SELECT 1")
 
 
 @pytest.mark.asyncio
@@ -172,8 +188,9 @@ async def test_transaction_yields_transaction_handle(db_url):
     from ferro import Transaction, transaction
 
     await connect(db_url)
-    async with transaction() as tx:
-        assert isinstance(tx, Transaction)
+    async with engines.session():
+        async with transaction() as tx:
+            assert isinstance(tx, Transaction)
 
 
 @pytest.mark.asyncio
@@ -182,13 +199,14 @@ async def test_transaction_without_as_clause_still_works(db_url):
     from ferro import execute, fetch_one, transaction
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t5d ({_id_pk(db_url)}, n INTEGER)")
+    async with engines.session():
+        await execute(f"CREATE TABLE t5d ({_id_pk(db_url)}, n INTEGER)")
 
-    async with transaction():
-        await execute(f"INSERT INTO t5d (n) VALUES ({_ph(db_url)})", 1)
+        async with transaction():
+            await execute(f"INSERT INTO t5d (n) VALUES ({_ph(db_url)})", 1)
 
-    row = await fetch_one("SELECT COUNT(*) AS c FROM t5d")
-    assert row is not None and row["c"] == 1
+        row = await fetch_one("SELECT COUNT(*) AS c FROM t5d")
+        assert row is not None and row["c"] == 1
 
 
 @pytest.mark.asyncio
@@ -197,17 +215,18 @@ async def test_fetch_all_returns_list_of_dicts(db_url):
     from ferro import execute, fetch_all
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t6 ({_id_pk(db_url)}, name TEXT, n INTEGER)")
-    p1 = _ph(db_url, 1)
-    p2 = _ph(db_url, 2)
-    await execute(f"INSERT INTO t6 (name, n) VALUES ({p1}, {p2})", "alice", 1)
-    await execute(f"INSERT INTO t6 (name, n) VALUES ({p1}, {p2})", "bob", 2)
+    async with engines.session():
+        await execute(f"CREATE TABLE t6 ({_id_pk(db_url)}, name TEXT, n INTEGER)")
+        p1 = _ph(db_url, 1)
+        p2 = _ph(db_url, 2)
+        await execute(f"INSERT INTO t6 (name, n) VALUES ({p1}, {p2})", "alice", 1)
+        await execute(f"INSERT INTO t6 (name, n) VALUES ({p1}, {p2})", "bob", 2)
 
-    rows = await fetch_all("SELECT name, n FROM t6 ORDER BY n")
-    assert isinstance(rows, list)
-    assert len(rows) == 2
-    assert rows[0] == {"name": "alice", "n": 1}
-    assert rows[1] == {"name": "bob", "n": 2}
+        rows = await fetch_all("SELECT name, n FROM t6 ORDER BY n")
+        assert isinstance(rows, list)
+        assert len(rows) == 2
+        assert rows[0] == {"name": "alice", "n": 1}
+        assert rows[1] == {"name": "bob", "n": 2}
 
 
 @pytest.mark.asyncio
@@ -216,10 +235,11 @@ async def test_fetch_one_returns_none_when_empty(db_url):
     from ferro import execute, fetch_one
 
     await connect(db_url)
-    await execute("CREATE TABLE t6b (id INTEGER PRIMARY KEY)")
+    async with engines.session():
+        await execute("CREATE TABLE t6b (id INTEGER PRIMARY KEY)")
 
-    row = await fetch_one("SELECT id FROM t6b WHERE id = -1")
-    assert row is None
+        row = await fetch_one("SELECT id FROM t6b WHERE id = -1")
+        assert row is None
 
 
 @pytest.mark.asyncio
@@ -228,13 +248,14 @@ async def test_fetch_one_returns_first_row_when_multiple(db_url):
     from ferro import execute, fetch_one
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t6c ({_id_pk(db_url)}, n INTEGER)")
-    p = _ph(db_url)
-    await execute(f"INSERT INTO t6c (n) VALUES ({p})", 10)
-    await execute(f"INSERT INTO t6c (n) VALUES ({p})", 20)
+    async with engines.session():
+        await execute(f"CREATE TABLE t6c ({_id_pk(db_url)}, n INTEGER)")
+        p = _ph(db_url)
+        await execute(f"INSERT INTO t6c (n) VALUES ({p})", 10)
+        await execute(f"INSERT INTO t6c (n) VALUES ({p})", 20)
 
-    row = await fetch_one("SELECT n FROM t6c ORDER BY n")
-    assert row == {"n": 10}
+        row = await fetch_one("SELECT n FROM t6c ORDER BY n")
+        assert row == {"n": 10}
 
 
 @pytest.mark.asyncio
@@ -243,12 +264,13 @@ async def test_fetch_inside_tx_sees_uncommitted_writes(db_url):
     from ferro import execute, transaction
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t6d ({_id_pk(db_url)}, n INTEGER)")
+    async with engines.session():
+        await execute(f"CREATE TABLE t6d ({_id_pk(db_url)}, n INTEGER)")
 
-    async with transaction() as tx:
-        await tx.execute(f"INSERT INTO t6d (n) VALUES ({_ph(db_url)})", 7)
-        rows = await tx.fetch_all("SELECT n FROM t6d")
-        assert rows == [{"n": 7}]
+        async with transaction() as tx:
+            await tx.execute(f"INSERT INTO t6d (n) VALUES ({_ph(db_url)})", 7)
+            rows = await tx.fetch_all("SELECT n FROM t6d")
+            assert rows == [{"n": 7}]
 
 
 @pytest.mark.asyncio
@@ -259,16 +281,17 @@ async def test_marshal_uuid(db_url):
     from ferro import execute, fetch_one
 
     await connect(db_url)
-    if "postgres" in db_url:
-        await execute("CREATE TABLE t7a (id UUID PRIMARY KEY)")
-        await execute("INSERT INTO t7a (id) VALUES ($1::uuid)", uuid.UUID(int=1))
-        row = await fetch_one("SELECT id::text AS id FROM t7a")
-    else:
-        await execute("CREATE TABLE t7a (id TEXT PRIMARY KEY)")
-        await execute("INSERT INTO t7a (id) VALUES (?)", uuid.UUID(int=1))
-        row = await fetch_one("SELECT id FROM t7a")
-    assert row is not None
-    assert row["id"] == "00000000-0000-0000-0000-000000000001"
+    async with engines.session():
+        if "postgres" in db_url:
+            await execute("CREATE TABLE t7a (id UUID PRIMARY KEY)")
+            await execute("INSERT INTO t7a (id) VALUES ($1::uuid)", uuid.UUID(int=1))
+            row = await fetch_one("SELECT id::text AS id FROM t7a")
+        else:
+            await execute("CREATE TABLE t7a (id TEXT PRIMARY KEY)")
+            await execute("INSERT INTO t7a (id) VALUES (?)", uuid.UUID(int=1))
+            row = await fetch_one("SELECT id FROM t7a")
+        assert row is not None
+        assert row["id"] == "00000000-0000-0000-0000-000000000001"
 
 
 @pytest.mark.asyncio
@@ -279,17 +302,18 @@ async def test_marshal_datetime(db_url):
     from ferro import execute, fetch_one
 
     await connect(db_url)
-    dt = datetime.datetime(2026, 4, 27, 20, 13, 45, tzinfo=datetime.timezone.utc)
-    if "postgres" in db_url:
-        await execute("CREATE TABLE t7b (id INTEGER PRIMARY KEY, ts TIMESTAMPTZ)")
-        await execute("INSERT INTO t7b (id, ts) VALUES (1, $1::timestamptz)", dt)
-        row = await fetch_one("SELECT ts::text AS ts FROM t7b")
-    else:
-        await execute("CREATE TABLE t7b (id INTEGER PRIMARY KEY, ts TEXT)")
-        await execute("INSERT INTO t7b (id, ts) VALUES (1, ?)", dt)
-        row = await fetch_one("SELECT ts FROM t7b")
-    assert row is not None
-    assert "2026-04-27" in str(row["ts"])
+    async with engines.session():
+        dt = datetime.datetime(2026, 4, 27, 20, 13, 45, tzinfo=datetime.timezone.utc)
+        if "postgres" in db_url:
+            await execute("CREATE TABLE t7b (id INTEGER PRIMARY KEY, ts TIMESTAMPTZ)")
+            await execute("INSERT INTO t7b (id, ts) VALUES (1, $1::timestamptz)", dt)
+            row = await fetch_one("SELECT ts::text AS ts FROM t7b")
+        else:
+            await execute("CREATE TABLE t7b (id INTEGER PRIMARY KEY, ts TEXT)")
+            await execute("INSERT INTO t7b (id, ts) VALUES (1, ?)", dt)
+            row = await fetch_one("SELECT ts FROM t7b")
+        assert row is not None
+        assert "2026-04-27" in str(row["ts"])
 
 
 @pytest.mark.asyncio
@@ -300,17 +324,18 @@ async def test_marshal_date(db_url):
     from ferro import execute, fetch_one
 
     await connect(db_url)
-    d = datetime.date(2026, 4, 27)
-    if "postgres" in db_url:
-        await execute("CREATE TABLE t7c (id INTEGER PRIMARY KEY, day DATE)")
-        await execute("INSERT INTO t7c (id, day) VALUES (1, $1::date)", d)
-        row = await fetch_one("SELECT day::text AS day FROM t7c")
-    else:
-        await execute("CREATE TABLE t7c (id INTEGER PRIMARY KEY, day TEXT)")
-        await execute("INSERT INTO t7c (id, day) VALUES (1, ?)", d)
-        row = await fetch_one("SELECT day FROM t7c")
-    assert row is not None
-    assert "2026-04-27" in str(row["day"])
+    async with engines.session():
+        d = datetime.date(2026, 4, 27)
+        if "postgres" in db_url:
+            await execute("CREATE TABLE t7c (id INTEGER PRIMARY KEY, day DATE)")
+            await execute("INSERT INTO t7c (id, day) VALUES (1, $1::date)", d)
+            row = await fetch_one("SELECT day::text AS day FROM t7c")
+        else:
+            await execute("CREATE TABLE t7c (id INTEGER PRIMARY KEY, day TEXT)")
+            await execute("INSERT INTO t7c (id, day) VALUES (1, ?)", d)
+            row = await fetch_one("SELECT day FROM t7c")
+        assert row is not None
+        assert "2026-04-27" in str(row["day"])
 
 
 @pytest.mark.asyncio
@@ -321,17 +346,18 @@ async def test_marshal_time(db_url):
     from ferro import execute, fetch_one
 
     await connect(db_url)
-    t = datetime.time(20, 13, 45)
-    if "postgres" in db_url:
-        await execute("CREATE TABLE t7c2 (id INTEGER PRIMARY KEY, t TIME)")
-        await execute("INSERT INTO t7c2 (id, t) VALUES (1, $1::time)", t)
-        row = await fetch_one("SELECT t::text AS t FROM t7c2")
-    else:
-        await execute("CREATE TABLE t7c2 (id INTEGER PRIMARY KEY, t TEXT)")
-        await execute("INSERT INTO t7c2 (id, t) VALUES (1, ?)", t)
-        row = await fetch_one("SELECT t FROM t7c2")
-    assert row is not None
-    assert "20:13:45" in str(row["t"])
+    async with engines.session():
+        t = datetime.time(20, 13, 45)
+        if "postgres" in db_url:
+            await execute("CREATE TABLE t7c2 (id INTEGER PRIMARY KEY, t TIME)")
+            await execute("INSERT INTO t7c2 (id, t) VALUES (1, $1::time)", t)
+            row = await fetch_one("SELECT t::text AS t FROM t7c2")
+        else:
+            await execute("CREATE TABLE t7c2 (id INTEGER PRIMARY KEY, t TEXT)")
+            await execute("INSERT INTO t7c2 (id, t) VALUES (1, ?)", t)
+            row = await fetch_one("SELECT t FROM t7c2")
+        assert row is not None
+        assert "20:13:45" in str(row["t"])
 
 
 @pytest.mark.asyncio
@@ -342,17 +368,18 @@ async def test_marshal_decimal(db_url):
     from ferro import execute, fetch_one
 
     await connect(db_url)
-    amt = decimal.Decimal("1234.5678")
-    if "postgres" in db_url:
-        await execute("CREATE TABLE t7d (id INTEGER PRIMARY KEY, amt NUMERIC(10,4))")
-        await execute("INSERT INTO t7d (id, amt) VALUES (1, $1::numeric)", amt)
-        row = await fetch_one("SELECT amt::text AS amt FROM t7d")
-    else:
-        await execute("CREATE TABLE t7d (id INTEGER PRIMARY KEY, amt TEXT)")
-        await execute("INSERT INTO t7d (id, amt) VALUES (1, ?)", amt)
-        row = await fetch_one("SELECT amt FROM t7d")
-    assert row is not None
-    assert "1234.5678" in str(row["amt"])
+    async with engines.session():
+        amt = decimal.Decimal("1234.5678")
+        if "postgres" in db_url:
+            await execute("CREATE TABLE t7d (id INTEGER PRIMARY KEY, amt NUMERIC(10,4))")
+            await execute("INSERT INTO t7d (id, amt) VALUES (1, $1::numeric)", amt)
+            row = await fetch_one("SELECT amt::text AS amt FROM t7d")
+        else:
+            await execute("CREATE TABLE t7d (id INTEGER PRIMARY KEY, amt TEXT)")
+            await execute("INSERT INTO t7d (id, amt) VALUES (1, ?)", amt)
+            row = await fetch_one("SELECT amt FROM t7d")
+        assert row is not None
+        assert "1234.5678" in str(row["amt"])
 
 
 @pytest.mark.asyncio
@@ -367,11 +394,12 @@ async def test_marshal_enum_str(db_url):
         BLUE = "blue"
 
     await connect(db_url)
-    await execute("CREATE TABLE t7e (id INTEGER PRIMARY KEY, c TEXT)")
-    p = "$1" if "postgres" in db_url else "?"
-    await execute(f"INSERT INTO t7e (id, c) VALUES (1, {p})", Color.RED)
-    row = await fetch_one("SELECT c FROM t7e")
-    assert row is not None and row["c"] == "red"
+    async with engines.session():
+        await execute("CREATE TABLE t7e (id INTEGER PRIMARY KEY, c TEXT)")
+        p = "$1" if "postgres" in db_url else "?"
+        await execute(f"INSERT INTO t7e (id, c) VALUES (1, {p})", Color.RED)
+        row = await fetch_one("SELECT c FROM t7e")
+        assert row is not None and row["c"] == "red"
 
 
 @pytest.mark.asyncio
@@ -386,11 +414,12 @@ async def test_marshal_enum_int(db_url):
         HIGH = 9
 
     await connect(db_url)
-    await execute("CREATE TABLE t7f (id INTEGER PRIMARY KEY, p INTEGER)")
-    p_ph = "$1" if "postgres" in db_url else "?"
-    await execute(f"INSERT INTO t7f (id, p) VALUES (1, {p_ph})", Priority.HIGH)
-    row = await fetch_one("SELECT p FROM t7f")
-    assert row is not None and row["p"] == 9
+    async with engines.session():
+        await execute("CREATE TABLE t7f (id INTEGER PRIMARY KEY, p INTEGER)")
+        p_ph = "$1" if "postgres" in db_url else "?"
+        await execute(f"INSERT INTO t7f (id, p) VALUES (1, {p_ph})", Priority.HIGH)
+        row = await fetch_one("SELECT p FROM t7f")
+        assert row is not None and row["p"] == 9
 
 
 @pytest.mark.postgres_only
@@ -402,12 +431,13 @@ async def test_marshal_dict_to_jsonb(db_url):
     from ferro import execute, fetch_one
 
     await connect(db_url)
-    await execute("CREATE TABLE t7g (id INTEGER PRIMARY KEY, data JSONB)")
-    payload = {"a": 1, "b": [2, 3]}
-    await execute("INSERT INTO t7g (id, data) VALUES (1, $1::jsonb)", payload)
-    row = await fetch_one("SELECT data::text AS data FROM t7g")
-    assert row is not None
-    assert json.loads(row["data"]) == payload
+    async with engines.session():
+        await execute("CREATE TABLE t7g (id INTEGER PRIMARY KEY, data JSONB)")
+        payload = {"a": 1, "b": [2, 3]}
+        await execute("INSERT INTO t7g (id, data) VALUES (1, $1::jsonb)", payload)
+        row = await fetch_one("SELECT data::text AS data FROM t7g")
+        assert row is not None
+        assert json.loads(row["data"]) == payload
 
 
 @pytest.mark.asyncio
@@ -416,20 +446,21 @@ async def test_marshal_bool_before_int_order(db_url):
     from ferro import execute, fetch_all
 
     await connect(db_url)
-    if "postgres" in db_url:
-        await execute("CREATE TABLE t7h (id INTEGER PRIMARY KEY, b BOOLEAN)")
-        await execute("INSERT INTO t7h (id, b) VALUES (1, $1)", True)
-        await execute("INSERT INTO t7h (id, b) VALUES (2, $1)", False)
-    else:
-        # SQLite stores booleans as integers, but the bind path must still type as bool.
-        await execute("CREATE TABLE t7h (id INTEGER PRIMARY KEY, b INTEGER)")
-        await execute("INSERT INTO t7h (id, b) VALUES (1, ?)", True)
-        await execute("INSERT INTO t7h (id, b) VALUES (2, ?)", False)
-    rows = await fetch_all("SELECT id, b FROM t7h ORDER BY id")
-    assert len(rows) == 2
-    # Truthiness check works on both 1/0 and True/False.
-    assert bool(rows[0]["b"]) is True
-    assert bool(rows[1]["b"]) is False
+    async with engines.session():
+        if "postgres" in db_url:
+            await execute("CREATE TABLE t7h (id INTEGER PRIMARY KEY, b BOOLEAN)")
+            await execute("INSERT INTO t7h (id, b) VALUES (1, $1)", True)
+            await execute("INSERT INTO t7h (id, b) VALUES (2, $1)", False)
+        else:
+            # SQLite stores booleans as integers, but the bind path must still type as bool.
+            await execute("CREATE TABLE t7h (id INTEGER PRIMARY KEY, b INTEGER)")
+            await execute("INSERT INTO t7h (id, b) VALUES (1, ?)", True)
+            await execute("INSERT INTO t7h (id, b) VALUES (2, ?)", False)
+        rows = await fetch_all("SELECT id, b FROM t7h ORDER BY id")
+        assert len(rows) == 2
+        # Truthiness check works on both 1/0 and True/False.
+        assert bool(rows[0]["b"]) is True
+        assert bool(rows[1]["b"]) is False
 
 
 @pytest.mark.asyncio
@@ -438,9 +469,10 @@ async def test_invalid_sql_raises_operational_error_with_db_message(db_url):
     from ferro import OperationalError, execute
 
     await connect(db_url)
-    with pytest.raises(OperationalError, match="Raw SQL execute failed") as excinfo:
-        await execute("THIS IS NOT VALID SQL")
-    assert excinfo.value.driver_message is not None
+    async with engines.session():
+        with pytest.raises(OperationalError, match="Raw SQL execute failed") as excinfo:
+            await execute("THIS IS NOT VALID SQL")
+        assert excinfo.value.driver_message is not None
 
 
 @pytest.mark.asyncio
@@ -449,22 +481,23 @@ async def test_savepoint_rollback_preserves_outer_writes(db_url):
     from ferro import execute, fetch_all, transaction
 
     await connect(db_url)
-    await execute(f"CREATE TABLE t8 ({_id_pk(db_url)}, n INTEGER)")
-    p = _ph(db_url)
+    async with engines.session():
+        await execute(f"CREATE TABLE t8 ({_id_pk(db_url)}, n INTEGER)")
+        p = _ph(db_url)
 
-    async with transaction() as outer:
-        await outer.execute(f"INSERT INTO t8 (n) VALUES ({p})", 1)
-        try:
-            async with transaction() as inner:
-                await inner.execute(f"INSERT INTO t8 (n) VALUES ({p})", 2)
-                raise RuntimeError("inner-fail")
-        except RuntimeError:
-            pass
-        rows = await outer.fetch_all("SELECT n FROM t8 ORDER BY n")
-        assert rows == [{"n": 1}]
+        async with transaction() as outer:
+            await outer.execute(f"INSERT INTO t8 (n) VALUES ({p})", 1)
+            try:
+                async with transaction() as inner:
+                    await inner.execute(f"INSERT INTO t8 (n) VALUES ({p})", 2)
+                    raise RuntimeError("inner-fail")
+            except RuntimeError:
+                pass
+            rows = await outer.fetch_all("SELECT n FROM t8 ORDER BY n")
+            assert rows == [{"n": 1}]
 
-    final = await fetch_all("SELECT n FROM t8 ORDER BY n")
-    assert final == [{"n": 1}]
+        final = await fetch_all("SELECT n FROM t8 ORDER BY n")
+        assert final == [{"n": 1}]
 
 
 @pytest.mark.postgres_only
@@ -480,15 +513,16 @@ async def test_set_config_then_current_setting_inside_tx(db_url):
     from ferro import transaction
 
     await connect(db_url)
-    claims = '{"sub": "user-123", "role": "tenant_admin"}'
+    async with engines.session():
+        claims = '{"sub": "user-123", "role": "tenant_admin"}'
 
-    async with transaction() as tx:
-        await tx.execute(
-            "select set_config('request.jwt.claims', $1, true)",
-            claims,
-        )
-        row = await tx.fetch_one(
-            "select current_setting('request.jwt.claims', true) as v"
-        )
-        assert row is not None
-        assert row["v"] == claims
+        async with transaction() as tx:
+            await tx.execute(
+                "select set_config('request.jwt.claims', $1, true)",
+                claims,
+            )
+            row = await tx.fetch_one(
+                "select current_setting('request.jwt.claims', true) as v"
+            )
+            assert row is not None
+            assert row["v"] == claims

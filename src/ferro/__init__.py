@@ -15,7 +15,6 @@ from pydantic import Field as PydanticField
 from ._core import (
     clear_registry as _core_clear_registry,
     create_tables as _core_create_tables,
-    evict_instance,
     migrate as _core_migrate,
     reset_engine,
     set_default_connection,
@@ -39,7 +38,7 @@ from .exceptions import (
     UniqueViolationError,
 )
 from .fields import BackRef, Field, ManyToMany
-from .models import Model, transaction
+from .models import Model, evict_instance, transaction
 from .query import Relation
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .session import Session, engines
@@ -117,9 +116,11 @@ async def connect(
         name: Optional connection name. Omitted connections register as "default".
         default: If True, make this named connection the default for unqualified operations.
         pool: Optional per-connection pool configuration.
-        identity_map: If True (default), keep a per-connection identity map so the same primary
-            key maps to a single Python instance. If False, each load returns fresh instances and
-            the map is not consulted (lower memory use; no ``a is b`` guarantees across loads).
+        identity_map: If True (default), sessions opened on this connection keep an identity
+            map so the same primary key maps to a single Python instance within a session.
+            Identity maps are session-scoped: operations outside a session never cache or
+            dedup instances. If False, loads on this connection return fresh instances even
+            inside a session (lower memory use; no ``a is b`` guarantees across loads).
         migrate_updates: If True, additionally update existing tables to match the
             registered models. Implies ``auto_migrate``. What this covers is
             capability-relative per backend:

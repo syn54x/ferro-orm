@@ -11,6 +11,7 @@ from ferro import (
     Model,
     Relation,
     connect,
+    engines,
     evict_instance,
     execute,
     transaction,
@@ -70,39 +71,40 @@ async def test_relationships_loaded_inside_transaction_inherit_transaction(db_ur
         courses: Relation[list[TxRelationCourse]] = ManyToMany(related_name="students")
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    parent = await TxRelationParent.create(id=1, label="parent")
-    await TxRelationChild.create(id=1, label="child", parent=parent)
-    student = await TxRelationStudent.create(id=1, label="student")
-    course_a = await TxRelationCourse.create(id=1, label="course-a")
-    course_b = await TxRelationCourse.create(id=2, label="course-b")
-    await student.courses.add(course_a)
+        parent = await TxRelationParent.create(id=1, label="parent")
+        await TxRelationChild.create(id=1, label="child", parent=parent)
+        student = await TxRelationStudent.create(id=1, label="student")
+        course_a = await TxRelationCourse.create(id=1, label="course-a")
+        course_b = await TxRelationCourse.create(id=2, label="course-b")
+        await student.courses.add(course_a)
 
-    evict_instance("TxRelationParent", "1")
-    evict_instance("TxRelationChild", "1")
-    evict_instance("TxRelationStudent", "1")
+        evict_instance("TxRelationParent", "1")
+        evict_instance("TxRelationChild", "1")
+        evict_instance("TxRelationStudent", "1")
 
-    async with transaction():
-        loaded_parent = await TxRelationParent.get(1)
-        assert loaded_parent is not None
-        children = await loaded_parent.children.all()
-        assert [child.label for child in children] == ["child"]
+        async with transaction():
+            loaded_parent = await TxRelationParent.get(1)
+            assert loaded_parent is not None
+            children = await loaded_parent.children.all()
+            assert [child.label for child in children] == ["child"]
 
-        loaded_child = await TxRelationChild.get(1)
-        assert loaded_child is not None
-        loaded_child_parent = await loaded_child.parent
-        assert loaded_child_parent.label == "parent"
+            loaded_child = await TxRelationChild.get(1)
+            assert loaded_child is not None
+            loaded_child_parent = await loaded_child.parent
+            assert loaded_child_parent.label == "parent"
 
-        loaded_student = await TxRelationStudent.get(1)
-        assert loaded_student is not None
-        courses = await loaded_student.courses.all()
-        assert [course.label for course in courses] == ["course-a"]
-        await loaded_student.courses.add(course_b)
+            loaded_student = await TxRelationStudent.get(1)
+            assert loaded_student is not None
+            courses = await loaded_student.courses.all()
+            assert [course.label for course in courses] == ["course-a"]
+            await loaded_student.courses.add(course_b)
 
-    reloaded_student = await TxRelationStudent.get(1)
-    assert reloaded_student is not None
-    courses = await reloaded_student.courses.order_by(TxRelationCourse.id).all()
-    assert [course.label for course in courses] == ["course-a", "course-b"]
+        reloaded_student = await TxRelationStudent.get(1)
+        assert reloaded_student is not None
+        courses = await reloaded_student.courses.order_by(TxRelationCourse.id).all()
+        assert [course.label for course in courses] == ["course-a", "course-b"]
 
 
 @pytest.mark.asyncio
@@ -114,28 +116,29 @@ async def test_instance_methods_loaded_inside_transaction_inherit_transaction(db
         username: str
 
     await connect(db_url, auto_migrate=True)
-    created = await TxInstanceMethodUser.create(id=1, username="before")
-    evict_instance("TxInstanceMethodUser", str(created.id))
+    async with engines.session():
+        created = await TxInstanceMethodUser.create(id=1, username="before")
+        evict_instance("TxInstanceMethodUser", str(created.id))
 
-    async with transaction():
-        loaded = await TxInstanceMethodUser.get(1)
-        assert loaded is not None
+        async with transaction():
+            loaded = await TxInstanceMethodUser.get(1)
+            assert loaded is not None
 
-        loaded.username = "saved"
-        await loaded.save()
+            loaded.username = "saved"
+            await loaded.save()
 
-        placeholder_sql = (
-            "UPDATE txinstancemethoduser SET username = $1 WHERE id = $2"
-            if db_url.startswith(("postgres://", "postgresql://"))
-            else "UPDATE txinstancemethoduser SET username = ? WHERE id = ?"
-        )
-        await execute(placeholder_sql, "refreshed", 1)
-        await loaded.refresh()
-        assert loaded.username == "refreshed"
+            placeholder_sql = (
+                "UPDATE txinstancemethoduser SET username = $1 WHERE id = $2"
+                if db_url.startswith(("postgres://", "postgresql://"))
+                else "UPDATE txinstancemethoduser SET username = ? WHERE id = ?"
+            )
+            await execute(placeholder_sql, "refreshed", 1)
+            await loaded.refresh()
+            assert loaded.username == "refreshed"
 
-        await loaded.delete()
+            await loaded.delete()
 
-    assert await TxInstanceMethodUser.get_or_none(1) is None
+        assert await TxInstanceMethodUser.get_or_none(1) is None
 
 
 @pytest.mark.asyncio
@@ -157,9 +160,12 @@ async def test_instance_methods_loaded_inside_named_transaction_keep_identity_sc
     await create_tables()
     await create_tables(using="service")
 
-    await TxNamedInstanceMethodUser.create(id=1, username="app")
+    async with engines.session():
+        await TxNamedInstanceMethodUser.create(id=1, username="app")
     await TxNamedInstanceMethodUser.using("service").create(id=1, username="service")
-    evict_instance("TxNamedInstanceMethodUser", "1")
+    # No implicit default-connection route (FF-D D3/D4): each evict is scoped
+    # to the connection it targets.
+    evict_instance("TxNamedInstanceMethodUser", "1", using="app")
     evict_instance("TxNamedInstanceMethodUser", "1", using="service")
 
     async with transaction(using="service"):
@@ -176,7 +182,8 @@ async def test_instance_methods_loaded_inside_named_transaction_keep_identity_sc
         await loaded.refresh()
         assert loaded.username == "service-refreshed"
 
-    app_row = await TxNamedInstanceMethodUser.get(1)
+    async with engines.session():
+        app_row = await TxNamedInstanceMethodUser.get(1)
     service_row = await TxNamedInstanceMethodUser.using("service").get(1)
 
     assert app_row is not None
@@ -204,9 +211,12 @@ async def test_matching_explicit_using_inside_named_transaction_is_allowed(tmp_p
 
     await create_tables()
     await create_tables(using="service")
-    await TxMatchingUsingUser.create(id=1, username="app")
+    async with engines.session():
+        await TxMatchingUsingUser.create(id=1, username="app")
     await TxMatchingUsingUser.using("service").create(id=1, username="service")
-    evict_instance("TxMatchingUsingUser", "1")
+    # No implicit default-connection route (FF-D D3/D4): each evict is scoped
+    # to the connection it targets.
+    evict_instance("TxMatchingUsingUser", "1", using="app")
     evict_instance("TxMatchingUsingUser", "1", using="service")
 
     async with transaction(using="service"):
@@ -220,7 +230,8 @@ async def test_matching_explicit_using_inside_named_transaction_is_allowed(tmp_p
         with pytest.raises(ValueError, match="inherit the transaction connection"):
             await TxMatchingUsingUser.using("app").get(1)
 
-    app_row = await TxMatchingUsingUser.get(1)
+    async with engines.session():
+        app_row = await TxMatchingUsingUser.get(1)
     service_row = await TxMatchingUsingUser.using("service").get(1)
 
     assert app_row is not None
@@ -238,14 +249,15 @@ async def test_transaction_commit(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    async with transaction():
-        await TxUser.create(username="alice")
-        await TxUser.create(username="bob")
+        async with transaction():
+            await TxUser.create(username="alice")
+            await TxUser.create(username="bob")
 
-    # Verify both exist
-    assert await TxUser.where(TxUser.username == "alice").exists()
-    assert await TxUser.where(TxUser.username == "bob").exists()
+        # Verify both exist
+        assert await TxUser.where(TxUser.username == "alice").exists()
+        assert await TxUser.where(TxUser.username == "bob").exists()
 
 
 @pytest.mark.asyncio
@@ -257,16 +269,17 @@ async def test_transaction_rollback(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    try:
-        async with transaction():
-            await TxUser.create(username="charlie")
-            raise ValueError("Something went wrong!")
-    except ValueError:
-        pass
+        try:
+            async with transaction():
+                await TxUser.create(username="charlie")
+                raise ValueError("Something went wrong!")
+        except ValueError:
+            pass
 
-    # Verify charlie DOES NOT exist
-    assert not await TxUser.where(TxUser.username == "charlie").exists()
+        # Verify charlie DOES NOT exist
+        assert not await TxUser.where(TxUser.username == "charlie").exists()
 
 
 @pytest.mark.asyncio
@@ -278,34 +291,35 @@ async def test_transaction_atomicity(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    # Create initial user
-    await TxUser.create(username="dave")
+        # Create initial user
+        await TxUser.create(username="dave")
 
-    try:
-        async with transaction():
-            # Update dave
-            dave = await TxUser.where(TxUser.username == "dave").first()
-            dave.username = "dave_updated"
-            await dave.save()
+        try:
+            async with transaction():
+                # Update dave
+                dave = await TxUser.where(TxUser.username == "dave").first()
+                dave.username = "dave_updated"
+                await dave.save()
 
-            # Create eve
-            await TxUser.create(username="eve")
+                # Create eve
+                await TxUser.create(username="eve")
 
-            # Trigger failure
-            raise RuntimeError("Abort!")
-    except RuntimeError:
-        pass
+                # Trigger failure
+                raise RuntimeError("Abort!")
+        except RuntimeError:
+            pass
 
-    # dave should still be "dave", eve should not exist
-    from ferro import evict_instance
+        # dave should still be "dave", eve should not exist
+        from ferro import evict_instance
 
-    evict_instance("TxUser", "1")
+        evict_instance("TxUser", "1")
 
-    dave_check = await TxUser.where(TxUser.username == "dave").first()
-    assert dave_check is not None
-    assert dave_check.username == "dave"
-    assert not await TxUser.where(TxUser.username == "eve").exists()
+        dave_check = await TxUser.where(TxUser.username == "dave").first()
+        assert dave_check is not None
+        assert dave_check.username == "dave"
+        assert not await TxUser.where(TxUser.username == "eve").exists()
 
 
 @pytest.mark.asyncio
@@ -317,20 +331,21 @@ async def test_nested_transaction_rolls_back_with_outer(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    try:
-        async with transaction():
-            await TxUser.create(username="outer")
-
+        try:
             async with transaction():
-                await TxUser.create(username="inner")
+                await TxUser.create(username="outer")
 
-            raise RuntimeError("abort outer")
-    except RuntimeError:
-        pass
+                async with transaction():
+                    await TxUser.create(username="inner")
 
-    assert not await TxUser.where(TxUser.username == "outer").exists()
-    assert not await TxUser.where(TxUser.username == "inner").exists()
+                raise RuntimeError("abort outer")
+        except RuntimeError:
+            pass
+
+        assert not await TxUser.where(TxUser.username == "outer").exists()
+        assert not await TxUser.where(TxUser.username == "inner").exists()
 
 
 @pytest.mark.asyncio
@@ -342,19 +357,20 @@ async def test_bulk_create_participates_in_transaction(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    rows = [TxUser(username="bulk_a"), TxUser(username="bulk_b")]
+        rows = [TxUser(username="bulk_a"), TxUser(username="bulk_b")]
 
-    try:
-        async with transaction():
-            inserted = await TxUser.bulk_create(rows)
-            assert inserted == 2
-            raise RuntimeError("abort bulk transaction")
-    except RuntimeError:
-        pass
+        try:
+            async with transaction():
+                inserted = await TxUser.bulk_create(rows)
+                assert inserted == 2
+                raise RuntimeError("abort bulk transaction")
+        except RuntimeError:
+            pass
 
-    assert not await TxUser.where(TxUser.username == "bulk_a").exists()
-    assert not await TxUser.where(TxUser.username == "bulk_b").exists()
+        assert not await TxUser.where(TxUser.username == "bulk_a").exists()
+        assert not await TxUser.where(TxUser.username == "bulk_b").exists()
 
 
 @pytest.mark.asyncio
@@ -366,19 +382,20 @@ async def test_nested_transaction_inner_rollback_allows_outer_commit(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    async with transaction():
-        await TxUser.create(username="outer_before")
+        async with transaction():
+            await TxUser.create(username="outer_before")
 
-        try:
-            async with transaction():
-                await TxUser.create(username="inner")
-                raise ValueError("abort inner")
-        except ValueError:
-            pass
+            try:
+                async with transaction():
+                    await TxUser.create(username="inner")
+                    raise ValueError("abort inner")
+            except ValueError:
+                pass
 
-        await TxUser.create(username="outer_after")
+            await TxUser.create(username="outer_after")
 
-    assert await TxUser.where(TxUser.username == "outer_before").exists()
-    assert await TxUser.where(TxUser.username == "outer_after").exists()
-    assert not await TxUser.where(TxUser.username == "inner").exists()
+        assert await TxUser.where(TxUser.username == "outer_before").exists()
+        assert await TxUser.where(TxUser.username == "outer_after").exists()
+        assert not await TxUser.where(TxUser.username == "inner").exists()

@@ -13,6 +13,7 @@ from ferro import (
     Relation,
     clear_registry,
     connect,
+    engines,
     reset_engine,
 )
 from ferro.migrations import get_metadata
@@ -744,23 +745,24 @@ async def test_use_case_m2m_reverse_query(db_url):
         tags: Relation[list["TagF1"]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    python_tag = await TagF1.create(name="python")
-    rust_tag = await TagF1.create(name="rust")
-    article_a = await ArticleF1.create(title="A")
-    article_b = await ArticleF1.create(title="B")
+        python_tag = await TagF1.create(name="python")
+        rust_tag = await TagF1.create(name="rust")
+        article_a = await ArticleF1.create(title="A")
+        article_b = await ArticleF1.create(title="B")
 
-    await python_tag.articles.add(article_a)
-    await python_tag.articles.add(article_b)
-    await rust_tag.articles.add(article_a)
+        await python_tag.articles.add(article_a)
+        await python_tag.articles.add(article_b)
+        await rust_tag.articles.add(article_a)
 
-    fetched_a = await ArticleF1.get(article_a.id)
-    a_tags = await fetched_a.tags.all()
-    assert {t.name for t in a_tags} == {"python", "rust"}
+        fetched_a = await ArticleF1.get(article_a.id)
+        a_tags = await fetched_a.tags.all()
+        assert {t.name for t in a_tags} == {"python", "rust"}
 
-    fetched_b = await ArticleF1.get(article_b.id)
-    b_tags = await fetched_b.tags.all()
-    assert {t.name for t in b_tags} == {"python"}
+        fetched_b = await ArticleF1.get(article_b.id)
+        b_tags = await fetched_b.tags.all()
+        assert {t.name for t in b_tags} == {"python"}
 
 
 @pytest.mark.asyncio

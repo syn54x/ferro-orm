@@ -53,7 +53,8 @@ async def test_set_default_connection_routes_unqualified_operations(tmp_path):
     await ferro.connect(f"sqlite:{service_db}?mode=rwc", name="service")
 
     ferro.set_default_connection("service")
-    await ferro.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
+    async with ferro.engines.session():
+        await ferro.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
 
     with closing(sqlite3.connect(app_db)) as app_conn:
         app_tables = app_conn.execute(
@@ -133,12 +134,14 @@ async def test_model_using_routes_create_and_query_to_named_connection(tmp_path)
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
+    # `using=` is its own explicit route — no session needed (D4).
     created = await ConnectionRouteMarker.using("service").create(id=42)
     rows = await ConnectionRouteMarker.using("service").all()
 
     assert created.id == 42
     assert [row.id for row in rows] == [42]
-    assert await ConnectionRouteMarker.all() == []
+    async with ferro.engines.session():
+        assert await ConnectionRouteMarker.all() == []
 
 
 @pytest.mark.asyncio
@@ -153,7 +156,10 @@ async def test_model_using_routes_query_mutations_to_named_connection(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    await ConnectionRouteMarker.create(id=100, label="app")
+    async with ferro.engines.session():
+        await ConnectionRouteMarker.create(id=100, label="app")
+
+    # `using=` is its own explicit route — no session needed (D4).
     await ConnectionRouteMarker.using("service").create(id=1, label="service")
     await ConnectionRouteMarker.using("service").create(id=2, label="service-delete")
 
@@ -172,9 +178,10 @@ async def test_model_using_routes_query_mutations_to_named_connection(tmp_path):
     assert [(row.id, row.label) for row in await service_query.all()] == [
         (1, "service-updated")
     ]
-    assert [(row.id, row.label) for row in await ConnectionRouteMarker.all()] == [
-        (100, "app")
-    ]
+    async with ferro.engines.session():
+        assert [(row.id, row.label) for row in await ConnectionRouteMarker.all()] == [
+            (100, "app")
+        ]
 
 
 @pytest.mark.asyncio
@@ -191,6 +198,7 @@ async def test_model_using_routes_helper_writes_to_named_connection(tmp_path):
 
     service_model = ConnectionRouteMarker.using("service")
 
+    # `using=` is its own explicit route — no session needed (D4).
     inserted = await service_model.bulk_create(
         [ConnectionRouteMarker(id=10, label="bulk")]
     )
@@ -208,12 +216,15 @@ async def test_model_using_routes_helper_writes_to_named_connection(tmp_path):
     assert updated_row.label == "updated"
     assert [
         (row.id, row.label)
-        for row in await service_model.select().order_by(ConnectionRouteMarker.id).all()
+        for row in await service_model.select()
+        .order_by(ConnectionRouteMarker.id)
+        .all()
     ] == [
         (10, "updated"),
         (11, "created"),
     ]
-    assert await ConnectionRouteMarker.all() == []
+    async with ferro.engines.session():
+        assert await ConnectionRouteMarker.all() == []
 
 
 @pytest.mark.asyncio
@@ -228,11 +239,13 @@ async def test_identity_map_is_scoped_by_named_connection(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    await ConnectionRouteMarker.create(id=1, label="app")
-    await ConnectionRouteMarker.using("service").create(id=1, label="service")
+    async with ferro.engines.session():
+        await ConnectionRouteMarker.create(id=1, label="app")
+        app_row = await ConnectionRouteMarker.get(1)
 
-    app_row = await ConnectionRouteMarker.get(1)
-    service_row = await ConnectionRouteMarker.using("service").get(1)
+    async with ferro.engines.session("service"):
+        await ConnectionRouteMarker.using("service").create(id=1, label="service")
+        service_row = await ConnectionRouteMarker.using("service").get(1)
 
     assert app_row is not None
     assert service_row is not None
@@ -253,16 +266,19 @@ async def test_service_loaded_instance_save_uses_origin_connection(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    await ConnectionRouteMarker.create(id=1, label="app")
+    async with ferro.engines.session():
+        await ConnectionRouteMarker.create(id=1, label="app")
     await ConnectionRouteMarker.using("service").create(id=1, label="service")
 
     service_row = await ConnectionRouteMarker.using("service").get(1)
     assert service_row is not None
 
-    service_row.label = "service-saved"
-    await service_row.save()
+    async with ferro.engines.session("service"):
+        service_row.label = "service-saved"
+        await service_row.save()
 
-    app_row = await ConnectionRouteMarker.get(1)
+    async with ferro.engines.session():
+        app_row = await ConnectionRouteMarker.get(1)
     reloaded_service_row = await ConnectionRouteMarker.using("service").get(1)
 
     assert app_row is not None
@@ -283,15 +299,18 @@ async def test_service_loaded_instance_delete_uses_origin_connection(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    await ConnectionRouteMarker.create(id=1, label="app")
+    async with ferro.engines.session():
+        await ConnectionRouteMarker.create(id=1, label="app")
     await ConnectionRouteMarker.using("service").create(id=1, label="service")
 
     service_row = await ConnectionRouteMarker.using("service").get(1)
     assert service_row is not None
 
-    await service_row.delete()
+    async with ferro.engines.session("service"):
+        await service_row.delete()
 
-    assert await ConnectionRouteMarker.get(1) is not None
+    async with ferro.engines.session():
+        assert await ConnectionRouteMarker.get(1) is not None
     assert await ConnectionRouteMarker.using("service").get_or_none(1) is None
 
 
@@ -307,7 +326,8 @@ async def test_service_loaded_instance_refresh_uses_origin_connection(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    await ConnectionRouteMarker.create(id=1, label="app")
+    async with ferro.engines.session():
+        await ConnectionRouteMarker.create(id=1, label="app")
     await ConnectionRouteMarker.using("service").create(id=1, label="service")
 
     service_row = await ConnectionRouteMarker.using("service").get(1)
@@ -319,7 +339,8 @@ async def test_service_loaded_instance_refresh_uses_origin_connection(tmp_path):
         1,
         using="service",
     )
-    await service_row.refresh()
+    async with ferro.engines.session("service"):
+        await service_row.refresh()
 
     assert service_row.label == "service-refreshed"
 
@@ -347,11 +368,13 @@ async def test_backref_query_inherits_source_instance_origin(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    app_parent = await RouteParent.create(id=1, label="app-parent")
+    async with ferro.engines.session():
+        app_parent = await RouteParent.create(id=1, label="app-parent")
     service_parent = await RouteParent.using("service").create(
         id=1, label="service-parent"
     )
-    await RouteChild.create(id=1, label="app-child", parent=app_parent)
+    async with ferro.engines.session():
+        await RouteChild.create(id=1, label="app-child", parent=app_parent)
     await RouteChild.using("service").create(
         id=1, label="service-child", parent=service_parent
     )
@@ -387,11 +410,13 @@ async def test_forward_fk_load_inherits_source_instance_origin(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    app_parent = await RouteForwardParent.create(id=1, label="app-parent")
+    async with ferro.engines.session():
+        app_parent = await RouteForwardParent.create(id=1, label="app-parent")
     service_parent = await RouteForwardParent.using("service").create(
         id=1, label="service-parent"
     )
-    await RouteForwardChild.create(id=1, label="app-child", parent=app_parent)
+    async with ferro.engines.session():
+        await RouteForwardChild.create(id=1, label="app-child", parent=app_parent)
     await RouteForwardChild.using("service").create(
         id=1, label="service-child", parent=service_parent
     )
@@ -430,8 +455,9 @@ async def test_m2m_relation_writes_inherit_source_instance_origin(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    app_student = await RouteStudent.create(id=1, label="app-student")
-    app_course = await RouteCourse.create(id=1, label="app-course")
+    async with ferro.engines.session():
+        app_student = await RouteStudent.create(id=1, label="app-student")
+        app_course = await RouteCourse.create(id=1, label="app-course")
     service_student = await RouteStudent.using("service").create(
         id=1, label="service-student"
     )
@@ -496,7 +522,7 @@ async def test_unqualified_operation_requires_default_connection(tmp_path):
 
     await ferro.connect(f"sqlite:{db_file}?mode=rwc", name="app")
 
-    with pytest.raises(ferro.InterfaceError, match="No default connection selected"):
+    with pytest.raises(RuntimeError, match="No database route"):
         await ferro.execute("SELECT 1")
 
 

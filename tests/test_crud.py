@@ -16,9 +16,11 @@ async def test_model_save_new_record(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    user = CrudUser(username="test_user", email="test@example.com")
-    await user.save()
-    assert user.id is not None
+    async with ferro.engines.session():
+
+        user = CrudUser(username="test_user", email="test@example.com")
+        await user.save()
+        assert user.id is not None
 
 
 @pytest.mark.asyncio
@@ -31,14 +33,16 @@ async def test_model_save_update_record(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    user = CrudUser(id=1, username="initial_name", email="initial@example.com")
-    await user.save()
-    user.username = "updated_name"
-    await user.save()
+    async with ferro.engines.session():
 
-    users = await CrudUser.all()
-    assert len(users) == 1
-    assert users[0].username == "updated_name"
+        user = CrudUser(id=1, username="initial_name", email="initial@example.com")
+        await user.save()
+        user.username = "updated_name"
+        await user.save()
+
+        users = await CrudUser.all()
+        assert len(users) == 1
+        assert users[0].username == "updated_name"
 
 
 @pytest.mark.asyncio
@@ -51,14 +55,16 @@ async def test_model_all_fetching(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    u1 = CrudUser(id=1, username="alice", email="alice@example.com")
-    u2 = CrudUser(id=2, username="bob", email="bob@example.com")
-    await u1.save()
-    await u2.save()
-    users = await CrudUser.all()
-    assert len(users) == 2
-    assert any(u.username == "alice" for u in users)
-    assert any(u.username == "bob" for u in users)
+    async with ferro.engines.session():
+
+        u1 = CrudUser(id=1, username="alice", email="alice@example.com")
+        u2 = CrudUser(id=2, username="bob", email="bob@example.com")
+        await u1.save()
+        await u2.save()
+        users = await CrudUser.all()
+        assert len(users) == 2
+        assert any(u.username == "alice" for u in users)
+        assert any(u.username == "bob" for u in users)
 
 
 @pytest.mark.asyncio
@@ -71,21 +77,25 @@ async def test_upsert_updates_existing_row_without_duplicate(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    user = CrudUser(id=42, username="original", email="original@example.com")
-    await user.save()
-    users_before = await CrudUser.all()
-    assert len(users_before) == 1
+    async with ferro.engines.session():
 
-    with pytest.raises(ferro.UniqueViolationError):
-        await CrudUser(id=42, username="updated", email="original@example.com").save()
+        user = CrudUser(id=42, username="original", email="original@example.com")
+        await user.save()
+        users_before = await CrudUser.all()
+        assert len(users_before) == 1
 
-    await CrudUser.upsert(id=42, username="updated", email="original@example.com")
+        with pytest.raises(ferro.UniqueViolationError):
+            await CrudUser(id=42, username="updated", email="original@example.com").save()
+
+        await CrudUser.upsert(id=42, username="updated", email="original@example.com")
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
-    fetched = await CrudUser.get(42)
-    assert fetched is not None
-    assert fetched.username == "updated"
-    assert len(await CrudUser.all()) == 1
+    async with ferro.engines.session():
+
+        fetched = await CrudUser.get(42)
+        assert fetched is not None
+        assert fetched.username == "updated"
+        assert len(await CrudUser.all()) == 1
 
 
 @pytest.mark.asyncio
@@ -98,14 +108,16 @@ async def test_identity_map_consistency(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    u1 = CrudUser(id=100, username="identity", email="id@test.com")
-    await u1.save()
-    results_1 = await CrudUser.all()
-    results_2 = await CrudUser.all()
-    user_a = results_1[0]
-    user_b = results_2[0]
-    assert user_a is user_b
-    assert user_a.id == 100
+    async with ferro.engines.session():
+
+        u1 = CrudUser(id=100, username="identity", email="id@test.com")
+        await u1.save()
+        results_1 = await CrudUser.all()
+        results_2 = await CrudUser.all()
+        user_a = results_1[0]
+        user_b = results_2[0]
+        assert user_a is user_b
+        assert user_a.id == 100
 
 
 @pytest.mark.asyncio
@@ -118,15 +130,17 @@ async def test_identity_map_disabled_returns_distinct_instances(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True, identity_map=False)
-    u1 = CrudUser(id=200, username="nomap", email="nomap@test.com")
-    await u1.save()
-    results_1 = await CrudUser.all()
-    results_2 = await CrudUser.all()
-    user_a = results_1[0]
-    user_b = results_2[0]
-    assert user_a is not user_b
-    assert user_a.id == user_b.id == 200
-    assert user_a.username == user_b.username
+    async with ferro.engines.session():
+
+        u1 = CrudUser(id=200, username="nomap", email="nomap@test.com")
+        await u1.save()
+        results_1 = await CrudUser.all()
+        results_2 = await CrudUser.all()
+        user_a = results_1[0]
+        user_b = results_2[0]
+        assert user_a is not user_b
+        assert user_a.id == user_b.id == 200
+        assert user_a.username == user_b.username
 
 
 @pytest.mark.asyncio
@@ -139,12 +153,14 @@ async def test_model_get_operation(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    u1 = CrudUser(id=500, username="get_test", email="get@test.com")
-    await u1.save()
-    user = await CrudUser.get(500)
-    assert user is not None
-    assert user.id == 500
-    assert user is u1
+    async with ferro.engines.session():
+
+        u1 = CrudUser(id=500, username="get_test", email="get@test.com")
+        await u1.save()
+        user = await CrudUser.get(500)
+        assert user is not None
+        assert user.id == 500
+        assert user is u1
 
 
 @pytest.mark.asyncio
@@ -157,10 +173,12 @@ async def test_model_get_invalid_usage(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    with pytest.raises(TypeError):
-        await CrudUser.get(id=1)
-    with pytest.raises(TypeError):
-        await CrudUser.get()
+    async with ferro.engines.session():
+
+        with pytest.raises(TypeError):
+            await CrudUser.get(id=1)
+        with pytest.raises(TypeError):
+            await CrudUser.get()
 
 
 @pytest.mark.asyncio
@@ -173,8 +191,10 @@ async def test_model_get_not_found(db_url):
         email: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    with pytest.raises(ModelDoesNotExist) as exc_info:
-        await CrudUser.get(9999)
-    assert exc_info.value.model is CrudUser
-    assert exc_info.value.pk == 9999
-    assert await CrudUser.get_or_none(9999) is None
+    async with ferro.engines.session():
+
+        with pytest.raises(ModelDoesNotExist) as exc_info:
+            await CrudUser.get(9999)
+        assert exc_info.value.model is CrudUser
+        assert exc_info.value.pk == 9999
+        assert await CrudUser.get_or_none(9999) is None

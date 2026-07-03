@@ -6,6 +6,8 @@ from decimal import Decimal
 from enum import Enum
 
 import pytest
+
+import ferro
 from ferro import Model, connect
 from ferro.query import Query, QueryNode, col
 from ferro.query.builder import _query_ir_payload_to_json
@@ -201,27 +203,28 @@ async def test_query_execution(db_url):
     # Initialize connection and auto-migrate
     await connect(db_url, auto_migrate=True)
 
-    # Seed data
-    await FilterUser(id=1, username="taylor", age=30).save()
-    await FilterUser(id=2, username="jeff", age=25).save()
-    await FilterUser(id=3, username="alice", age=35).save()
+    async with ferro.engines.session():
+        # Seed data
+        await FilterUser(id=1, username="taylor", age=30).save()
+        await FilterUser(id=2, username="jeff", age=25).save()
+        await FilterUser(id=3, username="alice", age=35).save()
 
-    # 1. Test basic filter
-    results = await FilterUser.where(lambda t: t.age >= 30).all()
-    assert len(results) == 2
-    assert {r.username for r in results} == {"taylor", "alice"}
+        # 1. Test basic filter
+        results = await FilterUser.where(lambda t: t.age >= 30).all()
+        assert len(results) == 2
+        assert {r.username for r in results} == {"taylor", "alice"}
 
-    # 2. Test IN filter
-    results_in = await FilterUser.where(lambda t: t.username << ["jeff", "alice"]).all()
-    assert len(results_in) == 2
-    assert {r.username for r in results_in} == {"jeff", "alice"}
+        # 2. Test IN filter
+        results_in = await FilterUser.where(lambda t: t.username << ["jeff", "alice"]).all()
+        assert len(results_in) == 2
+        assert {r.username for r in results_in} == {"jeff", "alice"}
 
-    # 3. Test combined filters (Chaining)
-    results_chained = await FilterUser.where(lambda t: t.age < 35).where(
-        lambda t: t.age > 20
-    ).all()
-    assert len(results_chained) == 2
-    assert {r.username for r in results_chained} == {"taylor", "jeff"}
+        # 3. Test combined filters (Chaining)
+        results_chained = await FilterUser.where(lambda t: t.age < 35).where(
+            lambda t: t.age > 20
+        ).all()
+        assert len(results_chained) == 2
+        assert {r.username for r in results_chained} == {"taylor", "jeff"}
 
 
 @pytest.mark.asyncio
@@ -235,16 +238,17 @@ async def test_query_first(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
-    await FirstUser(id=1, username="taylor").save()
+    async with ferro.engines.session():
+        await FirstUser(id=1, username="taylor").save()
 
-    # 1. Match found
-    user = await FirstUser.where(lambda t: t.username == "taylor").first()
-    assert user is not None
-    assert user.username == "taylor"
+        # 1. Match found
+        user = await FirstUser.where(lambda t: t.username == "taylor").first()
+        assert user is not None
+        assert user.username == "taylor"
 
-    # 2. No match found
-    no_user = await FirstUser.where(lambda t: t.username == "nonexistent").first()
-    assert no_user is None
+        # 2. No match found
+        no_user = await FirstUser.where(lambda t: t.username == "nonexistent").first()
+        assert no_user is None
 
 
 @pytest.mark.asyncio
@@ -258,16 +262,17 @@ async def test_sql_injection_protection(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
-    await SafeUser(id=1, username="taylor").save()
+    async with ferro.engines.session():
+        await SafeUser(id=1, username="taylor").save()
 
-    # Attempt standard SQL injection
-    injection_string = "' OR '1'='1"
+        # Attempt standard SQL injection
+        injection_string = "' OR '1'='1"
 
-    # If not parameterized, this might return the user.
-    # If parameterized, it should look for the literal string and return None.
-    result = await SafeUser.where(lambda t: t.username == injection_string).first()
+        # If not parameterized, this might return the user.
+        # If parameterized, it should look for the literal string and return None.
+        result = await SafeUser.where(lambda t: t.username == injection_string).first()
 
-    assert result is None
+        assert result is None
 
 
 @pytest.mark.asyncio
@@ -282,34 +287,35 @@ async def test_query_bitwise_logic(db_url):
         age: int
 
     await connect(db_url, auto_migrate=True)
-    await LogicUser(id=1, username="taylor", age=30).save()
-    await LogicUser(id=2, username="jeff", age=25).save()
-    await LogicUser(id=3, username="alice", age=35).save()
+    async with ferro.engines.session():
+        await LogicUser(id=1, username="taylor", age=30).save()
+        await LogicUser(id=2, username="jeff", age=25).save()
+        await LogicUser(id=3, username="alice", age=35).save()
 
-    # 1. Test OR (|)
-    # SQL: SELECT * FROM logicuser WHERE age < 30 OR username == 'alice'
-    results_or = await LogicUser.where(
-        lambda t: (t.age < 30) | (t.username == "alice")
-    ).all()
-    assert len(results_or) == 2
-    assert {r.username for r in results_or} == {"jeff", "alice"}
+        # 1. Test OR (|)
+        # SQL: SELECT * FROM logicuser WHERE age < 30 OR username == 'alice'
+        results_or = await LogicUser.where(
+            lambda t: (t.age < 30) | (t.username == "alice")
+        ).all()
+        assert len(results_or) == 2
+        assert {r.username for r in results_or} == {"jeff", "alice"}
 
-    # 2. Test nested AND (&) within WHERE
-    # SQL: SELECT * FROM logicuser WHERE (age > 20) AND (username != 'taylor')
-    results_and = await LogicUser.where(
-        lambda t: (t.age > 20) & (t.username != "taylor")
-    ).all()
-    assert len(results_and) == 2
-    assert {r.username for r in results_and} == {"jeff", "alice"}
+        # 2. Test nested AND (&) within WHERE
+        # SQL: SELECT * FROM logicuser WHERE (age > 20) AND (username != 'taylor')
+        results_and = await LogicUser.where(
+            lambda t: (t.age > 20) & (t.username != "taylor")
+        ).all()
+        assert len(results_and) == 2
+        assert {r.username for r in results_and} == {"jeff", "alice"}
 
-    # 3. Test Complex Nesting: (A OR B) AND C
-    # SQL: SELECT * FROM logicuser WHERE (username == 'taylor' OR username == 'jeff') AND age > 28
-    # Only taylor (30) matches both. jeff (25) is under 28.
-    results_complex = await LogicUser.where(
-        lambda t: ((t.username == "taylor") | (t.username == "jeff")) & (t.age > 28)
-    ).all()
-    assert len(results_complex) == 1
-    assert results_complex[0].username == "taylor"
+        # 3. Test Complex Nesting: (A OR B) AND C
+        # SQL: SELECT * FROM logicuser WHERE (username == 'taylor' OR username == 'jeff') AND age > 28
+        # Only taylor (30) matches both. jeff (25) is under 28.
+        results_complex = await LogicUser.where(
+            lambda t: ((t.username == "taylor") | (t.username == "jeff")) & (t.age > 28)
+        ).all()
+        assert len(results_complex) == 1
+        assert results_complex[0].username == "taylor"
 
 
 @pytest.mark.asyncio
@@ -324,14 +330,15 @@ async def test_query_bitwise_multiple_where(db_url):
         age: int
 
     await connect(db_url, auto_migrate=True)
-    await LogicUser(id=1, username="taylor", age=30).save()
-    await LogicUser(id=2, username="jeff", age=25).save()
-    await LogicUser(id=3, username="alice", age=35).save()
+    async with ferro.engines.session():
+        await LogicUser(id=1, username="taylor", age=30).save()
+        await LogicUser(id=2, username="jeff", age=25).save()
+        await LogicUser(id=3, username="alice", age=35).save()
 
-    # (A OR B) AND (C)
-    query = LogicUser.where(lambda t: (t.username == "jeff") | (t.username == "alice"))
-    query = query.where(lambda t: t.age > 30)
+        # (A OR B) AND (C)
+        query = LogicUser.where(lambda t: (t.username == "jeff") | (t.username == "alice"))
+        query = query.where(lambda t: t.age > 30)
 
-    results = await query.all()
-    assert len(results) == 1
-    assert results[0].username == "alice"
+        results = await query.all()
+        assert len(results) == 1
+        assert results[0].username == "alice"

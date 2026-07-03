@@ -11,7 +11,7 @@ import asyncio
 from datetime import datetime
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation, connect
+from ferro import BackRef, Field, ForeignKey, Model, Relation, connect, engines
 
 
 class Author(Model):
@@ -34,12 +34,13 @@ class Post(Model):
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
-    alice = await Author.create(name="Alice", email="alice@example.com")
-    post = await Post.create(title="Hello", body="...", published=True, author=alice)
+    async with engines.session():
+        alice = await Author.create(name="Alice", email="alice@example.com")
+        post = await Post.create(title="Hello", body="...", published=True, author=alice)
 
-    assert post.id is not None
-    assert (await post.author).email == "alice@example.com"
-    assert len(await alice.posts.where(lambda post: post.published == True).all()) == 1  # noqa: E712
+        assert post.id is not None
+        assert (await post.author).email == "alice@example.com"
+        assert len(await alice.posts.where(lambda post: post.published == True).all()) == 1  # noqa: E712
 
     print("quickstart_annotated example ran successfully")
 

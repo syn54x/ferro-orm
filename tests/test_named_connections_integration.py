@@ -73,35 +73,59 @@ async def test_named_connections_smoke_matrix_sqlite(tmp_path):
     await ferro.create_tables()
     await ferro.create_tables(using="service")
 
-    app_row = await NamedSmokeMarker.create(id=1, label="app")
-    service_row = await NamedSmokeMarker.using("service").create(id=1, label="service")
+    async with ferro.engines.session():
 
-    assert app_row is not service_row
-    assert (await NamedSmokeMarker.get(1)).label == "app"
-    assert (await NamedSmokeMarker.using("service").get(1)).label == "service"
+        app_row = await NamedSmokeMarker.create(id=1, label="app")
 
-    async with ferro.transaction(using="service"):
-        await ferro.execute(
-            "UPDATE namedsmokemarker SET label = ? WHERE id = ?",
-            "service-tx",
-            1,
+        # `using="service"` conflicts with the ambient "app" session (D4)
+        # unless the ambient session for that call is itself "service" —
+        # a nested `engines.session("service")` block gives .using("service")
+        # a matching ambient session while the outer "app" session (and its
+        # identity map) stays open underneath.
+        async with ferro.engines.session("service"):
+            service_row = await NamedSmokeMarker.using("service").create(id=1, label="service")
+
+        assert app_row is not service_row
+        assert (await NamedSmokeMarker.get(1)).label == "app"
+        async with ferro.engines.session("service"):
+            assert (await NamedSmokeMarker.using("service").get(1)).label == "service"
+
+        async with ferro.engines.session("service"):
+            async with ferro.transaction(using="service") as tx:
+                await tx.execute(
+                    "UPDATE namedsmokemarker SET label = ? WHERE id = ?",
+                    "service-tx",
+                    1,
+                )
+
+        assert (await NamedSmokeMarker.get(1)).label == "app"
+        async with ferro.engines.session("service"):
+            raw_service = await ferro.fetch_one(
+                "SELECT label FROM namedsmokemarker WHERE id = ?",
+                1,
+                using="service",
+            )
+        assert raw_service == {"label": "service-tx"}
+        async with ferro.engines.session("service"):
+            await service_row.refresh()
+        assert service_row.label == "service-tx"
+
+        # A raw FFI escape hatch — bypasses the Python-level route resolver
+        # (and its D4 conflict check) entirely, so no session is needed. FF-D
+        # D3 collapsed the tx_id/using/session_id triple into one resolved
+        # RouteHandle; build it directly since this deliberately skips
+        # resolve_operation_scope.
+        from ferro._core import RouteHandle, delete_record
+
+        assert (
+            await delete_record(
+                "NamedSmokeMarker", "1", RouteHandle(connection_name="service")
+            )
+            is True
         )
-
-    assert (await NamedSmokeMarker.get(1)).label == "app"
-    raw_service = await ferro.fetch_one(
-        "SELECT label FROM namedsmokemarker WHERE id = ?",
-        1,
-        using="service",
-    )
-    assert raw_service == {"label": "service-tx"}
-    await service_row.refresh()
-    assert service_row.label == "service-tx"
-
-    from ferro._core import delete_record
-
-    assert await delete_record("NamedSmokeMarker", "1", using="service") is True
-    assert await NamedSmokeMarker.get(1) is app_row
-    assert await NamedSmokeMarker.using("service").get_or_none(1) is None
+        assert await NamedSmokeMarker.get(1) is app_row
+        async with ferro.engines.session("service"):
+            assert await NamedSmokeMarker.using("service").get_or_none(1) is None
 
 
 @pytest.mark.asyncio

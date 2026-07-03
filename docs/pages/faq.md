@@ -53,7 +53,9 @@ import ferro
 await ferro.connect(APP_DATABASE_URL, name="app", default=True)
 await ferro.connect(SERVICE_DATABASE_URL, name="service")
 
-users = await User.all()                    # default connection
+async with ferro.engines.session():
+    users = await User.all()                # default connection
+
 jobs = await Job.using("service").all()     # explicit routing
 ```
 

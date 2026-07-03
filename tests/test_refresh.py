@@ -1,6 +1,6 @@
 import pytest
 from typing import Annotated
-from ferro import Model, connect, FerroField
+from ferro import Model, connect, FerroField, engines
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -15,23 +15,24 @@ async def test_instance_refresh(db_url):
         points: int
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    # 1. Create a user
-    user = await RefreshUser.create(username="taylor", points=100)
-    assert user.points == 100
+        # 1. Create a user
+        user = await RefreshUser.create(username="taylor", points=100)
+        assert user.points == 100
 
-    # 2. Update the DB directly (bypassing the 'user' object)
-    # We'll use the QueryBuilder to perform a bulk update
-    await RefreshUser.where(RefreshUser.id == user.id).update(points=200)
+        # 2. Update the DB directly (bypassing the 'user' object)
+        # We'll use the QueryBuilder to perform a bulk update
+        await RefreshUser.where(RefreshUser.id == user.id).update(points=200)
 
-    # The 'user' object still has 100 points
-    assert user.points == 100
+        # The 'user' object still has 100 points
+        assert user.points == 100
 
-    # 3. Refresh the user
-    await user.refresh()
+        # 3. Refresh the user
+        await user.refresh()
 
-    # 4. Verify it was updated
-    assert user.points == 200
+        # 4. Verify it was updated
+        assert user.points == 200
 
 
 @pytest.mark.asyncio
@@ -43,11 +44,12 @@ async def test_refresh_not_found(db_url):
         username: str
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    user = await RefreshUser.create(username="deleted_soon")
+        user = await RefreshUser.create(username="deleted_soon")
 
-    # Delete it from DB
-    await RefreshUser.where(RefreshUser.id == user.id).delete()
+        # Delete it from DB
+        await RefreshUser.where(RefreshUser.id == user.id).delete()
 
-    with pytest.raises(RuntimeError, match="Instance not found in database"):
-        await user.refresh()
+        with pytest.raises(RuntimeError, match="Instance not found in database"):
+            await user.refresh()

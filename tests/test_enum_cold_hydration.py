@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from ferro import FerroField, Model, clear_registry, connect, reset_engine
+from ferro import FerroField, Model, clear_registry, connect, engines, reset_engine
 from ferro.state import _MODEL_REGISTRY_PY
 
 pytestmark = pytest.mark.backend_matrix
@@ -52,13 +52,16 @@ def test_enum_type_name_unchanged_for_deferred_annotated_strenum():
 async def test_annotated_strenum_text_cold_fetch_after_reset_engine(db_url):
     """Cold read after reset_engine must return StrEnum members, not str (#65)."""
     await connect(db_url, auto_migrate=True)
-    row_id = uuid4()
-    await BillingRow.create(id=row_id, name="x", billing_mode=BillingMode.HOURLY)
+    async with engines.session():
+
+        row_id = uuid4()
+        await BillingRow.create(id=row_id, name="x", billing_mode=BillingMode.HOURLY)
 
     reset_engine()
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    loaded = (await BillingRow.all())[0]
-    assert isinstance(loaded.billing_mode, BillingMode)
-    assert loaded.billing_mode == BillingMode.HOURLY
-    assert loaded.billing_mode.value == "hourly"
+        loaded = (await BillingRow.all())[0]
+        assert isinstance(loaded.billing_mode, BillingMode)
+        assert loaded.billing_mode == BillingMode.HOURLY
+        assert loaded.billing_mode.value == "hourly"

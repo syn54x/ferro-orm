@@ -29,14 +29,15 @@ state.
 | 1 | **FF-A** Mutation-surface correctness & typed errors | Public *behavior* changes — breaking after 1.0, cheap now. No dependencies. |
 | 2 | **FF-B** Structural I-1 on Postgres | Completes the IR-first program's own promise; blocks trustworthy 1.0 migrations. |
 | 3 | **FF-C** Compiled hot path | Largest epic; makes the performance pitch honest. Unblocks FF-D. |
-| 4 | **FF-D** Identity map & routing redesign | Rides the v0.14 shim-removal cutover (IR-P9); depends on FF-C's codec plan for refresh-on-load. |
+| 4 | **FF-D** Identity map & routing redesign | Landed v0.13, one minor ahead of the v0.14 shim-removal cutover (IR-P9) originally targeted; depended on FF-C's codec plan for refresh-on-load. |
 | ∥ | **FF-E** Registry & model identity | Independent; can run parallel to FF-B/FF-C. |
 | ∥ | **FF-F** Query builder 1.0 shape | Independent of FF-A–FF-D; gates the public roadmap features (aggregations, partial selects). |
 | ∥ | **FF-G** Hardening & hygiene | Small parallel items; fold into whichever epic touches the same file. |
 
 Interaction with the IR-first program: FF-B extends IR-P8.5's consolidation to
-the *derived*-type domain; FF-D's global-map removal belongs in the IR-P9 /
-v0.14 cutover. Neither replaces those phases — they sharpen their exit gates.
+the *derived*-type domain; FF-D's global-map removal landed in v0.13, ahead of
+the IR-P9 / v0.14 cutover it was originally scoped to ride. Neither replaces
+those phases — they sharpen their exit gates.
 
 ---
 
@@ -232,7 +233,7 @@ finally gets its runtime consumer.
 
 ---
 
-## Epic FF-D — Identity map & routing redesign (v0.14 cutover)
+## Epic FF-D — Identity map & routing redesign (landed v0.13)
 
 Findings: **F3** (unbounded strong refs, stale reads, global-clear
 invalidation), **F13** (triple stringly-typed route resolved twice; `using=`
@@ -240,43 +241,45 @@ silently bypasses ambient session; `Model.__init__` reads target PK by the
 *source* model's PK name).
 
 **Objective:** identity is session-scoped, memory-bounded, and never returns
-stale data; routing is resolved exactly once through one handle. Lands with
-the IR-P9 / v0.14 shim removal, which already deletes the ambient-global path.
+stale data; routing is resolved exactly once through one handle. Landed in
+v0.13, one minor ahead of the IR-P9 / v0.14 shim removal originally announced
+for the ambient-global path.
 
 **Sub-tasks**
 
-- [ ] **D1 — Weak-value identity map with refresh-on-load.**
+- [x] **D1 — Weak-value identity map with refresh-on-load.**
       Map holds weak references (instances are released when user code drops
       them). On fetch-hit, update the cached instance's `__dict__` from the
       freshly fetched row (the decoded fields are already in hand — today they
       are discarded), preserving `a is b` while eliminating the stale-read
       class. Document the guarantee precisely in
       `docs/pages/concepts/identity-map.md`.
-- [ ] **D2 — Scoped invalidation.**
+- [x] **D2 — Scoped invalidation.**
       Rollback evicts per `(connection, session)` — not the global
       everything-clear in `rollback_transaction`; bulk update/delete evict per
-      `(connection, model)`. Global `IDENTITY_MAP` is deleted with the v0.14
-      ambient-session removal (IR-P9), not kept as a fallback.
-- [ ] **D3 — One route handle.**
+      `(connection, model)`. Global `IDENTITY_MAP` is deleted in v0.13 along
+      with the ambient-session removal, not kept as a fallback.
+- [x] **D3 — One route handle.**
       Replace the `(tx_id, using, session_id)` triple threaded through every
       FFI call with a single opaque route resolved once (in
       `resolve_operation_scope`) and passed through. Rust stops re-deriving
       the connection per operation (`active_route_for_operation` collapses).
-- [ ] **D4 — `using=` vs ambient session is an error.**
+- [x] **D4 — `using=` vs ambient session is an error.**
       The silent session-bypass in `resolve_operation_scope` (explicit `using`
       different from ambient session → runs sessionless on the global map)
-      becomes a `ValueError` at the v0.14 boundary. Migration impact:
-      **breaking**; deprecation warning lands ahead of the cutover.
-- [ ] **D5 — Fix `Model.__init__` FK extraction.**
+      becomes a `ValueError`. Migration impact: **breaking**; shipped directly
+      in v0.13 with no deprecation phase — one minor ahead of the v0.14 notice
+      originally announced.
+- [x] **D5 — Fix `Model.__init__` FK extraction.**
       Relationship inputs read the *target* model's PK field name, not the
       source's (`models.py:197–204`). Correct today only because every model's
       PK is named `id`. Test with a target model whose PK is not `id`.
 
 **Exit gate**
 
-- [ ] A loop loading 1M rows shows bounded RSS after GC (memory test).
-- [ ] External UPDATE + re-fetch returns fresh values with identity preserved.
-- [ ] Exactly one route-resolution site per operation (grep-verified);
+- [x] A loop loading 1M rows shows bounded RSS after GC (memory test).
+- [x] External UPDATE + re-fetch returns fresh values with identity preserved.
+- [x] Exactly one route-resolution site per operation (grep-verified);
       v0.14 matrix green with the global map gone.
 
 ---

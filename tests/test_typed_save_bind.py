@@ -36,12 +36,13 @@ async def test_save_roundtrips_binary(db_url, payload):
         data: bytes = b""
 
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    doc = SaveDoc(id=uuid4(), data=payload)
-    await doc.save()
-    got = (await SaveDoc.all())[0].data
-    assert isinstance(got, bytes)
-    assert got == payload
+        doc = SaveDoc(id=uuid4(), data=payload)
+        await doc.save()
+        got = (await SaveDoc.all())[0].data
+        assert isinstance(got, bytes)
+        assert got == payload
 
 
 @pytest.mark.asyncio
@@ -51,10 +52,11 @@ async def test_save_nullable_bytes_roundtrips_none(db_url):
         blob: bytes | None = None
 
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    doc = SaveNullDoc(id=uuid4(), blob=None)
-    await doc.save()
-    assert (await SaveNullDoc.all())[0].blob is None
+        doc = SaveNullDoc(id=uuid4(), blob=None)
+        await doc.save()
+        assert (await SaveNullDoc.all())[0].blob is None
 
 
 @pytest.mark.asyncio
@@ -70,24 +72,25 @@ async def test_save_preserves_rich_types(db_url):
         note: str | None = None
 
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    uid = uuid4()
-    when = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
-    amount = decimal.Decimal("12.34")
-    rec = SaveRec(
-        id=uuid4(), uid=uid, when=when, amount=amount,
-        count=7, active=True, tags=["a", "b"],
-    )
-    await rec.save()
+        uid = uuid4()
+        when = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
+        amount = decimal.Decimal("12.34")
+        rec = SaveRec(
+            id=uuid4(), uid=uid, when=when, amount=amount,
+            count=7, active=True, tags=["a", "b"],
+        )
+        await rec.save()
 
-    got = (await SaveRec.all())[0]
-    assert got.uid == uid
-    assert got.amount == amount
-    assert got.count == 7
-    assert got.active is True
-    assert got.tags == ["a", "b"]
-    assert got.note is None
-    assert got.when == when
+        got = (await SaveRec.all())[0]
+        assert got.uid == uid
+        assert got.amount == amount
+        assert got.count == 7
+        assert got.active is True
+        assert got.tags == ["a", "b"]
+        assert got.note is None
+        assert got.when == when
 
 
 @pytest.mark.parametrize(
@@ -103,14 +106,15 @@ async def test_update_roundtrips_binary(db_url, payload):
         data: bytes = b""
 
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    doc = UpdDoc(id=uuid4(), name="x", data=b"seed")
-    await doc.save()
-    n = await UpdDoc.where(lambda d: d.name == "x").update(data=payload)
-    assert n == 1
-    got = (await UpdDoc.where(lambda d: d.name == "x").all())[0].data
-    assert isinstance(got, bytes)
-    assert got == payload
+        doc = UpdDoc(id=uuid4(), name="x", data=b"seed")
+        await doc.save()
+        n = await UpdDoc.where(lambda d: d.name == "x").update(data=payload)
+        assert n == 1
+        got = (await UpdDoc.where(lambda d: d.name == "x").all())[0].data
+        assert isinstance(got, bytes)
+        assert got == payload
 
 
 @pytest.mark.asyncio
@@ -121,15 +125,16 @@ async def test_update_preserves_rich_types(db_url):
         count: int = 0
 
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    rid = uuid4()
-    await UpdRec(id=rid, amount=decimal.Decimal("1.00"), count=1).save()
-    await UpdRec.where(lambda r: r.id == rid).update(
-        amount=decimal.Decimal("99.99"), count=42
-    )
-    got = (await UpdRec.all())[0]
-    assert got.amount == decimal.Decimal("99.99")
-    assert got.count == 42
+        rid = uuid4()
+        await UpdRec(id=rid, amount=decimal.Decimal("1.00"), count=1).save()
+        await UpdRec.where(lambda r: r.id == rid).update(
+            amount=decimal.Decimal("99.99"), count=42
+        )
+        got = (await UpdRec.all())[0]
+        assert got.amount == decimal.Decimal("99.99")
+        assert got.count == 42
 
 
 @pytest.mark.asyncio
@@ -139,13 +144,14 @@ async def test_bulk_create_roundtrips_binary(db_url):
         data: bytes = b""
 
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    docs = [BulkDoc(id=uuid4(), data=v) for v in BINARY_VECTORS]
-    n = await BulkDoc.bulk_create(docs)
-    assert n == len(BINARY_VECTORS)
+        docs = [BulkDoc(id=uuid4(), data=v) for v in BINARY_VECTORS]
+        n = await BulkDoc.bulk_create(docs)
+        assert n == len(BINARY_VECTORS)
 
-    stored = {bytes(d.data) for d in await BulkDoc.all()}
-    assert stored == {bytes(v) for v in BINARY_VECTORS}
+        stored = {bytes(d.data) for d in await BulkDoc.all()}
+        assert stored == {bytes(v) for v in BINARY_VECTORS}
 
 
 @pytest.mark.asyncio
@@ -155,13 +161,14 @@ async def test_bulk_create_preserves_rich_types(db_url):
         amount: decimal.Decimal = decimal.Decimal("0")
 
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    await BulkRec.bulk_create([
-        BulkRec(id=uuid4(), amount=decimal.Decimal("1.11")),
-        BulkRec(id=uuid4(), amount=decimal.Decimal("2.22")),
-    ])
-    amounts = sorted(r.amount for r in await BulkRec.all())
-    assert amounts == [decimal.Decimal("1.11"), decimal.Decimal("2.22")]
+        await BulkRec.bulk_create([
+            BulkRec(id=uuid4(), amount=decimal.Decimal("1.11")),
+            BulkRec(id=uuid4(), amount=decimal.Decimal("2.22")),
+        ])
+        amounts = sorted(r.amount for r in await BulkRec.all())
+        assert amounts == [decimal.Decimal("1.11"), decimal.Decimal("2.22")]
 
 
 @pytest.mark.asyncio
@@ -171,18 +178,19 @@ async def test_update_unbindable_value_raises_clear_typeerror(db_url):
         name: str = ""
 
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    rid = uuid4()
-    await FloorDoc(id=rid, name="x").save()
+        rid = uuid4()
+        await FloorDoc(id=rid, name="x").save()
 
-    import pydantic_core
+        import pydantic_core
 
-    # Use an object() — genuinely unbindable (pydantic_core.to_json rejects it with
-    # PydanticSerializationError; a raw set is silently coerced to a list by to_json
-    # and would not trigger the error floor).
-    with pytest.raises((TypeError, pydantic_core.PydanticSerializationError)) as exc:
-        await FloorDoc.where(lambda d: d.id == rid).update(name=object())
-    # Whichever layer rejects it, the message must not be an opaque deep-DB error.
-    # pydantic_core says "Unable to serialize unknown type" — clear, not a DB error.
-    msg = str(exc.value).lower()
-    assert "serialize" in msg or "type" in msg or "name" in msg
+        # Use an object() — genuinely unbindable (pydantic_core.to_json rejects it with
+        # PydanticSerializationError; a raw set is silently coerced to a list by to_json
+        # and would not trigger the error floor).
+        with pytest.raises((TypeError, pydantic_core.PydanticSerializationError)) as exc:
+            await FloorDoc.where(lambda d: d.id == rid).update(name=object())
+        # Whichever layer rejects it, the message must not be an opaque deep-DB error.
+        # pydantic_core says "Unable to serialize unknown type" — clear, not a DB error.
+        msg = str(exc.value).lower()
+        assert "serialize" in msg or "type" in msg or "name" in msg

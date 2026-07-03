@@ -5,7 +5,7 @@ import asyncio
 # --8<-- [start:setup]
 from typing import Annotated
 
-from ferro import Field, Model, connect
+from ferro import Field, Model, connect, engines
 
 
 class User(Model):
@@ -19,15 +19,17 @@ class User(Model):
 
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
-    await User.bulk_create(
-        [
-            User(name="alice", age=34, role="admin"),
-            User(name="bob", age=19),
-        ]
-    )
 
-    adults = await User.where(lambda user: user.age >= 18).all()
-    assert len(adults) == 2
+    async with engines.session():
+        await User.bulk_create(
+            [
+                User(name="alice", age=34, role="admin"),
+                User(name="bob", age=19),
+            ]
+        )
+
+        adults = await User.where(lambda user: user.age >= 18).all()
+        assert len(adults) == 2
 
     print("predicates_annotated example ran successfully")
 

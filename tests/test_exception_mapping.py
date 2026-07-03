@@ -20,6 +20,7 @@ from ferro import (
     Relation,
     UniqueViolationError,
     connect,
+    engines,
 )
 from ferro import Field
 from ferro.exceptions import CheckViolationError, ForeignKeyViolationError
@@ -33,17 +34,19 @@ async def test_unique_violation_is_typed(db_url, db_backend):
         email: Annotated[str, FerroField(unique=True)]
 
     await connect(db_url, auto_migrate=True)
-    await UniqueUser(email="a@b.com").save()
+    async with engines.session():
 
-    with pytest.raises(UniqueViolationError) as excinfo:
         await UniqueUser(email="a@b.com").save()
 
-    exc = excinfo.value
-    assert isinstance(exc, IntegrityError)
-    assert exc.driver_message is not None
-    if db_backend == "postgres":
-        assert exc.sqlstate == "23505"
-        assert exc.constraint is not None
+        with pytest.raises(UniqueViolationError) as excinfo:
+            await UniqueUser(email="a@b.com").save()
+
+        exc = excinfo.value
+        assert isinstance(exc, IntegrityError)
+        assert exc.driver_message is not None
+        if db_backend == "postgres":
+            assert exc.sqlstate == "23505"
+            assert exc.constraint is not None
 
 
 @pytest.mark.backend_matrix
@@ -54,18 +57,20 @@ async def test_not_null_violation_is_typed(db_url, db_backend):
         body: str
 
     await connect(db_url, auto_migrate=True)
-    note = NotNullNote(body="text")
-    await note.save()
-    pk = note.id
+    async with engines.session():
 
-    with pytest.raises(NotNullViolationError) as excinfo:
-        await NotNullNote.where(lambda note: note.id == pk).update(body=None)
+        note = NotNullNote(body="text")
+        await note.save()
+        pk = note.id
 
-    exc = excinfo.value
-    assert isinstance(exc, IntegrityError)
-    assert exc.driver_message is not None
-    if db_backend == "postgres":
-        assert exc.sqlstate == "23502"
+        with pytest.raises(NotNullViolationError) as excinfo:
+            await NotNullNote.where(lambda note: note.id == pk).update(body=None)
+
+        exc = excinfo.value
+        assert isinstance(exc, IntegrityError)
+        assert exc.driver_message is not None
+        if db_backend == "postgres":
+            assert exc.sqlstate == "23502"
 
 
 # db_check constraints are emitted on Postgres only (SQLite would need a
@@ -85,19 +90,21 @@ async def test_check_violation_is_typed(db_url, db_backend):
         format: Annotated[DocFormat, Field(db_type="text", db_check=True)]
 
     await connect(db_url, auto_migrate=True)
-    doc = CheckedDoc(format=DocFormat.MARKDOWN)
-    await doc.save()
-    pk = doc.id
+    async with engines.session():
 
-    # Pydantic validation is bypassed on the bulk-update path by design;
-    # the DB CHECK constraint is the enforcement of record.
-    with pytest.raises(CheckViolationError) as excinfo:
-        await CheckedDoc.where(lambda doc: doc.id == pk).update(format="bogus")
+        doc = CheckedDoc(format=DocFormat.MARKDOWN)
+        await doc.save()
+        pk = doc.id
 
-    exc = excinfo.value
-    assert isinstance(exc, IntegrityError)
-    if db_backend == "postgres":
-        assert exc.sqlstate == "23514"
+        # Pydantic validation is bypassed on the bulk-update path by design;
+        # the DB CHECK constraint is the enforcement of record.
+        with pytest.raises(CheckViolationError) as excinfo:
+            await CheckedDoc.where(lambda doc: doc.id == pk).update(format="bogus")
+
+        exc = excinfo.value
+        assert isinstance(exc, IntegrityError)
+        if db_backend == "postgres":
+            assert exc.sqlstate == "23514"
 
 
 @pytest.mark.backend_matrix
@@ -114,14 +121,15 @@ async def test_foreign_key_violation_is_typed(db_url, db_backend):
         author: Annotated[FkAuthor, ForeignKey(related_name="books")]
 
     await connect(db_url, auto_migrate=True)
+    async with engines.session():
 
-    with pytest.raises(ForeignKeyViolationError) as excinfo:
-        await FkBook(title="Ghost", author_id=99999).save()
+        with pytest.raises(ForeignKeyViolationError) as excinfo:
+            await FkBook(title="Ghost", author_id=99999).save()
 
-    exc = excinfo.value
-    assert isinstance(exc, IntegrityError)
-    if db_backend == "postgres":
-        assert exc.sqlstate == "23503"
+        exc = excinfo.value
+        assert isinstance(exc, IntegrityError)
+        if db_backend == "postgres":
+            assert exc.sqlstate == "23503"
 
 
 @pytest.mark.asyncio

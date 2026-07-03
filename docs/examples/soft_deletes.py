@@ -5,7 +5,7 @@ import asyncio
 # --8<-- [start:model]
 from datetime import UTC, datetime
 
-from ferro import Field, Model, connect
+from ferro import Field, Model, connect, engines
 from ferro.query import Query
 
 
@@ -42,17 +42,18 @@ class Invoice(SoftDeleteMixin, Model):
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
-    # --8<-- [start:usage]
-    invoice = await Invoice.create(number="INV-001")
-    await Invoice.create(number="INV-002")
+    async with engines.session():
+        # --8<-- [start:usage]
+        invoice = await Invoice.create(number="INV-001")
+        await Invoice.create(number="INV-002")
 
-    await invoice.soft_delete()
-    assert await Invoice.active().count() == 1
-    assert await Invoice.select().count() == 2  # row still exists
+        await invoice.soft_delete()
+        assert await Invoice.active().count() == 1
+        assert await Invoice.select().count() == 2  # row still exists
 
-    await invoice.restore()
-    assert await Invoice.active().count() == 2
-    # --8<-- [end:usage]
+        await invoice.restore()
+        assert await Invoice.active().count() == 2
+        # --8<-- [end:usage]
 
     print("soft_deletes example ran successfully")
 

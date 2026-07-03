@@ -14,13 +14,15 @@ Each `connect()` call creates an independent pool, configurable per connection w
 
 ## Routing Queries
 
-Everything runs on the default connection unless routed. `Model.using(name)` returns a handle exposing the same API (`create`, `all`, `select`, `where`, `get`, `get_or_none`, `bulk_create`, `get_or_create`, `update_or_create`) pinned to the named connection:
+Operations need a route: either an open session (ambient or explicit `session=`) or an explicit `using=`. Inside `async with engines.session():`, unqualified calls resolve to that session's connection — the default connection if you opened the session with no name. `Model.using(name)` returns a handle exposing the same API (`create`, `all`, `select`, `where`, `get`, `get_or_none`, `bulk_create`, `get_or_create`, `update_or_create`) pinned to the named connection, and it runs on its own — no session required:
 
 ```python
 --8<-- "docs/examples/multiple_databases.py:routing"
 ```
 
-Routing is per-call: `using()` doesn't change any global state, so two coroutines can talk to different databases concurrently without interfering.
+Routing is per-call: `using()` doesn't change any global state, so two coroutines can talk to different databases concurrently without interfering. A `using()` call made without a session, as `analytics_metrics` is above, runs with no identity map — every load is a fresh instance, with no `a is b` guarantee across calls. See [Identity Map](../concepts/identity-map.md#no-session-no-identity) for what that trades away.
+
+An explicit `using=` that names a connection different from the session you're ambiently inside of raises `ValueError` rather than silently running outside the session — and an operation with no session and no `using=` at all raises `RuntimeError`. There is no implicit default-connection fallback.
 
 For session-first workflows, use `engines.session(name)` to pin a full block:
 
@@ -62,7 +64,7 @@ Don't run schema creation concurrently through multiple names that point at the 
 - **Keep credentials server-side.** Elevated service-role connections belong in configuration, not source control — and never make a service-role connection the default in a user-facing runtime.
 - **Never route from untrusted input.** Don't pick the `using` name from request data.
 - **Pools isolate roles, not request context.** A named connection isolates credentials and pooling; it does not provide per-request RLS/JWT context inside one shared pool. Objects loaded through an elevated connection can contain elevated data — filter before returning them to users.
-- **No automatic routing.** Read/write splitting, cross-connection joins, and two-phase commit are not features; routing is always an explicit `using` call.
+- **No automatic routing.** Read/write splitting, cross-connection joins, and two-phase commit are not features; routing is always an explicit `using=`, `session=`, or `engines.session(name)` you name yourself — never inferred from query shape or request data.
 
 ## See Also
 

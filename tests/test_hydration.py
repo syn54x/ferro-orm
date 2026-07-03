@@ -38,28 +38,30 @@ async def test_direct_injection_bypasses_init(db_url):
             INIT_CALLED_COUNT += 1
 
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    # 1. Create a record normally (this WILL call __init__)
-    global INIT_CALLED_COUNT
-    INIT_CALLED_COUNT = 0
-    user = HydrationTestUser(id=1, name="Direct Injector")
-    await user.save()
-    assert INIT_CALLED_COUNT == 1
+        # 1. Create a record normally (this WILL call __init__)
+        global INIT_CALLED_COUNT
+        INIT_CALLED_COUNT = 0
+        user = HydrationTestUser(id=1, name="Direct Injector")
+        await user.save()
+        assert INIT_CALLED_COUNT == 1
 
     # 2. Reset engine to clear Identity Map (so we force a DB fetch)
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    # 3. Fetch the record
-    INIT_CALLED_COUNT = 0
-    fetched_user = await HydrationTestUser.get(1)
+        # 3. Fetch the record
+        INIT_CALLED_COUNT = 0
+        fetched_user = await HydrationTestUser.get(1)
 
-    assert fetched_user is not None
-    assert fetched_user.name == "Direct Injector"
+        assert fetched_user is not None
+        assert fetched_user.name == "Direct Injector"
 
-    # CRITICAL ASSERTION: If Direct Injection is working, __init__ was never called
-    # by the Rust core when instantiating this object.
-    assert INIT_CALLED_COUNT == 0
+        # CRITICAL ASSERTION: If Direct Injection is working, __init__ was never called
+        # by the Rust core when instantiating this object.
+        assert INIT_CALLED_COUNT == 0
 
 
 @pytest.mark.asyncio
@@ -71,23 +73,25 @@ async def test_hydrated_row_initializes_pydantic_slots(db_url):
         name: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    created = SlotCheckUser(id=1, name="slot-check")
-    await created.save()
+    async with ferro.engines.session():
+        created = SlotCheckUser(id=1, name="slot-check")
+        await created.save()
 
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    row = await SlotCheckUser.get(1)
-    assert row is not None
-    _assert_pydantic_slots(
-        row,
-        expected_fields={"id", "name"},
-        expected_extra=None,
-    )
-    assert dict(row)["name"] == "slot-check"
-    copied = row.model_copy()
-    assert copied.name == row.name
-    assert dict(copied)["name"] == "slot-check"
+        row = await SlotCheckUser.get(1)
+        assert row is not None
+        _assert_pydantic_slots(
+            row,
+            expected_fields={"id", "name"},
+            expected_extra=None,
+        )
+        assert dict(row)["name"] == "slot-check"
+        copied = row.model_copy()
+        assert copied.name == row.name
+        assert dict(copied)["name"] == "slot-check"
 
 
 @pytest.mark.asyncio
@@ -101,20 +105,22 @@ async def test_hydrated_extra_allow_starts_with_empty_extra_dict(db_url):
         name: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    created = ExtraAllowUser(id=1, name="ea")
-    await created.save()
+    async with ferro.engines.session():
+        created = ExtraAllowUser(id=1, name="ea")
+        await created.save()
 
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    row = await ExtraAllowUser.get(1)
-    assert row is not None
-    _assert_pydantic_slots(
-        row,
-        expected_fields={"id", "name"},
-        expected_extra={},
-    )
-    assert dict(row)["name"] == "ea"
+        row = await ExtraAllowUser.get(1)
+        assert row is not None
+        _assert_pydantic_slots(
+            row,
+            expected_fields={"id", "name"},
+            expected_extra={},
+        )
+        assert dict(row)["name"] == "ea"
 
 
 @pytest.mark.asyncio
@@ -124,24 +130,26 @@ async def test_hydration_slots_match_across_get_all_and_first(db_url):
         name: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    await SlotPathUser(id=1, name="one").save()
+    async with ferro.engines.session():
+        await SlotPathUser(id=1, name="one").save()
 
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    by_get = await SlotPathUser.get(1)
-    by_all = (await SlotPathUser.all())[0]
-    by_first = await SlotPathUser.where(SlotPathUser.id == 1).first()
-    assert by_get is not None
-    assert by_first is not None
+        by_get = await SlotPathUser.get(1)
+        by_all = (await SlotPathUser.all())[0]
+        by_first = await SlotPathUser.where(SlotPathUser.id == 1).first()
+        assert by_get is not None
+        assert by_first is not None
 
-    for row in (by_get, by_all, by_first):
-        _assert_pydantic_slots(
-            row,
-            expected_fields={"id", "name"},
-            expected_extra=None,
-        )
-        assert row.name == "one"
+        for row in (by_get, by_all, by_first):
+            _assert_pydantic_slots(
+                row,
+                expected_fields={"id", "name"},
+                expected_extra=None,
+            )
+            assert row.name == "one"
 
 
 @pytest.mark.asyncio
@@ -153,15 +161,17 @@ async def test_hydrated_extra_forbid_initializes_slots(db_url):
         name: str
 
     await ferro.connect(db_url, auto_migrate=True)
-    await ExtraForbidUser(id=1, name="ef").save()
+    async with ferro.engines.session():
+        await ExtraForbidUser(id=1, name="ef").save()
 
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    row = await ExtraForbidUser.get(1)
-    assert row is not None
-    _assert_pydantic_slots(
-        row,
-        expected_fields={"id", "name"},
-        expected_extra=None,
-    )
+        row = await ExtraForbidUser.get(1)
+        assert row is not None
+        _assert_pydantic_slots(
+            row,
+            expected_fields={"id", "name"},
+            expected_extra=None,
+        )
