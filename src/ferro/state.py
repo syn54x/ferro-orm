@@ -2,6 +2,8 @@ from contextvars import ContextVar
 
 from typing import Any, Protocol
 
+from ._core import RouteHandle
+
 # Context variable to store the active transaction ID for the current task
 _CURRENT_TRANSACTION: ContextVar[str | None] = ContextVar(
     "current_transaction", default=None
@@ -69,13 +71,15 @@ def resolve_operation_scope(
     *,
     using: str | None,
     session: SessionLike | None,
-) -> tuple[str | None, str | None, str | None]:
+) -> RouteHandle:
     """Resolve the route for ORM/raw operations.
 
     Exactly one resolution site per operation (FF-D D3/D4): a session
     (ambient or explicit), an explicit `using=`, or an active transaction.
     No route is an error; `using=` conflicting with the ambient session is
-    an error (the silent sessionless bypass was removed in v0.13).
+    an error (the silent sessionless bypass was removed in v0.13). The
+    returned `RouteHandle` is resolved once and threaded by value through
+    every FFI operation — Rust never re-derives it.
     """
     tx_id = _CURRENT_TRANSACTION.get()
     tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
@@ -110,26 +114,30 @@ def resolve_operation_scope(
                 raise ValueError(
                     "Active transaction is bound to a different connection than session"
                 )
-        return tx_id, None, session_id
+        return RouteHandle(
+            connection_name=tx_connection, tx_id=tx_id, session_id=session_id
+        )
 
     effective_using = using or (
         effective_session.connection_name if effective_session is not None else None
     )
     if effective_using is None:
         raise RuntimeError(_NO_ROUTE_MESSAGE)
-    return None, effective_using, session_id
+    return RouteHandle(connection_name=effective_using, session_id=session_id)
 
 
 def resolve_transaction_scope(
     *,
     using: str | None,
     session: SessionLike | None,
-) -> tuple[str | None, str | None, str | None]:
+) -> RouteHandle:
     """Resolve the route for `transaction()` — same rules as
     `resolve_operation_scope`, but nested transactions always inherit the
-    parent transaction's route.
+    parent transaction's route. The returned handle's `tx_id` is the
+    *parent* transaction (or `None` for a root transaction).
     """
     parent_tx_id = _CURRENT_TRANSACTION.get()
+    tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
     ambient_session = _CURRENT_SESSION.get()
     explicit_session = session
     effective_session = explicit_session or ambient_session
@@ -148,10 +156,12 @@ def resolve_transaction_scope(
         _ensure_active_session(ambient_session)
     _ensure_active_session(effective_session)
 
+    session_id = effective_session.session_id if effective_session is not None else None
+
     if parent_tx_id is not None:
         # Nested tx route is always inherited from parent.
-        return parent_tx_id, None, (
-            effective_session.session_id if effective_session is not None else None
+        return RouteHandle(
+            connection_name=tx_connection, tx_id=parent_tx_id, session_id=session_id
         )
 
     effective_using = using or (
@@ -159,6 +169,18 @@ def resolve_transaction_scope(
     )
     if effective_using is None:
         raise RuntimeError(_NO_ROUTE_MESSAGE)
-    return None, effective_using, (
-        effective_session.session_id if effective_session is not None else None
-    )
+    return RouteHandle(connection_name=effective_using, session_id=session_id)
+
+
+def route_for_transaction(
+    connection_name: str, tx_id: str, session_id: str | None
+) -> RouteHandle:
+    """Build the child route for the `Transaction` handle yielded by
+    `transaction()` (FF-D D3).
+
+    Kept in `state.py` — the only module allowed to construct
+    `RouteHandle` — rather than inline in `models.py`, so the single
+    construction-site invariant holds for every route, including the one
+    handed to raw SQL inside a transaction block.
+    """
+    return RouteHandle(connection_name=connection_name, tx_id=tx_id, session_id=session_id)

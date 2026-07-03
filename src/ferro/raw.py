@@ -28,6 +28,7 @@ import json
 import uuid
 from typing import Any
 
+from ._core import RouteHandle
 from ._core import raw_execute as _raw_execute
 from ._core import raw_fetch_all as _raw_fetch_all
 from ._core import raw_fetch_one as _raw_fetch_one
@@ -68,9 +69,7 @@ def _check_sql(sql: str) -> None:
         raise ValueError("sql must be a non-empty statement")
 
 
-def _transaction_or_using(
-    using: str | None, session: Any | None
-) -> tuple[str | None, str | None, str | None]:
+def _transaction_or_using(using: str | None, session: Any | None) -> RouteHandle:
     return resolve_operation_scope(using=using, session=session)
 
 
@@ -87,8 +86,8 @@ async def execute(
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
-    tx_id, using, session_id = _transaction_or_using(using, session)
-    return await _raw_execute(sql, marshalled, tx_id, using, session_id=session_id)
+    route = _transaction_or_using(using, session)
+    return await _raw_execute(sql, marshalled, route)
 
 
 async def fetch_all(
@@ -101,8 +100,8 @@ async def fetch_all(
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
-    tx_id, using, session_id = _transaction_or_using(using, session)
-    return await _raw_fetch_all(sql, marshalled, tx_id, using, session_id=session_id)
+    route = _transaction_or_using(using, session)
+    return await _raw_fetch_all(sql, marshalled, route)
 
 
 async def fetch_one(
@@ -114,8 +113,8 @@ async def fetch_one(
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
-    tx_id, using, session_id = _transaction_or_using(using, session)
-    return await _raw_fetch_one(sql, marshalled, tx_id, using, session_id=session_id)
+    route = _transaction_or_using(using, session)
+    return await _raw_fetch_one(sql, marshalled, route)
 
 
 class Transaction:
@@ -123,7 +122,8 @@ class Transaction:
 
     Obtained via ``async with transaction() as tx``. Methods delegate to the
     top-level :func:`execute` / :func:`fetch_all` / :func:`fetch_one` with this
-    transaction's ``tx_id`` set explicitly, so they don't depend on the
+    transaction's route (a :class:`RouteHandle` built by
+    ``models.transaction()``) passed explicitly, so they don't depend on the
     ContextVar state. This makes the connection-affinity invariant
     structurally impossible to violate from inside the ``async with`` block.
 
@@ -131,27 +131,22 @@ class Transaction:
     subsequent call raises :class:`RuntimeError`.
     """
 
-    __slots__ = ("_tx_id", "_session_id")
+    __slots__ = ("_route",)
 
-    def __init__(self, tx_id: str, session_id: str | None = None) -> None:
-        self._tx_id = tx_id
-        self._session_id = session_id
+    def __init__(self, route: RouteHandle) -> None:
+        self._route = route
 
     async def execute(self, sql: str, *args: Any) -> int:
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
-        return await _raw_execute(sql, marshalled, self._tx_id, session_id=self._session_id)
+        return await _raw_execute(sql, marshalled, self._route)
 
     async def fetch_all(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
-        return await _raw_fetch_all(
-            sql, marshalled, self._tx_id, session_id=self._session_id
-        )
+        return await _raw_fetch_all(sql, marshalled, self._route)
 
     async def fetch_one(self, sql: str, *args: Any) -> dict[str, Any] | None:
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
-        return await _raw_fetch_one(
-            sql, marshalled, self._tx_id, session_id=self._session_id
-        )
+        return await _raw_fetch_one(sql, marshalled, self._route)

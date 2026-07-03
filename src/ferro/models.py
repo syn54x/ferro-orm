@@ -22,7 +22,7 @@ from ._bind_payload import save_bind_payload
 from ._core import (
     begin_transaction,
     commit_transaction,
-    evict_instance,
+    evict_instance as _core_evict_instance,
     fetch_all,
     register_instance,
     rollback_transaction,
@@ -36,10 +36,12 @@ from .exceptions import ModelDoesNotExist
 from .metaclass import ModelMetaclass
 from .query import Predicate, Query, QueryNode
 from .state import (
+    RouteHandle,
     _CURRENT_TRANSACTION,
     _CURRENT_TRANSACTION_CONNECTION,
     resolve_operation_scope,
     resolve_transaction_scope,
+    route_for_transaction,
 )
 
 
@@ -67,25 +69,29 @@ def _field_eq(field_name: str, value: Any) -> Predicate[Any]:
 
 def _transaction_or_using(
     using: str | None, session: "Session | None"
-) -> tuple[str | None, str | None, str | None]:
+) -> RouteHandle:
     return resolve_operation_scope(using=using, session=session)
 
 
 def _instance_transaction_route(
     instance: object, using: str | None, session: "Session | None"
-) -> tuple[str | None, str | None, str | None, str | None]:
+) -> tuple[RouteHandle, str]:
+    """Resolve the route for an instance method (`save`/`delete`/`refresh`).
+
+    Returns `(route, effective_connection)`. `effective_connection` is
+    `route.connection_name` — always the real connection the instance's
+    identity-map entry lives on, whether or not an ambient transaction is
+    active (FF-D D3/D4 folded the old `identity_using`/`operation_using`
+    split into the single resolved route).
+    """
     origin = _instance_origin(instance)
     if using is not None and origin is not None and using != origin:
         raise ValueError("Instance is already bound to a different connection")
 
     # Origin is the instance's implicit route (FF-D D4): it participates in
     # session-conflict checks instead of silently bypassing the session.
-    tx_id, route_using, session_id = _transaction_or_using(using or origin, session)
-    if tx_id is not None:
-        tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
-        return tx_id, route_using, origin or tx_connection, session_id
-
-    return None, route_using, route_using, session_id
+    route = _transaction_or_using(using or origin, session)
+    return route, route.connection_name
 
 
 def _instance_origin(instance: object) -> str | None:
@@ -96,6 +102,25 @@ def _instance_origin(instance: object) -> str | None:
 def _set_instance_origin(instance: object, using: str | None) -> None:
     if using is not None:
         object.__setattr__(instance, _FERRO_CONNECTION_ATTR, using)
+
+
+def evict_instance(
+    model_name: str,
+    pk: str,
+    *,
+    using: str | None = None,
+    session: "Session | None" = None,
+) -> None:
+    """Remove one instance from the active scope's identity map.
+
+    Public wrapper around the FFI `evict_instance` (FF-D D3): resolves the
+    route once via `resolve_operation_scope`, then passes it through. Model
+    instance methods (`save`/`delete`/`refresh`) call the FFI symbol
+    directly with their already-resolved route instead of going through this
+    wrapper, so a route is never resolved twice for one operation.
+    """
+    route = resolve_operation_scope(using=using, session=session)
+    _core_evict_instance(model_name, pk, route)
 
 
 @asynccontextmanager
@@ -124,18 +149,17 @@ async def transaction(using: str | None = None, *, session: "Session | None" = N
     """
     from .raw import Transaction
 
-    parent_tx_id, effective_using, session_id = resolve_transaction_scope(
-        using=using, session=session
-    )
-    tx_id = await begin_transaction(parent_tx_id, effective_using, session_id=session_id)
-    connection_name = transaction_connection_name(tx_id, session_id=session_id)
+    route = resolve_transaction_scope(using=using, session=session)
+    tx_id = await begin_transaction(route)
+    connection_name = transaction_connection_name(tx_id, session_id=route.session_id)
+    child_route = route_for_transaction(connection_name, tx_id, route.session_id)
     token = _CURRENT_TRANSACTION.set(tx_id)
     connection_token = _CURRENT_TRANSACTION_CONNECTION.set(connection_name)
     try:
-        yield Transaction(tx_id, session_id=session_id)
-        await commit_transaction(tx_id, session_id=session_id)
+        yield Transaction(child_route)
+        await commit_transaction(tx_id, session_id=route.session_id)
     except Exception:
-        await rollback_transaction(tx_id, session_id=session_id)
+        await rollback_transaction(tx_id, session_id=route.session_id)
         raise
     finally:
         _CURRENT_TRANSACTION.reset(token)
@@ -278,17 +302,13 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise ValueError(
                 f'on_conflict must be None or "update", got {on_conflict!r}'
             )
-        tx_id, operation_using, identity_using, session_id = _instance_transaction_route(
-            self, using, session
-        )
+        route, identity_using = _instance_transaction_route(self, using, session)
         new_id = None
         if on_conflict == "update":
             new_id = await save_record(
                 self.__class__.__name__,
                 save_bind_payload(self),
-                tx_id,
-                operation_using,
-                session_id=session_id,
+                route,
                 mode="upsert",
             )
         elif _is_persisted(self):
@@ -302,9 +322,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             rows_affected = await update_record(
                 self.__class__.__name__,
                 save_bind_payload(self),
-                tx_id,
-                operation_using,
-                session_id=session_id,
+                route,
             )
             if rows_affected == 0:
                 raise ModelDoesNotExist(self.__class__, pk_val)
@@ -312,9 +330,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             new_id = await save_record(
                 self.__class__.__name__,
                 save_bind_payload(self),
-                tx_id,
-                operation_using,
-                session_id=session_id,
+                route,
                 mode="insert",
             )
 
@@ -344,8 +360,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 self.__class__.__name__,
                 str(pk_val),
                 self,
-                identity_using,
-                session_id=session_id,
+                route,
             )
             _set_instance_origin(self, identity_using)
         _set_persisted(self, True)
@@ -365,21 +380,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         pk_field_name = self.__class__._primary_key_field_name()
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
-        _tx_id, operation_using, identity_using, session_id = _instance_transaction_route(
-            self, using, session
-        )
+        route, _identity_using = _instance_transaction_route(self, using, session)
 
         if pk_val is not None:
             name = self.__class__.__name__
-            query = self.__class__.where(_field_eq(pk_field_name, pk_val))
-            if operation_using is not None:
-                query = Query(self.__class__, using=operation_using).where(
-                    _field_eq(pk_field_name, pk_val)
-                )
-            await query.delete()
-            evict_instance(
-                name, str(pk_val), identity_using, session_id=session_id
+            query = Query(self.__class__, using=route.connection_name).where(
+                _field_eq(pk_field_name, pk_val)
             )
+            await query.delete()
+            _core_evict_instance(name, str(pk_val), route)
             # The instance is transient again: a later save() re-INSERTs.
             _set_persisted(self, False)
 
@@ -409,8 +418,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> isinstance(users, list)
             True
         """
-        tx_id, using, session_id = _transaction_or_using(using, session)
-        return await fetch_all(cls, tx_id, using, session_id=session_id)
+        route = _transaction_or_using(using, session)
+        return await fetch_all(cls, route)
 
     @classmethod
     async def get(cls, pk: Any, *, session: "Session | None" = None) -> Self:
@@ -476,25 +485,19 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise RuntimeError("Cannot refresh a model without a primary key")
 
         name = self.__class__.__name__
-        _tx_id, operation_using, identity_using, session_id = _instance_transaction_route(
-            self, using, session
-        )
+        route, identity_using = _instance_transaction_route(self, using, session)
 
-        evict_instance(name, str(pk_val), identity_using, session_id=session_id)
-        query = self.__class__.where(_field_eq(pk_field_name, pk_val))
-        if operation_using is not None:
-            query = Query(self.__class__, using=operation_using).where(
-                _field_eq(pk_field_name, pk_val)
-            )
+        _core_evict_instance(name, str(pk_val), route)
+        query = Query(self.__class__, using=route.connection_name).where(
+            _field_eq(pk_field_name, pk_val)
+        )
         fresh_instance = await query.first()
 
         if fresh_instance is None:
             raise RuntimeError(f"Instance not found in database: {name}({pk_val})")
 
         self.__dict__.update(fresh_instance.__dict__)
-        register_instance(
-            name, str(pk_val), self, identity_using, session_id=session_id
-        )
+        register_instance(name, str(pk_val), self, route)
         _set_instance_origin(self, identity_using)
         _set_persisted(self, True)
 
@@ -636,10 +639,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if not instances:
             return 0
         data = [save_bind_payload(i) for i in instances]
-        tx_id, using, session_id = _transaction_or_using(using, session)
-        return await save_bulk_records(
-            cls.__name__, data, tx_id, using, session_id=session_id
-        )
+        route = _transaction_or_using(using, session)
+        return await save_bulk_records(cls.__name__, data, route)
 
     @classmethod
     async def get_or_create(

@@ -111,10 +111,18 @@ async def test_named_connections_smoke_matrix_sqlite(tmp_path):
         assert service_row.label == "service-tx"
 
         # A raw FFI escape hatch — bypasses the Python-level route resolver
-        # (and its D4 conflict check) entirely, so no session is needed.
-        from ferro._core import delete_record
+        # (and its D4 conflict check) entirely, so no session is needed. FF-D
+        # D3 collapsed the tx_id/using/session_id triple into one resolved
+        # RouteHandle; build it directly since this deliberately skips
+        # resolve_operation_scope.
+        from ferro._core import RouteHandle, delete_record
 
-        assert await delete_record("NamedSmokeMarker", "1", using="service") is True
+        assert (
+            await delete_record(
+                "NamedSmokeMarker", "1", RouteHandle(connection_name="service")
+            )
+            is True
+        )
         assert await NamedSmokeMarker.get(1) is app_row
         async with ferro.engines.session("service"):
             assert await NamedSmokeMarker.using("service").get_or_none(1) is None

@@ -163,7 +163,9 @@ async def test_instance_methods_loaded_inside_named_transaction_keep_identity_sc
     async with engines.session():
         await TxNamedInstanceMethodUser.create(id=1, username="app")
     await TxNamedInstanceMethodUser.using("service").create(id=1, username="service")
-    evict_instance("TxNamedInstanceMethodUser", "1")
+    # No implicit default-connection route (FF-D D3/D4): each evict is scoped
+    # to the connection it targets.
+    evict_instance("TxNamedInstanceMethodUser", "1", using="app")
     evict_instance("TxNamedInstanceMethodUser", "1", using="service")
 
     async with transaction(using="service"):
@@ -212,7 +214,9 @@ async def test_matching_explicit_using_inside_named_transaction_is_allowed(tmp_p
     async with engines.session():
         await TxMatchingUsingUser.create(id=1, username="app")
     await TxMatchingUsingUser.using("service").create(id=1, username="service")
-    evict_instance("TxMatchingUsingUser", "1")
+    # No implicit default-connection route (FF-D D3/D4): each evict is scoped
+    # to the connection it targets.
+    evict_instance("TxMatchingUsingUser", "1", using="app")
     evict_instance("TxMatchingUsingUser", "1", using="service")
 
     async with transaction(using="service"):

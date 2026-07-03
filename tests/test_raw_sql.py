@@ -27,12 +27,18 @@ def _ph(db_url: str, n: int = 1) -> str:
 @pytest.mark.asyncio
 async def test_raw_execute_ffi_smoke(db_url):
     """Task 2 smoke: ferro._core.raw_execute is callable and creates a table."""
-    from ferro._core import raw_execute
+    from ferro._core import RouteHandle, raw_execute
 
     await connect(db_url)
-    async with engines.session():
+    async with engines.session() as session:
+        # FF-D D3: raw_execute takes a single resolved RouteHandle rather than
+        # a tx_id/using/session_id triple. This low-level smoke test builds
+        # one directly instead of going through resolve_operation_scope.
+        route = RouteHandle(
+            connection_name=session.connection_name, session_id=session.session_id
+        )
         rows_affected = await raw_execute(
-            "CREATE TABLE raw_smoke (id INTEGER PRIMARY KEY)", [], None
+            "CREATE TABLE raw_smoke (id INTEGER PRIMARY KEY)", [], route
         )
         assert isinstance(rows_affected, int)
 

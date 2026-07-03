@@ -1,5 +1,27 @@
 from typing import Any, Optional
 
+class RouteHandle:
+    """Opaque, immutable route for one operation (FF-D D3).
+
+    Resolved exactly once by ``ferro.state.resolve_operation_scope`` /
+    ``resolve_transaction_scope`` and threaded by value through every FFI
+    operation. ``connection_name`` is never ``None`` — a routeless handle is
+    unrepresentable, not an error branch.
+    """
+
+    def __init__(
+        self,
+        connection_name: str,
+        tx_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None: ...
+    @property
+    def connection_name(self) -> str: ...
+    @property
+    def tx_id(self) -> Optional[str]: ...
+    @property
+    def session_id(self) -> Optional[str]: ...
+
 def register_model_schema(name: str, schema: str) -> None: ...
 async def connect(
     url: str,
@@ -90,74 +112,54 @@ def _shadow_compare_query_plan_for_test(
 
 async def fetch_all(
     cls: object,
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> list[Any]: ...
 async def fetch_filtered(
     cls: object,
     query_ir_json: str,
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> list[Any]: ...
 async def count_filtered(
     name: str,
     query_ir_json: str,
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> int: ...
 async def fetch_one(
     cls: object,
     pk_val: str,
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> Any | None: ...
 async def save_record(
     name: str,
     data: dict[str, Any],
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
     mode: str = "insert",
 ) -> int | None: ...
 async def update_record(
     name: str,
     data: dict[str, Any],
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> int: ...
 async def save_bulk_records(
     name: str,
     rows: list[dict[str, Any]],
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> int: ...
 async def delete_record(
     name: str,
     pk_val: str,
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> bool: ...
 async def delete_filtered(
     name: str,
     query_ir_json: str,
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> int: ...
 async def update_filtered(
     name: str,
     query_ir_json: str,
     updates: dict[str, Any],
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> int: ...
 async def add_m2m_links(
     join_table: str,
@@ -165,9 +167,7 @@ async def add_m2m_links(
     target_col: str,
     source_id: Any,
     target_ids: list[Any],
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> None: ...
 async def remove_m2m_links(
     join_table: str,
@@ -175,23 +175,15 @@ async def remove_m2m_links(
     target_col: str,
     source_id: Any,
     target_ids: list[Any],
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> None: ...
 async def clear_m2m_links(
     join_table: str,
     source_col: str,
     source_id: Any,
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> None: ...
-async def begin_transaction(
-    parent_tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
-) -> str: ...
+async def begin_transaction(route: RouteHandle) -> str: ...
 async def commit_transaction(tx_id: str, session_id: Optional[str] = None) -> None: ...
 def transaction_connection_name(tx_id: str, session_id: Optional[str] = None) -> str: ...
 async def rollback_transaction(tx_id: str, session_id: Optional[str] = None) -> None: ...
@@ -200,34 +192,25 @@ def close_session(session_id: str) -> None: ...
 async def raw_execute(
     sql: str,
     args: list[Any],
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> int: ...
 async def raw_fetch_all(
     sql: str,
     args: list[Any],
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> list[dict[str, Any]]: ...
 async def raw_fetch_one(
     sql: str,
     args: list[Any],
-    tx_id: Optional[str] = None,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> dict[str, Any] | None: ...
 def register_instance(
     name: str,
     pk: str,
     obj: object,
-    using: Optional[str] = None,
-    session_id: Optional[str] = None,
+    route: RouteHandle,
 ) -> None: ...
-def evict_instance(
-    name: str, pk: str, using: Optional[str] = None, session_id: Optional[str] = None
-) -> None: ...
+def evict_instance(name: str, pk: str, route: RouteHandle) -> None: ...
 def reset_engine() -> None: ...
 def set_default_connection(name: str) -> None: ...
 def clear_registry() -> None: ...

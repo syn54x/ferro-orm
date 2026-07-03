@@ -15,7 +15,6 @@ from pydantic import Field as PydanticField
 from ._core import (
     clear_registry as _core_clear_registry,
     create_tables as _core_create_tables,
-    evict_instance,
     migrate as _core_migrate,
     reset_engine,
     set_default_connection,
@@ -39,7 +38,7 @@ from .exceptions import (
     UniqueViolationError,
 )
 from .fields import BackRef, Field, ManyToMany
-from .models import Model, transaction
+from .models import Model, evict_instance, transaction
 from .query import Relation
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .session import Session, engines
