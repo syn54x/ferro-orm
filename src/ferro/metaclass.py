@@ -32,7 +32,7 @@ from .relations.descriptors import ForwardDescriptor
 from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
-_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def _assert_weakref_support(cls: type) -> None:
