@@ -275,17 +275,13 @@ class Query(Generic[T]):
             "m2m": self._m2m_context,
         }
         tx_id, using, session_id = self._transaction_or_using()
-        results = await fetch_filtered(
+        return await fetch_filtered(
             self.model_cls,
             _query_ir_payload_to_json(query_def),
             tx_id,
             using,
             session_id=session_id,
         )
-        for instance in results:
-            if hasattr(self.model_cls, "_fix_types"):
-                self.model_cls._fix_types(instance)
-        return results
 
     async def count(self) -> int:
         """Return the number of records that match the current query

@@ -1021,6 +1021,7 @@ pub fn fetch_all<'py>(
                     );
                 }
             }
+            let enum_classes = crate::hydration::enum_classes_for(py, cls);
 
             for (row_pk_val, fields) in parsed_data {
                 if use_identity_map
@@ -1040,6 +1041,7 @@ pub fn fetch_all<'py>(
                     &connection_name,
                     fields,
                     &py_col_names,
+                    &enum_classes,
                 )?;
 
                 if use_identity_map && let Some(pk_val) = row_pk_val {
@@ -1177,12 +1179,14 @@ pub fn fetch_one<'py>(
             Some(fields) => Python::attach(|py| {
                 let cls = cls_py.bind(py);
                 let py_col_names = HashMap::new();
+                let enum_classes = crate::hydration::enum_classes_for(py, cls);
                 let instance = crate::hydration::hydrate_model_instance(
                     py,
                     cls,
                     &connection_name,
                     fields,
                     &py_col_names,
+                    &enum_classes,
                 )?;
                 if use_identity_map {
                     identity_map_insert(
@@ -1860,6 +1864,7 @@ pub fn fetch_filtered<'py>(
                     );
                 }
             }
+            let enum_classes = crate::hydration::enum_classes_for(py, cls);
 
             for (row_pk_val, fields) in parsed_data {
                 if use_identity_map
@@ -1879,6 +1884,7 @@ pub fn fetch_filtered<'py>(
                     &connection_name,
                     fields,
                     &py_col_names,
+                    &enum_classes,
                 )?;
 
                 if use_identity_map && let Some(pk_val) = row_pk_val {

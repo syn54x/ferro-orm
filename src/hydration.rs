@@ -9,6 +9,29 @@ use crate::state::RustValue;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
+/// Resolve a model's enum-typed fields to their Python enum classes.
+///
+/// Built once per fetch (not per row) from `cls._enum_fields`, which the
+/// metaclass populates from resolved annotations. The model class itself is
+/// the registry holding the enum classes (FF-C C4), so no Python object ever
+/// enters static Rust state.
+pub fn enum_classes_for<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+) -> HashMap<String, Bound<'py, PyAny>> {
+    let mut out = HashMap::new();
+    if let Ok(enum_fields) = cls.getattr(pyo3::intern!(py, "_enum_fields"))
+        && let Ok(dict) = enum_fields.cast::<pyo3::types::PyDict>()
+    {
+        for (field_name, enum_cls) in dict.iter() {
+            if let Ok(field_name) = field_name.extract::<String>() {
+                out.insert(field_name, enum_cls);
+            }
+        }
+    }
+    out
+}
+
 /// Initialize Pydantic v2 hydration slots on a freshly allocated instance.
 ///
 /// Mirrors `BaseModel.__init__` slot assignment so attribute access on hydrated instances
@@ -45,18 +68,22 @@ fn set_pydantic_hydration_slots<'py>(
 /// * `connection_name` — Registered connection name stored on the instance for routing.
 /// * `fields` — `(column_name, decoded_value)` pairs in query result order.
 /// * `py_col_names` — Interned `PyString` handles for column names (avoids per-row allocation).
+/// * `enum_classes` — Enum class per enum-typed field, from [`enum_classes_for`];
+///   non-null values of those fields hydrate as enum members (FF-C C4).
 ///
 /// # Returns
 /// A bound model instance with `__pydantic_fields_set__` populated for assigned columns.
 ///
 /// # Errors
-/// Returns `PyErr` if `__new__`, dict/slot assignment, or `RustValue` → Python conversion fails.
+/// Returns `PyErr` if `__new__`, dict/slot assignment, or `RustValue` → Python conversion
+/// fails, or if an enum column holds a value its enum class does not accept.
 pub fn hydrate_model_instance<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
     connection_name: &str,
     fields: Vec<(String, RustValue)>,
     py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
+    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let instance = cls.call_method1(pyo3::intern!(py, "__new__"), (cls,))?;
     let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
@@ -71,7 +98,23 @@ pub fn hydrate_model_instance<'py>(
     let fields_set = pyo3::types::PySet::empty(py)?;
 
     for (col_name, val) in fields {
-        let py_val = val.into_py_any(py)?;
+        let mut py_val = val.into_py_any(py)?;
+        if let Some(enum_cls) = enum_classes.get(&col_name)
+            && !py_val.is_none()
+        {
+            // One plan-consistent conversion at the hydration boundary; a
+            // value the enum class rejects is real data corruption and must
+            // surface, not be silently passed through (FF-C C4, I-6).
+            py_val = enum_cls.call1((py_val,)).map_err(|err| {
+                let model = cls
+                    .getattr(pyo3::intern!(py, "__name__"))
+                    .and_then(|n| n.extract::<String>())
+                    .unwrap_or_else(|_| "<model>".to_string());
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Failed to hydrate enum field {model}.{col_name}: {err}"
+                ))
+            })?;
+        }
         if let Some(py_name) = py_col_names.get(&col_name) {
             let py_name = py_name.bind(py);
             dict.set_item(py_name, py_val)?;

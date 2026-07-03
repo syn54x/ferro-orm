@@ -399,24 +399,6 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return None
 
     @classmethod
-    def _fix_types(cls, instance: Self) -> None:
-        """Normalize hydrated values to declared Python types
-
-        Args:
-            instance: Model instance to normalize in-place.
-
-        Returns:
-            None
-        """
-        for field_name, enum_cls in cls._enum_fields.items():
-            val = getattr(instance, field_name)
-            if val is not None and not isinstance(val, enum_cls):
-                try:
-                    setattr(instance, field_name, enum_cls(val))
-                except Exception:
-                    pass
-
-    @classmethod
     async def all(
         cls, *, using: str | None = None, session: "Session | None" = None
     ) -> list[Self]:
@@ -431,10 +413,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             True
         """
         tx_id, using, session_id = _transaction_or_using(using, session)
-        results = await fetch_all(cls, tx_id, using, session_id=session_id)
-        for instance in results:
-            cls._fix_types(instance)
-        return results
+        return await fetch_all(cls, tx_id, using, session_id=session_id)
 
     @classmethod
     async def get(cls, pk: Any, *, session: "Session | None" = None) -> Self:
@@ -476,12 +455,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if pk_field_name is None:
             raise RuntimeError(f"Model {cls.__name__} does not define a primary key")
 
-        instance = await cls.where(
-            _field_eq(pk_field_name, pk), session=session
-        ).first()
-        if instance:
-            cls._fix_types(instance)
-        return instance
+        return await cls.where(_field_eq(pk_field_name, pk), session=session).first()
 
     async def refresh(
         self, *, using: str | None = None, session: "Session | None" = None
@@ -526,7 +500,6 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         )
         _set_instance_origin(self, identity_using)
         _set_persisted(self, True)
-        self.__class__._fix_types(self)
 
     @overload
     @classmethod
@@ -793,10 +766,7 @@ class ModelConnection[M: Model]:
                 f"Model {self.model_cls.__name__} does not define a primary key"
             )
 
-        instance = await self.where(_field_eq(pk_field_name, pk)).first()
-        if instance:
-            self.model_cls._fix_types(instance)
-        return instance
+        return await self.where(_field_eq(pk_field_name, pk)).first()
 
     async def bulk_create(self, instances: list[M]) -> int:
         return await self.model_cls.bulk_create(instances, using=self._connection_name)
