@@ -141,13 +141,18 @@ def resolve_relationships():
 
     reconcile_shadow_fk_types(_MODEL_REGISTRY_PY)
 
-    # Second pass: Re-register schemas
+    # Second pass: Re-register schemas — loudly (FF-E E4). A model whose
+    # schema fails to rebuild here would otherwise be silently left on its
+    # pre-relationship schema.
     for model_name, model_cls in _MODEL_REGISTRY_PY.items():
         try:
             schema = build_model_schema(model_cls)
-            register_model_schema(model_name, json.dumps(schema))
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(
+                f"Ferro failed to rebuild the schema for model '{model_name}' "
+                f"while resolving relationships: {exc}"
+            ) from exc
+        register_model_schema(model_name, json.dumps(schema))
 
     compile_registry_schema_ir()
     _PENDING_RELATIONS.clear()
