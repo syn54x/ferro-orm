@@ -36,6 +36,44 @@ def _ensure_active_session(session: SessionLike | None) -> None:
 # Global registry for models (Python side)
 _MODEL_REGISTRY_PY = {}
 
+_UNSET = object()
+
+
+def resolve_model_reference(ref: str, *, default: Any = _UNSET) -> Any:
+    """Resolve a model reference to a registered model class (FF-E E1).
+
+    Accepts a qualified identity (``module.QualName``) or a bare class name.
+    A bare name matching exactly one registered model resolves to it; several
+    matches raise with the qualified candidates listed; no match raises
+    (or returns ``default`` when given). Ambiguity always raises.
+
+    The registry is still keyed by bare class name in this task (FF-E task
+    2), so a qualified identity is matched by scanning registered classes'
+    ``__ferro_identity__`` stamp rather than by a direct dict lookup — that
+    dict-key change lands in a later FF-E task.
+    """
+    model = _MODEL_REGISTRY_PY.get(ref)
+    if model is not None:
+        return model
+    for cls in _MODEL_REGISTRY_PY.values():
+        if getattr(cls, "__ferro_identity__", None) == ref:
+            return cls
+    candidates = [cls for cls in _MODEL_REGISTRY_PY.values() if cls.__name__ == ref]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        listed = ", ".join(
+            sorted(getattr(c, "__ferro_identity__", c.__qualname__) for c in candidates)
+        )
+        raise RuntimeError(
+            f"Model reference '{ref}' is ambiguous: {listed}. "
+            "Use the qualified 'module.QualName' form to disambiguate."
+        )
+    if default is not _UNSET:
+        return default
+    raise RuntimeError(f"Model '{ref}' not found in registry")
+
+
 # Global registry for relationships that need deferred resolution
 _PENDING_RELATIONS = []
 

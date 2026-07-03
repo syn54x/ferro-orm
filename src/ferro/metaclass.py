@@ -1,4 +1,5 @@
 import json
+import re
 import types
 from enum import Enum
 from typing import (
@@ -30,6 +31,8 @@ from .query import FieldProxy, Relation
 from .relations.descriptors import ForwardDescriptor
 from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _assert_weakref_support(cls: type) -> None:
@@ -75,6 +78,9 @@ class ModelMetaclass(type(BaseModel)):
         if name == "Model":
             return cls
 
+        cls.__ferro_identity__ = f"{cls.__module__}.{cls.__qualname__}"
+        cls.__ferro_table__ = mcs._resolve_table_name(name, namespace)
+
         mcs._register_model_and_proxies(cls, name, local_relations)
         ferro_fields = mcs._parse_ferro_field_metadata(cls)
         cls.ferro_fields = ferro_fields
@@ -84,6 +90,30 @@ class ModelMetaclass(type(BaseModel)):
         mcs._generate_and_register_schema(cls, name, ferro_fields, local_relations)
 
         return cls
+
+    @staticmethod
+    def _resolve_table_name(name: str, namespace: dict) -> str:
+        """Resolve the physical table name for a model class (FF-E E2).
+
+        ``__ferro_table__`` is honored only when declared in the class's own
+        body (the metaclass namespace) — a subclass never silently inherits
+        its parent's physical table. Default: ``classname.lower()``.
+        """
+        configured = namespace.get("__ferro_table__")
+        if configured is None:
+            return name.lower()
+        if not isinstance(configured, str):
+            raise TypeError(
+                f"__ferro_table__ on model '{name}' must be a str, "
+                f"got {type(configured).__name__}"
+            )
+        if len(configured) > 63 or not _TABLE_NAME_RE.match(configured):
+            raise ValueError(
+                f"__ferro_table__ {configured!r} on model '{name}' is not a "
+                "valid table name: expected a 1-63 character identifier "
+                "matching [A-Za-z_][A-Za-z0-9_]*"
+            )
+        return configured
 
     @staticmethod
     def _field_ferro_payload(obj: Any) -> dict[str, Any]:
