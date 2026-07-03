@@ -211,11 +211,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 val = data.pop(field_name)
                 # If it's a Model instance, extract the ID
                 if isinstance(val, Model):
-                    pk_field = "id"
-                    for f_name, f_meta in self.__class__.ferro_fields.items():
-                        if f_meta.primary_key:
-                            pk_field = f_name
-                            break
+                    # Read the *target* model's PK (FF-D D5) — the source
+                    # model's PK name is irrelevant to the related instance.
+                    pk_field = val.__class__._primary_key_field_name() or "id"
                     id_val = getattr(val, pk_field, None)
                     data[f"{field_name}_id"] = id_val
                 else:
