@@ -289,7 +289,8 @@ pub fn connect(
     })
 }
 
-/// Shuts down the global engine and clears the Identity Map.
+/// Shuts down the global engine and tears down all sessions (and their
+/// session-scoped identity maps).
 ///
 /// This is useful for testing environments to ensure isolation
 /// between test runs.
