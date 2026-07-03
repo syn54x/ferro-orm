@@ -100,3 +100,34 @@ recreated PG schema), a pinned pool (`max_connections=5`), and a single
 persistent event loop across all cases. The fetch cases are measured with the
 identity map both on and off because that bookkeeping is real hot-path cost the
 FF-C rewrite interacts with.
+
+## FF-C epic results (recorded 2026-07-02)
+
+Full before/after of Epic FF-C — **before** is the pre-C1 baseline capture
+(`d9a656b`), **after** is post-C2 (catalog cache; C1 codec plan, C3 native
+decode, and C4 enum hydration included). Same machine, release-profile `.so`
+(sha-verified), medians in ms.
+
+**Postgres**
+
+| benchmark                | pre-C1 | post-C2 | Δ %    | C2-only Δ % (vs post-C3) |
+| ------------------------ | ------ | ------- | ------ | ------------------------ |
+| single_save              | 1.708  | 0.399   | −76.6% | −66.9%                   |
+| bulk_save                | 389.5  | 92.1    | −76.4% | −11.8%                   |
+| fetch_10000_identity_on  | 189.5  | 16.1    | −91.5% | −16.9%                   |
+| fetch_10000_identity_off | 285.9  | 67.3    | −76.5% | +0.0%                    |
+
+**SQLite**
+
+| benchmark                | pre-C1 | post-C2 | Δ %    | C2-only Δ % (vs post-C3) |
+| ------------------------ | ------ | ------- | ------ | ------------------------ |
+| single_save              | 0.352  | 0.277   | −21.2% | −9.8%                    |
+| bulk_save                | 221.5  | 54.6    | −75.4% | −0.1%                    |
+| fetch_10000_identity_on  | 175.5  | 34.5    | −80.4% | +1.0%                    |
+| fetch_10000_identity_off | 271.2  | 80.9    | −70.2% | +0.4%                    |
+
+The C2 column isolates the catalog cache: on Postgres the save path drops
+sharply (3 catalog round-trips per op eliminated — F4; single_save
+1.21 → 0.40 ms), while SQLite deltas are noise, as required (the cache is a
+no-op off Postgres). The checked-in `baselines/*.json` are the post-C2
+capture.

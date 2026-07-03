@@ -9,7 +9,9 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Column, Connection, PgPool, Postgres, Row, Sqlite, SqlitePool, ValueRef};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Infer the SQL dialect / backend from a connection-URL scheme.
@@ -88,6 +90,26 @@ impl PoolSpec {
     }
 }
 
+/// One table's Postgres catalog snapshot: everything the bind layer needs to
+/// emit OID-correct parameters against columns whose SQL type differs from
+/// the bound value's wire type.
+///
+/// Bind casting must follow **DB truth**, not the model's declared storage —
+/// Postgres has no assignment-context coercion for typed (TEXT-OID)
+/// parameters, so a column that is a native enum / `uuid` / temporal in the
+/// database needs an explicit cast even when the model declares plain `str`
+/// (and conversely, a TEXT column must NOT be cast to a type that doesn't
+/// exist). See `docs/plans/2026-07-02-004-ff-c-c2-catalog-cache-design.md`.
+#[derive(Debug, Default)]
+pub struct TableCatalog {
+    /// Native enum (`typtype = 'e'`) UDT name by column.
+    pub enum_udt: HashMap<String, String>,
+    /// Columns whose SQL type is `uuid`.
+    pub uuid_columns: HashSet<String>,
+    /// `CAST` target (`timestamp`, `timestamptz`, `date`) by temporal column.
+    pub ts_cast: HashMap<String, String>,
+}
+
 /// Persistent runtime engine state for the currently connected backend.
 ///
 /// The pool lives behind a shared `RwLock` so [`EngineHandle::refresh_pool`]
@@ -104,6 +126,15 @@ pub struct EngineHandle {
     identity_map_enabled: bool,
     /// Enables internal IR shadow-planner comparisons at runtime.
     shadow_runtime_enabled: bool,
+    /// Lifetime count of catalog-introspection queries this engine has issued.
+    /// Shared across clones (like `pool`) so the statement-count exit gate for
+    /// FF-C C2 can be asserted from tests via `_catalog_query_count_for_test`.
+    catalog_queries: Arc<AtomicU64>,
+    /// Per-table [`TableCatalog`] snapshots, populated lazily on a table's
+    /// first operation and valid for one schema epoch: [`Self::refresh_pool`]
+    /// — the engine's only epoch boundary — clears the map. Shared across
+    /// clones (like `pool`).
+    catalog_cache: Arc<RwLock<HashMap<String, Arc<TableCatalog>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -255,6 +286,8 @@ impl EngineHandle {
             spec: Some(spec),
             identity_map_enabled: true,
             shadow_runtime_enabled: false,
+            catalog_queries: Arc::new(AtomicU64::new(0)),
+            catalog_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -269,6 +302,8 @@ impl EngineHandle {
             spec: None,
             identity_map_enabled: true,
             shadow_runtime_enabled: false,
+            catalog_queries: Arc::new(AtomicU64::new(0)),
+            catalog_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -283,6 +318,8 @@ impl EngineHandle {
             spec: None,
             identity_map_enabled: true,
             shadow_runtime_enabled: false,
+            catalog_queries: Arc::new(AtomicU64::new(0)),
+            catalog_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -318,7 +355,9 @@ impl EngineHandle {
         };
 
         if spec.is_ephemeral_sqlite() {
-            return self.clear_all_statement_caches(spec).await;
+            self.clear_all_statement_caches(spec).await?;
+            self.clear_catalog_cache();
+            return Ok(());
         }
 
         let new_pool = spec.build().await?;
@@ -329,6 +368,9 @@ impl EngineHandle {
             };
             std::mem::replace(&mut *guard, new_pool)
         };
+        // After the swap, so a concurrent operation cannot re-populate the
+        // cache from the old pool between clear and swap.
+        self.clear_catalog_cache();
         old_pool.close().await;
         Ok(())
     }
@@ -387,6 +429,51 @@ impl EngineHandle {
 
     pub fn backend(&self) -> Dialect {
         self.backend
+    }
+
+    /// Record one catalog-introspection round-trip (called at the single
+    /// choke point that executes catalog SQL).
+    pub fn record_catalog_query(&self) {
+        self.catalog_queries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Lifetime catalog-introspection query count for this engine.
+    #[must_use]
+    pub fn catalog_query_count(&self) -> u64 {
+        self.catalog_queries.load(Ordering::Relaxed)
+    }
+
+    /// Cached [`TableCatalog`] snapshot for `table_name`, if this schema epoch
+    /// has one. Poisoning is recovered like [`Self::pool_snapshot`].
+    #[must_use]
+    pub fn cached_table_catalog(&self, table_name: &str) -> Option<Arc<TableCatalog>> {
+        let guard = match self.catalog_cache.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.get(table_name).cloned()
+    }
+
+    /// Store a freshly introspected snapshot for `table_name`. Concurrent
+    /// first operations may race here; both snapshots come from the same
+    /// epoch, so last-write-wins is harmless.
+    pub fn store_table_catalog(&self, table_name: &str, catalog: Arc<TableCatalog>) {
+        let mut guard = match self.catalog_cache.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.insert(table_name.to_string(), catalog);
+    }
+
+    /// Drop every cached [`TableCatalog`] snapshot. Called from
+    /// [`Self::refresh_pool`] so catalog state and prepared-statement caches
+    /// share one epoch boundary.
+    fn clear_catalog_cache(&self) {
+        let mut guard = match self.catalog_cache.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.clear();
     }
 
     #[allow(dead_code)]
