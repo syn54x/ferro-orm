@@ -25,12 +25,13 @@ async def test_connect_with_auto_migrate(db_url):
     # Connect with auto_migrate=True
     # This should internally call the same logic as create_tables()
     await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    # We can verify it works by trying to call create_tables again
-    # or by just ensuring it doesn't crash.
-    # In a future step, when we have INSERT, we can verify the table exists.
-    # For now, we are verifying the API signature and that it runs without error.
-    assert True
+        # We can verify it works by trying to call create_tables again
+        # or by just ensuring it doesn't crash.
+        # In a future step, when we have INSERT, we can verify the table exists.
+        # For now, we are verifying the API signature and that it runs without error.
+        assert True
 
 
 @pytest.mark.asyncio
@@ -39,9 +40,10 @@ async def test_connect_without_auto_migrate(db_url):
     ferro.reset_engine()
 
     await ferro.connect(db_url, auto_migrate=False)
-    # Manual call still works
-    await ferro.create_tables()
-    assert True
+    async with ferro.engines.session():
+        # Manual call still works
+        await ferro.create_tables()
+        assert True
 
 
 @pytest.mark.asyncio
@@ -69,28 +71,29 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
         actors: Relation[list["Actor"]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    actor = await Actor.create(name="Alice")
-    movie = await Movie.create(title="Matrix")
-    await actor.movies.add(movie)
+        actor = await Actor.create(name="Alice")
+        movie = await Movie.create(title="Matrix")
+        await actor.movies.add(movie)
 
-    linked = await actor.movies.all()
-    assert len(linked) == 1
-    assert linked[0].id == movie.id
-    assert linked[0].title == "Matrix"
-    assert await actor.movies.count() == 1
+        linked = await actor.movies.all()
+        assert len(linked) == 1
+        assert linked[0].id == movie.id
+        assert linked[0].title == "Matrix"
+        assert await actor.movies.count() == 1
 
-    reverse_linked = await movie.actors.all()
-    assert [row.id for row in reverse_linked] == [actor.id]
+        reverse_linked = await movie.actors.all()
+        assert [row.id for row in reverse_linked] == [actor.id]
 
-    await actor.movies.remove(movie)
-    assert await actor.movies.count() == 0
+        await actor.movies.remove(movie)
+        assert await actor.movies.count() == 0
 
-    movie_2 = await Movie.create(title="Reloaded")
-    await actor.movies.add(movie, movie_2)
-    assert await actor.movies.count() == 2
-    await actor.movies.clear()
-    assert await actor.movies.count() == 0
+        movie_2 = await Movie.create(title="Reloaded")
+        await actor.movies.add(movie, movie_2)
+        assert await actor.movies.count() == 2
+        await actor.movies.clear()
+        assert await actor.movies.count() == 0
 
 
 @pytest.mark.asyncio
@@ -117,31 +120,32 @@ async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_ur
         actors: Relation[list["UuidActor"]] = BackRef()
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    import sqlite3
+        import sqlite3
 
-    db_path = db_url.removeprefix("sqlite:").split("?", 1)[0]
-    conn = sqlite3.connect(db_path)
-    rows = conn.execute("PRAGMA table_info(uuidactor_movies)").fetchall()
-    conn.close()
+        db_path = db_url.removeprefix("sqlite:").split("?", 1)[0]
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("PRAGMA table_info(uuidactor_movies)").fetchall()
+        conn.close()
 
-    columns = {row[1]: row for row in rows}
-    assert columns["uuidactor_id"][2].upper() in {
-        "UUID",
-        "CHAR(32)",
-        "TEXT",
-        "CHAR",
-        "VARCHAR",
-    }
-    assert columns["uuidmovie_id"][2].upper() in {
-        "UUID",
-        "CHAR(32)",
-        "TEXT",
-        "CHAR",
-        "VARCHAR",
-    }
-    assert columns["uuidactor_id"][3] == 1
-    assert columns["uuidmovie_id"][3] == 1
+        columns = {row[1]: row for row in rows}
+        assert columns["uuidactor_id"][2].upper() in {
+            "UUID",
+            "CHAR(32)",
+            "TEXT",
+            "CHAR",
+            "VARCHAR",
+        }
+        assert columns["uuidmovie_id"][2].upper() in {
+            "UUID",
+            "CHAR(32)",
+            "TEXT",
+            "CHAR",
+            "VARCHAR",
+        }
+        assert columns["uuidactor_id"][3] == 1
+        assert columns["uuidmovie_id"][3] == 1
 
 
 @pytest.mark.asyncio
@@ -169,35 +173,36 @@ async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
         tags: Relation[list[UuidTag]] = ManyToMany(related_name="posts")
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    post = await UuidPost.create(title="Hello")
-    tag = await UuidTag.create(name="python")
+        post = await UuidPost.create(title="Hello")
+        tag = await UuidTag.create(name="python")
 
-    await post.tags.add(tag)
-
-    linked = await post.tags.all()
-    assert [row.id for row in linked] == [tag.id]
-    assert await post.tags.count() == 1
-
-    reverse_linked = await tag.posts.all()
-    assert [row.id for row in reverse_linked] == [post.id]
-
-    await post.tags.remove(tag)
-    assert await post.tags.count() == 0
-
-    tag_2 = await UuidTag.create(name="orm")
-    await post.tags.add(tag, tag_2)
-    assert await post.tags.count() == 2
-    await post.tags.clear()
-    assert await post.tags.count() == 0
-
-    async with transaction():
         await post.tags.add(tag)
+
+        linked = await post.tags.all()
+        assert [row.id for row in linked] == [tag.id]
         assert await post.tags.count() == 1
+
+        reverse_linked = await tag.posts.all()
+        assert [row.id for row in reverse_linked] == [post.id]
+
         await post.tags.remove(tag)
         assert await post.tags.count() == 0
 
-    assert await post.tags.count() == 0
+        tag_2 = await UuidTag.create(name="orm")
+        await post.tags.add(tag, tag_2)
+        assert await post.tags.count() == 2
+        await post.tags.clear()
+        assert await post.tags.count() == 0
+
+        async with transaction():
+            await post.tags.add(tag)
+            assert await post.tags.count() == 1
+            await post.tags.remove(tag)
+            assert await post.tags.count() == 0
+
+        assert await post.tags.count() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -264,33 +269,35 @@ async def test_migrate_updates_adds_missing_columns_and_hydrates(
 
     # Bootstrap the OLD (narrow) schema by hand, as an older release would have.
     await ferro.connect(db_url)
-    if db_backend == "sqlite":
-        await execute(
-            'CREATE TABLE "miginvoice" '
-            '("id" integer PRIMARY KEY AUTOINCREMENT, "number" varchar NOT NULL)'
-        )
-    else:
-        await execute(
-            'CREATE TABLE "miginvoice" ("id" serial PRIMARY KEY, "number" varchar NOT NULL)'
-        )
-    await execute('INSERT INTO "miginvoice" ("number") VALUES (\'INV-1\')')
+    async with ferro.engines.session():
+        if db_backend == "sqlite":
+            await execute(
+                'CREATE TABLE "miginvoice" '
+                '("id" integer PRIMARY KEY AUTOINCREMENT, "number" varchar NOT NULL)'
+            )
+        else:
+            await execute(
+                'CREATE TABLE "miginvoice" ("id" serial PRIMARY KEY, "number" varchar NOT NULL)'
+            )
+        await execute('INSERT INTO "miginvoice" ("number") VALUES (\'INV-1\')')
     ferro.reset_engine()
 
     await ferro.connect(db_url, migrate_updates=True)
+    async with ferro.engines.session():
 
-    rows = await MigInvoice.all()
-    assert len(rows) == 1
-    assert rows[0].number == "INV-1"
-    assert rows[0].paid_date is None
-    assert rows[0].memo is None
+        rows = await MigInvoice.all()
+        assert len(rows) == 1
+        assert rows[0].number == "INV-1"
+        assert rows[0].paid_date is None
+        assert rows[0].memo is None
 
-    # The new columns are usable immediately.
-    inv = await MigInvoice.create(
-        number="INV-2", paid_date=date(2026, 1, 15), memo="paid"
-    )
-    fetched = await MigInvoice.get(inv.id)
-    assert fetched.paid_date == date(2026, 1, 15)
-    assert fetched.memo == "paid"
+        # The new columns are usable immediately.
+        inv = await MigInvoice.create(
+            number="INV-2", paid_date=date(2026, 1, 15), memo="paid"
+        )
+        fetched = await MigInvoice.get(inv.id)
+        assert fetched.paid_date == date(2026, 1, 15)
+        assert fetched.memo == "paid"
 
 
 @pytest.mark.asyncio
@@ -308,29 +315,30 @@ async def test_manual_migrate_on_live_pool_refreshes_cached_statements(
         summary: str | None = None
 
     await ferro.connect(db_url)
-    if db_backend == "sqlite":
-        await execute(
-            'CREATE TABLE "migreport" '
-            '("id" integer PRIMARY KEY AUTOINCREMENT, "title" varchar NOT NULL)'
-        )
-    else:
-        await execute(
-            'CREATE TABLE "migreport" ("id" serial PRIMARY KEY, "title" varchar NOT NULL)'
-        )
-    await execute('INSERT INTO "migreport" ("title") VALUES (\'Q1\')')
+    async with ferro.engines.session():
+        if db_backend == "sqlite":
+            await execute(
+                'CREATE TABLE "migreport" '
+                '("id" integer PRIMARY KEY AUTOINCREMENT, "title" varchar NOT NULL)'
+            )
+        else:
+            await execute(
+                'CREATE TABLE "migreport" ("id" serial PRIMARY KEY, "title" varchar NOT NULL)'
+            )
+        await execute('INSERT INTO "migreport" ("title") VALUES (\'Q1\')')
 
-    # Prepare (and cache) the SELECT against the narrow schema.
-    rows_before = await MigReport.all()
-    assert len(rows_before) == 1
+        # Prepare (and cache) the SELECT against the narrow schema.
+        rows_before = await MigReport.all()
+        assert len(rows_before) == 1
 
-    await ferro.migrate()
+        await ferro.migrate()
 
-    # Same query again: without the pool refresh this panics in the sqlx
-    # worker and silently returns zero rows on SQLite.
-    rows_after = await MigReport.all()
-    assert len(rows_after) == 1
-    assert rows_after[0].title == "Q1"
-    assert rows_after[0].summary is None
+        # Same query again: without the pool refresh this panics in the sqlx
+        # worker and silently returns zero rows on SQLite.
+        rows_after = await MigReport.all()
+        assert len(rows_after) == 1
+        assert rows_after[0].title == "Q1"
+        assert rows_after[0].summary is None
 
 
 @pytest.mark.asyncio
@@ -343,9 +351,10 @@ async def test_migrate_updates_not_null_without_default_fails_loudly(
     from datetime import datetime
 
     await ferro.connect(db_url)
-    await execute(
-        'CREATE TABLE "migstrict" ("id" integer PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL)'
-    )
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "migstrict" ("id" integer PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL)'
+        )
     ferro.reset_engine()
 
     class MigStrict(Model):
@@ -363,10 +372,11 @@ async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
     db_url, clean_registry
 ):
     await ferro.connect(db_url)
-    await execute(
-        'CREATE TABLE "migdrift" '
-        '("id" integer PRIMARY KEY AUTOINCREMENT, "count" varchar NOT NULL)'
-    )
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "migdrift" '
+            '("id" integer PRIMARY KEY AUTOINCREMENT, "count" varchar NOT NULL)'
+        )
     ferro.reset_engine()
 
     class MigDrift(Model):
@@ -419,10 +429,11 @@ async def test_sqlite_genuine_text_to_blob_diff_still_warns(
     """Control: a pre-existing TEXT column adopted by a `bytes` model is a REAL
     difference and must still warn — the fix only silences blob==blob. (#165)"""
     await ferro.connect(db_url)
-    await execute(
-        'CREATE TABLE "attachment" '
-        '("id" integer PRIMARY KEY AUTOINCREMENT, "payload" text NOT NULL)'
-    )
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "attachment" '
+            '("id" integer PRIMARY KEY AUTOINCREMENT, "payload" text NOT NULL)'
+        )
     ferro.reset_engine()
 
     class Attachment(Model):
@@ -489,10 +500,11 @@ async def test_pg_datetime_over_external_naive_timestamp_warns_and_skips(
     import datetime as dt
 
     await ferro.connect(db_url)
-    await execute(
-        'CREATE TABLE "event" '
-        '("id" serial PRIMARY KEY, "occurred_at" timestamp NOT NULL)'
-    )
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "event" '
+            '("id" serial PRIMARY KEY, "occurred_at" timestamp NOT NULL)'
+        )
     ferro.reset_engine()
 
     class Event(Model):
@@ -520,10 +532,11 @@ async def test_pg_datetime_db_type_override_keeps_naive_no_drift(
     import warnings as _warnings
 
     await ferro.connect(db_url)
-    await execute(
-        'CREATE TABLE "event2" '
-        '("id" serial PRIMARY KEY, "occurred_at" timestamp NOT NULL)'
-    )
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "event2" '
+            '("id" serial PRIMARY KEY, "occurred_at" timestamp NOT NULL)'
+        )
     ferro.reset_engine()
 
     class Event2(Model):
@@ -555,10 +568,11 @@ async def test_pg_ferro_created_timestamptz_no_drift(
         occurred_at: dt.datetime
 
     await ferro.connect(db_url, auto_migrate=True)  # Ferro creates it -> timestamptz
-    assert (
-        _pg_live_type(postgres_base_url, db_schema_name, "event3", "occurred_at")
-        == "timestamp with time zone"
-    )
+    async with ferro.engines.session():
+        assert (
+            _pg_live_type(postgres_base_url, db_schema_name, "event3", "occurred_at")
+            == "timestamp with time zone"
+        )
     ferro.reset_engine()
 
     with _warnings.catch_warnings():
@@ -581,32 +595,35 @@ async def test_migrate_destructive_drops_removed_columns(
         name: str
 
     await ferro.connect(db_url)
-    if db_backend == "sqlite":
+    async with ferro.engines.session():
+        if db_backend == "sqlite":
+            await execute(
+                'CREATE TABLE "migslim" ("id" integer PRIMARY KEY AUTOINCREMENT, '
+                '"name" varchar NOT NULL, "legacy_notes" text)'
+            )
+        else:
+            await execute(
+                'CREATE TABLE "migslim" ("id" serial PRIMARY KEY, '
+                '"name" varchar NOT NULL, "legacy_notes" text)'
+            )
         await execute(
-            'CREATE TABLE "migslim" ("id" integer PRIMARY KEY AUTOINCREMENT, '
-            '"name" varchar NOT NULL, "legacy_notes" text)'
+            'INSERT INTO "migslim" ("name", "legacy_notes") VALUES (\'keep\', \'bye\')'
         )
-    else:
-        await execute(
-            'CREATE TABLE "migslim" ("id" serial PRIMARY KEY, '
-            '"name" varchar NOT NULL, "legacy_notes" text)'
-        )
-    await execute(
-        'INSERT INTO "migslim" ("name", "legacy_notes") VALUES (\'keep\', \'bye\')'
-    )
     ferro.reset_engine()
 
     # Without the flag the extra column is untouched.
     await ferro.connect(db_url, migrate_updates=True)
-    rows = await fetch_all('SELECT * FROM "migslim"')
-    assert "legacy_notes" in rows[0]
+    async with ferro.engines.session():
+        rows = await fetch_all('SELECT * FROM "migslim"')
+        assert "legacy_notes" in rows[0]
     ferro.reset_engine()
 
     await ferro.connect(db_url, migrate_destructive=True)
-    rows = await fetch_all('SELECT * FROM "migslim"')
-    assert len(rows) == 1
-    assert rows[0]["name"] == "keep", "surviving data must be intact"
-    assert "legacy_notes" not in rows[0]
+    async with ferro.engines.session():
+        rows = await fetch_all('SELECT * FROM "migslim"')
+        assert len(rows) == 1
+        assert rows[0]["name"] == "keep", "surviving data must be intact"
+        assert "legacy_notes" not in rows[0]
 
 
 @pytest.mark.asyncio
@@ -619,23 +636,25 @@ async def test_destructive_drop_of_indexed_column_drops_index_first(
         name: str
 
     await ferro.connect(db_url)
-    await execute(
-        'CREATE TABLE "migidx" ("id" integer PRIMARY KEY AUTOINCREMENT, '
-        '"name" varchar NOT NULL, "old_status" varchar)'
-    )
-    await execute('CREATE INDEX "idx_migidx_old_status" ON "migidx" ("old_status")')
-    await execute(
-        'INSERT INTO "migidx" ("name", "old_status") VALUES (\'keep\', \'x\')'
-    )
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "migidx" ("id" integer PRIMARY KEY AUTOINCREMENT, '
+            '"name" varchar NOT NULL, "old_status" varchar)'
+        )
+        await execute('CREATE INDEX "idx_migidx_old_status" ON "migidx" ("old_status")')
+        await execute(
+            'INSERT INTO "migidx" ("name", "old_status") VALUES (\'keep\', \'x\')'
+        )
     ferro.reset_engine()
 
     await ferro.connect(db_url, migrate_destructive=True)
+    async with ferro.engines.session():
 
-    columns = _sqlite_columns(db_url, "migidx")
-    assert "old_status" not in columns
-    assert "idx_migidx_old_status" not in _sqlite_index_names(db_url, "migidx")
-    rows = await fetch_all('SELECT * FROM "migidx"')
-    assert rows[0]["name"] == "keep"
+        columns = _sqlite_columns(db_url, "migidx")
+        assert "old_status" not in columns
+        assert "idx_migidx_old_status" not in _sqlite_index_names(db_url, "migidx")
+        rows = await fetch_all('SELECT * FROM "migidx"')
+        assert rows[0]["name"] == "keep"
 
 
 @pytest.mark.asyncio
@@ -648,10 +667,11 @@ async def test_destructive_refuses_unique_constraint_column_on_sqlite(
         name: str
 
     await ferro.connect(db_url)
-    await execute(
-        'CREATE TABLE "miguq" ("id" integer PRIMARY KEY AUTOINCREMENT, '
-        '"name" varchar NOT NULL, "old_code" varchar UNIQUE)'
-    )
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "miguq" ("id" integer PRIMARY KEY AUTOINCREMENT, '
+            '"name" varchar NOT NULL, "old_code" varchar UNIQUE)'
+        )
     ferro.reset_engine()
 
     with pytest.raises(ValueError, match=r"miguq\.old_code.*UNIQUE.*Alembic"):
@@ -670,19 +690,21 @@ async def test_added_indexed_and_unique_columns_get_their_indexes(
         slug: Annotated[str | None, FerroField(unique=True)] = None
 
     await ferro.connect(db_url)
-    await execute(
-        'CREATE TABLE "migindexed" '
-        '("id" integer PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL)'
-    )
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "migindexed" '
+            '("id" integer PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL)'
+        )
     ferro.reset_engine()
 
     # The uq_ index is the canonical unique shape on both dialects since
     # FF-B B4/D1 — no SQLite-compromise warning is emitted anymore.
     await ferro.connect(db_url, migrate_updates=True)
+    async with ferro.engines.session():
 
-    index_names = _sqlite_index_names(db_url, "migindexed")
-    assert "idx_migindexed_status" in index_names
-    assert "uq_migindexed_slug" in index_names
+        index_names = _sqlite_index_names(db_url, "migindexed")
+        assert "idx_migindexed_status" in index_names
+        assert "uq_migindexed_slug" in index_names
 
 
 @pytest.mark.asyncio
@@ -692,11 +714,12 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
     existing data), SET NOT NULL, and no lingering server default after a
     backfilled NOT NULL add."""
     await ferro.connect(db_url)
-    await execute(
-        'CREATE TABLE "migpg" ("id" serial PRIMARY KEY, '
-        '"total" integer NOT NULL, "note" varchar)'
-    )
-    await execute('INSERT INTO "migpg" ("total", "note") VALUES (41, NULL)')
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "migpg" ("id" serial PRIMARY KEY, '
+            '"total" integer NOT NULL, "note" varchar)'
+        )
+        await execute('INSERT INTO "migpg" ("total", "note") VALUES (41, NULL)')
     ferro.reset_engine()
 
     # Assignment style keeps this model valid. The #155 trap is an *invalid*
@@ -713,24 +736,25 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
         status: str = ferro.Field(default="draft")
 
     await ferro.connect(db_url, migrate_updates=True)
+    async with ferro.engines.session():
 
-    rows = await fetch_all(
-        "SELECT column_name, data_type, is_nullable, column_default "
-        "FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = 'migpg'"
-    )
-    by_name = {row["column_name"]: row for row in rows}
-    assert by_name["total"]["data_type"] == "bigint", "integer -> bigint via USING cast"
-    assert by_name["status"]["is_nullable"] == "NO"
-    assert (
-        by_name["status"]["column_default"] is None
-    ), "backfill default must not linger"
+        rows = await fetch_all(
+            "SELECT column_name, data_type, is_nullable, column_default "
+            "FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'migpg'"
+        )
+        by_name = {row["column_name"]: row for row in rows}
+        assert by_name["total"]["data_type"] == "bigint", "integer -> bigint via USING cast"
+        assert by_name["status"]["is_nullable"] == "NO"
+        assert (
+            by_name["status"]["column_default"] is None
+        ), "backfill default must not linger"
 
-    data = await fetch_all('SELECT "total", "status" FROM "migpg"')
-    assert data[0]["total"] == 41, "existing data survives the type change"
-    assert (
-        data[0]["status"] == "draft"
-    ), "existing rows backfilled with the literal default"
+        data = await fetch_all('SELECT "total", "status" FROM "migpg"')
+        assert data[0]["total"] == 41, "existing data survives the type change"
+        assert (
+            data[0]["status"] == "draft"
+        ), "existing rows backfilled with the literal default"
 
 
 # ---------------------------------------------------------------------------
@@ -785,18 +809,19 @@ async def test_index_reconcile_adds_composite_index_to_existing_table(
 
     # Create the table without any indexes.
     await ferro.connect(db_url)
-    if db_backend == "sqlite":
-        await execute(
-            'CREATE TABLE "idxcompmodel" '
-            '("id" integer PRIMARY KEY AUTOINCREMENT, '
-            '"col_a" integer NOT NULL, "col_b" integer NOT NULL)'
-        )
-    else:
-        await execute(
-            'CREATE TABLE "idxcompmodel" '
-            '("id" serial PRIMARY KEY, '
-            '"col_a" integer NOT NULL, "col_b" integer NOT NULL)'
-        )
+    async with ferro.engines.session():
+        if db_backend == "sqlite":
+            await execute(
+                'CREATE TABLE "idxcompmodel" '
+                '("id" integer PRIMARY KEY AUTOINCREMENT, '
+                '"col_a" integer NOT NULL, "col_b" integer NOT NULL)'
+            )
+        else:
+            await execute(
+                'CREATE TABLE "idxcompmodel" '
+                '("id" serial PRIMARY KEY, '
+                '"col_a" integer NOT NULL, "col_b" integer NOT NULL)'
+            )
     ferro.reset_engine()
 
     # Re-register a NEW model class with the composite index annotation.
@@ -817,11 +842,12 @@ async def test_index_reconcile_adds_composite_index_to_existing_table(
         col_b: int
 
     await ferro.connect(db_url, migrate_updates=True)
+    async with ferro.engines.session():
 
-    names = _live_index_names(db_url, db_backend, "idxcompmodel")
-    assert "idx_idxcompmodel_col_a_col_b" in names, (
-        f"expected composite index idx_idxcompmodel_col_a_col_b, got: {names}"
-    )
+        names = _live_index_names(db_url, db_backend, "idxcompmodel")
+        assert "idx_idxcompmodel_col_a_col_b" in names, (
+            f"expected composite index idx_idxcompmodel_col_a_col_b, got: {names}"
+        )
 
 
 @pytest.mark.asyncio
@@ -838,16 +864,17 @@ async def test_index_reconcile_adds_single_column_index_to_existing_column(
 
     # Create table with 'status' but no index on it.
     await ferro.connect(db_url)
-    if db_backend == "sqlite":
-        await execute(
-            'CREATE TABLE "idxsinglemodel" '
-            '("id" integer PRIMARY KEY AUTOINCREMENT, "status" varchar NOT NULL)'
-        )
-    else:
-        await execute(
-            'CREATE TABLE "idxsinglemodel" '
-            '("id" serial PRIMARY KEY, "status" varchar NOT NULL)'
-        )
+    async with ferro.engines.session():
+        if db_backend == "sqlite":
+            await execute(
+                'CREATE TABLE "idxsinglemodel" '
+                '("id" integer PRIMARY KEY AUTOINCREMENT, "status" varchar NOT NULL)'
+            )
+        else:
+            await execute(
+                'CREATE TABLE "idxsinglemodel" '
+                '("id" serial PRIMARY KEY, "status" varchar NOT NULL)'
+            )
     ferro.reset_engine()
 
     # Re-register with index=True on the existing column.
@@ -864,11 +891,12 @@ async def test_index_reconcile_adds_single_column_index_to_existing_column(
         status: Annotated[str, FerroField(index=True)]
 
     await ferro.connect(db_url, migrate_updates=True)
+    async with ferro.engines.session():
 
-    names = _live_index_names(db_url, db_backend, "idxsinglemodel")
-    assert "idx_idxsinglemodel_status" in names, (
-        f"expected idx_idxsinglemodel_status, got: {names}"
-    )
+        names = _live_index_names(db_url, db_backend, "idxsinglemodel")
+        assert "idx_idxsinglemodel_status" in names, (
+            f"expected idx_idxsinglemodel_status, got: {names}"
+        )
 
 
 @pytest.mark.asyncio
@@ -890,17 +918,19 @@ async def test_index_reconcile_noop_when_index_already_present(
 
     # First connect creates the table + index.
     await ferro.connect(db_url, auto_migrate=True)
-    names_after_first = _live_index_names(db_url, db_backend, "idxnoopmodel")
-    assert "idx_idxnoopmodel_x_y" in names_after_first
+    async with ferro.engines.session():
+        names_after_first = _live_index_names(db_url, db_backend, "idxnoopmodel")
+        assert "idx_idxnoopmodel_x_y" in names_after_first
     ferro.reset_engine()
 
     # Second connect — same model, same index already present.
     await ferro.connect(db_url, migrate_updates=True)
+    async with ferro.engines.session():
 
-    names_after_second = _live_index_names(db_url, db_backend, "idxnoopmodel")
-    assert "idx_idxnoopmodel_x_y" in names_after_second, (
-        "index must survive second migrate_updates pass (no-op guard)"
-    )
+        names_after_second = _live_index_names(db_url, db_backend, "idxnoopmodel")
+        assert "idx_idxnoopmodel_x_y" in names_after_second, (
+            "index must survive second migrate_updates pass (no-op guard)"
+        )
 
 
 @pytest.mark.asyncio
@@ -923,8 +953,9 @@ async def test_index_reconcile_destructive_drops_removed_composite_index(
 
     # Bootstrap with the index present.
     await ferro.connect(db_url, auto_migrate=True)
-    names = _live_index_names(db_url, db_backend, "idxdropmodel")
-    assert "idx_idxdropmodel_p_q" in names
+    async with ferro.engines.session():
+        names = _live_index_names(db_url, db_backend, "idxdropmodel")
+        assert "idx_idxdropmodel_p_q" in names
     ferro.reset_engine()
 
     # Re-register model WITHOUT the composite index.
@@ -943,18 +974,20 @@ async def test_index_reconcile_destructive_drops_removed_composite_index(
 
     # Non-destructive: index must remain.
     await ferro.connect(db_url, migrate_updates=True)
-    names_after_updates = _live_index_names(db_url, db_backend, "idxdropmodel")
-    assert "idx_idxdropmodel_p_q" in names_after_updates, (
-        "non-destructive pass must leave orphaned ferro index intact"
-    )
+    async with ferro.engines.session():
+        names_after_updates = _live_index_names(db_url, db_backend, "idxdropmodel")
+        assert "idx_idxdropmodel_p_q" in names_after_updates, (
+            "non-destructive pass must leave orphaned ferro index intact"
+        )
     ferro.reset_engine()
 
     # Destructive: index must be dropped.
     await ferro.connect(db_url, migrate_destructive=True)
-    names_after_destructive = _live_index_names(db_url, db_backend, "idxdropmodel")
-    assert "idx_idxdropmodel_p_q" not in names_after_destructive, (
-        "migrate_destructive must drop the orphaned ferro index"
-    )
+    async with ferro.engines.session():
+        names_after_destructive = _live_index_names(db_url, db_backend, "idxdropmodel")
+        assert "idx_idxdropmodel_p_q" not in names_after_destructive, (
+            "migrate_destructive must drop the orphaned ferro index"
+        )
 
 
 @pytest.mark.asyncio
@@ -976,29 +1009,32 @@ async def test_index_reconcile_user_index_survives_auto_migrate(
 
     # Create table with a Ferro composite index AND a custom user index.
     await ferro.connect(db_url, auto_migrate=True)
-    await execute('CREATE INDEX "my_custom_idx" ON "idxusermodel" ("m")')
+    async with ferro.engines.session():
+        await execute('CREATE INDEX "my_custom_idx" ON "idxusermodel" ("m")')
 
-    names_initial = _live_index_names(db_url, db_backend, "idxusermodel")
-    assert "idx_idxusermodel_m_n" in names_initial
-    assert "my_custom_idx" in names_initial
+        names_initial = _live_index_names(db_url, db_backend, "idxusermodel")
+        assert "idx_idxusermodel_m_n" in names_initial
+        assert "my_custom_idx" in names_initial
     ferro.reset_engine()
 
     # Non-destructive pass: both indexes must survive.
     await ferro.connect(db_url, migrate_updates=True)
-    names_after_updates = _live_index_names(db_url, db_backend, "idxusermodel")
-    assert "idx_idxusermodel_m_n" in names_after_updates
-    assert "my_custom_idx" in names_after_updates, (
-        "user index must survive non-destructive auto-migrate"
-    )
+    async with ferro.engines.session():
+        names_after_updates = _live_index_names(db_url, db_backend, "idxusermodel")
+        assert "idx_idxusermodel_m_n" in names_after_updates
+        assert "my_custom_idx" in names_after_updates, (
+            "user index must survive non-destructive auto-migrate"
+        )
     ferro.reset_engine()
 
     # Destructive pass: Ferro index still present (model still has it), user index still present.
     await ferro.connect(db_url, migrate_destructive=True)
-    names_after_destructive = _live_index_names(db_url, db_backend, "idxusermodel")
-    assert "idx_idxusermodel_m_n" in names_after_destructive
-    assert "my_custom_idx" in names_after_destructive, (
-        "user index must survive destructive auto-migrate"
-    )
+    async with ferro.engines.session():
+        names_after_destructive = _live_index_names(db_url, db_backend, "idxusermodel")
+        assert "idx_idxusermodel_m_n" in names_after_destructive
+        assert "my_custom_idx" in names_after_destructive, (
+            "user index must survive destructive auto-migrate"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1147,21 +1183,22 @@ async def test_create_tables_pushes_modelset_for_model_defined_after_connect(
     # Connect first, with NO models registered yet — the connect-time modelset
     # snapshot is empty.
     await ferro.connect(db_url, auto_migrate=False)
+    async with ferro.engines.session():
 
-    # Now define a model AFTER connect().
-    class LateModel(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
-        label: str
+        # Now define a model AFTER connect().
+        class LateModel(Model):
+            id: int = Field(json_schema_extra={"primary_key": True})
+            label: str
 
-    # create_tables() must compile + push the up-to-date registry IR before the
-    # Rust create runs, otherwise this table never gets created.
-    await ferro.create_tables()
+        # create_tables() must compile + push the up-to-date registry IR before the
+        # Rust create runs, otherwise this table never gets created.
+        await ferro.create_tables()
 
-    # If the table exists, an INSERT + SELECT round-trips cleanly.
-    row = await LateModel.create(id=1, label="hello")
-    assert row.id == 1
-    fetched = await LateModel.get(1)
-    assert fetched.label == "hello"
+        # If the table exists, an INSERT + SELECT round-trips cleanly.
+        row = await LateModel.create(id=1, label="hello")
+        assert row.id == 1
+        fetched = await LateModel.get(1)
+        assert fetched.label == "hello"
 
 
 @pytest.mark.asyncio
@@ -1225,8 +1262,9 @@ async def test_db_check_reconnect_is_idempotent(db_url):
     # Second connect re-runs the create path against the existing schema —
     # this raised OperationalError before the idempotency fix.
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    rows = await fetch_all(
-        "SELECT conname FROM pg_constraint WHERE conname = 'ck_reconnectdoc_status'"
-    )
-    assert len(rows) == 1, f"expected exactly one CHECK constraint, got: {rows}"
+        rows = await fetch_all(
+            "SELECT conname FROM pg_constraint WHERE conname = 'ck_reconnectdoc_status'"
+        )
+        assert len(rows) == 1, f"expected exactly one CHECK constraint, got: {rows}"

@@ -68,8 +68,9 @@ async def _alembic_sqlite_db() -> AsyncIterator[tuple[str, Path]]:
 async def _reload_row[M: Model](model: type[M], uri: str, row_id: str) -> M:
     reset_engine()
     await ferro.connect(uri, auto_migrate=False)
-    row = await model.where(model.id == row_id).first()  # type: ignore[attr-defined]
-    assert row is not None
+    async with ferro.engines.session():
+        row = await model.where(model.id == row_id).first()  # type: ignore[attr-defined]
+        assert row is not None
     return row
 
 
@@ -93,7 +94,8 @@ async def test_null_optional_datetime_is_none_not_zero() -> None:
 
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
-        created = await Client.create(name="Acme")
+        async with ferro.engines.session():
+            created = await Client.create(name="Acme")
         row = await _reload_row(Client, uri, created.id)
         raw, affinity = _sqlite_typeof(db_path, "client", "archived_at", created.id)
 
@@ -110,7 +112,8 @@ async def test_non_null_datetime_round_trips() -> None:
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
         expected = datetime(2026, 4, 24, 18, 30, tzinfo=UTC)
-        created = await Event.create(happened_at=expected)
+        async with ferro.engines.session():
+            created = await Event.create(happened_at=expected)
         row = await _reload_row(Event, uri, created.id)
         _sqlite_typeof(db_path, "event", "happened_at", created.id)
 
@@ -126,7 +129,8 @@ async def test_non_null_date_round_trips() -> None:
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
         expected = date(2026, 4, 24)
-        created = await Day.create(on_date=expected)
+        async with ferro.engines.session():
+            created = await Day.create(on_date=expected)
         row = await _reload_row(Day, uri, created.id)
         _sqlite_typeof(db_path, "day", "on_date", created.id)
 
@@ -152,7 +156,8 @@ async def test_decimal_round_trips(hours: Decimal, expected: Decimal) -> None:
 
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
-        created = await Widget.create(hours=hours)
+        async with ferro.engines.session():
+            created = await Widget.create(hours=hours)
         row = await _reload_row(Widget, uri, created.id)
         raw, affinity = _sqlite_typeof(db_path, "widget", "hours", created.id)
 
@@ -194,7 +199,8 @@ async def test_optional_decimal_null_is_none() -> None:
 
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
-        created = await Line.create()
+        async with ferro.engines.session():
+            created = await Line.create()
         row = await _reload_row(Line, uri, created.id)
         raw, _ = _sqlite_typeof(db_path, "line", "amount", created.id)
 
@@ -210,7 +216,8 @@ async def test_bool_round_trips() -> None:
 
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
-        created = await Flag.create(is_active=True)
+        async with ferro.engines.session():
+            created = await Flag.create(is_active=True)
         row = await _reload_row(Flag, uri, created.id)
         raw, affinity = _sqlite_typeof(db_path, "flag", "is_active", created.id)
 
@@ -228,7 +235,8 @@ async def test_uuid_round_trips() -> None:
     token = uuid4()
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
-        created = await Token.create(subject_id=token)
+        async with ferro.engines.session():
+            created = await Token.create(subject_id=token)
         row = await _reload_row(Token, uri, created.id)
         _sqlite_typeof(db_path, "token", "subject_id", created.id)
 
@@ -244,7 +252,8 @@ async def test_json_dict_round_trips() -> None:
     data = {"k": "v", "n": "2"}
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
-        created = await Doc.create(payload=data)
+        async with ferro.engines.session():
+            created = await Doc.create(payload=data)
         row = await _reload_row(Doc, uri, created.id)
         raw, affinity = _sqlite_typeof(db_path, "doc", "payload", created.id)
 
@@ -263,7 +272,8 @@ async def test_non_null_int_zero_round_trips() -> None:
 
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
-        created = await Counter.create(score=0)
+        async with ferro.engines.session():
+            created = await Counter.create(score=0)
         row = await _reload_row(Counter, uri, created.id)
         raw, affinity = _sqlite_typeof(db_path, "counter", "score", created.id)
 
