@@ -32,6 +32,23 @@ from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
 
+def _assert_weakref_support(cls: type) -> None:
+    """Reject model classes whose instances cannot be weakly referenced.
+
+    The identity map holds weak references to instances (FF-D D1). A class
+    that suppresses ``__weakref__`` would force a silent strong-ref fallback,
+    which is exactly the unbounded-memory failure F3 removed — so it fails
+    loudly at class definition time instead.
+    """
+    if not any("__weakref__" in getattr(base, "__dict__", {}) for base in cls.__mro__):
+        raise TypeError(
+            f"{cls.__name__} instances do not support weak references "
+            "(no __weakref__ slot in the MRO). Ferro model instances must be "
+            "weakly referenceable for identity mapping; remove __slots__ "
+            "declarations that suppress __weakref__."
+        )
+
+
 class ModelMetaclass(type(BaseModel)):
     """
     Metaclass for Ferro models that automatically registers the model schema with the Rust core.
@@ -50,6 +67,9 @@ class ModelMetaclass(type(BaseModel)):
 
         # Phase 2: Class Creation
         cls = super().__new__(mcs, name, bases, namespace, **kwargs)
+
+        # Verify weakref support for identity mapping (FF-D D1)
+        _assert_weakref_support(cls)
 
         # Phase 3: Post-Creation Setup
         if name == "Model":
