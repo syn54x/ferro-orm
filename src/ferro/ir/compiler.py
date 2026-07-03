@@ -379,17 +379,22 @@ def wrap_schema_ir(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def compile_model_schema_ir(model_name: str, model_cls: type[Any]) -> dict[str, Any]:
+def compile_model_schema_ir(
+    model_name: str, model_cls: type[Any], schema: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Compile and persist a single model's SchemaIR envelope + fingerprint.
 
     Args:
         model_name: Registry key / model class name.
         model_cls: Python model class to compile.
+        schema: Optional prebuilt canonical schema — avoids a redundant
+            build_model_schema pass when the caller just built it (FF-E E3).
 
     Returns:
         The compiled SchemaIR envelope for ``model_cls``.
     """
-    schema = build_model_schema(model_cls)
+    if schema is None:
+        schema = build_model_schema(model_cls)
     payload = compile_schema_ir_payload(
         model_name,
         schema,
