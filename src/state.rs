@@ -324,6 +324,8 @@ pub enum RustValue {
     DateTime(String),
     /// ISO date string (`format: date`).
     Date(String),
+    /// ISO time string (`format: time`).
+    Time(String),
     /// Parsed JSON object or array column.
     Json(serde_json::Value),
     /// Binary column bytes.
@@ -356,6 +358,11 @@ impl RustValue {
                 let dt_module = py.import("datetime")?;
                 let date_class = dt_module.getattr("date")?;
                 date_class.call_method1("fromisoformat", (s,))
+            }
+            RustValue::Time(s) => {
+                let dt_module = py.import("datetime")?;
+                let time_class = dt_module.getattr("time")?;
+                time_class.call_method1("fromisoformat", (s,))
             }
             RustValue::Json(v) => {
                 let json_str = v.to_string();

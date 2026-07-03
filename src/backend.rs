@@ -191,6 +191,11 @@ pub struct EngineExecuteResult {
 }
 
 /// Scalar value on the engine wire before schema-aware decoding.
+///
+/// SQLite produces only the first five variants (its wire really is
+/// int/real/text/blob/bool). Postgres decodes rich types natively (FF-C C3):
+/// the typed variants come straight from the binary wire format, so they are
+/// independent of any session rendering settings (notably `TimeZone`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineValue {
     /// Boolean column.
@@ -203,6 +208,22 @@ pub enum EngineValue {
     String(String),
     /// Binary column.
     Bytes(Vec<u8>),
+    /// Native `uuid` column (Postgres).
+    Uuid(sqlx::types::Uuid),
+    /// Native `timestamptz`: an absolute instant, session-`TimeZone`-independent.
+    TimestampTz(sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>),
+    /// Native `timestamp` (naive, no zone).
+    Timestamp(sqlx::types::chrono::NaiveDateTime),
+    /// Native `date`.
+    Date(sqlx::types::chrono::NaiveDate),
+    /// Native `time`.
+    Time(sqlx::types::chrono::NaiveTime),
+    /// Native `numeric`, transported as its plain-decimal string. PG `numeric`
+    /// is arbitrary-precision, so the string (via `BigDecimal`) is the only
+    /// lossless transport; scale/trailing zeros are preserved.
+    Decimal(String),
+    /// Native `json` / `jsonb`.
+    Json(serde_json::Value),
     /// SQL `NULL`.
     Null,
 }
@@ -447,7 +468,7 @@ impl EngineHandle {
                     query = bind_engine_value(query, value);
                 }
                 let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_engine_row).collect())
+                Ok(rows.iter().map(materialize_pg_row).collect())
             }
         }
     }
@@ -514,7 +535,7 @@ impl EngineHandle {
                     query = bind_engine_value(query, value);
                 }
                 let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_engine_row).collect())
+                Ok(rows.iter().map(materialize_pg_row).collect())
             }
         }
     }
@@ -604,7 +625,7 @@ impl EngineConnection {
                     query = bind_engine_value(query, value);
                 }
                 let rows = query.fetch_all(&mut **conn).await?;
-                Ok(rows.iter().map(materialize_engine_row).collect())
+                Ok(rows.iter().map(materialize_pg_row).collect())
             }
         }
     }
@@ -649,6 +670,82 @@ where
         .collect();
 
     EngineRow { values }
+}
+
+/// Materialize one Postgres row with native typed decode (FF-C C3).
+///
+/// Unlike the generic ladder, each value is decoded by its declared pg column
+/// type — the physical truth of the wire. Rich types (`uuid`, temporal,
+/// `numeric`, `json`) come out as typed [`EngineValue`] variants straight from
+/// the binary protocol, so no session rendering setting (notably `TimeZone`)
+/// can influence them. Schema-aware shaping against the compiled codec plan
+/// happens later in `codec::decode_engine_value`.
+fn materialize_pg_row(row: &sqlx::postgres::PgRow) -> EngineRow {
+    let values = row
+        .columns()
+        .iter()
+        .map(|column| {
+            let name = column.name().to_string();
+            let ordinal = column.ordinal();
+            let value = match row.try_get_raw(ordinal) {
+                Ok(raw) if raw.is_null() => EngineValue::Null,
+                Ok(_) | Err(_) => decode_non_null_pg_value(row, ordinal),
+            };
+            (name, value)
+        })
+        .collect();
+
+    EngineRow { values }
+}
+
+fn decode_non_null_pg_value(row: &sqlx::postgres::PgRow, ordinal: usize) -> EngineValue {
+    use sqlx::TypeInfo;
+    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+
+    let type_name = row.columns()[ordinal].type_info().name();
+    let decoded = match type_name {
+        "BOOL" => row.try_get::<bool, _>(ordinal).map(EngineValue::Bool),
+        "INT2" => row
+            .try_get::<i16, _>(ordinal)
+            .map(|v| EngineValue::I64(v.into())),
+        "INT4" => row
+            .try_get::<i32, _>(ordinal)
+            .map(|v| EngineValue::I64(v.into())),
+        "INT8" => row.try_get::<i64, _>(ordinal).map(EngineValue::I64),
+        "FLOAT4" => row
+            .try_get::<f32, _>(ordinal)
+            .map(|v| EngineValue::F64(v.into())),
+        "FLOAT8" => row.try_get::<f64, _>(ordinal).map(EngineValue::F64),
+        "NUMERIC" => row
+            .try_get::<sqlx::types::BigDecimal, _>(ordinal)
+            .map(|v| EngineValue::Decimal(v.to_string())),
+        "UUID" => row
+            .try_get::<sqlx::types::Uuid, _>(ordinal)
+            .map(EngineValue::Uuid),
+        "TIMESTAMPTZ" => row
+            .try_get::<DateTime<Utc>, _>(ordinal)
+            .map(EngineValue::TimestampTz),
+        "TIMESTAMP" => row
+            .try_get::<NaiveDateTime, _>(ordinal)
+            .map(EngineValue::Timestamp),
+        "DATE" => row.try_get::<NaiveDate, _>(ordinal).map(EngineValue::Date),
+        "TIME" => row.try_get::<NaiveTime, _>(ordinal).map(EngineValue::Time),
+        "JSON" | "JSONB" => row
+            .try_get::<serde_json::Value, _>(ordinal)
+            .map(EngineValue::Json),
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CHAR" => {
+            row.try_get::<String, _>(ordinal).map(EngineValue::String)
+        }
+        "BYTEA" => row.try_get::<Vec<u8>, _>(ordinal).map(EngineValue::Bytes),
+        // Custom types (enum UDTs foremost): the wire payload is the label
+        // text in both text and binary format; decode without the type check.
+        _ => row
+            .try_get_unchecked::<String, _>(ordinal)
+            .map(EngineValue::String),
+    };
+    // Never error across the FFI boundary for an exotic wire value (AGENTS.md
+    // I-3): anything undecodable takes the generic ladder, as before C3.
+    decoded.unwrap_or_else(|_| decode_non_null_engine_value(row, ordinal))
 }
 
 fn decode_non_null_engine_value<R>(row: &R, ordinal: usize) -> EngineValue

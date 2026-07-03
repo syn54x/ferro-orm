@@ -78,13 +78,6 @@ pub struct ColumnCodecEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelCodecPlan {
     columns: HashMap<String, ColumnCodecEntry>,
-    /// Column names sorted alphabetically — the deterministic projection
-    /// order (matches serde_json's BTreeMap property order, so SELECT SQL is
-    /// byte-identical to the pre-plan schema-driven projection).
-    ordered_names: Vec<String>,
-    /// Precomputed: at least one column needs the Postgres text projection
-    /// (`CAST(col AS text)` in SELECT) from the declared schema alone.
-    pub pg_text_projection: bool,
 }
 
 impl ModelCodecPlan {
@@ -99,16 +92,6 @@ impl ModelCodecPlan {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn entry(&self, col_name: &str) -> Option<&ColumnCodecEntry> {
         self.columns.get(col_name)
-    }
-
-    /// True when the model declared no columns (projection falls back to `*`).
-    pub fn is_empty(&self) -> bool {
-        self.columns.is_empty()
-    }
-
-    /// Column names in deterministic (alphabetical) projection order.
-    pub fn ordered_columns(&self) -> &[String] {
-        &self.ordered_names
     }
 
     /// Compile a model's enriched Pydantic JSON schema into a codec plan.
@@ -134,32 +117,8 @@ impl ModelCodecPlan {
                 );
             }
         }
-        let pg_text_projection = columns
-            .values()
-            .any(|entry| codec_needs_pg_text_projection(&entry.codec));
-        let mut ordered_names: Vec<String> = columns.keys().cloned().collect();
-        ordered_names.sort();
-        ModelCodecPlan {
-            columns,
-            ordered_names,
-            pg_text_projection,
-        }
+        ModelCodecPlan { columns }
     }
-}
-
-/// Whether a codec's columns must be wrapped in `CAST(... AS text)` in the
-/// Postgres SELECT projection so hydration matches SQLite (removed in C3).
-/// `Time` deliberately takes no cast — pinned to pre-plan behavior.
-pub fn codec_needs_pg_text_projection(codec: &ColumnCodec) -> bool {
-    matches!(
-        codec,
-        ColumnCodec::Uuid
-            | ColumnCodec::DateTime
-            | ColumnCodec::Date
-            | ColumnCodec::Decimal
-            | ColumnCodec::Json
-            | ColumnCodec::Enum { .. }
-    )
 }
 
 fn resolve_ref<'a>(
@@ -596,7 +555,6 @@ mod tests {
         ] {
             assert_eq!(plan.codec(col), Some(&codec), "column {col}");
         }
-        assert!(plan.pg_text_projection);
     }
 
     /// The schema epoch: re-registering a model rebuilds its plan atomically.

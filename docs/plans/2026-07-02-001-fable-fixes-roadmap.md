@@ -192,7 +192,7 @@ finally gets its runtime consumer.
       no new invalidation concept). Then shrink the need: everything except
       Alembic-created native enums is statically derivable from the C1 plan;
       the catalog is consulted once per table per epoch at most.
-- [ ] **C3 — Native typed decode on Postgres.**
+- [x] **C3 — Native typed decode on Postgres.**
       Add typed `EngineValue` variants via sqlx features (`uuid`, `chrono`,
       `rust_decimal`); remove `apply_postgres_text_select_columns` and the
       `CAST(col AS text)` projection. Kills the session-`TimeZone` rendering
@@ -200,7 +200,7 @@ finally gets its runtime consumer.
       SQLite becomes the emulation target, not the source of truth. Careful
       parity tests on hydrated Python values across backends (aware/naive
       datetimes, Decimal precision, UUID casing).
-- [ ] **C4 — Enum decode moves into hydration; delete `_fix_types`.**
+- [x] **C4 — Enum decode moves into hydration; delete `_fix_types`.**
       `enum_values` live in the plan; Rust hydrates the Python `Enum` member
       directly (registry holds the enum class or Python converts via a single
       plan-driven hook). Removes the partial-coverage, `except Exception: pass`
