@@ -172,3 +172,63 @@ def test_fk_string_ref_to_ambiguous_short_name_errors_with_candidates():
     message = str(excinfo.value)
     assert t1.__ferro_identity__ in message
     assert t2.__ferro_identity__ in message
+
+
+def test_two_distinct_models_sharing_a_table_error_names_both():
+    def make_a():
+        class SharedTable(Model):
+            __ferro_table__: ClassVar[str] = "ff_e_shared_table"
+            id: int | None = None
+
+        return SharedTable
+
+    a = make_a()
+    with pytest.raises(RuntimeError) as excinfo:
+
+        class Other(Model):
+            __ferro_table__: ClassVar[str] = "ff_e_shared_table"
+            id: int | None = None
+
+    message = str(excinfo.value)
+    assert "ff_e_shared_table" in message
+    assert a.__ferro_identity__ in message
+    assert "Other" in message
+    assert "__ferro_table__" in message
+
+
+def test_same_identity_redefinition_is_idempotent():
+    from ferro.state import _MODEL_REGISTRY_PY
+
+    class Redefined(Model):  # noqa: F811
+        id: int | None = None
+        name: str
+
+    class Redefined(Model):  # noqa: F811
+        id: int | None = None
+        name: str
+        age: int
+
+    assert "age" in Redefined.model_fields
+    assert _MODEL_REGISTRY_PY[Redefined.__ferro_identity__] is Redefined
+
+
+def test_m2m_join_table_colliding_with_model_table_errors():
+    from typing import Annotated  # noqa: F401
+
+    from ferro import ManyToMany, Relation, BackRef
+    from ferro.relations import resolve_relationships
+
+    class JoinVictim(Model):
+        __ferro_table__: ClassVar[str] = "joinsource_tags"
+        id: int | None = None
+
+    class JoinSource(Model):
+        id: int | None = None
+        tags: Relation[list["JoinTagT"]] = ManyToMany(related_name="sources")
+
+    class JoinTagT(Model):
+        id: int | None = None
+        sources: Relation[list[JoinSource]] = BackRef()
+
+    with pytest.raises(RuntimeError, match="joinsource_tags"):
+        resolve_relationships()

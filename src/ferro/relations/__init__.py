@@ -77,6 +77,15 @@ def resolve_relationships():
             else:
                 join_table = rel.through
 
+            for key, other in _MODEL_REGISTRY_PY.items():
+                if getattr(other, "__ferro_table__", None) == join_table:
+                    raise RuntimeError(
+                        f"M2M relation '{model_name}.{field_name}' derives join "
+                        f"table '{join_table}', which is already the table of "
+                        f"model '{key}'. Set through= on the relation or "
+                        "__ferro_table__ on the model to resolve the collision."
+                    )
+
             source_col = f"{source_table}_id"
             target_col = f"{target_table}_id"
 

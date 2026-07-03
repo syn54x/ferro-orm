@@ -403,13 +403,27 @@ class ModelMetaclass(type(BaseModel)):
             del namespace["__annotate_func__"]
 
     @staticmethod
-    def _register_model_and_proxies(cls, name: str, local_relations: dict) -> None:
+    def _register_model_and_proxies(cls, identity: str, local_relations: dict) -> None:
         """
         Register model in global registry and inject FieldProxy for query building.
 
-        Mutates cls in place.
+        Raises:
+            RuntimeError: When a *distinct* model already claims this model's
+                resolved table name (FF-E E1). Re-registration under the same
+                qualified identity is idempotent.
         """
-        _MODEL_REGISTRY_PY[name] = cls
+        table_name = cls.__ferro_table__
+        for key, other in _MODEL_REGISTRY_PY.items():
+            if key == identity:
+                continue
+            if getattr(other, "__ferro_table__", None) == table_name:
+                raise RuntimeError(
+                    f"Ferro model '{identity}' resolves to table '{table_name}', "
+                    f"which is already registered by model '{key}'. Two distinct "
+                    "models cannot share a table. Set __ferro_table__ on one of "
+                    "them to give it a distinct table name."
+                )
+        _MODEL_REGISTRY_PY[identity] = cls
         cls.ferro_relations = local_relations
 
         # Inject FieldProxy for each field to enable operator overloading on the class
