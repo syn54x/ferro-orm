@@ -208,3 +208,28 @@ def cleanup_models():
 
     yield
     reset_engine()
+
+
+@pytest.fixture(autouse=True)
+def _ferro_registry_isolation():
+    """Snapshot/restore the global model registries around every test (FF-E).
+
+    Function-local test models used to accumulate in the global registries
+    for the whole session — harmless under bare-class-name keys (later
+    same-named models clobbered earlier ones) but fatal under FF-E's
+    qualified keys + table-name collision detection. Module-scope models are
+    captured in the baseline snapshot and survive; function-local models are
+    dropped when the test ends.
+    """
+    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+    models_snapshot = dict(_MODEL_REGISTRY_PY)
+    pending_snapshot = list(_PENDING_RELATIONS)
+    joins_snapshot = dict(_JOIN_TABLE_REGISTRY)
+    yield
+    _MODEL_REGISTRY_PY.clear()
+    _MODEL_REGISTRY_PY.update(models_snapshot)
+    _PENDING_RELATIONS.clear()
+    _PENDING_RELATIONS.extend(pending_snapshot)
+    _JOIN_TABLE_REGISTRY.clear()
+    _JOIN_TABLE_REGISTRY.update(joins_snapshot)

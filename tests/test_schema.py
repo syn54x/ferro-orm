@@ -10,7 +10,7 @@ from typing import Dict, List
 pytestmark = pytest.mark.backend_matrix
 
 
-class Product(Model):
+class SchemaProduct(Model):
     id: int = Field(json_schema_extra={"primary_key": True})
     name: str
     price: float
@@ -22,7 +22,7 @@ async def test_create_tables_success(db_url):
     """Test that create_tables generates and executes SQL correctly."""
     await ferro.connect(db_url)
 
-    # This should generate CREATE TABLE product (...)
+    # This should generate CREATE TABLE schemaproduct (...)
     await ferro.create_tables()
 
     # Verification: We'll try to insert a record later,
