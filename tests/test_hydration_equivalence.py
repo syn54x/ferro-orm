@@ -11,10 +11,11 @@ register) and passed on the text-decode path, so it pins behavior across the
 swap: native decode must produce byte-for-byte the same Python values the
 `CAST(... AS text)` round-trip produced.
 
-Tests marked ``xfail(strict=True)`` are the deliberately-red TDD targets for
-C3 — behaviors the text path gets wrong (``time`` hydrating as ``str``,
-``timestamptz`` values coupled to the session ``TimeZone``). The swap commit
-flips them green by removing the markers' reason for existing.
+The tests under the "TDD targets" section below started life as strict
+xfails against the text-decode path (``time`` hydrated ``str``, IntEnum
+hydrated the stringified label, ``timestamptz`` followed the session
+``TimeZone``); the C3/C4 commits flipped each one green and they are now part
+of the standing contract.
 
 The suite connects with ``identity_map=False`` so every fetch hydrates from
 the wire instead of returning the instance that was saved.
@@ -200,9 +201,8 @@ async def test_decimal_survives_filter_roundtrip(db_url):
 
 
 # --------------------------------------------------------------------------
-# Deliberately-red TDD targets for the C3 native-decode swap.
-# xfail(strict=True): they MUST fail on the text-decode path; the swap commit
-# removes the markers and they become part of the standing contract.
+# TDD targets of the C3/C4 native-decode swap. Each was a strict xfail on the
+# text-decode path (verified red) before the swap flipped it green.
 # --------------------------------------------------------------------------
 
 
@@ -224,10 +224,6 @@ async def test_int_enum_hydrates_member(db_url):
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-@pytest.mark.xfail(
-    strict=True,
-    reason="C3 red: text-decode renders timestamptz in the session TimeZone",
-)
 async def test_timestamptz_stable_under_non_utc_session_timezone(db_url):
     """Native decode must yield the same aware UTC datetime no matter what
     the session TimeZone renders text as.

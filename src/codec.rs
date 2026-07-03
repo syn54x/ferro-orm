@@ -10,9 +10,9 @@
 //! pattern inference happens here.
 
 use crate::backend::{EngineRow, EngineValue};
-use crate::codec_plan::{ColumnCodec, ModelCodecPlan, codec_needs_pg_text_projection};
+use crate::codec_plan::{ColumnCodec, ModelCodecPlan};
 use crate::state::{Dialect, RustValue};
-use sea_query::{Alias, Expr, SelectStatement, SimpleExpr, Value as SeaValue};
+use sea_query::{Alias, Expr, SimpleExpr, Value as SeaValue};
 use serde_json::Value;
 use chrono::SecondsFormat;
 use std::collections::{HashMap, HashSet};
@@ -37,58 +37,6 @@ fn codec_is_integer(codec: Option<&ColumnCodec>) -> bool {
         Some(ColumnCodec::Int | ColumnCodec::SmallInt | ColumnCodec::BigInt) => true,
         Some(ColumnCodec::Enum { int_valued, .. }) => *int_valued,
         _ => false,
-    }
-}
-
-/// Expand a `SELECT` column list on Postgres so text-like columns hydrate identically to SQLite.
-///
-/// UUID, temporal, decimal, JSON, enum, and native enum UDT columns are wrapped in
-/// `CAST(... AS text)` in the projection. Other backends receive `SELECT *`.
-/// Which columns need the cast is decided by the compiled plan (plus the live
-/// native-enum catalog set); emitting the cast at all goes away in C3.
-///
-/// # Arguments
-/// * `select` — SeaQuery select under construction (mutated in place).
-/// * `table_name` — Physical table name for column qualification.
-/// * `plan` — Compiled codec plan for the model.
-/// * `pg_native_enum_columns` — Columns whose live type is `typtype = 'e'` in `pg_catalog`.
-/// * `backend` — Active dialect; no-op expansion when not Postgres.
-pub fn apply_postgres_text_select_columns(
-    select: &mut SelectStatement,
-    table_name: &str,
-    plan: &ModelCodecPlan,
-    pg_native_enum_columns: &HashSet<String>,
-    backend: Dialect,
-) {
-    let tbl = Alias::new(table_name);
-    if backend != Dialect::Postgres || plan.is_empty() {
-        select.column((tbl.clone(), sea_query::Asterisk));
-        return;
-    }
-    let need_text_from_native_enum = plan
-        .ordered_columns()
-        .iter()
-        .any(|k| pg_native_enum_columns.contains(k.as_str()));
-    if !plan.pg_text_projection && !need_text_from_native_enum {
-        select.column((tbl.clone(), sea_query::Asterisk));
-        return;
-    }
-    for col_name in plan.ordered_columns() {
-        let col_iden = Alias::new(col_name.as_str());
-        let needs_cast = plan
-            .codec(col_name)
-            .map(codec_needs_pg_text_projection)
-            .unwrap_or(false)
-            || pg_native_enum_columns.contains(col_name.as_str());
-        if needs_cast {
-            let expr = Expr::cast_as(
-                Expr::col((tbl.clone(), col_iden.clone())),
-                Alias::new("text"),
-            );
-            select.expr_as(expr, col_iden);
-        } else {
-            select.column((tbl.clone(), col_iden));
-        }
     }
 }
 

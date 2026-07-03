@@ -562,22 +562,6 @@ fn maybe_compare_shadow_query_artifacts(
 
 /// On Postgres, cast text-like special columns in SELECT output so Python hydration
 /// sees the same string representation as SQLite.
-fn apply_postgres_text_select_columns(
-    select: &mut sea_query::SelectStatement,
-    table_name: &str,
-    model: &crate::state::RegisteredModel,
-    pg_native_enum_columns: &HashSet<String>,
-    backend: Dialect,
-) {
-    crate::codec::apply_postgres_text_select_columns(
-        select,
-        table_name,
-        &model.codec_plan,
-        pg_native_enum_columns,
-        backend,
-    );
-}
-
 /// Maps each table column to its PostgreSQL enum `typname` (``typtype = 'e'``) for the current schema.
 async fn postgres_enum_udt_by_column(
     table_name: &str,
@@ -979,10 +963,6 @@ pub fn fetch_all<'py>(
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
-        let pg_native_enum_cols: HashSet<String> = {
-            let m = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
-            m.keys().cloned().collect()
-        };
         // ... same sql generation ...
         let (sql, pk_col, schema_for_decode) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1005,13 +985,7 @@ pub fn fetch_all<'py>(
                 }
             }
             let mut stmt = Query::select();
-            apply_postgres_text_select_columns(
-                &mut stmt,
-                &table_name,
-                schema,
-                &pg_native_enum_cols,
-                backend,
-            );
+            stmt.column((Alias::new(&table_name), sea_query::Asterisk));
             let s = sea_query_to_string_for_backend!(stmt.from(Alias::new(&table_name)), backend);
             (s, pk, schema.clone())
         };
@@ -1127,10 +1101,6 @@ pub fn fetch_one<'py>(
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
-        let pg_native_enum_cols: HashSet<String> = {
-            let m = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
-            m.keys().cloned().collect()
-        };
         // ... sql logic ...
         let (sql, bind_values, _pk_col_name, schema_for_decode) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1155,13 +1125,7 @@ pub fn fetch_one<'py>(
             let pk_name =
                 pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let mut stmt = Query::select();
-            apply_postgres_text_select_columns(
-                &mut stmt,
-                &table_name,
-                schema,
-                &pg_native_enum_cols,
-                backend,
-            );
+            stmt.column((Alias::new(&table_name), sea_query::Asterisk));
             let no_enum_udt = HashMap::new();
             let no_uuid = HashSet::new();
             let no_ts: HashMap<String, String> = HashMap::new();
@@ -1786,7 +1750,6 @@ pub fn fetch_filtered<'py>(
         let postgres_enum_udt =
             postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
         query_def.postgres_enum_udt = postgres_enum_udt.clone();
-        let pg_native_enum_cols: HashSet<String> = postgres_enum_udt.keys().cloned().collect();
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1810,13 +1773,7 @@ pub fn fetch_filtered<'py>(
             }
 
             let mut select = Query::select();
-            apply_postgres_text_select_columns(
-                &mut select,
-                &table_name,
-                schema,
-                &pg_native_enum_cols,
-                backend,
-            );
+            select.column((Alias::new(&table_name), sea_query::Asterisk));
             select.from(Alias::new(&table_name));
 
             if let Some(m2m) = &query_def.m2m {
