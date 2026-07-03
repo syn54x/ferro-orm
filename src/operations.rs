@@ -4,7 +4,7 @@
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
 use crate::backend::{
-    EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind,
+    EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind, TableCatalog,
 };
 use crate::query::{QueryDef, query_def_from_ir_payload};
 use crate::state::{
@@ -563,111 +563,72 @@ fn maybe_compare_shadow_query_artifacts(
 
 /// On Postgres, cast text-like special columns in SELECT output so Python hydration
 /// sees the same string representation as SQLite.
-/// Maps each table column to its PostgreSQL enum `typname` (``typtype = 'e'``) for the current schema.
-async fn postgres_enum_udt_by_column(
+/// One combined catalog probe per table per schema epoch.
+///
+/// Returns the table's [`TableCatalog`] — native enum UDTs, `uuid` columns,
+/// and temporal `CAST` targets — from the engine's schema-epoch cache,
+/// introspecting `pg_catalog` once on the first operation against the table.
+/// `refresh_pool()` (the engine's only epoch boundary; auto-migrate calls it
+/// after DDL) invalidates the cache, so steady-state CRUD issues zero
+/// catalog round-trips.
+///
+/// Bind casts must follow DB truth rather than model-declared storage —
+/// Postgres has no assignment coercion for typed parameters, so e.g. an
+/// Alembic-created native enum on a column the model declares as `str` still
+/// needs the `::udt` cast (and an auto-migrate TEXT enum column must not be
+/// cast). See the C2 design doc for the probe evidence.
+///
+/// `typname` doubles as the temporal cast token: `timestamp`, `timestamptz`,
+/// and `date` are exactly the strings the bind layer casts to.
+async fn postgres_table_catalog(
     table_name: &str,
     engine: &EngineHandle,
     tx_conn: &Option<TransactionConnection>,
     backend: Dialect,
-) -> PyResult<HashMap<String, String>> {
+) -> PyResult<Arc<TableCatalog>> {
     if backend != Dialect::Postgres {
-        return Ok(HashMap::new());
+        static EMPTY: std::sync::OnceLock<Arc<TableCatalog>> = std::sync::OnceLock::new();
+        return Ok(EMPTY.get_or_init(|| Arc::new(TableCatalog::default())).clone());
+    }
+
+    if let Some(cached) = engine.cached_table_catalog(table_name) {
+        return Ok(cached);
     }
 
     let sql = r#"
-        SELECT a.attname::text AS column_name, t.typname::text AS udt_name
+        SELECT a.attname::text AS column_name,
+               t.typname::text AS udt_name,
+               t.typtype::text AS typtype
         FROM pg_attribute a
         JOIN pg_class c ON a.attrelid = c.oid
         JOIN pg_namespace n ON c.relnamespace = n.oid
         JOIN pg_type t ON a.atttypid = t.oid
         WHERE n.nspname = current_schema()
           AND c.relname = $1
-          AND t.typtype = 'e'
           AND a.attnum > 0
           AND NOT a.attisdropped
         "#;
 
-    let mut out = HashMap::new();
-    for row in postgres_catalog_rows(engine, tx_conn, sql, table_name, "enum columns").await? {
+    let mut catalog = TableCatalog::default();
+    for row in postgres_catalog_rows(engine, tx_conn, sql, table_name, "table catalog").await? {
         let column_name = engine_row_string(&row, "column_name").unwrap_or_default();
         let udt_name = engine_row_string(&row, "udt_name").unwrap_or_default();
-        if !column_name.is_empty() && !udt_name.is_empty() {
-            out.insert(column_name, udt_name);
+        let typtype = engine_row_string(&row, "typtype").unwrap_or_default();
+        if column_name.is_empty() || udt_name.is_empty() {
+            continue;
+        }
+        if typtype == "e" {
+            catalog.enum_udt.insert(column_name, udt_name);
+        } else if udt_name == "uuid" {
+            catalog.uuid_columns.insert(column_name);
+        } else if matches!(udt_name.as_str(), "timestamp" | "timestamptz" | "date") {
+            catalog.ts_cast.insert(column_name, udt_name);
         }
     }
 
-    Ok(out)
-}
-
-/// Column names on `table_name` in the current schema whose SQL type is `uuid`.
-async fn postgres_uuid_column_names(
-    table_name: &str,
-    engine: &EngineHandle,
-    tx_conn: &Option<TransactionConnection>,
-    backend: Dialect,
-) -> PyResult<HashSet<String>> {
-    if backend != Dialect::Postgres {
-        return Ok(HashSet::new());
-    }
-
-    let sql = r#"
-        SELECT column_name::text
-        FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = $1
-          AND (data_type = 'uuid' OR udt_name = 'uuid')
-        "#;
-
-    Ok(
-        postgres_catalog_rows(engine, tx_conn, sql, table_name, "uuid columns")
-            .await?
-            .into_iter()
-            .filter_map(|row| {
-                engine_row_string(&row, "column_name").filter(|name| !name.is_empty())
-            })
-            .collect(),
-    )
-}
-
-/// For each column whose SQL type is a date or timestamp family, the ``CAST ( … AS … )`` target
-/// (``date``, ``timestamp``, ``timestamptz``) so parameters are not sent as untyped text.
-async fn postgres_temporal_cast_by_column(
-    table_name: &str,
-    engine: &EngineHandle,
-    tx_conn: &Option<TransactionConnection>,
-    backend: Dialect,
-) -> PyResult<HashMap<String, String>> {
-    if backend != Dialect::Postgres {
-        return Ok(HashMap::new());
-    }
-
-    let sql = r#"
-        SELECT column_name::text,
-               CASE data_type::text
-                   WHEN 'timestamp without time zone' THEN 'timestamp'
-                   WHEN 'timestamp with time zone' THEN 'timestamptz'
-                   WHEN 'date' THEN 'date'
-                   ELSE NULL
-               END AS cast_type
-        FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = $1
-          AND data_type::text IN (
-              'timestamp without time zone',
-              'timestamp with time zone',
-              'date'
-          )
-        "#;
-
-    let mut out = HashMap::new();
-    for row in postgres_catalog_rows(engine, tx_conn, sql, table_name, "temporal columns").await? {
-        let column_name = engine_row_string(&row, "column_name").unwrap_or_default();
-        let cast_type = engine_row_string(&row, "cast_type").unwrap_or_default();
-        if !column_name.is_empty() && !cast_type.is_empty() {
-            out.insert(column_name, cast_type);
-        }
-    }
-    Ok(out)
+    let catalog = Arc::new(catalog);
+    engine.store_table_catalog(table_name, catalog.clone());
+    Ok(catalog)
 }
 
 /// Build a SeaQuery expression for a column value, preserving type information
@@ -1426,11 +1387,8 @@ pub fn save_record<'py>(
         }
 
         let table_name = name.to_lowercase();
-        let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
-        let uuid_columns =
-            postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
-        let ts_cast =
-            postgres_temporal_cast_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         let (sql, bind_values, needs_postgres_returning) = build_save_sql(
             &schema,
             &table_name,
@@ -1439,9 +1397,9 @@ pub fn save_record<'py>(
             pk_is_auto,
             mode,
             backend,
-            &enum_udt,
-            &uuid_columns,
-            &ts_cast,
+            enum_udt,
+            uuid_columns,
+            ts_cast,
         )?;
 
         match tx_conn {
@@ -1548,11 +1506,8 @@ pub fn update_record<'py>(
         }
 
         let table_name = name.to_lowercase();
-        let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
-        let uuid_columns =
-            postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
-        let ts_cast =
-            postgres_temporal_cast_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
 
         let plan = build_update_by_pk_sql(
             &schema,
@@ -1560,9 +1515,9 @@ pub fn update_record<'py>(
             &bind_inputs,
             pk_col.as_deref(),
             backend,
-            &enum_udt,
-            &uuid_columns,
-            &ts_cast,
+            enum_udt,
+            uuid_columns,
+            ts_cast,
         )?;
 
         match plan {
@@ -1668,11 +1623,8 @@ pub fn save_bulk_records<'py>(
         }
 
         let table_name = name.to_lowercase();
-        let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
-        let uuid_columns =
-            postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
-        let ts_cast =
-            postgres_temporal_cast_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         let (sql, bind_values) = {
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
@@ -1698,7 +1650,7 @@ pub fn save_bulk_records<'py>(
                     let input = lookup.get(col.as_str()).copied().unwrap_or(&null_input);
                     row_values.push(bind_input_to_expr(
                         &schema, &table_name, col, input,
-                        &enum_udt, &uuid_columns, &ts_cast, backend,
+                        enum_udt, uuid_columns, ts_cast, backend,
                     )?);
                 }
                 insert_stmt.values(row_values).map_err(|e| {
@@ -1752,9 +1704,8 @@ pub fn fetch_filtered<'py>(
         let use_identity_map = engine.is_identity_map_enabled();
 
         let table_name = name.to_lowercase();
-        let postgres_enum_udt =
-            postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
-        query_def.postgres_enum_udt = postgres_enum_udt.clone();
+        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        query_def.postgres_enum_udt = catalog.enum_udt.clone();
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -1933,8 +1884,10 @@ pub fn count_filtered(
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
 
         let table_name = name.to_lowercase();
-        query_def.postgres_enum_udt =
-            postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        query_def.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
+            .await?
+            .enum_udt
+            .clone();
         // ... sql ...
         let (sql, bind_values) = {
             let mut select = Query::select();
@@ -2187,8 +2140,10 @@ pub fn delete_filtered(
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
 
         let table_name = name.to_lowercase();
-        query_def.postgres_enum_udt =
-            postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        query_def.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
+            .await?
+            .enum_udt
+            .clone();
         // ... sql ...
         let (sql, bind_values) = {
             let mut delete = Query::delete();
@@ -2254,12 +2209,9 @@ pub fn update_filtered<'py>(
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
 
         let table_name = name.to_lowercase();
-        let enum_udt = postgres_enum_udt_by_column(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         query_def.postgres_enum_udt = enum_udt.clone();
-        let uuid_columns =
-            postgres_uuid_column_names(&table_name, &engine, &tx_conn, backend).await?;
-        let ts_cast =
-            postgres_temporal_cast_by_column(&table_name, &engine, &tx_conn, backend).await?;
         // ... sql ...
         let (sql, bind_values) = {
             let registry = MODEL_REGISTRY.read().map_err(|_| {
@@ -2280,9 +2232,9 @@ pub fn update_filtered<'py>(
                         &table_name,
                         key,
                         input,
-                        &enum_udt,
-                        &uuid_columns,
-                        &ts_cast,
+                        enum_udt,
+                        uuid_columns,
+                        ts_cast,
                         backend,
                     )?,
                 );
@@ -2349,8 +2301,8 @@ pub fn add_m2m_links<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
-        let uuid_columns =
-            postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&join_table, &engine, &tx_conn, backend).await?;
+        let uuid_columns = &catalog.uuid_columns;
 
         let (sql, bind_values) = {
             let mut insert = InsertStatement::new()
@@ -2364,10 +2316,10 @@ pub fn add_m2m_links<'py>(
                         backend_column_value_expr(
                             &source_col,
                             s_id.clone(),
-                            &uuid_columns,
+                            uuid_columns,
                             backend,
                         ),
-                        backend_column_value_expr(&target_col, t_id, &uuid_columns, backend),
+                        backend_column_value_expr(&target_col, t_id, uuid_columns, backend),
                     ])
                     .map_err(|e| {
                         pyo3::exceptions::PyValueError::new_err(format!(
@@ -2425,8 +2377,8 @@ pub fn remove_m2m_links<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (_, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
-        let uuid_columns =
-            postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&join_table, &engine, &tx_conn, backend).await?;
+        let uuid_columns = &catalog.uuid_columns;
 
         let (sql, bind_values) = sea_query_build_for_backend!(
             Query::delete()
@@ -2435,7 +2387,7 @@ pub fn remove_m2m_links<'py>(
                     Expr::col(Alias::new(&source_col)).eq(backend_column_value_expr(
                         &source_col,
                         s_id,
-                        &uuid_columns,
+                        uuid_columns,
                         backend
                     ))
                 )
@@ -2444,7 +2396,7 @@ pub fn remove_m2m_links<'py>(
                         t_ids
                             .into_iter()
                             .map(|t_id| {
-                                backend_column_value_expr(&target_col, t_id, &uuid_columns, backend)
+                                backend_column_value_expr(&target_col, t_id, uuid_columns, backend)
                             })
                             .collect::<Vec<_>>()
                     )
@@ -2495,8 +2447,8 @@ pub fn clear_m2m_links<'py>(
             let tx_conn = get_transaction_connection(tx_id, session_id.as_deref())?;
             (engine, tx_conn, backend)
         };
-        let uuid_columns =
-            postgres_uuid_column_names(&join_table, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&join_table, &engine, &tx_conn, backend).await?;
+        let uuid_columns = &catalog.uuid_columns;
 
         let (sql, bind_values) = sea_query_build_for_backend!(
             Query::delete()
@@ -2505,7 +2457,7 @@ pub fn clear_m2m_links<'py>(
                     Expr::col(Alias::new(&source_col)).eq(backend_column_value_expr(
                         &source_col,
                         s_id,
-                        &uuid_columns,
+                        uuid_columns,
                         backend
                     ))
                 ),
