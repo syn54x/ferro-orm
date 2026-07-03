@@ -87,11 +87,12 @@ class TestColWrapper:
             archived: bool = False
 
         await ferro.connect(db_url, auto_migrate=True)
-        await ColUser(id=1, username="alice", archived=False).save()
-        await ColUser(id=2, username="bob", archived=True).save()
+        async with ferro.engines.session():
+            await ColUser(id=1, username="alice", archived=False).save()
+            await ColUser(id=2, username="bob", archived=True).save()
 
-        active = await ColUser.where(col(ColUser.archived) == False).all()  # noqa: E712
-        assert {u.username for u in active} == {"alice"}
+            active = await ColUser.where(col(ColUser.archived) == False).all()  # noqa: E712
+            assert {u.username for u in active} == {"alice"}
 
 
 # ---------------------------------------------------------------------------
@@ -163,11 +164,12 @@ class TestLambdaPredicates:
             archived: bool = False
 
         await ferro.connect(db_url, auto_migrate=True)
-        await LamUser(id=1, username="alice", archived=False).save()
-        await LamUser(id=2, username="bob", archived=True).save()
+        async with ferro.engines.session():
+            await LamUser(id=1, username="alice", archived=False).save()
+            await LamUser(id=2, username="bob", archived=True).save()
 
-        active = await LamUser.where(lambda t: t.archived == False).all()  # noqa: E712
-        assert {u.username for u in active} == {"alice"}
+            active = await LamUser.where(lambda t: t.archived == False).all()  # noqa: E712
+            assert {u.username for u in active} == {"alice"}
 
 
 # ---------------------------------------------------------------------------
@@ -194,15 +196,16 @@ class TestOperatorPathUnchanged:
             email: str
 
         await ferro.connect(db_url, auto_migrate=True)
-        await OpUser(id=1, email="a@b.com").save()
-        await OpUser(id=2, email="c@d.com").save()
+        async with ferro.engines.session():
+            await OpUser(id=1, email="a@b.com").save()
+            await OpUser(id=2, email="c@d.com").save()
 
-        with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
-            rows = await OpUser.where(
-                OpUser.email == "a@b.com"
-            ).all()  # ty: ignore[no-matching-overload]
-        assert len(rows) == 1
-        assert rows[0].email == "a@b.com"
+            with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
+                rows = await OpUser.where(
+                    OpUser.email == "a@b.com"
+                ).all()  # ty: ignore[no-matching-overload]
+            assert len(rows) == 1
+            assert rows[0].email == "a@b.com"
 
 
 # ---------------------------------------------------------------------------
@@ -223,19 +226,20 @@ class TestCombinedStyles:
             archived: bool = False
 
         await ferro.connect(db_url, auto_migrate=True)
-        await MixUser(id=1, role="admin", archived=False).save()
-        await MixUser(id=1_001, role="admin", archived=True).save()
-        await MixUser(id=2, role="user", archived=False).save()
+        async with ferro.engines.session():
+            await MixUser(id=1, role="admin", archived=False).save()
+            await MixUser(id=1_001, role="admin", archived=True).save()
+            await MixUser(id=2, role="user", archived=False).save()
 
-        with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
-            rows = await (
-                MixUser.where(MixUser.id == 1)  # ty: ignore[no-matching-overload]
-                .where(col(MixUser.archived) == False)  # noqa: E712
-                .where(lambda t: t.role == "admin")
-                .all()
-            )
-        assert len(rows) == 1
-        assert rows[0].id == 1
+            with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
+                rows = await (
+                    MixUser.where(MixUser.id == 1)  # ty: ignore[no-matching-overload]
+                    .where(col(MixUser.archived) == False)  # noqa: E712
+                    .where(lambda t: t.role == "admin")
+                    .all()
+                )
+            assert len(rows) == 1
+            assert rows[0].id == 1
 
 
 # ---------------------------------------------------------------------------
@@ -260,13 +264,14 @@ class TestRelationLambda:
             author: Annotated[RelAuthor, ForeignKey(related_name="posts")]
 
         await ferro.connect(db_url, auto_migrate=True)
-        author = RelAuthor(id=1, name="taylor")
-        await author.save()
-        await RelPost(id=10, title="draft", published=False, author=author).save()
-        await RelPost(id=11, title="live", published=True, author=author).save()
+        async with ferro.engines.session():
+            author = RelAuthor(id=1, name="taylor")
+            await author.save()
+            await RelPost(id=10, title="draft", published=False, author=author).save()
+            await RelPost(id=11, title="live", published=True, author=author).save()
 
-        published = await author.posts.where(lambda t: t.published == True).all()  # noqa: E712
-        assert {p.title for p in published} == {"live"}
+            published = await author.posts.where(lambda t: t.published == True).all()  # noqa: E712
+            assert {p.title for p in published} == {"live"}
 
 
 # ---------------------------------------------------------------------------

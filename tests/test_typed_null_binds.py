@@ -27,6 +27,7 @@ from typing import Annotated, Any
 import pytest
 from pydantic import Field
 
+import ferro
 from ferro import FerroField, Model, connect
 
 
@@ -46,21 +47,22 @@ async def test_insert_with_none_for_each_nullable_primitive(db_url):
         blob: bytes | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    row = await Mixed.create()
-    assert row.id is not None
-    assert row.count is None
-    assert row.active is None
-    assert row.ratio is None
-    assert row.name is None
-    assert row.blob is None
+        row = await Mixed.create()
+        assert row.id is not None
+        assert row.count is None
+        assert row.active is None
+        assert row.ratio is None
+        assert row.name is None
+        assert row.blob is None
 
-    fetched = await Mixed.get(row.id)
-    assert fetched is not None
-    assert fetched.count is None
-    assert fetched.active is None
-    assert fetched.ratio is None
-    assert fetched.name is None
+        fetched = await Mixed.get(row.id)
+        assert fetched is not None
+        assert fetched.count is None
+        assert fetched.active is None
+        assert fetched.ratio is None
+        assert fetched.name is None
 
 
 @pytest.mark.asyncio
@@ -76,14 +78,15 @@ async def test_insert_with_value_round_trips_for_each_type(db_url):
         name: str | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    row = await Mixed.create(count=42, active=True, ratio=3.14, name="ferro")
-    fetched = await Mixed.get(row.id)
-    assert fetched is not None
-    assert fetched.count == 42
-    assert fetched.active is True
-    assert fetched.ratio == pytest.approx(3.14)
-    assert fetched.name == "ferro"
+        row = await Mixed.create(count=42, active=True, ratio=3.14, name="ferro")
+        fetched = await Mixed.get(row.id)
+        assert fetched is not None
+        assert fetched.count == 42
+        assert fetched.active is True
+        assert fetched.ratio == pytest.approx(3.14)
+        assert fetched.name == "ferro"
 
 
 @pytest.mark.asyncio
@@ -100,17 +103,18 @@ async def test_insert_with_none_for_uuid(db_url):
         run_id: uuid.UUID | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    null_row = await WithUuid.create()
-    fetched_null = await WithUuid.get(null_row.id)
-    assert fetched_null is not None
-    assert fetched_null.run_id is None
+        null_row = await WithUuid.create()
+        fetched_null = await WithUuid.get(null_row.id)
+        assert fetched_null is not None
+        assert fetched_null.run_id is None
 
-    u = uuid.uuid4()
-    set_row = await WithUuid.create(run_id=u)
-    fetched_set = await WithUuid.get(set_row.id)
-    assert fetched_set is not None
-    assert fetched_set.run_id == u
+        u = uuid.uuid4()
+        set_row = await WithUuid.create(run_id=u)
+        fetched_set = await WithUuid.get(set_row.id)
+        assert fetched_set is not None
+        assert fetched_set.run_id == u
 
 
 @pytest.mark.asyncio
@@ -135,14 +139,15 @@ async def test_uuid_pk_round_trips_through_bind_layer(db_url):
         )
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    target = uuid.uuid4()
-    created = await UuidPk.create(id=target)
-    assert created.id == target
+        target = uuid.uuid4()
+        created = await UuidPk.create(id=target)
+        assert created.id == target
 
-    fetched = await UuidPk.get(target)
-    assert fetched is not None
-    assert fetched.id == target
+        fetched = await UuidPk.get(target)
+        assert fetched is not None
+        assert fetched.id == target
 
 
 @pytest.mark.asyncio
@@ -162,17 +167,18 @@ async def test_uuid_pk_filter_by_string_does_not_send_text(db_url):
         name: str | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    target = uuid.uuid4()
-    await UuidProfile.create(id=target, name="alice")
+        target = uuid.uuid4()
+        await UuidProfile.create(id=target, name="alice")
 
-    matched_str = await UuidProfile.where(UuidProfile.id == str(target)).first()
-    assert matched_str is not None
-    assert matched_str.name == "alice"
+        matched_str = await UuidProfile.where(UuidProfile.id == str(target)).first()
+        assert matched_str is not None
+        assert matched_str.name == "alice"
 
-    matched_uuid = await UuidProfile.where(UuidProfile.id == target).first()
-    assert matched_uuid is not None
-    assert matched_uuid.name == "alice"
+        matched_uuid = await UuidProfile.where(UuidProfile.id == target).first()
+        assert matched_uuid is not None
+        assert matched_uuid.name == "alice"
 
 
 @pytest.mark.asyncio
@@ -185,11 +191,12 @@ async def test_insert_with_none_for_decimal(db_url):
         amount: Decimal | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    null_row = await WithDecimal.create()
-    fetched = await WithDecimal.get(null_row.id)
-    assert fetched is not None
-    assert fetched.amount is None
+        null_row = await WithDecimal.create()
+        fetched = await WithDecimal.get(null_row.id)
+        assert fetched is not None
+        assert fetched.amount is None
 
 
 @pytest.mark.asyncio
@@ -209,10 +216,11 @@ async def test_issue_38_exact_regression(db_url):
         bench_level: int | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    row = await Scorecard.create()
-    assert row.id is not None
-    assert row.bench_level is None
+        row = await Scorecard.create()
+        assert row.id is not None
+        assert row.bench_level is None
 
 
 @pytest.mark.asyncio
@@ -236,18 +244,19 @@ async def test_update_to_none_succeeds_on_postgres(db_url):
         name: str | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    row = await Mixed.create(count=99, active=True, name="initial")
-    updated = await Mixed.where(Mixed.id == row.id).update(
-        count=None, active=None, name=None
-    )
-    assert updated == 1
+        row = await Mixed.create(count=99, active=True, name="initial")
+        updated = await Mixed.where(Mixed.id == row.id).update(
+            count=None, active=None, name=None
+        )
+        assert updated == 1
 
-    fetched = await Mixed.get(row.id)
-    assert fetched is not None
-    assert fetched.count is None
-    assert fetched.active is None
-    assert fetched.name is None
+        fetched = await Mixed.get(row.id)
+        assert fetched is not None
+        assert fetched.count is None
+        assert fetched.active is None
+        assert fetched.name is None
 
 
 @pytest.mark.asyncio
@@ -266,10 +275,11 @@ async def test_update_to_none_executes_without_error(db_url):
         count: int | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    row = await Mixed.create(count=99)
-    updated = await Mixed.where(Mixed.id == row.id).update(count=None)
-    assert updated == 1
+        row = await Mixed.create(count=99)
+        updated = await Mixed.where(Mixed.id == row.id).update(count=None)
+        assert updated == 1
 
 
 @pytest.mark.asyncio
@@ -285,17 +295,18 @@ async def test_filter_by_none_does_not_reproduce_38(db_url):
         count: int | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    with_value = await Filterable.create(count=1)
-    null_row = await Filterable.create()  # count = None
+        with_value = await Filterable.create(count=1)
+        null_row = await Filterable.create()  # count = None
 
-    matched_null = await Filterable.where(Filterable.count == None).all()  # noqa: E711
-    assert len(matched_null) == 1
-    assert matched_null[0].id == null_row.id
+        matched_null = await Filterable.where(Filterable.count == None).all()  # noqa: E711
+        assert len(matched_null) == 1
+        assert matched_null[0].id == null_row.id
 
-    matched_non_null = await Filterable.where(Filterable.count != None).all()  # noqa: E711
-    assert len(matched_non_null) == 1
-    assert matched_non_null[0].id == with_value.id
+        matched_non_null = await Filterable.where(Filterable.count != None).all()  # noqa: E711
+        assert len(matched_non_null) == 1
+        assert matched_non_null[0].id == with_value.id
 
 
 @pytest.mark.asyncio
@@ -313,30 +324,31 @@ async def test_lambda_predicate_null_filter_datetime_and_json(db_url):
         payload: list[Any] | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    null_dt = await Pending.create(name="null-dt", attached_at=None, payload=[{"x": 1}])
-    null_json = await Pending.create(name="null-json", attached_at=datetime.now(UTC))
-    with_values = await Pending.create(
-        name="set",
-        attached_at=datetime.now(UTC),
-        payload=[{"x": 2}],
-    )
+        null_dt = await Pending.create(name="null-dt", attached_at=None, payload=[{"x": 1}])
+        null_json = await Pending.create(name="null-json", attached_at=datetime.now(UTC))
+        with_values = await Pending.create(
+            name="set",
+            attached_at=datetime.now(UTC),
+            payload=[{"x": 2}],
+        )
 
-    matched_dt_null = await Pending.where(lambda t: t.attached_at == None).all()  # noqa: E711
-    assert len(matched_dt_null) == 1
-    assert matched_dt_null[0].id == null_dt.id
+        matched_dt_null = await Pending.where(lambda t: t.attached_at == None).all()  # noqa: E711
+        assert len(matched_dt_null) == 1
+        assert matched_dt_null[0].id == null_dt.id
 
-    matched_json_null = await Pending.where(lambda t: t.payload == None).all()  # noqa: E711
-    assert len(matched_json_null) == 1
-    assert matched_json_null[0].id == null_json.id
+        matched_json_null = await Pending.where(lambda t: t.payload == None).all()  # noqa: E711
+        assert len(matched_json_null) == 1
+        assert matched_json_null[0].id == null_json.id
 
-    matched_dt_set = await Pending.where(lambda t: t.attached_at != None).all()  # noqa: E711
-    assert len(matched_dt_set) == 2
-    assert {r.id for r in matched_dt_set} == {null_json.id, with_values.id}
+        matched_dt_set = await Pending.where(lambda t: t.attached_at != None).all()  # noqa: E711
+        assert len(matched_dt_set) == 2
+        assert {r.id for r in matched_dt_set} == {null_json.id, with_values.id}
 
-    matched_json_set = await Pending.where(lambda t: t.payload != None).all()  # noqa: E711
-    assert len(matched_json_set) == 2
-    assert {r.id for r in matched_json_set} == {null_dt.id, with_values.id}
+        matched_json_set = await Pending.where(lambda t: t.payload != None).all()  # noqa: E711
+        assert len(matched_json_set) == 2
+        assert {r.id for r in matched_json_set} == {null_dt.id, with_values.id}
 
 
 @pytest.mark.asyncio
@@ -355,16 +367,17 @@ async def test_invalid_uuid_raises_pyvalueerror_or_pydantic_error(db_url):
         run_id: uuid.UUID | None = None
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
 
-    with pytest.raises((ValueError, TypeError)) as exc_info:
-        await WithUuid.create(run_id="not-a-uuid")
+        with pytest.raises((ValueError, TypeError)) as exc_info:
+            await WithUuid.create(run_id="not-a-uuid")
 
-    msg = str(exc_info.value)
-    if "Invalid UUID for" in msg:
-        # Rust-core diagnostic shape (U5)
-        assert "withuuid" in msg.lower() or "WithUuid" in msg
-        assert "run_id" in msg
-        assert "not-a-uuid" in msg
+        msg = str(exc_info.value)
+        if "Invalid UUID for" in msg:
+            # Rust-core diagnostic shape (U5)
+            assert "withuuid" in msg.lower() or "WithUuid" in msg
+            assert "run_id" in msg
+            assert "not-a-uuid" in msg
 
 
 @pytest.mark.asyncio
@@ -375,13 +388,14 @@ async def test_temporal_update_to_none_uses_unified_codec_path(db_url):
         attached_at: datetime | None = None
 
     await connect(db_url, auto_migrate=True)
-    row = await TemporalUpdate.create(attached_at=datetime.now(UTC))
-    updated = await TemporalUpdate.where(TemporalUpdate.id == row.id).update(attached_at=None)
-    assert updated == 1
+    async with ferro.engines.session():
+        row = await TemporalUpdate.create(attached_at=datetime.now(UTC))
+        updated = await TemporalUpdate.where(TemporalUpdate.id == row.id).update(attached_at=None)
+        assert updated == 1
 
-    fetched = await TemporalUpdate.get(row.id)
-    assert fetched is not None
-    assert fetched.attached_at is None
+        fetched = await TemporalUpdate.get(row.id)
+        assert fetched is not None
+        assert fetched.attached_at is None
 
 
 @pytest.mark.asyncio
@@ -396,12 +410,13 @@ async def test_nullable_enum_null_and_value_roundtrip(db_url):
         state: RunState | None = None
 
     await connect(db_url, auto_migrate=True)
-    null_row = await EnumNullRow.create()
-    set_row = await EnumNullRow.create(state=RunState.READY)
+    async with ferro.engines.session():
+        null_row = await EnumNullRow.create()
+        set_row = await EnumNullRow.create(state=RunState.READY)
 
-    fetched_null = await EnumNullRow.get(null_row.id)
-    fetched_set = await EnumNullRow.get(set_row.id)
-    assert fetched_null is not None
-    assert fetched_set is not None
-    assert fetched_null.state is None
-    assert fetched_set.state == RunState.READY
+        fetched_null = await EnumNullRow.get(null_row.id)
+        fetched_set = await EnumNullRow.get(set_row.id)
+        assert fetched_null is not None
+        assert fetched_set is not None
+        assert fetched_null.state is None
+        assert fetched_set.state == RunState.READY

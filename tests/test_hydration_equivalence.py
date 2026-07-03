@@ -111,13 +111,17 @@ def _make_specimen(cls: type[Model]) -> Model:
     )
 
 
-async def _connect_and_save(db_url: str) -> tuple[type[Model], int]:
+async def _connect(db_url: str) -> type[Model]:
     specimen_cls = _build_specimen()
     await ferro.connect(db_url, auto_migrate=True, identity_map=False)
+    return specimen_cls
+
+
+async def _save_specimen(specimen_cls: type[Model]) -> int:
     row = _make_specimen(specimen_cls)
     await row.save()
     assert row.id is not None
-    return specimen_cls, row.id
+    return row.id
 
 
 def _assert_core_values(row: Model) -> None:
@@ -155,49 +159,57 @@ def _assert_core_values(row: Model) -> None:
 
 @pytest.mark.asyncio
 async def test_full_type_row_hydrates_expected_values(db_url):
-    specimen_cls, _pk = await _connect_and_save(db_url)
+    specimen_cls = await _connect(db_url)
+    async with ferro.engines.session():
+        await _save_specimen(specimen_cls)
 
-    rows = await specimen_cls.all()
-    assert len(rows) == 1
-    _assert_core_values(rows[0])
+        rows = await specimen_cls.all()
+        assert len(rows) == 1
+        _assert_core_values(rows[0])
 
 
 @pytest.mark.asyncio
 async def test_every_fetch_path_hydrates_identically(db_url):
     """all(), get(), where().all(), first(), get_or_none(), refresh() agree."""
-    specimen_cls, pk = await _connect_and_save(db_url)
+    specimen_cls = await _connect(db_url)
+    async with ferro.engines.session():
+        pk = await _save_specimen(specimen_cls)
 
-    fetched = [
-        (await specimen_cls.all())[0],
-        await specimen_cls.get(pk),
-        (await specimen_cls.where(lambda s: s.name == "specimen").all())[0],
-        await specimen_cls.where(lambda s: s.token == TOKEN).first(),
-        await specimen_cls.get_or_none(pk),
-    ]
+        fetched = [
+            (await specimen_cls.all())[0],
+            await specimen_cls.get(pk),
+            (await specimen_cls.where(lambda s: s.name == "specimen").all())[0],
+            await specimen_cls.where(lambda s: s.token == TOKEN).first(),
+            await specimen_cls.get_or_none(pk),
+        ]
 
-    refreshed = await specimen_cls.get(pk)
-    await refreshed.refresh()
-    fetched.append(refreshed)
+        refreshed = await specimen_cls.get(pk)
+        await refreshed.refresh()
+        fetched.append(refreshed)
 
-    for row in fetched:
-        _assert_core_values(row)
+        for row in fetched:
+            _assert_core_values(row)
 
 
 @pytest.mark.asyncio
 async def test_uuid_exact_object_equality_not_str(db_url):
     """UUID casing must not leak: compare UUID objects and canonical str."""
-    specimen_cls, pk = await _connect_and_save(db_url)
-    row = await specimen_cls.get(pk)
-    assert row.token == TOKEN
-    assert str(row.token) == str(TOKEN)  # canonical lowercase hyphenated
+    specimen_cls = await _connect(db_url)
+    async with ferro.engines.session():
+        pk = await _save_specimen(specimen_cls)
+        row = await specimen_cls.get(pk)
+        assert row.token == TOKEN
+        assert str(row.token) == str(TOKEN)  # canonical lowercase hyphenated
 
 
 @pytest.mark.asyncio
 async def test_decimal_survives_filter_roundtrip(db_url):
-    specimen_cls, _pk = await _connect_and_save(db_url)
-    row = await specimen_cls.where(lambda s: s.amount == AMOUNT).first()
-    assert row is not None
-    assert row.amount == AMOUNT
+    specimen_cls = await _connect(db_url)
+    async with ferro.engines.session():
+        await _save_specimen(specimen_cls)
+        row = await specimen_cls.where(lambda s: s.amount == AMOUNT).first()
+        assert row is not None
+        assert row.amount == AMOUNT
 
 
 # --------------------------------------------------------------------------
@@ -208,18 +220,22 @@ async def test_decimal_survives_filter_roundtrip(db_url):
 
 @pytest.mark.asyncio
 async def test_time_hydrates_datetime_time(db_url):
-    specimen_cls, pk = await _connect_and_save(db_url)
-    row = await specimen_cls.get(pk)
-    assert type(row.opens_at) is datetime.time
-    assert row.opens_at == OPENS_AT
+    specimen_cls = await _connect(db_url)
+    async with ferro.engines.session():
+        pk = await _save_specimen(specimen_cls)
+        row = await specimen_cls.get(pk)
+        assert type(row.opens_at) is datetime.time
+        assert row.opens_at == OPENS_AT
 
 
 @pytest.mark.asyncio
 async def test_int_enum_hydrates_member(db_url):
-    specimen_cls, pk = await _connect_and_save(db_url)
-    row = await specimen_cls.get(pk)
-    assert isinstance(row.priority, Priority)
-    assert row.priority is Priority.HIGH
+    specimen_cls = await _connect(db_url)
+    async with ferro.engines.session():
+        pk = await _save_specimen(specimen_cls)
+        row = await specimen_cls.get(pk)
+        assert isinstance(row.priority, Priority)
+        assert row.priority is Priority.HIGH
 
 
 @pytest.mark.asyncio
@@ -241,16 +257,19 @@ async def test_timestamptz_stable_under_non_utc_session_timezone(db_url):
         identity_map=False,
         pool=ferro.PoolConfig(max_connections=1),
     )
-    await execute("SET TIME ZONE 'America/Chicago'")
-    assert (await ferro.raw.fetch_one("SHOW timezone"))["TimeZone"] == "America/Chicago"
+    async with ferro.engines.session():
+        await execute("SET TIME ZONE 'America/Chicago'")
+        assert (
+            await ferro.raw.fetch_one("SHOW timezone")
+        )["TimeZone"] == "America/Chicago"
 
-    row = _make_specimen(specimen_cls)
-    await row.save()
-    pk = row.id
-    row = await specimen_cls.get(pk)
+        row = _make_specimen(specimen_cls)
+        await row.save()
+        pk = row.id
+        row = await specimen_cls.get(pk)
 
-    assert row.aware_at == AWARE_AT
-    assert row.aware_at.utcoffset() == datetime.timedelta(0), (
-        "hydrated timestamptz must be stable UTC regardless of session TimeZone, "
-        f"got offset {row.aware_at.utcoffset()!r}"
-    )
+        assert row.aware_at == AWARE_AT
+        assert row.aware_at.utcoffset() == datetime.timedelta(0), (
+            "hydrated timestamptz must be stable UTC regardless of session TimeZone, "
+            f"got offset {row.aware_at.utcoffset()!r}"
+        )

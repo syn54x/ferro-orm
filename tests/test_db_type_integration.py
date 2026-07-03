@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+import ferro
 from ferro import Field, Model, clear_registry, connect, reset_engine, varchar
 from ferro.state import _MODEL_REGISTRY_PY
 
@@ -256,19 +257,19 @@ async def test_strenum_text_storage_round_trip(db_url):
         format: _FileFormat = Field(db_type="text")
 
     await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        created = await TextFormatDoc.create(format=_FileFormat.JSON)
+        fetched = await TextFormatDoc.get(created.id)
+        assert fetched is not None
+        assert fetched.format == _FileFormat.JSON
 
-    created = await TextFormatDoc.create(format=_FileFormat.JSON)
-    fetched = await TextFormatDoc.get(created.id)
-    assert fetched is not None
-    assert fetched.format == _FileFormat.JSON
-
-    updated = await TextFormatDoc.where(TextFormatDoc.id == created.id).update(
-        format=_FileFormat.PDF
-    )
-    assert updated == 1
-    again = await TextFormatDoc.get(created.id)
-    assert again is not None
-    assert again.format == _FileFormat.PDF
+        updated = await TextFormatDoc.where(TextFormatDoc.id == created.id).update(
+            format=_FileFormat.PDF
+        )
+        assert updated == 1
+        again = await TextFormatDoc.get(created.id)
+        assert again is not None
+        assert again.format == _FileFormat.PDF
 
 
 @pytest.mark.asyncio
@@ -278,12 +279,12 @@ async def test_bigint_value_round_trip(db_url):
         value: int = Field(db_type="bigint")
 
     await connect(db_url, auto_migrate=True)
-
-    large = 9_000_000_000
-    row = await BigintCounter.create(value=large)
-    fetched = await BigintCounter.get(row.id)
-    assert fetched is not None
-    assert fetched.value == large
+    async with ferro.engines.session():
+        large = 9_000_000_000
+        row = await BigintCounter.create(value=large)
+        fetched = await BigintCounter.get(row.id)
+        assert fetched is not None
+        assert fetched.value == large
 
 
 @pytest.mark.asyncio
@@ -293,12 +294,12 @@ async def test_uuid_stored_as_text_round_trip(db_url):
         external_id: UUID = Field(db_type="text")
 
     await connect(db_url, auto_migrate=True)
-
-    uid = uuid4()
-    row = await UuidTextRecord.create(external_id=uid)
-    fetched = await UuidTextRecord.get(row.id)
-    assert fetched is not None
-    assert fetched.external_id == uid
+    async with ferro.engines.session():
+        uid = uuid4()
+        row = await UuidTextRecord.create(external_id=uid)
+        fetched = await UuidTextRecord.get(row.id)
+        assert fetched is not None
+        assert fetched.external_id == uid
 
 
 @pytest.mark.asyncio
@@ -308,11 +309,11 @@ async def test_varchar_helper_round_trip(db_url):
         code: str = Field(db_type=varchar(32))
 
     await connect(db_url, auto_migrate=True)
-
-    row = await CodeRow.create(code="ABC-123")
-    fetched = await CodeRow.get(row.id)
-    assert fetched is not None
-    assert fetched.code == "ABC-123"
+    async with ferro.engines.session():
+        row = await CodeRow.create(code="ABC-123")
+        fetched = await CodeRow.get(row.id)
+        assert fetched is not None
+        assert fetched.code == "ABC-123"
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +331,8 @@ async def test_db_check_rejects_invalid_value_on_insert(
         format: _FileFormat = Field(db_type="text", db_check=True)
 
     await connect(db_url, auto_migrate=True)
-    await CheckedDoc.create(format=_FileFormat.PDF)
+    async with ferro.engines.session():
+        await CheckedDoc.create(format=_FileFormat.PDF)
 
     import psycopg
     from psycopg import errors
@@ -375,7 +377,8 @@ async def test_default_strenum_without_db_type_runtime_ddl_and_round_trip(
         "auto_migrate should create the native PG enum type for a default enum"
     )
 
-    row = await NativeEnumDoc.create(format=_FileFormat.JSON)
-    fetched = await NativeEnumDoc.get(row.id)
-    assert fetched is not None
-    assert fetched.format == _FileFormat.JSON
+    async with ferro.engines.session():
+        row = await NativeEnumDoc.create(format=_FileFormat.JSON)
+        fetched = await NativeEnumDoc.get(row.id)
+        assert fetched is not None
+        assert fetched.format == _FileFormat.JSON
