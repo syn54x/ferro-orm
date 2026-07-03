@@ -110,6 +110,30 @@ argument) binds to that default connection — you do not need to pass
 Need to target a specific connection from inside another session? Pass
 `session=` explicitly — it overrides the ambient session.
 
+!!! warning "v0.13 update: this removal already landed"
+    The deprecation window above described a `v0.14.0` removal. It actually
+    shipped one minor early, in `v0.13.0`, as part of the identity-map and
+    routing redesign (FF-D). If you are on `v0.13.0` or later:
+
+    - Unqualified operations with no active session and no `using=` no
+      longer warn — they raise `RuntimeError` immediately.
+    - An explicit `using=` that names a connection different from the
+      session you're ambiently inside of no longer runs silently on that
+      connection — it raises `ValueError`. Pass an explicit `session=` for
+      that connection instead, or open a session on the connection you
+      named.
+    - `using=`-only operations (no session at all) still run, but now with
+      **no identity map**: every load returns a fresh instance and nothing
+      is cached across calls. This is a behavior change, not just a
+      deprecation — the data returned is still correct and current, but
+      `a is b` across two `using=`-only fetches of the same row is no
+      longer guaranteed. Wrap the code in a session if you need that
+      guarantee back.
+
+    See [Identity Map](../concepts/identity-map.md) for the full guarantee
+    session-scoped identity now provides (weak-valued map, refresh-on-load,
+    scoped invalidation).
+
 ### 3. Build Alembic metadata from `get_metadata()`
 
 The private JSON-derivation helpers `ferro.migrations.alembic._build_sa_table`
@@ -136,7 +160,7 @@ directly in your Alembic `env.py`.
 | Deprecated surface | Replacement | Removed in |
 | --- | --- | --- |
 | `Model.where(Model.field OP value)` | `where(lambda t: ...)` or `col(Model.field)` | `v0.14.0` |
-| Unqualified ORM/raw operations outside an active session | `async with ferro.engines.session("name")` or explicit `session=` | `v0.14.0` |
+| Unqualified ORM/raw operations outside an active session | `async with ferro.engines.session("name")` or explicit `session=` | `v0.13.0` (landed early — see note above) |
 | `ferro.migrations.alembic._build_sa_table` | `ferro.migrations.get_metadata()` | `v0.14.0` |
 | `ferro.migrations.alembic._map_to_sa_type` | `ferro.migrations.get_metadata()` | `v0.14.0` |
 
