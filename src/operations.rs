@@ -373,6 +373,7 @@ fn engine_row_string(row: &EngineRow, column_name: &str) -> Option<String> {
         .and_then(|(_, value)| match value {
             EngineValue::String(value) => Some(value.clone()),
             EngineValue::I64(value) => Some(value.to_string()),
+            EngineValue::Uuid(value) => Some(value.hyphenated().to_string()),
             _ => None,
         })
 }
@@ -398,6 +399,28 @@ fn engine_row_to_pydict<'py>(
             EngineValue::F64(f) => f.into_py_any(py)?.into_bound(py),
             EngineValue::String(s) => s.into_py_any(py)?.into_bound(py),
             EngineValue::Bytes(b) => PyBytes::new(py, &b).into_any(),
+            // Typed Postgres wire values keep the documented raw contract:
+            // rich types come out as their canonical strings. (Before FF-C C3
+            // these decoded as None on Postgres — the generic ladder had no
+            // arm for them.)
+            EngineValue::Uuid(u) => u.hyphenated().to_string().into_py_any(py)?.into_bound(py),
+            EngineValue::TimestampTz(dt) => dt
+                .to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+                .into_py_any(py)?
+                .into_bound(py),
+            EngineValue::Timestamp(dt) => dt
+                .format("%Y-%m-%dT%H:%M:%S%.6f")
+                .to_string()
+                .into_py_any(py)?
+                .into_bound(py),
+            EngineValue::Date(d) => d.to_string().into_py_any(py)?.into_bound(py),
+            EngineValue::Time(t) => t
+                .format("%H:%M:%S%.6f")
+                .to_string()
+                .into_py_any(py)?
+                .into_bound(py),
+            EngineValue::Decimal(s) => s.into_py_any(py)?.into_bound(py),
+            EngineValue::Json(v) => v.to_string().into_py_any(py)?.into_bound(py),
         };
         dict.set_item(col_name, py_val)?;
     }

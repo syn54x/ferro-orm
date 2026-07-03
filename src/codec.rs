@@ -14,6 +14,7 @@ use crate::codec_plan::{ColumnCodec, ModelCodecPlan, codec_needs_pg_text_project
 use crate::state::{Dialect, RustValue};
 use sea_query::{Alias, Expr, SelectStatement, SimpleExpr, Value as SeaValue};
 use serde_json::Value;
+use chrono::SecondsFormat;
 use std::collections::{HashMap, HashSet};
 
 /// One ORM row after GIL-free decode: optional stringified PK plus column values.
@@ -402,10 +403,13 @@ pub fn json_value_to_sea_value(value: &Value) -> SeaValue {
 
 /// Decode one [`EngineValue`] into a [`RustValue`] using the compiled codec plan.
 ///
-/// Applies decimal, binary, boolean-as-integer (SQLite), UUID, temporal, and JSON rules
-/// before the generic scalar mapping. Columns outside the plan (joined/m2m
-/// columns) take the generic mapping. `Time` deliberately decodes as a plain
-/// string in C1 — pinned to pre-plan behavior; C3 revisits.
+/// Typed wire values (native Postgres decode, FF-C C3) carry the physical
+/// truth of the column; the plan refines the Python-facing shape (e.g. a
+/// `UUID` column widened to text storage still hydrates `uuid.UUID`, and a
+/// `str` column widened to `uuid` storage hydrates `str`). SQLite's text wire
+/// funnels into the same shapes, keeping both backends observationally
+/// identical at the Python boundary. Columns outside the plan (joined/m2m
+/// columns) take each wire value's natural mapping.
 ///
 /// # Arguments
 /// * `value` — Wire value from SQLx fetch.
@@ -416,6 +420,67 @@ pub fn json_value_to_sea_value(value: &Value) -> SeaValue {
 /// Rust-native value ready for [`RustValue::into_py_any`].
 pub fn decode_engine_value(value: EngineValue, plan: &ModelCodecPlan, col_name: &str) -> RustValue {
     let codec = plan.codec(col_name);
+    let plan_says_str = matches!(codec, Some(ColumnCodec::Str));
+
+    // Typed wire values: natural mapping unless the plan's logical codec is
+    // `Str` (explicit `db_type` widened storage away from a str field).
+    match value {
+        EngineValue::Uuid(v) => {
+            let s = v.hyphenated().to_string();
+            return if plan_says_str {
+                RustValue::String(s)
+            } else {
+                RustValue::Uuid(s)
+            };
+        }
+        EngineValue::TimestampTz(v) => {
+            let s = v.to_rfc3339_opts(SecondsFormat::Micros, false);
+            return if plan_says_str {
+                RustValue::String(s)
+            } else {
+                RustValue::DateTime(s)
+            };
+        }
+        EngineValue::Timestamp(v) => {
+            let s = v.format("%Y-%m-%dT%H:%M:%S%.6f").to_string();
+            return if plan_says_str {
+                RustValue::String(s)
+            } else {
+                RustValue::DateTime(s)
+            };
+        }
+        EngineValue::Date(v) => {
+            let s = v.to_string();
+            return if plan_says_str {
+                RustValue::String(s)
+            } else {
+                RustValue::Date(s)
+            };
+        }
+        EngineValue::Time(v) => {
+            let s = v.format("%H:%M:%S%.6f").to_string();
+            return if plan_says_str {
+                RustValue::String(s)
+            } else {
+                RustValue::Time(s)
+            };
+        }
+        EngineValue::Decimal(v) => {
+            return if plan_says_str {
+                RustValue::String(v)
+            } else {
+                RustValue::Decimal(v)
+            };
+        }
+        EngineValue::Json(v) => {
+            return if plan_says_str {
+                RustValue::String(v.to_string())
+            } else {
+                RustValue::Json(v)
+            };
+        }
+        _ => {}
+    }
 
     if matches!(codec, Some(ColumnCodec::Decimal)) {
         return match value {
@@ -442,7 +507,17 @@ pub fn decode_engine_value(value: EngineValue, plan: &ModelCodecPlan, col_name: 
         EngineValue::String(v) => match codec {
             Some(ColumnCodec::DateTime) => RustValue::DateTime(v),
             Some(ColumnCodec::Date) => RustValue::Date(v),
+            Some(ColumnCodec::Time) => RustValue::Time(v),
             Some(ColumnCodec::Uuid) => RustValue::Uuid(v),
+            // IntEnum members are stored as their stringified values on
+            // text-family storage; hydration needs the integer back so the
+            // Python enum class can resolve the member (FF-C C4, F14).
+            Some(ColumnCodec::Enum {
+                int_valued: true, ..
+            }) => match v.parse::<i64>() {
+                Ok(parsed) => RustValue::BigInt(parsed),
+                Err(_) => RustValue::String(v),
+            },
             Some(ColumnCodec::Json) => {
                 if let Ok(json_val) = serde_json::from_str(&v) {
                     RustValue::Json(json_val)
@@ -454,6 +529,8 @@ pub fn decode_engine_value(value: EngineValue, plan: &ModelCodecPlan, col_name: 
         },
         EngineValue::Bool(v) => RustValue::Bool(v),
         EngineValue::Null => RustValue::None,
+        // Typed variants are fully handled above.
+        _ => RustValue::None,
     }
 }
 
@@ -481,6 +558,10 @@ pub fn typed_rows_to_parsed_data(
                     row_pk_val = match &value {
                         EngineValue::I64(v) => Some(v.to_string()),
                         EngineValue::String(v) => Some(v.clone()),
+                        // Native uuid PKs stringify to the same canonical
+                        // lowercase-hyphenated form SQLite stores as text, so
+                        // identity-map keys agree across backends.
+                        EngineValue::Uuid(v) => Some(v.hyphenated().to_string()),
                         _ => None,
                     };
                 }

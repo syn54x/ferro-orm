@@ -207,10 +207,6 @@ async def test_decimal_survives_filter_roundtrip(db_url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="C3 red: time columns hydrate as str on the text-decode path",
-)
 async def test_time_hydrates_datetime_time(db_url):
     specimen_cls, pk = await _connect_and_save(db_url)
     row = await specimen_cls.get(pk)
@@ -219,14 +215,6 @@ async def test_time_hydrates_datetime_time(db_url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "C4 red (F14): IntEnum columns store stringified labels and "
-        "`Priority('2')` raises inside _fix_types's `except: pass`, so the "
-        "hydrated value is the str '2'"
-    ),
-)
 async def test_int_enum_hydrates_member(db_url):
     specimen_cls, pk = await _connect_and_save(db_url)
     row = await specimen_cls.get(pk)
