@@ -185,13 +185,20 @@ finally gets its runtime consumer.
       Fixes the F5 bug: `year_code: str = Field(pattern=r"^\d{4}$")` currently
       hydrates as `decimal.Decimal` and binds `CAST(... AS numeric)`.
       Regression test for exactly that model first (TDD red).
-- [ ] **C2 — Schema-epoch catalog cache.**
+- [x] **C2 — Schema-epoch catalog cache.**
       `postgres_enum_udt_by_column` / `postgres_uuid_column_names` /
       `postgres_temporal_cast_by_column` results cached on `EngineHandle` keyed
       by table, invalidated in `refresh_pool()` (the existing epoch primitive —
       no new invalidation concept). Then shrink the need: everything except
       Alembic-created native enums is statically derivable from the C1 plan;
       the catalog is consulted once per table per epoch at most.
+      *(Landed with one correction: plan-derivation is unsound for **all
+      three** type families, not just enums — Postgres has no
+      assignment-context coercion for typed parameters, so Alembic-created
+      uuid/temporal columns on model-declared `str` fields need catalog-driven
+      casts too. The three lookups collapse into one combined `pg_catalog`
+      probe per table per epoch instead; probe evidence in
+      `2026-07-02-004-ff-c-c2-catalog-cache-design.md`.)*
 - [x] **C3 — Native typed decode on Postgres.**
       Add typed `EngineValue` variants via sqlx features (`uuid`, `chrono`,
       `rust_decimal`); remove `apply_postgres_text_select_columns` and the
@@ -215,11 +222,13 @@ finally gets its runtime consumer.
 
 **Exit gate**
 
-- [ ] Zero catalog queries on steady-state CRUD (verified by a statement-count
+- [x] Zero catalog queries on steady-state CRUD (verified by a statement-count
       test against a live PG).
 - [x] No JSON-schema shape/pattern inference anywhere in `codec.rs`.
 - [x] F5 repro model round-trips as `str` on both backends.
-- [ ] Benchmarks recorded in-repo; full matrix green.
+- [x] Benchmarks recorded in-repo; full matrix green.
+      (`benchmarks/README.md` § FF-C epic results: Postgres −76% to −91%
+      pre-C1 → post-C2; matrix 1044 passed.)
 
 ---
 
