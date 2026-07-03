@@ -27,3 +27,7 @@ def test_route_handle_constructed_only_in_state_py():
 def test_rust_route_rederivation_is_gone():
     assert _grep(ROOT / "src", "active_route_for_operation", ".rs") == []
     assert _grep(ROOT / "src", "active_engine_for_connection", ".rs") == []
+
+
+def test_global_identity_map_is_gone():
+    assert _grep(ROOT / "src", "IDENTITY_MAP", ".rs") == []

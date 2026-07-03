@@ -8,7 +8,7 @@ use crate::backend::{
 };
 use crate::query::{QueryDef, query_def_from_ir_payload};
 use crate::state::{
-    Dialect, IDENTITY_MAP, MODEL_REGISTRY, TRANSACTION_REGISTRY,
+    Dialect, MODEL_REGISTRY, TRANSACTION_REGISTRY,
     TransactionConnection, TransactionHandle, connection_for_route, ensure_session_idle_for_close,
     engine_for_connection, register_session, session_state, unregister_session,
 };
@@ -84,25 +84,22 @@ fn identity_map_get(
     session_id: Option<&str>,
     key: &(String, String, String),
 ) -> PyResult<Option<Py<PyAny>>> {
+    // Sessionless operations have no identity map (FF-D Option B): nothing
+    // is cached, so nothing can dedup — and nothing can go stale.
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    let session = session_state(session_id)?;
     // Clone the weakref out of the shard guard before touching Python:
     // GIL-before-shard ordering is the invariant (see maybe_sweep).
-    let weak = if let Some(session_id) = session_id {
-        let session = session_state(session_id)?;
-        session.identity_map.get(key).map(|e| e.value().clone_ref(py))
-    } else {
-        IDENTITY_MAP.get(key).map(|e| e.value().clone_ref(py))
-    };
+    let weak = session.identity_map.get(key).map(|e| e.value().clone_ref(py));
     let Some(weak) = weak else { return Ok(None) };
     // Upgrade to a strong ref; hit-vs-miss is decided on the upgraded ref so
     // the instance cannot die between the check and use.
     let obj = weak.bind(py).call0()?;
     if obj.is_none() {
         // Dead entry: prune the tombstone, report a miss.
-        if let Some(session_id) = session_id {
-            session_state(session_id)?.identity_map.remove(key);
-        } else {
-            IDENTITY_MAP.remove(key);
-        }
+        session.identity_map.remove(key);
         return Ok(None);
     }
     Ok(Some(obj.unbind()))
@@ -114,6 +111,10 @@ fn identity_map_insert(
     key: (String, String, String),
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
+    // Sessionless operations have no identity map (FF-D Option B): no-op.
+    let Some(session_id) = session_id else {
+        return Ok(());
+    };
     // Weak by design: the map must never keep an instance alive (FF-D D1).
     // A class that can't be weakly referenced is a loud error, never a
     // silent strong-ref fallback.
@@ -127,46 +128,38 @@ fn identity_map_insert(
         })?
         .into_any()
         .unbind();
-    if let Some(session_id) = session_id {
-        let session = session_state(session_id)?;
-        session.identity_map.insert(key, weak);
-        maybe_sweep(py, &session.identity_map, &session.identity_ops);
-        return Ok(());
-    }
-    IDENTITY_MAP.insert(key, weak);
-    maybe_sweep(py, &IDENTITY_MAP, &crate::state::IDENTITY_MAP_OPS);
+    let session = session_state(session_id)?;
+    session.identity_map.insert(key, weak);
+    maybe_sweep(py, &session.identity_map, &session.identity_ops);
     Ok(())
 }
 
 fn identity_map_remove(session_id: Option<&str>, key: &(String, String, String)) -> PyResult<()> {
-    if let Some(session_id) = session_id {
-        let session = session_state(session_id)?;
-        session.identity_map.remove(key);
+    let Some(session_id) = session_id else {
         return Ok(());
-    }
-    IDENTITY_MAP.remove(key);
+    };
+    let session = session_state(session_id)?;
+    session.identity_map.remove(key);
     Ok(())
 }
 
 fn identity_map_retain_model(session_id: Option<&str>, model_name: &str) -> PyResult<()> {
-    if let Some(session_id) = session_id {
-        let session = session_state(session_id)?;
-        session
-            .identity_map
-            .retain(|(_, m_name, _), _| m_name != model_name);
+    let Some(session_id) = session_id else {
         return Ok(());
-    }
-    IDENTITY_MAP.retain(|(_, m_name, _), _| m_name != model_name);
+    };
+    let session = session_state(session_id)?;
+    session
+        .identity_map
+        .retain(|(_, m_name, _), _| m_name != model_name);
     Ok(())
 }
 
 fn identity_map_clear(session_id: Option<&str>) -> PyResult<()> {
-    if let Some(session_id) = session_id {
-        let session = session_state(session_id)?;
-        session.identity_map.clear();
+    let Some(session_id) = session_id else {
         return Ok(());
-    }
-    IDENTITY_MAP.clear();
+    };
+    let session = session_state(session_id)?;
+    session.identity_map.clear();
     Ok(())
 }
 
@@ -174,13 +167,12 @@ fn identity_map_clear(session_id: Option<&str>) -> PyResult<()> {
 #[pyfunction]
 #[pyo3(signature = (session_id=None))]
 pub fn identity_map_len(py: Python<'_>, session_id: Option<String>) -> PyResult<usize> {
-    let count = |map: &DashMap<(String, String, String), Py<PyAny>>| {
-        map.iter().filter(|e| weakref_is_live(py, e.value())).count()
+    // Sessionless operations have no identity map (FF-D Option B): always 0.
+    let Some(session_id) = session_id else {
+        return Ok(0);
     };
-    if let Some(session_id) = session_id {
-        return Ok(count(&session_state(&session_id)?.identity_map));
-    }
-    Ok(count(&IDENTITY_MAP))
+    let map = &session_state(&session_id)?.identity_map;
+    Ok(map.iter().filter(|e| weakref_is_live(py, e.value())).count())
 }
 
 fn tx_get(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<TransactionHandle>> {
@@ -817,7 +809,10 @@ pub fn transaction_connection_name(tx_id: String, session_id: Option<String>) ->
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))
 }
 
-/// Roll back a transaction or nested savepoint and clear the identity map.
+/// Roll back a transaction or nested savepoint and evict the transaction's
+/// session-scoped identity map (a session is pinned to one connection, so
+/// this is exactly the affected `(connection, session)` scope; sessionless
+/// rollbacks have no map to evict).
 ///
 /// Args:
 ///     tx_id (str): Id returned by `begin_transaction`.

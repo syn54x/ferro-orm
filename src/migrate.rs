@@ -34,7 +34,7 @@ use crate::schema::{
     ColumnPlan, build_column_plan, internal_create_tables,
     order_schemas_for_creation,
 };
-use crate::state::{IDENTITY_MAP, MODEL_REGISTRY, engine_for_connection};
+use crate::state::{MODEL_REGISTRY, engine_for_connection};
 use pyo3::prelude::*;
 use sea_query::{Alias, ColumnDef, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table};
 use std::collections::{HashMap, HashSet};
@@ -878,12 +878,6 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
                 e,
             )
         })?;
-        // Identity-mapped instances were hydrated against the pre-migration
-        // schema (e.g. a row loaded before a column add lacks the new field).
-        // The schema lives in the database, which any number of named
-        // connections may share, so the whole map is invalidated — eviction is
-        // always safe; instances simply re-hydrate on next load.
-        IDENTITY_MAP.clear();
     }
 
     for warning in &warnings {

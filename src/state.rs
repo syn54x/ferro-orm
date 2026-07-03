@@ -244,16 +244,6 @@ impl TransactionHandle {
 /// Maps Transaction ID -> backend connection plus optional savepoint.
 pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> = Lazy::new(DashMap::new);
 
-/// Identity Map used for object tracking and deduplication.
-///
-/// Values are Python `weakref.ref` objects (FF-D D1) — the map never keeps an
-/// instance alive. Transitional: deleted with the ambient path (FF-D D2).
-pub static IDENTITY_MAP: Lazy<DashMap<(String, String, String), Py<PyAny>>> =
-    Lazy::new(DashMap::new);
-
-/// Amortized-sweep op counter for [`IDENTITY_MAP`] (see `maybe_sweep`).
-pub static IDENTITY_MAP_OPS: Lazy<AtomicUsize> = Lazy::new(AtomicUsize::default);
-
 /// Session-scoped runtime state for Phase 6 sessionized execution.
 ///
 /// A session pins connection routing and keeps transactional/identity state local
@@ -269,7 +259,9 @@ pub static IDENTITY_MAP_OPS: Lazy<AtomicUsize> = Lazy::new(AtomicUsize::default)
 pub struct SessionState {
     /// Transactions opened within this session (isolated from global registry).
     pub transaction_registry: DashMap<String, TransactionHandle>,
-    /// Session-local identity map; values are `weakref.ref` objects (FF-D D1).
+    /// Session-local identity map — the *only* identity map (FF-D D2:
+    /// sessionless operations cache nothing); values are `weakref.ref`
+    /// objects (FF-D D1).
     pub identity_map: DashMap<(String, String, String), Py<PyAny>>,
     /// Amortized-sweep op counter for `identity_map`.
     pub identity_ops: AtomicUsize,
