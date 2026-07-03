@@ -97,6 +97,35 @@ pub fn hydrate_model_instance<'py>(
     dict.set_item(pyo3::intern!(py, "__ferro_persisted"), true)?;
     let fields_set = pyo3::types::PySet::empty(py)?;
 
+    apply_decoded_fields(
+        py,
+        cls,
+        dict,
+        &fields_set,
+        fields,
+        py_col_names,
+        enum_classes,
+    )?;
+
+    let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
+    set_pydantic_hydration_slots(py, cls, &instance)?;
+    Ok(instance)
+}
+
+/// Write decoded column values into `dict` and record them in `fields_set`.
+///
+/// The single materialization path for both fresh hydration and fetch-hit
+/// refresh (FF-D D1b) — refresh cannot drift from hydration, and a partial
+/// write is structurally impossible.
+fn apply_decoded_fields<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    dict: &Bound<'py, pyo3::types::PyDict>,
+    fields_set: &Bound<'py, pyo3::types::PySet>,
+    fields: Vec<(String, RustValue)>,
+    py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
+    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
+) -> PyResult<()> {
     for (col_name, val) in fields {
         let mut py_val = val.into_py_any(py)?;
         if let Some(enum_cls) = enum_classes.get(&col_name)
@@ -125,8 +154,35 @@ pub fn hydrate_model_instance<'py>(
             fields_set.add(&py_name)?;
         }
     }
+    Ok(())
+}
 
-    let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
-    set_pydantic_hydration_slots(py, cls, &instance)?;
-    Ok(instance)
+/// Refresh a live cached instance from a freshly decoded row (FF-D D1b).
+///
+/// Overwrites every decoded field and resets `__pydantic_fields_set__` to
+/// match a fresh hydration. Ferro markers (`__ferro_connection_name`,
+/// `__ferro_persisted`) and pydantic extra/private slots are already present
+/// on the instance and are left untouched.
+pub fn refresh_model_instance<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    instance: &Bound<'py, PyAny>,
+    fields: Vec<(String, RustValue)>,
+    py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
+    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
+) -> PyResult<()> {
+    let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
+    let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+    let fields_set = pyo3::types::PySet::empty(py)?;
+    apply_decoded_fields(
+        py,
+        cls,
+        dict,
+        &fields_set,
+        fields,
+        py_col_names,
+        enum_classes,
+    )?;
+    instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set)?;
+    Ok(())
 }

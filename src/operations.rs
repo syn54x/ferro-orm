@@ -1066,7 +1066,16 @@ pub fn fetch_all<'py>(
                         &(connection_name.clone(), name.clone(), pk_val.clone()),
                     )?
                 {
-                    results.append(existing_obj.clone_ref(py))?;
+                    let existing = existing_obj.bind(py);
+                    crate::hydration::refresh_model_instance(
+                        py,
+                        cls,
+                        existing,
+                        fields,
+                        &py_col_names,
+                        &enum_classes,
+                    )?;
+                    results.append(existing)?;
                     continue;
                 }
 
@@ -1121,19 +1130,9 @@ pub fn fetch_one<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = cls.getattr("__name__")?.extract::<String>()?;
     let cls_py = cls.unbind();
-    let (connection_name, engine) = active_route_for_operation(tx_id.clone(), using.clone(), session_id.clone()).map(|(c,e,_,_)|(c,e))?;
-
-    // Check Identity Map first (if no transaction, or even with transaction, IM is usually safe)
-    if engine.is_identity_map_enabled()
-        && let Some(existing_obj) = identity_map_get(
-            py,
-            session_id.as_deref(),
-            &(connection_name.clone(), name.clone(), pk_val.clone()),
-        )?
-    {
-        let obj = existing_obj.clone_ref(py);
-        return pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) });
-    }
+    // No identity-map short-circuit before the query (FF-D D1b): the map is
+    // an identity/dedup structure, not a query cache — every fetch reads the
+    // database and refreshes the cached instance in place.
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (connection_name, engine, tx_conn, backend) = active_route_for_operation(tx_id, using, session_id.clone())?;
@@ -1217,6 +1216,26 @@ pub fn fetch_one<'py>(
                 let cls = cls_py.bind(py);
                 let py_col_names = HashMap::new();
                 let enum_classes = crate::hydration::enum_classes_for(py, cls);
+
+                if use_identity_map
+                    && let Some(existing_obj) = identity_map_get(
+                        py,
+                        session_id.as_deref(),
+                        &(connection_name.clone(), name.clone(), pk_val.clone()),
+                    )?
+                {
+                    let existing = existing_obj.bind(py);
+                    crate::hydration::refresh_model_instance(
+                        py,
+                        cls,
+                        existing,
+                        fields,
+                        &py_col_names,
+                        &enum_classes,
+                    )?;
+                    return Ok(existing.clone().unbind());
+                }
+
                 let instance = crate::hydration::hydrate_model_instance(
                     py,
                     cls,
@@ -1903,7 +1922,16 @@ pub fn fetch_filtered<'py>(
                         &(connection_name.clone(), name.clone(), pk_val.clone()),
                     )?
                 {
-                    results.append(existing_obj.clone_ref(py))?;
+                    let existing = existing_obj.bind(py);
+                    crate::hydration::refresh_model_instance(
+                        py,
+                        cls,
+                        existing,
+                        fields,
+                        &py_col_names,
+                        &enum_classes,
+                    )?;
+                    results.append(existing)?;
                     continue;
                 }
 
