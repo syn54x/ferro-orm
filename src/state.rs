@@ -10,6 +10,7 @@ use once_cell::sync::Lazy;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
@@ -208,9 +209,13 @@ pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> = Lazy
 
 /// Identity Map used for object tracking and deduplication.
 ///
-/// Maps `(ConnectionName, ModelName, PrimaryKeyValue)` to a live Python object.
+/// Values are Python `weakref.ref` objects (FF-D D1) — the map never keeps an
+/// instance alive. Transitional: deleted with the ambient path (FF-D D2).
 pub static IDENTITY_MAP: Lazy<DashMap<(String, String, String), Py<PyAny>>> =
     Lazy::new(DashMap::new);
+
+/// Amortized-sweep op counter for [`IDENTITY_MAP`] (see `maybe_sweep`).
+pub static IDENTITY_MAP_OPS: Lazy<AtomicUsize> = Lazy::new(AtomicUsize::default);
 
 /// Session-scoped runtime state for Phase 6 sessionized execution.
 ///
@@ -221,8 +226,10 @@ pub struct SessionState {
     pub connection_name: String,
     /// Transactions opened within this session (isolated from global registry).
     pub transaction_registry: DashMap<String, TransactionHandle>,
-    /// Session-local identity map (isolated from global [`IDENTITY_MAP`]).
+    /// Session-local identity map; values are `weakref.ref` objects (FF-D D1).
     pub identity_map: DashMap<(String, String, String), Py<PyAny>>,
+    /// Amortized-sweep op counter for `identity_map`.
+    pub identity_ops: AtomicUsize,
 }
 
 impl SessionState {
@@ -232,6 +239,7 @@ impl SessionState {
             connection_name,
             transaction_registry: DashMap::new(),
             identity_map: DashMap::new(),
+            identity_ops: AtomicUsize::new(0),
         }
     }
 }

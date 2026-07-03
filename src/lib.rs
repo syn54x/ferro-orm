@@ -102,6 +102,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(operations::fetch_one, m)?)?;
     m.add_function(wrap_pyfunction!(operations::register_instance, m)?)?;
     m.add_function(wrap_pyfunction!(operations::evict_instance, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::identity_map_len, m)?)?;
     m.add_function(wrap_pyfunction!(operations::save_record, m)?)?;
     m.add_function(wrap_pyfunction!(operations::update_record, m)?)?;
     m.add_function(wrap_pyfunction!(operations::save_bulk_records, m)?)?;

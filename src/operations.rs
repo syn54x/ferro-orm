@@ -12,6 +12,7 @@ use crate::state::{
     TransactionConnection, TransactionHandle, connection_for_route, ensure_session_idle_for_close,
     engine_for_connection, register_session, session_state, unregister_session,
 };
+use dashmap::DashMap;
 use ferro_schema_ir::{IrEnvelope, QueryIrPayload};
 use pyo3::prelude::*;
 use sea_query::{
@@ -103,32 +104,90 @@ fn active_connection_for_route(using: Option<String>) -> PyResult<(String, Arc<E
     connection_for_route(using)
 }
 
+/// Sweep the map for dead weakrefs every N tracked operations (FF-D D1).
+///
+/// Amortized O(1)/op; memory is bounded by live instances plus at most one
+/// interval of tombstones. Callback-based eviction is deliberately avoided:
+/// a weakref callback fires mid-GC and would re-enter the DashMap, risking a
+/// shard-lock deadlock across the FFI boundary (AGENTS.md I-3).
+const IDENTITY_SWEEP_INTERVAL: usize = 1024;
+
+fn weakref_is_live(py: Python<'_>, weak: &Py<PyAny>) -> bool {
+    weak.bind(py)
+        .call0()
+        .map(|obj| !obj.is_none())
+        .unwrap_or(false)
+}
+
+fn maybe_sweep(
+    py: Python<'_>,
+    map: &DashMap<(String, String, String), Py<PyAny>>,
+    ops: &std::sync::atomic::AtomicUsize,
+) {
+    use std::sync::atomic::Ordering;
+    if ops.fetch_add(1, Ordering::Relaxed) % IDENTITY_SWEEP_INTERVAL
+        == IDENTITY_SWEEP_INTERVAL - 1
+    {
+        map.retain(|_, weak| weakref_is_live(py, weak));
+    }
+}
+
 fn identity_map_get(
+    py: Python<'_>,
     session_id: Option<&str>,
     key: &(String, String, String),
 ) -> PyResult<Option<Py<PyAny>>> {
-    if let Some(session_id) = session_id {
+    // Clone the weakref out of the shard guard before touching Python:
+    // GIL-before-shard ordering is the invariant (see maybe_sweep).
+    let weak = if let Some(session_id) = session_id {
         let session = session_state(session_id)?;
-        return Ok(session.identity_map.get(key).map(|entry| {
-            Python::attach(|py| entry.value().clone_ref(py))
-        }));
+        session.identity_map.get(key).map(|e| e.value().clone_ref(py))
+    } else {
+        IDENTITY_MAP.get(key).map(|e| e.value().clone_ref(py))
+    };
+    let Some(weak) = weak else { return Ok(None) };
+    // Upgrade to a strong ref; hit-vs-miss is decided on the upgraded ref so
+    // the instance cannot die between the check and use.
+    let obj = weak.bind(py).call0()?;
+    if obj.is_none() {
+        // Dead entry: prune the tombstone, report a miss.
+        if let Some(session_id) = session_id {
+            session_state(session_id)?.identity_map.remove(key);
+        } else {
+            IDENTITY_MAP.remove(key);
+        }
+        return Ok(None);
     }
-    Ok(IDENTITY_MAP
-        .get(key)
-        .map(|entry| Python::attach(|py| entry.value().clone_ref(py))))
+    Ok(Some(obj.unbind()))
 }
 
 fn identity_map_insert(
+    py: Python<'_>,
     session_id: Option<&str>,
     key: (String, String, String),
-    value: Py<PyAny>,
+    value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
+    // Weak by design: the map must never keep an instance alive (FF-D D1).
+    // A class that can't be weakly referenced is a loud error, never a
+    // silent strong-ref fallback.
+    let weak = pyo3::types::PyWeakrefReference::new(value)
+        .map_err(|err| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "Cannot track instance in the identity map: the class does not \
+                 support weak references ({err}). Ferro model instances must be \
+                 weakly referenceable."
+            ))
+        })?
+        .into_any()
+        .unbind();
     if let Some(session_id) = session_id {
         let session = session_state(session_id)?;
-        session.identity_map.insert(key, value);
+        session.identity_map.insert(key, weak);
+        maybe_sweep(py, &session.identity_map, &session.identity_ops);
         return Ok(());
     }
-    IDENTITY_MAP.insert(key, value);
+    IDENTITY_MAP.insert(key, weak);
+    maybe_sweep(py, &IDENTITY_MAP, &crate::state::IDENTITY_MAP_OPS);
     Ok(())
 }
 
@@ -162,6 +221,19 @@ fn identity_map_clear(session_id: Option<&str>) -> PyResult<()> {
     }
     IDENTITY_MAP.clear();
     Ok(())
+}
+
+/// Count *live* identity-map entries (test diagnostic for FF-D D1).
+#[pyfunction]
+#[pyo3(signature = (session_id=None))]
+pub fn identity_map_len(py: Python<'_>, session_id: Option<String>) -> PyResult<usize> {
+    let count = |map: &DashMap<(String, String, String), Py<PyAny>>| {
+        map.iter().filter(|e| weakref_is_live(py, e.value())).count()
+    };
+    if let Some(session_id) = session_id {
+        return Ok(count(&session_state(&session_id)?.identity_map));
+    }
+    Ok(count(&IDENTITY_MAP))
 }
 
 fn tx_get(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<TransactionHandle>> {
@@ -989,6 +1061,7 @@ pub fn fetch_all<'py>(
                 if use_identity_map
                     && let Some(ref pk_val) = row_pk_val
                     && let Some(existing_obj) = identity_map_get(
+                        py,
                         session_id.as_deref(),
                         &(connection_name.clone(), name.clone(), pk_val.clone()),
                     )?
@@ -1008,9 +1081,10 @@ pub fn fetch_all<'py>(
 
                 if use_identity_map && let Some(pk_val) = row_pk_val {
                     identity_map_insert(
+                        py,
                         session_id.as_deref(),
                         (connection_name.clone(), name.clone(), pk_val),
-                        instance.clone().unbind(),
+                        &instance,
                     )?;
                 }
 
@@ -1052,6 +1126,7 @@ pub fn fetch_one<'py>(
     // Check Identity Map first (if no transaction, or even with transaction, IM is usually safe)
     if engine.is_identity_map_enabled()
         && let Some(existing_obj) = identity_map_get(
+            py,
             session_id.as_deref(),
             &(connection_name.clone(), name.clone(), pk_val.clone()),
         )?
@@ -1152,9 +1227,10 @@ pub fn fetch_one<'py>(
                 )?;
                 if use_identity_map {
                     identity_map_insert(
+                        py,
                         session_id.as_deref(),
                         (connection_name.clone(), name.clone(), pk_val),
-                        instance.clone().unbind(),
+                        &instance,
                     )?;
                 }
                 Ok(instance.into_any().unbind())
@@ -1822,6 +1898,7 @@ pub fn fetch_filtered<'py>(
                 if use_identity_map
                     && let Some(ref pk_val) = row_pk_val
                     && let Some(existing_obj) = identity_map_get(
+                        py,
                         session_id.as_deref(),
                         &(connection_name.clone(), name.clone(), pk_val.clone()),
                     )?
@@ -1841,9 +1918,10 @@ pub fn fetch_filtered<'py>(
 
                 if use_identity_map && let Some(pk_val) = row_pk_val {
                     identity_map_insert(
+                        py,
                         session_id.as_deref(),
                         (connection_name.clone(), name.clone(), pk_val),
-                        instance.clone().unbind(),
+                        &instance,
                     )?;
                 }
 
@@ -1994,6 +2072,7 @@ pub fn count_filtered(
 #[pyfunction]
 #[pyo3(signature = (name, pk, obj, using=None, session_id=None))]
 pub fn register_instance(
+    py: Python<'_>,
     name: String,
     pk: String,
     obj: Py<PyAny>,
@@ -2007,7 +2086,12 @@ pub fn register_instance(
     )
     .map(|(name, engine, _, _)| (name, engine))?;
     if engine.is_identity_map_enabled() {
-        identity_map_insert(session_id.as_deref(), (connection_name, name, pk), obj)?;
+        identity_map_insert(
+            py,
+            session_id.as_deref(),
+            (connection_name, name, pk),
+            obj.bind(py),
+        )?;
     }
     Ok(())
 }
