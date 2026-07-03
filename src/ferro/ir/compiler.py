@@ -409,8 +409,6 @@ def compile_registry_schema_ir() -> dict[str, Any]:
     """
     models: list[dict[str, Any]] = []
     for model_name, model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
-        if model_name == "Model":
-            continue
         model_envelope = compile_model_schema_ir(model_name, model_cls)
         model_payload = model_envelope["payload"]["models"][0]
         models.append(model_payload)

@@ -71,7 +71,15 @@ def _target_table_name(target: Any) -> str:
     if isinstance(target, ForwardRef):
         target = target.__forward_arg__
     if isinstance(target, str):
-        model = resolve_model_reference(target, default=None)
+        try:
+            model = resolve_model_reference(target, default=None)
+        except RuntimeError:
+            # Ambiguous short ref during first-pass schema build: defer the
+            # loud, candidate-listing error to resolve_relationships (the
+            # authoritative resolution point), same as a not-yet-defined
+            # forward ref. Falling back here keeps the single-resolution-site
+            # invariant instead of raising twice from two different phases.
+            model = None
         if model is not None:
             return model.__ferro_table__
         # Provisional first-pass fallback for a not-yet-defined forward ref:

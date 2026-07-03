@@ -105,7 +105,7 @@ def _set_instance_origin(instance: object, using: str | None) -> None:
 
 
 def evict_instance(
-    model_name: str,
+    model: "type[Model] | str",
     pk: str,
     *,
     using: str | None = None,
@@ -113,14 +113,20 @@ def evict_instance(
 ) -> None:
     """Remove one instance from the active scope's identity map.
 
+    ``model`` is a model class, its qualified identity, or an unambiguous
+    bare class name (ambiguity raises with the candidates listed).
+
     Public wrapper around the FFI `evict_instance` (FF-D D3): resolves the
     route once via `resolve_operation_scope`, then passes it through. Model
     instance methods (`save`/`delete`/`refresh`) call the FFI symbol
     directly with their already-resolved route instead of going through this
     wrapper, so a route is never resolved twice for one operation.
     """
+    from .state import resolve_model_reference
+
+    model_cls = resolve_model_reference(model) if isinstance(model, str) else model
     route = resolve_operation_scope(using=using, session=session)
-    _core_evict_instance(model_name, pk, route)
+    _core_evict_instance(model_cls.__ferro_identity__, pk, route)
 
 
 @asynccontextmanager
@@ -209,7 +215,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             from ._core import register_model_schema
 
             register_model_schema(
-                cls.__name__, json.dumps(schema), cls.__ferro_table__
+                cls.__ferro_identity__, json.dumps(schema), cls.__ferro_table__
             )
 
     model_config = ConfigDict(
@@ -308,7 +314,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         new_id = None
         if on_conflict == "update":
             new_id = await save_record(
-                self.__class__.__name__,
+                self.__class__.__ferro_identity__,
                 save_bind_payload(self),
                 route,
                 mode="upsert",
@@ -322,7 +328,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     "without a primary key value"
                 )
             rows_affected = await update_record(
-                self.__class__.__name__,
+                self.__class__.__ferro_identity__,
                 save_bind_payload(self),
                 route,
             )
@@ -330,7 +336,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 raise ModelDoesNotExist(self.__class__, pk_val)
         else:
             new_id = await save_record(
-                self.__class__.__name__,
+                self.__class__.__ferro_identity__,
                 save_bind_payload(self),
                 route,
                 mode="insert",
@@ -359,7 +365,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         if pk_val is not None:
             register_instance(
-                self.__class__.__name__,
+                self.__class__.__ferro_identity__,
                 str(pk_val),
                 self,
                 route,
@@ -385,7 +391,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         route, _identity_using = _instance_transaction_route(self, using, session)
 
         if pk_val is not None:
-            name = self.__class__.__name__
+            name = self.__class__.__ferro_identity__
             query = Query(self.__class__, using=route.connection_name).where(
                 _field_eq(pk_field_name, pk_val)
             )
@@ -486,7 +492,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if pk_val is None:
             raise RuntimeError("Cannot refresh a model without a primary key")
 
-        name = self.__class__.__name__
+        name = self.__class__.__ferro_identity__
         route, identity_using = _instance_transaction_route(self, using, session)
 
         _core_evict_instance(name, str(pk_val), route)
@@ -642,7 +648,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             return 0
         data = [save_bind_payload(i) for i in instances]
         route = _transaction_or_using(using, session)
-        return await save_bulk_records(cls.__name__, data, route)
+        return await save_bulk_records(cls.__ferro_identity__, data, route)
 
     @classmethod
     async def get_or_create(

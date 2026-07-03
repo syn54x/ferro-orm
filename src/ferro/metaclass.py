@@ -62,8 +62,8 @@ class ModelMetaclass(type(BaseModel)):
         annotations = mcs._resolve_deferred_annotations(namespace)
         namespace["__annotations__"] = annotations
 
-        local_relations, fields_to_remove = mcs._scan_relationship_annotations(
-            annotations, namespace, name
+        local_relations, fields_to_remove, pending_relations = (
+            mcs._scan_relationship_annotations(annotations, namespace, name)
         )
         mcs._inject_shadow_fields(annotations, namespace, local_relations)
         mcs._prepare_namespace_for_pydantic(namespace, annotations, fields_to_remove)
@@ -80,14 +80,18 @@ class ModelMetaclass(type(BaseModel)):
 
         cls.__ferro_identity__ = f"{cls.__module__}.{cls.__qualname__}"
         cls.__ferro_table__ = mcs._resolve_table_name(name, namespace)
+        for field_name, metadata in pending_relations:
+            _PENDING_RELATIONS.append((cls.__ferro_identity__, field_name, metadata))
 
-        mcs._register_model_and_proxies(cls, name, local_relations)
+        mcs._register_model_and_proxies(cls, cls.__ferro_identity__, local_relations)
         ferro_fields = mcs._parse_ferro_field_metadata(cls)
         cls.ferro_fields = ferro_fields
         mcs._validate_db_type_options(cls, ferro_fields)
         mcs._register_enum_fields(cls)
         mcs._inject_relation_descriptors(cls, local_relations)
-        mcs._generate_and_register_schema(cls, name, ferro_fields, local_relations)
+        mcs._generate_and_register_schema(
+            cls, cls.__ferro_identity__, ferro_fields, local_relations
+        )
 
         return cls
 
@@ -275,15 +279,19 @@ class ModelMetaclass(type(BaseModel)):
     @staticmethod
     def _scan_relationship_annotations(
         annotations: dict, namespace: dict, model_name: str
-    ) -> tuple[dict, list]:
+    ) -> tuple[dict, list, list]:
         """
         Scan annotations for relationship fields (BackRef, ForeignKey, ManyToMany).
 
         Returns:
-            (local_relations, fields_to_remove): Relationship metadata and fields to hide from Pydantic
+            (local_relations, fields_to_remove, pending_relations): Relationship
+            metadata, fields to hide from Pydantic, and ``(field_name, metadata)``
+            entries deferred to ``_PENDING_RELATIONS`` (flushed under the model's
+            resolved ``__ferro_identity__`` after the class object exists).
         """
         local_relations = {}
         fields_to_remove = []
+        pending_relations = []
 
         for field_name, hint in list(annotations.items()):
             if ModelMetaclass._annotation_looks_like_back_ref(hint):
@@ -330,7 +338,7 @@ class ModelMetaclass(type(BaseModel)):
                 )
                 metadata.to = target
                 local_relations[field_name] = metadata
-                _PENDING_RELATIONS.append((model_name, field_name, metadata))
+                pending_relations.append((field_name, metadata))
                 fields_to_remove.append(field_name)
                 continue
 
@@ -343,7 +351,7 @@ class ModelMetaclass(type(BaseModel)):
                         inner = ModelMetaclass._strip_optional_union(args[0])
                         metadata.to = inner
                         local_relations[field_name] = metadata
-                        _PENDING_RELATIONS.append((model_name, field_name, metadata))
+                        pending_relations.append((field_name, metadata))
                         fields_to_remove.append(field_name)
                         break
 
@@ -353,7 +361,7 @@ class ModelMetaclass(type(BaseModel)):
                             "Relation[list[T]] = ManyToMany(...)."
                         )
 
-        return local_relations, fields_to_remove
+        return local_relations, fields_to_remove, pending_relations
 
     @staticmethod
     def _inject_shadow_fields(
@@ -571,6 +579,11 @@ class ModelMetaclass(type(BaseModel)):
                 )
                 if isinstance(metadata.to, ForwardRef):
                     target_name = metadata.to.__forward_arg__
+                target_name = (
+                    metadata.to.__ferro_identity__
+                    if hasattr(metadata.to, "__ferro_identity__")
+                    else target_name
+                )
 
                 setattr(
                     cls,

@@ -918,7 +918,7 @@ pub fn fetch_all<'py>(
     cls: Bound<'py, PyAny>,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let name = cls.getattr("__name__")?.extract::<String>()?;
+    let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1052,7 +1052,7 @@ pub fn fetch_one<'py>(
     pk_val: String,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let name = cls.getattr("__name__")?.extract::<String>()?;
+    let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
     // No identity-map short-circuit before the query (FF-D D1b): the map is
     // an identity/dedup structure, not a query cache — every fetch reads the
@@ -1678,7 +1678,7 @@ pub fn fetch_filtered<'py>(
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let name = cls.getattr("__name__")?.extract::<String>()?;
+    let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
 
     let mut query_def = query_def_from_ir_json(&query_ir_json)?;

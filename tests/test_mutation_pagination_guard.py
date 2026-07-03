@@ -51,7 +51,7 @@ def test_mutating_query_def_omits_pagination_keys():
         payload = query._mutating_query_def(operation)
         assert "limit" not in payload
         assert "offset" not in payload
-        assert payload["model_name"] == "PaginationGuardItem"
+        assert payload["model_name"] == PaginationGuardItem.__ferro_identity__
         assert payload["order_by"] == []
         assert payload["m2m"] is None
         assert len(payload["where"]) == 1

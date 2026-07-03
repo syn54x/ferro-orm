@@ -43,21 +43,14 @@ def resolve_model_reference(ref: str, *, default: Any = _UNSET) -> Any:
     """Resolve a model reference to a registered model class (FF-E E1).
 
     Accepts a qualified identity (``module.QualName``) or a bare class name.
-    A bare name matching exactly one registered model resolves to it; several
-    matches raise with the qualified candidates listed; no match raises
-    (or returns ``default`` when given). Ambiguity always raises.
-
-    The registry is still keyed by bare class name in this task (FF-E task
-    2), so a qualified identity is matched by scanning registered classes'
-    ``__ferro_identity__`` stamp rather than by a direct dict lookup — that
-    dict-key change lands in a later FF-E task.
+    The registry keys by ``__ferro_identity__``, so a qualified reference is a
+    direct dict hit. A bare name matching exactly one registered model resolves
+    to it; several matches raise with the qualified candidates listed; no match
+    raises (or returns ``default`` when given). Ambiguity always raises.
     """
     model = _MODEL_REGISTRY_PY.get(ref)
     if model is not None:
         return model
-    for cls in _MODEL_REGISTRY_PY.values():
-        if getattr(cls, "__ferro_identity__", None) == ref:
-            return cls
     candidates = [cls for cls in _MODEL_REGISTRY_PY.values() if cls.__name__ == ref]
     if len(candidates) == 1:
         return candidates[0]

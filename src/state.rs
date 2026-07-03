@@ -43,6 +43,21 @@ impl RegisteredModel {
 pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, Arc<RegisteredModel>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
+/// Extract the qualified Ferro identity stamped on a model class (FF-E E1).
+///
+/// # Errors
+/// `PyTypeError` when the object is not a Ferro model class.
+pub fn model_identity(cls: &Bound<'_, PyAny>) -> PyResult<String> {
+    let attr = cls.getattr("__ferro_identity__").map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "Object is not a Ferro model class (missing __ferro_identity__)",
+        )
+    })?;
+    attr.extract::<String>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("__ferro_identity__ must be a str")
+    })
+}
+
 /// Look up one registration by registry key.
 ///
 /// # Errors

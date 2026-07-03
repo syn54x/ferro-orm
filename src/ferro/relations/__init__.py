@@ -14,6 +14,7 @@ from ..state import (  # noqa: F401
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
     _PENDING_RELATIONS,
+    resolve_model_reference,
 )
 from .descriptors import RelationshipDescriptor
 
@@ -37,7 +38,7 @@ def resolve_relationships():
         # 1. Resolve 'to' model
         if isinstance(rel.to, (str, ForwardRef)):
             to_name = rel.to if isinstance(rel.to, str) else rel.to.__forward_arg__
-            target_model = _MODEL_REGISTRY_PY.get(to_name)
+            target_model = resolve_model_reference(to_name, default=None)
             if not target_model:
                 raise RuntimeError(
                     f"Relationship resolution failed: '{to_name}' not found"
@@ -85,7 +86,7 @@ def resolve_relationships():
                 source_model,
                 field_name,
                 RelationshipDescriptor(
-                    target_model_name=target_model.__name__,
+                    target_model_name=target_model.__ferro_identity__,
                     field_name=field_name,
                     is_m2m=True,
                     join_table=join_table,

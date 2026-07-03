@@ -103,14 +103,16 @@ def _ensure_models_registered():
     from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
     for model_cls in (DocUser, DocPost, Comment, Tag, DocProduct):
-        _MODEL_REGISTRY_PY[model_cls.__name__] = model_cls
+        _MODEL_REGISTRY_PY[model_cls.__ferro_identity__] = model_cls
 
     # Some tests clear private relationship state to model fresh imports. These
     # module-level models must restore both schemas and descriptors afterward.
     for model_cls in (DocUser, DocPost, Comment, Tag, DocProduct):
         for field_name, relation in model_cls.ferro_relations.items():
             if isinstance(relation, (ForeignKey, ManyToManyRelation)):
-                _PENDING_RELATIONS.append((model_cls.__name__, field_name, relation))
+                _PENDING_RELATIONS.append(
+                    (model_cls.__ferro_identity__, field_name, relation)
+                )
 
     resolve_relationships()
     yield
