@@ -338,6 +338,69 @@ Validation mirrors composite uniques: at least two columns per tuple, columns mu
 
 Both ClassVars flow through to [Alembic autogenerate](migrations.md) as matching `UniqueConstraint` / `Index` objects.
 
+## Custom table names
+
+By default a model's table is its class name lowercased: `class User` →
+table `user`. Set `__ferro_table__` in the class body to choose the table
+name yourself:
+
+=== "Assignment"
+
+    ```python
+    from typing import ClassVar
+
+    from ferro import Field, Model
+
+
+    class User(Model):
+        __ferro_table__: ClassVar[str] = "app_users"
+
+        id: int | None = Field(default=None, primary_key=True)
+        email: str = Field(unique=True)
+    ```
+
+=== "Annotated"
+
+    ```python
+    from typing import Annotated, ClassVar
+
+    from ferro import Field, Model
+
+
+    class User(Model):
+        __ferro_table__: ClassVar[str] = "app_users"
+
+        id: Annotated[int | None, Field(default=None, primary_key=True)]
+        email: Annotated[str, Field(unique=True)]
+    ```
+
+Both declare a `User` model stored in `app_users` — every generated
+statement follows it:
+
+```sql
+CREATE TABLE IF NOT EXISTS "app_users" (
+  "email" varchar NOT NULL,
+  "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "uq_app_users_email" ON "app_users" ("email");
+```
+
+Relationships follow it too: a `ForeignKey` to `User` renders
+`REFERENCES "app_users" ("id")`, and default many-to-many join tables are
+named from the source model's table name and the relationship's field name —
+a `tags` relation on a model stored in `wiki_pages` gets the join table
+`wiki_pages_tags` — with join columns (`wiki_pages_id`, `wiki_tags_id`)
+following both participants' configured tables.
+
+`__ferro_table__` applies only to the class that declares it — a subclass
+gets its own default (`classname.lower()`) unless it declares its own.
+The name must be a 1–63 character identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+
+Two distinct models cannot share one table: defining a second model that
+resolves to an already-claimed table name raises immediately at class
+definition, naming both models. Redefining the *same* class (in a REPL or
+re-imported module) is fine.
+
 ## Pydantic Validation
 
 Ferro models *are* Pydantic models, so validation runs whenever an instance is constructed — including inside `Model.create(...)` and before `bulk_create(...)` hits the database:

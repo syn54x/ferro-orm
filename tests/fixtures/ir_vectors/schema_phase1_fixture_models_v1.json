@@ -9,7 +9,7 @@
       "dialect_agnostic": true,
       "models": [
         {
-          "model_name": "Member",
+          "model_name": "tests.test_cross_emitter_parity._build_fixture_models.<locals>.Member",
           "table_name": "member",
           "columns": [
             {
@@ -82,7 +82,7 @@
           "checks": []
         },
         {
-          "model_name": "Org",
+          "model_name": "tests.test_cross_emitter_parity._build_fixture_models.<locals>.Org",
           "table_name": "org",
           "columns": [
             {
@@ -244,7 +244,7 @@
           "checks": []
         },
         {
-          "model_name": "Project",
+          "model_name": "tests.test_cross_emitter_parity._build_fixture_models.<locals>.Project",
           "table_name": "project",
           "columns": [
             {
@@ -313,5 +313,5 @@
       ]
     }
   },
-  "fingerprint": "6549a096b589c7412286720ede7921b38bb1976642e778815fd52ecaec7f72b8"
+  "fingerprint": "f17ddd92c5f493cccd5af75d6e2441210e6b7d4afda1ba7e8ed303d9803773af"
 }

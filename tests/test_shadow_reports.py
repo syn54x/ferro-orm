@@ -10,6 +10,7 @@ from ferro._core import (
     _render_migration_sql_for_test,
     _shadow_compare_migration_plan_for_test,
     _shadow_compare_query_plan_for_test,
+    register_model_schema,
 )
 from ferro.ir.compiler import compile_schema_ir_payload, wrap_schema_ir
 from ferro.query.builder import _query_ir_payload_to_json
@@ -33,6 +34,10 @@ def _report_for_backend(dialect: str) -> dict:
             "age": {"type": "integer"},
         }
     }
+    # The legacy query planner resolves the physical table name from the
+    # registration (FF-E E2 — no lowercase fallback), so register the model
+    # under its resolved table name before driving the shadow comparator.
+    register_model_schema("ShadowUser", json.dumps(schema), "shadowuser")
     query_json = _query_ir_payload_to_json(
         {
             "model_name": "ShadowUser",
@@ -74,7 +79,7 @@ def _report_for_backend(dialect: str) -> dict:
         ]
     )
     migration_stmts, migration_warns = _render_migration_sql_for_test(
-        "ShadowUser",
+        "shadowuser",
         _schema_ir_json,
         _live_json,
         dialect,
@@ -83,7 +88,7 @@ def _report_for_backend(dialect: str) -> dict:
     )
     migration_compare = json.loads(
         _shadow_compare_migration_plan_for_test(
-            "ShadowUser",
+            "shadowuser",
             _schema_ir_json,
             json.dumps(schema),
             _live_json,

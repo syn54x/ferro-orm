@@ -14,6 +14,7 @@ from ..state import (  # noqa: F401
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
     _PENDING_RELATIONS,
+    resolve_model_reference,
 )
 from .descriptors import RelationshipDescriptor
 
@@ -37,7 +38,7 @@ def resolve_relationships():
         # 1. Resolve 'to' model
         if isinstance(rel.to, (str, ForwardRef)):
             to_name = rel.to if isinstance(rel.to, str) else rel.to.__forward_arg__
-            target_model = _MODEL_REGISTRY_PY.get(to_name)
+            target_model = resolve_model_reference(to_name, default=None)
             if not target_model:
                 raise RuntimeError(
                     f"Relationship resolution failed: '{to_name}' not found"
@@ -65,25 +66,36 @@ def resolve_relationships():
                 ),
             )
         elif isinstance(rel, ManyToManyRelation):
+            source_model = _MODEL_REGISTRY_PY[model_name]
+            source_table = source_model.__ferro_table__
+            target_table = target_model.__ferro_table__
+
             # Resolve join table
             if not rel.through:
-                # Default join table name: alphabetized model names
-                # Actually, we should probably just use source_model_field_name
-                # or similar to avoid confusion.
-                join_table = f"{model_name.lower()}_{field_name}"
+                # Default join table name: source table + field name.
+                join_table = f"{source_table}_{field_name}"
             else:
                 join_table = rel.through
 
-            source_col = f"{model_name.lower()}_id"
-            target_col = f"{target_model.__name__.lower()}_id"
+            for key, other in _MODEL_REGISTRY_PY.items():
+                if getattr(other, "__ferro_table__", None) == join_table:
+                    raise RuntimeError(
+                        f"M2M relation '{model_name}.{field_name}' derives join "
+                        f"table '{join_table}', which is already the table of "
+                        f"model '{key}'. Set through= on the relation or "
+                        "__ferro_table__ on the model to resolve the collision."
+                    )
+
+            source_col = f"{source_table}_id"
+            target_col = f"{target_table}_id"
 
             # Inject M2M descriptors into BOTH sides
             # Source -> Target
             setattr(
-                _MODEL_REGISTRY_PY[model_name],
+                source_model,
                 field_name,
                 RelationshipDescriptor(
-                    target_model_name=target_model.__name__,
+                    target_model_name=target_model.__ferro_identity__,
                     field_name=field_name,
                     is_m2m=True,
                     join_table=join_table,
@@ -107,7 +119,7 @@ def resolve_relationships():
 
             # 4. Register Join Table schema with Rust
             source_schema = schema_fragment_for_pk(
-                pk_python_type_for_model(_MODEL_REGISTRY_PY[model_name])
+                pk_python_type_for_model(source_model)
             )
             target_schema = schema_fragment_for_pk(
                 pk_python_type_for_model(target_model)
@@ -118,7 +130,7 @@ def resolve_relationships():
                         **source_schema,
                         "ferro_nullable": False,
                         "foreign_key": {
-                            "to_table": model_name.lower(),
+                            "to_table": source_table,
                             "on_delete": "CASCADE",
                         },
                     },
@@ -126,7 +138,7 @@ def resolve_relationships():
                         **target_schema,
                         "ferro_nullable": False,
                         "foreign_key": {
-                            "to_table": target_model.__name__.lower(),
+                            "to_table": target_table,
                             "on_delete": "CASCADE",
                         },
                     },
@@ -136,18 +148,25 @@ def resolve_relationships():
             }
             if rel.reverse_index:
                 join_schema["ferro_composite_indexes"] = [[target_col, source_col]]
-            register_model_schema(join_table, json.dumps(join_schema))
+            register_model_schema(join_table, json.dumps(join_schema), join_table)
             _JOIN_TABLE_REGISTRY[join_table] = join_schema
 
     reconcile_shadow_fk_types(_MODEL_REGISTRY_PY)
 
-    # Second pass: Re-register schemas
+    # Second pass: Re-register schemas — loudly (FF-E E4). A model whose
+    # schema fails to rebuild here would otherwise be silently left on its
+    # pre-relationship schema.
     for model_name, model_cls in _MODEL_REGISTRY_PY.items():
         try:
             schema = build_model_schema(model_cls)
-            register_model_schema(model_name, json.dumps(schema))
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(
+                f"Ferro failed to rebuild the schema for model '{model_name}' "
+                f"while resolving relationships: {exc}"
+            ) from exc
+        register_model_schema(
+            model_name, json.dumps(schema), model_cls.__ferro_table__
+        )
 
     compile_registry_schema_ir()
     _PENDING_RELATIONS.clear()

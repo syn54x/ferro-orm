@@ -8,7 +8,7 @@ use crate::backend::{
 };
 use crate::query::{QueryDef, query_def_from_ir_payload};
 use crate::state::{
-    Dialect, MODEL_REGISTRY, TRANSACTION_REGISTRY,
+    Dialect, TRANSACTION_REGISTRY,
     TransactionConnection, TransactionHandle, connection_for_route, ensure_session_idle_for_close,
     engine_for_connection, register_session, session_state, unregister_session,
 };
@@ -918,7 +918,7 @@ pub fn fetch_all<'py>(
     cls: Bound<'py, PyAny>,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let name = cls.getattr("__name__")?.extract::<String>()?;
+    let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -927,15 +927,10 @@ pub fn fetch_all<'py>(
         let session_id = r.session_id.clone();
         let use_identity_map = engine.is_identity_map_enabled();
 
-        let table_name = name.to_lowercase();
+        let schema = crate::state::registered_model(&name)?;
+        let table_name = schema.table_name.clone();
         // ... same sql generation ...
         let (sql, pk_col, schema_for_decode) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
-            })?;
-            let schema = registry.get(&name).ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-            })?;
             let mut pk = None;
             if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
@@ -1057,7 +1052,7 @@ pub fn fetch_one<'py>(
     pk_val: String,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let name = cls.getattr("__name__")?.extract::<String>()?;
+    let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
     // No identity-map short-circuit before the query (FF-D D1b): the map is
     // an identity/dedup structure, not a query cache — every fetch reads the
@@ -1069,15 +1064,10 @@ pub fn fetch_one<'py>(
         let session_id = r.session_id.clone();
         let use_identity_map = engine.is_identity_map_enabled();
 
-        let table_name = name.to_lowercase();
+        let schema = crate::state::registered_model(&name)?;
+        let table_name = schema.table_name.clone();
         // ... sql logic ...
         let (sql, bind_values, _pk_col_name, schema_for_decode) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
-            })?;
-            let schema = registry.get(&name).ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-            })?;
             let mut pk = None;
             if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
@@ -1099,7 +1089,7 @@ pub fn fetch_one<'py>(
             let no_uuid = HashSet::new();
             let no_ts: HashMap<String, String> = HashMap::new();
             let pk_expr = schema_value_expr(
-                schema,
+                &schema,
                 &table_name,
                 &pk_name,
                 &serde_json::Value::String(pk_val.clone()),
@@ -1382,14 +1372,8 @@ pub fn save_record<'py>(
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
 
-        let schema = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
-            })?;
-            registry.get(&name).cloned().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-            })?
-        };
+        let schema = crate::state::registered_model(&name)?;
+        let table_name = schema.table_name.clone();
 
         let mut pk_col = None;
         let mut pk_is_auto = true;
@@ -1410,7 +1394,6 @@ pub fn save_record<'py>(
             }
         }
 
-        let table_name = name.to_lowercase();
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         let (sql, bind_values, needs_postgres_returning) = build_save_sql(
@@ -1504,14 +1487,8 @@ pub fn update_record<'py>(
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
 
-        let schema = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
-            })?;
-            registry.get(&name).cloned().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-            })?
-        };
+        let schema = crate::state::registered_model(&name)?;
+        let table_name = schema.table_name.clone();
 
         let mut pk_col = None;
         if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
@@ -1527,7 +1504,6 @@ pub fn update_record<'py>(
             }
         }
 
-        let table_name = name.to_lowercase();
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
 
@@ -1606,17 +1582,8 @@ pub fn save_bulk_records<'py>(
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
 
-        let schema = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry")
-            })?;
-            registry.get(&name).cloned().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Model '{}' not found in registry",
-                    name
-                ))
-            })?
-        };
+        let schema = crate::state::registered_model(&name)?;
+        let table_name = schema.table_name.clone();
 
         if record_inputs.is_empty() {
             return Ok(0);
@@ -1642,7 +1609,6 @@ pub fn save_bulk_records<'py>(
             }
         }
 
-        let table_name = name.to_lowercase();
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         let (sql, bind_values) = {
@@ -1712,7 +1678,7 @@ pub fn fetch_filtered<'py>(
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let name = cls.getattr("__name__")?.extract::<String>()?;
+    let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
 
     let mut query_def = query_def_from_ir_json(&query_ir_json)?;
@@ -1723,17 +1689,12 @@ pub fn fetch_filtered<'py>(
         let session_id = r.session_id.clone();
         let use_identity_map = engine.is_identity_map_enabled();
 
-        let table_name = name.to_lowercase();
+        let schema = crate::state::registered_model(&name)?;
+        let table_name = schema.table_name.clone();
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
         query_def.postgres_enum_udt = catalog.enum_udt.clone();
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
-            })?;
-            let schema = registry.get(&name).ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-            })?;
             let mut pk = None;
             if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
@@ -1913,7 +1874,8 @@ pub fn count_filtered(
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
 
-        let table_name = name.to_lowercase();
+        let schema = crate::state::registered_model(&name)?;
+        let table_name = schema.table_name.clone();
         query_def.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
             .await?
             .enum_udt
@@ -1929,12 +1891,6 @@ pub fn count_filtered(
                 let target_col = Alias::new(&m2m.target_col);
 
                 // We need the PK name of the target table to join
-                let registry = MODEL_REGISTRY.read().map_err(|_| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
-                })?;
-                let schema = registry.get(&name).ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-                })?;
                 let mut pk = None;
                 if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                     for (col_name, col_info) in properties {
@@ -2080,15 +2036,10 @@ pub fn delete_record(
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
 
-        let table_name = name.to_lowercase();
+        let schema = crate::state::registered_model(&name)?;
+        let table_name = schema.table_name.clone();
         // ... sql ...
         let (sql, bind_values) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
-            })?;
-            let schema = registry.get(&name).ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-            })?;
             let mut pk = None;
             if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
                 for (col_name, col_info) in properties {
@@ -2108,7 +2059,7 @@ pub fn delete_record(
             let no_uuid = HashSet::new();
             let no_ts: HashMap<String, String> = HashMap::new();
             let pk_expr = schema_value_expr(
-                schema,
+                &schema,
                 &table_name,
                 &pk_name,
                 &serde_json::Value::String(pk_val),
@@ -2164,7 +2115,7 @@ pub fn delete_filtered(
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
 
-        let table_name = name.to_lowercase();
+        let table_name = crate::state::registered_model(&name)?.table_name.clone();
         query_def.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
             .await?
             .enum_udt
@@ -2233,18 +2184,13 @@ pub fn update_filtered<'py>(
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
 
-        let table_name = name.to_lowercase();
+        let schema = crate::state::registered_model(&name)?;
+        let table_name = schema.table_name.clone();
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         query_def.postgres_enum_udt = enum_udt.clone();
         // ... sql ...
         let (sql, bind_values) = {
-            let registry = MODEL_REGISTRY.read().map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Failed to lock registry")
-            })?;
-            let schema = registry.get(&name).ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
-            })?;
             let mut update = UpdateStatement::new()
                 .table(Alias::new(&table_name))
                 .cond_where(query_condition_for_backend(&query_def, backend)?)
@@ -2253,7 +2199,7 @@ pub fn update_filtered<'py>(
                 update.value(
                     Alias::new(key),
                     bind_input_to_expr(
-                        schema,
+                        &schema,
                         &table_name,
                         key,
                         input,
@@ -2943,12 +2889,19 @@ pub fn _shadow_compare_query_plan_for_test(
             pyo3::exceptions::PyValueError::new_err(format!("Invalid query payload JSON: {}", e))
         })?
     };
+    let legacy_table = query_def
+        .registration
+        .as_ref()
+        .map(|r| r.table_name.clone())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Model '{}' not found",
+                query_def.model_name
+            ))
+        })?;
     let mut select_legacy = Query::select();
-    select_legacy.from(Alias::new(query_def.model_name.to_lowercase()));
-    select_legacy.column((
-        Alias::new(query_def.model_name.to_lowercase()),
-        sea_query::Asterisk,
-    ));
+    select_legacy.from(Alias::new(&legacy_table));
+    select_legacy.column((Alias::new(&legacy_table), sea_query::Asterisk));
     select_legacy.cond_where(query_condition_for_backend(&query_def, backend)?);
     if let Some(ref orders) = query_def.order_by {
         for order in orders {
@@ -3153,7 +3106,7 @@ mod m2m_value_tests {
             "properties": { "data": { "type": "string", "format": "binary" } }
         });
         let input = BindInput::Bytes(vec![0x89, 0x00, 0xff]);
-        let model = crate::state::RegisteredModel::new(schema);
+        let model = crate::state::RegisteredModel::new(schema, "test_table".to_string());
         let expr = bind_input_to_expr(
             &model, "doc", "data", &input,
             &HashMap::new(), &HashSet::new(), &HashMap::new(), Dialect::Sqlite,
@@ -3192,7 +3145,7 @@ mod schema_value_expr_tests {
     ) -> pyo3::PyResult<(String, sea_query::Values)> {
         let enum_udt = HashMap::new();
         let ts_cast = HashMap::new();
-        let model = crate::state::RegisteredModel::new(schema.clone());
+        let model = crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string());
         let expr = schema_value_expr(
             &model,
             table,
@@ -3408,7 +3361,7 @@ mod schema_value_expr_tests {
             let _ = py;
 
             let err = schema_value_expr(
-                &crate::state::RegisteredModel::new(schema.clone()),
+                &crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string()),
                 "thing",
                 "id",
                 &serde_json::Value::String("not-a-uuid".to_string()),
@@ -3448,7 +3401,7 @@ mod schema_value_expr_tests {
         ts_cast.insert("created_at".to_string(), "timestamptz".to_string());
 
         let expr = schema_value_expr(
-            &crate::state::RegisteredModel::new(schema.clone()),
+            &crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string()),
             "thing",
             "created_at",
             &serde_json::Value::Null,
@@ -3479,7 +3432,7 @@ mod schema_value_expr_tests {
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
 
         let expr = schema_value_expr(
-            &crate::state::RegisteredModel::new(schema.clone()),
+            &crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string()),
             "thing",
             "id",
             &serde_json::Value::String(uuid_str.to_string()),
@@ -3912,7 +3865,7 @@ mod save_mode_sql_tests {
         backend: Dialect,
     ) -> (String, sea_query::Values, bool) {
         build_save_sql(
-            &crate::state::RegisteredModel::new(widget_schema()),
+            &crate::state::RegisteredModel::new(widget_schema(), "widget".to_string()),
             "widget",
             inputs,
             Some("id"),
@@ -3933,7 +3886,7 @@ mod save_mode_sql_tests {
         backend: Dialect,
     ) -> super::PyResult<UpdateByPkSql> {
         build_update_by_pk_sql(
-            &crate::state::RegisteredModel::new(schema.clone()),
+            &crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string()),
             "widget",
             inputs,
             pk_col,

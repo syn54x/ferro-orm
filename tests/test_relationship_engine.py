@@ -1,4 +1,4 @@
-from typing import Annotated, ForwardRef
+from typing import Annotated, ClassVar, ForwardRef
 
 import pytest
 
@@ -33,6 +33,13 @@ def cleanup():
 
 
 class User(Model):
+    # Module-scope fixture model: defined once at import time, so it is part
+    # of every test's registry baseline for the whole session (conftest's
+    # _ferro_registry_isolation only snapshots/restores, it never clears).
+    # Explicit __ferro_table__ names keep it from squatting the generic
+    # "user"/"post" default table names that many other test files'
+    # function-local models rely on (FF-E E1 table-name collision detection).
+    __ferro_table__: ClassVar[str] = "relationship_engine_user"
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     username: str
     # Reverse marker
@@ -40,6 +47,7 @@ class User(Model):
 
 
 class Post(Model):
+    __ferro_table__: ClassVar[str] = "relationship_engine_post"
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str
     # Forward link

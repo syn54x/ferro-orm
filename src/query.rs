@@ -716,7 +716,7 @@ mod tests {
                 "properties": {
                     "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
                 }
-            })),
+            }), "widget".to_string()),
         );
         let query_def = empty_query_def("WidgetIntNull");
 
@@ -741,7 +741,7 @@ mod tests {
                 "properties": {
                     "active": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
                 }
-            })),
+            }), "widget".to_string()),
         );
         let query_def = empty_query_def("WidgetBoolNull");
 
@@ -766,7 +766,7 @@ mod tests {
                 "properties": {
                     "id": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "null"}]}
                 }
-            })),
+            }), "widget".to_string()),
         );
         let query_def = empty_query_def("WidgetUuidNull");
 
@@ -791,7 +791,7 @@ mod tests {
                 "properties": {
                     "blob": {"type": "string", "format": "binary"}
                 }
-            })),
+            }), "widget".to_string()),
         );
         let query_def = empty_query_def("WidgetBinary");
 
@@ -844,7 +844,7 @@ mod tests {
                 "properties": {
                     "color": {"enum_type_name": "color", "db_type": "text"}
                 }
-            })),
+            }), "widget".to_string()),
         );
         let query_def = empty_query_def("WidgetTextColor");
 
@@ -882,7 +882,7 @@ mod tests {
                         "format": "decimal"
                     }
                 }
-            })),
+            }), "widget".to_string()),
         );
         let query_def = empty_query_def("WidgetDecimal");
 

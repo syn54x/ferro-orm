@@ -248,7 +248,7 @@ class Query(Generic[T]):
                 "primary-key set."
             )
         return {
-            "model_name": self.model_cls.__name__,
+            "model_name": self.model_cls.__ferro_identity__,
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": [],
             "m2m": None,
@@ -266,7 +266,7 @@ class Query(Generic[T]):
             True
         """
         query_def = {
-            "model_name": self.model_cls.__name__,
+            "model_name": self.model_cls.__ferro_identity__,
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": self.order_by_clause,
             "limit": self._limit,
@@ -292,7 +292,7 @@ class Query(Generic[T]):
             True
         """
         query_def = {
-            "model_name": self.model_cls.__name__,
+            "model_name": self.model_cls.__ferro_identity__,
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": [],
             "limit": None,
@@ -301,7 +301,7 @@ class Query(Generic[T]):
         }
         route = self._transaction_or_using()
         return await count_filtered(
-            self.model_cls.__name__,
+            self.model_cls.__ferro_identity__,
             _query_ir_payload_to_json(query_def),
             route,
         )
@@ -326,7 +326,7 @@ class Query(Generic[T]):
         query_def = self._mutating_query_def("update")
         route = self._transaction_or_using()
         return await update_filtered(
-            self.model_cls.__name__,
+            self.model_cls.__ferro_identity__,
             _query_ir_payload_to_json(query_def),
             update_bind_payload(fields),
             route,
@@ -368,7 +368,7 @@ class Query(Generic[T]):
         query_def = self._mutating_query_def("delete")
         route = self._transaction_or_using()
         return await delete_filtered(
-            self.model_cls.__name__,
+            self.model_cls.__ferro_identity__,
             _query_ir_payload_to_json(query_def),
             route,
         )

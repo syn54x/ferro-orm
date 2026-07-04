@@ -21,7 +21,7 @@ def _compile_schema_ir_json(schema: dict, name: str) -> str:
 
 def render(schema, live, dialect, *, updates=True, destructive=False, name="Invoice"):
     return _render_migration_sql_for_test(
-        name, _compile_schema_ir_json(schema, name.lower()), json.dumps(live), dialect, updates, destructive
+        name.lower(), _compile_schema_ir_json(schema, name.lower()), json.dumps(live), dialect, updates, destructive
     )
 
 

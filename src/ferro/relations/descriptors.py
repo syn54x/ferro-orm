@@ -7,7 +7,7 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from ferro.models import Model
 
-from ..state import _MODEL_REGISTRY_PY
+from ..state import resolve_model_reference
 
 
 def _instance_origin_outside_transaction(instance: object) -> str | None:
@@ -36,11 +36,7 @@ class RelationshipDescriptor(BaseModel):
             return self
 
         if self._target_model is None:
-            self._target_model = _MODEL_REGISTRY_PY.get(self.target_model_name)
-            if self._target_model is None:
-                raise RuntimeError(
-                    f"Model '{self.target_model_name}' not found in registry"
-                )
+            self._target_model = resolve_model_reference(self.target_model_name)
 
         # Find the primary key value of the current instance
         pk_field = "id"
@@ -95,11 +91,7 @@ class ForwardDescriptor(BaseModel):
             return self
 
         if self._target_model is None:
-            self._target_model = _MODEL_REGISTRY_PY.get(self.target_model_name)
-            if self._target_model is None:
-                raise RuntimeError(
-                    f"Model '{self.target_model_name}' not found in registry"
-                )
+            self._target_model = resolve_model_reference(self.target_model_name)
 
         async def _fetch():
             id_val = getattr(instance, f"{self.field_name}_id")

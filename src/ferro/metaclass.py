@@ -1,4 +1,5 @@
 import json
+import re
 import types
 from enum import Enum
 from typing import (
@@ -25,11 +26,13 @@ from ._core import register_model_schema
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyRelation
 from .fields import FERRO_FIELD_EXTRA_KEY
-from .ir import compile_model_schema_ir, compile_registry_schema_ir
+from .ir import compile_model_schema_ir
 from .query import FieldProxy, Relation
 from .relations.descriptors import ForwardDescriptor
 from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+
+_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def _assert_weakref_support(cls: type) -> None:
@@ -59,8 +62,8 @@ class ModelMetaclass(type(BaseModel)):
         annotations = mcs._resolve_deferred_annotations(namespace)
         namespace["__annotations__"] = annotations
 
-        local_relations, fields_to_remove = mcs._scan_relationship_annotations(
-            annotations, namespace, name
+        local_relations, fields_to_remove, pending_relations = (
+            mcs._scan_relationship_annotations(annotations, namespace, name)
         )
         mcs._inject_shadow_fields(annotations, namespace, local_relations)
         mcs._prepare_namespace_for_pydantic(namespace, annotations, fields_to_remove)
@@ -75,15 +78,46 @@ class ModelMetaclass(type(BaseModel)):
         if name == "Model":
             return cls
 
-        mcs._register_model_and_proxies(cls, name, local_relations)
+        cls.__ferro_identity__ = f"{cls.__module__}.{cls.__qualname__}"
+        cls.__ferro_table__ = mcs._resolve_table_name(name, namespace)
+        for field_name, metadata in pending_relations:
+            _PENDING_RELATIONS.append((cls.__ferro_identity__, field_name, metadata))
+
+        mcs._register_model_and_proxies(cls, cls.__ferro_identity__, local_relations)
         ferro_fields = mcs._parse_ferro_field_metadata(cls)
         cls.ferro_fields = ferro_fields
         mcs._validate_db_type_options(cls, ferro_fields)
         mcs._register_enum_fields(cls)
         mcs._inject_relation_descriptors(cls, local_relations)
-        mcs._generate_and_register_schema(cls, name, ferro_fields, local_relations)
+        mcs._generate_and_register_schema(
+            cls, cls.__ferro_identity__, ferro_fields, local_relations
+        )
 
         return cls
+
+    @staticmethod
+    def _resolve_table_name(name: str, namespace: dict) -> str:
+        """Resolve the physical table name for a model class (FF-E E2).
+
+        ``__ferro_table__`` is honored only when declared in the class's own
+        body (the metaclass namespace) — a subclass never silently inherits
+        its parent's physical table. Default: ``classname.lower()``.
+        """
+        configured = namespace.get("__ferro_table__")
+        if configured is None:
+            return name.lower()
+        if not isinstance(configured, str):
+            raise TypeError(
+                f"__ferro_table__ on model '{name}' must be a str, "
+                f"got {type(configured).__name__}"
+            )
+        if len(configured) > 63 or not _TABLE_NAME_RE.match(configured):
+            raise ValueError(
+                f"__ferro_table__ {configured!r} on model '{name}' is not a "
+                "valid table name: expected a 1-63 character identifier "
+                "matching [A-Za-z_][A-Za-z0-9_]*"
+            )
+        return configured
 
     @staticmethod
     def _field_ferro_payload(obj: Any) -> dict[str, Any]:
@@ -245,15 +279,19 @@ class ModelMetaclass(type(BaseModel)):
     @staticmethod
     def _scan_relationship_annotations(
         annotations: dict, namespace: dict, model_name: str
-    ) -> tuple[dict, list]:
+    ) -> tuple[dict, list, list]:
         """
         Scan annotations for relationship fields (BackRef, ForeignKey, ManyToMany).
 
         Returns:
-            (local_relations, fields_to_remove): Relationship metadata and fields to hide from Pydantic
+            (local_relations, fields_to_remove, pending_relations): Relationship
+            metadata, fields to hide from Pydantic, and ``(field_name, metadata)``
+            entries deferred to ``_PENDING_RELATIONS`` (flushed under the model's
+            resolved ``__ferro_identity__`` after the class object exists).
         """
         local_relations = {}
         fields_to_remove = []
+        pending_relations = []
 
         for field_name, hint in list(annotations.items()):
             if ModelMetaclass._annotation_looks_like_back_ref(hint):
@@ -300,7 +338,7 @@ class ModelMetaclass(type(BaseModel)):
                 )
                 metadata.to = target
                 local_relations[field_name] = metadata
-                _PENDING_RELATIONS.append((model_name, field_name, metadata))
+                pending_relations.append((field_name, metadata))
                 fields_to_remove.append(field_name)
                 continue
 
@@ -313,7 +351,7 @@ class ModelMetaclass(type(BaseModel)):
                         inner = ModelMetaclass._strip_optional_union(args[0])
                         metadata.to = inner
                         local_relations[field_name] = metadata
-                        _PENDING_RELATIONS.append((model_name, field_name, metadata))
+                        pending_relations.append((field_name, metadata))
                         fields_to_remove.append(field_name)
                         break
 
@@ -323,7 +361,7 @@ class ModelMetaclass(type(BaseModel)):
                             "Relation[list[T]] = ManyToMany(...)."
                         )
 
-        return local_relations, fields_to_remove
+        return local_relations, fields_to_remove, pending_relations
 
     @staticmethod
     def _inject_shadow_fields(
@@ -365,13 +403,27 @@ class ModelMetaclass(type(BaseModel)):
             del namespace["__annotate_func__"]
 
     @staticmethod
-    def _register_model_and_proxies(cls, name: str, local_relations: dict) -> None:
+    def _register_model_and_proxies(cls, identity: str, local_relations: dict) -> None:
         """
         Register model in global registry and inject FieldProxy for query building.
 
-        Mutates cls in place.
+        Raises:
+            RuntimeError: When a *distinct* model already claims this model's
+                resolved table name (FF-E E1). Re-registration under the same
+                qualified identity is idempotent.
         """
-        _MODEL_REGISTRY_PY[name] = cls
+        table_name = cls.__ferro_table__
+        for key, other in _MODEL_REGISTRY_PY.items():
+            if key == identity:
+                continue
+            if getattr(other, "__ferro_table__", None) == table_name:
+                raise RuntimeError(
+                    f"Ferro model '{identity}' resolves to table '{table_name}', "
+                    f"which is already registered by model '{key}'. Two distinct "
+                    "models cannot share a table. Set __ferro_table__ on one of "
+                    "them to give it a distinct table name."
+                )
+        _MODEL_REGISTRY_PY[identity] = cls
         cls.ferro_relations = local_relations
 
         # Inject FieldProxy for each field to enable operator overloading on the class
@@ -541,6 +593,11 @@ class ModelMetaclass(type(BaseModel)):
                 )
                 if isinstance(metadata.to, ForwardRef):
                     target_name = metadata.to.__forward_arg__
+                target_name = (
+                    metadata.to.__ferro_identity__
+                    if hasattr(metadata.to, "__ferro_identity__")
+                    else target_name
+                )
 
                 setattr(
                     cls,
@@ -570,8 +627,7 @@ class ModelMetaclass(type(BaseModel)):
 
             if schema:
                 setattr(cls, "__ferro_schema__", schema)
-                register_model_schema(name, json.dumps(schema))
-                compile_model_schema_ir(name, cls)
-                compile_registry_schema_ir()
+                register_model_schema(name, json.dumps(schema), cls.__ferro_table__)
+                compile_model_schema_ir(name, cls, schema=schema)
         except Exception as e:
             raise RuntimeError(f"Ferro failed to register model '{name}': {e}")

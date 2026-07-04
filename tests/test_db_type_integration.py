@@ -15,7 +15,7 @@ import pytest
 
 import ferro
 from ferro import Field, Model, clear_registry, connect, reset_engine, varchar
-from ferro.state import _MODEL_REGISTRY_PY
+from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -31,17 +31,20 @@ def cleanup():
 
     ``clear_registry()`` only clears the Rust side; ``connect()`` calls
     ``resolve_relationships()`` which re-registers every entry in
-    ``_MODEL_REGISTRY_PY``. Without removing test-local models, later tests
-    see duplicate CHECK/index DDL (e.g. ``ck_checkeddoc_format``).
+    ``_MODEL_REGISTRY_PY``. Clearing the Python registries at setup keeps each
+    test's ``connect()`` scoped to its own inline model (module-level models
+    from other files would otherwise leak their tables/enums into this test's
+    schema); the global ``_ferro_registry_isolation`` fixture restores the
+    baseline afterward.
     """
-    registered_before = set(_MODEL_REGISTRY_PY)
     reset_engine()
     clear_registry()
+    _MODEL_REGISTRY_PY.clear()
+    _PENDING_RELATIONS.clear()
+    _JOIN_TABLE_REGISTRY.clear()
     yield
     reset_engine()
     clear_registry()
-    for name in set(_MODEL_REGISTRY_PY) - registered_before:
-        del _MODEL_REGISTRY_PY[name]
 
 
 def _sqlite_column_type(db_url: str, table: str, column: str) -> str:

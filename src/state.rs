@@ -23,21 +23,55 @@ pub(crate) use ferro_ddl_lowering::Dialect;
 pub struct RegisteredModel {
     /// The enriched Pydantic JSON schema as pushed from Python.
     pub schema: serde_json::Value,
+    /// Resolved physical table name (configured `__ferro_table__` or the
+    /// lowercased class name), pushed from Python at registration (FF-E E2).
+    /// Rust never derives a table name from a model name.
+    pub table_name: String,
     /// Per-column codec decisions, compiled once at registration.
     pub codec_plan: crate::codec_plan::ModelCodecPlan,
 }
 
 impl RegisteredModel {
     /// Compile the codec plan and wrap the registration for the registry.
-    pub fn new(schema: serde_json::Value) -> Arc<Self> {
+    pub fn new(schema: serde_json::Value, table_name: String) -> Arc<Self> {
         let codec_plan = crate::codec_plan::ModelCodecPlan::compile(&schema);
-        Arc::new(RegisteredModel { schema, codec_plan })
+        Arc::new(RegisteredModel { schema, table_name, codec_plan })
     }
 }
 
 /// Global registry mapping model names to their registration (schema + codec plan).
 pub static MODEL_REGISTRY: Lazy<RwLock<HashMap<String, Arc<RegisteredModel>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Extract the qualified Ferro identity stamped on a model class (FF-E E1).
+///
+/// # Errors
+/// `PyTypeError` when the object is not a Ferro model class.
+pub fn model_identity(cls: &Bound<'_, PyAny>) -> PyResult<String> {
+    let attr = cls.getattr("__ferro_identity__").map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "Object is not a Ferro model class (missing __ferro_identity__)",
+        )
+    })?;
+    attr.extract::<String>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("__ferro_identity__ must be a str")
+    })
+}
+
+/// Look up one registration by registry key.
+///
+/// # Errors
+/// `PyRuntimeError` when the registry lock fails or the model is unknown.
+pub fn registered_model(name: &str) -> PyResult<Arc<RegisteredModel>> {
+    MODEL_REGISTRY
+        .read()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?
+        .get(name)
+        .cloned()
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", name))
+        })
+}
 
 /// Python-compiled SchemaIR modelset pushed by the `connect`/`migrate` wrappers.
 ///

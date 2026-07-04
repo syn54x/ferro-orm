@@ -40,27 +40,27 @@ class UserRole(Enum):
     MODERATOR = "moderator"
 
 
-class User(Model):
-    """User model for testing"""
+class DocUser(Model):
+    """DocUser model for testing"""
 
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     username: Annotated[str, FerroField(unique=True)]
     email: Annotated[str, FerroField(unique=True, index=True)]
     is_active: bool = True
     role: UserRole = UserRole.USER
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["DocPost"]] = BackRef()
     comments: Relation[list["Comment"]] = BackRef()
 
 
-class Post(Model):
-    """Post model for testing"""
+class DocPost(Model):
+    """DocPost model for testing"""
 
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str
     content: str
     published: bool = False
     created_at: datetime = Field(default_factory=datetime.now)
-    author: Annotated[User, ForeignKey(related_name="posts")]
+    author: Annotated[DocUser, ForeignKey(related_name="posts")]
     comments: Relation[list["Comment"]] = BackRef()
     tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
 
@@ -71,8 +71,8 @@ class Comment(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     text: str
     created_at: datetime = Field(default_factory=datetime.now)
-    author: Annotated[User, ForeignKey(related_name="comments")]
-    post: Annotated[Post, ForeignKey(related_name="comments")]
+    author: Annotated[DocUser, ForeignKey(related_name="comments")]
+    post: Annotated[DocPost, ForeignKey(related_name="comments")]
 
 
 class Tag(Model):
@@ -80,11 +80,11 @@ class Tag(Model):
 
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: Annotated[str, FerroField(unique=True)]
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["DocPost"]] = BackRef()
 
 
-class Product(Model):
-    """Product model for testing field types"""
+class DocProduct(Model):
+    """DocProduct model for testing field types"""
 
     sku: str = Field(primary_key=True)
     name: str
@@ -102,15 +102,17 @@ def _ensure_models_registered():
     from ferro.relations import resolve_relationships
     from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
-    for model_cls in (User, Post, Comment, Tag, Product):
-        _MODEL_REGISTRY_PY[model_cls.__name__] = model_cls
+    for model_cls in (DocUser, DocPost, Comment, Tag, DocProduct):
+        _MODEL_REGISTRY_PY[model_cls.__ferro_identity__] = model_cls
 
     # Some tests clear private relationship state to model fresh imports. These
     # module-level models must restore both schemas and descriptors afterward.
-    for model_cls in (User, Post, Comment, Tag, Product):
+    for model_cls in (DocUser, DocPost, Comment, Tag, DocProduct):
         for field_name, relation in model_cls.ferro_relations.items():
             if isinstance(relation, (ForeignKey, ManyToManyRelation)):
-                _PENDING_RELATIONS.append((model_cls.__name__, field_name, relation))
+                _PENDING_RELATIONS.append(
+                    (model_cls.__ferro_identity__, field_name, relation)
+                )
 
     resolve_relationships()
     yield
@@ -144,7 +146,7 @@ async def test_field_types(db_url):
     """Test all documented field types work correctly"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        product = await Product.create(
+        product = await DocProduct.create(
             sku="PROD-001",
             name="Test Product",
             price=Decimal("19.99"),
@@ -164,11 +166,11 @@ async def test_enum_field_type(db_url):
     """Test enum field type works as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        user = await User.create(
+        user = await DocUser.create(
             username="admin_user", email="admin@example.com", role=UserRole.ADMIN
         )
 
-        fetched = await User.get(user.id)
+        fetched = await DocUser.get(user.id)
         assert fetched.role == UserRole.ADMIN
         assert isinstance(fetched.role, UserRole)
 
@@ -178,7 +180,7 @@ async def test_field_constraints_pydantic_style(db_url):
     """Test Field() constraint syntax"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        product = await Product.create(sku="TEST-001", name="Test", price=Decimal("10.00"))
+        product = await DocProduct.create(sku="TEST-001", name="Test", price=Decimal("10.00"))
         assert product.sku == "TEST-001"
 
 
@@ -187,12 +189,12 @@ async def test_field_constraints_annotated_style(db_url):
     """Test FerroField() annotated syntax"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        user = await User.create(username="test", email="test@example.com")
+        user = await DocUser.create(username="test", email="test@example.com")
         assert user.username == "test"
 
         # Verify unique constraint
         with pytest.raises(Exception):  # Should raise integrity error
-            await User.create(username="test", email="other@example.com")
+            await DocUser.create(username="test", email="other@example.com")
 
 
 # ============================================================================
@@ -205,7 +207,7 @@ async def test_create_method(db_url):
     """Test Model.create() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        user = await User.create(
+        user = await DocUser.create(
             username="alice", email="alice@example.com", is_active=True
         )
 
@@ -219,9 +221,9 @@ async def test_get_method(db_url):
     """Test Model.get() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        user = await User.create(username="bob", email="bob@example.com")
+        user = await DocUser.create(username="bob", email="bob@example.com")
 
-        fetched = await User.get(user.id)
+        fetched = await DocUser.get(user.id)
         assert fetched is not None
         assert fetched.id == user.id
         assert fetched.username == "bob"
@@ -232,10 +234,10 @@ async def test_all_method(db_url):
     """Test Model.all() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="user1", email="user1@example.com")
-        await User.create(username="user2", email="user2@example.com")
+        await DocUser.create(username="user1", email="user1@example.com")
+        await DocUser.create(username="user2", email="user2@example.com")
 
-        all_users = await User.all()
+        all_users = await DocUser.all()
         assert len(all_users) == 2
 
 
@@ -244,13 +246,13 @@ async def test_save_method(db_url):
     """Test instance.save() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        user = await User.create(username="alice", email="alice@example.com")
+        user = await DocUser.create(username="alice", email="alice@example.com")
 
         user.email = "alice.new@example.com"
         user.is_active = False
         await user.save()
 
-        fetched = await User.get(user.id)
+        fetched = await DocUser.get(user.id)
         assert fetched.email == "alice.new@example.com"
         assert fetched.is_active is False
 
@@ -260,12 +262,12 @@ async def test_delete_method(db_url):
     """Test instance.delete() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        user = await User.create(username="alice", email="alice@example.com")
+        user = await DocUser.create(username="alice", email="alice@example.com")
         user_id = user.id
 
         await user.delete()
 
-        assert await User.get_or_none(user_id) is None
+        assert await DocUser.get_or_none(user_id) is None
 
 
 @pytest.mark.asyncio
@@ -273,10 +275,10 @@ async def test_refresh_method(db_url):
     """Test instance.refresh() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        user = await User.create(username="alice", email="alice@example.com")
+        user = await DocUser.create(username="alice", email="alice@example.com")
 
         # Simulate external update
-        await User.where(lambda t: t.id == user.id).update(email="updated@example.com")
+        await DocUser.where(lambda t: t.id == user.id).update(email="updated@example.com")
 
         # Refresh instance
         await user.refresh()
@@ -289,13 +291,13 @@ async def test_bulk_create(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         users = [
-            User(username=f"user_{i}", email=f"user{i}@example.com") for i in range(100)
+            DocUser(username=f"user_{i}", email=f"user{i}@example.com") for i in range(100)
         ]
 
-        count = await User.bulk_create(users)
+        count = await DocUser.bulk_create(users)
         assert count == 100
 
-        all_users = await User.all()
+        all_users = await DocUser.all()
         assert len(all_users) == 100
 
 
@@ -305,14 +307,14 @@ async def test_get_or_create(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         # First call creates
-        user1, created1 = await User.get_or_create(
+        user1, created1 = await DocUser.get_or_create(
             email="test@example.com", defaults={"username": "testuser"}
         )
         assert created1 is True
         assert user1.username == "testuser"
 
         # Second call retrieves
-        user2, created2 = await User.get_or_create(
+        user2, created2 = await DocUser.get_or_create(
             email="test@example.com", defaults={"username": "different"}
         )
         assert created2 is False
@@ -326,13 +328,13 @@ async def test_update_or_create(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         # First call creates
-        user1, created1 = await User.update_or_create(
+        user1, created1 = await DocUser.update_or_create(
             email="test@example.com", defaults={"username": "testuser"}
         )
         assert created1 is True
 
         # Second call updates
-        user2, created2 = await User.update_or_create(
+        user2, created2 = await DocUser.update_or_create(
             email="test@example.com", defaults={"username": "updated"}
         )
         assert created2 is False
@@ -350,10 +352,10 @@ async def test_where_equality(db_url):
     """Test .where() with equality operator"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="alice", email="alice@example.com", is_active=True)
-        await User.create(username="bob", email="bob@example.com", is_active=False)
+        await DocUser.create(username="alice", email="alice@example.com", is_active=True)
+        await DocUser.create(username="bob", email="bob@example.com", is_active=False)
 
-        active_users = await User.where(lambda t: t.is_active == True).all()  # noqa: E712
+        active_users = await DocUser.where(lambda t: t.is_active == True).all()  # noqa: E712
         assert len(active_users) == 1
         assert active_users[0].username == "alice"
 
@@ -364,16 +366,16 @@ async def test_where_comparison_operators(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         for i in range(5):
-            await Product.create(
+            await DocProduct.create(
                 sku=f"PROD-{i}", name=f"Product {i}", price=Decimal(str(i * 10))
             )
 
         # Greater than
-        expensive = await Product.where(lambda t: t.price > Decimal("20")).all()
+        expensive = await DocProduct.where(lambda t: t.price > Decimal("20")).all()
         assert len(expensive) == 2  # 30 and 40
 
         # Less than or equal
-        cheap = await Product.where(lambda t: t.price <= Decimal("20")).all()
+        cheap = await DocProduct.where(lambda t: t.price <= Decimal("20")).all()
         assert len(cheap) == 3  # 0, 10, 20
 
 
@@ -382,11 +384,11 @@ async def test_where_like_operator(db_url):
     """Test .like() operator as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="alice", email="alice@gmail.com")
-        await User.create(username="bob", email="bob@yahoo.com")
-        await User.create(username="charlie", email="charlie@gmail.com")
+        await DocUser.create(username="alice", email="alice@gmail.com")
+        await DocUser.create(username="bob", email="bob@yahoo.com")
+        await DocUser.create(username="charlie", email="charlie@gmail.com")
 
-        gmail_users = await User.where(lambda t: t.email.like("%gmail.com")).all()
+        gmail_users = await DocUser.where(lambda t: t.email.like("%gmail.com")).all()
         assert len(gmail_users) == 2
 
 
@@ -395,14 +397,14 @@ async def test_where_in_operator(db_url):
     """Test .in_() operator as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
-        await User.create(username="bob", email="bob@example.com", role=UserRole.MODERATOR)
-        await User.create(
+        await DocUser.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
+        await DocUser.create(username="bob", email="bob@example.com", role=UserRole.MODERATOR)
+        await DocUser.create(
             username="charlie", email="charlie@example.com", role=UserRole.USER
         )
 
         # Use enum values instead of enum instances
-        staff = await User.where(
+        staff = await DocUser.where(
             lambda t: t.role.in_([UserRole.ADMIN.value, UserRole.MODERATOR.value])
         ).all()
         assert len(staff) == 2
@@ -413,20 +415,20 @@ async def test_logical_and_operator(db_url):
     """Test & (AND) operator in queries"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(
+        await DocUser.create(
             username="alice", email="alice@example.com", is_active=True, role=UserRole.ADMIN
         )
-        await User.create(
+        await DocUser.create(
             username="bob", email="bob@example.com", is_active=True, role=UserRole.USER
         )
-        await User.create(
+        await DocUser.create(
             username="charlie",
             email="charlie@example.com",
             is_active=False,
             role=UserRole.ADMIN,
         )
 
-        active_admins = await User.where(
+        active_admins = await DocUser.where(
             lambda t: (t.is_active == True) & (t.role == UserRole.ADMIN.value)  # noqa: E712
         ).all()
         assert len(active_admins) == 1
@@ -438,13 +440,13 @@ async def test_logical_or_operator(db_url):
     """Test | (OR) operator in queries"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
-        await User.create(username="bob", email="bob@example.com", role=UserRole.MODERATOR)
-        await User.create(
+        await DocUser.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
+        await DocUser.create(username="bob", email="bob@example.com", role=UserRole.MODERATOR)
+        await DocUser.create(
             username="charlie", email="charlie@example.com", role=UserRole.USER
         )
 
-        staff = await User.where(
+        staff = await DocUser.where(
             lambda t: (t.role == UserRole.ADMIN.value)
             | (t.role == UserRole.MODERATOR.value)
         ).all()
@@ -456,18 +458,18 @@ async def test_order_by(db_url):
     """Test .order_by() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="charlie", email="charlie@example.com")
-        await User.create(username="alice", email="alice@example.com")
-        await User.create(username="bob", email="bob@example.com")
+        await DocUser.create(username="charlie", email="charlie@example.com")
+        await DocUser.create(username="alice", email="alice@example.com")
+        await DocUser.create(username="bob", email="bob@example.com")
 
         # Ascending
-        users_asc = await User.select().order_by(User.username, "asc").all()
+        users_asc = await DocUser.select().order_by(DocUser.username, "asc").all()
         assert users_asc[0].username == "alice"
         assert users_asc[1].username == "bob"
         assert users_asc[2].username == "charlie"
 
         # Descending
-        users_desc = await User.select().order_by(User.username, "desc").all()
+        users_desc = await DocUser.select().order_by(DocUser.username, "desc").all()
         assert users_desc[0].username == "charlie"
 
 
@@ -477,14 +479,14 @@ async def test_limit_and_offset(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         for i in range(10):
-            await User.create(username=f"user_{i}", email=f"user{i}@example.com")
+            await DocUser.create(username=f"user_{i}", email=f"user{i}@example.com")
 
         # Limit
-        first_5 = await User.select().order_by(User.id).limit(5).all()
+        first_5 = await DocUser.select().order_by(DocUser.id).limit(5).all()
         assert len(first_5) == 5
 
         # Offset
-        skip_5 = await User.select().order_by(User.id).offset(5).limit(5).all()
+        skip_5 = await DocUser.select().order_by(DocUser.id).offset(5).limit(5).all()
         assert len(skip_5) == 5
         assert skip_5[0].id != first_5[0].id
 
@@ -494,13 +496,13 @@ async def test_query_first(db_url):
     """Test .first() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="alice", email="alice@example.com")
+        await DocUser.create(username="alice", email="alice@example.com")
 
-        user = await User.where(lambda t: t.username == "alice").first()
+        user = await DocUser.where(lambda t: t.username == "alice").first()
         assert user is not None
         assert user.username == "alice"
 
-        none_user = await User.where(lambda t: t.username == "nonexistent").first()
+        none_user = await DocUser.where(lambda t: t.username == "nonexistent").first()
         assert none_user is None
 
 
@@ -509,11 +511,11 @@ async def test_query_count(db_url):
     """Test .count() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="alice", email="alice@example.com", is_active=True)
-        await User.create(username="bob", email="bob@example.com", is_active=True)
-        await User.create(username="charlie", email="charlie@example.com", is_active=False)
+        await DocUser.create(username="alice", email="alice@example.com", is_active=True)
+        await DocUser.create(username="bob", email="bob@example.com", is_active=True)
+        await DocUser.create(username="charlie", email="charlie@example.com", is_active=False)
 
-        active_count = await User.where(lambda t: t.is_active == True).count()  # noqa: E712
+        active_count = await DocUser.where(lambda t: t.is_active == True).count()  # noqa: E712
         assert active_count == 2
 
 
@@ -522,12 +524,12 @@ async def test_query_exists(db_url):
     """Test .exists() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
+        await DocUser.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
 
-        has_admin = await User.where(lambda t: t.role == UserRole.ADMIN.value).exists()
+        has_admin = await DocUser.where(lambda t: t.role == UserRole.ADMIN.value).exists()
         assert has_admin is True
 
-        has_moderator = await User.where(
+        has_moderator = await DocUser.where(
             lambda t: t.role == UserRole.MODERATOR.value
         ).exists()
         assert has_moderator is False
@@ -538,15 +540,15 @@ async def test_query_update(db_url):
     """Test .update() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="alice", email="alice@example.com", is_active=True)
-        await User.create(username="bob", email="bob@example.com", is_active=True)
+        await DocUser.create(username="alice", email="alice@example.com", is_active=True)
+        await DocUser.create(username="bob", email="bob@example.com", is_active=True)
 
-        count = await User.where(lambda t: t.is_active == True).update(  # noqa: E712
+        count = await DocUser.where(lambda t: t.is_active == True).update(  # noqa: E712
             is_active=False
         )
         assert count == 2
 
-        active_users = await User.where(lambda t: t.is_active == True).all()  # noqa: E712
+        active_users = await DocUser.where(lambda t: t.is_active == True).all()  # noqa: E712
         assert len(active_users) == 0
 
 
@@ -555,13 +557,13 @@ async def test_query_delete(db_url):
     """Test .delete() on query as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await User.create(username="alice", email="alice@example.com", is_active=True)
-        await User.create(username="bob", email="bob@example.com", is_active=False)
+        await DocUser.create(username="alice", email="alice@example.com", is_active=True)
+        await DocUser.create(username="bob", email="bob@example.com", is_active=False)
 
-        count = await User.where(lambda t: t.is_active == False).delete()  # noqa: E712
+        count = await DocUser.where(lambda t: t.is_active == False).delete()  # noqa: E712
         assert count == 1
 
-        remaining = await User.all()
+        remaining = await DocUser.all()
         assert len(remaining) == 1
         assert remaining[0].username == "alice"
 
@@ -576,10 +578,10 @@ async def test_foreign_key_creation(db_url):
     """Test creating records with ForeignKey relationships"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        author = await User.create(username="alice", email="alice@example.com")
+        author = await DocUser.create(username="alice", email="alice@example.com")
 
         # Pass model instance
-        post = await Post.create(title="My Post", content="Content here", author=author)
+        post = await DocPost.create(title="My Post", content="Content here", author=author)
 
         assert post.author_id == author.id
 
@@ -589,8 +591,8 @@ async def test_foreign_key_forward_relation(db_url):
     """Test accessing forward relation (ForeignKey)"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        author = await User.create(username="alice", email="alice@example.com")
-        post = await Post.create(title="Test", content="Content", author=author)
+        author = await DocUser.create(username="alice", email="alice@example.com")
+        post = await DocPost.create(title="Test", content="Content", author=author)
 
         # Access forward relation
         post_author = await post.author
@@ -603,10 +605,10 @@ async def test_foreign_key_reverse_relation(db_url):
     """Test accessing reverse relation (BackRef)"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        author = await User.create(username="alice", email="alice@example.com")
+        author = await DocUser.create(username="alice", email="alice@example.com")
 
-        await Post.create(title="Post 1", content="Content 1", author=author)
-        await Post.create(title="Post 2", content="Content 2", author=author)
+        await DocPost.create(title="DocPost 1", content="Content 1", author=author)
+        await DocPost.create(title="DocPost 2", content="Content 2", author=author)
 
         # Access reverse relation
         author_posts = await author.posts.all()
@@ -618,12 +620,12 @@ async def test_reverse_relation_filtering(db_url):
     """Test filtering on reverse relations"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        author = await User.create(username="alice", email="alice@example.com")
+        author = await DocUser.create(username="alice", email="alice@example.com")
 
-        await Post.create(
+        await DocPost.create(
             title="Published", content="Content", author=author, published=True
         )
-        await Post.create(title="Draft", content="Content", author=author, published=False)
+        await DocPost.create(title="Draft", content="Content", author=author, published=False)
 
         published = await author.posts.where(lambda t: t.published == True).all()  # noqa: E712
         assert len(published) == 1
@@ -635,14 +637,14 @@ async def test_shadow_field_access(db_url):
     """Test accessing shadow fields (author_id) as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        author = await User.create(username="alice", email="alice@example.com")
-        post = await Post.create(title="Test", content="Content", author=author)
+        author = await DocUser.create(username="alice", email="alice@example.com")
+        post = await DocPost.create(title="Test", content="Content", author=author)
 
         # Access shadow field
         assert post.author_id == author.id
 
         # Query by shadow field
-        posts = await Post.where(lambda t: t.author_id == author.id).all()
+        posts = await DocPost.where(lambda t: t.author_id == author.id).all()
         assert len(posts) == 1
 
 
@@ -653,10 +655,10 @@ async def test_shadow_field_access(db_url):
 async def test_many_to_many_add(db_url):
     """Test .add() for many-to-many relationships"""
     await connect(db_url, auto_migrate=True)
-    post = await Post.create(
+    post = await DocPost.create(
         title="Test Post",
         content="Content",
-        author=await User.create(username="alice", email="alice@example.com"),
+        author=await DocUser.create(username="alice", email="alice@example.com"),
     )
 
     tag1 = await Tag.create(name="python")
@@ -675,10 +677,10 @@ async def test_many_to_many_add(db_url):
 async def test_many_to_many_remove(db_url):
     """Test .remove() for many-to-many relationships"""
     await connect(db_url, auto_migrate=True)
-    post = await Post.create(
+    post = await DocPost.create(
         title="Test Post",
         content="Content",
-        author=await User.create(username="alice", email="alice@example.com"),
+        author=await DocUser.create(username="alice", email="alice@example.com"),
     )
 
     tag1 = await Tag.create(name="python")
@@ -699,10 +701,10 @@ async def test_many_to_many_remove(db_url):
 async def test_many_to_many_clear(db_url):
     """Test .clear() for many-to-many relationships"""
     await connect(db_url, auto_migrate=True)
-    post = await Post.create(
+    post = await DocPost.create(
         title="Test Post",
         content="Content",
-        author=await User.create(username="alice", email="alice@example.com"),
+        author=await DocUser.create(username="alice", email="alice@example.com"),
     )
 
     tag1 = await Tag.create(name="python")
@@ -722,10 +724,10 @@ async def test_many_to_many_clear(db_url):
 async def test_many_to_many_reverse(db_url):
     """Test many-to-many from both sides"""
     await connect(db_url, auto_migrate=True)
-    post = await Post.create(
+    post = await DocPost.create(
         title="Test Post",
         content="Content",
-        author=await User.create(username="alice", email="alice@example.com"),
+        author=await DocUser.create(username="alice", email="alice@example.com"),
     )
     tag = await Tag.create(name="python")
 
@@ -748,12 +750,12 @@ async def test_transaction_commit(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         async with transaction():
-            user = await User.create(username="alice", email="alice@example.com")
-            await Post.create(title="Test", content="Content", author=user)
+            user = await DocUser.create(username="alice", email="alice@example.com")
+            await DocPost.create(title="Test", content="Content", author=user)
 
         # Verify data persisted
-        users = await User.all()
-        posts = await Post.all()
+        users = await DocUser.all()
+        posts = await DocPost.all()
         assert len(users) == 1
         assert len(posts) == 1
 
@@ -765,13 +767,13 @@ async def test_transaction_rollback(db_url):
     async with engines.session():
         try:
             async with transaction():
-                await User.create(username="alice", email="alice@example.com")
+                await DocUser.create(username="alice", email="alice@example.com")
                 raise ValueError("Test error")
         except ValueError:
             pass
 
         # Verify data was rolled back
-        users = await User.all()
+        users = await DocUser.all()
         assert len(users) == 0
 
 
@@ -783,16 +785,16 @@ async def test_transaction_isolation(db_url):
 
         async def task_a():
             async with transaction():
-                await User.create(username="task_a_user", email="a@example.com")
+                await DocUser.create(username="task_a_user", email="a@example.com")
                 await asyncio.sleep(0.1)
 
         async def task_b():
             async with transaction():
-                await User.create(username="task_b_user", email="b@example.com")
+                await DocUser.create(username="task_b_user", email="b@example.com")
 
         await asyncio.gather(task_a(), task_b())
 
-        users = await User.all()
+        users = await DocUser.all()
         assert len(users) == 2
 
 
@@ -807,25 +809,25 @@ async def test_tutorial_blog_example(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         # Create users
-        alice = await User.create(username="alice", email="alice@example.com")
-        bob = await User.create(username="bob", email="bob@example.com")
+        alice = await DocUser.create(username="alice", email="alice@example.com")
+        bob = await DocUser.create(username="bob", email="bob@example.com")
 
         # Create posts
-        post1 = await Post.create(
+        post1 = await DocPost.create(
             title="Why Ferro is Fast",
             content="Ferro uses a Rust engine...",
             published=True,
             author=alice,
         )
 
-        post2 = await Post.create(
+        post2 = await DocPost.create(
             title="Getting Started with Async Python",
             content="Async programming can be tricky...",
             published=True,
             author=alice,
         )
 
-        draft = await Post.create(
+        draft = await DocPost.create(
             title="Draft Post",
             content="This is not published yet",
             published=False,
@@ -838,15 +840,15 @@ async def test_tutorial_blog_example(db_url):
         comment2 = await Comment.create(text="Thanks for sharing", author=alice, post=post1)
 
         # Query: Find all published posts
-        published = await Post.where(lambda t: t.published == True).all()  # noqa: E712
+        published = await DocPost.where(lambda t: t.published == True).all()  # noqa: E712
         assert len(published) == 2
 
         # Query: Find posts by author
-        alice_posts = await Post.where(lambda t: t.author_id == alice.id).all()
+        alice_posts = await DocPost.where(lambda t: t.author_id == alice.id).all()
         assert len(alice_posts) == 2
 
         # Query: Get post with pattern matching
-        post = await Post.where(lambda t: t.title.like("%Fast%")).first()
+        post = await DocPost.where(lambda t: t.title.like("%Fast%")).first()
         assert post is not None
         assert post.title == "Why Ferro is Fast"
 
@@ -862,7 +864,7 @@ async def test_tutorial_blog_example(db_url):
         draft.published = True
         await draft.save()
 
-        published_after = await Post.where(lambda t: t.published == True).all()  # noqa: E712
+        published_after = await DocPost.where(lambda t: t.published == True).all()  # noqa: E712
         assert len(published_after) == 3
 
 

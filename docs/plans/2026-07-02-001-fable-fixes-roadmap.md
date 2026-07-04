@@ -292,27 +292,27 @@ not configurable), **F11** (O(N²) import-time SchemaIR recompiles;
 
 **Sub-tasks**
 
-- [ ] **E1 — Qualified registry keys + duplicate detection.**
+- [x] **E1 — Qualified registry keys + duplicate detection.**
       Python and Rust registries key by qualified name; a second model
       resolving to the same *table name* raises at class definition. FK
       string resolution follows the same rules (unambiguous short name still
       works; ambiguity errors with candidates listed).
-- [ ] **E2 — Configurable table name.**
+- [x] **E2 — Configurable table name.**
       `__ferro_table__` (or `model_config` key) overriding the
       `classname.lower()` default. SchemaIR already carries `table_name`
       separately — cheap now, breaking to retrofit after 1.0.
-- [ ] **E3 — Kill the O(N²) import cost.**
+- [x] **E3 — Kill the O(N²) import cost.**
       `_generate_and_register_schema` stops calling
       `compile_registry_schema_ir()` per class; the registry modelset compiles
       lazily (connect/create_tables/migrate/get_metadata already push it).
       Add an import-time budget test (N models → O(N) schema builds).
-- [ ] **E4 — `resolve_relationships` fails loudly.**
+- [x] **E4 — `resolve_relationships` fails loudly.**
       Remove the `except Exception: pass` around re-registration; a model
       whose schema fails to rebuild aborts with the model named (I-6).
 
 **Exit gate**
 
-- [ ] Two same-named models in different modules: hard error, actionable
+- [x] Two same-named models in different modules: hard error, actionable
       message. Custom table names round-trip through both emitters (parity
       test). Import of 200-model fixture within budget.
 

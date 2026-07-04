@@ -1243,11 +1243,17 @@ async def test_db_check_reconnect_is_idempotent(db_url):
     from ferro import Field as FerroField
     from ferro import clear_registry, connect, reset_engine
     from ferro.raw import fetch_all
-    from ferro.state import _MODEL_REGISTRY_PY
+    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
 
     reset_engine()
     clear_registry()
     _MODEL_REGISTRY_PY.clear()
+    # Match this file's other reconnect tests: clearing the model registry
+    # without also draining the pending-relations queue leaves import-time
+    # relations from module-level models in other test files dangling, so the
+    # connect() below crashes in resolve_relationships when their now-unregistered
+    # source model is looked up. (Pre-existing isolation gap surfaced by ordering.)
+    _PENDING_RELATIONS.clear()
 
     class DocStatus(StrEnum):
         PENDING = "pending"

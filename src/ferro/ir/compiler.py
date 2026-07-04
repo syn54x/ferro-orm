@@ -379,18 +379,27 @@ def wrap_schema_ir(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def compile_model_schema_ir(model_name: str, model_cls: type[Any]) -> dict[str, Any]:
+def compile_model_schema_ir(
+    model_name: str, model_cls: type[Any], schema: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Compile and persist a single model's SchemaIR envelope + fingerprint.
 
     Args:
         model_name: Registry key / model class name.
         model_cls: Python model class to compile.
+        schema: Optional prebuilt canonical schema — avoids a redundant
+            build_model_schema pass when the caller just built it (FF-E E3).
 
     Returns:
         The compiled SchemaIR envelope for ``model_cls``.
     """
-    schema = build_model_schema(model_cls)
-    payload = compile_schema_ir_payload(model_name, schema)
+    if schema is None:
+        schema = build_model_schema(model_cls)
+    payload = compile_schema_ir_payload(
+        model_name,
+        schema,
+        table_name=getattr(model_cls, "__ferro_table__", None),
+    )
     envelope = wrap_schema_ir(payload)
     _SCHEMA_IR_BY_MODEL[model_name] = envelope
     _SCHEMA_IR_FINGERPRINT_BY_MODEL[model_name] = _fingerprint(envelope)
@@ -405,8 +414,6 @@ def compile_registry_schema_ir() -> dict[str, Any]:
     """
     models: list[dict[str, Any]] = []
     for model_name, model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
-        if model_name == "Model":
-            continue
         model_envelope = compile_model_schema_ir(model_name, model_cls)
         model_payload = model_envelope["payload"]["models"][0]
         models.append(model_payload)

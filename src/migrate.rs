@@ -817,9 +817,9 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
     let mut warnings = Vec::new();
     let mut ddl_ran = false;
 
-    for (name, model) in order_schemas_for_creation(schemas) {
+    for (_name, model) in order_schemas_for_creation(schemas) {
         let schema = &model.schema;
-        let table_lower = name.to_lowercase();
+        let table_lower = model.table_name.clone();
         let Some(live) = live_table_columns(&engine, &table_lower).await? else {
             // Freshly created (or otherwise absent) tables have nothing to diff.
             continue;
@@ -956,7 +956,7 @@ pub fn _render_migration_sql_for_test(
         })?
     };
 
-    let table_lower = name.to_lowercase();
+    let table_lower = name;
     let opts = MigrateOptions::laddered(updates, destructive);
     let plan = plan_table_migration(&table_lower, &declared, &live, &live_indexes, backend, opts)?;
 
@@ -1023,7 +1023,7 @@ pub fn _shadow_compare_migration_plan_for_test(
         })?
     };
 
-    let table_lower = name.to_lowercase();
+    let table_lower = name;
     let opts = MigrateOptions::laddered(updates, destructive);
 
     // Build column-domain IR plan (filter AddIndex/DropIndex) for parity comparison.
@@ -2168,7 +2168,7 @@ mod tests {
             {"name": "stale", "declared_type": "varchar"},
         ]);
         let (statements, warnings) = _render_migration_sql_for_test(
-            "Doc".to_string(),
+            "doc".to_string(),
             ir_json,
             live_json.to_string(),
             "sqlite".to_string(),

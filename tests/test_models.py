@@ -18,7 +18,10 @@ def test_model_registration():
 
 
 def test_duplicate_model_registration():
-    """Test that re-defining a model doesn't crash."""
+    """FF-E E1 contract: redefining the *same* model (same module + qualname,
+    e.g. REPL or module re-import) is idempotent — the latest definition wins.
+    Two *distinct* models resolving to the same table name is a hard error at
+    class definition (see tests/test_model_identity.py)."""
 
     class DuplicateModel(Model):
         name: str
