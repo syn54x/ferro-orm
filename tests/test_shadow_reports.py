@@ -9,11 +9,8 @@ from ferro._core import (
     _render_create_table_sql_for_test,
     _render_migration_sql_for_test,
     _shadow_compare_migration_plan_for_test,
-    _shadow_compare_query_plan_for_test,
-    register_model_schema,
 )
 from ferro.ir.compiler import compile_schema_ir_payload, wrap_schema_ir
-from ferro.query.builder import _query_ir_payload_to_json
 
 
 def _compile_schema_ir_json(schema: dict, name: str) -> str:
@@ -34,36 +31,6 @@ def _report_for_backend(dialect: str) -> dict:
             "age": {"type": "integer"},
         }
     }
-    # The legacy query planner resolves the physical table name from the
-    # registration (FF-E E2 — no lowercase fallback), so register the model
-    # under its resolved table name before driving the shadow comparator.
-    register_model_schema("ShadowUser", json.dumps(schema), "shadowuser")
-    query_json = _query_ir_payload_to_json(
-        {
-            "model_name": "ShadowUser",
-            "where": [
-                {
-                    "node_kind": "leaf",
-                    "column": "age",
-                    "operator": ">=",
-                    "value": {"kind": "int", "value": 18},
-                },
-                {
-                    "node_kind": "leaf",
-                    "column": "name",
-                    "operator": "LIKE",
-                    "value": {"kind": "string", "value": "a%"},
-                },
-            ],
-            "order_by": [{"column": "age", "direction": "desc"}],
-            "limit": 5,
-            "offset": 1,
-            "m2m": None,
-        }
-    )
-    query_compare = json.loads(
-        _shadow_compare_query_plan_for_test(query_json, dialect, "select")
-    )
     create_table_sql, create_table_extras, _pre_create = _render_create_table_sql_for_test(
         "ShadowUser", json.dumps(compile_schema_ir_payload("ShadowUser", schema)), dialect
     )
@@ -98,7 +65,6 @@ def _report_for_backend(dialect: str) -> dict:
         )
     )
     return {
-        "query_compare": query_compare,
         "create_table": [create_table_sql, list(create_table_extras)],
         "migration": [list(migration_stmts), list(migration_warns)],
         "migration_compare": migration_compare,

@@ -104,12 +104,6 @@ def _shadow_compare_migration_plan_for_test(
     """
     ...
 
-def _shadow_compare_query_plan_for_test(
-    query_payload_json: str, dialect: str, operation: str = "select"
-) -> str:
-    """Test-only: compare query payload planning semantics."""
-    ...
-
 async def fetch_all(
     cls: object,
     route: RouteHandle,
