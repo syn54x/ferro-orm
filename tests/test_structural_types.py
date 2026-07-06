@@ -142,12 +142,12 @@ async def test_structural_filtering(db_url):
         await ComplexModel.create(user_id=uid2, balance=Decimal("20.0"))
 
         # Filter by UUID
-        res = await ComplexModel.where(ComplexModel.user_id == uid1).first()
+        res = await ComplexModel.where(lambda m: m.user_id == uid1).first()
         assert res is not None
         assert res.user_id == uid1
 
         # Filter by Decimal
-        res = await ComplexModel.where(ComplexModel.balance > Decimal("15.0")).first()
+        res = await ComplexModel.where(lambda m: m.balance > Decimal("15.0")).first()
         assert res is not None
         assert res.balance == Decimal("20.0")
 
@@ -171,7 +171,7 @@ async def test_uuid_in_filter_serializes_collection_values(db_url):
         await ComplexModel.create(user_id=uid2)
         await ComplexModel.create(user_id=uid3)
 
-        results = await ComplexModel.where(ComplexModel.user_id << [uid1, uid3]).all()
+        results = await ComplexModel.where(lambda m: m.user_id << [uid1, uid3]).all()
         assert {row.user_id for row in results} == {uid1, uid3}
 
 
@@ -193,15 +193,15 @@ async def test_uuid_filter_serializes_for_update_and_delete_queries(db_url):
         await UuidMutationModel.create(run_id=uid2, label="keep")
 
         updated = await UuidMutationModel.where(
-            UuidMutationModel.run_id == uid1
+            lambda m: m.run_id == uid1
         ).update(label="new")
         assert updated == 1
 
-        fetched = await UuidMutationModel.where(UuidMutationModel.run_id == uid1).first()
+        fetched = await UuidMutationModel.where(lambda m: m.run_id == uid1).first()
         assert fetched is not None
         assert fetched.label == "new"
 
-        deleted = await UuidMutationModel.where(UuidMutationModel.run_id == uid1).delete()
+        deleted = await UuidMutationModel.where(lambda m: m.run_id == uid1).delete()
         assert deleted == 1
         remaining = await UuidMutationModel.all()
         assert [row.run_id for row in remaining] == [uid2]
@@ -227,7 +227,7 @@ async def test_postgres_json_and_decimal_updates_keep_typed_hydration(db_url):
             balance=Decimal("1.50"),
         )
 
-        updated = await PgTypedMutation.where(PgTypedMutation.id == row.id).update(
+        updated = await PgTypedMutation.where(lambda m: m.id == row.id).update(
             metadata={"new": "value"},
             tags=["b", "c"],
             balance=Decimal("2.75"),
@@ -241,7 +241,7 @@ async def test_postgres_json_and_decimal_updates_keep_typed_hydration(db_url):
         assert fetched.balance == Decimal("2.75")
 
         filtered = await PgTypedMutation.where(
-            PgTypedMutation.balance > Decimal("2.00")
+            lambda m: m.balance > Decimal("2.00")
         ).first()
         assert filtered is not None
         assert filtered.id == row.id

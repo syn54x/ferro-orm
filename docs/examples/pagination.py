@@ -14,7 +14,7 @@ class Article(Model):
 async def get_page(page: int, per_page: int = 20) -> list[Article]:
     return (
         await Article.select()
-        .order_by(Article.id)
+        .order_by(lambda article: article.id)
         .limit(per_page)
         .offset((page - 1) * per_page)
         .all()
@@ -25,7 +25,7 @@ async def get_page(page: int, per_page: int = 20) -> list[Article]:
 # --8<-- [start:keyset]
 async def get_after(after_id: int | None, limit: int = 20) -> list[Article]:
     query = Article.select() if after_id is None else Article.where(lambda article: article.id > after_id)
-    return await query.order_by(Article.id).limit(limit).all()
+    return await query.order_by(lambda article: article.id).limit(limit).all()
 # --8<-- [end:keyset]
 
 

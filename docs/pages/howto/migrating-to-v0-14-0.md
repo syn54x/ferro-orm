@@ -243,11 +243,19 @@ auto-migrate refuses the conversion and warns — keep with
 
 ## What about the deprecated v0.12 surfaces?
 
-[Migrating to v0.12.0](migrating-to-v0-12-0.md) announced that operator-style
-predicates, implicit default-connection routing, and the private Alembic
-helpers are planned for removal in `v0.14.0`. That removal is tracked
-separately and may ship in a later release — but the warnings still mean what
-they say. If you have not migrated yet, do it now:
+[Migrating to v0.12.0](migrating-to-v0-12-0.md) announced three removals
+planned for `v0.14.0`. Their status:
+
+- **Operator-style predicates and `col()` are removed.** `where()` now
+  accepts only lambda predicates (`where(lambda user: user.age >= 18)`).
+  Class attributes are no longer replaced with `FieldProxy` — accessing
+  `Model.field` at class scope raises `AttributeError` under normal Pydantic
+  semantics. See [Typed Query Predicates](../concepts/query-typing.md).
+- **Implicit default-connection routing** and **the private Alembic
+  helpers** (`_build_sa_table`, `_map_to_sa_type`) remain deprecated but
+  present; their removal is tracked separately and may ship in a later
+  release — the warnings still mean what they say. If you have not migrated
+  those call sites yet, do it now:
 
 ```bash
 uv run pytest -W error::DeprecationWarning

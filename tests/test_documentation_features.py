@@ -463,13 +463,13 @@ async def test_order_by(db_url):
         await DocUser.create(username="bob", email="bob@example.com")
 
         # Ascending
-        users_asc = await DocUser.select().order_by(DocUser.username, "asc").all()
+        users_asc = await DocUser.select().order_by("username", "asc").all()
         assert users_asc[0].username == "alice"
         assert users_asc[1].username == "bob"
         assert users_asc[2].username == "charlie"
 
         # Descending
-        users_desc = await DocUser.select().order_by(DocUser.username, "desc").all()
+        users_desc = await DocUser.select().order_by("username", "desc").all()
         assert users_desc[0].username == "charlie"
 
 
@@ -482,11 +482,11 @@ async def test_limit_and_offset(db_url):
             await DocUser.create(username=f"user_{i}", email=f"user{i}@example.com")
 
         # Limit
-        first_5 = await DocUser.select().order_by(DocUser.id).limit(5).all()
+        first_5 = await DocUser.select().order_by("id").limit(5).all()
         assert len(first_5) == 5
 
         # Offset
-        skip_5 = await DocUser.select().order_by(DocUser.id).offset(5).limit(5).all()
+        skip_5 = await DocUser.select().order_by("id").offset(5).limit(5).all()
         assert len(skip_5) == 5
         assert skip_5[0].id != first_5[0].id
 

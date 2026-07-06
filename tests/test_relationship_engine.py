@@ -180,7 +180,7 @@ def test_metadata_discovery():
     """Verify that the Metaclass finds ForeignKey and BackRef annotations."""
     # Before resolution
     assert "author" in Post.ferro_relations
-    assert Post.author_id is not None  # FieldProxy
+    assert "author_id" in Post.__ferro_query_columns__  # shadow FK column
 
     # After resolution
     from ferro.relations import resolve_relationships

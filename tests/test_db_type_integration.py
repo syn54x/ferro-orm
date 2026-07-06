@@ -266,7 +266,7 @@ async def test_strenum_text_storage_round_trip(db_url):
         assert fetched is not None
         assert fetched.format == _FileFormat.JSON
 
-        updated = await TextFormatDoc.where(TextFormatDoc.id == created.id).update(
+        updated = await TextFormatDoc.where(lambda d: d.id == created.id).update(
             format=_FileFormat.PDF
         )
         assert updated == 1

@@ -126,3 +126,26 @@ class TestOrderByValidation:
 
         with pytest.raises(ValueError, match="asc"):
             ObUser6.select().order_by("id", "sideways")
+
+
+class TestOperatorSurfaceRemoved:
+    def test_class_attribute_is_not_a_field_proxy(self):
+        class RmUser(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            age: int = 0
+
+        with pytest.raises(AttributeError):
+            RmUser.age  # normal Pydantic v2 class-attribute semantics restored
+
+    def test_col_is_gone(self):
+        with pytest.raises(ImportError):
+            from ferro.query import col  # noqa: F401
+
+    def test_where_rejects_raw_query_node(self):
+        from ferro.query import QueryNode
+
+        class RmUser2(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+        with pytest.raises(TypeError, match="predicate callable"):
+            RmUser2.where(QueryNode("id", "==", 1))

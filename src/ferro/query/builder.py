@@ -4,12 +4,6 @@ import copy
 from typing import TYPE_CHECKING, Any, Callable, Generic, Self, Type, TypeVar, overload
 
 from .._bind_payload import update_bind_payload
-from .._deprecations import (
-    IR_FIRST_DEPRECATION_REMOVE_IN,
-    IR_FIRST_DEPRECATION_SINCE,
-    IR_FIRST_MIGRATION_GUIDE_PREDICATES,
-    deprecated,
-)
 from .._core import (
     add_m2m_links,
     clear_m2m_links,
@@ -19,11 +13,17 @@ from .._core import (
     remove_m2m_links,
     update_filtered,
 )
-from .nodes import FieldProxy, QueryNode, QueryProxy, _serialize_query_value, validate_query_column
+from .nodes import (
+    FieldProxy,
+    Predicate,
+    QueryNode,
+    QueryProxy,
+    _serialize_query_value,
+    validate_query_column,
+)
 
 if TYPE_CHECKING:
     from .._core import RouteHandle
-    from .nodes import Predicate
 
 T = TypeVar("T")
 E = TypeVar("E")
@@ -42,42 +42,20 @@ def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
     )
 
 
-@deprecated(
-    reason=(
-        "Operator predicate style (Model.field OP value) is deprecated; use lambda "
-        "predicates (`where(lambda user: ...)`) or col(Model.field) instead."
-    ),
-    since=IR_FIRST_DEPRECATION_SINCE,
-    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
-    reference=IR_FIRST_MIGRATION_GUIDE_PREDICATES,
-)
-def _deprecated_operator_query_node(node: QueryNode) -> QueryNode:
-    return node
-
-
-def _resolve_where_node(node: Any, model_cls: type) -> QueryNode:
-    """Normalize a ``where`` argument into a ``QueryNode``.
-
-    Accepts an existing ``QueryNode`` directly (the operator and ``col()``
-    paths) or a predicate callable that takes a ``QueryProxy`` and returns
-    a ``QueryNode`` (the lambda path).
-    """
-    if isinstance(node, QueryNode):
-        if node.uses_operator_style():
-            return _deprecated_operator_query_node(node)
-        return node
-    if callable(node):
-        result = node(QueryProxy(model_cls))
-        if not isinstance(result, QueryNode):
-            raise TypeError(
-                "where() predicate callable must return QueryNode, "
-                f"got {type(result).__name__}"
-            )
-        return result
-    raise TypeError(
-        "where() expected QueryNode or predicate callable, "
-        f"got {type(node).__name__}"
-    )
+def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNode:
+    """Evaluate a lambda predicate against a validating ``QueryProxy``."""
+    if not callable(predicate):
+        raise TypeError(
+            "where() expected a predicate callable "
+            f"(e.g. `lambda user: user.age >= 18`), got {type(predicate).__name__}"
+        )
+    result = predicate(QueryProxy(model_cls))
+    if not isinstance(result, QueryNode):
+        raise TypeError(
+            "where() predicate callable must return QueryNode, "
+            f"got {type(result).__name__}"
+        )
+    return result
 
 
 class Query(Generic[T]):
@@ -147,38 +125,28 @@ class Query(Generic[T]):
         }
         return new
 
-    @overload
-    def where(self, node: "QueryNode") -> Self: ...
-
-    @overload
-    def where(self, node: "Predicate[T]") -> Self: ...
-
-    def where(self, node: "QueryNode | Predicate[T]") -> Self:
+    def where(self, predicate: "Predicate[T]") -> Self:
         """Add a filter condition to the query.
 
-        The recommended style is a lambda predicate of shape
-        ``Callable[[QueryProxy[T]], QueryNode]``. The lambda receives a
-        fresh :class:`QueryProxy` whose attributes return
-        :class:`FieldProxy` instances, so ``lambda user: user.archived == False``
-        builds a comparison without static-typing friction. A prebuilt
-        :class:`QueryNode` is also accepted, built either with
-        :func:`ferro.query.col` (the type-safe escape hatch that preserves
-        operator shape) or with operator syntax on class attributes. The
-        bare operator form (``User.where(User.age >= 18)``) is deprecated and
-        on the v0.14.0 removal track. It does not
-        type-check statically:
-        the class attribute types as the field type, so the comparison
-        resolves to ``bool``, not ``QueryNode``.
+        ``predicate`` is a lambda of shape ``Callable[[QueryProxy[T]], QueryNode]``.
+        The lambda receives a fresh :class:`QueryProxy` whose attributes
+        return :class:`FieldProxy` instances, so
+        ``lambda user: user.archived == False`` builds a comparison. Column
+        names are validated at build time against the model's declared
+        fields (plus shadow ``{fk}_id`` columns): a misspelled column raises
+        ``AttributeError`` naming the closest valid match, before any query
+        is sent to the database.
 
         Args:
-            node: A predicate callable or a ``QueryNode``.
+            predicate: A callable that takes a :class:`QueryProxy` and
+                returns a :class:`QueryNode`.
 
         Returns:
             A new ``Query`` with the clause added; ``self`` is unchanged.
 
         Raises:
-            TypeError: If ``node`` is neither a ``QueryNode`` nor a callable,
-                or if the callable does not return a ``QueryNode``.
+            TypeError: If ``predicate`` is not callable, or if it does not
+                return a ``QueryNode``.
 
         Examples:
             >>> q1 = User.where(lambda user: user.archived == False)  # noqa: E712
@@ -187,7 +155,7 @@ class Query(Generic[T]):
             True
         """
         new = self._clone()
-        new.where_clause.append(_resolve_where_node(node, self.model_cls))
+        new.where_clause.append(_resolve_where_node(predicate, self.model_cls))
         return new
 
     def order_by(
@@ -387,7 +355,7 @@ class Query(Generic[T]):
             A model instance or None.
 
         Examples:
-            >>> user = await User.select().order_by(User.id).first()
+            >>> user = await User.select().order_by("id").first()
             >>> user is None or isinstance(user, User)
             True
         """

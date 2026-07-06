@@ -153,7 +153,7 @@ async def test_uuid_pk_round_trips_through_bind_layer(db_url):
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
 async def test_uuid_pk_filter_by_string_does_not_send_text(db_url):
-    """`Profile.where(Profile.id == str(uuid))` on a UUID PK does not
+    """`Profile.where(lambda p: p.id == str(uuid))` on a UUID PK does not
     fail with ``operator does not exist: uuid = text``.
 
     Same root cause as ``test_uuid_pk_round_trips_through_bind_layer``,
@@ -172,11 +172,11 @@ async def test_uuid_pk_filter_by_string_does_not_send_text(db_url):
         target = uuid.uuid4()
         await UuidProfile.create(id=target, name="alice")
 
-        matched_str = await UuidProfile.where(UuidProfile.id == str(target)).first()
+        matched_str = await UuidProfile.where(lambda p: p.id == str(target)).first()
         assert matched_str is not None
         assert matched_str.name == "alice"
 
-        matched_uuid = await UuidProfile.where(UuidProfile.id == target).first()
+        matched_uuid = await UuidProfile.where(lambda p: p.id == target).first()
         assert matched_uuid is not None
         assert matched_uuid.name == "alice"
 
@@ -247,7 +247,7 @@ async def test_update_to_none_succeeds_on_postgres(db_url):
     async with ferro.engines.session():
 
         row = await Mixed.create(count=99, active=True, name="initial")
-        updated = await Mixed.where(Mixed.id == row.id).update(
+        updated = await Mixed.where(lambda m: m.id == row.id).update(
             count=None, active=None, name=None
         )
         assert updated == 1
@@ -278,7 +278,7 @@ async def test_update_to_none_executes_without_error(db_url):
     async with ferro.engines.session():
 
         row = await Mixed.create(count=99)
-        updated = await Mixed.where(Mixed.id == row.id).update(count=None)
+        updated = await Mixed.where(lambda m: m.id == row.id).update(count=None)
         assert updated == 1
 
 
@@ -300,11 +300,11 @@ async def test_filter_by_none_does_not_reproduce_38(db_url):
         with_value = await Filterable.create(count=1)
         null_row = await Filterable.create()  # count = None
 
-        matched_null = await Filterable.where(Filterable.count == None).all()  # noqa: E711
+        matched_null = await Filterable.where(lambda f: f.count == None).all()  # noqa: E711
         assert len(matched_null) == 1
         assert matched_null[0].id == null_row.id
 
-        matched_non_null = await Filterable.where(Filterable.count != None).all()  # noqa: E711
+        matched_non_null = await Filterable.where(lambda f: f.count != None).all()  # noqa: E711
         assert len(matched_non_null) == 1
         assert matched_non_null[0].id == with_value.id
 
@@ -390,7 +390,7 @@ async def test_temporal_update_to_none_uses_unified_codec_path(db_url):
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         row = await TemporalUpdate.create(attached_at=datetime.now(UTC))
-        updated = await TemporalUpdate.where(TemporalUpdate.id == row.id).update(attached_at=None)
+        updated = await TemporalUpdate.where(lambda t: t.id == row.id).update(attached_at=None)
         assert updated == 1
 
         fetched = await TemporalUpdate.get(row.id)

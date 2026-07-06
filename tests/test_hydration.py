@@ -139,7 +139,7 @@ async def test_hydration_slots_match_across_get_all_and_first(db_url):
 
         by_get = await SlotPathUser.get(1)
         by_all = (await SlotPathUser.all())[0]
-        by_first = await SlotPathUser.where(SlotPathUser.id == 1).first()
+        by_first = await SlotPathUser.where(lambda u: u.id == 1).first()
         assert by_get is not None
         assert by_first is not None
 

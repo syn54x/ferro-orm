@@ -45,54 +45,30 @@ Both methods also exist on `Model.using("name")` for [named connections](connect
 
 `Model.select()` starts an unfiltered query — useful when you only want ordering, slicing, or a count.
 
-## Predicate Styles
+## Predicate Style
 
-`where()` accepts three predicate styles. **Lambda predicates are the officially recommended style** — use them for all new code. The other two exist for compatibility and share the same runtime path, so you can mix them within a single chain.
+`where()` accepts a lambda predicate — a callable that receives a query proxy and returns a comparison. The proxy's attributes are validated against your model's columns at build time (a misspelled column raises `AttributeError` naming the closest match, before any query reaches the database):
 
-=== "Lambda (recommended)"
+```python
+--8<-- "docs/examples/predicates.py:lambda-style"
+```
 
-    The official style. Write the predicate against a query proxy — fully type-checked, works for every column and operator:
-
-    ```python
-    --8<-- "docs/examples/predicates.py:lambda-style"
-    ```
-
-=== "col()"
-
-    Wrap one attribute in `col()` to keep the operator shape while staying type-safe (it statically narrows to the runtime `FieldProxy` type):
-
-    ```python
-    --8<-- "docs/examples/predicates.py:col-style"
-    ```
-
-=== "Operator"
-
-    Compare class attributes directly — the original style:
-
-    ```python
-    --8<-- "docs/examples/predicates.py:operator-style"
-    ```
-
-    !!! warning "Operator style is deprecated"
-        The operator style is compatible today but on the `v0.14.0` removal track. It is also incompatible with static type checkers (ty, mypy, Pyright): they see `User.age >= 18` as a `bool` from your Pydantic annotations, while `where()` expects a `QueryNode | Predicate`. Prefer the lambda style.
-        See [Migrating to v0.12.0](../howto/migrating-to-v0-12-0.md) for the compatibility-window migration checklist.
-
-Lambda predicates keep the call site fully type-checked because the proxy's attributes are real `FieldProxy` objects in the type checker's eyes, not your Pydantic annotations. Reach for `col()` only when you want to preserve the operator shape on a single attribute. See [Typed Query Predicates](../concepts/query-typing.md) for the full reasoning.
+Lambda predicates keep the call site fully type-checked: the proxy's attributes are real `FieldProxy` objects in the type checker's eyes, not your Pydantic annotations. See [Typed Query Predicates](../concepts/query-typing.md) for the full reasoning.
 
 ## Operators
 
 | Python | SQL | Example |
 | :--- | :--- | :--- |
-| `==` | `=` | `User.role == "admin"` |
-| `!=` | `!=` | `User.role != "admin"` |
-| `>` | `>` | `User.age > 18` |
-| `>=` | `>=` | `User.age >= 21` |
-| `<` | `<` | `User.age < 100` |
-| `<=` | `<=` | `User.age <= 65` |
-| `.like(pattern)` | `LIKE` | `User.name.like("a%")` |
-| `.in_(values)` | `IN` | `User.role.in_(["admin", "moderator"])` |
-| `== None` | `IS NULL` | `User.deleted_at == None` |
-| `!= None` | `IS NOT NULL` | `User.deleted_at != None` |
+| `==` | `=` | `lambda user: user.role == "admin"` |
+| `!=` | `!=` | `lambda user: user.role != "admin"` |
+| `>` | `>` | `lambda user: user.age > 18` |
+| `>=` | `>=` | `lambda user: user.age >= 21` |
+| `<` | `<` | `lambda user: user.age < 100` |
+| `<=` | `<=` | `lambda user: user.age <= 65` |
+| `.like(pattern)` | `LIKE` | `lambda user: user.name.like("a%")` |
+| `.in_(values)` | `IN` | `lambda user: user.role.in_(["admin", "moderator"])` |
+| `== None` | `IS NULL` | `lambda user: user.deleted_at == None` |
+| `!= None` | `IS NOT NULL` | `lambda user: user.deleted_at != None` |
 
 ```python
 --8<-- "docs/examples/predicates.py:operators"
@@ -107,11 +83,11 @@ Combine predicates with `&` (AND) and `|` (OR), or chain multiple `.where()` cal
 ```
 
 !!! warning "Always parenthesize `&` and `|` operands"
-    Python's `&` and `|` bind tighter than comparison operators, so `User.age < 18 | User.archived == True` parses as `User.age < (18 | User.archived) == True` — not what you meant. Wrap each condition in parentheses: `(User.age < 18) | (User.archived == True)`.
+    Python's `&` and `|` bind tighter than comparison operators, so `user.age < 18 | user.archived == True` parses as `user.age < (18 | user.archived) == True` — not what you meant. Wrap each condition in parentheses: `(user.age < 18) | (user.archived == True)`.
 
 ## Ordering, Limit & Offset
 
-Sort with `.order_by(field, direction)` (direction defaults to ascending; pass `"desc"` to reverse) and slice with `.limit()` / `.offset()`. Unlike `where()`, `order_by` is not a predicate: pass the column attribute itself (`User.age`), not a lambda. Its parameter is typed `Any`, so it raises no type-checker friction:
+Sort with `.order_by(field, direction)` (direction defaults to ascending; pass `"desc"` to reverse) and slice with `.limit()` / `.offset()`. `field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time:
 
 ```python
 --8<-- "docs/examples/predicates.py:ordering-slicing"
@@ -151,7 +127,7 @@ Reverse relations (`BackRef`) are chainable queries themselves — filter, order
 
 ```python
 published = await author.posts.where(lambda post: post.published == True).all()  # noqa: E712
-latest = await author.posts.order_by(Post.created_at, "desc").limit(5).all()
+latest = await author.posts.order_by(lambda post: post.created_at, "desc").limit(5).all()
 n = await author.posts.count()
 ```
 

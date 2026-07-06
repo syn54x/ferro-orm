@@ -103,7 +103,7 @@ async def test_relationships_loaded_inside_transaction_inherit_transaction(db_ur
 
         reloaded_student = await TxRelationStudent.get(1)
         assert reloaded_student is not None
-        courses = await reloaded_student.courses.order_by(TxRelationCourse.id).all()
+        courses = await reloaded_student.courses.order_by("id").all()
         assert [course.label for course in courses] == ["course-a", "course-b"]
 
 
@@ -256,8 +256,8 @@ async def test_transaction_commit(db_url):
             await TxUser.create(username="bob")
 
         # Verify both exist
-        assert await TxUser.where(TxUser.username == "alice").exists()
-        assert await TxUser.where(TxUser.username == "bob").exists()
+        assert await TxUser.where(lambda u: u.username == "alice").exists()
+        assert await TxUser.where(lambda u: u.username == "bob").exists()
 
 
 @pytest.mark.asyncio
@@ -279,7 +279,7 @@ async def test_transaction_rollback(db_url):
             pass
 
         # Verify charlie DOES NOT exist
-        assert not await TxUser.where(TxUser.username == "charlie").exists()
+        assert not await TxUser.where(lambda u: u.username == "charlie").exists()
 
 
 @pytest.mark.asyncio
@@ -299,7 +299,7 @@ async def test_transaction_atomicity(db_url):
         try:
             async with transaction():
                 # Update dave
-                dave = await TxUser.where(TxUser.username == "dave").first()
+                dave = await TxUser.where(lambda u: u.username == "dave").first()
                 dave.username = "dave_updated"
                 await dave.save()
 
@@ -316,10 +316,10 @@ async def test_transaction_atomicity(db_url):
 
         evict_instance("TxUser", "1")
 
-        dave_check = await TxUser.where(TxUser.username == "dave").first()
+        dave_check = await TxUser.where(lambda u: u.username == "dave").first()
         assert dave_check is not None
         assert dave_check.username == "dave"
-        assert not await TxUser.where(TxUser.username == "eve").exists()
+        assert not await TxUser.where(lambda u: u.username == "eve").exists()
 
 
 @pytest.mark.asyncio
@@ -344,8 +344,8 @@ async def test_nested_transaction_rolls_back_with_outer(db_url):
         except RuntimeError:
             pass
 
-        assert not await TxUser.where(TxUser.username == "outer").exists()
-        assert not await TxUser.where(TxUser.username == "inner").exists()
+        assert not await TxUser.where(lambda u: u.username == "outer").exists()
+        assert not await TxUser.where(lambda u: u.username == "inner").exists()
 
 
 @pytest.mark.asyncio
@@ -369,8 +369,8 @@ async def test_bulk_create_participates_in_transaction(db_url):
         except RuntimeError:
             pass
 
-        assert not await TxUser.where(TxUser.username == "bulk_a").exists()
-        assert not await TxUser.where(TxUser.username == "bulk_b").exists()
+        assert not await TxUser.where(lambda u: u.username == "bulk_a").exists()
+        assert not await TxUser.where(lambda u: u.username == "bulk_b").exists()
 
 
 @pytest.mark.asyncio
@@ -396,6 +396,6 @@ async def test_nested_transaction_inner_rollback_allows_outer_commit(db_url):
 
             await TxUser.create(username="outer_after")
 
-        assert await TxUser.where(TxUser.username == "outer_before").exists()
-        assert await TxUser.where(TxUser.username == "outer_after").exists()
-        assert not await TxUser.where(TxUser.username == "inner").exists()
+        assert await TxUser.where(lambda u: u.username == "outer_before").exists()
+        assert await TxUser.where(lambda u: u.username == "outer_after").exists()
+        assert not await TxUser.where(lambda u: u.username == "inner").exists()

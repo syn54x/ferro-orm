@@ -27,7 +27,7 @@ from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyRelation
 from .fields import FERRO_FIELD_EXTRA_KEY
 from .ir import compile_model_schema_ir
-from .query import FieldProxy, Relation
+from .query import Relation
 from .relations.descriptors import ForwardDescriptor
 from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
@@ -83,7 +83,7 @@ class ModelMetaclass(type(BaseModel)):
         for field_name, metadata in pending_relations:
             _PENDING_RELATIONS.append((cls.__ferro_identity__, field_name, metadata))
 
-        mcs._register_model_and_proxies(cls, cls.__ferro_identity__, local_relations)
+        mcs._register_model(cls, cls.__ferro_identity__, local_relations)
         ferro_fields = mcs._parse_ferro_field_metadata(cls)
         cls.ferro_fields = ferro_fields
         mcs._validate_db_type_options(cls, ferro_fields)
@@ -403,9 +403,9 @@ class ModelMetaclass(type(BaseModel)):
             del namespace["__annotate_func__"]
 
     @staticmethod
-    def _register_model_and_proxies(cls, identity: str, local_relations: dict) -> None:
+    def _register_model(cls, identity: str, local_relations: dict) -> None:
         """
-        Register model in global registry and inject FieldProxy for query building.
+        Register model in global registry and compute its queryable-column set.
 
         Raises:
             RuntimeError: When a *distinct* model already claims this model's
@@ -434,10 +434,6 @@ class ModelMetaclass(type(BaseModel)):
             if isinstance(metadata, ForeignKey)
         }
         cls.__ferro_query_columns__ = frozenset(cls.model_fields) | shadow_fk_columns
-
-        # Inject FieldProxy for each field to enable operator overloading on the class
-        for field_name in cls.model_fields:
-            setattr(cls, field_name, FieldProxy(field_name))
 
     @staticmethod
     def _parse_ferro_field_metadata(cls) -> dict[str, FerroField]:
@@ -588,9 +584,6 @@ class ModelMetaclass(type(BaseModel)):
         """
         for field_name, metadata in local_relations.items():
             if isinstance(metadata, ForeignKey):
-                id_field_name = f"{field_name}_id"
-                setattr(cls, id_field_name, FieldProxy(id_field_name))
-
                 target_name = (
                     metadata.to
                     if isinstance(metadata.to, str)

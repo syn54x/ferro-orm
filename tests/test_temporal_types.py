@@ -64,12 +64,12 @@ async def test_temporal_filtering(db_url):
 
         # Filter for future events
         future_events = await TemporalModel.where(
-            TemporalModel.occurred_at > now
+            lambda m: m.occurred_at > now
         ).all()
         assert len(future_events) == 1
         assert future_events[0].occurred_at.year == 2030
 
         # Filter for past events
-        past_events = await TemporalModel.where(TemporalModel.occurred_at < now).all()
+        past_events = await TemporalModel.where(lambda m: m.occurred_at < now).all()
         assert len(past_events) == 1
         assert past_events[0].occurred_at.year == 2020

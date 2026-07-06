@@ -4,7 +4,6 @@ import asyncio
 
 # --8<-- [start:setup]
 from ferro import Field, Model, connect, engines
-from ferro.query import col
 
 
 class User(Model):
@@ -34,17 +33,6 @@ async def main() -> None:
         # --8<-- [end:filtering]
         assert len(adults) == 3
 
-        # --8<-- [start:operator-style]
-        # Deprecated path (planned removal: v0.14.0).
-        adults = await User.where(User.age >= 18).all()
-        # --8<-- [end:operator-style]
-        assert len(adults) == 3
-
-        # --8<-- [start:col-style]
-        active = await User.where(col(User.archived) == False).all()  # noqa: E712
-        # --8<-- [end:col-style]
-        assert len(active) == 3
-
         # --8<-- [start:lambda-style]
         admins = await User.where(lambda user: (user.role == "admin") & (user.archived == False)).all()  # noqa: E712
         # --8<-- [end:lambda-style]
@@ -70,8 +58,10 @@ async def main() -> None:
         assert len(young_members) == 2
 
         # --8<-- [start:ordering-slicing]
-        oldest_first = await User.select().order_by(User.age, "desc").all()
-        second_page = await User.select().order_by(User.id).limit(2).offset(2).all()
+        oldest_first = await User.select().order_by(lambda user: user.age, "desc").all()
+        second_page = (
+            await User.select().order_by(lambda user: user.id).limit(2).offset(2).all()
+        )
         # --8<-- [end:ordering-slicing]
         assert oldest_first[0].name == "carol"
         assert len(second_page) == 2

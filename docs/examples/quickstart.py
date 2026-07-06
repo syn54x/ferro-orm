@@ -59,7 +59,7 @@ async def main() -> None:
         # Filter, order, and slice
         published = (
             await Post.where(lambda post: post.published == True)  # noqa: E712
-            .order_by(Post.created_at, "desc")
+            .order_by(lambda post: post.created_at, "desc")
             .limit(10)
             .all()
         )

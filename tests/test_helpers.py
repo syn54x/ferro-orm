@@ -42,11 +42,11 @@ async def test_exists_helper(db_url):
         await HelperUser.create(username="exists_check")
 
         assert (
-            await HelperUser.where(HelperUser.username == "exists_check").exists()
+            await HelperUser.where(lambda u: u.username == "exists_check").exists()
             is True
         )
         assert (
-            await HelperUser.where(HelperUser.username == "does_not_exist").exists()
+            await HelperUser.where(lambda u: u.username == "does_not_exist").exists()
             is False
         )
 
