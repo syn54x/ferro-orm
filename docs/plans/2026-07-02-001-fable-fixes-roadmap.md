@@ -327,38 +327,37 @@ eager loading) — build those on the post-F shape, not the current one.
 
 **Sub-tasks**
 
-- [ ] **F-1 — Immutable chaining.**
+- [x] **F-1 — Immutable chaining.**
       `where`/`order_by`/`limit`/`offset` return a new `Query`;
       `q2 = q1.where(...)` no longer mutates `q1`. `first()` stops temporarily
       mutating `self._limit`. Migration impact: **minor** (code that relied on
       aliasing is almost certainly buggy already; document).
-- [ ] **F-2 — Column-name validation at build time.**
+- [x] **F-2 — Column-name validation at build time.**
       `QueryProxy`/`order_by` validate attribute names against
       `model_fields` + shadow columns; `lambda user: user.nmae == 3` raises
       `AttributeError` naming valid columns. Deletes the documented
       "`order_by` lambda produces a junk column — never show it" trap by
       making it impossible.
-- [ ] **F-3 — Typed proxies via `@dataclass_transform`.**
+- [x] **F-3 — Typed proxies via `@dataclass_transform`.**
       Per-field `FieldProxy[T]` through the metaclass so
       `lambda user: user.age >= "x"` fails type-checking — the plumbing the
       nodes.py docstring already names as the real design.
-- [ ] **F-4 — Collapse `QueryDef` onto the IR types.**
+- [x] **F-4 — Collapse `QueryDef` onto the IR types.**
       `operations.rs`/`query.rs` consume `ferro_schema_ir::QueryNode` directly;
       delete the IR→legacy conversion layer (`query_node_from_ir`, the
       `QueryDef` shadow shapes). Prerequisite for extending the payload with
       projection/aggregation nodes without triple-editing.
-- [ ] **F-5 — Post-operator-style surface decision.**
+- [x] **F-5 — Post-operator-style surface decision.**
       Decide v1.0 `order_by` (string / lambda / `col()`); if `FieldProxy`
       class-attribute injection is no longer needed once operator style is
       removed (v0.14), delete it — restoring normal Pydantic class-attribute
       semantics (`User.age` stops being a `FieldProxy`).
-- [ ] **F-6 — Then, and only then: aggregations + partial selects** (the
-      existing public-roadmap items), designed as IR payload extensions with
-      hydration-ABI-aware partial materialization.
+- **F-6 — spun off**: aggregations + partial selects moved to their own epic
+      on the post-F shape (tracked separately; see the FF-F design doc §7).
 
 **Exit gate**
 
-- [ ] Builder is immutable; misspelled columns fail at build time; QueryIR is
+- [x] Builder is immutable; misspelled columns fail at build time; QueryIR is
       the only query shape in Rust (grep: no `struct QueryNode` outside the IR
       crate); typed-predicate static tests added to `test_static_contracts.py`.
 
