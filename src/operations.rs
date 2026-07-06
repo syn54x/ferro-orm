@@ -885,19 +885,7 @@ pub fn fetch_all<'py>(
         let table_name = schema.table_name.clone();
         // ... same sql generation ...
         let (sql, pk_col, schema_for_decode) = {
-            let mut pk = None;
-            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                for (col_name, col_info) in properties {
-                    if col_info
-                        .get("primary_key")
-                        .and_then(|pk| pk.as_bool())
-                        .unwrap_or(false)
-                    {
-                        pk = Some(col_name.clone());
-                        break;
-                    }
-                }
-            }
+            let pk = schema.meta.pk_col.clone();
             let mut stmt = Query::select();
             stmt.column((Alias::new(&table_name), sea_query::Asterisk));
             let s = sea_query_to_string_for_backend!(stmt.from(Alias::new(&table_name)), backend);
@@ -1022,21 +1010,11 @@ pub fn fetch_one<'py>(
         let table_name = schema.table_name.clone();
         // ... sql logic ...
         let (sql, bind_values, _pk_col_name, schema_for_decode) = {
-            let mut pk = None;
-            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                for (col_name, col_info) in properties {
-                    if col_info
-                        .get("primary_key")
-                        .and_then(|pk| pk.as_bool())
-                        .unwrap_or(false)
-                    {
-                        pk = Some(col_name.clone());
-                        break;
-                    }
-                }
-            }
-            let pk_name =
-                pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+            let pk_name = schema
+                .meta
+                .pk_col
+                .clone()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let mut stmt = Query::select();
             stmt.column((Alias::new(&table_name), sea_query::Asterisk));
             let no_enum_udt = HashMap::new();
