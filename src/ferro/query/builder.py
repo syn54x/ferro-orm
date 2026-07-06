@@ -1,6 +1,7 @@
 """Build fluent query objects that serialize QueryIR payloads for the Rust core."""
 
-from typing import TYPE_CHECKING, Any, Generic, Type, TypeVar, overload
+import copy
+from typing import TYPE_CHECKING, Any, Generic, Self, Type, TypeVar, overload
 
 from .._bind_payload import update_bind_payload
 from .._deprecations import (
@@ -115,25 +116,44 @@ class Query(Generic[T]):
 
         return resolve_operation_scope(using=self._using, session=self._session)
 
+    def _clone(self) -> Self:
+        """Return a copy of this query with no shared mutable state.
+
+        ``copy.copy`` preserves the concrete class (``Relation`` stays
+        ``Relation``); the mutable containers are then replaced so chained
+        queries never alias the originals (FF-F F-1).
+        """
+        new = copy.copy(self)
+        new.where_clause = list(self.where_clause)
+        new.order_by_clause = list(self.order_by_clause)
+        new._m2m_context = (
+            dict(self._m2m_context) if self._m2m_context is not None else None
+        )
+        return new
+
     def _m2m(
         self, join_table: str, source_col: str, target_col: str, source_id: Any
-    ) -> "Query[T]":
-        """Store many-to-many linkage context for relationship operations"""
-        self._m2m_context = {
+    ) -> Self:
+        """Store many-to-many linkage context for relationship operations.
+
+        A new ``Query`` with the m2m context set; ``self`` is unchanged.
+        """
+        new = self._clone()
+        new._m2m_context = {
             "join_table": join_table,
             "source_col": source_col,
             "target_col": target_col,
             "source_id": source_id,
         }
-        return self
+        return new
 
     @overload
-    def where(self, node: "QueryNode") -> "Query[T]": ...
+    def where(self, node: "QueryNode") -> Self: ...
 
     @overload
-    def where(self, node: "Predicate[T]") -> "Query[T]": ...
+    def where(self, node: "Predicate[T]") -> Self: ...
 
-    def where(self, node: "QueryNode | Predicate[T]") -> "Query[T]":
+    def where(self, node: "QueryNode | Predicate[T]") -> Self:
         """Add a filter condition to the query.
 
         The recommended style is a lambda predicate of shape
@@ -154,7 +174,7 @@ class Query(Generic[T]):
             node: A predicate callable or a ``QueryNode``.
 
         Returns:
-            The current Query instance for chaining.
+            A new ``Query`` with the clause added; ``self`` is unchanged.
 
         Raises:
             TypeError: If ``node`` is neither a ``QueryNode`` nor a callable,
@@ -166,10 +186,11 @@ class Query(Generic[T]):
             >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """
-        self.where_clause.append(_resolve_where_node(node))
-        return self
+        new = self._clone()
+        new.where_clause.append(_resolve_where_node(node))
+        return new
 
-    def order_by(self, field: Any, direction: str = "asc") -> "Query[T]":
+    def order_by(self, field: Any, direction: str = "asc") -> Self:
         """Add an ordering clause to the query
 
         Args:
@@ -177,7 +198,7 @@ class Query(Generic[T]):
             direction: The direction of the sort ("asc" or "desc").
 
         Returns:
-            The current Query instance for chaining.
+            A new ``Query`` with the clause added; ``self`` is unchanged.
 
         Raises:
             ValueError: If direction is not "asc" or "desc".
@@ -191,44 +212,47 @@ class Query(Generic[T]):
             raise ValueError("direction must be 'asc' or 'desc'")
 
         col_name = field.column if hasattr(field, "column") else str(field)
-        self.order_by_clause.append(
+        new = self._clone()
+        new.order_by_clause.append(
             {"column": col_name, "direction": direction.lower()}
         )
-        return self
+        return new
 
-    def limit(self, value: int) -> "Query[T]":
+    def limit(self, value: int) -> Self:
         """Limit the number of records returned
 
         Args:
             value: The maximum number of records to return.
 
         Returns:
-            The current Query instance for chaining.
+            A new ``Query`` with the clause added; ``self`` is unchanged.
 
         Examples:
             >>> query = User.select().limit(10)
             >>> query._limit
             10
         """
-        self._limit = value
-        return self
+        new = self._clone()
+        new._limit = value
+        return new
 
-    def offset(self, value: int) -> "Query[T]":
+    def offset(self, value: int) -> Self:
         """Skip a specific number of records
 
         Args:
             value: The number of records to skip.
 
         Returns:
-            The current Query instance for chaining.
+            A new ``Query`` with the clause added; ``self`` is unchanged.
 
         Examples:
             >>> query = User.select().offset(20)
             >>> query._offset
             20
         """
-        self._offset = value
-        return self
+        new = self._clone()
+        new._offset = value
+        return new
 
     def _mutating_query_def(self, operation: str) -> dict[str, Any]:
         """Build the QueryIR payload for a mutating operation (update/delete).
@@ -343,13 +367,8 @@ class Query(Generic[T]):
             >>> user is None or isinstance(user, User)
             True
         """
-        old_limit = self._limit
-        self._limit = 1
-        try:
-            results = await self.all()
-            return results[0] if results else None
-        finally:
-            self._limit = old_limit
+        results = await self.limit(1).all()
+        return results[0] if results else None
 
     async def delete(self) -> int:
         """Delete all records matching the current query
@@ -501,34 +520,6 @@ class Relation(Query[T]):
         >>> isinstance(posts, list)
         True
     """
-
-    def _m2m(
-        self, join_table: str, source_col: str, target_col: str, source_id: Any
-    ) -> "Relation[T]":
-        super()._m2m(join_table, source_col, target_col, source_id)
-        return self
-
-    @overload
-    def where(self, node: "QueryNode") -> "Relation[T]": ...
-
-    @overload
-    def where(self, node: "Predicate[T]") -> "Relation[T]": ...
-
-    def where(self, node: "QueryNode | Predicate[T]") -> "Relation[T]":
-        super().where(node)  # type: ignore[arg-type]
-        return self
-
-    def order_by(self, field: Any, direction: str = "asc") -> "Relation[T]":
-        super().order_by(field, direction)
-        return self
-
-    def limit(self, value: int) -> "Relation[T]":
-        super().limit(value)
-        return self
-
-    def offset(self, value: int) -> "Relation[T]":
-        super().offset(value)
-        return self
 
     # NOTE ON TYPING:
     #
