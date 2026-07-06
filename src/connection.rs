@@ -136,6 +136,21 @@ fn normalized_connection_name(name: Option<String>) -> PyResult<(String, bool)> 
     }
 }
 
+/// Builds the duplicate-connection error shared by the early fail-fast check
+/// and the authoritative insert-time check (FF-G G4b). Both sites must raise
+/// the same tailored message for a given `(connection_name, is_implicit_default)`
+/// pair so a race between the two checks can't surface inconsistent errors.
+fn duplicate_connection_error(connection_name: &str, is_implicit_default: bool) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(if is_implicit_default {
+        "A default connection is already registered. Pass name=\"...\" to \
+         register an additional named connection, or call reset_engine() \
+         first to tear down existing connections."
+            .to_string()
+    } else {
+        format!("Connection '{}' is already registered", connection_name)
+    })
+}
+
 fn shadow_runtime_enabled_from_env() -> bool {
     std::env::var("FERRO_SHADOW_RUNTIME")
         .map(|value| {
@@ -221,16 +236,12 @@ pub fn connect(
             .contains_key(&connection_name)
         {
             // FF-G G4b: a second unnamed connect() used to silently replace
-            // the default engine — a loud error, not a swallow (I-6).
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                if is_implicit_default {
-                    "A default connection is already registered. Pass name=\"...\" to \
-                     register an additional named connection, or call reset_engine() \
-                     first to tear down existing connections."
-                        .to_string()
-                } else {
-                    format!("Connection '{}' is already registered", connection_name)
-                },
+            // the default engine — a loud error, not a swallow (I-6). This is
+            // only a fail-fast shortcut to avoid wasted pool creation; the
+            // insert-time check below (under the write lock) is authoritative.
+            return Err(duplicate_connection_error(
+                &connection_name,
+                is_implicit_default,
             ));
         }
 
@@ -271,11 +282,17 @@ pub fn connect(
         let mut registry = CONNECTION_REGISTRY.write().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Connection Registry")
         })?;
-        if registry.contains_key(&connection_name) && !is_implicit_default {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Connection '{}' is already registered",
-                connection_name
-            )));
+        // Authoritative check: registration happens after pool creation (and
+        // optional auto-migrate), so two concurrent connect() calls for the
+        // same name can both pass the early fail-fast check above before
+        // either registers here. This check runs under the write lock and
+        // must not carry the implicit-default exemption, or the second
+        // caller would silently replace the default engine (FF-G G4b).
+        if registry.contains_key(&connection_name) {
+            return Err(duplicate_connection_error(
+                &connection_name,
+                is_implicit_default,
+            ));
         }
         registry.insert(connection_name.clone(), engine_handle.clone());
         drop(registry);

@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from contextlib import closing
 from typing import Annotated
@@ -27,6 +28,18 @@ def _ensure_models_registered():
 async def test_connection_smoke(db_url):
     """Test connecting to the configured backend."""
     await ferro.connect(db_url)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_unnamed_connects_one_wins_one_raises(db_url):
+    """G4b: two unnamed connect() racing must not silently replace the
+    default engine — exactly one registers, the other raises."""
+    results = await asyncio.gather(
+        ferro.connect(db_url), ferro.connect(db_url), return_exceptions=True
+    )
+    errors = [r for r in results if isinstance(r, Exception)]
+    assert len(errors) == 1
+    assert "already registered" in str(errors[0])
 
 
 @pytest.mark.asyncio

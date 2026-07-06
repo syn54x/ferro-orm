@@ -72,7 +72,10 @@ fn weakref_is_live(py: Python<'_>, weak: &Py<PyAny>) -> bool {
 /// sweeps and liveness checks call into Python while holding a shard guard,
 /// so a GIL-less thread blocking on that shard while the shard-holder waits
 /// for the GIL would deadlock. GIL-before-shard is the required lock order;
-/// this asserts it in debug builds (free in release).
+/// this asserts it in debug builds (free in release). pyo3-ffi hides
+/// `PyGILState_Check` behind `#[cfg(not(Py_LIMITED_API))]`, hence the local
+/// extern declaration below; the call itself sits under `debug_assert!`, so
+/// release abi3 wheels never reference the symbol.
 #[inline]
 fn debug_assert_gil_held() {
     // PyGILState_Check is a Python C API function that's available at runtime
