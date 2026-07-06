@@ -1267,6 +1267,7 @@ async def test_db_check_reconnect_is_idempotent(db_url):
     await connect(db_url, auto_migrate=True)
     # Second connect re-runs the create path against the existing schema —
     # this raised OperationalError before the idempotency fix.
+    reset_engine()  # G4b: a second unnamed connect() now raises; simulate a fresh process
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
 
