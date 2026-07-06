@@ -1,5 +1,6 @@
 """Define query AST nodes and field proxies for fluent filtering"""
 
+import difflib
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -368,30 +369,59 @@ def col(value: TField) -> "FieldProxy[TField]":
     return FieldProxy(value.column, predicate_style="col")  # type: ignore[return-value]
 
 
+def validate_query_column(model_cls: type, name: str) -> str:
+    """Validate a queryable column name at build time (FF-F F-2).
+
+    Raises:
+        AttributeError: If ``name`` is not a declared field or shadow
+            ``{fk}_id`` column of ``model_cls``. The message names the bad
+            column, suggests the closest valid one, and lists all valid
+            columns.
+    """
+    valid = getattr(model_cls, "__ferro_query_columns__", None)
+    if valid is None:
+        raise TypeError(
+            f"{model_cls!r} is not a registered Ferro model class; "
+            "query predicates require a Ferro Model."
+        )
+    if name in valid:
+        return name
+    close = difflib.get_close_matches(name, sorted(valid), n=1)
+    hint = f" Did you mean {close[0]!r}?" if close else ""
+    raise AttributeError(
+        f"{model_cls.__name__} has no queryable column {name!r}.{hint} "
+        f"Valid columns: {', '.join(sorted(valid))}."
+    )
+
+
 class QueryProxy(Generic[TModel]):
-    """Lazy attribute proxy used by lambda predicates passed to ``Query.where``.
+    """Validating attribute proxy passed to lambda predicates (FF-F F-2).
 
-    A fresh ``QueryProxy`` is constructed each time a lambda predicate is
-    evaluated. Any attribute access returns a :class:`FieldProxy` for the
-    accessed name, so ``lambda user: user.archived == False`` builds a
-    :class:`QueryNode` without ever asking the model class what type
-    ``archived`` is. The ``TModel`` type parameter exists so user-supplied
-    lambdas can name the proxy after the model (``user`` for ``User``) in
-    static analysis; the proxy itself ignores the parameter at runtime.
+    A fresh ``QueryProxy`` is constructed for the queried model each time a
+    lambda predicate is evaluated. Attribute access validates the name
+    against the model's queryable columns (declared fields plus shadow
+    ``{fk}_id`` columns) and returns a :class:`FieldProxy` — so
+    ``lambda user: user.archived == False`` builds a :class:`QueryNode`,
+    while ``lambda user: user.archievd == False`` raises ``AttributeError``
+    at build time naming the valid columns.
 
-    The proxy attribute return type is intentionally ``FieldProxy[Any]`` for
-    now — wiring per-field types through a lambda parameter requires
-    ``@dataclass_transform`` plumbing on the metaclass, which is outside this
-    feature's scope.
+    Attribute types are ``FieldProxy[Any]``: per-field static types for bare
+    lambda parameters require TypeScript-style mapped types, proposed for
+    Python in PEP 827 (draft, targeting 3.16) — adopted here when type
+    checkers support it.
 
     Examples:
         >>> rows = await User.where(lambda user: user.archived == False).all()  # noqa: E712
     """
 
-    __slots__ = ()
+    __slots__ = ("_model_cls",)
+
+    def __init__(self, model_cls: type) -> None:
+        self._model_cls = model_cls
 
     def __getattr__(self, name: str) -> "FieldProxy[Any]":
-        """Return a fresh ``FieldProxy`` for any attribute name."""
+        """Validate ``name`` and return a ``FieldProxy`` for it."""
+        validate_query_column(self._model_cls, name)
         return FieldProxy(name, predicate_style="lambda")
 
 

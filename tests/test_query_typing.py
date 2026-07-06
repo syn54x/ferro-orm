@@ -148,8 +148,13 @@ class TestLambdaPredicates:
             Query(LamUser).where(123)  # type: ignore[arg-type]  # ty: ignore[no-matching-overload]
 
     def test_query_proxy_attribute_returns_field_proxy(self):
-        """QueryProxy attribute access yields a FieldProxy at runtime."""
-        proxy = QueryProxy()
+        """QueryProxy attribute access yields a validated FieldProxy at runtime."""
+
+        class ProxyUser(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            archived: bool = False
+
+        proxy = QueryProxy(ProxyUser)
         f = proxy.archived
         assert isinstance(f, FieldProxy)
         assert f.column == "archived"
@@ -297,4 +302,4 @@ if TYPE_CHECKING:
 
     # Lambda predicates type-check as Predicate[Model]
     _pred: Predicate[_StaticUser] = lambda t: t.archived == False  # noqa: E712
-    assert_type(_pred(QueryProxy[_StaticUser]()), QueryNode)
+    assert_type(_pred(QueryProxy[_StaticUser](_StaticUser)), QueryNode)

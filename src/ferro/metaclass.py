@@ -426,6 +426,15 @@ class ModelMetaclass(type(BaseModel)):
         _MODEL_REGISTRY_PY[identity] = cls
         cls.ferro_relations = local_relations
 
+        # Queryable-column set for build-time predicate validation (FF-F F-2):
+        # declared fields plus the shadow {fk}_id columns.
+        shadow_fk_columns = {
+            f"{field_name}_id"
+            for field_name, metadata in local_relations.items()
+            if isinstance(metadata, ForeignKey)
+        }
+        cls.__ferro_query_columns__ = frozenset(cls.model_fields) | shadow_fk_columns
+
         # Inject FieldProxy for each field to enable operator overloading on the class
         for field_name in cls.model_fields:
             setattr(cls, field_name, FieldProxy(field_name))

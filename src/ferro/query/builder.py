@@ -55,7 +55,7 @@ def _deprecated_operator_query_node(node: QueryNode) -> QueryNode:
     return node
 
 
-def _resolve_where_node(node: Any) -> QueryNode:
+def _resolve_where_node(node: Any, model_cls: type) -> QueryNode:
     """Normalize a ``where`` argument into a ``QueryNode``.
 
     Accepts an existing ``QueryNode`` directly (the operator and ``col()``
@@ -67,7 +67,7 @@ def _resolve_where_node(node: Any) -> QueryNode:
             return _deprecated_operator_query_node(node)
         return node
     if callable(node):
-        result = node(QueryProxy())
+        result = node(QueryProxy(model_cls))
         if not isinstance(result, QueryNode):
             raise TypeError(
                 "where() predicate callable must return QueryNode, "
@@ -187,7 +187,7 @@ class Query(Generic[T]):
             True
         """
         new = self._clone()
-        new.where_clause.append(_resolve_where_node(node))
+        new.where_clause.append(_resolve_where_node(node, self.model_cls))
         return new
 
     def order_by(self, field: Any, direction: str = "asc") -> Self:
