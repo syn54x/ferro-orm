@@ -136,6 +136,21 @@ fn normalized_connection_name(name: Option<String>) -> PyResult<(String, bool)> 
     }
 }
 
+/// Builds the duplicate-connection error shared by the early fail-fast check
+/// and the authoritative insert-time check (FF-G G4b). Both sites must raise
+/// the same tailored message for a given `(connection_name, is_implicit_default)`
+/// pair so a race between the two checks can't surface inconsistent errors.
+fn duplicate_connection_error(connection_name: &str, is_implicit_default: bool) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(if is_implicit_default {
+        "A default connection is already registered. Pass name=\"...\" to \
+         register an additional named connection, or call reset_engine() \
+         first to tear down existing connections."
+            .to_string()
+    } else {
+        format!("Connection '{}' is already registered", connection_name)
+    })
+}
+
 fn shadow_runtime_enabled_from_env() -> bool {
     std::env::var("FERRO_SHADOW_RUNTIME")
         .map(|value| {
@@ -172,12 +187,18 @@ async fn connect_engine_handle(
 ///         registered models on connection. Defaults to False.
 ///     migrate_updates (bool): If True, also adds missing model columns to
 ///         existing tables (and reconciles type/nullability drift on
-///         Postgres). Implies `auto_migrate`.
+///         Postgres). Implies `auto_migrate`. On Postgres each table's plan
+///         runs in one transaction (a mid-plan failure rolls that table
+///         back); SQLite applies statements one at a time.
 ///     migrate_destructive (bool): If True, also drops live columns that no
 ///         longer exist on the model. Implies `migrate_updates`.
 ///
 /// # Errors
 /// Returns a `PyErr` if the connection fails or if auto-migration fails.
+/// Also returns a `PyErr` (`ValueError`) if a connection with this name (or a
+/// default connection, when `name` is omitted) is already registered — call
+/// `reset_engine()` first or pass a distinct `name` to register an additional
+/// connection.
 #[pyfunction]
 #[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0, identity_map=true, migrate_updates=false, migrate_destructive=false))]
 #[allow(clippy::too_many_arguments)]
@@ -213,12 +234,15 @@ pub fn connect(
                 pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Connection Registry")
             })?
             .contains_key(&connection_name)
-            && !is_implicit_default
         {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Connection '{}' is already registered",
-                connection_name
-            )));
+            // FF-G G4b: a second unnamed connect() used to silently replace
+            // the default engine — a loud error, not a swallow (I-6). This is
+            // only a fail-fast shortcut to avoid wasted pool creation; the
+            // insert-time check below (under the write lock) is authoritative.
+            return Err(duplicate_connection_error(
+                &connection_name,
+                is_implicit_default,
+            ));
         }
 
         if let Some(ref search_path) = search_path
@@ -258,11 +282,17 @@ pub fn connect(
         let mut registry = CONNECTION_REGISTRY.write().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Connection Registry")
         })?;
-        if registry.contains_key(&connection_name) && !is_implicit_default {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Connection '{}' is already registered",
-                connection_name
-            )));
+        // Authoritative check: registration happens after pool creation (and
+        // optional auto-migrate), so two concurrent connect() calls for the
+        // same name can both pass the early fail-fast check above before
+        // either registers here. This check runs under the write lock and
+        // must not carry the implicit-default exemption, or the second
+        // caller would silently replace the default engine (FF-G G4b).
+        if registry.contains_key(&connection_name) {
+            return Err(duplicate_connection_error(
+                &connection_name,
+                is_implicit_default,
+            ));
         }
         registry.insert(connection_name.clone(), engine_handle.clone());
         drop(registry);

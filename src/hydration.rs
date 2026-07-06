@@ -1,13 +1,30 @@
 //! Zero-copy model hydration (AGENTS.md I-2).
 //!
 //! Builds Pydantic model instances by writing `__dict__` and required Pydantic slots directly,
-//! without calling `BaseModel.__init__`. The Rust core must initialize every slot in
-//! `BaseModel.__slots__` that `__init__` would set (`__pydantic_fields_set__`,
-//! `__pydantic_extra__`, `__pydantic_private__`).
+//! without calling `BaseModel.__init__`. The authoritative list of slots the Rust core
+//! initializes is [`HANDLED_BASEMODEL_SLOTS`]; an import-time guard
+//! (`verify_pydantic_slot_abi`) refuses to load if the installed pydantic's `BaseModel.__slots__`
+//! contains anything not in that list.
 
 use crate::state::RustValue;
 use pyo3::prelude::*;
 use std::collections::HashMap;
+
+/// Every `BaseModel.__slots__` entry the zero-copy hydrator accounts for.
+///
+/// Single source of truth for the hydration ABI (FF-G G1): the import-time
+/// guard (`verify_pydantic_slot_abi`) diffs live `BaseModel.__slots__`
+/// against this list, and `init_handled_slots` iterates it to initialize
+/// each slot — the guard and the hydrator cannot drift apart because they
+/// read the same const. A slot pydantic adds fails the guard at import; a
+/// slot added here without a matching initializer arm fails loudly on the
+/// first hydrate.
+pub(crate) const HANDLED_BASEMODEL_SLOTS: &[&str] = &[
+    "__dict__",
+    "__pydantic_fields_set__",
+    "__pydantic_extra__",
+    "__pydantic_private__",
+];
 
 /// Resolve a model's enum-typed fields to their Python enum classes.
 ///
@@ -32,27 +49,48 @@ pub fn enum_classes_for<'py>(
     out
 }
 
-/// Initialize Pydantic v2 hydration slots on a freshly allocated instance.
+/// Initialize every slot in [`HANDLED_BASEMODEL_SLOTS`] on a freshly
+/// allocated instance, mirroring `BaseModel.__init__` slot assignment.
 ///
-/// Mirrors `BaseModel.__init__` slot assignment so attribute access on hydrated instances
-/// matches conventionally constructed models.
-fn set_pydantic_hydration_slots<'py>(
+/// Driven by the const so the list and the initializers cannot drift: a
+/// listed slot with no match arm is a loud error, never a silent skip.
+fn init_handled_slots<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
     instance: &Bound<'py, PyAny>,
+    fields_set: &Bound<'py, pyo3::types::PySet>,
 ) -> PyResult<()> {
-    let model_config = cls.getattr(pyo3::intern!(py, "model_config"))?;
-    let extra_policy = model_config.call_method1(
-        pyo3::intern!(py, "get"),
-        (pyo3::intern!(py, "extra"), pyo3::intern!(py, "ignore")),
-    )?;
-    let extra_slot = if extra_policy.eq(pyo3::intern!(py, "allow"))? {
-        pyo3::types::PyDict::new(py).into_any().unbind()
-    } else {
-        py.None()
-    };
-    instance.setattr(pyo3::intern!(py, "__pydantic_extra__"), extra_slot)?;
-    instance.setattr(pyo3::intern!(py, "__pydantic_private__"), py.None())?;
+    for slot in HANDLED_BASEMODEL_SLOTS {
+        match *slot {
+            // Materialized by the field writes in `apply_decoded_fields`.
+            "__dict__" => {}
+            "__pydantic_fields_set__" => {
+                instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set)?;
+            }
+            "__pydantic_extra__" => {
+                let model_config = cls.getattr(pyo3::intern!(py, "model_config"))?;
+                let extra_policy = model_config.call_method1(
+                    pyo3::intern!(py, "get"),
+                    (pyo3::intern!(py, "extra"), pyo3::intern!(py, "ignore")),
+                )?;
+                let extra_slot = if extra_policy.eq(pyo3::intern!(py, "allow"))? {
+                    pyo3::types::PyDict::new(py).into_any().unbind()
+                } else {
+                    py.None()
+                };
+                instance.setattr(pyo3::intern!(py, "__pydantic_extra__"), extra_slot)?;
+            }
+            "__pydantic_private__" => {
+                instance.setattr(pyo3::intern!(py, "__pydantic_private__"), py.None())?;
+            }
+            other => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "HANDLED_BASEMODEL_SLOTS lists '{other}' but init_handled_slots has no \
+                     initializer for it — add a match arm"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -107,8 +145,7 @@ pub fn hydrate_model_instance<'py>(
         enum_classes,
     )?;
 
-    let _ = instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set);
-    set_pydantic_hydration_slots(py, cls, &instance)?;
+    init_handled_slots(py, cls, &instance, &fields_set)?;
     Ok(instance)
 }
 
@@ -196,4 +233,54 @@ pub fn refresh_model_instance<'py>(
     )?;
     instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set)?;
     Ok(())
+}
+
+/// Diff a class's `__slots__` against [`HANDLED_BASEMODEL_SLOTS`].
+///
+/// # Errors
+/// Returns a `PyErr` naming every unknown slot and the running pydantic
+/// version when the class declares a slot the hydrator does not initialize.
+fn verify_slots_handled(cls: &Bound<'_, PyAny>) -> PyResult<()> {
+    let py = cls.py();
+    let slots: Vec<String> = cls.getattr(pyo3::intern!(py, "__slots__"))?.extract()?;
+    let unknown: Vec<&str> = slots
+        .iter()
+        .map(String::as_str)
+        .filter(|slot| !HANDLED_BASEMODEL_SLOTS.contains(slot))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let version = py
+        .import("pydantic")
+        .and_then(|m| m.getattr("VERSION"))
+        .and_then(|v| v.extract::<String>())
+        .unwrap_or_else(|_| "unknown".to_string());
+    Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+        "ferro's zero-copy hydration does not know how to initialize pydantic BaseModel \
+         slot(s) {unknown:?} (pydantic {version}). This ferro build supports: \
+         {HANDLED_BASEMODEL_SLOTS:?}. Your pydantic version is likely newer than this \
+         ferro build supports — pin pydantic to a supported minor or upgrade ferro."
+    )))
+}
+
+/// Import-time hydration ABI guard (FF-G G1): refuse to load `_core` when
+/// pydantic's `BaseModel.__slots__` contains a slot the hydrator would leave
+/// uninitialized — a loud startup error instead of silent breakage on the
+/// next pydantic minor.
+///
+/// # Errors
+/// Returns a `PyErr` if pydantic cannot be imported or declares an unknown slot.
+pub(crate) fn verify_pydantic_slot_abi(py: Python<'_>) -> PyResult<()> {
+    let base_model = py.import("pydantic")?.getattr("BaseModel")?;
+    verify_slots_handled(&base_model)
+}
+
+/// Test-only: run the hydration ABI diff against an arbitrary class.
+///
+/// # Errors
+/// Returns a `PyErr` when the class declares a slot the hydrator does not handle.
+#[pyfunction]
+pub fn _verify_hydration_abi_for_test(cls: Bound<'_, PyAny>) -> PyResult<()> {
+    verify_slots_handled(&cls)
 }

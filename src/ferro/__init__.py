@@ -137,6 +137,13 @@ async def connect(
             - **SQLite**: type/nullability drift cannot be changed in place; ferro
               emits a ``UserWarning`` naming the column and pointing at Alembic.
               (SQLite's type affinity makes declared-type drift mostly cosmetic.)
+            - **Transactionality**: on Postgres each table's migration plan
+              runs inside a single transaction — a mid-plan failure rolls the
+              table back to exactly its pre-migration state. On SQLite,
+              statements apply one at a time; a mid-run failure can leave
+              earlier statements of that table applied (SQLite ALTERs are
+              single-statement operations). For transactional multi-step
+              SQLite migrations, use the Alembic bridge.
 
             After any schema change, the connection pool is refreshed so no cached
             statement can observe the pre-migration schema.
@@ -145,6 +152,11 @@ async def connect(
             ``migrate_updates``. Dropping is dependency-aware: explicit indexes
             covering the column are dropped first; columns that are primary keys or
             enforced by table constraints fail with a clear error instead.
+
+    Raises:
+        ValueError: A connection with this name (or a default connection,
+            when ``name`` is omitted) is already registered. Use ``name=...``
+            for additional connections or ``reset_engine()`` to tear down.
 
     For schema changes beyond these (renames, primary-key changes, complex
     transforms), use the Alembic bridge — see ``docs/guide/migrations.md``.

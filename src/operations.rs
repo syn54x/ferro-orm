@@ -66,11 +66,38 @@ fn weakref_is_live(py: Python<'_>, weak: &Py<PyAny>) -> bool {
         .unwrap_or(false)
 }
 
+/// Identity-map lock-order guard (FF-G G4c).
+///
+/// Every access to a session's `identity_map` DashMap must hold the GIL:
+/// sweeps and liveness checks call into Python while holding a shard guard,
+/// so a GIL-less thread blocking on that shard while the shard-holder waits
+/// for the GIL would deadlock. GIL-before-shard is the required lock order;
+/// this asserts it in debug builds (free in release). pyo3-ffi hides
+/// `PyGILState_Check` behind `#[cfg(not(Py_LIMITED_API))]`, hence the local
+/// extern declaration below; the call itself sits under `debug_assert!`, so
+/// release abi3 wheels never reference the symbol.
+#[inline]
+fn debug_assert_gil_held() {
+    // PyGILState_Check is a Python C API function that's available at runtime
+    // since we're running as a Python extension module. Declaration works via
+    // symbol lookup at runtime (Python is already loaded in the address space).
+    unsafe {
+        unsafe extern "C" {
+            fn PyGILState_Check() -> i32;
+        }
+        debug_assert!(
+            PyGILState_Check() == 1,
+            "identity-map access without the GIL — GIL-before-shard is the required lock order"
+        );
+    }
+}
+
 fn maybe_sweep(
     py: Python<'_>,
     map: &DashMap<(String, String, String), Py<PyAny>>,
     ops: &std::sync::atomic::AtomicUsize,
 ) {
+    debug_assert_gil_held();
     use std::sync::atomic::Ordering;
     if ops.fetch_add(1, Ordering::Relaxed) % IDENTITY_SWEEP_INTERVAL
         == IDENTITY_SWEEP_INTERVAL - 1
@@ -84,6 +111,7 @@ fn identity_map_get(
     session_id: Option<&str>,
     key: &(String, String, String),
 ) -> PyResult<Option<Py<PyAny>>> {
+    debug_assert_gil_held();
     // Sessionless operations have no identity map (FF-D Option B): nothing
     // is cached, so nothing can dedup — and nothing can go stale.
     let Some(session_id) = session_id else {
@@ -111,6 +139,7 @@ fn identity_map_insert(
     key: (String, String, String),
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
+    debug_assert_gil_held();
     // Sessionless operations have no identity map (FF-D Option B): no-op.
     let Some(session_id) = session_id else {
         return Ok(());
@@ -135,6 +164,7 @@ fn identity_map_insert(
 }
 
 fn identity_map_remove(session_id: Option<&str>, key: &(String, String, String)) -> PyResult<()> {
+    debug_assert_gil_held();
     let Some(session_id) = session_id else {
         return Ok(());
     };
@@ -144,6 +174,7 @@ fn identity_map_remove(session_id: Option<&str>, key: &(String, String, String))
 }
 
 fn identity_map_retain_model(session_id: Option<&str>, model_name: &str) -> PyResult<()> {
+    debug_assert_gil_held();
     let Some(session_id) = session_id else {
         return Ok(());
     };
@@ -155,6 +186,7 @@ fn identity_map_retain_model(session_id: Option<&str>, model_name: &str) -> PyRe
 }
 
 fn identity_map_clear(session_id: Option<&str>) -> PyResult<()> {
+    debug_assert_gil_held();
     let Some(session_id) = session_id else {
         return Ok(());
     };
@@ -167,6 +199,7 @@ fn identity_map_clear(session_id: Option<&str>) -> PyResult<()> {
 #[pyfunction]
 #[pyo3(signature = (session_id=None))]
 pub fn identity_map_len(py: Python<'_>, session_id: Option<String>) -> PyResult<usize> {
+    debug_assert_gil_held();
     // Sessionless operations have no identity map (FF-D Option B): always 0.
     let Some(session_id) = session_id else {
         return Ok(0);
@@ -771,7 +804,10 @@ pub fn rollback_transaction(
                 .map_err(|e| crate::errors::map_db_error("Failed to ROLLBACK", e))?;
         }
 
-        identity_map_clear(session_id.as_deref())?;
+        // Re-acquire the GIL before accessing identity map (async context has no GIL).
+        pyo3::Python::attach(|_py| {
+            identity_map_clear(session_id.as_deref())
+        })?;
         Ok(())
     })
 }
@@ -1336,12 +1372,14 @@ pub fn save_record<'py>(
                         .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                         .await
                         .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+                    // FF-G G4a: return the RETURNING value as decoded. A
+                    // non-positive id is a legitimate PK (sequence MINVALUE
+                    // <= 0); only a missing row / non-integer PK maps to None.
                     let id = rows
                         .first()
                         .and_then(|row| row.values.first())
-                        .and_then(|(_, value)| value.as_i64())
-                        .unwrap_or(0);
-                    Ok((id > 0).then_some(id))
+                        .and_then(|(_, value)| value.as_i64());
+                    Ok(id)
                 } else {
                     let exec_res = conn
                         .execute_sql_with_binds_result(&sql, &engine_bind_values)
@@ -1357,12 +1395,14 @@ pub fn save_record<'py>(
                         .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                         .await
                         .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+                    // FF-G G4a: return the RETURNING value as decoded. A
+                    // non-positive id is a legitimate PK (sequence MINVALUE
+                    // <= 0); only a missing row / non-integer PK maps to None.
                     let id = rows
                         .first()
                         .and_then(|row| row.values.first())
-                        .and_then(|(_, value)| value.as_i64())
-                        .unwrap_or(0);
-                    Ok((id > 0).then_some(id))
+                        .and_then(|(_, value)| value.as_i64());
+                    Ok(id)
                 } else {
                     let exec_res = engine
                         .execute_sql_with_binds_result(&sql, &engine_bind_values)
@@ -2039,8 +2079,11 @@ pub fn delete_filtered(
                 .map_err(|e| crate::errors::map_db_error("Delete failed", e))?;
 
         // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
+        // Re-acquire the GIL before accessing identity map (async context has no GIL).
         if engine.is_identity_map_enabled() {
-            identity_map_retain_model(session_id.as_deref(), &name)?;
+            pyo3::Python::attach(|_py| {
+                identity_map_retain_model(session_id.as_deref(), &name)
+            })?;
         }
 
         Ok(rows_affected)
@@ -2117,8 +2160,11 @@ pub fn update_filtered<'py>(
                 .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
 
         // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
+        // Re-acquire the GIL before accessing identity map (async context has no GIL).
         if engine.is_identity_map_enabled() {
-            identity_map_retain_model(session_id.as_deref(), &name)?;
+            pyo3::Python::attach(|_py| {
+                identity_map_retain_model(session_id.as_deref(), &name)
+            })?;
         }
 
         Ok(rows_affected)

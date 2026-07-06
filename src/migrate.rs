@@ -722,6 +722,31 @@ fn plan_existing_column(
     }
 }
 
+/// Render the `ALTER TABLE ... DROP COLUMN ...` DDL for one column drop.
+/// Shared by the SQLite path in [`execute_drop_column`] and the Postgres
+/// per-table transaction in [`internal_migrate`].
+fn render_drop_column_sql(table_lower: &str, col_name: &str) -> String {
+    format!(
+        "ALTER TABLE {} DROP COLUMN {}",
+        quote_ident(table_lower),
+        quote_ident(col_name)
+    )
+}
+
+/// Map a column-drop execution failure to a `PyErr` with a consistent,
+/// actionable message. Shared by the SQLite path in [`execute_drop_column`]
+/// and the Postgres per-table transaction in [`internal_migrate`].
+fn map_drop_column_error(table_lower: &str, col_name: &str, e: sqlx::Error) -> PyErr {
+    crate::errors::map_db_error(
+        &format!(
+            "Cannot drop column '{}.{}' (columns referenced by constraints, foreign \
+             keys, triggers, or views must be migrated with Alembic)",
+            table_lower, col_name
+        ),
+        e,
+    )
+}
+
 /// Drop one column, resolving SQLite index dependencies first.
 ///
 /// Explicit indexes covering the column are orphaned by its removal and are
@@ -765,21 +790,11 @@ async fn execute_drop_column(
         }
     }
 
-    let sql = format!(
-        "ALTER TABLE {} DROP COLUMN {}",
-        quote_ident(table_lower),
-        quote_ident(col_name)
-    );
-    engine.execute_sql_unprepared(&sql).await.map_err(|e| {
-        crate::errors::map_db_error(
-            &format!(
-                "Cannot drop column '{}.{}' (columns referenced by constraints, foreign \
-                 keys, triggers, or views must be migrated with Alembic)",
-                table_lower, col_name
-            ),
-            e,
-        )
-    })?;
+    let sql = render_drop_column_sql(table_lower, col_name);
+    engine
+        .execute_sql_unprepared(&sql)
+        .await
+        .map_err(|e| map_drop_column_error(table_lower, col_name, e))?;
     Ok(())
 }
 
@@ -845,21 +860,85 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
             continue;
         }
 
-        for sql in &plan.statements {
-            engine.execute_sql_unprepared(sql).await.map_err(|e| {
+        if backend == Dialect::Postgres {
+            // FF-G G3: Postgres DDL is transactional — run this table's whole
+            // plan in one transaction so a mid-plan failure leaves the table
+            // exactly as it was. Per-table, not whole-run: every table ends
+            // fully migrated or untouched, so a failed run is safely
+            // re-runnable. (SQLite keeps statement-at-a-time execution below;
+            // its scope is documented on connect()/migrate().)
+            let mut conn = engine.begin_transaction_connection().await.map_err(|e| {
                 crate::errors::map_db_error(
                     &format!(
-                        "Auto-migrate DDL failed for table '{}' (statement: {})",
-                        table_lower, sql
+                        "Auto-migrate failed to open a transaction for table '{}'",
+                        table_lower
                     ),
                     e,
                 )
             })?;
-            ddl_ran = true;
-        }
-        for col_name in &plan.drop_columns {
-            execute_drop_column(&engine, &table_lower, col_name, backend).await?;
-            ddl_ran = true;
+            let table_result: PyResult<()> = async {
+                for sql in &plan.statements {
+                    conn.execute_sql_unprepared(sql).await.map_err(|e| {
+                        crate::errors::map_db_error(
+                            &format!(
+                                "Auto-migrate DDL failed for table '{}' (statement: {})",
+                                table_lower, sql
+                            ),
+                            e,
+                        )
+                    })?;
+                }
+                for col_name in &plan.drop_columns {
+                    // Postgres needs no index pre-scan (that path is
+                    // SQLite-only in execute_drop_column).
+                    conn.execute_sql_unprepared(&render_drop_column_sql(&table_lower, col_name))
+                        .await
+                        .map_err(|e| map_drop_column_error(&table_lower, col_name, e))?;
+                }
+                Ok(())
+            }
+            .await;
+            match table_result {
+                Ok(()) => {
+                    conn.commit().await.map_err(|e| {
+                        crate::errors::map_db_error(
+                            &format!(
+                                "Auto-migrate failed to commit DDL for table '{}'",
+                                table_lower
+                            ),
+                            e,
+                        )
+                    })?;
+                    ddl_ran = true;
+                }
+                Err(err) => {
+                    if let Err(rollback_err) = conn.rollback().await {
+                        crate::log_debug(format!(
+                            "⚠️ Ferro Engine: rollback after failed migration of '{}' also \
+                             failed: {}",
+                            table_lower, rollback_err
+                        ));
+                    }
+                    return Err(err);
+                }
+            }
+        } else {
+            for sql in &plan.statements {
+                engine.execute_sql_unprepared(sql).await.map_err(|e| {
+                    crate::errors::map_db_error(
+                        &format!(
+                            "Auto-migrate DDL failed for table '{}' (statement: {})",
+                            table_lower, sql
+                        ),
+                        e,
+                    )
+                })?;
+                ddl_ran = true;
+            }
+            for col_name in &plan.drop_columns {
+                execute_drop_column(&engine, &table_lower, col_name, backend).await?;
+                ddl_ran = true;
+            }
         }
         warnings.append(&mut plan.warnings);
 
@@ -893,6 +972,9 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
 /// for consumers that want explicit control over when DDL runs. `updates`
 /// defaults to true — calling `migrate()` and getting create-only behavior
 /// would be surprising; use `create_tables()` for that.
+///
+/// On Postgres each table's plan runs in one transaction (a mid-plan failure
+/// rolls that table back); SQLite applies statements one at a time.
 ///
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or the migration fails.

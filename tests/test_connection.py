@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from contextlib import closing
 from typing import Annotated
@@ -27,6 +28,18 @@ def _ensure_models_registered():
 async def test_connection_smoke(db_url):
     """Test connecting to the configured backend."""
     await ferro.connect(db_url)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_unnamed_connects_one_wins_one_raises(db_url):
+    """G4b: two unnamed connect() racing must not silently replace the
+    default engine — exactly one registers, the other raises."""
+    results = await asyncio.gather(
+        ferro.connect(db_url), ferro.connect(db_url), return_exceptions=True
+    )
+    errors = [r for r in results if isinstance(r, Exception)]
+    assert len(errors) == 1
+    assert "already registered" in str(errors[0])
 
 
 @pytest.mark.asyncio
@@ -550,3 +563,25 @@ async def test_unsupported_database_scheme_is_rejected_before_connect_attempt():
 async def test_postgres_connection(db_url):
     """Test connecting to the configured Postgres backend."""
     await ferro.connect(db_url)
+
+
+@pytest.mark.asyncio
+async def test_second_unnamed_connect_raises(db_url):
+    """FF-G G4b: a second bare connect() must not silently replace the
+    default engine."""
+    await ferro.connect(db_url)
+    with pytest.raises(ValueError, match="default connection is already registered"):
+        await ferro.connect(db_url)
+
+
+@pytest.mark.asyncio
+async def test_reset_engine_then_unnamed_connect_succeeds(db_url):
+    await ferro.connect(db_url)
+    ferro.reset_engine()
+    await ferro.connect(db_url)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_named_connect_after_default_still_works(db_url):
+    await ferro.connect(db_url)
+    await ferro.connect(db_url, name="analytics")  # must not raise

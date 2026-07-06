@@ -1267,6 +1267,7 @@ async def test_db_check_reconnect_is_idempotent(db_url):
     await connect(db_url, auto_migrate=True)
     # Second connect re-runs the create path against the existing schema —
     # this raised OperationalError before the idempotency fix.
+    reset_engine()  # G4b: a second unnamed connect() now raises; simulate a fresh process
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
 
@@ -1274,3 +1275,39 @@ async def test_db_check_reconnect_is_idempotent(db_url):
             "SELECT conname FROM pg_constraint WHERE conname = 'ck_reconnectdoc_status'"
         )
         assert len(rows) == 1, f"expected exactly one CHECK constraint, got: {rows}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_pg_failed_migration_rolls_back_whole_table_plan(db_url, clean_registry):
+    """FF-G G3: a mid-plan DDL failure on Postgres leaves the table exactly
+    as it was — earlier statements of the same table's plan are rolled back.
+
+    The differ plans all AddColumn ops before AlterColumnType ops, so the
+    ADD COLUMN for `added` executes first and the USING cast on `amount`
+    (varchar 'not-a-number' → integer) fails second."""
+
+    class MigTxRollback(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        added: str | None = None
+        amount: int | None = None
+
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "migtxrollback" ("id" serial PRIMARY KEY, "amount" varchar)'
+        )
+        await execute(
+            'INSERT INTO "migtxrollback" ("amount") VALUES (\'not-a-number\')'
+        )
+
+        with pytest.raises(Exception, match="Auto-migrate DDL failed"):
+            await ferro.migrate()
+
+        cols = await fetch_all(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_name = 'migtxrollback'"
+        )
+        by_name = {c["column_name"]: c["data_type"] for c in cols}
+        assert "added" not in by_name, "ADD COLUMN must be rolled back"
+        assert by_name["amount"] == "character varying", "failed cast must not commit"
