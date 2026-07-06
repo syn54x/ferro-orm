@@ -1307,24 +1307,8 @@ pub fn save_record<'py>(
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
 
-        let mut pk_col = None;
-        let mut pk_is_auto = true;
-        if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-            for (col_name, col_info) in properties {
-                if col_info
-                    .get("primary_key")
-                    .and_then(|pk| pk.as_bool())
-                    .unwrap_or(false)
-                {
-                    pk_col = Some(col_name.clone());
-                    pk_is_auto = col_info
-                        .get("autoincrement")
-                        .and_then(|auto| auto.as_bool())
-                        .unwrap_or(true);
-                    break;
-                }
-            }
-        }
+        let pk_col = schema.meta.pk_col.clone();
+        let pk_is_auto = schema.meta.pk_autoincrement;
 
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
@@ -1426,19 +1410,7 @@ pub fn update_record<'py>(
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
 
-        let mut pk_col = None;
-        if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-            for (col_name, col_info) in properties {
-                if col_info
-                    .get("primary_key")
-                    .and_then(|pk| pk.as_bool())
-                    .unwrap_or(false)
-                {
-                    pk_col = Some(col_name.clone());
-                    break;
-                }
-            }
-        }
+        let pk_col = schema.meta.pk_col.clone();
 
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
@@ -1525,25 +1497,8 @@ pub fn save_bulk_records<'py>(
             return Ok(0);
         }
 
-        let mut pk_col = None;
-        let mut pk_is_auto = true;
-        if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-            for (col_name, col_info) in properties {
-                let is_pk = col_info
-                    .get("primary_key")
-                    .and_then(|pk| pk.as_bool())
-                    .unwrap_or(false);
-
-                if is_pk {
-                    pk_col = Some(col_name.clone());
-                    pk_is_auto = col_info
-                        .get("autoincrement")
-                        .and_then(|auto| auto.as_bool())
-                        .unwrap_or(true);
-                    break;
-                }
-            }
-        }
+        let pk_col = schema.meta.pk_col.clone();
+        let pk_is_auto = schema.meta.pk_autoincrement;
 
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
