@@ -88,13 +88,14 @@ existing `state → backend` dependency):
 /// or the routed engine's pool (FF-G G2). Each method holds the tx mutex for
 /// exactly one engine call — the same guard scope as the match arms it
 /// replaces.
-enum Executor {
-    Tx(TransactionConnection),   // Arc<Mutex<EngineConnection>>, cheap clone
-    Pool(Arc<EngineHandle>),
+#[derive(Clone, Copy)]
+enum Executor<'a> {
+    Tx(&'a TransactionConnection),   // &Arc<Mutex<EngineConnection>>
+    Pool(&'a EngineHandle),
 }
 
-impl Executor {
-    fn new(tx_conn: Option<TransactionConnection>, engine: &Arc<EngineHandle>) -> Self;
+impl<'a> Executor<'a> {
+    fn new(tx_conn: Option<&'a TransactionConnection>, engine: &'a EngineHandle) -> Self;
     async fn fetch_all(&self, sql: &str, binds: &[EngineBindValue])
         -> Result<Vec<EngineRow>, sqlx::Error>;
     async fn execute(&self, sql: &str, binds: &[EngineBindValue])
@@ -104,6 +105,10 @@ impl Executor {
 }
 ```
 
+Borrowed rather than owned: the executor is `Copy`, adds zero `Arc` clones,
+and — decisively — leaves every site's `tx_conn` ownership exactly as it is
+today, so the diff cannot accidentally change a connection's lifetime.
+
 Three methods — the complete verb set the eleven sites use — and nothing
 speculative. A trait buys nothing here (no third implementor, async-trait
 machinery, dyn overhead); the enum's one `match self` per method replaces
@@ -111,7 +116,7 @@ eleven per-site matches.
 
 **Exact-semantics requirements, and how the shape meets them:**
 
-- **Connection identity/lifetime:** `Tx` holds the same
+- **Connection identity/lifetime:** `Tx` borrows the very
   `Arc<Mutex<EngineConnection>>` the site holds today; `lock().await` scope is
   one engine call, identical to every current arm (no site holds the guard
   across two calls). Queries can never migrate off the transaction.
@@ -121,16 +126,19 @@ eleven per-site matches.
 - **Lazy engine resolution on the raw path:** `raw_execute`/`raw_fetch_all`/
   `raw_fetch_one` currently call `engine_for_connection(...)` only inside the
   `None` arm — with a live tx, a missing connection never errors. Those sites
-  build the executor inside the async block as
-  `match tx_conn { Some(tx) => Executor::Tx(tx), None => Executor::Pool(engine_for_connection(..)?) }`,
-  preserving that ordering exactly. CRUD sites resolve the engine eagerly via
-  `route_engine` today and keep doing so (`Executor::new(tx_conn, &engine)`).
+  keep that ordering with a deferred-init local:
+  `let pool_engine; let exec = match &tx_conn { Some(tx) => Executor::Tx(tx),
+  None => { pool_engine = engine_for_connection(..)?; Executor::Pool(&pool_engine) } };`
+  CRUD sites resolve the engine eagerly via `route_engine` today and keep
+  doing so (`Executor::new(tx_conn.as_ref(), &engine)`).
 - **Bind conversion:** methods take `&[EngineBindValue]`; sites keep their
   existing `engine_bind_values_from_sea` calls (conversion is pure — arm-inside
   vs. before-the-match is observationally identical).
   `execute_statement_with_optional_tx` (the existing one-off mini-executor for
   `SeaValue` slices) is reimplemented as a thin wrapper over
-  `Executor::execute`; its eight callers don't change.
+  `Executor::execute`, its `tx_conn` parameter becoming
+  `Option<&TransactionConnection>` so callers that also hold an `Executor`
+  never move their `tx_conn`; callers only add `.as_ref()`.
 - **Catalog path:** `postgres_catalog_rows` takes the `Executor` (plus the
   engine it already uses for `record_catalog_query()`); its match collapses
   like the rest. `postgres_table_catalog` threads it through.
