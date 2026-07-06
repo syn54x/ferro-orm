@@ -178,6 +178,10 @@ async fn connect_engine_handle(
 ///
 /// # Errors
 /// Returns a `PyErr` if the connection fails or if auto-migration fails.
+/// Also returns a `PyErr` (`ValueError`) if a connection with this name (or a
+/// default connection, when `name` is omitted) is already registered — call
+/// `reset_engine()` first or pass a distinct `name` to register an additional
+/// connection.
 #[pyfunction]
 #[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0, identity_map=true, migrate_updates=false, migrate_destructive=false))]
 #[allow(clippy::too_many_arguments)]
@@ -213,12 +217,19 @@ pub fn connect(
                 pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Connection Registry")
             })?
             .contains_key(&connection_name)
-            && !is_implicit_default
         {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Connection '{}' is already registered",
-                connection_name
-            )));
+            // FF-G G4b: a second unnamed connect() used to silently replace
+            // the default engine — a loud error, not a swallow (I-6).
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                if is_implicit_default {
+                    "A default connection is already registered. Pass name=\"...\" to \
+                     register an additional named connection, or call reset_engine() \
+                     first to tear down existing connections."
+                        .to_string()
+                } else {
+                    format!("Connection '{}' is already registered", connection_name)
+                },
+            ));
         }
 
         if let Some(ref search_path) = search_path

@@ -27,6 +27,7 @@ from ferro import (
     connect,
     create_tables,
     engines,
+    reset_engine,
     transaction,
 )
 
@@ -133,6 +134,7 @@ async def test_basic_model_definition(db_url):
         username: str
         is_active: bool = True
 
+    reset_engine()
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         await create_tables()

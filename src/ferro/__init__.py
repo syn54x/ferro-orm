@@ -146,6 +146,11 @@ async def connect(
             covering the column are dropped first; columns that are primary keys or
             enforced by table constraints fail with a clear error instead.
 
+    Raises:
+        ValueError: A connection with this name (or a default connection,
+            when ``name`` is omitted) is already registered. Use ``name=...``
+            for additional connections or ``reset_engine()`` to tear down.
+
     For schema changes beyond these (renames, primary-key changes, complex
     transforms), use the Alembic bridge — see ``docs/guide/migrations.md``.
     """
