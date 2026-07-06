@@ -526,37 +526,19 @@ fn engine_row_to_pydict<'py>(
 
 async fn postgres_catalog_rows(
     engine: &EngineHandle,
-    tx_conn: &Option<TransactionConnection>,
+    exec: Executor<'_>,
     sql: &str,
     table_name: &str,
     label: &str,
 ) -> PyResult<Vec<EngineRow>> {
     engine.record_catalog_query();
     let values = [EngineBindValue::String(table_name.to_string())];
-    let rows = match tx_conn {
-        Some(conn_arc) => {
-            let mut conn = conn_arc.lock().await;
-            conn.fetch_all_sql_with_binds(sql, &values)
-                .await
-                .map_err(|e| {
-                    crate::errors::map_db_error(
-                        &format!("Failed to inspect {} for '{}'", label, table_name),
-                        e,
-                    )
-                })?
-        }
-        None => engine
-            .fetch_all_sql_with_binds(sql, &values)
-            .await
-            .map_err(|e| {
-                crate::errors::map_db_error(
-                    &format!("Failed to inspect {} for '{}'", label, table_name),
-                    e,
-                )
-            })?,
-    };
-
-    Ok(rows)
+    exec.fetch_all(sql, &values).await.map_err(|e| {
+        crate::errors::map_db_error(
+            &format!("Failed to inspect {} for '{}'", label, table_name),
+            e,
+        )
+    })
 }
 
 macro_rules! sea_query_build_for_backend {
@@ -599,7 +581,7 @@ macro_rules! sea_query_to_string_for_backend {
 async fn postgres_table_catalog(
     table_name: &str,
     engine: &EngineHandle,
-    tx_conn: &Option<TransactionConnection>,
+    exec: Executor<'_>,
     backend: Dialect,
 ) -> PyResult<Arc<TableCatalog>> {
     if backend != Dialect::Postgres {
@@ -626,7 +608,7 @@ async fn postgres_table_catalog(
         "#;
 
     let mut catalog = TableCatalog::default();
-    for row in postgres_catalog_rows(engine, tx_conn, sql, table_name, "table catalog").await? {
+    for row in postgres_catalog_rows(engine, exec, sql, table_name, "table catalog").await? {
         let column_name = engine_row_string(&row, "column_name").unwrap_or_default();
         let udt_name = engine_row_string(&row, "udt_name").unwrap_or_default();
         let typtype = engine_row_string(&row, "typtype").unwrap_or_default();
@@ -1357,6 +1339,7 @@ pub fn save_record<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
@@ -1364,7 +1347,7 @@ pub fn save_record<'py>(
         let pk_col = schema.meta.pk_col.clone();
         let pk_is_auto = schema.meta.pk_autoincrement;
 
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         let (sql, bind_values, needs_postgres_returning) = build_save_sql(
             &schema,
@@ -1460,13 +1443,14 @@ pub fn update_record<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
 
         let pk_col = schema.meta.pk_col.clone();
 
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
 
         let plan = build_update_by_pk_sql(
@@ -1543,6 +1527,7 @@ pub fn save_bulk_records<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
@@ -1554,7 +1539,7 @@ pub fn save_bulk_records<'py>(
         let pk_col = schema.meta.pk_col.clone();
         let pk_is_auto = schema.meta.pk_autoincrement;
 
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         let (sql, bind_values) = {
             let mut insert_stmt = InsertStatement::new()
@@ -1632,11 +1617,12 @@ pub fn fetch_filtered<'py>(
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
         let use_identity_map = engine.is_identity_map_enabled();
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         plan.postgres_enum_udt = catalog.enum_udt.clone();
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
@@ -1798,10 +1784,11 @@ pub fn count_filtered(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
-        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
+        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, exec, backend)
             .await?
             .enum_udt
             .clone();
@@ -2013,9 +2000,10 @@ pub fn delete_filtered(
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let table_name = crate::state::registered_model(&name)?.table_name.clone();
-        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
+        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, exec, backend)
             .await?
             .enum_udt
             .clone();
@@ -2079,10 +2067,11 @@ pub fn update_filtered<'py>(
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         plan.postgres_enum_udt = enum_udt.clone();
         // ... sql ...
@@ -2164,7 +2153,8 @@ pub fn add_m2m_links<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let catalog = postgres_table_catalog(&join_table, &engine, &tx_conn, backend).await?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
+        let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
         let uuid_columns = &catalog.uuid_columns;
 
         let (sql, bind_values) = {
@@ -2239,7 +2229,8 @@ pub fn remove_m2m_links<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let catalog = postgres_table_catalog(&join_table, &engine, &tx_conn, backend).await?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
+        let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
         let uuid_columns = &catalog.uuid_columns;
 
         let (sql, bind_values) = sea_query_build_for_backend!(
@@ -2303,7 +2294,8 @@ pub fn clear_m2m_links<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let catalog = postgres_table_catalog(&join_table, &engine, &tx_conn, backend).await?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
+        let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
         let uuid_columns = &catalog.uuid_columns;
 
         let (sql, bind_values) = sea_query_build_for_backend!(
