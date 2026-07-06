@@ -167,10 +167,15 @@ def test_junk_lambda_predicates_fail_the_type_checker():
 def test_query_ir_is_the_only_query_shape_in_rust():
     """FF-F F-4 exit gate: no `struct QueryNode` outside the IR crate."""
     repo = Path(__file__).parent.parent
+    rust_roots = [repo / "src", repo / "crates"]
+    ir_crate = repo / "crates" / "ferro-schema-ir"
     offenders = []
-    for rust_file in (repo / "src").rglob("*.rs"):
-        if "struct QueryNode" in rust_file.read_text(encoding="utf-8"):
-            offenders.append(str(rust_file))
+    for root in rust_roots:
+        for rust_file in root.rglob("*.rs"):
+            if ir_crate in rust_file.parents:
+                continue
+            if "struct QueryNode" in rust_file.read_text(encoding="utf-8"):
+                offenders.append(str(rust_file))
     assert offenders == [], (
         f"legacy QueryNode shape resurfaced outside crates/ferro-schema-ir: {offenders}"
     )

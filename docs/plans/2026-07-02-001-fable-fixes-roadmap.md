@@ -341,7 +341,7 @@ eager loading) — build those on the post-F shape, not the current one.
 - [x] **F-3 — Typed proxies via `@dataclass_transform`.**
       Per-field `FieldProxy[T]` through the metaclass so
       `lambda user: user.age >= "x"` fails type-checking — the plumbing the
-      nodes.py docstring already names as the real design.
+      nodes.py docstring already names as the real design. *(re-scoped by the FF-F design, Fork A: bare-lambda RHS typing deferred to PEP 827; delivered as validated `QueryProxy` + `Predicate` static contracts under the ty gate.)*
 - [x] **F-4 — Collapse `QueryDef` onto the IR types.**
       `operations.rs`/`query.rs` consume `ferro_schema_ir::QueryNode` directly;
       delete the IR→legacy conversion layer (`query_node_from_ir`, the
