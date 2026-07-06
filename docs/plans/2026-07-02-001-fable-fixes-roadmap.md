@@ -370,7 +370,7 @@ fold into whichever epic touches the same file when convenient.
 
 **Sub-tasks**
 
-- [ ] **G1 — Hydration ABI structural guard.**
+- [x] **G1 — Hydration ABI structural guard.**
       At `_core` import, diff `BaseModel.__slots__` against the slots the
       hydrator initializes; unknown slot → loud, actionable startup error
       (turns "breaks on next Pydantic minor" into "refuses to start").
@@ -382,16 +382,16 @@ fold into whichever epic touches the same file when convenient.
       over `Option<TransactionConnection>` replaces the doubled tx/no-tx match
       arms. Behavior-preserving; shrinks the god-module ahead of FF-C/FF-D
       work in the same file.
-- [ ] **G3 — Transactional auto-migrate on Postgres.**
+- [x] **G3 — Transactional auto-migrate on Postgres.**
       Wrap each table's plan (or the whole run) in a transaction so a mid-run
       failure cannot leave partial DDL (Postgres DDL is transactional; SQLite
       documented as best-possible per its capabilities — scoped-down, stated).
-- [ ] **G4 — Small correctness edges.**
+- [x] **G4 — Small correctness edges.**
       `save()`'s `(id > 0).then_some(id)` PK heuristic (breaks legitimate
       non-positive PKs); second unnamed `connect()` silently replacing the
       default engine → error; document/guard the identity-map DashMap+GIL
       lock-order hazard (all access must hold the GIL) with a debug assertion.
-- [ ] **G5 — `RustValue::into_py_any` module-handle caching.**
+- [x] **G5 — `RustValue::into_py_any` module-handle caching.**
       Intern `datetime`/`uuid`/`decimal`/`json` handles instead of
       `py.import` per value. Micro; measure under FF-C's benchmarks.
 - [x] **G6 — Idempotent check-constraint emission in Postgres auto_migrate.**
@@ -411,9 +411,9 @@ fold into whichever epic touches the same file when convenient.
 
 **Exit gate**
 
-- [ ] Slot-guard test that fails when a fake slot is injected; `cargo llvm-lines`
-      (or LOC) shows `operations.rs` duplication removed; PG migration
+- [x] Slot-guard test that fails when a fake slot is injected; PG migration
       interrupted mid-plan leaves the schema unchanged.
+- [ ] `cargo llvm-lines` (or LOC) shows `operations.rs` duplication removed (G2).
 - [x] Second `connect(auto_migrate=True)` against an already-migrated Postgres
       schema with a `db_check` model succeeds.
 
