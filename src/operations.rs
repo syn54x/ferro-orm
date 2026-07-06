@@ -914,6 +914,7 @@ pub fn fetch_all<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
         let session_id = r.session_id.clone();
         let use_identity_map = engine.is_identity_map_enabled();
 
@@ -928,23 +929,11 @@ pub fn fetch_all<'py>(
             (s, pk, schema.clone())
         };
 
-        let parsed_data = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                let rows = conn
-                    .fetch_all_sql_with_binds(&sql, &[])
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
-            }
-            None => {
-                let rows = engine
-                    .fetch_all_sql_with_binds(&sql, &[])
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
-            }
-        };
+        let rows = exec
+            .fetch_all(&sql, &[])
+            .await
+            .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
+        let parsed_data = typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref());
 
         Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
@@ -1039,6 +1028,7 @@ pub fn fetch_one<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
         let session_id = r.session_id.clone();
         let use_identity_map = engine.is_identity_map_enabled();
 
@@ -1074,31 +1064,15 @@ pub fn fetch_one<'py>(
             (s, values, pk_name, schema.clone())
         };
 
-        let parsed_row = match tx_conn {
-            Some(conn_arc) => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let mut conn = conn_arc.lock().await;
-                let rows = conn
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, None)
-                    .into_iter()
-                    .next()
-                    .map(|(_, fields)| fields)
-            }
-            None => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let rows = engine
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, None)
-                    .into_iter()
-                    .next()
-                    .map(|(_, fields)| fields)
-            }
-        };
+        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+        let rows = exec
+            .fetch_all(&sql, &engine_bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
+        let parsed_row = typed_rows_to_parsed_data(rows, &schema_for_decode, None)
+            .into_iter()
+            .next()
+            .map(|(_, fields)| fields);
 
         match parsed_row {
             Some(fields) => Python::attach(|py| {
@@ -1675,25 +1649,12 @@ pub fn fetch_filtered<'py>(
             (s, values, pk, schema.clone())
         };
 
-        let parsed_data = match tx_conn {
-            Some(conn_arc) => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let mut conn = conn_arc.lock().await;
-                let rows = conn
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
-            }
-            None => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let rows = engine
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
-            }
-        };
+        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+        let rows = exec
+            .fetch_all(&sql, &engine_bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
+        let parsed_data = typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref());
 
         Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
@@ -1832,29 +1793,15 @@ pub fn count_filtered(
         };
 
         let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-        let count = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                let rows = conn
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
-                rows.first()
-                    .and_then(|row| row.values.first())
-                    .and_then(|(_, value)| value.as_i64())
-                    .unwrap_or(0)
-            }
-            None => {
-                let rows = engine
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
-                rows.first()
-                    .and_then(|row| row.values.first())
-                    .and_then(|(_, value)| value.as_i64())
-                    .unwrap_or(0)
-            }
-        };
+        let rows = exec
+            .fetch_all(&sql, &engine_bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
+        let count = rows
+            .first()
+            .and_then(|row| row.values.first())
+            .and_then(|(_, value)| value.as_i64())
+            .unwrap_or(0);
 
         Ok(count)
     })
