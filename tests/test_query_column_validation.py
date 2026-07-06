@@ -77,3 +77,52 @@ class TestQueryProxyContract:
 
         with pytest.raises(TypeError, match="not a registered Ferro model"):
             validate_query_column(NotAModel, "anything")
+
+
+class TestOrderByValidation:
+    def test_order_by_lambda_is_validated_and_extracts_column(self):
+        class ObUser(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            created_at: str = ""
+
+        q = ObUser.select().order_by(lambda u: u.created_at, "desc")
+        assert q.order_by_clause == [{"column": "created_at", "direction": "desc"}]
+
+    def test_order_by_string_is_validated(self):
+        class ObUser2(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            age: int = 0
+
+        q = ObUser2.select().order_by("age")
+        assert q.order_by_clause == [{"column": "age", "direction": "asc"}]
+
+    def test_order_by_misspelled_string_raises(self):
+        class ObUser3(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            age: int = 0
+
+        with pytest.raises(AttributeError, match="age"):
+            ObUser3.select().order_by("aeg")
+
+    def test_order_by_misspelled_lambda_raises(self):
+        class ObUser4(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            age: int = 0
+
+        with pytest.raises(AttributeError, match="Valid columns"):
+            ObUser4.select().order_by(lambda u: u.aeg)
+
+    def test_order_by_lambda_must_return_field_proxy(self):
+        class ObUser5(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            age: int = 0
+
+        with pytest.raises(TypeError, match="FieldProxy"):
+            ObUser5.select().order_by(lambda u: u.age >= 3)
+
+    def test_order_by_rejects_bad_direction(self):
+        class ObUser6(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+        with pytest.raises(ValueError, match="asc"):
+            ObUser6.select().order_by("id", "sideways")

@@ -1,7 +1,7 @@
 """Build fluent query objects that serialize QueryIR payloads for the Rust core."""
 
 import copy
-from typing import TYPE_CHECKING, Any, Generic, Self, Type, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Callable, Generic, Self, Type, TypeVar, overload
 
 from .._bind_payload import update_bind_payload
 from .._deprecations import (
@@ -19,7 +19,7 @@ from .._core import (
     remove_m2m_links,
     update_filtered,
 )
-from .nodes import QueryNode, QueryProxy, _serialize_query_value
+from .nodes import FieldProxy, QueryNode, QueryProxy, _serialize_query_value, validate_query_column
 
 if TYPE_CHECKING:
     from .._core import RouteHandle
@@ -190,32 +190,56 @@ class Query(Generic[T]):
         new.where_clause.append(_resolve_where_node(node, self.model_cls))
         return new
 
-    def order_by(self, field: Any, direction: str = "asc") -> Self:
-        """Add an ordering clause to the query
+    def order_by(
+        self,
+        field: "str | Callable[[QueryProxy[T]], FieldProxy[Any]]",
+        direction: str = "asc",
+    ) -> Self:
+        """Add an ordering clause and return a new query.
+
+        Accepts a lambda naming the column (``order_by(lambda u: u.created_at,
+        "desc")`` — the documented style, matching ``where`` predicates) or a
+        column-name string (``order_by("created_at", "desc")``). Both forms are
+        validated against the model's queryable columns at build time.
 
         Args:
-            field: The field to order by (e.g., User.username).
-            direction: The direction of the sort ("asc" or "desc").
+            field: Column selector — lambda receiving a :class:`QueryProxy`,
+                or a column-name string.
+            direction: ``"asc"`` (default) or ``"desc"``.
 
         Returns:
-            A new ``Query`` with the clause added; ``self`` is unchanged.
+            A new ``Query`` with the ordering added; ``self`` is unchanged.
 
         Raises:
-            ValueError: If direction is not "asc" or "desc".
+            AttributeError: If the column is not a queryable column.
+            TypeError: If a lambda selector returns something other than a
+                single column reference.
+            ValueError: If ``direction`` is not ``"asc"`` or ``"desc"``.
 
         Examples:
-            >>> query = User.select().order_by(User.username, "desc")
-            >>> query.order_by_clause[-1]["direction"]
-            'desc'
+            >>> newest = await Post.select().order_by(lambda p: p.created_at, "desc").all()
         """
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
 
-        col_name = field.column if hasattr(field, "column") else str(field)
+        if callable(field):
+            selected = field(QueryProxy(self.model_cls))
+            if not isinstance(selected, FieldProxy):
+                raise TypeError(
+                    "order_by() selector must return a FieldProxy "
+                    f"(e.g. `lambda u: u.created_at`), got {type(selected).__name__}"
+                )
+            col_name = selected.column
+        elif isinstance(field, str):
+            col_name = validate_query_column(self.model_cls, field)
+        else:
+            raise TypeError(
+                "order_by() expected a column-name string or a lambda selector, "
+                f"got {type(field).__name__}"
+            )
+
         new = self._clone()
-        new.order_by_clause.append(
-            {"column": col_name, "direction": direction.lower()}
-        )
+        new.order_by_clause.append({"column": col_name, "direction": direction.lower()})
         return new
 
     def limit(self, value: int) -> Self:
