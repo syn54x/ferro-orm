@@ -303,12 +303,7 @@ async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
         card = await TyRoundScorecard.create(title="card-a", job_role=role)
         assert card.job_role_id == role.id
 
-        by_attr = await TyRoundScorecard.where(
-            TyRoundScorecard.job_role_id == role.id
-        ).first()
-        assert by_attr is not None and by_attr.id == card.id
-
-        by_lambda = await TyRoundScorecard.where(
+        by_shadow_id = await TyRoundScorecard.where(
             lambda s: s.job_role_id == role.id
         ).first()
-        assert by_lambda is not None and by_lambda.id == card.id
+        assert by_shadow_id is not None and by_shadow_id.id == card.id

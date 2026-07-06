@@ -23,12 +23,12 @@ async def test_count_operation(db_url):
         await AggProduct(name="Item 3", price=30.0, category="B").save()
 
         # Total count
-        assert await AggProduct.where(AggProduct.id >= 0).count() == 3
+        assert await AggProduct.where(lambda p: p.id >= 0).count() == 3
 
         # Filtered count
-        assert await AggProduct.where(AggProduct.category == "A").count() == 2
-        assert await AggProduct.where(AggProduct.price > 25).count() == 1
-        assert await AggProduct.where(AggProduct.category == "C").count() == 0
+        assert await AggProduct.where(lambda p: p.category == "A").count() == 2
+        assert await AggProduct.where(lambda p: p.price > 25).count() == 1
+        assert await AggProduct.where(lambda p: p.category == "C").count() == 0
 
 
 @pytest.mark.asyncio
@@ -50,25 +50,25 @@ async def test_order_by_operation(db_url):
 
         # Sort by price ascending
         results = (
-            await AggProduct.where(AggProduct.id >= 0)
-            .order_by(AggProduct.price)
+            await AggProduct.where(lambda p: p.id >= 0)
+            .order_by("price")
             .all()
         )
         assert [r.name for r in results] == ["A", "M", "Z"]
 
         # Sort by name descending
         results = (
-            await AggProduct.where(AggProduct.id >= 0)
-            .order_by(AggProduct.name, direction="desc")
+            await AggProduct.where(lambda p: p.id >= 0)
+            .order_by("name", direction="desc")
             .all()
         )
         assert [r.name for r in results] == ["Z", "M", "A"]
 
         # Sort by category (asc), then price (desc)
         results = (
-            await AggProduct.where(AggProduct.id >= 0)
-            .order_by(AggProduct.category)
-            .order_by(AggProduct.price, direction="desc")
+            await AggProduct.where(lambda p: p.id >= 0)
+            .order_by("category")
+            .order_by("price", direction="desc")
             .all()
         )
         assert [r.name for r in results] == ["Z", "M", "A"]

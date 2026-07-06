@@ -32,10 +32,6 @@ if TYPE_CHECKING:
         assert_type(await bound.all(), list[NamedSmokeMarker])
         assert_type(bound.select(), "Query[NamedSmokeMarker]")
         assert_type(
-            bound.where(NamedSmokeMarker.id == 1),  # type: ignore[arg-type]
-            "Query[NamedSmokeMarker]",
-        )
-        assert_type(
             bound.where(lambda t: t.id == 1),  # type: ignore[arg-type]
             "Query[NamedSmokeMarker]",
         )

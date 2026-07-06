@@ -10,40 +10,6 @@
     ],
     []
   ],
-  "query_compare": {
-    "legacy": {
-      "artifact": {
-        "bind_semantics": [
-          "I64(18)",
-          "String(\"a%\")",
-          "I64(5)",
-          "I64(1)"
-        ],
-        "operation": "select",
-        "semantic_signature": [
-          "age >= 18",
-          "name LIKE \"a%\""
-        ]
-      },
-      "sql": "SELECT \"shadowuser\".* FROM \"shadowuser\" WHERE \"age\" >= ? AND \"name\" LIKE ? ORDER BY \"age\" DESC LIMIT ? OFFSET ?"
-    },
-    "matches": true,
-    "shadow": {
-      "artifact": {
-        "bind_semantics": [
-          "I64(18)",
-          "String(\"a%\")",
-          "I64(5)",
-          "I64(1)"
-        ],
-        "operation": "select",
-        "semantic_signature": [
-          "age >= 18",
-          "name LIKE \"a%\""
-        ]
-      }
-    }
-  },
   "migration_compare": {
     "ir": {
       "drop_columns": [],

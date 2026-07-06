@@ -52,10 +52,10 @@ async def test_query_delete(db_url):
 
         # Delete matching
         deleted_count = await DeletableUser.where(
-            DeletableUser.username == "delete_1"
+            lambda u: u.username == "delete_1"
         ).delete()
         deleted_count += await DeletableUser.where(
-            DeletableUser.username == "delete_2"
+            lambda u: u.username == "delete_2"
         ).delete()
         assert deleted_count == 2
 
@@ -84,7 +84,7 @@ async def test_delete_evicts_identity_map(db_url):
         assert await DeletableUser.get(user_id) is user
 
         # Delete via query
-        await DeletableUser.where(DeletableUser.id == user_id).delete()
+        await DeletableUser.where(lambda u: u.id == user_id).delete()
 
         # A fresh 'get' should NOT return the old 'user' object (it should be None)
         assert await DeletableUser.get_or_none(user_id) is None

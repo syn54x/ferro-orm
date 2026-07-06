@@ -1,16 +1,7 @@
 # Typed Query Predicates
 
-Ferro's query DSL accepts three predicate styles on `Model.where`, `Query.where`, and `Relation.where`. They run on the same code path and can be mixed in the same chain, but they are not equal: **lambda predicates are the officially recommended style**, `col()` is the type-safe escape hatch, and the operator style is slated for deprecation.
-
-## Why Three Predicate Styles Exist
-
-Ferro's metaclass replaces every model field with a `FieldProxy` at class-creation time, so `User.archived` is a `FieldProxy` at runtime — and `User.archived == False` builds a `QueryNode`, not a Python `bool`. Static type checkers (Pyright, `ty`, mypy, basedpyright) only see your Pydantic annotations, though, so they read `User.archived` as a `bool` and reject the same expression they would happily run.
-
-The lambda and `col()` styles give you the runtime ergonomics back without forcing a model-annotation rewrite, a type-checker plugin, or any change to the existing operator path.
-
-## The Styles
-
-### 1. Lambda predicate (recommended)
+`Model.where`, `Query.where`, and `Relation.where` accept a single predicate
+shape: a lambda that receives a `QueryProxy` and returns a `QueryNode`.
 
 ```python
 rows = await User.where(lambda user: user.archived == False).all()
@@ -19,57 +10,29 @@ rows = await User.where(
 ).all()
 ```
 
-This is the officially recommended style — use it for all new code. Name the lambda parameter after the model in lowercase singular (`user` for `User`, `post` for `Post`) so predicates read like English. The lambda receives a `QueryProxy` whose attribute access yields a fresh `FieldProxy` for each name, so `user.archived == False` is a `QueryNode` from the type checker's point of view as well as at runtime. The call site stays free of `# type: ignore` even when comparing booleans, integers, or any other value type, and the full operator surface is available: `.like()`, `.in_()`, `&`, `|`, `== None`, and shadow FK columns (`user.author_id`).
+## How It Works
 
-The proxy attribute type is currently `FieldProxy[Any]`, which is a deliberate scope decision (see [Scope boundaries](#scope-boundaries) below). Pyright still resolves the predicate's *return* type as `QueryNode` correctly.
+The lambda receives a fresh `QueryProxy` for the model being queried.
+Attribute access on the proxy is validated against the model's declared
+columns (plus shadow `{fk}_id` columns) and returns a `FieldProxy`, so
+`user.archived == False` builds a `QueryNode`. A misspelled column —
+`user.archievd` — raises `AttributeError` naming the closest valid match and
+listing every queryable column, at build time, before any query reaches the
+database.
 
-### 2. `col()` wrapper
+Name the lambda parameter after the model in lowercase singular (`user` for
+`User`, `post` for `Post`) so predicates read like English. The full operator
+surface is available: `==`, `!=`, `<`, `<=`, `>`, `>=`, `.like()`, `.in_()`,
+`&`, `|`, `== None`, and shadow FK columns (`user.author_id`).
 
-```python
-from ferro.query import col
+That gives you two concrete guarantees today:
 
-rows = await User.where(col(User.archived) == False).all()
-```
+- **A valid predicate type-checks as `QueryNode`.** `lambda user: user.age >= 18` passes `ty check` / Pyright because `>=` on a `FieldProxy` is typed to return `QueryNode`, which is exactly what `where()` expects.
+- **A junk predicate fails the checker.** `lambda user: True` — a callable that doesn't return a `QueryNode` at all — is a type error, not a silent no-op query, because `where()`'s parameter type is `Predicate = Callable[[QueryProxy[TModel]], QueryNode]`.
 
-`col()` is a runtime helper that returns a typed `FieldProxy[T]` for the same column while preserving the operator shape. It validates input with an `isinstance` guard (and raises `TypeError` if you accidentally hand it a literal). Reach for it when you want to keep the operator shape on an existing call site while staying type-safe.
+What isn't checked yet is the *right-hand side* of a comparison: the proxy attribute type is `FieldProxy[Any]`, so `user.age >= "eighteen"` type-checks even though it would fail at runtime. Closing that gap needs per-field static types on the proxy — TypeScript-style mapped types, proposed for Python in [PEP 827](https://peps.python.org/pep-0827/) ("Type Manipulation", draft status, targeting Python 3.16). When type checkers support it, `QueryProxy` attribute typing upgrades from `FieldProxy[Any]` to each field's real declared type — with zero runtime change — and `user.age >= "eighteen"` starts failing the checker too.
 
-### 3. Operator (legacy)
-
-```python
-rows = await User.where(User.id == 1).all()
-rows = await User.where(User.email.like("%@example.com")).all()
-```
-
-!!! warning "Operator style is deprecated"
-    The operator style is compatible today but on the `v0.14.0` removal track. It also fails static type checking: checkers read `User.id == 1` through your Pydantic annotations as a `bool`, while `where()` expects a `QueryNode | Predicate`. Use lambda predicates for new code, or `col()` when migrating existing operator-style call sites with minimal diff.
-    See [Migrating to v0.12.0](../howto/migrating-to-v0-12-0.md) for the Phase 7 migration checklist.
-
-## When to Use Which
-
-| Style | Use when |
-|------|----------|
-| Lambda | All new code — the official default. Fully type-checked, full operator surface. |
-| `col()` | Migrating existing operator-style call sites with minimal diff while staying type-safe. |
-| Operator | Legacy/untyped codebases only. Slated for deprecation; fails static type checking. |
-
-All three are equally efficient at runtime — every one of them produces a `QueryNode` and appends it to the query's where clause.
-
-## Combining Styles
-
-You can mix all three on a single chain — useful mid-migration. They compose because they all funnel through the same dispatch in `Query.where`:
-
-```python
-from ferro.query import col
-
-rows = await (
-    User.where(lambda user: user.role == "admin")     # lambda (recommended)
-    .where(col(User.archived) == False)         # col()
-    .where(User.id == 1)                        # operator (legacy)
-    .all()
-)
-```
-
-`Relation.where` (used on `BackRef` collections) accepts the same three shapes:
+`Relation.where` (used on `BackRef` collections) accepts the same shape:
 
 ```python
 published = await author.posts.where(lambda post: post.published == True).all()
@@ -78,27 +41,14 @@ published = await author.posts.where(lambda post: post.published == True).all()
 ## What This Doesn't Change
 
 - Your model annotations. `archived: bool = False` stays exactly as it is.
-- The metaclass's `FieldProxy` injection. Class attribute access is unchanged.
 - Pydantic schema generation, JSON schema output, or model validation.
-- The Rust FFI bridge architecture (predicates now serialize through QueryIR envelopes).
-- The operator-path runtime. Existing `Model.field == value` calls take the same code path they always have.
-
-## Scope Boundaries
-
-The current implementation deliberately stops short of:
-
-- **Per-field types on the lambda proxy.** `user.archived` resolves to `FieldProxy[Any]`, not `FieldProxy[bool]`. Wiring per-field types through the proxy needs `@dataclass_transform` plumbing on the metaclass; that's future work.
-- **A type-checker plugin.** Ferro stays plugin-free.
-- **A kwargs-style or template-string predicate API.** Both have been considered; neither shipped here.
-
-If `user.archived` resolving as `FieldProxy[Any]` ever bites you statically, drop back to `col(Model.archived) == ...` for that one comparison — that's exactly the role `col()` plays.
+- The Rust FFI bridge architecture (predicates serialize through QueryIR envelopes).
 
 ## Reference
 
-- `ferro.query.col` — runtime-identity wrapper, raises `TypeError` for non-`FieldProxy` input.
-- `ferro.query.QueryProxy` — attribute proxy passed to lambda predicates.
+- `ferro.query.QueryProxy` — validating attribute proxy passed to lambda predicates.
 - `ferro.query.Predicate` — `Callable[[QueryProxy[TModel]], QueryNode]`, the type of any lambda predicate.
-- `ferro.query.FieldProxy` — generic over the column's Python type (`FieldProxy[T]`).
+- `ferro.query.FieldProxy` — generic over the column's Python type (`FieldProxy[T]`); the mechanism a `QueryProxy` attribute access returns.
 
 ## See Also
 

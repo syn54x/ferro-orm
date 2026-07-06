@@ -58,7 +58,7 @@ A keyset endpoint returns the items plus the cursor for the next request:
         limit: int = Query(20, ge=1, le=100),
     ):
         query = Article.select() if cursor is None else Article.where(lambda t: t.id > cursor)
-        items = await query.order_by(Article.id).limit(limit).all()
+        items = await query.order_by(lambda t: t.id).limit(limit).all()
         return {
             "items": items,
             "next_cursor": items[-1].id if items else None,
@@ -90,7 +90,7 @@ A keyset endpoint returns the items plus the cursor for the next request:
         limit: int = Query(20, ge=1, le=100),
     ):
         query = Article.select() if cursor is None else Article.where(lambda t: t.id > cursor)
-        items = await query.order_by(Article.id).limit(limit).all()
+        items = await query.order_by(lambda t: t.id).limit(limit).all()
         return {
             "items": items,
             "next_cursor": items[-1].id if items else None,

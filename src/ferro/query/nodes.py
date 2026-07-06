@@ -1,5 +1,6 @@
 """Define query AST nodes and field proxies for fluent filtering"""
 
+import difflib
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -21,8 +22,8 @@ class QueryNode:
         is_compound: Flag indicating whether the node combines two child nodes.
 
     Examples:
-        >>> active_filter = User.active == True
-        >>> admin_filter = User.role == "admin"
+        >>> active_filter = FieldProxy("active") == True
+        >>> admin_filter = FieldProxy("role") == "admin"
         >>> expr = active_filter & admin_filter
         >>> isinstance(expr, QueryNode)
         True
@@ -36,7 +37,6 @@ class QueryNode:
         left: "QueryNode | None" = None,
         right: "QueryNode | None" = None,
         is_compound: bool = False,
-        predicate_style: str | None = None,
     ):
         """Initialize a query expression node
 
@@ -54,7 +54,6 @@ class QueryNode:
         self.left = left
         self.right = right
         self.is_compound = is_compound
-        self.predicate_style = predicate_style
 
     def __or__(self, other: "QueryNode") -> "QueryNode":
         """Combine two nodes with logical OR
@@ -66,21 +65,14 @@ class QueryNode:
             A compound node representing ``self OR other``.
 
         Examples:
-            >>> expr = (User.role == "admin") | (User.role == "owner")
+            >>> role = FieldProxy("role")
+            >>> expr = (role == "admin") | (role == "owner")
             >>> expr.is_compound
             True
         """
         if not isinstance(other, QueryNode):
             return NotImplemented
-        return QueryNode(
-            left=self,
-            operator="OR",
-            right=other,
-            is_compound=True,
-            predicate_style="operator"
-            if self.uses_operator_style() or other.uses_operator_style()
-            else self.predicate_style or other.predicate_style,
-        )
+        return QueryNode(left=self, operator="OR", right=other, is_compound=True)
 
     def __and__(self, other: "QueryNode") -> "QueryNode":
         """Combine two nodes with logical AND
@@ -92,47 +84,15 @@ class QueryNode:
             A compound node representing ``self AND other``.
 
         Examples:
-            >>> expr = (User.active == True) & (User.email.like("%@ferro.dev"))
+            >>> active = FieldProxy("active") == True
+            >>> email = FieldProxy("email").like("%@ferro.dev")
+            >>> expr = active & email
             >>> expr.is_compound
             True
         """
         if not isinstance(other, QueryNode):
             return NotImplemented
-        return QueryNode(
-            left=self,
-            operator="AND",
-            right=other,
-            is_compound=True,
-            predicate_style="operator"
-            if self.uses_operator_style() or other.uses_operator_style()
-            else self.predicate_style or other.predicate_style,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the query node tree into a JSON-friendly dictionary
-
-        Returns:
-            A dictionary representation of the current node and its children.
-
-        Examples:
-            >>> expr = (User.active == True) & (User.id > 10)
-            >>> payload = expr.to_dict()
-            >>> payload["is_compound"]
-            True
-        """
-        if not self.is_compound:
-            return {
-                "column": self.column,
-                "operator": self.operator,
-                "value": _serialize_query_value(self.value),
-                "is_compound": False,
-            }
-        return {
-            "left": self.left.to_dict() if self.left else None,
-            "operator": self.operator,
-            "right": self.right.to_dict() if self.right else None,
-            "is_compound": True,
-        }
+        return QueryNode(left=self, operator="AND", right=other, is_compound=True)
 
     def to_ir_dict(self) -> dict[str, Any]:
         """Serialize the query node tree into a QueryIR payload shape."""
@@ -150,13 +110,6 @@ class QueryNode:
             "left": self.left.to_ir_dict() if self.left else None,
             "right": self.right.to_ir_dict() if self.right else None,
         }
-
-    def uses_operator_style(self) -> bool:
-        if self.is_compound:
-            return (self.left.uses_operator_style() if self.left else False) or (
-                self.right.uses_operator_style() if self.right else False
-            )
-        return self.predicate_style == "operator"
 
     def __repr__(self):
         """Return a developer-friendly representation of the node"""
@@ -209,55 +162,46 @@ class FieldProxy(Generic[TField]):
         column: Database column name associated with the model field.
 
     Examples:
-        >>> email_filter = User.email == "taylor@example.com"
+        >>> email_filter = FieldProxy("email") == "taylor@example.com"
         >>> isinstance(email_filter, QueryNode)
         True
     """
 
-    def __init__(self, column: str, predicate_style: str = "operator"):
+    def __init__(self, column: str):
         """Initialize a field proxy for a specific column
 
         Args:
             column: Database column name to target in expressions.
         """
         self.column = column
-        self.predicate_style = predicate_style
 
     def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an equality comparison node"""
-        return QueryNode(
-            self.column, "==", other, predicate_style=self.predicate_style
-        )
+        return QueryNode(self.column, "==", other)
 
     def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an inequality comparison node"""
-        return QueryNode(
-            self.column, "!=", other, predicate_style=self.predicate_style
-        )
+        return QueryNode(self.column, "!=", other)
 
     def __lt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than comparison node"""
-        return QueryNode(self.column, "<", other, predicate_style=self.predicate_style)
+        return QueryNode(self.column, "<", other)
 
     def __le__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than-or-equal comparison node"""
-        return QueryNode(
-            self.column, "<=", other, predicate_style=self.predicate_style
-        )
+        return QueryNode(self.column, "<=", other)
 
     def __gt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than comparison node"""
-        return QueryNode(self.column, ">", other, predicate_style=self.predicate_style)
+        return QueryNode(self.column, ">", other)
 
     def __ge__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than-or-equal comparison node"""
-        return QueryNode(
-            self.column, ">=", other, predicate_style=self.predicate_style
-        )
+        return QueryNode(self.column, ">=", other)
 
     def in_(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
@@ -274,7 +218,7 @@ class FieldProxy(Generic[TField]):
             TypeError: If ``other`` is not a list, tuple, or set.
 
         Examples:
-            >>> status_filter = User.status.in_(["active", "pending"])
+            >>> status_filter = FieldProxy("status").in_(["active", "pending"])
             >>> status_filter.operator
             'IN'
         """
@@ -282,9 +226,7 @@ class FieldProxy(Generic[TField]):
             raise TypeError(
                 f"The 'in_' operator expects a list, tuple, or set, got {type(other).__name__}"
             )
-        return QueryNode(
-            self.column, "IN", list(other), predicate_style=self.predicate_style
-        )
+        return QueryNode(self.column, "IN", list(other))
 
     def like(self: "FieldProxy[str]", pattern: str) -> QueryNode:
         """Build a ``LIKE`` comparison node
@@ -300,13 +242,11 @@ class FieldProxy(Generic[TField]):
             A node using the SQL ``LIKE`` operator.
 
         Examples:
-            >>> email_filter = User.email.like("%@example.com")
+            >>> email_filter = FieldProxy("email").like("%@example.com")
             >>> email_filter.operator
             'LIKE'
         """
-        return QueryNode(
-            self.column, "LIKE", pattern, predicate_style=self.predicate_style
-        )
+        return QueryNode(self.column, "LIKE", pattern)
 
     def __lshift__(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
@@ -320,7 +260,7 @@ class FieldProxy(Generic[TField]):
             A node using the SQL ``IN`` operator.
 
         Examples:
-            >>> role_filter = User.role << {"admin", "owner"}
+            >>> role_filter = FieldProxy("role") << {"admin", "owner"}
             >>> role_filter.operator
             'IN'
         """
@@ -331,68 +271,60 @@ class FieldProxy(Generic[TField]):
         return f"FieldProxy(column={self.column!r})"
 
 
-def col(value: TField) -> "FieldProxy[TField]":
-    """Treat a model class attribute as a typed query column.
-
-    At runtime Ferro's metaclass replaces ``Model.field`` with a
-    :class:`FieldProxy`, so ``Model.field`` is already a ``FieldProxy`` when
-    accessed on the class. Static type checkers, however, see the field's
-    Pydantic-annotated type (``bool``, ``int``, ...). That makes expressions
-    like ``Model.archived == False`` resolve to ``bool`` statically, even
-    though the runtime value is a ``QueryNode``.
-
-    ``col()`` is runtime-identity for ``FieldProxy`` inputs and statically
-    narrows the return type to ``FieldProxy[T]``, so ``col(Model.archived) ==
-    False`` type-checks as ``QueryNode``. Use it when a single attribute
-    trips your type checker; for new code, prefer the lambda predicate API
-    on :meth:`Query.where`.
-
-    Args:
-        value: A model class attribute (already a ``FieldProxy`` at runtime).
-
-    Returns:
-        The same object, statically typed as ``FieldProxy[T]``.
+def validate_query_column(model_cls: type, name: str) -> str:
+    """Validate a queryable column name at build time (FF-F F-2).
 
     Raises:
-        TypeError: If ``value`` is not a ``FieldProxy``. This guards against
-            calling ``col()`` on a literal (e.g., ``col(False)``), which is
-            almost certainly a bug.
-
-    Examples:
-        >>> rows = await User.where(col(User.archived) == False).all()  # noqa: E712
+        AttributeError: If ``name`` is not a declared field or shadow
+            ``{fk}_id`` column of ``model_cls``. The message names the bad
+            column, suggests the closest valid one, and lists all valid
+            columns.
     """
-    if not isinstance(value, FieldProxy):
+    valid = getattr(model_cls, "__ferro_query_columns__", None)
+    if valid is None:
         raise TypeError(
-            f"col() expects a model column reference (FieldProxy), got {type(value).__name__}"
+            f"{model_cls!r} is not a registered Ferro model class; "
+            "query predicates require a Ferro Model."
         )
-    return FieldProxy(value.column, predicate_style="col")  # type: ignore[return-value]
+    if name in valid:
+        return name
+    close = difflib.get_close_matches(name, sorted(valid), n=1)
+    hint = f" Did you mean {close[0]!r}?" if close else ""
+    raise AttributeError(
+        f"{model_cls.__name__} has no queryable column {name!r}.{hint} "
+        f"Valid columns: {', '.join(sorted(valid))}."
+    )
 
 
 class QueryProxy(Generic[TModel]):
-    """Lazy attribute proxy used by lambda predicates passed to ``Query.where``.
+    """Validating attribute proxy passed to lambda predicates (FF-F F-2).
 
-    A fresh ``QueryProxy`` is constructed each time a lambda predicate is
-    evaluated. Any attribute access returns a :class:`FieldProxy` for the
-    accessed name, so ``lambda user: user.archived == False`` builds a
-    :class:`QueryNode` without ever asking the model class what type
-    ``archived`` is. The ``TModel`` type parameter exists so user-supplied
-    lambdas can name the proxy after the model (``user`` for ``User``) in
-    static analysis; the proxy itself ignores the parameter at runtime.
+    A fresh ``QueryProxy`` is constructed for the queried model each time a
+    lambda predicate is evaluated. Attribute access validates the name
+    against the model's queryable columns (declared fields plus shadow
+    ``{fk}_id`` columns) and returns a :class:`FieldProxy` — so
+    ``lambda user: user.archived == False`` builds a :class:`QueryNode`,
+    while ``lambda user: user.archievd == False`` raises ``AttributeError``
+    at build time naming the valid columns.
 
-    The proxy attribute return type is intentionally ``FieldProxy[Any]`` for
-    now — wiring per-field types through a lambda parameter requires
-    ``@dataclass_transform`` plumbing on the metaclass, which is outside this
-    feature's scope.
+    Attribute types are ``FieldProxy[Any]``: per-field static types for bare
+    lambda parameters require TypeScript-style mapped types, proposed for
+    Python in PEP 827 (draft, targeting 3.16) — adopted here when type
+    checkers support it.
 
     Examples:
         >>> rows = await User.where(lambda user: user.archived == False).all()  # noqa: E712
     """
 
-    __slots__ = ()
+    __slots__ = ("_model_cls",)
+
+    def __init__(self, model_cls: type) -> None:
+        self._model_cls = model_cls
 
     def __getattr__(self, name: str) -> "FieldProxy[Any]":
-        """Return a fresh ``FieldProxy`` for any attribute name."""
-        return FieldProxy(name, predicate_style="lambda")
+        """Validate ``name`` and return a ``FieldProxy`` for it."""
+        validate_query_column(self._model_cls, name)
+        return FieldProxy(name)
 
 
 Predicate: TypeAlias = Callable[[QueryProxy[TModel]], QueryNode]

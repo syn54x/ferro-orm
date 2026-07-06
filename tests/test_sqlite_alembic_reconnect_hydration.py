@@ -69,7 +69,7 @@ async def _reload_row[M: Model](model: type[M], uri: str, row_id: str) -> M:
     reset_engine()
     await ferro.connect(uri, auto_migrate=False)
     async with ferro.engines.session():
-        row = await model.where(model.id == row_id).first()  # type: ignore[attr-defined]
+        row = await model.where(lambda m: m.id == row_id).first()  # type: ignore[attr-defined]
         assert row is not None
     return row
 

@@ -24,17 +24,17 @@ async def test_bulk_update_operation(db_url):
 
         # Bulk update: set in_stock=False for all Electronics
         updated_count = await BulkProduct.where(
-            BulkProduct.category == "Electronics"
+            lambda p: p.category == "Electronics"
         ).update(in_stock=False)
         assert updated_count == 2
 
         # Verify results
         electronics = await BulkProduct.where(
-            BulkProduct.category == "Electronics"
+            lambda p: p.category == "Electronics"
         ).all()
         assert all(p.in_stock is False for p in electronics)
 
-        furniture = await BulkProduct.where(BulkProduct.category == "Furniture").all()
+        furniture = await BulkProduct.where(lambda p: p.category == "Furniture").all()
         assert furniture[0].in_stock is True
 
 
@@ -58,7 +58,7 @@ async def test_bulk_update_evicts_identity_map(db_url):
         assert cached_p1 is p1
 
         # Update price via bulk query
-        await BulkProduct.where(BulkProduct.id == p1.id).update(price=20.0)
+        await BulkProduct.where(lambda p: p.id == p1.id).update(price=20.0)
 
         # Fetching again should NOT return the old 'p1' object (it should be a fresh object or re-hydrated)
         fresh_p1 = await BulkProduct.get(p1.id)

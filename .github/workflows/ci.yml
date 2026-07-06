@@ -152,6 +152,10 @@ jobs:
         run: |
           uv run maturin develop
 
+      - name: Static type gate (ty, scoped)
+        run: |
+          uv run ty check src/ferro/query tests/test_query_typing.py tests/test_static_contracts.py
+
       - name: Run IR vector contract harness
         run: |
           uv run pytest -v tests/test_ir_vectors_contract.py

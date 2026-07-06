@@ -20,7 +20,7 @@ async def test_like_search(db_url):
         await SearchableUser.create(name="Tyler")
 
         # .like()
-        results = await SearchableUser.where(SearchableUser.name.like("Tay%")).all()
+        results = await SearchableUser.where(lambda u: u.name.like("Tay%")).all()
         assert len(results) >= 1
         assert any(r.name == "Taylor" for r in results)
 
@@ -42,13 +42,13 @@ async def test_in_helper(db_url):
 
         # Use .in_()
         results = await SearchableUser.where(
-            SearchableUser.name.in_(["user1", "user3"])
+            lambda u: u.name.in_(["user1", "user3"])
         ).all()
         assert len(results) == 2
         assert {r.name for r in results} == {"user1", "user3"}
 
         # Verify << still works
         results_legacy = await SearchableUser.where(
-            SearchableUser.name << ["user1", "user3"]
+            lambda u: u.name << ["user1", "user3"]
         ).all()
         assert len(results_legacy) == 2

@@ -99,12 +99,12 @@ Rich field types validate end to end: `datetime`, `date`, `Decimal`, `UUID`, enu
 
 ## Limits
 
-One place where static typing is weaker than the runtime: **query predicates**. The metaclass replaces `User.age` with a `FieldProxy` at runtime, but type checkers see the annotation (`int`), so an expression like `User.archived == False` types as `bool` rather than as a query node. Ferro provides two additional predicate styles — `col()` and lambda predicates — that restore full static cleanliness without `# type: ignore`.
+**Query predicates** are one place static typing needs a small assist: the lambda parameter passed to `where()` is typed as a `QueryProxy`, whose attributes resolve to `FieldProxy[Any]` rather than each field's declared type. That means the checker catches a predicate that returns the wrong *shape* — `lambda user: True` fails `ty check` / Pyright because it doesn't return a `QueryNode` — but not one that compares a field to the wrong *type*, like `user.age >= "eighteen"`. Wiring per-field types through the proxy needs mapped types, proposed for Python in [PEP 827](https://peps.python.org/pep-0827/) (draft, targeting Python 3.16); Ferro adopts it with zero runtime change once checkers support it.
 
 This is a deep enough topic to get its own page: see [Typed Query Predicates](query-typing.md).
 
 ## See Also
 
-- [Typed Query Predicates](query-typing.md) — the three predicate styles
+- [Typed Query Predicates](query-typing.md) — how lambda predicates type-check
 - [Models & Fields](../guide/models-and-fields.md)
 - [Architecture](architecture.md)

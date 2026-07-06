@@ -1,7 +1,7 @@
 """Expose query-building primitives used by Ferro models"""
 
 from .builder import Query, Relation
-from .nodes import FieldProxy, Predicate, QueryNode, QueryProxy, col
+from .nodes import FieldProxy, Predicate, QueryNode, QueryProxy
 
 __all__ = [
     "FieldProxy",
@@ -10,5 +10,4 @@ __all__ = [
     "QueryNode",
     "QueryProxy",
     "Relation",
-    "col",
 ]

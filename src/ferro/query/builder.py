@@ -1,14 +1,9 @@
 """Build fluent query objects that serialize QueryIR payloads for the Rust core."""
 
-from typing import TYPE_CHECKING, Any, Generic, Type, TypeVar, overload
+import copy
+from typing import TYPE_CHECKING, Any, Callable, Generic, Self, Type, TypeVar, overload
 
 from .._bind_payload import update_bind_payload
-from .._deprecations import (
-    IR_FIRST_DEPRECATION_REMOVE_IN,
-    IR_FIRST_DEPRECATION_SINCE,
-    IR_FIRST_MIGRATION_GUIDE_PREDICATES,
-    deprecated,
-)
 from .._core import (
     add_m2m_links,
     clear_m2m_links,
@@ -18,11 +13,17 @@ from .._core import (
     remove_m2m_links,
     update_filtered,
 )
-from .nodes import QueryNode, QueryProxy, _serialize_query_value
+from .nodes import (
+    FieldProxy,
+    Predicate,
+    QueryNode,
+    QueryProxy,
+    _serialize_query_value,
+    validate_query_column,
+)
 
 if TYPE_CHECKING:
     from .._core import RouteHandle
-    from .nodes import Predicate
 
 T = TypeVar("T")
 E = TypeVar("E")
@@ -41,42 +42,25 @@ def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
     )
 
 
-@deprecated(
-    reason=(
-        "Operator predicate style (Model.field OP value) is deprecated; use lambda "
-        "predicates (`where(lambda user: ...)`) or col(Model.field) instead."
-    ),
-    since=IR_FIRST_DEPRECATION_SINCE,
-    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
-    reference=IR_FIRST_MIGRATION_GUIDE_PREDICATES,
-)
-def _deprecated_operator_query_node(node: QueryNode) -> QueryNode:
-    return node
+def _model_identity(model_cls: type) -> str:
+    """Qualified registry identity of a Ferro model class (FF-E)."""
+    return model_cls.__ferro_identity__  # ty: ignore[unresolved-attribute]
 
 
-def _resolve_where_node(node: Any) -> QueryNode:
-    """Normalize a ``where`` argument into a ``QueryNode``.
-
-    Accepts an existing ``QueryNode`` directly (the operator and ``col()``
-    paths) or a predicate callable that takes a ``QueryProxy`` and returns
-    a ``QueryNode`` (the lambda path).
-    """
-    if isinstance(node, QueryNode):
-        if node.uses_operator_style():
-            return _deprecated_operator_query_node(node)
-        return node
-    if callable(node):
-        result = node(QueryProxy())
-        if not isinstance(result, QueryNode):
-            raise TypeError(
-                "where() predicate callable must return QueryNode, "
-                f"got {type(result).__name__}"
-            )
-        return result
-    raise TypeError(
-        "where() expected QueryNode or predicate callable, "
-        f"got {type(node).__name__}"
-    )
+def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNode:
+    """Evaluate a lambda predicate against a validating ``QueryProxy``."""
+    if not callable(predicate):
+        raise TypeError(
+            "where() expected a predicate callable "
+            f"(e.g. `lambda user: user.age >= 18`), got {type(predicate).__name__}"
+        )
+    result = predicate(QueryProxy(model_cls))
+    if not isinstance(result, QueryNode):
+        raise TypeError(
+            "where() predicate callable must return QueryNode, "
+            f"got {type(result).__name__}"
+        )
+    return result
 
 
 class Query(Generic[T]):
@@ -115,50 +99,59 @@ class Query(Generic[T]):
 
         return resolve_operation_scope(using=self._using, session=self._session)
 
+    def _clone(self) -> Self:
+        """Return a copy of this query with no shared mutable state.
+
+        ``copy.copy`` preserves the concrete class (``Relation`` stays
+        ``Relation``); the mutable containers are then replaced so chained
+        queries never alias the originals (FF-F F-1).
+        """
+        new = copy.copy(self)
+        new.where_clause = list(self.where_clause)
+        new.order_by_clause = list(self.order_by_clause)
+        new._m2m_context = (
+            dict(self._m2m_context) if self._m2m_context is not None else None
+        )
+        return new
+
     def _m2m(
         self, join_table: str, source_col: str, target_col: str, source_id: Any
-    ) -> "Query[T]":
-        """Store many-to-many linkage context for relationship operations"""
-        self._m2m_context = {
+    ) -> Self:
+        """Store many-to-many linkage context for relationship operations.
+
+        A new ``Query`` with the m2m context set; ``self`` is unchanged.
+        """
+        new = self._clone()
+        new._m2m_context = {
             "join_table": join_table,
             "source_col": source_col,
             "target_col": target_col,
             "source_id": source_id,
         }
-        return self
+        return new
 
-    @overload
-    def where(self, node: "QueryNode") -> "Query[T]": ...
-
-    @overload
-    def where(self, node: "Predicate[T]") -> "Query[T]": ...
-
-    def where(self, node: "QueryNode | Predicate[T]") -> "Query[T]":
+    def where(self, predicate: "Predicate[T]") -> Self:
         """Add a filter condition to the query.
 
-        The recommended style is a lambda predicate of shape
-        ``Callable[[QueryProxy[T]], QueryNode]``. The lambda receives a
-        fresh :class:`QueryProxy` whose attributes return
-        :class:`FieldProxy` instances, so ``lambda user: user.archived == False``
-        builds a comparison without static-typing friction. A prebuilt
-        :class:`QueryNode` is also accepted, built either with
-        :func:`ferro.query.col` (the type-safe escape hatch that preserves
-        operator shape) or with operator syntax on class attributes. The
-        bare operator form (``User.where(User.age >= 18)``) is deprecated and
-        on the v0.14.0 removal track. It does not
-        type-check statically:
-        the class attribute types as the field type, so the comparison
-        resolves to ``bool``, not ``QueryNode``.
+        ``predicate`` is a lambda of shape ``Callable[[QueryProxy[T]], QueryNode]``.
+        The lambda receives a fresh :class:`QueryProxy` whose attributes
+        return :class:`FieldProxy` instances, so
+        ``lambda user: user.archived == False`` builds a comparison. Column
+        names are validated at build time against the model's declared
+        fields (plus shadow ``{fk}_id`` columns): a misspelled column raises
+        ``AttributeError`` naming the closest valid match, before any query
+        is sent to the database.
 
         Args:
-            node: A predicate callable or a ``QueryNode``.
+            predicate: A callable that takes a :class:`QueryProxy` and
+                returns a :class:`QueryNode`.
 
         Returns:
-            The current Query instance for chaining.
+            A new ``Query`` with the clause added; ``self`` is unchanged.
 
         Raises:
-            TypeError: If ``node`` is neither a ``QueryNode`` nor a callable,
-                or if the callable does not return a ``QueryNode``.
+            TypeError: If ``predicate`` is not callable, or if it does not
+                return a ``QueryNode``.
 
         Examples:
             >>> q1 = User.where(lambda user: user.archived == False)  # noqa: E712
@@ -166,69 +159,97 @@ class Query(Generic[T]):
             >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """
-        self.where_clause.append(_resolve_where_node(node))
-        return self
+        new = self._clone()
+        new.where_clause.append(_resolve_where_node(predicate, self.model_cls))
+        return new
 
-    def order_by(self, field: Any, direction: str = "asc") -> "Query[T]":
-        """Add an ordering clause to the query
+    def order_by(
+        self,
+        field: "str | Callable[[QueryProxy[T]], FieldProxy[Any]]",
+        direction: str = "asc",
+    ) -> Self:
+        """Add an ordering clause and return a new query.
+
+        Accepts a lambda naming the column (``order_by(lambda u: u.created_at,
+        "desc")`` — the documented style, matching ``where`` predicates) or a
+        column-name string (``order_by("created_at", "desc")``). Both forms are
+        validated against the model's queryable columns at build time.
 
         Args:
-            field: The field to order by (e.g., User.username).
-            direction: The direction of the sort ("asc" or "desc").
+            field: Column selector — lambda receiving a :class:`QueryProxy`,
+                or a column-name string.
+            direction: ``"asc"`` (default) or ``"desc"``.
 
         Returns:
-            The current Query instance for chaining.
+            A new ``Query`` with the ordering added; ``self`` is unchanged.
 
         Raises:
-            ValueError: If direction is not "asc" or "desc".
+            AttributeError: If the column is not a queryable column.
+            TypeError: If a lambda selector returns something other than a
+                single column reference.
+            ValueError: If ``direction`` is not ``"asc"`` or ``"desc"``.
 
         Examples:
-            >>> query = User.select().order_by(User.username, "desc")
-            >>> query.order_by_clause[-1]["direction"]
-            'desc'
+            >>> newest = await Post.select().order_by(lambda p: p.created_at, "desc").all()
         """
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
 
-        col_name = field.column if hasattr(field, "column") else str(field)
-        self.order_by_clause.append(
-            {"column": col_name, "direction": direction.lower()}
-        )
-        return self
+        if isinstance(field, str):
+            col_name = validate_query_column(self.model_cls, field)
+        elif callable(field):
+            selected = field(QueryProxy(self.model_cls))
+            if not isinstance(selected, FieldProxy):
+                raise TypeError(
+                    "order_by() selector must return a FieldProxy "
+                    f"(e.g. `lambda u: u.created_at`), got {type(selected).__name__}"
+                )
+            col_name = selected.column
+        else:
+            raise TypeError(
+                "order_by() expected a column-name string or a lambda selector, "
+                f"got {type(field).__name__}"
+            )
 
-    def limit(self, value: int) -> "Query[T]":
+        new = self._clone()
+        new.order_by_clause.append({"column": col_name, "direction": direction.lower()})
+        return new
+
+    def limit(self, value: int) -> Self:
         """Limit the number of records returned
 
         Args:
             value: The maximum number of records to return.
 
         Returns:
-            The current Query instance for chaining.
+            A new ``Query`` with the clause added; ``self`` is unchanged.
 
         Examples:
             >>> query = User.select().limit(10)
             >>> query._limit
             10
         """
-        self._limit = value
-        return self
+        new = self._clone()
+        new._limit = value
+        return new
 
-    def offset(self, value: int) -> "Query[T]":
+    def offset(self, value: int) -> Self:
         """Skip a specific number of records
 
         Args:
             value: The number of records to skip.
 
         Returns:
-            The current Query instance for chaining.
+            A new ``Query`` with the clause added; ``self`` is unchanged.
 
         Examples:
             >>> query = User.select().offset(20)
             >>> query._offset
             20
         """
-        self._offset = value
-        return self
+        new = self._clone()
+        new._offset = value
+        return new
 
     def _mutating_query_def(self, operation: str) -> dict[str, Any]:
         """Build the QueryIR payload for a mutating operation (update/delete).
@@ -248,7 +269,7 @@ class Query(Generic[T]):
                 "primary-key set."
             )
         return {
-            "model_name": self.model_cls.__ferro_identity__,
+            "model_name": _model_identity(self.model_cls),
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": [],
             "m2m": None,
@@ -266,7 +287,7 @@ class Query(Generic[T]):
             True
         """
         query_def = {
-            "model_name": self.model_cls.__ferro_identity__,
+            "model_name": _model_identity(self.model_cls),
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": self.order_by_clause,
             "limit": self._limit,
@@ -292,7 +313,7 @@ class Query(Generic[T]):
             True
         """
         query_def = {
-            "model_name": self.model_cls.__ferro_identity__,
+            "model_name": _model_identity(self.model_cls),
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": [],
             "limit": None,
@@ -301,7 +322,7 @@ class Query(Generic[T]):
         }
         route = self._transaction_or_using()
         return await count_filtered(
-            self.model_cls.__ferro_identity__,
+            _model_identity(self.model_cls),
             _query_ir_payload_to_json(query_def),
             route,
         )
@@ -326,7 +347,7 @@ class Query(Generic[T]):
         query_def = self._mutating_query_def("update")
         route = self._transaction_or_using()
         return await update_filtered(
-            self.model_cls.__ferro_identity__,
+            _model_identity(self.model_cls),
             _query_ir_payload_to_json(query_def),
             update_bind_payload(fields),
             route,
@@ -339,17 +360,12 @@ class Query(Generic[T]):
             A model instance or None.
 
         Examples:
-            >>> user = await User.select().order_by(User.id).first()
+            >>> user = await User.select().order_by("id").first()
             >>> user is None or isinstance(user, User)
             True
         """
-        old_limit = self._limit
-        self._limit = 1
-        try:
-            results = await self.all()
-            return results[0] if results else None
-        finally:
-            self._limit = old_limit
+        results = await self.limit(1).all()
+        return results[0] if results else None
 
     async def delete(self) -> int:
         """Delete all records matching the current query
@@ -368,7 +384,7 @@ class Query(Generic[T]):
         query_def = self._mutating_query_def("delete")
         route = self._transaction_or_using()
         return await delete_filtered(
-            self.model_cls.__ferro_identity__,
+            _model_identity(self.model_cls),
             _query_ir_payload_to_json(query_def),
             route,
         )
@@ -501,34 +517,6 @@ class Relation(Query[T]):
         >>> isinstance(posts, list)
         True
     """
-
-    def _m2m(
-        self, join_table: str, source_col: str, target_col: str, source_id: Any
-    ) -> "Relation[T]":
-        super()._m2m(join_table, source_col, target_col, source_id)
-        return self
-
-    @overload
-    def where(self, node: "QueryNode") -> "Relation[T]": ...
-
-    @overload
-    def where(self, node: "Predicate[T]") -> "Relation[T]": ...
-
-    def where(self, node: "QueryNode | Predicate[T]") -> "Relation[T]":
-        super().where(node)  # type: ignore[arg-type]
-        return self
-
-    def order_by(self, field: Any, direction: str = "asc") -> "Relation[T]":
-        super().order_by(field, direction)
-        return self
-
-    def limit(self, value: int) -> "Relation[T]":
-        super().limit(value)
-        return self
-
-    def offset(self, value: int) -> "Relation[T]":
-        super().offset(value)
-        return self
 
     # NOTE ON TYPING:
     #

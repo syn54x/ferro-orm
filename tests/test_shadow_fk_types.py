@@ -110,7 +110,7 @@ async def test_uuid_fk_create_get_dump(db_url):
         assert fetched.parent_id == parent.id
 
         by_shadow = await UuidIssueChild.where(
-            UuidIssueChild.parent_id == parent.id
+            lambda c: c.parent_id == parent.id
         ).first()
         assert by_shadow is not None
         assert by_shadow.id == child.id

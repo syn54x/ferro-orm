@@ -9,7 +9,6 @@ from typing import (
     ClassVar,
     Literal,
     Self,
-    overload,
 )
 
 if TYPE_CHECKING:
@@ -34,7 +33,7 @@ from ._core import (
 from .base import ForeignKey, foreign_key_allows_none
 from .exceptions import ModelDoesNotExist
 from .metaclass import ModelMetaclass
-from .query import Predicate, Query, QueryNode
+from .query import Predicate, Query
 from .state import (
     RouteHandle,
     _CURRENT_TRANSACTION,
@@ -509,40 +508,25 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         _set_instance_origin(self, identity_using)
         _set_persisted(self, True)
 
-    @overload
-    @classmethod
-    def where(cls, node: QueryNode) -> Query[Self]: ...
-
-    @overload
-    @classmethod
-    def where(cls, node: "Predicate[Self]") -> Query[Self]: ...
-
     @classmethod
     def where(
-        cls, node: "QueryNode | Predicate[Self]", *, session: "Session | None" = None
+        cls, predicate: "Predicate[Self]", *, session: "Session | None" = None
     ) -> Query[Self]:
         """Start a fluent query with an initial condition.
 
-        The recommended style is a lambda predicate of shape
+        ``predicate`` is a lambda of shape
         ``Callable[[QueryProxy[Self]], QueryNode]``, e.g.
         ``User.where(lambda user: user.age >= 18)``. The lambda receives a
         :class:`QueryProxy` whose attributes build comparisons as
         :class:`QueryNode` instances, so predicates type-check cleanly.
         Name the parameter after the model in lowercase singular (``user`` for
-        ``User``, ``post`` for ``Post``).
-        A prebuilt :class:`QueryNode` is also accepted, built either with
-        :func:`ferro.query.col` (the type-safe escape hatch that preserves
-        operator shape) or with operator syntax on class attributes. The
-        bare operator form (``User.where(User.age >= 18)``) is deprecated and
-        on the v0.14.0 removal track. It does not
-        type-check statically:
-        the class attribute types as the field type, so the comparison
-        resolves to ``bool``, not ``QueryNode``. See
-        ``docs/concepts/query-typing.md`` for the trade-offs between the
-        three styles.
+        ``User``, ``post`` for ``Post``). Column names are validated at build
+        time against the model's declared fields (plus shadow ``{fk}_id``
+        columns).
 
         Args:
-            node: A predicate callable or a ``QueryNode``.
+            predicate: A callable that takes a :class:`QueryProxy` and
+                returns a :class:`QueryNode`.
 
         Returns:
             A query object scoped to this model class.
@@ -553,7 +537,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> isinstance(q1, Query) and isinstance(q2, Query)
             True
         """
-        return Query(cls, session=session).where(node)
+        return Query(cls, session=session).where(predicate)
 
     @classmethod
     def select(cls, *, session: "Session | None" = None) -> Query[Self]:
@@ -750,14 +734,8 @@ class ModelConnection[M: Model]:
     def select(self) -> Query[M]:
         return Query(self.model_cls, using=self._connection_name)
 
-    @overload
-    def where(self, node: QueryNode) -> Query[M]: ...
-
-    @overload
-    def where(self, node: "Predicate[M]") -> Query[M]: ...
-
-    def where(self, node: "QueryNode | Predicate[M]") -> Query[M]:
-        return self.select().where(node)
+    def where(self, predicate: "Predicate[M]") -> Query[M]:
+        return self.select().where(predicate)
 
     async def get(self, pk: Any) -> M:
         instance = await self.get_or_none(pk)

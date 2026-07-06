@@ -86,7 +86,7 @@ async def main() -> None:
         assert crab.team_id == team.id
 
         # Reverse: the BackRef is a chainable query
-        roster = await team.members.order_by(Player.name).all()
+        roster = await team.members.order_by(lambda player: player.name).all()
         # --8<-- [end:one-to-many-usage]
         assert len(roster) == 1
 

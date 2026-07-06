@@ -1,6 +1,5 @@
 import json
 import uuid
-import warnings
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -9,9 +8,9 @@ import pytest
 
 import ferro
 from ferro import Model, connect
-from ferro.query import Query, QueryNode, col
+from ferro.query import Query, QueryNode
 from ferro.query.builder import _query_ir_payload_to_json
-from ferro.query.nodes import _serialize_query_value
+from ferro.query.nodes import FieldProxy, _serialize_query_value
 from pydantic import Field
 
 pytestmark = pytest.mark.backend_matrix
@@ -82,7 +81,7 @@ def test_query_node_to_dict_serializes_uuid_values_inside_in_filters():
     uid2 = uuid.uuid4()
     node = QueryNode(column="run_id", operator="IN", value=[uid1, uid2])
 
-    assert node.to_dict()["value"] == [str(uid1), str(uid2)]
+    assert node.to_ir_dict()["value"]["value"] == [str(uid1), str(uid2)]
 
 
 def test_query_node_to_ir_dict_uses_query_ir_shape():
@@ -97,17 +96,10 @@ def test_query_node_to_ir_dict_uses_query_ir_shape():
 
 def test_field_proxy_operator_overloading():
     """
-    Test that accessing a field on the Model class returns a FieldProxy
-    and that operators on it return a QueryNode.
+    Test that operators on a FieldProxy (the lambda predicate mechanism)
+    return a QueryNode.
     """
-
-    class QueryUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
-        age: int
-        username: str
-
-    # 1. Accessing via class should return something that supports operators
-    expr = QueryUser.age >= 18
+    expr = FieldProxy("age") >= 18
 
     assert isinstance(expr, QueryNode)
     assert expr.column == "age"
@@ -115,7 +107,6 @@ def test_field_proxy_operator_overloading():
     assert expr.value == 18
 
 
-@pytest.mark.deprecated_operator_path
 def test_model_where_clause():
     """
     Test that Model.where() returns a Query object with the correct condition.
@@ -125,8 +116,7 @@ def test_model_where_clause():
         id: int = Field(json_schema_extra={"primary_key": True})
         age: int
 
-    with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
-        query = QueryUser.where(QueryUser.age >= 21)
+    query = QueryUser.where(lambda u: u.age >= 21)
 
     assert isinstance(query, Query)
     assert len(query.where_clause) == 1
@@ -135,7 +125,6 @@ def test_model_where_clause():
     assert query.where_clause[0].value == 21
 
 
-@pytest.mark.deprecated_operator_path
 def test_query_chaining_placeholders():
     """
     Test that Query object supports chaining (even if not yet executed).
@@ -145,8 +134,7 @@ def test_query_chaining_placeholders():
         id: int = Field(json_schema_extra={"primary_key": True})
         age: int
 
-    with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
-        query = QueryUser.where(QueryUser.age >= 18).limit(10).offset(5)
+    query = QueryUser.where(lambda u: u.age >= 18).limit(10).offset(5)
 
     assert query._limit == 10
     assert query._offset == 5
@@ -157,12 +145,7 @@ def test_in_operator_lshift():
     """
     Test that the << operator correctly creates an IN condition.
     """
-
-    class QueryUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
-        username: str
-
-    expr = QueryUser.username << ["taylor", "jeff"]
+    expr = FieldProxy("username") << ["taylor", "jeff"]
 
     assert isinstance(expr, QueryNode)
     assert expr.column == "username"
@@ -170,23 +153,11 @@ def test_in_operator_lshift():
     assert expr.value == ["taylor", "jeff"]
 
     # Test with tuple
-    expr_tuple = QueryUser.username << ("alice", "bob")
+    expr_tuple = FieldProxy("username") << ("alice", "bob")
     assert expr_tuple.value == ["alice", "bob"]
 
     with pytest.raises(TypeError, match="expects a list, tuple, or set"):
-        _ = QueryUser.username << "not a list"
-
-
-def test_col_style_where_does_not_emit_deprecation_warning():
-    class ColUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
-        age: int
-
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always", DeprecationWarning)
-        query = ColUser.where(col(ColUser.age) >= 21)
-    assert isinstance(query, Query)
-    assert not [w for w in captured if issubclass(w.category, DeprecationWarning)]
+        _ = FieldProxy("username") << "not a list"
 
 
 @pytest.mark.asyncio

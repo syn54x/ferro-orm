@@ -6,20 +6,20 @@
 use crate::backend::{
     EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind, TableCatalog,
 };
-use crate::query::{QueryDef, query_def_from_ir_payload};
+use crate::query::QueryPlan;
 use crate::state::{
     Dialect, TRANSACTION_REGISTRY,
     TransactionConnection, TransactionHandle, connection_for_route, ensure_session_idle_for_close,
     engine_for_connection, register_session, session_state, unregister_session,
 };
 use dashmap::DashMap;
-use ferro_schema_ir::{IrEnvelope, QueryIrPayload};
+use ferro_schema_ir::QueryIrPayload;
 use pyo3::prelude::*;
 use sea_query::{
     Alias, Condition, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query,
     SimpleExpr, SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -216,7 +216,7 @@ struct QueryIrEnvelope {
     payload: QueryIrPayload,
 }
 
-fn query_def_from_ir_json(query_ir_json: &str) -> PyResult<QueryDef> {
+fn query_plan_from_ir_json(query_ir_json: &str) -> PyResult<QueryPlan> {
     let envelope: QueryIrEnvelope = serde_json::from_str(query_ir_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR JSON: {}", e))
     })?;
@@ -232,16 +232,15 @@ fn query_def_from_ir_json(query_ir_json: &str) -> PyResult<QueryDef> {
             envelope.ir_version
         )));
     }
-    query_def_from_ir_payload(envelope.payload)
+    QueryPlan::from_ir_payload(envelope.payload)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR: {e}")))
 }
 
 fn query_condition_for_backend(
-    query_def: &QueryDef,
+    plan: &QueryPlan,
     backend: Dialect,
 ) -> PyResult<Condition> {
-    query_def
-        .to_condition_for_backend(backend)
+    plan.to_condition_for_backend(backend)
         .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
@@ -250,8 +249,8 @@ fn query_condition_for_backend(
 /// Portable SQL has no `UPDATE/DELETE ... LIMIT`. The Python builder raises
 /// before serializing and omits the keys from mutating payloads; this
 /// boundary guard keeps the contract from regressing via any other caller.
-fn reject_pagination_on_mutation(query_def: &QueryDef, operation: &str) -> PyResult<()> {
-    if query_def.limit.is_some() || query_def.offset.is_some() {
+fn reject_pagination_on_mutation(plan: &QueryPlan, operation: &str) -> PyResult<()> {
+    if plan.limit.is_some() || plan.offset.is_some() {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "{operation}() does not support limit/offset: portable SQL has no {} ... LIMIT",
             operation.to_uppercase()
@@ -489,87 +488,6 @@ macro_rules! sea_query_to_string_for_backend {
             crate::state::Dialect::Postgres => $stmt.to_string(PostgresQueryBuilder),
         }
     }};
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct QueryPlanArtifact {
-    operation: String,
-    semantic_signature: Vec<String>,
-    bind_semantics: Vec<String>,
-}
-
-fn bind_semantics(bind_values: &[SeaValue]) -> Vec<String> {
-    engine_bind_values_from_sea(bind_values)
-        .into_iter()
-        .map(|value| format!("{value:?}"))
-        .collect()
-}
-
-fn query_plan_artifact(
-    operation: &str,
-    query_def: &QueryDef,
-    bind_values: &[SeaValue],
-) -> QueryPlanArtifact {
-    let mut semantic_signature = query_def
-        .semantic_signature()
-        .where_semantics
-        .into_iter()
-        .collect::<Vec<_>>();
-    semantic_signature.sort();
-
-    QueryPlanArtifact {
-        operation: operation.to_string(),
-        semantic_signature,
-        bind_semantics: bind_semantics(bind_values),
-    }
-}
-
-fn shadow_artifact_from_ir_roundtrip(
-    operation: &str,
-    query_def: &QueryDef,
-    bind_values: &[SeaValue],
-) -> Result<QueryPlanArtifact, String> {
-    let ir_payload = query_def.to_ir_payload();
-    let ir_roundtrip = query_def_from_ir_payload(ir_payload)?;
-    Ok(query_plan_artifact(operation, &ir_roundtrip, bind_values))
-}
-
-fn compare_shadow_query_artifacts(
-    operation: &str,
-    query_def: &QueryDef,
-    bind_values: &[SeaValue],
-) -> Result<(), String> {
-    let legacy = query_plan_artifact(operation, query_def, bind_values);
-    let shadow = shadow_artifact_from_ir_roundtrip(operation, query_def, bind_values)?;
-    if legacy == shadow {
-        return Ok(());
-    }
-    let legacy_json = serde_json::to_string(&legacy).unwrap_or_else(|_| "<legacy>".to_string());
-    let shadow_json = serde_json::to_string(&shadow).unwrap_or_else(|_| "<shadow>".to_string());
-    Err(format!(
-        "shadow planner mismatch for '{operation}': legacy={legacy_json} shadow={shadow_json}"
-    ))
-}
-
-fn maybe_compare_shadow_query_artifacts(
-    engine: &EngineHandle,
-    operation: &str,
-    query_def: &QueryDef,
-    bind_values: &[SeaValue],
-) -> PyResult<()> {
-    if !engine.is_shadow_runtime_enabled() {
-        return Ok(());
-    }
-    if let Err(diff) = compare_shadow_query_artifacts(operation, query_def, bind_values) {
-        crate::log_debug(format!("⚠️ Ferro shadow runtime mismatch: {diff}"));
-        if std::env::var("FERRO_SHADOW_RUNTIME_STRICT")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(diff));
-        }
-    }
-    Ok(())
 }
 
 /// On Postgres, cast text-like special columns in SELECT output so Python hydration
@@ -1681,7 +1599,7 @@ pub fn fetch_filtered<'py>(
     let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
 
-    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
+    let mut plan = query_plan_from_ir_json(&query_ir_json)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -1692,7 +1610,7 @@ pub fn fetch_filtered<'py>(
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
-        query_def.postgres_enum_udt = catalog.enum_udt.clone();
+        plan.postgres_enum_udt = catalog.enum_udt.clone();
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
             let mut pk = None;
@@ -1713,7 +1631,7 @@ pub fn fetch_filtered<'py>(
             select.column((Alias::new(&table_name), sea_query::Asterisk));
             select.from(Alias::new(&table_name));
 
-            if let Some(m2m) = &query_def.m2m {
+            if let Some(m2m) = &plan.m2m {
                 let join_table = Alias::new(&m2m.join_table);
                 let source_col = Alias::new(&m2m.source_col);
                 let target_col = Alias::new(&m2m.target_col);
@@ -1727,7 +1645,7 @@ pub fn fetch_filtered<'py>(
                         .equals((join_table.clone(), target_col.clone())),
                 );
                 select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
-                    query_def.value_rhs_simple_expr_for_backend(
+                    plan.value_rhs_simple_expr_for_backend(
                         &m2m.source_col,
                         &m2m.source_id,
                         true,
@@ -1736,33 +1654,25 @@ pub fn fetch_filtered<'py>(
                 ));
             }
 
-            select.cond_where(query_condition_for_backend(&query_def, backend)?);
-            if let Some(ref orders) = query_def.order_by {
-                for order in orders {
-                    let col = Alias::new(&order.column);
-                    let dir = if order.direction.to_lowercase() == "desc" {
-                        Order::Desc
-                    } else {
-                        Order::Asc
-                    };
-                    select.order_by(col, dir);
-                }
+            select.cond_where(query_condition_for_backend(&plan, backend)?);
+            for order in &plan.order_by {
+                let col = Alias::new(&order.column);
+                let dir = if order.direction.to_lowercase() == "desc" {
+                    Order::Desc
+                } else {
+                    Order::Asc
+                };
+                select.order_by(col, dir);
             }
-            if let Some(limit) = query_def.limit {
+            if let Some(limit) = plan.limit {
                 select.limit(limit);
             }
-            if let Some(offset) = query_def.offset {
+            if let Some(offset) = plan.offset {
                 select.offset(offset);
             }
             let (s, values) = sea_query_build_for_backend!(select, backend);
             (s, values, pk, schema.clone())
         };
-        maybe_compare_shadow_query_artifacts(
-            &engine,
-            "fetch_filtered",
-            &query_def,
-            &bind_values.0,
-        )?;
 
         let parsed_data = match tx_conn {
             Some(conn_arc) => {
@@ -1868,7 +1778,7 @@ pub fn count_filtered(
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
+    let mut plan = query_plan_from_ir_json(&query_ir_json)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -1876,7 +1786,7 @@ pub fn count_filtered(
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
-        query_def.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
+        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
             .await?
             .enum_udt
             .clone();
@@ -1885,7 +1795,7 @@ pub fn count_filtered(
             let mut select = Query::select();
             select.expr(Expr::cust("COUNT(*)"));
 
-            if let Some(m2m) = &query_def.m2m {
+            if let Some(m2m) = &plan.m2m {
                 let join_table = Alias::new(&m2m.join_table);
                 let source_col = Alias::new(&m2m.source_col);
                 let target_col = Alias::new(&m2m.target_col);
@@ -1914,7 +1824,7 @@ pub fn count_filtered(
                         .equals((join_table.clone(), target_col.clone())),
                 );
                 select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
-                    query_def.value_rhs_simple_expr_for_backend(
+                    plan.value_rhs_simple_expr_for_backend(
                         &m2m.source_col,
                         &m2m.source_id,
                         true,
@@ -1925,15 +1835,9 @@ pub fn count_filtered(
                 select.from(Alias::new(&table_name));
             }
 
-            select.cond_where(query_condition_for_backend(&query_def, backend)?);
+            select.cond_where(query_condition_for_backend(&plan, backend)?);
             sea_query_build_for_backend!(select, backend)
         };
-        maybe_compare_shadow_query_artifacts(
-            &engine,
-            "count_filtered",
-            &query_def,
-            &bind_values.0,
-        )?;
 
         let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
         let count = match tx_conn {
@@ -2107,8 +2011,8 @@ pub fn delete_filtered(
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
-    reject_pagination_on_mutation(&query_def, "delete")?;
+    let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    reject_pagination_on_mutation(&plan, "delete")?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -2116,7 +2020,7 @@ pub fn delete_filtered(
         let session_id = r.session_id.clone();
 
         let table_name = crate::state::registered_model(&name)?.table_name.clone();
-        query_def.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
+        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
             .await?
             .enum_udt
             .clone();
@@ -2125,15 +2029,9 @@ pub fn delete_filtered(
             let mut delete = Query::delete();
             delete
                 .from_table(Alias::new(&table_name))
-                .cond_where(query_condition_for_backend(&query_def, backend)?);
+                .cond_where(query_condition_for_backend(&plan, backend)?);
             sea_query_build_for_backend!(delete, backend)
         };
-        maybe_compare_shadow_query_artifacts(
-            &engine,
-            "delete_filtered",
-            &query_def,
-            &bind_values.0,
-        )?;
 
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
@@ -2175,8 +2073,8 @@ pub fn update_filtered<'py>(
     updates: Bound<'py, pyo3::types::PyDict>,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let mut query_def = query_def_from_ir_json(&query_ir_json)?;
-    reject_pagination_on_mutation(&query_def, "update")?;
+    let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    reject_pagination_on_mutation(&plan, "update")?;
     let update_inputs = bind_inputs_from_py(&updates)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2188,12 +2086,12 @@ pub fn update_filtered<'py>(
         let table_name = schema.table_name.clone();
         let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
-        query_def.postgres_enum_udt = enum_udt.clone();
+        plan.postgres_enum_udt = enum_udt.clone();
         // ... sql ...
         let (sql, bind_values) = {
             let mut update = UpdateStatement::new()
                 .table(Alias::new(&table_name))
-                .cond_where(query_condition_for_backend(&query_def, backend)?)
+                .cond_where(query_condition_for_backend(&plan, backend)?)
                 .to_owned();
             for (key, input) in &update_inputs {
                 update.value(
@@ -2212,12 +2110,6 @@ pub fn update_filtered<'py>(
             }
             sea_query_build_for_backend!(update, backend)
         };
-        maybe_compare_shadow_query_artifacts(
-            &engine,
-            "update_filtered",
-            &query_def,
-            &bind_values.0,
-        )?;
 
         let rows_affected =
             execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
@@ -2814,18 +2706,6 @@ pub fn raw_fetch_one<'py>(
     })
 }
 
-/// Compare legacy and IR query planners for shadow-runtime parity tests.
-///
-/// Args:
-///     query_payload_json (str): Query IR envelope JSON or legacy query JSON.
-///     dialect (str): `"postgres"` or `"sqlite"`.
-///     operation (str): Planner operation label (default `"select"`).
-///
-/// Returns:
-///     str: Semantic diff or match summary for assertions in pytest.
-///
-/// # Errors
-/// `PyValueError` for unknown dialect or unparseable JSON.
 /// Lifetime catalog-introspection query count for a connection's engine.
 ///
 /// Test-only instrument for the FF-C C2 exit gate: steady-state CRUD must
@@ -2846,97 +2726,6 @@ pub fn raw_fetch_one<'py>(
 pub fn _catalog_query_count_for_test(using: Option<String>) -> PyResult<u64> {
     let (_, engine) = active_connection_for_route(using)?;
     Ok(engine.catalog_query_count())
-}
-
-#[pyfunction]
-#[pyo3(name = "_shadow_compare_query_plan_for_test")]
-#[pyo3(signature = (query_payload_json, dialect, operation="select".to_string()))]
-pub fn _shadow_compare_query_plan_for_test(
-    query_payload_json: String,
-    dialect: String,
-    operation: String,
-) -> PyResult<String> {
-    let backend = match dialect.as_str() {
-        "postgres" => Dialect::Postgres,
-        "sqlite" => Dialect::Sqlite,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
-                other
-            )));
-        }
-    };
-    let query_def: QueryDef = if let Ok(ir_envelope) =
-        serde_json::from_str::<IrEnvelope<QueryIrPayload>>(&query_payload_json)
-    {
-        if ir_envelope.ir_kind != "query" {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Invalid QueryIR envelope kind {:?}; expected \"query\"",
-                ir_envelope.ir_kind
-            )));
-        }
-        if ir_envelope.ir_version != 1 {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unsupported QueryIR version {}; expected 1",
-                ir_envelope.ir_version
-            )));
-        }
-        query_def_from_ir_payload(ir_envelope.payload).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR payload: {e}"))
-        })?
-    } else {
-        serde_json::from_str(&query_payload_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid query payload JSON: {}", e))
-        })?
-    };
-    let legacy_table = query_def
-        .registration
-        .as_ref()
-        .map(|r| r.table_name.clone())
-        .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Model '{}' not found",
-                query_def.model_name
-            ))
-        })?;
-    let mut select_legacy = Query::select();
-    select_legacy.from(Alias::new(&legacy_table));
-    select_legacy.column((Alias::new(&legacy_table), sea_query::Asterisk));
-    select_legacy.cond_where(query_condition_for_backend(&query_def, backend)?);
-    if let Some(ref orders) = query_def.order_by {
-        for order in orders {
-            let dir = if order.direction.to_lowercase() == "desc" {
-                Order::Desc
-            } else {
-                Order::Asc
-            };
-            select_legacy.order_by(Alias::new(&order.column), dir);
-        }
-    }
-    if let Some(limit) = query_def.limit {
-        select_legacy.limit(limit);
-    }
-    if let Some(offset) = query_def.offset {
-        select_legacy.offset(offset);
-    }
-    let (legacy_sql, legacy_values) = sea_query_build_for_backend!(select_legacy, backend);
-    let legacy = query_plan_artifact(&operation, &query_def, &legacy_values.0);
-
-    let shadow = shadow_artifact_from_ir_roundtrip(&operation, &query_def, &legacy_values.0)
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    let payload = serde_json::json!({
-        "matches": legacy == shadow,
-        "legacy": {
-            "sql": legacy_sql,
-            "artifact": legacy,
-        },
-        "shadow": {
-            "artifact": shadow,
-        },
-    });
-    serde_json::to_string(&payload).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to encode JSON: {e}"))
-    })
 }
 
 #[cfg(test)]
@@ -3765,7 +3554,7 @@ mod engine_value_to_rust_value_tests {
 
 #[cfg(test)]
 mod mutation_pagination_guard_tests {
-    use super::{query_def_from_ir_json, reject_pagination_on_mutation};
+    use super::{query_plan_from_ir_json, reject_pagination_on_mutation};
 
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
@@ -3788,25 +3577,25 @@ mod mutation_pagination_guard_tests {
 
     #[test]
     fn query_ir_without_pagination_keys_parses_to_none() {
-        let query_def = query_def_from_ir_json(&envelope_without_pagination_keys())
+        let plan = query_plan_from_ir_json(&envelope_without_pagination_keys())
             .expect("mutating payloads omit limit/offset keys; parsing must succeed");
-        assert_eq!(query_def.limit, None);
-        assert_eq!(query_def.offset, None);
+        assert_eq!(plan.limit, None);
+        assert_eq!(plan.offset, None);
     }
 
     #[test]
     fn guard_allows_mutation_without_pagination() {
-        let query_def = query_def_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        assert!(reject_pagination_on_mutation(&query_def, "delete").is_ok());
-        assert!(reject_pagination_on_mutation(&query_def, "update").is_ok());
+        let plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        assert!(reject_pagination_on_mutation(&plan, "delete").is_ok());
+        assert!(reject_pagination_on_mutation(&plan, "update").is_ok());
     }
 
     #[test]
     fn guard_rejects_limit_with_pyvalueerror() {
-        let mut query_def = query_def_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        query_def.limit = Some(5);
+        let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        plan.limit = Some(5);
         pyo3::Python::attach(|py| {
-            let err = reject_pagination_on_mutation(&query_def, "delete")
+            let err = reject_pagination_on_mutation(&plan, "delete")
                 .expect_err("limit on a mutating query must be rejected");
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             let msg = err.to_string();
@@ -3819,10 +3608,10 @@ mod mutation_pagination_guard_tests {
 
     #[test]
     fn guard_rejects_offset_with_pyvalueerror() {
-        let mut query_def = query_def_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        query_def.offset = Some(2);
+        let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        plan.offset = Some(2);
         pyo3::Python::attach(|py| {
-            let err = reject_pagination_on_mutation(&query_def, "update")
+            let err = reject_pagination_on_mutation(&plan, "update")
                 .expect_err("offset on a mutating query must be rejected");
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             let msg = err.to_string();

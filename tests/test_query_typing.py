@@ -1,9 +1,8 @@
 """Integration tests for typed query predicates.
 
-Covers the three predicate styles accepted by ``Query.where`` and
-``Relation.where`` — operator (``Model.field == value``), ``col()`` wrapper,
-and lambda predicate (``lambda t: t.field == value``) — plus the AE5
-mixed-style chain from the requirements doc.
+Covers the lambda predicate style (``lambda t: t.field == value``) accepted
+by ``Query.where`` and ``Relation.where`` — the only predicate style Ferro
+supports since the v0.14.0 operator/``col()`` removal.
 """
 
 from typing import TYPE_CHECKING, Annotated
@@ -20,7 +19,7 @@ from ferro import (
     clear_registry,
     reset_engine,
 )
-from ferro.query import FieldProxy, Predicate, Query, QueryNode, QueryProxy, col
+from ferro.query import FieldProxy, Predicate, Query, QueryNode, QueryProxy
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -35,64 +34,6 @@ def _clear_state():
     reset_engine()
     clear_registry()
     yield
-
-
-# ---------------------------------------------------------------------------
-# col() runtime behavior
-# ---------------------------------------------------------------------------
-
-
-class TestColWrapper:
-    def test_col_returns_field_proxy_with_same_column(self):
-        """col(FieldProxy) returns a typed query proxy for the same column."""
-
-        class ColUser(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            archived: bool = False
-
-        wrapped = col(ColUser.archived)  # type: ignore[arg-type]
-        assert isinstance(wrapped, FieldProxy)
-        assert wrapped.column == "archived"
-
-    def test_col_eq_builds_query_node(self):
-        """col(field) == value builds a QueryNode with the right shape."""
-
-        class ColUser(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            archived: bool = False
-
-        node = col(ColUser.archived) == False  # noqa: E712
-        assert isinstance(node, QueryNode)
-        assert node.column == "archived"
-        assert node.operator == "=="
-        assert node.value is False
-
-    def test_col_rejects_literal_bool(self):
-        """col(False) raises TypeError naming the bad type."""
-        with pytest.raises(TypeError, match="bool"):
-            col(False)  # type: ignore[arg-type]
-
-    def test_col_rejects_string(self):
-        """col('archived') raises TypeError naming the bad type."""
-        with pytest.raises(TypeError, match="str"):
-            col("archived")  # type: ignore[arg-type]
-
-    @pytest.mark.asyncio
-    async def test_col_query_round_trips(self, db_url):
-        """col() predicates execute against the real backend."""
-
-        class ColUser(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            username: str
-            archived: bool = False
-
-        await ferro.connect(db_url, auto_migrate=True)
-        async with ferro.engines.session():
-            await ColUser(id=1, username="alice", archived=False).save()
-            await ColUser(id=2, username="bob", archived=True).save()
-
-            active = await ColUser.where(col(ColUser.archived) == False).all()  # noqa: E712
-            assert {u.username for u in active} == {"alice"}
 
 
 # ---------------------------------------------------------------------------
@@ -136,20 +77,25 @@ class TestLambdaPredicates:
             id: Annotated[int | None, FerroField(primary_key=True)] = None
 
         with pytest.raises(TypeError, match="must return QueryNode"):
-            Query(LamUser).where(lambda t: True)  # type: ignore[arg-type, return-value]  # ty: ignore[no-matching-overload]
+            Query(LamUser).where(lambda t: True)  # type: ignore[arg-type, return-value]  # ty: ignore[invalid-argument-type]
 
     def test_where_rejects_non_node_non_callable(self):
-        """A bare value (not a QueryNode and not callable) is rejected."""
+        """A non-callable value is rejected."""
 
         class LamUser(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
 
-        with pytest.raises(TypeError, match="QueryNode or predicate callable"):
-            Query(LamUser).where(123)  # type: ignore[arg-type]  # ty: ignore[no-matching-overload]
+        with pytest.raises(TypeError, match="predicate callable"):
+            Query(LamUser).where(123)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
 
     def test_query_proxy_attribute_returns_field_proxy(self):
-        """QueryProxy attribute access yields a FieldProxy at runtime."""
-        proxy = QueryProxy()
+        """QueryProxy attribute access yields a validated FieldProxy at runtime."""
+
+        class ProxyUser(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            archived: bool = False
+
+        proxy = QueryProxy(ProxyUser)
         f = proxy.archived
         assert isinstance(f, FieldProxy)
         assert f.column == "archived"
@@ -170,76 +116,6 @@ class TestLambdaPredicates:
 
             active = await LamUser.where(lambda t: t.archived == False).all()  # noqa: E712
             assert {u.username for u in active} == {"alice"}
-
-
-# ---------------------------------------------------------------------------
-# Operator path (regression — must keep working unchanged)
-# ---------------------------------------------------------------------------
-
-
-class TestOperatorPathUnchanged:
-    pytestmark = pytest.mark.deprecated_operator_path
-
-    @pytest.mark.asyncio
-    async def test_operator_eq_still_works(self, db_url):
-        """The original ``Model.field == value`` form is unchanged at runtime.
-
-        This is the exact static-typing scenario that motivates ``col()`` and
-        the lambda predicate API — ``OpUser.email == "a@b.com"`` resolves to
-        ``bool`` statically, so ``ty`` rejects it. The runtime path is
-        unaffected; the ``ty: ignore`` documents the trade-off rather than
-        hiding it.
-        """
-
-        class OpUser(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            email: str
-
-        await ferro.connect(db_url, auto_migrate=True)
-        async with ferro.engines.session():
-            await OpUser(id=1, email="a@b.com").save()
-            await OpUser(id=2, email="c@d.com").save()
-
-            with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
-                rows = await OpUser.where(
-                    OpUser.email == "a@b.com"
-                ).all()  # ty: ignore[no-matching-overload]
-            assert len(rows) == 1
-            assert rows[0].email == "a@b.com"
-
-
-# ---------------------------------------------------------------------------
-# AE5 — mixed chain
-# ---------------------------------------------------------------------------
-
-
-class TestCombinedStyles:
-    pytestmark = pytest.mark.deprecated_operator_path
-
-    @pytest.mark.asyncio
-    async def test_mixed_chain_executes(self, db_url):
-        """Operator + col() + lambda chained together filter correctly."""
-
-        class MixUser(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            role: str = "user"
-            archived: bool = False
-
-        await ferro.connect(db_url, auto_migrate=True)
-        async with ferro.engines.session():
-            await MixUser(id=1, role="admin", archived=False).save()
-            await MixUser(id=1_001, role="admin", archived=True).save()
-            await MixUser(id=2, role="user", archived=False).save()
-
-            with pytest.deprecated_call(match="Operator predicate style.*v0\\.14\\.0"):
-                rows = await (
-                    MixUser.where(MixUser.id == 1)  # ty: ignore[no-matching-overload]
-                    .where(col(MixUser.archived) == False)  # noqa: E712
-                    .where(lambda t: t.role == "admin")
-                    .all()
-                )
-            assert len(rows) == 1
-            assert rows[0].id == 1
 
 
 # ---------------------------------------------------------------------------
@@ -289,12 +165,9 @@ if TYPE_CHECKING:
         archived: bool = False
         email: str = ""
 
-    # col() narrows back to FieldProxy[T]
-    assert_type(col(_StaticUser.archived), FieldProxy[bool])
-
-    # col(field) == value resolves to QueryNode (not bool)
-    assert_type(col(_StaticUser.archived) == False, QueryNode)  # noqa: E712
-
     # Lambda predicates type-check as Predicate[Model]
     _pred: Predicate[_StaticUser] = lambda t: t.archived == False  # noqa: E712
-    assert_type(_pred(QueryProxy[_StaticUser]()), QueryNode)
+    assert_type(_pred(QueryProxy[_StaticUser](_StaticUser)), QueryNode)
+
+    # FieldProxy comparisons resolve to QueryNode (the lambda mechanism)
+    assert_type(FieldProxy("archived") == False, QueryNode)  # noqa: E712

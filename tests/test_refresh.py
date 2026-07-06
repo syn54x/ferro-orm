@@ -23,7 +23,7 @@ async def test_instance_refresh(db_url):
 
         # 2. Update the DB directly (bypassing the 'user' object)
         # We'll use the QueryBuilder to perform a bulk update
-        await RefreshUser.where(RefreshUser.id == user.id).update(points=200)
+        await RefreshUser.where(lambda u: u.id == user.id).update(points=200)
 
         # The 'user' object still has 100 points
         assert user.points == 100
@@ -49,7 +49,7 @@ async def test_refresh_not_found(db_url):
         user = await RefreshUser.create(username="deleted_soon")
 
         # Delete it from DB
-        await RefreshUser.where(RefreshUser.id == user.id).delete()
+        await RefreshUser.where(lambda u: u.id == user.id).delete()
 
         with pytest.raises(RuntimeError, match="Instance not found in database"):
             await user.refresh()

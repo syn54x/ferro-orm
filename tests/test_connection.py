@@ -166,12 +166,12 @@ async def test_model_using_routes_query_mutations_to_named_connection(tmp_path):
     service_query = ConnectionRouteMarker.using("service")
 
     assert await service_query.select().count() == 2
-    assert await service_query.where(ConnectionRouteMarker.label == "service").exists()
+    assert await service_query.where(lambda m: m.label == "service").exists()
 
-    updated = await service_query.where(ConnectionRouteMarker.id == 1).update(
+    updated = await service_query.where(lambda m: m.id == 1).update(
         label="service-updated"
     )
-    deleted = await service_query.where(ConnectionRouteMarker.id == 2).delete()
+    deleted = await service_query.where(lambda m: m.id == 2).delete()
 
     assert updated == 1
     assert deleted == 1
@@ -217,7 +217,7 @@ async def test_model_using_routes_helper_writes_to_named_connection(tmp_path):
     assert [
         (row.id, row.label)
         for row in await service_model.select()
-        .order_by(ConnectionRouteMarker.id)
+        .order_by("id")
         .all()
     ] == [
         (10, "updated"),

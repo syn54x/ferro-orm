@@ -126,10 +126,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(operations::raw_fetch_all, m)?)?;
     m.add_function(wrap_pyfunction!(operations::raw_fetch_one, m)?)?;
     m.add_function(wrap_pyfunction!(
-        operations::_shadow_compare_query_plan_for_test,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
         operations::_catalog_query_count_for_test,
         m
     )?)?;

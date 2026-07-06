@@ -25,7 +25,7 @@ Every model that wants timestamps repeats the same two field declarations and ad
 
 !!! note "Why a mixin instead of a `Model` base class?"
 
-    You might expect to declare the fields once on a shared base, e.g. `class Timestamped(Model)` with `created_at` / `updated_at`, and inherit from it. Ferro does not support this: the ORM registers a table schema and query proxies (the class attributes behind `Note.created_at > ...`) on each model class as it is defined, so fields declared on a `Model` base class are not contributed to its subclasses' tables. Keep shared *behavior* in a plain mixin and declare *fields* on each concrete model.
+    You might expect to declare the fields once on a shared base, e.g. `class Timestamped(Model)` with `created_at` / `updated_at`, and inherit from it. Ferro does not support this: the ORM registers a table schema for each model class as it is defined, so fields declared on a `Model` base class are not contributed to its subclasses' tables. Keep shared *behavior* in a plain mixin and declare *fields* on each concrete model.
 
 ## Usage
 
