@@ -1586,19 +1586,7 @@ pub fn fetch_filtered<'py>(
         plan.postgres_enum_udt = catalog.enum_udt.clone();
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
-            let mut pk = None;
-            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                for (col_name, col_info) in properties {
-                    if col_info
-                        .get("primary_key")
-                        .and_then(|pk| pk.as_bool())
-                        .unwrap_or(false)
-                    {
-                        pk = Some(col_name.clone());
-                        break;
-                    }
-                }
-            }
+            let pk = schema.meta.pk_col.clone();
 
             let mut select = Query::select();
             select.column((Alias::new(&table_name), sea_query::Asterisk));
@@ -1774,21 +1762,11 @@ pub fn count_filtered(
                 let target_col = Alias::new(&m2m.target_col);
 
                 // We need the PK name of the target table to join
-                let mut pk = None;
-                if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                    for (col_name, col_info) in properties {
-                        if col_info
-                            .get("primary_key")
-                            .and_then(|pk| pk.as_bool())
-                            .unwrap_or(false)
-                        {
-                            pk = Some(col_name.clone());
-                            break;
-                        }
-                    }
-                }
-                let pk_name =
-                    pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+                let pk_name = schema
+                    .meta
+                    .pk_col
+                    .clone()
+                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
 
                 select.from(Alias::new(&table_name));
                 select.inner_join(
@@ -1917,21 +1895,11 @@ pub fn delete_record(
         let table_name = schema.table_name.clone();
         // ... sql ...
         let (sql, bind_values) = {
-            let mut pk = None;
-            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                for (col_name, col_info) in properties {
-                    if col_info
-                        .get("primary_key")
-                        .and_then(|pk| pk.as_bool())
-                        .unwrap_or(false)
-                    {
-                        pk = Some(col_name.clone());
-                        break;
-                    }
-                }
-            }
-            let pk_name =
-                pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+            let pk_name = schema
+                .meta
+                .pk_col
+                .clone()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let no_enum_udt = HashMap::new();
             let no_uuid = HashSet::new();
             let no_ts: HashMap<String, String> = HashMap::new();
