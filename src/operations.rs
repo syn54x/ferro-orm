@@ -1336,12 +1336,14 @@ pub fn save_record<'py>(
                         .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                         .await
                         .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+                    // FF-G G4a: return the RETURNING value as decoded. A
+                    // non-positive id is a legitimate PK (sequence MINVALUE
+                    // <= 0); only a missing row / non-integer PK maps to None.
                     let id = rows
                         .first()
                         .and_then(|row| row.values.first())
-                        .and_then(|(_, value)| value.as_i64())
-                        .unwrap_or(0);
-                    Ok((id > 0).then_some(id))
+                        .and_then(|(_, value)| value.as_i64());
+                    Ok(id)
                 } else {
                     let exec_res = conn
                         .execute_sql_with_binds_result(&sql, &engine_bind_values)
@@ -1357,12 +1359,14 @@ pub fn save_record<'py>(
                         .fetch_all_sql_with_binds(&sql, &engine_bind_values)
                         .await
                         .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+                    // FF-G G4a: return the RETURNING value as decoded. A
+                    // non-positive id is a legitimate PK (sequence MINVALUE
+                    // <= 0); only a missing row / non-integer PK maps to None.
                     let id = rows
                         .first()
                         .and_then(|row| row.values.first())
-                        .and_then(|(_, value)| value.as_i64())
-                        .unwrap_or(0);
-                    Ok((id > 0).then_some(id))
+                        .and_then(|(_, value)| value.as_i64());
+                    Ok(id)
                 } else {
                     let exec_res = engine
                         .execute_sql_with_binds_result(&sql, &engine_bind_values)
