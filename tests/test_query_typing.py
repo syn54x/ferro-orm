@@ -77,7 +77,7 @@ class TestLambdaPredicates:
             id: Annotated[int | None, FerroField(primary_key=True)] = None
 
         with pytest.raises(TypeError, match="must return QueryNode"):
-            Query(LamUser).where(lambda t: True)  # type: ignore[arg-type, return-value]  # ty: ignore[no-matching-overload]
+            Query(LamUser).where(lambda t: True)  # type: ignore[arg-type, return-value]  # ty: ignore[invalid-argument-type]
 
     def test_where_rejects_non_node_non_callable(self):
         """A non-callable value is rejected."""
@@ -86,7 +86,7 @@ class TestLambdaPredicates:
             id: Annotated[int | None, FerroField(primary_key=True)] = None
 
         with pytest.raises(TypeError, match="predicate callable"):
-            Query(LamUser).where(123)  # type: ignore[arg-type]  # ty: ignore[no-matching-overload]
+            Query(LamUser).where(123)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
 
     def test_query_proxy_attribute_returns_field_proxy(self):
         """QueryProxy attribute access yields a validated FieldProxy at runtime."""

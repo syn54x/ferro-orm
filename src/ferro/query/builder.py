@@ -42,6 +42,11 @@ def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
     )
 
 
+def _model_identity(model_cls: type) -> str:
+    """Qualified registry identity of a Ferro model class (FF-E)."""
+    return model_cls.__ferro_identity__  # ty: ignore[unresolved-attribute]
+
+
 def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNode:
     """Evaluate a lambda predicate against a validating ``QueryProxy``."""
     if not callable(predicate):
@@ -190,7 +195,9 @@ class Query(Generic[T]):
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
 
-        if callable(field):
+        if isinstance(field, str):
+            col_name = validate_query_column(self.model_cls, field)
+        elif callable(field):
             selected = field(QueryProxy(self.model_cls))
             if not isinstance(selected, FieldProxy):
                 raise TypeError(
@@ -198,8 +205,6 @@ class Query(Generic[T]):
                     f"(e.g. `lambda u: u.created_at`), got {type(selected).__name__}"
                 )
             col_name = selected.column
-        elif isinstance(field, str):
-            col_name = validate_query_column(self.model_cls, field)
         else:
             raise TypeError(
                 "order_by() expected a column-name string or a lambda selector, "
@@ -264,7 +269,7 @@ class Query(Generic[T]):
                 "primary-key set."
             )
         return {
-            "model_name": self.model_cls.__ferro_identity__,
+            "model_name": _model_identity(self.model_cls),
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": [],
             "m2m": None,
@@ -282,7 +287,7 @@ class Query(Generic[T]):
             True
         """
         query_def = {
-            "model_name": self.model_cls.__ferro_identity__,
+            "model_name": _model_identity(self.model_cls),
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": self.order_by_clause,
             "limit": self._limit,
@@ -308,7 +313,7 @@ class Query(Generic[T]):
             True
         """
         query_def = {
-            "model_name": self.model_cls.__ferro_identity__,
+            "model_name": _model_identity(self.model_cls),
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": [],
             "limit": None,
@@ -317,7 +322,7 @@ class Query(Generic[T]):
         }
         route = self._transaction_or_using()
         return await count_filtered(
-            self.model_cls.__ferro_identity__,
+            _model_identity(self.model_cls),
             _query_ir_payload_to_json(query_def),
             route,
         )
@@ -342,7 +347,7 @@ class Query(Generic[T]):
         query_def = self._mutating_query_def("update")
         route = self._transaction_or_using()
         return await update_filtered(
-            self.model_cls.__ferro_identity__,
+            _model_identity(self.model_cls),
             _query_ir_payload_to_json(query_def),
             update_bind_payload(fields),
             route,
@@ -379,7 +384,7 @@ class Query(Generic[T]):
         query_def = self._mutating_query_def("delete")
         route = self._transaction_or_using()
         return await delete_filtered(
-            self.model_cls.__ferro_identity__,
+            _model_identity(self.model_cls),
             _query_ir_payload_to_json(query_def),
             route,
         )

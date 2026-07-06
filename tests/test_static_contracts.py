@@ -1,4 +1,5 @@
 import ast
+import subprocess
 from pathlib import Path
 
 
@@ -53,7 +54,7 @@ def _class_def(tree: ast.Module, class_name: str) -> ast.ClassDef:
     )
 
 
-def _method_def(cls: ast.ClassDef, method_name: str) -> ast.AsyncFunctionDef:
+def _method_def(cls: ast.ClassDef, method_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     return next(
         node
         for node in cls.body
@@ -129,3 +130,57 @@ def test_bulk_create_payload_has_no_conflict_handling():
         assert (
             "mode" not in keywords and "on_conflict" not in keywords
         ), "bulk_create must not grow conflict handling implicitly"
+
+
+FIXTURES = Path(__file__).parent / "static_fixtures"
+
+
+def _run_ty(target: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["uv", "run", "ty", "check", "--output-format", "concise", str(target)],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).parent.parent,
+    )
+
+
+def test_valid_lambda_predicates_pass_the_type_checker():
+    result = _run_ty(FIXTURES / "good_predicates.py")
+    assert result.returncode == 0, (
+        f"good predicates must type-check cleanly:\n{result.stdout}\n{result.stderr}"
+    )
+
+
+def test_junk_lambda_predicates_fail_the_type_checker():
+    """`lambda t: True` (bool, not QueryNode) must be rejected statically.
+
+    Bare-lambda RHS typing (`u.age >= "x"`) is NOT checkable today: it
+    requires TypeScript-style mapped types (PEP 827, draft, targeting
+    Python 3.16). When checkers support it, QueryProxy's attribute typing
+    upgrades from FieldProxy[Any] with zero runtime change.
+    """
+    result = _run_ty(FIXTURES / "bad_predicates.py")
+    assert result.returncode != 0, "bad_predicates.py must fail ty"
+    assert "invalid-assignment" in result.stdout
+
+
+def test_query_ir_is_the_only_query_shape_in_rust():
+    """FF-F F-4 exit gate: no `struct QueryNode` outside the IR crate."""
+    repo = Path(__file__).parent.parent
+    offenders = []
+    for rust_file in (repo / "src").rglob("*.rs"):
+        if "struct QueryNode" in rust_file.read_text(encoding="utf-8"):
+            offenders.append(str(rust_file))
+    assert offenders == [], (
+        f"legacy QueryNode shape resurfaced outside crates/ferro-schema-ir: {offenders}"
+    )
+
+
+def test_operator_predicate_surface_is_gone():
+    nodes_src = Path("src/ferro/query/nodes.py").read_text(encoding="utf-8")
+    assert "def col(" not in nodes_src
+    assert "predicate_style" not in nodes_src
+    builder_src = Path("src/ferro/query/builder.py").read_text(encoding="utf-8")
+    assert "_deprecated_operator_query_node" not in builder_src
+    metaclass_src = Path("src/ferro/metaclass.py").read_text(encoding="utf-8")
+    assert "FieldProxy(" not in metaclass_src
