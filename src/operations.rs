@@ -1336,54 +1336,26 @@ pub fn save_record<'py>(
             ts_cast,
         )?;
 
-        match tx_conn {
-            Some(conn_arc) => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let mut conn = conn_arc.lock().await;
-                if needs_postgres_returning {
-                    let rows = conn
-                        .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                    // FF-G G4a: return the RETURNING value as decoded. A
-                    // non-positive id is a legitimate PK (sequence MINVALUE
-                    // <= 0); only a missing row / non-integer PK maps to None.
-                    let id = rows
-                        .first()
-                        .and_then(|row| row.values.first())
-                        .and_then(|(_, value)| value.as_i64());
-                    Ok(id)
-                } else {
-                    let exec_res = conn
-                        .execute_sql_with_binds_result(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                    Ok(exec_res.last_insert_id)
-                }
-            }
-            None => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                if needs_postgres_returning {
-                    let rows = engine
-                        .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                    // FF-G G4a: return the RETURNING value as decoded. A
-                    // non-positive id is a legitimate PK (sequence MINVALUE
-                    // <= 0); only a missing row / non-integer PK maps to None.
-                    let id = rows
-                        .first()
-                        .and_then(|row| row.values.first())
-                        .and_then(|(_, value)| value.as_i64());
-                    Ok(id)
-                } else {
-                    let exec_res = engine
-                        .execute_sql_with_binds_result(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                    Ok(exec_res.last_insert_id)
-                }
-            }
+        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+        if needs_postgres_returning {
+            let rows = exec
+                .fetch_all(&sql, &engine_bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+            // FF-G G4a: return the RETURNING value as decoded. A
+            // non-positive id is a legitimate PK (sequence MINVALUE
+            // <= 0); only a missing row / non-integer PK maps to None.
+            let id = rows
+                .first()
+                .and_then(|row| row.values.first())
+                .and_then(|(_, value)| value.as_i64());
+            Ok(id)
+        } else {
+            let exec_res = exec
+                .execute_result(&sql, &engine_bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+            Ok(exec_res.last_insert_id)
         }
     })
 }
@@ -1448,18 +1420,10 @@ pub fn update_record<'py>(
             }
             UpdateByPkSql::ExistenceCheck(sql, bind_values) => {
                 let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let rows = match tx_conn {
-                    Some(conn_arc) => {
-                        let mut conn = conn_arc.lock().await;
-                        conn.fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                            .await
-                            .map_err(|e| crate::errors::map_db_error("Update failed", e))?
-                    }
-                    None => engine
-                        .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Update failed", e))?,
-                };
+                let rows = exec
+                    .fetch_all(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
                 let count = rows
                     .first()
                     .and_then(|row| row.values.first())
@@ -2532,17 +2496,18 @@ pub fn raw_execute<'py>(
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let rows_affected = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                conn.execute_sql_with_binds(&sql, &bind_values).await
-            }
+        let pool_engine;
+        let exec = match &tx_conn {
+            Some(tx) => Executor::Tx(tx),
             None => {
-                let engine = engine_for_connection(Some(route_connection_name))?;
-                engine.execute_sql_with_binds(&sql, &bind_values).await
+                pool_engine = engine_for_connection(Some(route_connection_name))?;
+                Executor::Pool(&pool_engine)
             }
-        }
-        .map_err(|e| crate::errors::map_db_error("Raw SQL execute failed", e))?;
+        };
+        let rows_affected = exec
+            .execute(&sql, &bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Raw SQL execute failed", e))?;
 
         Ok(rows_affected as i64)
     })
@@ -2572,17 +2537,18 @@ pub fn raw_fetch_all<'py>(
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let rows = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                conn.fetch_all_sql_with_binds(&sql, &bind_values).await
-            }
+        let pool_engine;
+        let exec = match &tx_conn {
+            Some(tx) => Executor::Tx(tx),
             None => {
-                let engine = engine_for_connection(Some(route_connection_name))?;
-                engine.fetch_all_sql_with_binds(&sql, &bind_values).await
+                pool_engine = engine_for_connection(Some(route_connection_name))?;
+                Executor::Pool(&pool_engine)
             }
-        }
-        .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_all failed", e))?;
+        };
+        let rows = exec
+            .fetch_all(&sql, &bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_all failed", e))?;
 
         Python::attach(|py| {
             let out = pyo3::types::PyList::empty(py);
@@ -2627,17 +2593,18 @@ pub fn raw_fetch_one<'py>(
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let rows = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                conn.fetch_all_sql_with_binds(&sql, &bind_values).await
-            }
+        let pool_engine;
+        let exec = match &tx_conn {
+            Some(tx) => Executor::Tx(tx),
             None => {
-                let engine = engine_for_connection(Some(route_connection_name))?;
-                engine.fetch_all_sql_with_binds(&sql, &bind_values).await
+                pool_engine = engine_for_connection(Some(route_connection_name))?;
+                Executor::Pool(&pool_engine)
             }
-        }
-        .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_one failed", e))?;
+        };
+        let rows = exec
+            .fetch_all(&sql, &bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_one failed", e))?;
 
         Python::attach(|py| match rows.into_iter().next() {
             Some(row) => Ok(engine_row_to_pydict(py, row)?.into_any().unbind()),
