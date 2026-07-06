@@ -650,6 +650,29 @@ impl EngineConnection {
         self.execute_sql_with_binds(sql, &[]).await
     }
 
+    /// Execute without entering the connection's prepared-statement cache —
+    /// the transactional counterpart of [`EngineHandle::execute_sql_unprepared`].
+    /// Migration DDL must use this: caching a statement against a schema the
+    /// same migration is about to change would poison the connection.
+    pub async fn execute_sql_unprepared(&mut self, sql: &str) -> Result<u64, sqlx::Error> {
+        match self {
+            EngineConnection::Sqlite(conn) => {
+                let result = sqlx::query(sql)
+                    .persistent(false)
+                    .execute(&mut **conn)
+                    .await?;
+                Ok(result.rows_affected())
+            }
+            EngineConnection::Postgres(conn) => {
+                let result = sqlx::query(sql)
+                    .persistent(false)
+                    .execute(&mut **conn)
+                    .await?;
+                Ok(result.rows_affected())
+            }
+        }
+    }
+
     pub async fn execute_sql_with_binds(
         &mut self,
         sql: &str,

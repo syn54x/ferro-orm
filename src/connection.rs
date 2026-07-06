@@ -172,7 +172,9 @@ async fn connect_engine_handle(
 ///         registered models on connection. Defaults to False.
 ///     migrate_updates (bool): If True, also adds missing model columns to
 ///         existing tables (and reconciles type/nullability drift on
-///         Postgres). Implies `auto_migrate`.
+///         Postgres). Implies `auto_migrate`. On Postgres each table's plan
+///         runs in one transaction (a mid-plan failure rolls that table
+///         back); SQLite applies statements one at a time.
 ///     migrate_destructive (bool): If True, also drops live columns that no
 ///         longer exist on the model. Implies `migrate_updates`.
 ///
