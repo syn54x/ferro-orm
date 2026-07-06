@@ -296,6 +296,9 @@ pub struct SessionState {
     /// Session-local identity map — the *only* identity map (FF-D D2:
     /// sessionless operations cache nothing); values are `weakref.ref`
     /// objects (FF-D D1).
+    /// INVARIANT (FF-G G4c): access only while holding the GIL — sweeps call
+    /// into Python under a shard guard, so GIL-before-shard is the required
+    /// lock order (asserted by `debug_assert_gil_held` in operations.rs).
     pub identity_map: DashMap<(String, String, String), Py<PyAny>>,
     /// Amortized-sweep op counter for `identity_map`.
     pub identity_ops: AtomicUsize,
