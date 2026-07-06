@@ -103,8 +103,8 @@ The backend kind decides which database-specific path is legal.
 Ferro models are real Pydantic V2 `BaseModel` subclasses. The Python layer owns:
 
 - **Model definition.** Annotated fields become columns; Pydantic handles validation, defaults, serialization, and JSON schema generation.
-- **Metaclass registration.** `ModelMetaclass` inspects each model at class-creation time, builds an enriched JSON schema (primary keys, uniques, indexes, foreign keys, nullability, composite constraints), registers it with the Rust engine, compiles a versioned **SchemaIR** artifact, and replaces class-level field access with `FieldProxy` objects for query construction.
-- **Query building.** Chains like `User.where(lambda t: t.active).order_by(User.age, "desc").limit(10)` are pure Python — they accumulate an in-memory query definition. Nothing touches the database until you await a terminal method (`.all()`, `.first()`, `.count()`, `.exists()`, `.update()`, `.delete()`).
+- **Metaclass registration.** `ModelMetaclass` inspects each model at class-creation time, builds an enriched JSON schema (primary keys, uniques, indexes, foreign keys, nullability, composite constraints), registers it with the Rust engine, and compiles a versioned **SchemaIR** artifact.
+- **Query building.** Chains like `User.where(lambda t: t.active).order_by(lambda t: t.age, "desc").limit(10)` are pure Python — each call returns a new, immutable `Query` that accumulates an in-memory query definition. Nothing touches the database until you await a terminal method (`.all()`, `.first()`, `.count()`, `.exists()`, `.update()`, `.delete()`). The lambda's parameter is a `QueryProxy` — a validating attribute proxy built fresh per predicate, not a class-level replacement of the model's fields — see [Typed Query Predicates](query-typing.md).
 - **Session routing.** ORM and raw operations run inside an active `engines.session()` context (or with an explicit `session=` handle). Sessions scope connection routing, transactions, and the identity map under concurrency.
 
 ### The Bridge

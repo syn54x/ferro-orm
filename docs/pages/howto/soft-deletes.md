@@ -19,7 +19,7 @@ Soft deletes mark rows as deleted instead of removing them, so records can be au
 - **Fields on the concrete model.** `is_deleted` and `deleted_at` are declared on `Invoice` itself. Every model that wants soft deletes repeats these two declarations.
 - **`SoftDeleteMixin` for behavior.** `soft_delete()` and `restore()` flip the flags and `save()`; `active()` is a classmethod returning a normal [`Query`](../api/queries.md) filtered to non-deleted rows, so it chains like any other query.
 
-The mixin is a plain class, not a `Model` subclass. Ferro registers table schemas and query proxies on each model class as it is defined, so a `Model` base class cannot contribute fields to subclasses — declare fields on each concrete model and keep shared behavior in the mixin. (See the [Timestamps how-to](timestamps.md) for the same pattern.)
+The mixin is a plain class, not a `Model` subclass. Ferro registers a table schema for each model class as it is defined, so a `Model` base class cannot contribute fields to subclasses — declare fields on each concrete model and keep shared behavior in the mixin. (See the [Timestamps how-to](timestamps.md) for the same pattern.)
 
 ## Usage
 

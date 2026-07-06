@@ -447,7 +447,7 @@ Custom `@field_validator` / `@model_validator` methods and `model_config` settin
 ## Reusing Fields Across Models
 
 !!! warning "Model subclasses cannot inherit fields"
-    You **cannot** declare fields on a `Model` base class and inherit them in subclasses. `Model`'s metaclass replaces field names with query proxies at the class level, so a "base model with shared columns" silently produces broken subclass defaults. Don't do this:
+    You **cannot** declare fields on a `Model` base class and inherit them in subclasses. `Model`'s metaclass registers a table schema per concrete model class at class-creation time, so a "base model with shared columns" silently produces broken subclass defaults. Don't do this:
 
     ```python
     class TimestampedModel(Model):  # WRONG — do not inherit fields from a Model

@@ -99,7 +99,7 @@ Rich field types validate end to end: `datetime`, `date`, `Decimal`, `UUID`, enu
 
 ## Limits
 
-**Query predicates** are one place static typing needs a small assist: the lambda parameter passed to `where()` is typed as a `QueryProxy`, whose attributes resolve to `FieldProxy[Any]` rather than each field's declared type. Wiring per-field types through the proxy needs `@dataclass_transform`-style plumbing that Ferro hasn't taken on; the predicate's overall *return* type still checks cleanly as `QueryNode`.
+**Query predicates** are one place static typing needs a small assist: the lambda parameter passed to `where()` is typed as a `QueryProxy`, whose attributes resolve to `FieldProxy[Any]` rather than each field's declared type. That means the checker catches a predicate that returns the wrong *shape* — `lambda user: True` fails `ty check` / Pyright because it doesn't return a `QueryNode` — but not one that compares a field to the wrong *type*, like `user.age >= "eighteen"`. Wiring per-field types through the proxy needs mapped types, proposed for Python in [PEP 827](https://peps.python.org/pep-0827/) (draft, targeting Python 3.16); Ferro adopts it with zero runtime change once checkers support it.
 
 This is a deep enough topic to get its own page: see [Typed Query Predicates](query-typing.md).
 

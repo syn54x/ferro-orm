@@ -16,6 +16,28 @@ The examples on this page use this model:
     --8<-- "docs/examples/predicates_annotated.py:setup"
     ```
 
+## Queries Are Immutable
+
+Every chain call — `.where()`, `.order_by()`, `.limit()`, `.offset()` — returns a **new** `Query`. None of them mutate the query they were called on, so a partially-built query is safe to keep around and reuse as the base for several different follow-ups:
+
+```python
+base = User.where(lambda user: user.role == "admin")
+
+page1 = base.limit(10)             # first 10 admins
+page2 = base.limit(10).offset(10)  # next 10 admins
+```
+
+`base` still matches every admin with no `limit()` applied — building `page1` and `page2` from it doesn't change it, and `page1` and `page2` don't affect each other either. This is what makes patterns like "build a filtered base query, then branch into a count and a page of results" safe:
+
+```python
+active = User.where(lambda user: user.archived == False)  # noqa: E712
+
+total = await active.count()
+first_page = await active.order_by(lambda user: user.id).limit(20).all()
+```
+
+`active` is never consumed or altered by either await — you can keep branching off it as many times as you like.
+
 ## Fetching by Primary Key
 
 `Model.get(pk)` loads exactly one row and returns your model type — not `YourModel | None`. If no row exists it raises `ModelDoesNotExist`, a `LookupError` subclass carrying `.model` and `.pk` (handy for HTTP 404s and structured logging). When a missing row is a normal outcome, use `Model.get_or_none(pk)` instead:
@@ -52,6 +74,15 @@ Both methods also exist on `Model.using("name")` for [named connections](connect
 ```python
 --8<-- "docs/examples/predicates.py:lambda-style"
 ```
+
+Typo a column name and you find out immediately, not after the query round-trips to the database:
+
+```text
+>>> await User.where(lambda user: user.naem == "alice").all()
+AttributeError: User has no queryable column 'naem'. Did you mean 'name'? Valid columns: age, archived, id, name, role.
+```
+
+The valid-columns list includes shadow `{fk}_id` foreign-key columns (see [Querying Across Relationships](#querying-across-relationships)), so the error is always a complete picture of what you can filter on.
 
 Lambda predicates keep the call site fully type-checked: the proxy's attributes are real `FieldProxy` objects in the type checker's eyes, not your Pydantic annotations. See [Typed Query Predicates](../concepts/query-typing.md) for the full reasoning.
 

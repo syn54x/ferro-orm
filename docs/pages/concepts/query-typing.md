@@ -25,11 +25,12 @@ Name the lambda parameter after the model in lowercase singular (`user` for
 surface is available: `==`, `!=`, `<`, `<=`, `>`, `>=`, `.like()`, `.in_()`,
 `&`, `|`, `== None`, and shadow FK columns (`user.author_id`).
 
-The proxy attribute type is `FieldProxy[Any]`: per-field static types for
-bare lambda parameters need TypeScript-style mapped types, proposed for
-Python in PEP 827 (draft, targeting 3.16) — adopted here when type checkers
-support it. Pyright and `ty` still resolve the predicate's *return* type as
-`QueryNode` correctly.
+That gives you two concrete guarantees today:
+
+- **A valid predicate type-checks as `QueryNode`.** `lambda user: user.age >= 18` passes `ty check` / Pyright because `>=` on a `FieldProxy` is typed to return `QueryNode`, which is exactly what `where()` expects.
+- **A junk predicate fails the checker.** `lambda user: True` — a callable that doesn't return a `QueryNode` at all — is a type error, not a silent no-op query, because `where()`'s parameter type is `Predicate = Callable[[QueryProxy[TModel]], QueryNode]`.
+
+What isn't checked yet is the *right-hand side* of a comparison: the proxy attribute type is `FieldProxy[Any]`, so `user.age >= "eighteen"` type-checks even though it would fail at runtime. Closing that gap needs per-field static types on the proxy — TypeScript-style mapped types, proposed for Python in [PEP 827](https://peps.python.org/pep-0827/) ("Type Manipulation", draft status, targeting Python 3.16). When type checkers support it, `QueryProxy` attribute typing upgrades from `FieldProxy[Any]` to each field's real declared type — with zero runtime change — and `user.age >= "eighteen"` starts failing the checker too.
 
 `Relation.where` (used on `BackRef` collections) accepts the same shape:
 

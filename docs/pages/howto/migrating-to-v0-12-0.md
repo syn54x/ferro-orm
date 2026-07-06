@@ -39,6 +39,15 @@ Then work through the three changes below.
 
 ### 1. Use lambda predicates in `where()`
 
+!!! warning "v0.14.0 update: this removal already landed"
+    The deprecation window below describes the `v0.12.x` compatibility story.
+    As of `v0.14.0`, operator-style predicates and the `col()` bridge are both
+    **gone** — `where()` accepts only lambda predicates. `order_by()` accepts
+    a lambda (`order_by(lambda t: t.created_at, "desc")`) or a validated
+    column-name string (`order_by("created_at", "desc")`); it never accepted
+    operator style. See [Migrating to v0.14.0](migrating-to-v0-14-0.md) and
+    [Typed Query Predicates](../concepts/query-typing.md).
+
 Operator-style predicates (`Model.field == value`) are deprecated. They never
 type-checked cleanly — static checkers read `User.age >= 18` as a `bool`, while
 `where()` expects a `QueryNode` — and they now warn at runtime. Lambda

@@ -69,7 +69,7 @@ Differences worth noting:
 - No `__tablename__` — the table name is derived from the class name (`user`).
 - The auto-increment primary key is annotated `int | None` with `default=None`: it is `None` until the row is inserted.
 - Because Ferro models are Pydantic models, you get validation, serialization, and FastAPI integration for free — no separate schema classes.
-- Declare fields on each concrete model. Ferro does not support inheriting fields from a `Model` base class (the ORM registers query proxies per model class); shared behavior goes in plain mixins instead — see the [Timestamps how-to](timestamps.md).
+- Declare fields on each concrete model. Ferro does not support inheriting fields from a `Model` base class (each model class gets its own table schema registration); shared behavior goes in plain mixins instead — see the [Timestamps how-to](timestamps.md).
 
 ## Queries
 
@@ -100,7 +100,7 @@ adults = result.scalars().all()
 
 ```python
 # Ferro
-adults = await User.where(lambda t: t.age >= 18).order_by(User.age).limit(10).all()
+adults = await User.where(lambda t: t.age >= 18).order_by(lambda t: t.age).limit(10).all()
 ```
 
 Get by primary key — the semantics differ. `session.get(User, pk)` returns `None` when the row is missing; Ferro's `User.get(pk)` raises `ModelDoesNotExist`, and `User.get_or_none(pk)` is the optional variant:
@@ -212,7 +212,7 @@ The `ForeignKey` annotation declares both the relation and the underlying `autho
 ```python
 author = await post.author                 # forward FK → instance
 posts = await user.posts.all()             # BackRef → chainable query
-recent = await user.posts.order_by(Post.id, "desc").limit(5).all()
+recent = await user.posts.order_by(lambda t: t.id, "desc").limit(5).all()
 ```
 
 Many-to-many uses `ManyToMany(related_name=...)` on one side and `BackRef()` on the other — see the [Relationships guide](../guide/relationships.md).
