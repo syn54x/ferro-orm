@@ -94,6 +94,7 @@ fn clear_registry() -> PyResult<()> {
 /// This module exposes the Rust-backed core functions to Python.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    hydration::verify_pydantic_slot_abi(m.py())?;
     m.add_class::<state::RouteHandle>()?;
     m.add_function(wrap_pyfunction!(schema::register_model_schema, m)?)?;
     m.add_function(wrap_pyfunction!(connection::connect, m)?)?;
@@ -160,6 +161,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_fk_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_resolve_storage_type, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_render_check_body, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        hydration::_verify_hydration_abi_for_test,
+        m
+    )?)?;
 
     Ok(())
 }

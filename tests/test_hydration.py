@@ -175,3 +175,30 @@ async def test_hydrated_extra_forbid_initializes_slots(db_url):
             expected_fields={"id", "name"},
             expected_extra=None,
         )
+
+
+def test_hydration_abi_guard_names_unknown_slot():
+    """FF-G G1: a BaseModel slot the hydrator does not initialize must be a
+    loud, actionable error naming the slot and the pydantic version."""
+    from pydantic import BaseModel
+
+    from ferro._core import _verify_hydration_abi_for_test
+
+    class FakeBaseModel:
+        __slots__ = (*BaseModel.__slots__, "__pydantic_future_slot__")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _verify_hydration_abi_for_test(FakeBaseModel)
+    message = str(excinfo.value)
+    assert "__pydantic_future_slot__" in message
+    assert "pydantic" in message
+
+
+def test_hydration_abi_guard_passes_real_basemodel():
+    """The guard that runs at ferro._core import accepts the installed
+    pydantic's real BaseModel (otherwise ferro would refuse to start)."""
+    from pydantic import BaseModel
+
+    from ferro._core import _verify_hydration_abi_for_test
+
+    _verify_hydration_abi_for_test(BaseModel)  # must not raise
