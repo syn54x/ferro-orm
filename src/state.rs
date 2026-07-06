@@ -17,6 +17,45 @@ use tokio::sync::Mutex;
 
 pub(crate) use ferro_ddl_lowering::Dialect;
 
+/// Primary-key facts scanned once from the enriched schema at registration
+/// (FF-G G2): the per-operation `properties` walks collapsed to one place.
+/// The schema is immutable after registration (a re-registration swaps the
+/// whole `Arc<RegisteredModel>`), so this can never go stale.
+#[derive(Debug)]
+pub struct ModelMeta {
+    /// First property flagged `"primary_key": true`, in schema-map iteration
+    /// order.
+    pub pk_col: Option<String>,
+    /// The PK's `"autoincrement"` flag; `true` when the key is absent — and
+    /// `true` when there is no PK at all, matching the historical per-site
+    /// default that `build_save_sql` receives.
+    pub pk_autoincrement: bool,
+}
+
+impl ModelMeta {
+    pub fn from_schema(schema: &serde_json::Value) -> Self {
+        let mut pk_col = None;
+        let mut pk_autoincrement = true;
+        if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+            for (col_name, col_info) in properties {
+                if col_info
+                    .get("primary_key")
+                    .and_then(|pk| pk.as_bool())
+                    .unwrap_or(false)
+                {
+                    pk_col = Some(col_name.clone());
+                    pk_autoincrement = col_info
+                        .get("autoincrement")
+                        .and_then(|auto| auto.as_bool())
+                        .unwrap_or(true);
+                    break;
+                }
+            }
+        }
+        ModelMeta { pk_col, pk_autoincrement }
+    }
+}
+
 /// One registered model: its Pydantic-generated JSON schema plus the codec
 /// plan compiled from it (FF-C C1). Schema and plan live in one value so a
 /// re-registration (the schema epoch) can never leave a stale plan behind.
@@ -30,13 +69,16 @@ pub struct RegisteredModel {
     pub table_name: String,
     /// Per-column codec decisions, compiled once at registration.
     pub codec_plan: crate::codec_plan::ModelCodecPlan,
+    /// Primary-key metadata, scanned once at registration (FF-G G2).
+    pub meta: ModelMeta,
 }
 
 impl RegisteredModel {
     /// Compile the codec plan and wrap the registration for the registry.
     pub fn new(schema: serde_json::Value, table_name: String) -> Arc<Self> {
         let codec_plan = crate::codec_plan::ModelCodecPlan::compile(&schema);
-        Arc::new(RegisteredModel { schema, table_name, codec_plan })
+        let meta = ModelMeta::from_schema(&schema);
+        Arc::new(RegisteredModel { schema, table_name, codec_plan, meta })
     }
 }
 
@@ -532,5 +574,68 @@ mod session_close_tests {
                 .is_empty()
         );
         assert!(unregister_session(&session_id));
+    }
+}
+
+#[cfg(test)]
+mod model_meta_tests {
+    use super::ModelMeta;
+    use serde_json::json;
+
+    #[test]
+    fn no_primary_key_yields_none_and_default_autoincrement() {
+        let meta = ModelMeta::from_schema(&json!({
+            "properties": {"name": {"type": "string"}}
+        }));
+        assert_eq!(meta.pk_col, None);
+        assert!(meta.pk_autoincrement);
+    }
+
+    #[test]
+    fn missing_properties_yields_none() {
+        let meta = ModelMeta::from_schema(&json!({"title": "X"}));
+        assert_eq!(meta.pk_col, None);
+        assert!(meta.pk_autoincrement);
+    }
+
+    #[test]
+    fn pk_without_autoincrement_key_defaults_true() {
+        let meta = ModelMeta::from_schema(&json!({
+            "properties": {"id": {"type": "integer", "primary_key": true}}
+        }));
+        assert_eq!(meta.pk_col.as_deref(), Some("id"));
+        assert!(meta.pk_autoincrement);
+    }
+
+    #[test]
+    fn pk_with_autoincrement_false_is_preserved() {
+        let meta = ModelMeta::from_schema(&json!({
+            "properties": {"id": {"type": "string", "primary_key": true, "autoincrement": false}}
+        }));
+        assert_eq!(meta.pk_col.as_deref(), Some("id"));
+        assert!(!meta.pk_autoincrement);
+    }
+
+    #[test]
+    fn non_bool_primary_key_flag_is_ignored() {
+        let meta = ModelMeta::from_schema(&json!({
+            "properties": {"id": {"type": "integer", "primary_key": "yes"}}
+        }));
+        assert_eq!(meta.pk_col, None);
+        assert!(meta.pk_autoincrement);
+    }
+
+    #[test]
+    fn first_flagged_column_in_map_order_wins() {
+        // serde_json's default map iterates keys lexicographically, which is
+        // exactly the order the old per-operation scans saw ("a_id" < "b_id").
+        let meta = ModelMeta::from_schema(&json!({
+            "properties": {
+                "b_id": {"type": "integer", "primary_key": true, "autoincrement": false},
+                "a_id": {"type": "integer", "primary_key": true}
+            }
+        }));
+        assert_eq!(meta.pk_col.as_deref(), Some("a_id"));
+        assert!(meta.pk_autoincrement);
     }
 }
