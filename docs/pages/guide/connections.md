@@ -147,8 +147,8 @@ Operations on a closed session handle (ambient or explicit `session=`) raise `Ru
 
 `ferro.reset_engine()` tears down **all** connections and is intended for test isolation — not per-session app lifecycle teardown.
 
-Legacy implicit default-connection routing (calling unqualified operations outside a session) is still temporarily supported for compatibility, but now emits a deprecation warning and is on the `v0.14.0` removal track.
-Follow [Migrating to v0.12.0](../howto/migrating-to-v0-12-0.md) to remove these legacy call sites during the compatibility window.
+Legacy implicit default-connection routing (calling unqualified operations outside a session) was removed in `0.13`; such calls now raise `RuntimeError`.
+See [Upgrade Guide: Connection routing requires a session](../howto/upgrade-guide.md#connection-routing-requires-a-session) to remove these legacy call sites.
 
 ## The Default Connection
 

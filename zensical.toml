@@ -1,7 +1,7 @@
 [project]
 site_name = "Ferro ORM"
 site_description = "A high-performance, Rust-backed, Pydantic-driven async ORM for Python."
-site_url = "https://syn54x.github.io/ferro-orm/"
+site_url = "https://ferro-orm.x54.sh/"
 repo_url = "https://github.com/syn54x/ferro-orm"
 repo_name = "syn54x/ferro-orm"
 edit_uri = "edit/main/docs/pages/"
@@ -30,8 +30,7 @@ nav = [
     { "Schema Migrations" = "guide/migrations.md" },
   ] },
   { "How-To" = [
-    { "Migrating to v0.12.0" = "howto/migrating-to-v0-12-0.md" },
-    { "Migrating to v0.14.0" = "howto/migrating-to-v0-14-0.md" },
+    { "Upgrade Guide" = "howto/upgrade-guide.md" },
     { "Testing" = "howto/testing.md" },
     { "Pagination" = "howto/pagination.md" },
     { "Timestamps" = "howto/timestamps.md" },
