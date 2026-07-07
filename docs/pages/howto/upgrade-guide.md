@@ -371,3 +371,75 @@ auto-migrate refuses the conversion and warns — keep with
 | `datetime.time` field (runtime emitter) | `varchar` | `time` | Keep via `db_type="varchar"`, or convert with `USING` |
 | FK constraints | Anonymous | Named `fk_<table>_<col>_<to_table>` | None (names not compared) |
 | Single-column unique | Inline column `UNIQUE` | Named `uq_<table>_<col>` unique index | Optional: drop the old inline constraint |
+
+## Upgrading to 0.12
+
+`0.12` is the first release built on Ferro's IR-first architecture: query
+execution, schema/migration planning, codecs, hydration, and connection routing
+all flow through one shared intermediate representation instead of several
+independent code paths. A single source of truth removes whole classes of drift
+bugs — predictable schema diffs, identical bind/null semantics across SQLite and
+PostgreSQL, and explicit session-scoped runtime state. Your model definitions do
+not change; this is about how a few APIs are called.
+
+`0.12` introduced these as **deprecation warnings**; the operator-predicate and
+routing removals later landed (see [Upgrading to 0.14](#upgrading-to-014) and the
+`0.13` routing note there). The one surface below still deprecated as of `0.14`
+is the private Alembic helper import — migrate it now.
+
+<!-- MAINTAINERS: keep this prompt in sync with the subsections below it. -->
+??? example "Automate this: copy this prompt to your coding agent"
+
+    ```text
+    You are helping upgrade a Python codebase from Ferro ORM 0.11.x to 0.12.
+    Reference: https://syn54x.github.io/ferro-orm/howto/upgrade-guide/#upgrading-to-012
+
+    All 0.12 changes are deprecation-based and safe to apply mechanically. Apply them,
+    then verify.
+
+    1. Query predicates: replace operator-style `where(Model.field == value)` with
+       lambda predicates `where(lambda m: m.field == value)`. (These were removed
+       outright in 0.14 — if you are upgrading past 0.12, prefer lambdas now.)
+    2. Connection routing: wrap request/task-scoped ORM and raw operations in
+       `async with ferro.engines.session("name"):` instead of relying on implicit
+       default-connection routing.
+    3. Alembic metadata: replace
+       `from ferro.migrations.alembic import _build_sa_table, _map_to_sa_type`
+       with `from ferro.migrations import get_metadata; target_metadata = get_metadata()`
+       in your Alembic env.py.
+
+    VERIFY:
+    - Run the test suite.
+    - Run `pytest -W error::DeprecationWarning`; a clean run means no deprecated
+      0.12-era surfaces remain on the paths you exercise.
+    ```
+
+### Alembic metadata: build from `get_metadata()`
+
+The private JSON-derivation helpers `ferro.migrations.alembic._build_sa_table`
+and `ferro.migrations.alembic._map_to_sa_type` are deprecated — still present as
+of `0.14`, but slated for removal. Schema metadata now derives from the IR through
+the public `get_metadata()` entry point; use it directly in your Alembic `env.py`.
+
+=== "Before (deprecated)"
+
+    ```python
+    from ferro.migrations.alembic import _build_sa_table, _map_to_sa_type
+    ```
+
+=== "After (recommended)"
+
+    ```python
+    from ferro.migrations import get_metadata
+
+    target_metadata = get_metadata()
+    ```
+
+### Deprecations introduced in 0.12, at a glance
+
+| Deprecated in 0.12 | Replacement | Status |
+| --- | --- | --- |
+| `Model.where(Model.field OP value)` / `col()` | `where(lambda t: ...)` | Removed in `0.14` — see [Predicates](#predicates-operator-style-and-col-are-gone) |
+| Unqualified ops outside an active session | `async with ferro.engines.session("name")` | Removed in `0.13` — see [Connection routing](#connection-routing-requires-a-session) |
+| `ferro.migrations.alembic._build_sa_table` | `ferro.migrations.get_metadata()` | Still deprecated as of `0.14` |
+| `ferro.migrations.alembic._map_to_sa_type` | `ferro.migrations.get_metadata()` | Still deprecated as of `0.14` |
