@@ -1,6 +1,106 @@
 # CHANGELOG
 
 
+## v0.14.0 (2026-07-07)
+
+### Bug Fixes
+
+- **ff-g**: Make Postgres db_check ADD CONSTRAINT idempotent (G6, #176)
+  ([#181](https://github.com/syn54x/ferro-orm/pull/181),
+  [`2c0e4cf`](https://github.com/syn54x/ferro-orm/commit/2c0e4cf6c922a73454198f6aa0aa75b30eb1f0c8))
+
+### Chores
+
+- **benchmarks**: Pinned async benchmark suite over the rich-type hot path
+  ([#196](https://github.com/syn54x/ferro-orm/pull/196),
+  [`d9a656b`](https://github.com/syn54x/ferro-orm/commit/d9a656b320bd7fb6b613f4408a796161e9badc41))
+
+### Documentation
+
+- Consolidate migration guides into one evergreen upgrade guide
+  ([#234](https://github.com/syn54x/ferro-orm/pull/234),
+  [`15c83db`](https://github.com/syn54x/ferro-orm/commit/15c83dbc6b1c057a78dfc425d70441e50c359f5d))
+
+- Fixes roadmap
+  ([`5718d02`](https://github.com/syn54x/ferro-orm/commit/5718d02630b6c84d3ced6f8a3080adf4e7fe2383))
+
+- **fable-fixes**: Fold #176 into Epic FF-G as sub-task G6
+  ([`b966e65`](https://github.com/syn54x/ferro-orm/commit/b966e65739d7c33ed666a7fd14086a27688516dd))
+
+- **ff-a**: A5 — docs & migration guide for the mutation-surface changes
+  ([#180](https://github.com/syn54x/ferro-orm/pull/180),
+  [`ffc5476`](https://github.com/syn54x/ferro-orm/commit/ffc5476f9ba72f03a35048f283b11390f813856b))
+
+- **ff-b**: Tick FF-B sub-task and exit-gate boxes in the fable-fixes roadmap
+  ([`29f9172`](https://github.com/syn54x/ferro-orm/commit/29f91724e2b6886f8299bbb42940c804c8e88141))
+
+### Features
+
+- **ff-a**: Create() is a real INSERT; save() distinguishes INSERT from UPDATE (A3+A4)
+  ([#179](https://github.com/syn54x/ferro-orm/pull/179),
+  [`de3ec30`](https://github.com/syn54x/ferro-orm/commit/de3ec30196202ee14c42afc5b02f163f82a68451))
+
+- **ff-a**: Reject limit/offset on mutating queries
+  ([#178](https://github.com/syn54x/ferro-orm/pull/178),
+  [`67faf42`](https://github.com/syn54x/ferro-orm/commit/67faf421d49984c5be16d2163982f13ab86cc5e4))
+
+- **ff-a**: Typed DBAPI-shaped exception hierarchy mapped from sqlx errors
+  ([#177](https://github.com/syn54x/ferro-orm/pull/177),
+  [`9c306c5`](https://github.com/syn54x/ferro-orm/commit/9c306c549e716dd4a5158d655265aa7890e63c0b))
+
+- **ff-b**: B1 canonical derived-type & naming decision table + refusal-rail scaffolding
+  ([`8c879f7`](https://github.com/syn54x/ferro-orm/commit/8c879f77833a7e5a983d53012efc8332cca5b852))
+
+- **ff-b**: B2+B6 one derived-type decision table; native PG enums + timestamptz/time parity; delete
+  bridge mirrors
+  ([`bfdc1fd`](https://github.com/syn54x/ferro-orm/commit/bfdc1fda1eceebe70ae711e38b785af88b46e11e))
+
+- **ff-b**: B3+B4 single-source artifact naming; both emitters emit named fk_/uq_ artifacts
+  ([`6b771f3`](https://github.com/syn54x/ferro-orm/commit/6b771f38933c72e8f848013a5ae93708fabf5c7a))
+
+- **ff-c**: C1 — per-model ColumnCodec plan; delete codec.rs schema sniffing (F5)
+  ([#197](https://github.com/syn54x/ferro-orm/pull/197),
+  [`0e8e572`](https://github.com/syn54x/ferro-orm/commit/0e8e57252f4cca2d2bc9fffd06d9155338056cf3))
+
+- **ff-c**: C2 — schema-epoch catalog cache; zero catalog queries on steady-state CRUD
+  ([#200](https://github.com/syn54x/ferro-orm/pull/200),
+  [`8c6d6ed`](https://github.com/syn54x/ferro-orm/commit/8c6d6edf578cf55ed7ada0d49359a7e09528da1e))
+
+- **ff-c**: C3+C4 — native typed Postgres decode; plan-driven enum hydration replaces _fix_types
+  ([#198](https://github.com/syn54x/ferro-orm/pull/198),
+  [`05a008c`](https://github.com/syn54x/ferro-orm/commit/05a008cb73f6c4dc8b2478a441c99282d07bd41d))
+
+- **ff-d**: Session-scoped weak identity map with refresh-on-load; single-handle routing
+  ([#201](https://github.com/syn54x/ferro-orm/pull/201),
+  [`a328cfc`](https://github.com/syn54x/ferro-orm/commit/a328cfcd107e2cac998ddc8af50845857ec669a5))
+
+- **ff-e**: Registry & model identity — qualified keys, configurable tables, O(N) import
+  ([#209](https://github.com/syn54x/ferro-orm/pull/209),
+  [`6391805`](https://github.com/syn54x/ferro-orm/commit/6391805c1b4ee46c0590513ac6684237c18f7430))
+
+- **ff-f**: Query builder 1.0 shape — immutable chaining, build-time column validation, lambda-only
+  predicates, QueryIR-only Rust ([#223](https://github.com/syn54x/ferro-orm/pull/223),
+  [`eb7fece`](https://github.com/syn54x/ferro-orm/commit/eb7fece8fbc2231220ecf9111616f803f2f987eb))
+
+- **ff-g-a**: Hardening — hydration ABI guard, transactional PG migrate, correctness edges,
+  decode-path caching ([#232](https://github.com/syn54x/ferro-orm/pull/232),
+  [`22617e1`](https://github.com/syn54x/ferro-orm/commit/22617e1cfe5e2bc9d0a3d7a1fed5acf4d8589cef))
+
+### Refactoring
+
+- **ff-g-b**: Operations.rs dedup — ModelMeta + Executor (G2)
+  ([#233](https://github.com/syn54x/ferro-orm/pull/233),
+  [`09c2c62`](https://github.com/syn54x/ferro-orm/commit/09c2c6214af9e2f9510d39d037935c53bd2e796d))
+
+### Testing
+
+- **ff-b**: B5 I-1 sentinel on the full backend matrix with a full-type fixture, zero filters
+  ([`1141eb4`](https://github.com/syn54x/ferro-orm/commit/1141eb437b4843303e01556a5b24ddee9d0e0279))
+
+- **ff-b**: Force psycopg v3 driver in the Postgres sentinel regardless of URL scheme
+  ([`64f9845`](https://github.com/syn54x/ferro-orm/commit/64f98454bdb5e090a41bd214de06b7670974f4eb))
+
+
 ## v0.13.0 (2026-07-02)
 
 ### Bug Fixes
