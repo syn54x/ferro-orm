@@ -1,8 +1,5 @@
-import enum
 import json
-import types
-import warnings
-from typing import Annotated, Any, Dict, Union, get_args, get_origin
+from typing import Any, Dict
 
 try:
     import sqlalchemy as sa
@@ -11,32 +8,15 @@ except ImportError:
 
 from .._annotation_utils import _VARCHAR_RE
 from .._core import _ddl_fk_name, _render_check_body, _resolve_storage_type
-from .._deprecations import (
-    IR_FIRST_DEPRECATION_REMOVE_IN,
-    IR_FIRST_DEPRECATION_SINCE,
-    IR_FIRST_MIGRATION_GUIDE_ALEMBIC,
-    deprecated,
-)
 from ..ir import compile_registry_schema_ir
-from ..schema_metadata import build_model_schema
-from ..state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY
 
-#: SQLAlchemy ``naming_convention`` mirroring the Rust emitter's names. The
-#: live IR bridge names every artifact explicitly (from the IR, which carries
-#: the single-sourced ``ferro-ddl-lowering`` names over FFI), so this is only
-#: load-bearing for the deprecated ``_build_sa_table`` path below.
+#: SQLAlchemy ``naming_convention`` mirroring the Rust emitter's names. IR-backed
+#: metadata names every artifact explicitly; this convention covers any
+#: SQLAlchemy-generated fallback names during autogenerate.
 _FERRO_NAMING_CONVENTION = {
     "ix": "idx_%(table_name)s_%(column_0_name)s",
     "ck": "ck_%(table_name)s_%(column_0_name)s",
 }
-
-
-def _ck_constraint_name(table_name: str, col_name: str) -> str:
-    """Canonical ``ck_<table>_<col>`` name with the 63-char Postgres guard."""
-    name = f"ck_{table_name}_{col_name}"
-    if len(name) > 63:
-        name = name[:60] + "_ck"
-    return name
 
 
 def get_metadata() -> "sa.MetaData":
@@ -197,16 +177,6 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
         sa.Index(name, *(table.columns[c] for c in cols), unique=unique)
 
 
-def model_ir_column_flag(model_ir: Dict[str, Any], column_name: str, flag: str) -> bool:
-    for col in model_ir.get("columns") or []:
-        if not isinstance(col, dict):
-            continue
-        if col.get("name") != column_name:
-            continue
-        return bool(col.get(flag, False))
-    return False
-
-
 def _sa_type_from_ir_column(col_name: str, col: Dict[str, Any]) -> "sa.types.TypeEngine":
     """Mechanical consumer of the shared derived-type decision table (FF-B B2).
 
@@ -243,196 +213,6 @@ def _sa_type_from_ir_column(col_name: str, col: Dict[str, Any]) -> "sa.types.Typ
             f"for column {col_name!r} — extend _db_type_to_sa_type (see AGENTS.md I-1)"
         )
     return mapped
-
-
-def _resolve_ref(schema: Dict[str, Any], col_info: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolve $ref in JSON schema if present."""
-    if "$ref" in col_info:
-        ref_path = col_info["$ref"]
-        if ref_path.startswith("#/$defs/"):
-            def_name = ref_path.split("/")[-1]
-            resolved = schema.get("$defs", {}).get(def_name, col_info)
-            if resolved is col_info:
-                return col_info
-            return {
-                **resolved,
-                **{k: v for k, v in col_info.items() if k != "$ref"},
-            }
-    return col_info
-
-
-def _strip_optional_union(annotation: Any) -> Any:
-    """Unwrap ``T | None`` / ``Optional[T]`` to ``T``."""
-    hint = annotation
-    while True:
-        origin = get_origin(hint)
-        if origin is Union or origin is types.UnionType:
-            args = [a for a in get_args(hint) if a is not type(None)]
-            if len(args) == 1:
-                hint = args[0]
-                continue
-        return hint
-
-
-def _annotation_as_enum_subclass(annotation: Any) -> type[enum.Enum] | None:
-    """If ``annotation`` denotes a Python ``Enum`` type, return that class."""
-    hint = _strip_optional_union(annotation)
-    origin = get_origin(hint)
-    if origin is Annotated:
-        args = get_args(hint)
-        if args:
-            return _annotation_as_enum_subclass(args[0])
-        return None
-    if isinstance(hint, type) and issubclass(hint, enum.Enum):
-        return hint
-    return None
-
-
-def _field_python_enum(
-    model_cls: type[Any] | None, field_name: str
-) -> type[enum.Enum] | None:
-    """Return the ``Enum`` class for a model field, if any."""
-    if model_cls is None:
-        return None
-    model_fields = getattr(model_cls, "model_fields", None)
-    if not model_fields:
-        return None
-    field = model_fields.get(field_name)
-    if field is None:
-        return None
-    return _annotation_as_enum_subclass(field.annotation)
-
-
-def _infer_nullable_join_table(
-    col_name: str,
-    col_info: Dict[str, Any],
-    required_fields: list[str],
-) -> bool:
-    """Join-table schemas without a model class: JSON-schema-only nullability."""
-    if "anyOf" in col_info:
-        return any(item.get("type") == "null" for item in col_info["anyOf"])
-    if col_info.get("type") == "null":
-        return True
-    return col_name not in required_fields
-
-
-def _resolve_sa_column_nullable(
-    col_name: str, col_info: Dict[str, Any], required_fields: list[str]
-) -> bool:
-    """SQLAlchemy ``Column.nullable`` for one table column."""
-    if col_info.get("primary_key"):
-        return False
-
-    override = col_info.get("ferro_nullable")
-    if isinstance(override, bool):
-        return override
-
-    return _infer_nullable_join_table(col_name, col_info, required_fields)
-
-
-@deprecated(
-    reason=(
-        "_build_sa_table() is deprecated. Alembic metadata now derives from "
-        "SchemaIR. Use get_metadata() / IR-backed helpers instead."
-    ),
-    since=IR_FIRST_DEPRECATION_SINCE,
-    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
-    reference=IR_FIRST_MIGRATION_GUIDE_ALEMBIC,
-)
-def _build_sa_table(
-    metadata: "sa.MetaData",
-    table_name: str,
-    schema: Dict[str, Any],
-    model_cls: type[Any] | None = None,
-):
-    """Build a SQLAlchemy Table object from a Ferro JSON schema."""
-    columns = []
-
-    properties = schema.get("properties", {})
-    required_fields = schema.get("required", [])
-
-    db_check_columns: list[tuple[str, type[enum.Enum] | None, list[Any]]] = []
-
-    for col_name, col_info in properties.items():
-        # Resolve $ref if present
-        col_info = _resolve_ref(schema, col_info)
-
-        python_enum = _field_python_enum(model_cls, col_name)
-        sa_type = _map_to_sa_type(schema, col_info, col_name, python_enum)
-
-        is_nullable = _resolve_sa_column_nullable(col_name, col_info, required_fields)
-
-        fk_info = col_info.get("foreign_key") or {}
-        column_unique = bool(col_info.get("unique")) or bool(fk_info.get("unique"))
-        kwargs = {
-            "primary_key": col_info.get("primary_key", False),
-            "nullable": is_nullable,
-            "unique": column_unique,
-            "index": col_info.get("index", False),
-        }
-
-        args = [col_name, sa_type]
-
-        # Handle Foreign Keys
-        if fk_info:
-            on_delete = fk_info.get("on_delete")
-            args.append(sa.ForeignKey(f"{fk_info['to_table']}.id", ondelete=on_delete))
-
-        columns.append(sa.Column(*args, **kwargs))
-
-        if col_info.get("db_check"):
-            enum_values_for_check = col_info.get("enum") or []
-            db_check_columns.append((col_name, python_enum, list(enum_values_for_check)))
-
-    table_args: list[Any] = list(columns)
-
-    for col_name, python_enum, enum_values in db_check_columns:
-        values = (
-            [m.value for m in python_enum] if python_enum is not None else enum_values
-        )
-        if not values:
-            continue
-        rendered = ", ".join(
-            (str(v) if isinstance(v, (int, float)) else f"'{str(v)}'") for v in values
-        )
-        sqltext = f"{col_name} IN ({rendered})"
-        ck_name = _ck_constraint_name(table_name, col_name)
-        table_args.append(sa.CheckConstraint(sqltext, name=ck_name))
-    composites = schema.get("ferro_composite_uniques") or []
-    for group in composites:
-        if not isinstance(group, (list, tuple)) or len(group) < 2:
-            warnings.warn(
-                f"Ignoring invalid ferro_composite_uniques entry for table "
-                f"{table_name!r} (expected a list/tuple of at least two column names): "
-                f"{group!r}",
-                UserWarning,
-                stacklevel=2,
-            )
-            continue
-        col_ids = [str(c) for c in group]
-        uc_name = f"uq_{table_name}_{'_'.join(col_ids)}"
-        if len(uc_name) > 63:
-            uc_name = uc_name[:60] + "_uq"
-        table_args.append(sa.UniqueConstraint(*col_ids, name=uc_name))
-
-    composite_idxs = schema.get("ferro_composite_indexes") or []
-    for group in composite_idxs:
-        if not isinstance(group, (list, tuple)) or len(group) < 2:
-            warnings.warn(
-                f"Ignoring invalid ferro_composite_indexes entry for table "
-                f"{table_name!r} (expected a list/tuple of at least two column names): "
-                f"{group!r}",
-                UserWarning,
-                stacklevel=2,
-            )
-            continue
-        col_ids = [str(c) for c in group]
-        idx_name = f"idx_{table_name}_{'_'.join(col_ids)}"
-        if len(idx_name) > 63:
-            idx_name = idx_name[:59] + "_idx"
-        table_args.append(sa.Index(idx_name, *col_ids))
-
-    sa.Table(table_name, metadata, *table_args)
 
 
 #: SQLAlchemy RENDERING of the shared ``db_type`` token vocabulary. This is
@@ -488,91 +268,3 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
         except ValueError:
             return None
     return None
-
-
-@deprecated(
-    reason=(
-        "_map_to_sa_type() is deprecated. Type lowering now flows through "
-        "SchemaIR and _sa_type_from_ir_column()."
-    ),
-    since=IR_FIRST_DEPRECATION_SINCE,
-    remove_in=IR_FIRST_DEPRECATION_REMOVE_IN,
-    reference=IR_FIRST_MIGRATION_GUIDE_ALEMBIC,
-)
-def _map_to_sa_type(
-    schema: Dict[str, Any],
-    col_info: Dict[str, Any],
-    field_name: str,
-    python_enum: type[enum.Enum] | None = None,
-) -> "sa.types.TypeEngine":
-    """Map Ferro/JSON schema types to SQLAlchemy types.
-
-    ``field_name`` is used as the PostgreSQL enum type name when the column is
-    not backed by a Python ``Enum`` subclass (for example join-table schemas
-    built only from JSON schema). When ``python_enum`` is set, the type name is
-    ``python_enum.__name__.lower()`` and member *values* are used as enum labels
-    so string and integer Python enums map consistently.
-
-    A ``db_type`` override on the JSON schema property takes precedence over
-    every other branch -- it is the canonical user-facing storage knob and is
-    validated at class-definition time (see ``metaclass._validate_db_type_options``).
-    """
-    # Resolve $ref if present
-    col_info = _resolve_ref(schema, col_info)
-
-    db_type = col_info.get("db_type")
-    if isinstance(db_type, str):
-        mapped = _db_type_to_sa_type(db_type)
-        if mapped is not None:
-            return mapped
-
-    json_type = col_info.get("type")
-    format = col_info.get("format")
-    enum_values = col_info.get("enum")
-
-    # Handle Pydantic 'anyOf' for Optional types or Enums
-    if "anyOf" in col_info:
-        # Simple heuristic: find the first non-null type
-        for item in col_info["anyOf"]:
-            item = _resolve_ref(schema, item)
-            if item.get("type") != "null":
-                json_type = item.get("type")
-                format = item.get("format") or format
-                enum_values = item.get("enum") or enum_values
-                break
-
-    if enum_values:
-        string_values = [str(v) for v in enum_values]
-        if python_enum is not None:
-            return sa.Enum(
-                python_enum,
-                name=python_enum.__name__.lower(),
-                values_callable=lambda obj: [str(m.value) for m in obj],
-            )
-        return sa.Enum(*string_values, name=field_name)
-
-    if json_type == "integer":
-        return sa.Integer()
-    elif json_type == "string":
-        if format == "date-time":
-            return sa.DateTime()
-        elif format == "date":
-            return sa.Date()
-        elif format == "uuid":
-            return sa.Uuid() if hasattr(sa, "Uuid") else sa.String(36)
-        elif format == "decimal":
-            return sa.Numeric()
-        return sa.String()
-    elif json_type == "boolean":
-        return sa.Boolean()
-    elif json_type == "number":
-        # Check if it might be a decimal/numeric
-        if format == "decimal":
-            return sa.Numeric()
-        return sa.Float()
-    elif json_type == "object":
-        return sa.JSON()
-    elif json_type == "array":
-        return sa.JSON()
-
-    return sa.String()  # Fallback

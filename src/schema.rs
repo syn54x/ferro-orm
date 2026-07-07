@@ -54,6 +54,25 @@ pub(crate) fn property_json_type_and_format(
     (None, top_format)
 }
 
+/// Map raw JSON Schema `(type, format)` to the domain `logical_type` tokens
+/// emitted by the Python SchemaIR compiler (`compiler.py::_logical_type`).
+pub(crate) fn json_schema_logical_type(json_type: &str, format: Option<&str>) -> &'static str {
+    match (json_type, format) {
+        ("integer", _) => "integer",
+        ("number", Some("decimal")) => "decimal",
+        ("number", _) => "number",
+        ("boolean", _) => "boolean",
+        ("string", Some("date-time")) => "datetime",
+        ("string", Some("date")) => "date",
+        ("string", Some("time")) => "time",
+        ("string", Some("uuid")) => "uuid",
+        ("string", Some("binary")) => "binary",
+        ("string", _) => "string",
+        ("object" | "array", _) => "json",
+        _ => "unknown",
+    }
+}
+
 fn column_bool_metadata(
     raw_col_info: &serde_json::Value,
     resolved_col_info: &serde_json::Value,
@@ -155,7 +174,8 @@ pub(crate) fn canonical_column_type(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let (json_type, format) = property_json_type_and_format(resolved_col_info);
-    canonical_from_parts(json_type.unwrap_or(""), format, db_type, backend)
+    let logical_type = json_schema_logical_type(json_type.unwrap_or(""), format);
+    canonical_from_parts(logical_type, None, db_type, backend)
         .unwrap_or(CanonicalType::Varchar(None))
 }
 
@@ -602,6 +622,23 @@ mod tests {
         assert_eq!(
             canonical_column_type(&raw, &raw, Dialect::Postgres),
             CanonicalType::Integer
+        );
+    }
+
+    #[test]
+    fn canonical_column_type_maps_json_schema_formats_to_logical_tokens() {
+        let explicit_date = json!({
+            "anyOf": [{"type": "string", "format": "date"}, {"type": "null"}],
+            "db_type": "date"
+        });
+        assert_eq!(
+            canonical_column_type(&explicit_date, &explicit_date, Dialect::Postgres),
+            CanonicalType::Date
+        );
+        let derived_date = json!({"type": "string", "format": "date"});
+        assert_eq!(
+            canonical_column_type(&derived_date, &derived_date, Dialect::Postgres),
+            CanonicalType::Date
         );
     }
 

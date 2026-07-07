@@ -340,23 +340,6 @@ def test_composite_unique_order_matters_two_separate_constraints():
     assert len(ucs) == 2
 
 
-def test_build_sa_table_warns_on_invalid_composite_unique_group():
-    """Malformed ferro_composite_uniques entries should warn, not fail silently."""
-    from ferro.migrations.alembic import _build_sa_table
-
-    md = sa.MetaData()
-    schema = {
-        "properties": {
-            "id": {"type": "integer", "primary_key": True},
-            "n": {"type": "integer"},
-        },
-        "required": ["id", "n"],
-        "ferro_composite_uniques": [["n"]],
-    }
-    with pytest.warns(UserWarning, match="ferro_composite_uniques"):
-        _build_sa_table(md, "warncomposite", schema, model_cls=None)
-    assert "warncomposite" in md.tables
-
 
 def test_single_column_composite_unique_raises_with_guidance():
     """A single-column group must error with guidance toward Field(unique=True)."""

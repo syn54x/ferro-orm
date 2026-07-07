@@ -146,10 +146,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        migrate::_shadow_compare_migration_plan_for_test,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
         migrate::_render_migration_sql_for_test,
         m
     )?)?;

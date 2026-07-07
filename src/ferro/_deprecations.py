@@ -9,25 +9,6 @@ from typing import Any, TypeVar
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-# Canonical IR-first compatibility window.
-IR_FIRST_DEPRECATION_SINCE = "v0.12.0"
-IR_FIRST_DEPRECATION_REMOVE_IN = "v0.14.0"
-
-# Back-compat alias used by inventory/docs.
-REMOVAL_RELEASE = IR_FIRST_DEPRECATION_REMOVE_IN
-
-# Published migration guide (see zensical.toml site_url + nav).
-IR_FIRST_MIGRATION_GUIDE = "https://syn54x.github.io/ferro-orm/howto/migrating-to-v0-12-0/"
-IR_FIRST_MIGRATION_GUIDE_PREDICATES = (
-    f"{IR_FIRST_MIGRATION_GUIDE}#1-use-lambda-predicates-in-where"
-)
-IR_FIRST_MIGRATION_GUIDE_SESSIONS = (
-    f"{IR_FIRST_MIGRATION_GUIDE}#2-run-operations-inside-a-session"
-)
-IR_FIRST_MIGRATION_GUIDE_ALEMBIC = (
-    f"{IR_FIRST_MIGRATION_GUIDE}#3-build-alembic-metadata-from-get_metadata"
-)
-
 
 def deprecation_message(
     *,

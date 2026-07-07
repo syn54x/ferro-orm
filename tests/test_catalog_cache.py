@@ -215,7 +215,7 @@ async def test_catalog_cache_invalidated_by_mid_session_migrate(
         # Non-optional: the legacy shadow migrate-planner resolves `Enum | None`
         # (anyOf) ADD COLUMN to varchar while the IR planner emits the native
         # enum — a pre-existing planner divergence unrelated to the catalog
-        # cache; optional here would fail under FERRO_SHADOW_RUNTIME_STRICT.
+        # cache; optional here would fail strict migrate parity gates.
         mood: C2Priority = C2Priority.LOW
 
     from ferro.raw import execute

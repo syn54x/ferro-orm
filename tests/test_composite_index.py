@@ -385,23 +385,6 @@ def test_coexists_with_single_column_field_index():
     assert len(composite_idxs) == 1
 
 
-def test_build_sa_table_warns_on_invalid_composite_index_group():
-    """B10: hand-edited schema with single-element group -> UserWarning, table still builds."""
-    from ferro.migrations.alembic import _build_sa_table
-
-    md = sa.MetaData()
-    schema = {
-        "properties": {
-            "id": {"type": "integer", "primary_key": True},
-            "n": {"type": "integer"},
-        },
-        "required": ["id", "n"],
-        "ferro_composite_indexes": [["n"]],
-    }
-    with pytest.warns(UserWarning, match="ferro_composite_indexes"):
-        _build_sa_table(md, "warnidx", schema, model_cls=None)
-    assert "warnidx" in md.tables
-
 
 def test_composite_index_name_python_matches_naming_convention():
     """B12: Python-side name follows idx_<table>_<cols> with _idx truncation suffix."""
