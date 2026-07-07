@@ -1,7 +1,7 @@
 ---
 title: "feat: Typed query predicates (col() + lambda)"
 type: feat
-status: active
+status: completed
 date: 2026-05-08
 origin: docs/brainstorms/2026-05-08-typed-query-predicates-requirements.md
 ---

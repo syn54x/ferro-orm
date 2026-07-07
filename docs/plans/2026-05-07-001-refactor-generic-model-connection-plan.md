@@ -1,7 +1,7 @@
 ---
 title: "refactor: Make ModelConnection generic to preserve model typing through .using()"
 type: refactor
-status: active
+status: completed
 date: 2026-05-07
 ---
 

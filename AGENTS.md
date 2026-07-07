@@ -318,3 +318,19 @@ Rules:
 This applies to brainstorming, design discussions, PR descriptions, issue
 comments, and any explanation directed at the maintainer. It governs how work is
 communicated, not what gets built.
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `syn54x/ferro-orm`; external PRs are a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — `CONTEXT.md` at repo root, ADRs in `docs/adr/`. See `docs/agents/domain.md`.

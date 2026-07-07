@@ -1,10 +1,10 @@
 ---
-
-## title: Refactor Ferro multi-db backend architecture
-
+title: Refactor Ferro multi-db backend architecture
 type: refactor
-status: active
+status: archived
 date: 2026-04-24
+superseded_by: docs/plans/2026-06-19-001-ir-first-roadmap.md
+---
 
 # Refactor Ferro multi-db backend architecture
 

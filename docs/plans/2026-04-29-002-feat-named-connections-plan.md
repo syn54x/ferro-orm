@@ -1,13 +1,10 @@
 ---
-
-## title: Add Named Connection Routing
-
+title: Add Named Connection Routing
 type: feat
-status: active
+status: completed
 date: 2026-04-29
 origin: docs/brainstorms/2026-04-29-named-connections-role-routing-requirements.md
-deepened: 2026-04-29
-deepened: 2026-04-29
+---
 
 # Add Named Connection Routing
 

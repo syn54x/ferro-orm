@@ -1,7 +1,8 @@
 ---
 title: "feat: Configurable column storage types (db_type / db_check)"
 type: feat
-status: shipped-phase-1
+status: completed
+follow_up: https://github.com/syn54x/ferro-orm/issues/54
 date: 2026-05-13
 origin: docs/brainstorms/2026-05-13-configurable-column-storage-types-requirements.md
 ---

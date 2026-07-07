@@ -1,9 +1,11 @@
 ---
-
-## title: Typed-null binds for primitives and UUID
+title: Typed-null binds for primitives and UUID
 type: bugfix-refactor
-status: active
+status: completed
 date: 2026-04-29
+issue: https://github.com/syn54x/ferro-orm/issues/38
+follow_up: https://github.com/syn54x/ferro-orm/issues/40
+---
 
 # Typed-null binds for primitives and UUID
 
