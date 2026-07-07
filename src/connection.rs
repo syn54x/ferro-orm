@@ -151,14 +151,6 @@ fn duplicate_connection_error(connection_name: &str, is_implicit_default: bool) 
     })
 }
 
-fn shadow_runtime_enabled_from_env() -> bool {
-    std::env::var("FERRO_SHADOW_RUNTIME")
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            value == "1" || value == "true" || value == "yes" || value == "on"
-        })
-        .unwrap_or(false)
-}
 
 async fn connect_engine_handle(
     connection_url: &str,
@@ -265,8 +257,7 @@ pub fn connect(
         .map_err(|e| {
             crate::errors::map_db_error(&format!("DB Connection failed for {}", redacted_url), e)
         })?
-        .with_identity_map_enabled(identity_map)
-        .with_shadow_runtime_enabled(shadow_runtime_enabled_from_env());
+        .with_identity_map_enabled(identity_map);
 
         let engine_handle = Arc::new(engine_handle);
 

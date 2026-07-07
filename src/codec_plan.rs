@@ -17,12 +17,12 @@
 //! is the runtime producer pinned by the golden vector
 //! `tests/fixtures/ir_vectors/codec_registry_core_v1.json`.
 
-use crate::schema::{property_json_type_and_format, resolve_column_storage_json};
-use crate::state::Dialect;
 use ferro_ddl_lowering::{
     CanonicalType, ResolvedStorage, canonical_from_parts, canonical_to_db_type_token,
     enum_label_strings,
 };
+use crate::schema::{json_schema_logical_type, property_json_type_and_format, resolve_column_storage_json};
+use crate::state::Dialect;
 use ferro_schema_ir::{CodecBindRule, CodecFetchRule, CodecIrPayload, HydrationAbi};
 use std::collections::HashMap;
 
@@ -172,10 +172,10 @@ fn compile_column(
             db_type,
         };
     }
-    // The same FF-B cascade WITHOUT the explicit-db_type override: the
-    // logical side of the column (unknown types fall back to Varchar → Str,
-    // matching `canonical_column_type`).
-    let logical = canonical_from_parts(json_type.unwrap_or(""), format, "", Dialect::Postgres)
+    // Logical side: JSON Schema → domain token, without the explicit `db_type`
+    // override (storage may widen away from the logical family, e.g. UUID as text).
+    let logical_type = json_schema_logical_type(json_type.unwrap_or(""), format);
+    let logical = canonical_from_parts(logical_type, None, "", Dialect::Postgres)
         .unwrap_or(CanonicalType::Varchar(None));
     let canonical = match storage {
         ResolvedStorage::Scalar(c) if type_family(*c) == type_family(logical) => *c,
@@ -555,6 +555,19 @@ mod tests {
         ] {
             assert_eq!(plan.codec(col), Some(&codec), "column {col}");
         }
+    }
+
+    /// Nullable `date` with explicit `db_type` (anyOf union shape) must hydrate
+    /// as `datetime.date`, not raw ISO strings.
+    #[test]
+    fn explicit_db_type_date_anyof_uses_date_codec() {
+        let plan = plan_for(json!({
+            "paid_date": {
+                "anyOf": [{"type": "string", "format": "date"}, {"type": "null"}],
+                "db_type": "date",
+            }
+        }));
+        assert_eq!(plan.codec("paid_date"), Some(&ColumnCodec::Date));
     }
 
     /// The schema epoch: re-registering a model rebuilds its plan atomically.

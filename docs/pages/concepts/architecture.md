@@ -206,9 +206,7 @@ await connect("sqlite::memory:", auto_migrate=True)
 - `migrate_updates=True` (0.11.0) additionally adds missing columns to existing tables, and on PostgreSQL reconciles type and nullability drift. Runtime updates are planned from **SchemaIR** diffing (`ferro-migrate`) and executed as backend-specific DDL.
 - `migrate_destructive=True` (0.11.0) additionally drops live columns no longer on the model (never whole tables).
 
-The legacy enriched-JSON migration planner remains in the codebase as a deprecated shadow reference until `v0.14.0` (Phase 9); parity against the IR path is gated in Phase 8 ([#120](https://github.com/syn54x/ferro-orm/issues/120)).
-
-For renames, primary-key changes, and complex transforms, use the [Alembic bridge](../guide/migrations.md). **SchemaIR** is the intended canonical contract for cross-emitter DDL parity — Alembic `get_metadata()` derives SQLAlchemy metadata from compiled SchemaIR so autogenerate agrees with Ferro's naming and type conventions. The runtime CREATE and migrate emitters do not yet consume SchemaIR directly, so today that parity is enforced by tests (`test_cross_emitter_parity.py`, `test_db_type_cross_emitter_parity.py`) rather than by shared lowering code; making it structural is tracked in [Phase 8.5](../../plans/2026-06-19-001-ir-first-roadmap.md). The enriched JSON schema in the Rust registry remains the runtime source for query bind typing and hydration metadata.
+For renames, primary-key changes, and complex transforms, use the [Alembic bridge](../guide/migrations.md). **SchemaIR** is the canonical contract for cross-emitter DDL parity — runtime CREATE, auto-migrate, and Alembic `get_metadata()` all derive from the Python-compiled SchemaIR modelset and shared `ferro-ddl-lowering` tokens. Parity is enforced structurally (`test_cross_emitter_parity.py`, `test_db_type_cross_emitter_parity.py`, `test_migrate_plan.py`). The enriched JSON schema in the Rust registry remains the runtime source for query bind typing and hydration metadata.
 
 ## Async Architecture
 

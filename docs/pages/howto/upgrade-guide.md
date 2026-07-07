@@ -383,10 +383,9 @@ bugs — predictable schema diffs, identical bind/null semantics across SQLite a
 PostgreSQL, and explicit session-scoped runtime state. Your model definitions do
 not change; this is about how a few APIs are called.
 
-`0.12` introduced these as **deprecation warnings**; the operator-predicate and
-routing removals later landed (see [Upgrading to 0.14](#upgrading-to-014) and the
-`0.13` routing note there). The one surface below still deprecated as of `0.14`
-is the private Alembic helper import — migrate it now.
+`0.12` introduced these as **deprecation warnings**; operator-predicate, routing,
+and private Alembic JSON helper removals later landed (see
+[Upgrading to 0.14](#upgrading-to-014)).
 
 <!-- MAINTAINERS: keep this prompt in sync with the subsections below it. -->
 ??? example "Automate this: copy this prompt to your coding agent"
@@ -418,17 +417,17 @@ is the private Alembic helper import — migrate it now.
 ### Alembic metadata: build from `get_metadata()`
 
 The private JSON-derivation helpers `ferro.migrations.alembic._build_sa_table`
-and `ferro.migrations.alembic._map_to_sa_type` are deprecated — still present as
-of `0.14`, but slated for removal. Schema metadata now derives from the IR through
-the public `get_metadata()` entry point; use it directly in your Alembic `env.py`.
+and `ferro.migrations.alembic._map_to_sa_type` were removed in `0.14`. Schema
+metadata derives from SchemaIR through the public `get_metadata()` entry point;
+use it directly in your Alembic `env.py`.
 
-=== "Before (deprecated)"
+=== "Before (removed)"
 
     ```python
     from ferro.migrations.alembic import _build_sa_table, _map_to_sa_type
     ```
 
-=== "After (recommended)"
+=== "After"
 
     ```python
     from ferro.migrations import get_metadata
@@ -442,5 +441,5 @@ the public `get_metadata()` entry point; use it directly in your Alembic `env.py
 | --- | --- | --- |
 | `Model.where(Model.field OP value)` / `col()` | `where(lambda t: ...)` | Removed in `0.14` — see [Predicates](#predicates-operator-style-and-col-are-gone) |
 | Unqualified ops outside an active session | `async with ferro.engines.session("name")` | Removed in `0.13` — see [Connection routing](#connection-routing-requires-a-session) |
-| `ferro.migrations.alembic._build_sa_table` | `ferro.migrations.get_metadata()` | Still deprecated as of `0.14` |
-| `ferro.migrations.alembic._map_to_sa_type` | `ferro.migrations.get_metadata()` | Still deprecated as of `0.14` |
+| `ferro.migrations.alembic._build_sa_table` | `ferro.migrations.get_metadata()` | Removed in `0.14` — see [Alembic metadata](#alembic-metadata-build-from-get_metadata) |
+| `ferro.migrations.alembic._map_to_sa_type` | `ferro.migrations.get_metadata()` | Removed in `0.14` — see [Alembic metadata](#alembic-metadata-build-from-get_metadata) |

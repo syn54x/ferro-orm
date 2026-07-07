@@ -313,41 +313,18 @@ pub fn canonical_from_parts(
         return Ok(canonical);
     }
     match (logical_type, format) {
-        // DEPRECATED (legacy JSON-Schema vocabulary): the Python SchemaIR compiler
-        // now emits domain `logical_type` tokens ("datetime"/"date"/"uuid") instead
-        // of "string"+format for these. These arms are now reached ONLY by
-        // `plan_table_migration_legacy` (migrate.rs) via `build_column_plan` →
-        // `canonical_column_type` → `canonical_from_parts`. The JSON create-table
-        // emitter was removed in #153 (Phase 8.6). Removal of these arms is gated
-        // on the Phase 9 legacy-planner removal (#108).
-        // Note: "time" does NOT appear here because the legacy planner has no
-        // ("string", "time") arm; it falls through to Varchar(None). See below.
-        // Raw JSON Schema types with format — produced by schema_json_to_schema_ir.
-        ("string", Some("date-time")) => Ok(CanonicalType::TimestampTz),
-        ("string", Some("date")) => Ok(CanonicalType::Date),
-        ("string", Some("uuid")) => Ok(CanonicalType::Uuid),
-        // `format = "decimal"` is only ever emitted alongside a concrete logical
-        // type (see src/ferro/schema_metadata.py), so `(None, Some("decimal"))`
-        // never arises from a real model — this broad arm is safe.
-        (_, Some("decimal")) => Ok(CanonicalType::Decimal),
-        ("string", Some("binary")) => Ok(CanonicalType::Blob),
         // Domain-specific logical_type tokens emitted by the Python SchemaIR
-        // compiler (compiler.py `_logical_type`). These are accepted alongside
-        // the raw JSON Schema types so compiled IR envelopes can be consumed.
-        // "datetime", "date", "uuid" have symmetric create-path counterparts.
-        // Domain token for bytes/binary fields (compiler.py _logical_type emits "binary").
+        // compiler (compiler.py `_logical_type`).
+        (_, Some("decimal")) => Ok(CanonicalType::Decimal),
         ("binary", _) => Ok(CanonicalType::Blob),
         ("datetime", _) => Ok(CanonicalType::TimestampTz),
         ("date", _) => Ok(CanonicalType::Date),
-        // FF-B B2: `datetime.time` stores as `time` on both dialects (the #141
-        // varchar asymmetry is resolved the other way). Legacy varchar-stored
-        // columns surface as drift and are REFUSED at emission
-        // (`RefusedConversion::VarcharToTime`) — never silently altered.
-        ("time", _) | ("string", Some("time")) => Ok(CanonicalType::Time),
+        // FF-B B2: `datetime.time` stores as `time` on both dialects.
+        ("time", _) => Ok(CanonicalType::Time),
         ("uuid", _) => Ok(CanonicalType::Uuid),
         ("json", _) => Ok(CanonicalType::Json),
         ("decimal", _) => Ok(CanonicalType::Decimal),
-        // Raw JSON Schema primitive types.
+        // Raw JSON Schema primitive types (introspection / token round-trip).
         ("integer", _) => Ok(CanonicalType::Integer),
         ("string", _) => Ok(CanonicalType::Varchar(None)),
         ("number", _) => Ok(CanonicalType::Double),
@@ -951,8 +928,8 @@ mod tests {
     fn uuid_model_does_not_drift_against_char32_live_on_sqlite() {
         // Live introspected `uuid_text` → db_type "uuid" → Char(32).
         let live = col_with_db_type("id", "string", Some("uuid"), Some("uuid"));
-        // Model derived (post-#141 wire IR): db_type None, format "uuid" → Uuid.
-        let model = col_with_db_type("id", "string", Some("uuid"), None);
+        // Model derived IR: logical_type "uuid" (Python SchemaIR compiler).
+        let model = col_with_db_type("id", "uuid", None, None);
         assert!(!schema_columns_storage_drift(&live, &model, Dialect::Sqlite));
     }
 
@@ -1092,8 +1069,8 @@ mod tests {
     fn canonical_from_parts_matches_schema_column_path() {
         // db_type wins
         assert_eq!(canonical_from_parts("string", None, "bigint", Dialect::Postgres), Ok(CanonicalType::BigInt));
-        // fallback to logical_type/format
-        assert_eq!(canonical_from_parts("string", Some("date-time"), "", Dialect::Postgres), Ok(CanonicalType::TimestampTz));
+        // domain logical_type tokens
+        assert_eq!(canonical_from_parts("datetime", None, "", Dialect::Postgres), Ok(CanonicalType::TimestampTz));
         assert_eq!(canonical_from_parts("integer", None, "", Dialect::Sqlite), Ok(CanonicalType::Integer));
         // unknown is an error (CREATE path maps this to Varchar at its call site)
         assert!(canonical_from_parts("mystery", None, "", Dialect::Postgres).is_err());
@@ -1341,11 +1318,6 @@ mod tests {
         );
         assert_eq!(
             canonical_from_parts("time", None, "", Dialect::Postgres),
-            Ok(CanonicalType::Time)
-        );
-        // The raw JSON-Schema spelling used by the legacy planner path.
-        assert_eq!(
-            canonical_from_parts("string", Some("time"), "", Dialect::Postgres),
             Ok(CanonicalType::Time)
         );
     }

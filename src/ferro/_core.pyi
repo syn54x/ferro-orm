@@ -87,23 +87,6 @@ def _render_migration_sql_for_test(
     """
     ...
 
-def _shadow_compare_migration_plan_for_test(
-    name: str,
-    schema_ir_json: str,
-    schema_json: str,
-    live_columns_json: str,
-    dialect: str,
-    updates: bool = True,
-    destructive: bool = False,
-    live_indexes_json: str = "",
-) -> str:
-    """Test-only: compare IR-primary vs legacy migration planners (column-domain scoped).
-
-    ``schema_ir_json`` drives the IR planner (compiled SchemaIR envelope);
-    ``schema_json`` drives the legacy planner (enriched Ferro schema JSON).
-    """
-    ...
-
 async def fetch_all(
     cls: object,
     route: RouteHandle,
