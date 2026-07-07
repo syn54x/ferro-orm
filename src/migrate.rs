@@ -569,4 +569,3 @@ pub fn _render_migration_sql_for_test(
     }
     Ok((statements, plan.warnings))
 }
-
