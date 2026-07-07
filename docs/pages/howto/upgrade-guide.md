@@ -21,9 +21,10 @@ the API does now, and what you change to get there.
 
 | You are on | Read |
 | --- | --- |
-| `0.13.x`, upgrading to `0.14` | [Upgrading to 0.14](#upgrading-to-014) |
+| `0.12.x` or `0.13.x`, upgrading to `0.14` | [Upgrading to 0.14](#upgrading-to-014) |
 | `0.11.x` or earlier, upgrading to `0.14` | Both sections, top to bottom |
-| `0.11.x` or earlier, stopping at `0.12`/`0.13` | [Upgrading to 0.12](#upgrading-to-012) |
+| `0.11.x` or earlier, stopping at `0.12` | [Upgrading to 0.12](#upgrading-to-012) |
+| `0.11.x` or earlier, stopping at `0.13` | [Upgrading to 0.12](#upgrading-to-012), plus the [connection-routing note](#connection-routing-requires-a-session) in Upgrading to 0.14 |
 
 Each section includes a copy/paste prompt for a coding agent. If you are crossing
 more than one boundary, run the prompts **newest first, one at a time**, and
