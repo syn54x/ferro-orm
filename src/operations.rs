@@ -359,25 +359,79 @@ fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
         .collect()
 }
 
+/// One execution route for an operation: the open transaction's connection,
+/// or the routed engine's pool (FF-G G2).
+///
+/// Replaces the per-site `match tx_conn { Some(..) => .., None => .. }`
+/// mirror arms. Each method holds the transaction mutex for exactly one
+/// engine call — the same guard scope as the arms it replaces — so a query
+/// can never migrate off its transaction. Methods return raw `sqlx::Error`;
+/// call sites keep their own `map_db_error` context labels.
+#[derive(Clone, Copy)]
+enum Executor<'a> {
+    /// A live transaction's dedicated connection.
+    Tx(&'a TransactionConnection),
+    /// The routed engine's pool.
+    Pool(&'a EngineHandle),
+}
+
+impl<'a> Executor<'a> {
+    fn new(tx_conn: Option<&'a TransactionConnection>, engine: &'a EngineHandle) -> Self {
+        match tx_conn {
+            Some(tx) => Executor::Tx(tx),
+            None => Executor::Pool(engine),
+        }
+    }
+
+    async fn fetch_all(
+        &self,
+        sql: &str,
+        binds: &[EngineBindValue],
+    ) -> Result<Vec<EngineRow>, sqlx::Error> {
+        match self {
+            Executor::Tx(tx) => {
+                let mut conn = tx.lock().await;
+                conn.fetch_all_sql_with_binds(sql, binds).await
+            }
+            Executor::Pool(engine) => engine.fetch_all_sql_with_binds(sql, binds).await,
+        }
+    }
+
+    async fn execute(&self, sql: &str, binds: &[EngineBindValue]) -> Result<u64, sqlx::Error> {
+        match self {
+            Executor::Tx(tx) => {
+                let mut conn = tx.lock().await;
+                conn.execute_sql_with_binds(sql, binds).await
+            }
+            Executor::Pool(engine) => engine.execute_sql_with_binds(sql, binds).await,
+        }
+    }
+
+    async fn execute_result(
+        &self,
+        sql: &str,
+        binds: &[EngineBindValue],
+    ) -> Result<crate::backend::EngineExecuteResult, sqlx::Error> {
+        match self {
+            Executor::Tx(tx) => {
+                let mut conn = tx.lock().await;
+                conn.execute_sql_with_binds_result(sql, binds).await
+            }
+            Executor::Pool(engine) => engine.execute_sql_with_binds_result(sql, binds).await,
+        }
+    }
+}
+
 async fn execute_statement_with_optional_tx(
     engine: &EngineHandle,
-    tx_conn: Option<TransactionConnection>,
+    tx_conn: Option<&TransactionConnection>,
     sql: &str,
     bind_values: &[SeaValue],
 ) -> Result<u64, sqlx::Error> {
-    match tx_conn {
-        Some(conn_arc) => {
-            let engine_bind_values = engine_bind_values_from_sea(bind_values);
-            let mut conn = conn_arc.lock().await;
-            conn.execute_sql_with_binds(sql, &engine_bind_values).await
-        }
-        None => {
-            let engine_bind_values = engine_bind_values_from_sea(bind_values);
-            engine
-                .execute_sql_with_binds(sql, &engine_bind_values)
-                .await
-        }
-    }
+    let engine_bind_values = engine_bind_values_from_sea(bind_values);
+    Executor::new(tx_conn, engine)
+        .execute(sql, &engine_bind_values)
+        .await
 }
 
 async fn execute_transaction_sql(
@@ -472,37 +526,19 @@ fn engine_row_to_pydict<'py>(
 
 async fn postgres_catalog_rows(
     engine: &EngineHandle,
-    tx_conn: &Option<TransactionConnection>,
+    exec: Executor<'_>,
     sql: &str,
     table_name: &str,
     label: &str,
 ) -> PyResult<Vec<EngineRow>> {
     engine.record_catalog_query();
     let values = [EngineBindValue::String(table_name.to_string())];
-    let rows = match tx_conn {
-        Some(conn_arc) => {
-            let mut conn = conn_arc.lock().await;
-            conn.fetch_all_sql_with_binds(sql, &values)
-                .await
-                .map_err(|e| {
-                    crate::errors::map_db_error(
-                        &format!("Failed to inspect {} for '{}'", label, table_name),
-                        e,
-                    )
-                })?
-        }
-        None => engine
-            .fetch_all_sql_with_binds(sql, &values)
-            .await
-            .map_err(|e| {
-                crate::errors::map_db_error(
-                    &format!("Failed to inspect {} for '{}'", label, table_name),
-                    e,
-                )
-            })?,
-    };
-
-    Ok(rows)
+    exec.fetch_all(sql, &values).await.map_err(|e| {
+        crate::errors::map_db_error(
+            &format!("Failed to inspect {} for '{}'", label, table_name),
+            e,
+        )
+    })
 }
 
 macro_rules! sea_query_build_for_backend {
@@ -545,7 +581,7 @@ macro_rules! sea_query_to_string_for_backend {
 async fn postgres_table_catalog(
     table_name: &str,
     engine: &EngineHandle,
-    tx_conn: &Option<TransactionConnection>,
+    exec: Executor<'_>,
     backend: Dialect,
 ) -> PyResult<Arc<TableCatalog>> {
     if backend != Dialect::Postgres {
@@ -572,7 +608,7 @@ async fn postgres_table_catalog(
         "#;
 
     let mut catalog = TableCatalog::default();
-    for row in postgres_catalog_rows(engine, tx_conn, sql, table_name, "table catalog").await? {
+    for row in postgres_catalog_rows(engine, exec, sql, table_name, "table catalog").await? {
         let column_name = engine_row_string(&row, "column_name").unwrap_or_default();
         let udt_name = engine_row_string(&row, "udt_name").unwrap_or_default();
         let typtype = engine_row_string(&row, "typtype").unwrap_or_default();
@@ -878,6 +914,7 @@ pub fn fetch_all<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
         let session_id = r.session_id.clone();
         let use_identity_map = engine.is_identity_map_enabled();
 
@@ -885,42 +922,18 @@ pub fn fetch_all<'py>(
         let table_name = schema.table_name.clone();
         // ... same sql generation ...
         let (sql, pk_col, schema_for_decode) = {
-            let mut pk = None;
-            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                for (col_name, col_info) in properties {
-                    if col_info
-                        .get("primary_key")
-                        .and_then(|pk| pk.as_bool())
-                        .unwrap_or(false)
-                    {
-                        pk = Some(col_name.clone());
-                        break;
-                    }
-                }
-            }
+            let pk = schema.meta.pk_col.clone();
             let mut stmt = Query::select();
             stmt.column((Alias::new(&table_name), sea_query::Asterisk));
             let s = sea_query_to_string_for_backend!(stmt.from(Alias::new(&table_name)), backend);
             (s, pk, schema.clone())
         };
 
-        let parsed_data = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                let rows = conn
-                    .fetch_all_sql_with_binds(&sql, &[])
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
-            }
-            None => {
-                let rows = engine
-                    .fetch_all_sql_with_binds(&sql, &[])
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
-            }
-        };
+        let rows = exec
+            .fetch_all(&sql, &[])
+            .await
+            .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
+        let parsed_data = typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref());
 
         Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
@@ -1015,6 +1028,7 @@ pub fn fetch_one<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
         let session_id = r.session_id.clone();
         let use_identity_map = engine.is_identity_map_enabled();
 
@@ -1022,21 +1036,11 @@ pub fn fetch_one<'py>(
         let table_name = schema.table_name.clone();
         // ... sql logic ...
         let (sql, bind_values, _pk_col_name, schema_for_decode) = {
-            let mut pk = None;
-            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                for (col_name, col_info) in properties {
-                    if col_info
-                        .get("primary_key")
-                        .and_then(|pk| pk.as_bool())
-                        .unwrap_or(false)
-                    {
-                        pk = Some(col_name.clone());
-                        break;
-                    }
-                }
-            }
-            let pk_name =
-                pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+            let pk_name = schema
+                .meta
+                .pk_col
+                .clone()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let mut stmt = Query::select();
             stmt.column((Alias::new(&table_name), sea_query::Asterisk));
             let no_enum_udt = HashMap::new();
@@ -1060,31 +1064,15 @@ pub fn fetch_one<'py>(
             (s, values, pk_name, schema.clone())
         };
 
-        let parsed_row = match tx_conn {
-            Some(conn_arc) => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let mut conn = conn_arc.lock().await;
-                let rows = conn
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, None)
-                    .into_iter()
-                    .next()
-                    .map(|(_, fields)| fields)
-            }
-            None => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let rows = engine
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, None)
-                    .into_iter()
-                    .next()
-                    .map(|(_, fields)| fields)
-            }
-        };
+        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+        let rows = exec
+            .fetch_all(&sql, &engine_bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
+        let parsed_row = typed_rows_to_parsed_data(rows, &schema_for_decode, None)
+            .into_iter()
+            .next()
+            .map(|(_, fields)| fields);
 
         match parsed_row {
             Some(fields) => Python::attach(|py| {
@@ -1325,30 +1313,15 @@ pub fn save_record<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
 
-        let mut pk_col = None;
-        let mut pk_is_auto = true;
-        if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-            for (col_name, col_info) in properties {
-                if col_info
-                    .get("primary_key")
-                    .and_then(|pk| pk.as_bool())
-                    .unwrap_or(false)
-                {
-                    pk_col = Some(col_name.clone());
-                    pk_is_auto = col_info
-                        .get("autoincrement")
-                        .and_then(|auto| auto.as_bool())
-                        .unwrap_or(true);
-                    break;
-                }
-            }
-        }
+        let pk_col = schema.meta.pk_col.clone();
+        let pk_is_auto = schema.meta.pk_autoincrement;
 
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         let (sql, bind_values, needs_postgres_returning) = build_save_sql(
             &schema,
@@ -1363,54 +1336,26 @@ pub fn save_record<'py>(
             ts_cast,
         )?;
 
-        match tx_conn {
-            Some(conn_arc) => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let mut conn = conn_arc.lock().await;
-                if needs_postgres_returning {
-                    let rows = conn
-                        .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                    // FF-G G4a: return the RETURNING value as decoded. A
-                    // non-positive id is a legitimate PK (sequence MINVALUE
-                    // <= 0); only a missing row / non-integer PK maps to None.
-                    let id = rows
-                        .first()
-                        .and_then(|row| row.values.first())
-                        .and_then(|(_, value)| value.as_i64());
-                    Ok(id)
-                } else {
-                    let exec_res = conn
-                        .execute_sql_with_binds_result(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                    Ok(exec_res.last_insert_id)
-                }
-            }
-            None => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                if needs_postgres_returning {
-                    let rows = engine
-                        .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                    // FF-G G4a: return the RETURNING value as decoded. A
-                    // non-positive id is a legitimate PK (sequence MINVALUE
-                    // <= 0); only a missing row / non-integer PK maps to None.
-                    let id = rows
-                        .first()
-                        .and_then(|row| row.values.first())
-                        .and_then(|(_, value)| value.as_i64());
-                    Ok(id)
-                } else {
-                    let exec_res = engine
-                        .execute_sql_with_binds_result(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                    Ok(exec_res.last_insert_id)
-                }
-            }
+        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+        if needs_postgres_returning {
+            let rows = exec
+                .fetch_all(&sql, &engine_bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+            // FF-G G4a: return the RETURNING value as decoded. A
+            // non-positive id is a legitimate PK (sequence MINVALUE
+            // <= 0); only a missing row / non-integer PK maps to None.
+            let id = rows
+                .first()
+                .and_then(|row| row.values.first())
+                .and_then(|(_, value)| value.as_i64());
+            Ok(id)
+        } else {
+            let exec_res = exec
+                .execute_result(&sql, &engine_bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+            Ok(exec_res.last_insert_id)
         }
     })
 }
@@ -1444,25 +1389,14 @@ pub fn update_record<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
 
-        let mut pk_col = None;
-        if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-            for (col_name, col_info) in properties {
-                if col_info
-                    .get("primary_key")
-                    .and_then(|pk| pk.as_bool())
-                    .unwrap_or(false)
-                {
-                    pk_col = Some(col_name.clone());
-                    break;
-                }
-            }
-        }
+        let pk_col = schema.meta.pk_col.clone();
 
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
 
         let plan = build_update_by_pk_sql(
@@ -1479,25 +1413,17 @@ pub fn update_record<'py>(
         match plan {
             UpdateByPkSql::Update(sql, bind_values) => {
                 let rows_affected =
-                    execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+                    execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
                         .await
                         .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
                 Ok(rows_affected)
             }
             UpdateByPkSql::ExistenceCheck(sql, bind_values) => {
                 let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let rows = match tx_conn {
-                    Some(conn_arc) => {
-                        let mut conn = conn_arc.lock().await;
-                        conn.fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                            .await
-                            .map_err(|e| crate::errors::map_db_error("Update failed", e))?
-                    }
-                    None => engine
-                        .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Update failed", e))?,
-                };
+                let rows = exec
+                    .fetch_all(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
                 let count = rows
                     .first()
                     .and_then(|row| row.values.first())
@@ -1539,6 +1465,7 @@ pub fn save_bulk_records<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
@@ -1547,27 +1474,10 @@ pub fn save_bulk_records<'py>(
             return Ok(0);
         }
 
-        let mut pk_col = None;
-        let mut pk_is_auto = true;
-        if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-            for (col_name, col_info) in properties {
-                let is_pk = col_info
-                    .get("primary_key")
-                    .and_then(|pk| pk.as_bool())
-                    .unwrap_or(false);
+        let pk_col = schema.meta.pk_col.clone();
+        let pk_is_auto = schema.meta.pk_autoincrement;
 
-                if is_pk {
-                    pk_col = Some(col_name.clone());
-                    pk_is_auto = col_info
-                        .get("autoincrement")
-                        .and_then(|auto| auto.as_bool())
-                        .unwrap_or(true);
-                    break;
-                }
-            }
-        }
-
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         let (sql, bind_values) = {
             let mut insert_stmt = InsertStatement::new()
@@ -1610,7 +1520,7 @@ pub fn save_bulk_records<'py>(
         };
 
         let rows_affected =
-            execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+            execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
                 .await
                 .map_err(|e| {
                     crate::errors::map_db_error(&format!("Bulk save failed for '{}'", name), e)
@@ -1645,27 +1555,16 @@ pub fn fetch_filtered<'py>(
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
         let use_identity_map = engine.is_identity_map_enabled();
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         plan.postgres_enum_udt = catalog.enum_udt.clone();
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
-            let mut pk = None;
-            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                for (col_name, col_info) in properties {
-                    if col_info
-                        .get("primary_key")
-                        .and_then(|pk| pk.as_bool())
-                        .unwrap_or(false)
-                    {
-                        pk = Some(col_name.clone());
-                        break;
-                    }
-                }
-            }
+            let pk = schema.meta.pk_col.clone();
 
             let mut select = Query::select();
             select.column((Alias::new(&table_name), sea_query::Asterisk));
@@ -1714,25 +1613,12 @@ pub fn fetch_filtered<'py>(
             (s, values, pk, schema.clone())
         };
 
-        let parsed_data = match tx_conn {
-            Some(conn_arc) => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let mut conn = conn_arc.lock().await;
-                let rows = conn
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
-            }
-            None => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let rows = engine
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref())
-            }
-        };
+        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+        let rows = exec
+            .fetch_all(&sql, &engine_bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
+        let parsed_data = typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref());
 
         Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
@@ -1823,10 +1709,11 @@ pub fn count_filtered(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
-        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
+        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, exec, backend)
             .await?
             .enum_udt
             .clone();
@@ -1841,21 +1728,11 @@ pub fn count_filtered(
                 let target_col = Alias::new(&m2m.target_col);
 
                 // We need the PK name of the target table to join
-                let mut pk = None;
-                if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                    for (col_name, col_info) in properties {
-                        if col_info
-                            .get("primary_key")
-                            .and_then(|pk| pk.as_bool())
-                            .unwrap_or(false)
-                        {
-                            pk = Some(col_name.clone());
-                            break;
-                        }
-                    }
-                }
-                let pk_name =
-                    pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+                let pk_name = schema
+                    .meta
+                    .pk_col
+                    .clone()
+                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
 
                 select.from(Alias::new(&table_name));
                 select.inner_join(
@@ -1880,29 +1757,15 @@ pub fn count_filtered(
         };
 
         let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-        let count = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                let rows = conn
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
-                rows.first()
-                    .and_then(|row| row.values.first())
-                    .and_then(|(_, value)| value.as_i64())
-                    .unwrap_or(0)
-            }
-            None => {
-                let rows = engine
-                    .fetch_all_sql_with_binds(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
-                rows.first()
-                    .and_then(|row| row.values.first())
-                    .and_then(|(_, value)| value.as_i64())
-                    .unwrap_or(0)
-            }
-        };
+        let rows = exec
+            .fetch_all(&sql, &engine_bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
+        let count = rows
+            .first()
+            .and_then(|row| row.values.first())
+            .and_then(|(_, value)| value.as_i64())
+            .unwrap_or(0);
 
         Ok(count)
     })
@@ -1984,21 +1847,11 @@ pub fn delete_record(
         let table_name = schema.table_name.clone();
         // ... sql ...
         let (sql, bind_values) = {
-            let mut pk = None;
-            if let Some(properties) = schema.schema.get("properties").and_then(|p| p.as_object()) {
-                for (col_name, col_info) in properties {
-                    if col_info
-                        .get("primary_key")
-                        .and_then(|pk| pk.as_bool())
-                        .unwrap_or(false)
-                    {
-                        pk = Some(col_name.clone());
-                        break;
-                    }
-                }
-            }
-            let pk_name =
-                pk.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+            let pk_name = schema
+                .meta
+                .pk_col
+                .clone()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
             let no_enum_udt = HashMap::new();
             let no_uuid = HashSet::new();
             let no_ts: HashMap<String, String> = HashMap::new();
@@ -2021,7 +1874,7 @@ pub fn delete_record(
             (s, values)
         };
 
-        execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+        execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
             .await
             .map_err(|e| crate::errors::map_db_error("Delete failed", e))?;
 
@@ -2058,9 +1911,10 @@ pub fn delete_filtered(
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let table_name = crate::state::registered_model(&name)?.table_name.clone();
-        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, &tx_conn, backend)
+        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, exec, backend)
             .await?
             .enum_udt
             .clone();
@@ -2074,7 +1928,7 @@ pub fn delete_filtered(
         };
 
         let rows_affected =
-            execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+            execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
                 .await
                 .map_err(|e| crate::errors::map_db_error("Delete failed", e))?;
 
@@ -2124,10 +1978,11 @@ pub fn update_filtered<'py>(
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
-        let catalog = postgres_table_catalog(&table_name, &engine, &tx_conn, backend).await?;
+        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
         plan.postgres_enum_udt = enum_udt.clone();
         // ... sql ...
@@ -2155,7 +2010,7 @@ pub fn update_filtered<'py>(
         };
 
         let rows_affected =
-            execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+            execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
                 .await
                 .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
 
@@ -2209,7 +2064,8 @@ pub fn add_m2m_links<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let catalog = postgres_table_catalog(&join_table, &engine, &tx_conn, backend).await?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
+        let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
         let uuid_columns = &catalog.uuid_columns;
 
         let (sql, bind_values) = {
@@ -2238,7 +2094,7 @@ pub fn add_m2m_links<'py>(
             sea_query_build_for_backend!(insert, backend)
         };
 
-        execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+        execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
             .await
             .map_err(|e| crate::errors::map_db_error("Add M2M links failed", e))?;
 
@@ -2284,7 +2140,8 @@ pub fn remove_m2m_links<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let catalog = postgres_table_catalog(&join_table, &engine, &tx_conn, backend).await?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
+        let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
         let uuid_columns = &catalog.uuid_columns;
 
         let (sql, bind_values) = sea_query_build_for_backend!(
@@ -2311,7 +2168,7 @@ pub fn remove_m2m_links<'py>(
             backend
         );
 
-        execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+        execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
             .await
             .map_err(|e| crate::errors::map_db_error("Remove M2M links failed", e))?;
 
@@ -2348,7 +2205,8 @@ pub fn clear_m2m_links<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let catalog = postgres_table_catalog(&join_table, &engine, &tx_conn, backend).await?;
+        let exec = Executor::new(tx_conn.as_ref(), &engine);
+        let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
         let uuid_columns = &catalog.uuid_columns;
 
         let (sql, bind_values) = sea_query_build_for_backend!(
@@ -2365,7 +2223,7 @@ pub fn clear_m2m_links<'py>(
             backend
         );
 
-        execute_statement_with_optional_tx(&engine, tx_conn, &sql, &bind_values.0)
+        execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
             .await
             .map_err(|e| crate::errors::map_db_error("Clear M2M links failed", e))?;
 
@@ -2638,17 +2496,18 @@ pub fn raw_execute<'py>(
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let rows_affected = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                conn.execute_sql_with_binds(&sql, &bind_values).await
-            }
+        let pool_engine;
+        let exec = match &tx_conn {
+            Some(tx) => Executor::Tx(tx),
             None => {
-                let engine = engine_for_connection(Some(route_connection_name))?;
-                engine.execute_sql_with_binds(&sql, &bind_values).await
+                pool_engine = engine_for_connection(Some(route_connection_name))?;
+                Executor::Pool(&pool_engine)
             }
-        }
-        .map_err(|e| crate::errors::map_db_error("Raw SQL execute failed", e))?;
+        };
+        let rows_affected = exec
+            .execute(&sql, &bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Raw SQL execute failed", e))?;
 
         Ok(rows_affected as i64)
     })
@@ -2678,17 +2537,18 @@ pub fn raw_fetch_all<'py>(
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let rows = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                conn.fetch_all_sql_with_binds(&sql, &bind_values).await
-            }
+        let pool_engine;
+        let exec = match &tx_conn {
+            Some(tx) => Executor::Tx(tx),
             None => {
-                let engine = engine_for_connection(Some(route_connection_name))?;
-                engine.fetch_all_sql_with_binds(&sql, &bind_values).await
+                pool_engine = engine_for_connection(Some(route_connection_name))?;
+                Executor::Pool(&pool_engine)
             }
-        }
-        .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_all failed", e))?;
+        };
+        let rows = exec
+            .fetch_all(&sql, &bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_all failed", e))?;
 
         Python::attach(|py| {
             let out = pyo3::types::PyList::empty(py);
@@ -2733,17 +2593,18 @@ pub fn raw_fetch_one<'py>(
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let rows = match tx_conn {
-            Some(conn_arc) => {
-                let mut conn = conn_arc.lock().await;
-                conn.fetch_all_sql_with_binds(&sql, &bind_values).await
-            }
+        let pool_engine;
+        let exec = match &tx_conn {
+            Some(tx) => Executor::Tx(tx),
             None => {
-                let engine = engine_for_connection(Some(route_connection_name))?;
-                engine.fetch_all_sql_with_binds(&sql, &bind_values).await
+                pool_engine = engine_for_connection(Some(route_connection_name))?;
+                Executor::Pool(&pool_engine)
             }
-        }
-        .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_one failed", e))?;
+        };
+        let rows = exec
+            .fetch_all(&sql, &bind_values)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_one failed", e))?;
 
         Python::attach(|py| match rows.into_iter().next() {
             Some(row) => Ok(engine_row_to_pydict(py, row)?.into_any().unbind()),
@@ -3908,5 +3769,88 @@ mod save_mode_sql_tests {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(err.to_string().contains("primary key"), "msg: {err}");
         });
+    }
+}
+
+#[cfg(test)]
+mod executor_tests {
+    use super::Executor;
+    use crate::backend::{EngineBindValue, EngineHandle};
+    use crate::state::TransactionConnection;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// max_connections(1): one shared in-memory database, and any query the
+    /// executor wrongly routed to the pool while the tx holds the only
+    /// connection would hang instead of silently passing.
+    async fn sqlite_engine() -> EngineHandle {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool");
+        EngineHandle::new_sqlite(pool)
+    }
+
+    #[tokio::test]
+    async fn pool_variant_executes_and_fetches() {
+        let engine = sqlite_engine().await;
+        let exec = Executor::new(None, &engine);
+        exec.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .unwrap();
+        let n = exec
+            .execute(
+                "INSERT INTO t (v) VALUES (?)",
+                &[EngineBindValue::String("x".to_string())],
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let res = exec
+            .execute_result(
+                "INSERT INTO t (v) VALUES (?)",
+                &[EngineBindValue::String("y".to_string())],
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.rows_affected, 1);
+        assert_eq!(res.last_insert_id, Some(2));
+        let rows = exec.fetch_all("SELECT v FROM t ORDER BY id", &[]).await.unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tx_variant_routes_through_the_transaction_connection() {
+        let engine = sqlite_engine().await;
+        Executor::new(None, &engine)
+            .execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .unwrap();
+
+        let conn = engine
+            .begin_transaction_connection()
+            .await
+            .expect("begin transaction connection");
+        let tx: TransactionConnection = Arc::new(Mutex::new(conn));
+        let exec = Executor::new(Some(&tx), &engine);
+        exec.execute(
+            "INSERT INTO t (v) VALUES (?)",
+            &[EngineBindValue::String("x".to_string())],
+        )
+        .await
+        .unwrap();
+        let rows = exec.fetch_all("SELECT v FROM t", &[]).await.unwrap();
+        assert_eq!(rows.len(), 1, "tx must see its own uncommitted write");
+
+        tx.lock().await.rollback().await.unwrap();
+        drop(tx);
+
+        let rows = Executor::new(None, &engine)
+            .fetch_all("SELECT v FROM t", &[])
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "rolled-back insert must not be visible");
     }
 }

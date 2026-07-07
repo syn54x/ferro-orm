@@ -8,6 +8,9 @@ origin: 2026-07-02 adversarial architecture review (Fable)
 
 # Fable Fixes roadmap
 
+> **Roadmap complete (2026-07-06):** every epic (FF-A…FF-G) has shipped and
+> all exit gates are verified.
+
 Remediation program for the findings of the 2026-07-02 architecture review.
 Finding numbers (F1–F15) refer to that review. Structure and process rules
 mirror the IR-first roadmap (`2026-06-19-001-ir-first-roadmap.md`): every epic
@@ -376,7 +379,7 @@ fold into whichever epic touches the same file when convenient.
       (turns "breaks on next Pydantic minor" into "refuses to start").
       Fix the swallowed `let _ = instance.setattr(__pydantic_fields_set__, …)`
       to propagate.
-- [ ] **G2 — `operations.rs` dedup.**
+- [x] **G2 — `operations.rs` dedup.**
       One `ModelMeta` (pk name, autoincrement, table) resolved per operation
       replaces the six copy-pasted PK-discovery scans; an executor abstraction
       over `Option<TransactionConnection>` replaces the doubled tx/no-tx match
@@ -413,7 +416,7 @@ fold into whichever epic touches the same file when convenient.
 
 - [x] Slot-guard test that fails when a fake slot is injected; PG migration
       interrupted mid-plan leaves the schema unchanged.
-- [ ] `cargo llvm-lines` (or LOC) shows `operations.rs` duplication removed (G2).
+- [x] `cargo llvm-lines` (or LOC) shows `operations.rs` duplication removed (G2).
 - [x] Second `connect(auto_migrate=True)` against an already-migrated Postgres
       schema with a `db_check` model succeeds.
 
