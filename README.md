@@ -41,7 +41,7 @@ pip install ferro-orm
 pip install "ferro-orm[alembic]"
 ```
 
-Ferro currently supports SQLite and PostgreSQL. Register multiple named connections with `connect(..., name="...")` when a process needs more than one database — see the [connections guide](https://syn54x.github.io/ferro-orm/guide/connections/).
+Ferro currently supports SQLite and PostgreSQL. Register multiple named connections with `connect(..., name="...")` when a process needs more than one database — see the [connections guide](https://ferro-orm.x54.sh/guide/connections/).
 
 ## Quick Start
 

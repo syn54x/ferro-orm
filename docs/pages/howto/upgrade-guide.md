@@ -57,7 +57,7 @@ derive column types and names, and **removes** the operator-style predicates and
 
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.13.x to 0.14.
-    Reference: https://syn54x.github.io/ferro-orm/howto/upgrade-guide/#upgrading-to-014
+    Reference: https://ferro-orm.x54.sh/howto/upgrade-guide/#upgrading-to-014
 
     Work in two passes. Do NOT open a PR until I have reviewed Pass 2.
 
@@ -393,7 +393,7 @@ is the private Alembic helper import — migrate it now.
 
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.11.x to 0.12.
-    Reference: https://syn54x.github.io/ferro-orm/howto/upgrade-guide/#upgrading-to-012
+    Reference: https://ferro-orm.x54.sh/howto/upgrade-guide/#upgrading-to-012
 
     All 0.12 changes are deprecation-based and safe to apply mechanically. Apply them,
     then verify.
