@@ -8,7 +8,6 @@ except ImportError:
 
 from .._annotation_utils import _VARCHAR_RE
 from .._core import _ddl_fk_name, _render_check_body, _resolve_storage_type
-from ..ir import compile_registry_schema_ir
 
 #: SQLAlchemy ``naming_convention`` mirroring the Rust emitter's names. IR-backed
 #: metadata names every artifact explicitly; this convention covers any
@@ -50,13 +49,9 @@ def get_metadata() -> "sa.MetaData":
 
     metadata = sa.MetaData(naming_convention=_FERRO_NAMING_CONVENTION)
 
-    # 1. First, ensure all relationships are resolved
-    from ..relations import resolve_relationships
+    from .. import ensure_resolved_modelset
 
-    resolve_relationships()
-
-    # 2. Build SQLAlchemy metadata from SchemaIR modelset only.
-    schema_ir = compile_registry_schema_ir()
+    schema_ir = ensure_resolved_modelset()
     payload = schema_ir.get("payload", {})
     models = payload.get("models", [])
     for model_ir in models:

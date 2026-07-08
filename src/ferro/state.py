@@ -100,6 +100,44 @@ _SCHEMA_IR_MODELSET_FINGERPRINT: str | None = None
 _SCHEMA_IR_BY_MODEL: dict[str, dict[str, Any]] = {}
 _SCHEMA_IR_FINGERPRINT_BY_MODEL: dict[str, str] = {}
 
+# Monotonic generation counter bumped by register/deregister; cleared (matched to
+# resolved) at the end of relationship resolution (#245).
+_REGISTRATION_GENERATION: int = 0
+_RESOLVED_GENERATION: int = 0
+
+
+def registration_generation() -> int:
+    """Return the current registration generation counter (test/diagnostic)."""
+    return _REGISTRATION_GENERATION
+
+
+def resolved_generation() -> int:
+    """Return the generation counter last cleared by relationship resolution."""
+    return _RESOLVED_GENERATION
+
+
+def is_modelset_dirty() -> bool:
+    """True when the registry changed since last resolve or relations are pending."""
+    return _REGISTRATION_GENERATION != _RESOLVED_GENERATION or bool(_PENDING_RELATIONS)
+
+
+def _bump_registration_generation() -> None:
+    global _REGISTRATION_GENERATION
+    _REGISTRATION_GENERATION += 1
+
+
+def mark_modelset_resolved() -> None:
+    """Record that the current registry generation has been resolved."""
+    global _RESOLVED_GENERATION
+    _RESOLVED_GENERATION = _REGISTRATION_GENERATION
+
+
+def reset_registration_generations_for_test() -> None:
+    """Reset generation counters (``clean_registry`` fixture)."""
+    global _REGISTRATION_GENERATION, _RESOLVED_GENERATION
+    _REGISTRATION_GENERATION = 0
+    _RESOLVED_GENERATION = 0
+
 
 def canonical_ir_json(value: dict[str, Any]) -> str:
     """Serialize an IR artifact with deterministic key ordering."""
@@ -135,6 +173,7 @@ def register_model(cls: FerroModelClass) -> None:
     same model by this identity, so there is exactly one name for a model.
     """
     _MODEL_REGISTRY_PY[cls.__ferro_identity__] = cls
+    _bump_registration_generation()
 
 
 def persist_model_envelope(name: str, envelope: dict[str, Any]) -> None:
@@ -174,8 +213,11 @@ def deregister_model(name: str) -> None:
     function-local model added during a test) and hold the identity string, not
     the class object.
     """
+    removed = name in _MODEL_REGISTRY_PY
     _MODEL_REGISTRY_PY.pop(name, None)
     evict_model_envelope(name)
+    if removed:
+        _bump_registration_generation()
 
 
 _NO_ROUTE_MESSAGE = (
