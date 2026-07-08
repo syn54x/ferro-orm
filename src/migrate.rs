@@ -40,33 +40,12 @@ fn schema_ir_column<'a>(
         .and_then(|model| model.columns.iter().find(|col| col.name == column))
 }
 
-/// Push the Python-compiled SchemaIR modelset for the runtime migrate diff to
-/// consume. Called by the `connect`/`migrate` Python wrappers after the registry
-/// is complete and relationships are resolved.
-#[pyfunction]
-#[pyo3(name = "_set_schema_ir_modelset")]
-pub fn _set_schema_ir_modelset(json: String) -> PyResult<()> {
-    let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid schema_ir_modelset json: {e}"))
-    })?;
-    if envelope.ir_kind != "schema" {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "expected ir_kind 'schema', got '{}'", envelope.ir_kind
-        )));
-    }
-    *crate::state::SCHEMA_IR_MODELSET.write().map_err(|_| {
-        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
-    })? = Some(envelope);
-    Ok(())
-}
-
 /// Atomically install the column registry, schema modelset, and modelset
 /// fingerprint from one assembled payload (#244).
 ///
 /// This is the single Rust registration sync seam: `connect()`,
-/// `create_tables()`, and `migrate()` route through it instead of the
-/// modelset-only `_set_schema_ir_modelset`. The heavy lifting (build-then-swap,
-/// the fingerprint gate, the push counter) lives in
+/// `create_tables()`, and `migrate()` route through it. The heavy lifting
+/// (build-then-swap, the fingerprint gate, the push counter) lives in
 /// [`crate::state::install_registration`]; this wrapper only parses and
 /// validates the payload envelope.
 ///
@@ -79,6 +58,11 @@ pub fn _set_schema_ir_modelset(json: String) -> PyResult<()> {
 #[pyfunction]
 #[pyo3(name = "_install_registration")]
 pub fn _install_registration(payload_json: String, fingerprint: String) -> PyResult<bool> {
+    // Fast path: a warm reconnect skips the swap, so it need not pay the
+    // payload parse. `install_registration` re-checks the gate authoritatively.
+    if crate::state::installed_fingerprint_matches(&fingerprint)? {
+        return Ok(false);
+    }
     let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&payload_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid registration payload json: {e}"))
     })?;

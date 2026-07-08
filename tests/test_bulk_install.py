@@ -23,18 +23,8 @@ from ferro import Model, connect, create_tables, reset_engine
 from ferro._core import _bulk_install_count_for_test, _install_registration
 from ferro.base import FerroField
 
-
-@pytest.fixture
-def clean_registry():
-    from ferro import clear_registry
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
-
-    reset_engine()
-    clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
-    yield
+# ``clean_registry`` is the shared fixture from ``tests/conftest.py`` (#243) —
+# it wipes every per-model store before and after the test.
 
 
 @pytest.mark.asyncio

@@ -130,7 +130,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(schema::create_tables, m)?)?;
     m.add_function(wrap_pyfunction!(migrate::migrate, m)?)?;
-    m.add_function(wrap_pyfunction!(migrate::_set_schema_ir_modelset, m)?)?;
     m.add_function(wrap_pyfunction!(migrate::_install_registration, m)?)?;
     m.add_function(wrap_pyfunction!(migrate::_bulk_install_count_for_test, m)?)?;
     m.add_function(wrap_pyfunction!(

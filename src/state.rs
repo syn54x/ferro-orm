@@ -143,6 +143,21 @@ pub static INSTALLED_FINGERPRINT: Lazy<RwLock<Option<String>>> = Lazy::new(|| Rw
 /// `_bulk_install_count_for_test`.
 pub static BULK_INSTALL_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Whether the runtime already holds the modelset named by `fingerprint`.
+///
+/// Lets the FFI wrapper short-circuit a warm reconnect *before* parsing the
+/// payload — [`install_registration`] re-checks the gate under the same read,
+/// so this is a pure fast-path optimization, never the correctness gate.
+///
+/// # Errors
+/// `PyRuntimeError` when the fingerprint lock is poisoned.
+pub fn installed_fingerprint_matches(fingerprint: &str) -> PyResult<bool> {
+    let recorded = INSTALLED_FINGERPRINT.read().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock installed fingerprint")
+    })?;
+    Ok(recorded.as_deref() == Some(fingerprint))
+}
+
 /// Atomically install the column registry, schema modelset, and recorded
 /// fingerprint from one assembled modelset payload (#244).
 ///
