@@ -1,7 +1,7 @@
 import json
 from typing import ForwardRef
 
-from .._core import register_model_schema
+from ..ir import register_model_with_ir
 from .._shadow_fk_types import (
     pk_python_type_for_model,
     reconcile_shadow_fk_types,
@@ -148,7 +148,7 @@ def resolve_relationships():
             }
             if rel.reverse_index:
                 join_schema["ferro_composite_indexes"] = [[target_col, source_col]]
-            register_model_schema(join_table, json.dumps(join_schema), join_table)
+            register_model_with_ir(join_table, join_schema, join_table)
             _JOIN_TABLE_REGISTRY[join_table] = join_schema
 
     reconcile_shadow_fk_types(_MODEL_REGISTRY_PY)
@@ -164,8 +164,8 @@ def resolve_relationships():
                 f"Ferro failed to rebuild the schema for model '{model_name}' "
                 f"while resolving relationships: {exc}"
             ) from exc
-        register_model_schema(
-            model_name, json.dumps(schema), model_cls.__ferro_table__
+        register_model_with_ir(
+            model_name, schema, model_cls.__ferro_table__
         )
 
     compile_registry_schema_ir()

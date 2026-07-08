@@ -3,7 +3,8 @@
 //! Every per-column type decision is made **once per model per schema epoch**
 //! (at registration) instead of per value per row. Both facets of a column
 //! come from the FF-B derived-type decision table
-//! (`ferro_ddl_lowering::resolve_column_storage` / `canonical_from_parts`):
+//! (`ferro_ddl_lowering::resolve_column_storage` /
+//! `logical_canonical_from_schema_column`):
 //!
 //! - the **storage** token (`db_type`) — what the DDL emitters create, the
 //!   codec↔DDL consistency witness;
@@ -17,13 +18,12 @@
 //! is the runtime producer pinned by the golden vector
 //! `tests/fixtures/ir_vectors/codec_registry_core_v1.json`.
 
-use ferro_ddl_lowering::{
-    CanonicalType, ResolvedStorage, canonical_from_parts, canonical_to_db_type_token,
-    enum_label_strings,
-};
-use crate::schema::{json_schema_logical_type, property_json_type_and_format, resolve_column_storage_json};
 use crate::state::Dialect;
-use ferro_schema_ir::{CodecBindRule, CodecFetchRule, CodecIrPayload, HydrationAbi};
+use ferro_ddl_lowering::{
+    CanonicalType, ResolvedStorage, canonical_to_db_type_token, enum_label_strings,
+    logical_canonical_from_schema_column, resolve_column_storage,
+};
+use ferro_schema_ir::{CodecBindRule, CodecFetchRule, CodecIrPayload, HydrationAbi, SchemaColumn};
 use std::collections::HashMap;
 
 /// Storage decision for an enum-typed column.
@@ -60,7 +60,7 @@ pub enum ColumnCodec {
         values: Vec<String>,
         storage: EnumStorage,
         /// Enum member values are integers (`IntEnum`) — drives integer-typed
-        /// binds and typed NULLs, mirroring the schema's `type: "integer"`.
+        /// binds and typed NULLs, mirroring SchemaIR `logical_type: "integer"`.
         int_valued: bool,
     },
 }
@@ -94,9 +94,9 @@ impl ModelCodecPlan {
         self.columns.get(col_name)
     }
 
-    /// Compile a model's enriched Pydantic JSON schema into a codec plan.
+    /// Compile a model's SchemaIR columns into a codec plan.
     ///
-    /// Storage resolves through `resolve_column_storage_json` at the Postgres
+    /// Storage resolves through `resolve_column_storage` at the Postgres
     /// dialect — the dialect that preserves the most type information
     /// (Boolean, Uuid, native enums). The plan itself is dialect-agnostic;
     /// dialect-specific behavior (SQLite bool-as-int, etc.) stays a
@@ -104,57 +104,26 @@ impl ModelCodecPlan {
     /// type family, storage refines width (`int` + `db_type="bigint"` →
     /// `BigInt`); when an explicit `db_type` crosses families (UUID stored as
     /// text), the logical codec wins so Python value shapes are preserved.
-    pub fn compile(schema: &serde_json::Value) -> ModelCodecPlan {
-        let mut columns = HashMap::new();
-        if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-            for (col_name, raw_col) in properties {
-                let resolved = resolve_ref(schema, raw_col);
-                let storage =
-                    resolve_column_storage_json(col_name, raw_col, resolved, Dialect::Postgres);
-                columns.insert(
-                    col_name.clone(),
-                    compile_column(raw_col, resolved, &storage),
-                );
-            }
+    pub fn compile_from_columns(columns: &[SchemaColumn]) -> Result<ModelCodecPlan, String> {
+        let mut map = HashMap::new();
+        for col in columns {
+            map.insert(col.name.clone(), compile_column_from_ir(col)?);
         }
-        ModelCodecPlan { columns }
+        Ok(ModelCodecPlan { columns: map })
     }
 }
 
-fn resolve_ref<'a>(
-    schema: &'a serde_json::Value,
-    col_info: &'a serde_json::Value,
-) -> &'a serde_json::Value {
-    if let Some(ref_path) = col_info.get("$ref").and_then(|r| r.as_str())
-        && let Some(def_name) = ref_path.strip_prefix("#/$defs/")
-        && let Some(def) = schema.get("$defs").and_then(|defs| defs.get(def_name))
-    {
-        return def;
-    }
-    col_info
-}
-
-fn compile_column(
-    raw_col: &serde_json::Value,
-    resolved: &serde_json::Value,
-    storage: &ResolvedStorage,
-) -> ColumnCodecEntry {
-    let db_type = match storage {
+fn compile_column_from_ir(col: &SchemaColumn) -> Result<ColumnCodecEntry, String> {
+    let storage = resolve_column_storage(col, Dialect::Postgres)?;
+    let db_type = match &storage {
         ResolvedStorage::Scalar(canonical) => {
             canonical_to_db_type_token(*canonical, Dialect::Postgres)
         }
         ResolvedStorage::PgEnum { type_name, .. } => type_name.clone(),
     };
 
-    let (json_type, format) = property_json_type_and_format(resolved);
-
-    let enum_values = resolved
-        .get("enum")
-        .or_else(|| raw_col.get("enum"))
-        .and_then(|v| v.as_array())
-        .filter(|v| !v.is_empty());
-    if let Some(values) = enum_values {
-        let enum_storage = match storage {
+    if let Some(values) = col.enum_values.as_ref().filter(|v| !v.is_empty()) {
+        let enum_storage = match &storage {
             ResolvedStorage::PgEnum { type_name, .. } => EnumStorage::PgNative {
                 type_name: type_name.clone(),
             },
@@ -163,28 +132,25 @@ fn compile_column(
                 _ => EnumStorage::Text,
             },
         };
-        return ColumnCodecEntry {
+        return Ok(ColumnCodecEntry {
             codec: ColumnCodec::Enum {
                 values: enum_label_strings(values),
                 storage: enum_storage,
-                int_valued: json_type == Some("integer"),
+                int_valued: col.logical_type == "integer",
             },
             db_type,
-        };
+        });
     }
-    // Logical side: JSON Schema → domain token, without the explicit `db_type`
-    // override (storage may widen away from the logical family, e.g. UUID as text).
-    let logical_type = json_schema_logical_type(json_type.unwrap_or(""), format);
-    let logical = canonical_from_parts(logical_type, None, "", Dialect::Postgres)
-        .unwrap_or(CanonicalType::Varchar(None));
-    let canonical = match storage {
+
+    let logical = logical_canonical_from_schema_column(col, Dialect::Postgres)?;
+    let canonical = match &storage {
         ResolvedStorage::Scalar(c) if type_family(*c) == type_family(logical) => *c,
         _ => logical,
     };
-    ColumnCodecEntry {
+    Ok(ColumnCodecEntry {
         codec: scalar_codec(canonical),
         db_type,
-    }
+    })
 }
 
 #[derive(PartialEq, Eq)]
@@ -394,6 +360,50 @@ mod tests {
     use ferro_schema_ir::IrEnvelope;
     use serde_json::json;
 
+    fn ir_col(name: &str, logical_type: &str) -> SchemaColumn {
+        SchemaColumn {
+            name: name.to_string(),
+            logical_type: logical_type.to_string(),
+            db_type: None,
+            db_type_explicit: None,
+            nullable: true,
+            primary_key: false,
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        }
+    }
+
+    fn ir_col_format(name: &str, logical_type: &str, format: &str) -> SchemaColumn {
+        SchemaColumn {
+            format: Some(format.to_string()),
+            ..ir_col(name, logical_type)
+        }
+    }
+
+    fn ir_col_db_type(
+        name: &str,
+        logical_type: &str,
+        db_type: &str,
+        format: Option<&str>,
+    ) -> SchemaColumn {
+        SchemaColumn {
+            db_type: Some(db_type.to_string()),
+            db_type_explicit: Some(true),
+            format: format.map(str::to_string),
+            ..ir_col(name, logical_type)
+        }
+    }
+
+    fn plan_for_columns(columns: Vec<SchemaColumn>) -> ModelCodecPlan {
+        ModelCodecPlan::compile_from_columns(&columns).expect("test columns should compile")
+    }
+
     /// The golden vector pins the RUNTIME rule table: every rule in
     /// `codec_registry_core_v1.json` must appear byte-identically in
     /// [`runtime_codec_ir_payload`] (which is a superset), and the hydration
@@ -434,37 +444,22 @@ mod tests {
         }
     }
 
-    fn plan_for(properties: serde_json::Value) -> ModelCodecPlan {
-        ModelCodecPlan::compile(&json!({ "properties": properties }))
-    }
-
     /// F5: a `pattern=` constraint must never change a column's codec.
     #[test]
     fn numeric_pattern_str_field_compiles_to_str() {
-        let plan = plan_for(json!({
-            "year_code": {"type": "string", "pattern": "^\\d{4}$"},
-            "serial": {"anyOf": [
-                {"type": "string", "pattern": "^\\d{6}$"},
-                {"type": "null"}
-            ]}
-        }));
+        let plan = plan_for_columns(vec![
+            ir_col("serial", "string"),
+            ir_col("year_code", "string"),
+        ]);
         assert_eq!(plan.codec("year_code"), Some(&ColumnCodec::Str));
         assert_eq!(plan.codec("serial"), Some(&ColumnCodec::Str));
         assert_eq!(plan.entry("year_code").unwrap().db_type, "varchar");
     }
 
-    /// Real Decimal fields are recognized by the enriched `format: "decimal"`.
+    /// Real Decimal fields are recognized by SchemaIR `logical_type: "decimal"`.
     #[test]
     fn decimal_format_compiles_to_decimal() {
-        let plan = plan_for(json!({
-            "amount": {
-                "anyOf": [
-                    {"type": "number"},
-                    {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"}
-                ],
-                "format": "decimal"
-            }
-        }));
+        let plan = plan_for_columns(vec![ir_col("amount", "decimal")]);
         assert_eq!(plan.codec("amount"), Some(&ColumnCodec::Decimal));
         assert_eq!(plan.entry("amount").unwrap().db_type, "numeric");
     }
@@ -474,9 +469,12 @@ mod tests {
     /// witnesses the DDL decision.
     #[test]
     fn uuid_stored_as_text_keeps_uuid_codec_with_text_storage() {
-        let plan = plan_for(json!({
-            "external_id": {"type": "string", "format": "uuid", "db_type": "text"}
-        }));
+        let plan = plan_for_columns(vec![ir_col_db_type(
+            "external_id",
+            "uuid",
+            "text",
+            Some("uuid"),
+        )]);
         let entry = plan.entry("external_id").unwrap();
         assert_eq!(entry.codec, ColumnCodec::Uuid);
         assert_eq!(entry.db_type, "text");
@@ -485,9 +483,7 @@ mod tests {
     /// Same-family explicit tokens refine width instead.
     #[test]
     fn same_family_db_type_refines_width() {
-        let plan = plan_for(json!({
-            "value": {"type": "integer", "db_type": "bigint"}
-        }));
+        let plan = plan_for_columns(vec![ir_col_db_type("value", "integer", "bigint", None)]);
         let entry = plan.entry("value").unwrap();
         assert_eq!(entry.codec, ColumnCodec::BigInt);
         assert_eq!(entry.db_type, "bigint");
@@ -495,14 +491,19 @@ mod tests {
 
     #[test]
     fn enum_columns_capture_values_storage_and_int_valuedness() {
-        let plan = plan_for(json!({
-            "status": {
-                "enum": ["active", "archived"],
-                "type": "string",
-                "enum_type_name": "docstatus"
+        let plan = plan_for_columns(vec![
+            SchemaColumn {
+                enum_values: Some(vec![json!("active"), json!("archived")]),
+                enum_type_name: Some("docstatus".to_string()),
+                ..ir_col("status", "string")
             },
-            "priority": {"enum": [1, 2], "type": "integer", "db_type": "smallint"}
-        }));
+            SchemaColumn {
+                enum_values: Some(vec![json!(1), json!(2)]),
+                db_type: Some("smallint".to_string()),
+                db_type_explicit: Some(true),
+                ..ir_col("priority", "integer")
+            },
+        ]);
         assert_eq!(
             plan.codec("status"),
             Some(&ColumnCodec::Enum {
@@ -527,19 +528,24 @@ mod tests {
     /// including the temporal/uuid/json formats.
     #[test]
     fn derived_families_match_ddl_cascade() {
-        let plan = plan_for(json!({
-            "id": {"type": "integer", "primary_key": true},
-            "name": {"type": "string"},
-            "ratio": {"type": "number"},
-            "active": {"type": "boolean"},
-            "payload": {"type": "object"},
-            "tags": {"type": "array"},
-            "data": {"type": "string", "format": "binary"},
-            "uid": {"type": "string", "format": "uuid"},
-            "created": {"type": "string", "format": "date-time"},
-            "day": {"type": "string", "format": "date"},
-            "at": {"type": "string", "format": "time"}
-        }));
+        let plan = plan_for_columns(vec![
+            SchemaColumn {
+                primary_key: true,
+                autoincrement: true,
+                nullable: false,
+                ..ir_col("id", "integer")
+            },
+            ir_col("name", "string"),
+            ir_col("ratio", "number"),
+            ir_col("active", "boolean"),
+            ir_col("payload", "json"),
+            ir_col("tags", "json"),
+            ir_col_format("data", "binary", "binary"),
+            ir_col_format("uid", "uuid", "uuid"),
+            ir_col_format("created", "datetime", "date-time"),
+            ir_col_format("day", "date", "date"),
+            ir_col_format("at", "time", "time"),
+        ]);
         for (col, codec) in [
             ("id", ColumnCodec::Int),
             ("name", ColumnCodec::Str),
@@ -557,17 +563,19 @@ mod tests {
         }
     }
 
-    /// Nullable `date` with explicit `db_type` (anyOf union shape) must hydrate
-    /// as `datetime.date`, not raw ISO strings.
+    /// Nullable `date` with explicit `db_type` must hydrate as `datetime.date`.
     #[test]
     fn explicit_db_type_date_anyof_uses_date_codec() {
-        let plan = plan_for(json!({
-            "paid_date": {
-                "anyOf": [{"type": "string", "format": "date"}, {"type": "null"}],
-                "db_type": "date",
-            }
-        }));
+        let plan = plan_for_columns(vec![ir_col_db_type("paid_date", "date", "date", Some("date"))]);
         assert_eq!(plan.codec("paid_date"), Some(&ColumnCodec::Date));
+    }
+
+    #[test]
+    fn unknown_logical_type_fails_at_compile_time() {
+        let err = ModelCodecPlan::compile_from_columns(&[ir_col("mystery", "bogus")])
+            .expect_err("unknown logical_type must fail");
+        assert!(err.contains("mystery"));
+        assert!(err.contains("bogus"));
     }
 
     /// The schema epoch: re-registering a model rebuilds its plan atomically.
@@ -578,14 +586,18 @@ mod tests {
             json!({
                 "properties": {"v": {"type": "integer"}}
             }),
+            vec![ir_col("v", "integer")],
             "epochmodel".to_string(),
-        );
+        )
+        .expect("first registration");
         let second = crate::state::RegisteredModel::new(
             json!({
                 "properties": {"v": {"type": "string"}}
             }),
+            vec![ir_col("v", "string")],
             "epochmodel".to_string(),
-        );
+        )
+        .expect("second registration");
         {
             let mut registry = crate::state::MODEL_REGISTRY.write().unwrap();
             registry.insert(name.clone(), first);

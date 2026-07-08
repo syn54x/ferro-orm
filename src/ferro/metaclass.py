@@ -1,4 +1,3 @@
-import json
 import re
 import types
 from enum import Enum
@@ -22,11 +21,10 @@ from ._annotation_utils import (
     is_closed_domain_annotation,
     is_valid_db_type_token,
 )
-from ._core import register_model_schema
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyRelation
 from .fields import FERRO_FIELD_EXTRA_KEY
-from .ir import compile_model_schema_ir
+from .ir import register_model_with_ir
 from .query import Relation
 from .relations.descriptors import ForwardDescriptor
 from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
@@ -629,7 +627,6 @@ class ModelMetaclass(type(BaseModel)):
 
             if schema:
                 setattr(cls, "__ferro_schema__", schema)
-                register_model_schema(name, json.dumps(schema), cls.__ferro_table__)
-                compile_model_schema_ir(name, cls, schema=schema)
+                register_model_with_ir(name, schema, cls.__ferro_table__)
         except Exception as e:
             raise RuntimeError(f"Ferro failed to register model '{name}': {e}")

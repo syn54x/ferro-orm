@@ -211,10 +211,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """Re-register this model's schema with the Rust core (e.g. after clear_registry)."""
         schema = getattr(cls, "__ferro_schema__", None)
         if schema is not None:
-            from ._core import register_model_schema
+            from .ir import register_model_with_ir
 
-            register_model_schema(
-                cls.__ferro_identity__, json.dumps(schema), cls.__ferro_table__
+            register_model_with_ir(
+                cls.__ferro_identity__, schema, cls.__ferro_table__
             )
 
     model_config = ConfigDict(
