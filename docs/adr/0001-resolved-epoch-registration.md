@@ -44,6 +44,9 @@ only.
   double-compile or install stale-then-fresh. The clean-path check is one
   in-process generation-counter comparison with no FFI; the stored fingerprint
   is read only inside the push path.
+- A failed resolve leaves the registry dirty and pending relations intact, so
+  the next sync retries from a consistent state — the Python mirror of the
+  install's retained-last-good guarantee.
 - `register_model_with_ir` must not call `register_model_schema` directly.
 - Bulk push must be atomic (all models + modelset + fingerprint, or none):
   build-then-swap — the payload is constructed and validated before the lock
