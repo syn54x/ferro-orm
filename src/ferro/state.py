@@ -99,22 +99,25 @@ def ir_fingerprint(value: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_ir_json(value).encode("utf-8")).hexdigest()
 
 
-def register_model(key: str, cls: type) -> None:
+def register_model(cls: type) -> None:
     """Record a model class in the Python registry (provisional registration).
 
     Single entrypoint for every per-model ``_MODEL_REGISTRY_PY`` write. Today the
-    writers are the metaclass (class-body registration, keyed by
-    ``__ferro_identity__``) and a handful of test fixtures that re-add models
-    after a registry wipe. Centralizing the write is the prefactor (#243) that
-    lets a later slice (#242) hook one site — e.g. a generation counter —
-    instead of chasing scattered dict assignments. Idempotent by construction.
+    writers are the metaclass (class-body registration) and a handful of test
+    fixtures that re-add models after a registry wipe. Centralizing the write is
+    the prefactor (#243) that lets a later slice (#242) hook one site — e.g. a
+    generation counter — instead of chasing scattered dict assignments.
+    Idempotent by construction.
 
-    ``key`` is passed explicitly rather than derived from ``cls`` so behavior is
-    identical to the direct writes this replaced (some marker-model fixtures
-    deliberately register under a bare ``__name__`` that a raw-FFI test relies
-    on); normalizing that key is a behavior change out of scope for this slice.
+    The key is the model's canonical identity (``__ferro_identity__``), derived
+    from ``cls`` here rather than caller-supplied (#249). Deriving it in one
+    place makes the registry key a pure function of the model: callers can no
+    longer register a model under a divergent bare ``__name__`` that a lookup by
+    canonical identity would miss (the "Model 'X' not found" footgun). Every
+    other emitter — the Rust runtime registry, the raw-FFI operations — keys the
+    same model by this identity, so there is exactly one name for a model.
     """
-    _MODEL_REGISTRY_PY[key] = cls
+    _MODEL_REGISTRY_PY[cls.__ferro_identity__] = cls
 
 
 def persist_model_envelope(name: str, envelope: dict[str, Any]) -> None:
