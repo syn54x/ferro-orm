@@ -582,19 +582,10 @@ pub fn infer_test_schema_columns(schema: &serde_json::Value) -> Vec<ferro_schema
     for (name, raw_col) in properties {
         let resolved = resolve_ref(schema, raw_col);
         let (json_type, format) = property_json_type_and_format(resolved);
-        let logical_type =
-            json_schema_logical_type(json_type.unwrap_or(""), format).to_string();
         let db_type = raw_col
             .get("db_type")
             .or_else(|| resolved.get("db_type"))
             .and_then(|v| v.as_str());
-        let db_type_explicit = db_type.is_some_and(|token| !token.is_empty());
-        let primary_key = column_bool_metadata(raw_col, resolved, "primary_key").unwrap_or(false);
-        let autoincrement = if primary_key {
-            column_bool_metadata(raw_col, resolved, "autoincrement").unwrap_or(true)
-        } else {
-            false
-        };
         let enum_values = resolved
             .get("enum")
             .or_else(|| raw_col.get("enum"))
@@ -604,8 +595,21 @@ pub fn infer_test_schema_columns(schema: &serde_json::Value) -> Vec<ferro_schema
         let enum_type_name = raw_col
             .get("enum_type_name")
             .or_else(|| resolved.get("enum_type_name"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+            .and_then(|v| v.as_str());
+        let logical_type = infer_test_logical_type(
+            json_type,
+            format,
+            db_type,
+            enum_values.as_ref(),
+            enum_type_name,
+        );
+        let db_type_explicit = db_type.is_some_and(|token| !token.is_empty());
+        let primary_key = column_bool_metadata(raw_col, resolved, "primary_key").unwrap_or(false);
+        let autoincrement = if primary_key {
+            column_bool_metadata(raw_col, resolved, "autoincrement").unwrap_or(true)
+        } else {
+            false
+        };
         columns.push(SchemaColumn {
             name: name.clone(),
             logical_type,
@@ -619,11 +623,52 @@ pub fn infer_test_schema_columns(schema: &serde_json::Value) -> Vec<ferro_schema
             default: None,
             format: format.map(str::to_string),
             enum_values,
-            enum_type_name,
+            enum_type_name: enum_type_name.map(str::to_string),
             postgres_native_enum: false,
         });
     }
     columns
+}
+
+#[cfg(test)]
+fn infer_test_logical_type(
+    json_type: Option<&str>,
+    format: Option<&str>,
+    db_type: Option<&str>,
+    enum_values: Option<&Vec<serde_json::Value>>,
+    enum_type_name: Option<&str>,
+) -> String {
+    let from_json = json_schema_logical_type(json_type.unwrap_or(""), format);
+    if from_json != "unknown" {
+        return from_json.to_string();
+    }
+    if enum_values.is_some() {
+        return if json_type == Some("integer") {
+            "integer".to_string()
+        } else {
+            "string".to_string()
+        };
+    }
+    if enum_type_name.is_some() {
+        return "string".to_string();
+    }
+    if let Some(token) = db_type.filter(|t| !t.is_empty()) {
+        return match token {
+            "bytea" => "binary",
+            "uuid" => "uuid",
+            "int" | "integer" | "bigint" | "smallint" => "integer",
+            "boolean" => "boolean",
+            "double" | "float" | "real" => "number",
+            "numeric" | "decimal" => "decimal",
+            "date" => "date",
+            "time" => "time",
+            "timestamp" | "timestamptz" | "datetime" => "datetime",
+            "json" | "jsonb" => "json",
+            _ => "string",
+        }
+        .to_string();
+    }
+    "string".to_string()
 }
 
 #[cfg(test)]
