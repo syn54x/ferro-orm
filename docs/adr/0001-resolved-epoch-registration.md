@@ -15,7 +15,10 @@ when Rust already holds the current modelset.
 
 `ensure_resolved_modelset()` and `push_registration_to_rust()` compose
 `_ensure_rust_registration_synced()`, shared by `connect()`, `create_tables()`,
-and `migrate()`. Alembic autogenerate calls `ensure_resolved_modelset()` only.
+`migrate()`, and the ORM operation seam — save/get/filter/delete run the O(1)
+dirty check before touching the runtime, so a model defined after `connect()`
+is synced on first use. Alembic autogenerate calls `ensure_resolved_modelset()`
+only.
 
 ## Considered options
 
@@ -30,9 +33,25 @@ and `migrate()`. Alembic autogenerate calls `ensure_resolved_modelset()` only.
 
 ## Consequences
 
-- Rust registration is empty until the first successful sync call.
+- Rust registration is empty until the first successful sync call; the
+  operation seam makes that window invisible — absence is never a steady state.
 - `register_model_with_ir` must not call `register_model_schema` directly.
-- Bulk push must be atomic (all models + modelset, or none).
+- Bulk push must be atomic (all models + modelset + fingerprint, or none):
+  build-then-swap — the payload is constructed and validated before the lock
+  is taken; a failed install retains the last good registration, never an
+  empty runtime.
 - Rust stores the modelset fingerprint after install for the clean-path skip.
+  The fingerprint is part of the atomic install unit: set only on successful
+  install, cleared by `clear_registry()` in the same lock scope.
 - `compile_registry_schema_ir()` becomes an assemble step over
-  `_SCHEMA_IR_BY_MODEL`, not a full recompile pass.
+  `_SCHEMA_IR_BY_MODEL`, not a full recompile pass. It iterates
+  `_MODEL_REGISTRY_PY` plus `_JOIN_TABLE_REGISTRY` (never the envelope cache
+  directly) and fails loudly on a missing envelope. A dirty resolve recompiles
+  only the models whose canonical schema changed during resolution, including
+  shadow-FK type reconciliation targets — "no recompilation" is the clean
+  path's property.
+- Model removal goes through a deregistration entrypoint that bumps the
+  generation counter and evicts the model's envelope; fixtures stop mutating
+  `_MODEL_REGISTRY_PY` directly.
+- `clear_registry()` also evicts join-table envelopes alongside its
+  `_JOIN_TABLE_REGISTRY` purge, preserving the #153 stale-join-table guard.
