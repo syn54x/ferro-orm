@@ -53,7 +53,7 @@ def _ensure_models_registered():
     from ferro.state import register_model
 
     NamedSmokeMarker._reregister_ferro()
-    register_model(NamedSmokeMarker.__name__, NamedSmokeMarker)
+    register_model(NamedSmokeMarker)
     yield
 
 
@@ -110,12 +110,16 @@ async def test_named_connections_smoke_matrix_sqlite(tmp_path):
         # (and its D4 conflict check) entirely, so no session is needed. FF-D
         # D3 collapsed the tx_id/using/session_id triple into one resolved
         # RouteHandle; build it directly since this deliberately skips
-        # resolve_operation_scope.
+        # resolve_operation_scope. The model name is the canonical identity the
+        # runtime registry keys by (#249) — the same name every ORM op passes,
+        # not a bare ``__name__``.
         from ferro._core import RouteHandle, delete_record
 
         assert (
             await delete_record(
-                "NamedSmokeMarker", "1", RouteHandle(connection_name="service")
+                NamedSmokeMarker.__ferro_identity__,
+                "1",
+                RouteHandle(connection_name="service"),
             )
             is True
         )

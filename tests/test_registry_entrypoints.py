@@ -42,7 +42,7 @@ def test_register_model_is_the_single_registry_write(clean_registry):
     assert identity in ferro_state._SCHEMA_IR_FINGERPRINT_BY_MODEL
 
 
-def test_register_model_records_under_given_key(clean_registry):
+def test_register_model_keys_by_canonical_identity(clean_registry):
     from ferro import state as ferro_state
     from ferro.state import register_model
 
@@ -50,9 +50,12 @@ def test_register_model_records_under_given_key(clean_registry):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
 
     ferro_state._MODEL_REGISTRY_PY.clear()
-    register_model(Marker.__ferro_identity__, Marker)
+    # #249: the key is derived from the model's canonical identity, never
+    # caller-supplied. A bare ``__name__`` must never become a registry key.
+    register_model(Marker)
 
     assert ferro_state._MODEL_REGISTRY_PY[Marker.__ferro_identity__] is Marker
+    assert Marker.__name__ not in ferro_state._MODEL_REGISTRY_PY
 
 
 def test_persist_model_envelope_fingerprint_matches_envelope(clean_registry):

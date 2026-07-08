@@ -20,7 +20,7 @@ def _ensure_models_registered():
     from ferro.state import register_model
 
     ConnectionRouteMarker._reregister_ferro()
-    register_model(ConnectionRouteMarker.__name__, ConnectionRouteMarker)
+    register_model(ConnectionRouteMarker)
     yield
 
 

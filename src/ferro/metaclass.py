@@ -421,7 +421,7 @@ class ModelMetaclass(type(BaseModel)):
                     "models cannot share a table. Set __ferro_table__ on one of "
                     "them to give it a distinct table name."
                 )
-        register_model(identity, cls)
+        register_model(cls)
         cls.ferro_relations = local_relations
 
         # Queryable-column set for build-time predicate validation (FF-F F-2):

@@ -22,7 +22,7 @@ def _ensure_models_registered():
     from ferro.state import register_model
 
     SessionMarker._reregister_ferro()
-    register_model(SessionMarker.__name__, SessionMarker)
+    register_model(SessionMarker)
     yield
 
 

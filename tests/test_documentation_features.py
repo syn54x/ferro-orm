@@ -104,7 +104,7 @@ def _ensure_models_registered():
     from ferro.state import _PENDING_RELATIONS, register_model
 
     for model_cls in (DocUser, DocPost, Comment, Tag, DocProduct):
-        register_model(model_cls.__ferro_identity__, model_cls)
+        register_model(model_cls)
 
     # Some tests clear private relationship state to model fresh imports. These
     # module-level models must restore both schemas and descriptors afterward.

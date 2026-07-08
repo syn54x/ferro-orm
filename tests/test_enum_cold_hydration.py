@@ -29,7 +29,7 @@ def cleanup():
     registered_before = set(_MODEL_REGISTRY_PY)
     # Other tests (e.g. test_sqlite_alembic_reconnect_hydration) clear the Python registry.
     if BillingRow.__ferro_identity__ not in _MODEL_REGISTRY_PY:
-        register_model(BillingRow.__ferro_identity__, BillingRow)
+        register_model(BillingRow)
     reset_engine()
     clear_registry()
     yield
