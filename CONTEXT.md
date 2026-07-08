@@ -31,3 +31,11 @@ _Avoid_: Select SQL, view definition, query body
 **Read-only view**:
 A `MaterializedView` that can be queried but never mutated. `save()`, `delete()`, and `create()` raise a clear error.
 _Avoid_: Immutable model, snapshot model
+
+**Provisional registration**:
+The per-model state installed when a class body finishes executing — enough for runtime codec and PK metadata, but relationships may still be pending and the modelset is not yet authoritative for DDL.
+_Avoid_: Import-time registration, partial registry
+
+**Resolved registration**:
+The registry epoch after relationship resolution completes — join tables exist, shadow FK columns are wired, and the SchemaIR modelset is authoritative for DDL and auto-migrate.
+_Avoid_: Final registration, committed registry
