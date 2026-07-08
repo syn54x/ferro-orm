@@ -1,124 +1,48 @@
-//! Schema translation and registration logic.
+//! Schema registration and table-creation orchestration.
 //!
-//! This module handles converting Pydantic JSON schemas into Sea-Query
-//! table definitions and managing the model registry.
+//! Model registration flows through the SchemaIR column slice; CREATE TABLE is
+//! emitted from the Python-compiled SchemaIR modelset via `ferro_migrate`.
 
 use crate::backend::EngineHandle;
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
-use ferro_ddl_lowering::{
-    CanonicalType, ResolvedStorage, canonical_from_parts, db_check_constraint_name,
-    db_type_token_to_canonical, enum_label_strings, render_db_check, single_index_name,
-};
-use ferro_schema_ir::SchemaCheck;
+use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::prelude::*;
-use sea_query::{
-    Alias, ForeignKeyAction, Index, PostgresQueryBuilder,
-    SqliteQueryBuilder,
-};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-fn resolve_ref<'a>(
-    schema: &'a serde_json::Value,
-    col_info: &'a serde_json::Value,
-) -> &'a serde_json::Value {
-    if let Some(ref_path) = col_info.get("$ref").and_then(|r| r.as_str())
-        && let Some(def_name) = ref_path.strip_prefix("#/$defs/")
-        && let Some(def) = schema.get("$defs").and_then(|defs| defs.get(def_name))
-    {
-        return def;
-    }
-    col_info
-}
-
-pub(crate) fn property_json_type_and_format(
-    col_info: &serde_json::Value,
-) -> (Option<&str>, Option<&str>) {
-    let top_type = col_info.get("type").and_then(|t| t.as_str());
-    let top_format = col_info.get("format").and_then(|f| f.as_str());
-    if top_type.is_some() {
-        return (top_type, top_format);
-    }
-
-    if let Some(items) = col_info.get("anyOf").and_then(|a| a.as_array()) {
-        for item in items {
-            let item_type = item.get("type").and_then(|t| t.as_str());
-            if item_type == Some("null") {
-                continue;
-            }
-            let item_format = item.get("format").and_then(|f| f.as_str());
-            return (item_type, item_format.or(top_format));
-        }
-    }
-
-    (None, top_format)
-}
-
-/// Map raw JSON Schema `(type, format)` to the domain `logical_type` tokens
-/// emitted by the Python SchemaIR compiler (`compiler.py::_logical_type`).
-pub(crate) fn json_schema_logical_type(json_type: &str, format: Option<&str>) -> &'static str {
-    match (json_type, format) {
-        ("integer", _) => "integer",
-        ("number", Some("decimal")) => "decimal",
-        ("number", _) => "number",
-        ("boolean", _) => "boolean",
-        ("string", Some("date-time")) => "datetime",
-        ("string", Some("date")) => "date",
-        ("string", Some("time")) => "time",
-        ("string", Some("uuid")) => "uuid",
-        ("string", Some("binary")) => "binary",
-        ("string", _) => "string",
-        ("object" | "array", _) => "json",
-        _ => "unknown",
-    }
-}
-
-fn column_bool_metadata(
-    raw_col_info: &serde_json::Value,
-    resolved_col_info: &serde_json::Value,
-    key: &str,
-) -> Option<bool> {
-    raw_col_info
-        .get(key)
-        .or_else(|| resolved_col_info.get(key))
-        .and_then(|value| value.as_bool())
-}
-
-fn column_object_metadata<'a>(
-    raw_col_info: &'a serde_json::Value,
-    resolved_col_info: &'a serde_json::Value,
-    key: &str,
-) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
-    raw_col_info
-        .get(key)
-        .or_else(|| resolved_col_info.get(key))
-        .and_then(|value| value.as_object())
-}
-
-fn schema_dependencies(schema: &serde_json::Value) -> Vec<String> {
-    let mut deps = Vec::new();
-    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-        for col_info in properties.values() {
-            let col_info = resolve_ref(schema, col_info);
-            if let Some(to_table) = col_info
-                .get("foreign_key")
-                .and_then(|fk| fk.get("to_table"))
-                .and_then(|t| t.as_str())
-            {
-                deps.push(to_table.to_string());
-            }
-        }
-    }
+fn model_ir_dependencies(
+    table_name: &str,
+    modelset: &IrEnvelope<SchemaIrPayload>,
+) -> Vec<String> {
+    let Some(model) = modelset
+        .payload
+        .models
+        .iter()
+        .find(|m| m.table_name == table_name)
+    else {
+        return Vec::new();
+    };
+    let mut deps: Vec<String> = model
+        .foreign_keys
+        .iter()
+        .map(|fk| fk.to_table.clone())
+        .collect();
     deps.sort();
     deps.dedup();
     deps
 }
 
-pub(crate) fn order_schemas_for_creation(
-    schemas: std::collections::HashMap<String, std::sync::Arc<crate::state::RegisteredModel>>,
-) -> Vec<(String, std::sync::Arc<crate::state::RegisteredModel>)> {
-    let mut remaining: Vec<(String, std::sync::Arc<crate::state::RegisteredModel>)> =
-        schemas.into_iter().collect();
+/// Topologically sort registered models for the migrate ALTER reconcile loop.
+///
+/// FK edges come from [`SchemaModel::foreign_keys`] in the pushed modelset.
+/// External targets (not among registered table names) do not block ordering.
+/// Cycles append the remaining entries when no progress is possible.
+pub(crate) fn order_models_for_migration(
+    registry: HashMap<String, Arc<crate::state::RegisteredModel>>,
+    modelset: &IrEnvelope<SchemaIrPayload>,
+) -> Vec<(String, Arc<crate::state::RegisteredModel>)> {
+    let mut remaining: Vec<(String, Arc<crate::state::RegisteredModel>)> =
+        registry.into_iter().collect();
     remaining.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut ordered = Vec::with_capacity(remaining.len());
@@ -133,7 +57,7 @@ pub(crate) fn order_schemas_for_creation(
         let mut index = 0;
 
         while index < remaining.len() {
-            let deps = schema_dependencies(&remaining[index].1.schema);
+            let deps = model_ir_dependencies(&remaining[index].1.table_name, modelset);
             if deps
                 .iter()
                 .all(|dep| created.contains(dep) || !available_names.contains(dep))
@@ -154,232 +78,6 @@ pub(crate) fn order_schemas_for_creation(
     }
 
     ordered
-}
-
-
-// Artifact naming (idx_/uq_/ck_/fk_ builders and their 63-char guards) is
-// single-sourced in `ferro-ddl-lowering` (FF-B B3) and imported at the top.
-
-/// Resolve a model property to its backend-specific [`CanonicalType`] via the
-/// shared lowering crate. `db_type` (when set) wins; otherwise the Pydantic
-/// JSON type/format cascade decides; unknown types fall back to `varchar`.
-pub(crate) fn canonical_column_type(
-    raw_col_info: &serde_json::Value,
-    resolved_col_info: &serde_json::Value,
-    backend: Dialect,
-) -> CanonicalType {
-    let db_type = raw_col_info
-        .get("db_type")
-        .or_else(|| resolved_col_info.get("db_type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let (json_type, format) = property_json_type_and_format(resolved_col_info);
-    let logical_type = json_schema_logical_type(json_type.unwrap_or(""), format);
-    canonical_from_parts(logical_type, None, db_type, backend)
-        .unwrap_or(CanonicalType::Varchar(None))
-}
-
-/// Resolve a model property's full storage decision from the enriched JSON
-/// schema — the legacy-planner counterpart of the IR path's
-/// `resolve_column_storage` (FF-B B2): an explicit `db_type` wins, then
-/// `enum` values select native Postgres enum storage (varchar(max label len)
-/// on SQLite, matching SQLAlchemy), then the scalar cascade decides.
-pub(crate) fn resolve_column_storage_json(
-    col_name: &str,
-    raw_col_info: &serde_json::Value,
-    resolved_col_info: &serde_json::Value,
-    backend: Dialect,
-) -> ResolvedStorage {
-    let db_type = raw_col_info
-        .get("db_type")
-        .or_else(|| resolved_col_info.get("db_type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if let Some(canonical) = db_type_token_to_canonical(db_type, backend) {
-        return ResolvedStorage::Scalar(canonical);
-    }
-    let enum_values = resolved_col_info
-        .get("enum")
-        .or_else(|| raw_col_info.get("enum"))
-        .and_then(|v| v.as_array())
-        .filter(|v| !v.is_empty());
-    if let Some(values) = enum_values {
-        let labels = enum_label_strings(values);
-        return match backend {
-            Dialect::Postgres => {
-                let type_name = raw_col_info
-                    .get("enum_type_name")
-                    .or_else(|| resolved_col_info.get("enum_type_name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(col_name)
-                    .to_string();
-                ResolvedStorage::PgEnum { type_name, labels }
-            }
-            Dialect::Sqlite => {
-                let max_len = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-                let max_len = u32::try_from(max_len).unwrap_or(u32::MAX);
-                ResolvedStorage::Scalar(CanonicalType::Varchar(if max_len == 0 {
-                    None
-                } else {
-                    Some(max_len)
-                }))
-            }
-        };
-    }
-    ResolvedStorage::Scalar(canonical_column_type(raw_col_info, resolved_col_info, backend))
-}
-
-/// Pre-rendered SQL literal tokens for a db_check column's allowed values,
-/// e.g. `["'admin'", "'user'"]`. Shape matches [`SchemaCheck::values`] so this
-/// legacy JSON path can feed the same emitter as the IR path.
-fn render_check_values(col_info: &serde_json::Value) -> Option<Vec<String>> {
-    let values = col_info.get("enum").and_then(|v| v.as_array())?;
-    if values.is_empty() {
-        return None;
-    }
-    let rendered: Vec<String> = values
-        .iter()
-        .map(|v| match v {
-            serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            other => format!("'{}'", other.to_string().replace('\'', "''")),
-        })
-        .collect();
-    Some(rendered)
-}
-
-fn build_check_constraint_sql(
-    table_lower: &str,
-    col_name: &str,
-    col_info: &serde_json::Value,
-    backend: Dialect,
-) -> Option<String> {
-    // SQLite cannot ALTER TABLE ADD CONSTRAINT and adding a named CHECK
-    // requires CREATE TABLE rebuild. db_check is a Postgres-first feature in
-    // Phase 1; SQLite users opting in just see the constraint elided at
-    // runtime. The parity test (U5) compares Postgres-side rendering.
-    //
-    // Delegate the actual wrapper to `render_db_check` — the single source
-    // shared with the IR emitter — so this legacy JSON path stays byte-identical
-    // (including the idempotent DO-block guard) and the shadow comparator sees
-    // matching plans.
-    let values = render_check_values(col_info)?;
-    let check = SchemaCheck {
-        name: db_check_constraint_name(table_lower, col_name),
-        column: col_name.to_string(),
-        values,
-    };
-    render_db_check(table_lower, &check, backend).statement
-}
-
-/// Foreign-key metadata for a column, resolved from the model schema.
-#[derive(Clone, Debug)]
-pub(crate) struct FkSpec {
-    pub to_table: String,
-    pub on_delete: ForeignKeyAction,
-}
-
-/// Everything any DDL path needs to know about one model column, built once
-/// so CREATE TABLE and ALTER TABLE ADD COLUMN emit byte-identical column
-/// definitions (AGENTS.md § I-1).
-pub(crate) struct ColumnPlan {
-    pub storage: ResolvedStorage,
-    pub is_primary_key: bool,
-    pub is_nullable: bool,
-    pub is_unique: bool,
-    /// Post-create SQL owned by this column, in emission order:
-    /// single-column index, then `db_check` CHECK constraint.
-    pub index_sqls: Vec<String>,
-    pub fk: Option<FkSpec>,
-    /// Literal default from the JSON schema (the Pydantic field default).
-    /// CREATE TABLE never emits server defaults; the ALTER path uses this to
-    /// backfill NOT NULL column adds on populated tables.
-    pub literal_default: Option<serde_json::Value>,
-}
-
-pub(crate) fn build_column_plan(
-    table_lower: &str,
-    col_name: &str,
-    raw_col_info: &serde_json::Value,
-    schema: &serde_json::Value,
-    backend: Dialect,
-) -> ColumnPlan {
-    let col_info = resolve_ref(schema, raw_col_info);
-    let storage = resolve_column_storage_json(col_name, raw_col_info, col_info, backend);
-
-    let is_primary_key =
-        column_bool_metadata(raw_col_info, col_info, "primary_key").unwrap_or(false);
-
-    let is_nullable = column_bool_metadata(raw_col_info, col_info, "ferro_nullable") != Some(false);
-
-    let is_unique = column_bool_metadata(raw_col_info, col_info, "unique").unwrap_or(false);
-
-    let mut index_sqls = Vec::new();
-    if column_bool_metadata(raw_col_info, col_info, "index").unwrap_or(false) {
-        let index_name = single_index_name(table_lower, col_name);
-        let index_stmt = Index::create()
-            .name(&index_name)
-            .table(Alias::new(table_lower))
-            .col(Alias::new(col_name))
-            .if_not_exists()
-            .to_owned();
-        let index_sql = match backend {
-            Dialect::Sqlite => index_stmt.to_string(SqliteQueryBuilder),
-            Dialect::Postgres => index_stmt.to_string(PostgresQueryBuilder),
-        };
-        index_sqls.push(index_sql);
-    }
-
-    // db_check=True -> single-column CHECK constraint named ck_<table>_<col>.
-    // Emitted (via the shared `render_db_check`) as a post-create ALTER TABLE
-    // wrapped in an idempotent DO-block guard, so the name flows through
-    // identically on both backends and a re-run is a no-op. SQLite cannot
-    // execute ADD CONSTRAINT; users opting in to db_check are expected to be on
-    // Postgres for Phase 1.
-    let db_check = column_bool_metadata(raw_col_info, col_info, "db_check").unwrap_or(false);
-    if db_check
-        && let Some(ck_sql) = build_check_constraint_sql(table_lower, col_name, col_info, backend)
-    {
-        index_sqls.push(ck_sql);
-    }
-
-    let fk = column_object_metadata(raw_col_info, col_info, "foreign_key").map(|fk_info| {
-        let to_table = fk_info
-            .get("to_table")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
-        let on_delete_str = fk_info
-            .get("on_delete")
-            .and_then(|o| o.as_str())
-            .unwrap_or("CASCADE");
-        let on_delete = match on_delete_str.to_uppercase().as_str() {
-            "RESTRICT" => ForeignKeyAction::Restrict,
-            "SET NULL" => ForeignKeyAction::SetNull,
-            "SET DEFAULT" => ForeignKeyAction::SetDefault,
-            "NO ACTION" => ForeignKeyAction::NoAction,
-            _ => ForeignKeyAction::Cascade, // Default
-        };
-        FkSpec {
-            to_table: to_table.to_string(),
-            on_delete,
-        }
-    });
-
-    let literal_default = raw_col_info
-        .get("default")
-        .or_else(|| col_info.get("default"))
-        .cloned();
-
-    ColumnPlan {
-        storage,
-        is_primary_key,
-        is_nullable,
-        is_unique,
-        index_sqls,
-        fk,
-        literal_default,
-    }
 }
 
 /// Internal utility to create all registered tables in the database.
@@ -452,24 +150,20 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
     Ok(())
 }
 
-/// Registers a model's JSON schema with the Rust core.
+/// Registers a model with the Rust core from its SchemaIR column slice.
 ///
 /// This is typically called automatically by the `ModelMetaclass` when
 /// a Pydantic model is defined.
 ///
 /// # Errors
-/// Returns a `PyErr` if the schema is invalid or if the registry is locked.
+/// Returns a `PyErr` if the columns JSON is invalid or if the registry is locked.
 #[pyfunction]
-#[pyo3(signature = (name, schema, columns, table_name))]
+#[pyo3(signature = (name, columns, table_name))]
 pub fn register_model_schema(
     name: String,
-    schema: String,
     columns: String,
     table_name: String,
 ) -> PyResult<()> {
-    let parsed_schema: serde_json::Value = serde_json::from_str(&schema).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
-    })?;
     let parsed_columns: Vec<ferro_schema_ir::SchemaColumn> =
         serde_json::from_str(&columns).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR columns: {}", e))
@@ -480,7 +174,7 @@ pub fn register_model_schema(
         ));
     }
 
-    let registered = crate::state::RegisteredModel::new(parsed_schema, parsed_columns, table_name)
+    let registered = crate::state::RegisteredModel::new(parsed_columns, table_name)
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
     let mut registry = MODEL_REGISTRY
@@ -631,6 +325,74 @@ pub fn infer_test_schema_columns(schema: &serde_json::Value) -> Vec<ferro_schema
 }
 
 #[cfg(test)]
+fn resolve_ref<'a>(
+    schema: &'a serde_json::Value,
+    col_info: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    if let Some(ref_path) = col_info.get("$ref").and_then(|r| r.as_str())
+        && let Some(def_name) = ref_path.strip_prefix("#/$defs/")
+        && let Some(def) = schema.get("$defs").and_then(|defs| defs.get(def_name))
+    {
+        return def;
+    }
+    col_info
+}
+
+#[cfg(test)]
+fn property_json_type_and_format(
+    col_info: &serde_json::Value,
+) -> (Option<&str>, Option<&str>) {
+    let top_type = col_info.get("type").and_then(|t| t.as_str());
+    let top_format = col_info.get("format").and_then(|f| f.as_str());
+    if top_type.is_some() {
+        return (top_type, top_format);
+    }
+
+    if let Some(items) = col_info.get("anyOf").and_then(|a| a.as_array()) {
+        for item in items {
+            let item_type = item.get("type").and_then(|t| t.as_str());
+            if item_type == Some("null") {
+                continue;
+            }
+            let item_format = item.get("format").and_then(|f| f.as_str());
+            return (item_type, item_format.or(top_format));
+        }
+    }
+
+    (None, top_format)
+}
+
+#[cfg(test)]
+fn json_schema_logical_type(json_type: &str, format: Option<&str>) -> &'static str {
+    match (json_type, format) {
+        ("integer", _) => "integer",
+        ("number", Some("decimal")) => "decimal",
+        ("number", _) => "number",
+        ("boolean", _) => "boolean",
+        ("string", Some("date-time")) => "datetime",
+        ("string", Some("date")) => "date",
+        ("string", Some("time")) => "time",
+        ("string", Some("uuid")) => "uuid",
+        ("string", Some("binary")) => "binary",
+        ("string", _) => "string",
+        ("object" | "array", _) => "json",
+        _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+fn column_bool_metadata(
+    raw_col_info: &serde_json::Value,
+    resolved_col_info: &serde_json::Value,
+    key: &str,
+) -> Option<bool> {
+    raw_col_info
+        .get(key)
+        .or_else(|| resolved_col_info.get(key))
+        .and_then(|value| value.as_bool())
+}
+
+#[cfg(test)]
 fn infer_test_logical_type(
     json_type: Option<&str>,
     format: Option<&str>,
@@ -674,8 +436,108 @@ fn infer_test_logical_type(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferro_ddl_lowering::composite_index_name;
-    use serde_json::json;
+    use crate::state::RegisteredModel;
+    use ferro_ddl_lowering::{composite_index_name, db_check_constraint_name};
+    use ferro_schema_ir::{SchemaForeignKey, SchemaModel};
+    use std::sync::Arc;
+
+    fn test_registered(table_name: &str) -> Arc<RegisteredModel> {
+        RegisteredModel::new(vec![], table_name.to_string()).expect("test registration")
+    }
+
+    fn test_modelset(models: Vec<SchemaModel>) -> IrEnvelope<SchemaIrPayload> {
+        IrEnvelope {
+            ir_kind: "schema".to_string(),
+            ir_version: 1,
+            payload: SchemaIrPayload {
+                dialect_agnostic: true,
+                models,
+            },
+        }
+    }
+
+    fn test_schema_model(table_name: &str, fk_targets: &[&str]) -> SchemaModel {
+        SchemaModel {
+            model_name: table_name.to_string(),
+            table_name: table_name.to_string(),
+            columns: vec![],
+            foreign_keys: fk_targets
+                .iter()
+                .map(|to| SchemaForeignKey {
+                    column: format!("{to}_id"),
+                    to_table: (*to).to_string(),
+                    to_column: "id".to_string(),
+                    on_delete: None,
+                    name: None,
+                })
+                .collect(),
+            indexes: vec![],
+            uniques: vec![],
+            checks: vec![],
+        }
+    }
+
+    #[test]
+    fn order_models_for_migration_sorts_fk_chain() {
+        let modelset = test_modelset(vec![
+            test_schema_model("child", &["parent"]),
+            test_schema_model("parent", &["grandparent"]),
+            test_schema_model("grandparent", &[]),
+        ]);
+        let mut registry = HashMap::new();
+        registry.insert("Child".to_string(), test_registered("child"));
+        registry.insert("Parent".to_string(), test_registered("parent"));
+        registry.insert("Grandparent".to_string(), test_registered("grandparent"));
+
+        let ordered = order_models_for_migration(registry, &modelset);
+        let tables: Vec<&str> = ordered
+            .iter()
+            .map(|(_, model)| model.table_name.as_str())
+            .collect();
+        assert_eq!(tables, vec!["grandparent", "parent", "child"]);
+    }
+
+    #[test]
+    fn order_models_for_migration_ignores_external_fk_targets() {
+        let modelset = test_modelset(vec![test_schema_model("post", &["external_user"])]);
+        let mut registry = HashMap::new();
+        registry.insert("Post".to_string(), test_registered("post"));
+
+        let ordered = order_models_for_migration(registry, &modelset);
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].1.table_name, "post");
+    }
+
+    #[test]
+    fn order_models_for_migration_appends_remaining_on_cycle() {
+        let modelset = test_modelset(vec![
+            test_schema_model("alpha", &["beta"]),
+            test_schema_model("beta", &["alpha"]),
+        ]);
+        let mut registry = HashMap::new();
+        registry.insert("Alpha".to_string(), test_registered("alpha"));
+        registry.insert("Beta".to_string(), test_registered("beta"));
+
+        let ordered = order_models_for_migration(registry, &modelset);
+        assert_eq!(ordered.len(), 2);
+        let tables: Vec<&str> = ordered
+            .iter()
+            .map(|(_, model)| model.table_name.as_str())
+            .collect();
+        assert!(tables.contains(&"alpha"));
+        assert!(tables.contains(&"beta"));
+    }
+
+    #[test]
+    fn order_models_for_migration_treats_missing_modelset_entry_as_no_deps() {
+        let modelset = test_modelset(vec![]);
+        let mut registry = HashMap::new();
+        registry.insert("Orphan".to_string(), test_registered("orphan"));
+
+        let ordered = order_models_for_migration(registry, &modelset);
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].1.table_name, "orphan");
+    }
 
     #[test]
     fn test_composite_index_name_short() {
@@ -684,9 +546,6 @@ mod tests {
 
     #[test]
     fn test_composite_index_name_at_63_chars() {
-        // Build inputs that produce a name of exactly 63 chars (no truncation).
-        // raw = "idx_t_<padding>_y" should be 63 chars.
-        // "idx_t_" is 6 chars; "_y" is 2 chars; need 55 chars of padding.
         let pad: String = "x".repeat(55);
         let cols = [pad.as_str(), "y"];
         let result = composite_index_name("t", &cols);
@@ -724,47 +583,4 @@ mod tests {
         assert_eq!(result.chars().count(), 63);
         assert!(result.ends_with("_ck"));
     }
-
-    #[test]
-    fn test_unknown_db_type_token_falls_back_to_json_cascade() {
-        // An unrecognized token must not change behavior: the JSON-type
-        // cascade decides, exactly as before the CanonicalType refactor.
-        let raw = json!({"type": "integer", "db_type": "banana"});
-        assert_eq!(
-            canonical_column_type(&raw, &raw, Dialect::Postgres),
-            CanonicalType::Integer
-        );
-    }
-
-    #[test]
-    fn canonical_column_type_maps_json_schema_formats_to_logical_tokens() {
-        let explicit_date = json!({
-            "anyOf": [{"type": "string", "format": "date"}, {"type": "null"}],
-            "db_type": "date"
-        });
-        assert_eq!(
-            canonical_column_type(&explicit_date, &explicit_date, Dialect::Postgres),
-            CanonicalType::Date
-        );
-        let derived_date = json!({"type": "string", "format": "date"});
-        assert_eq!(
-            canonical_column_type(&derived_date, &derived_date, Dialect::Postgres),
-            CanonicalType::Date
-        );
-    }
-
-    #[test]
-    fn canonical_column_type_unknown_and_missing_type_fall_back_to_varchar() {
-        let unknown = serde_json::json!({ "type": "mystery" });
-        assert_eq!(
-            canonical_column_type(&unknown, &unknown, Dialect::Postgres),
-            CanonicalType::Varchar(None)
-        );
-        let no_type = serde_json::json!({});
-        assert_eq!(
-            canonical_column_type(&no_type, &no_type, Dialect::Sqlite),
-            CanonicalType::Varchar(None)
-        );
-    }
-
 }

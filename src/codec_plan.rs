@@ -583,17 +583,11 @@ mod tests {
     fn reregistration_rebuilds_plan() {
         let name = "EpochModel".to_string();
         let first = crate::state::RegisteredModel::new(
-            json!({
-                "properties": {"v": {"type": "integer"}}
-            }),
             vec![ir_col("v", "integer")],
             "epochmodel".to_string(),
         )
         .expect("first registration");
         let second = crate::state::RegisteredModel::new(
-            json!({
-                "properties": {"v": {"type": "string"}}
-            }),
             vec![ir_col("v", "string")],
             "epochmodel".to_string(),
         )
