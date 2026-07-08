@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry, reset_engine
+from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
@@ -211,28 +211,10 @@ def test_ir_vectors_match_phase0_contract_envelope() -> None:
 
 
 @pytest.fixture()
-def clean_model_registry() -> None:
-    from ferro import state as ferro_state
-
-    reset_engine()
-    clear_registry()
-    ferro_state._MODEL_REGISTRY_PY.clear()
-    ferro_state._PENDING_RELATIONS.clear()
-    ferro_state._JOIN_TABLE_REGISTRY.clear()
-    ferro_state._SCHEMA_IR_BY_MODEL.clear()
-    ferro_state._SCHEMA_IR_FINGERPRINT_BY_MODEL.clear()
-    ferro_state._SCHEMA_IR_MODELSET = None
-    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = None
+def clean_model_registry(clean_registry) -> None:
+    # Thin alias over the shared conftest `clean_registry` fixture, kept so the
+    # many `clean_model_registry` parameters below need not be renamed.
     yield
-    reset_engine()
-    clear_registry()
-    ferro_state._MODEL_REGISTRY_PY.clear()
-    ferro_state._PENDING_RELATIONS.clear()
-    ferro_state._JOIN_TABLE_REGISTRY.clear()
-    ferro_state._SCHEMA_IR_BY_MODEL.clear()
-    ferro_state._SCHEMA_IR_FINGERPRINT_BY_MODEL.clear()
-    ferro_state._SCHEMA_IR_MODELSET = None
-    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = None
 
 
 def _load_vector(path: Path) -> dict[str, Any]:

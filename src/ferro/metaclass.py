@@ -28,7 +28,7 @@ from .ir import register_model_with_ir
 from .query import Relation
 from .relations.descriptors import ForwardDescriptor
 from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
-from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS, register_model
 
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -421,7 +421,7 @@ class ModelMetaclass(type(BaseModel)):
                     "models cannot share a table. Set __ferro_table__ on one of "
                     "them to give it a distinct table name."
                 )
-        _MODEL_REGISTRY_PY[identity] = cls
+        register_model(identity, cls)
         cls.ferro_relations = local_relations
 
         # Queryable-column set for build-time predicate validation (FF-F F-2):

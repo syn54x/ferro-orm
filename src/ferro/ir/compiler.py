@@ -7,7 +7,6 @@ individual models and full model sets.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any
 
@@ -25,26 +24,9 @@ from ..schema_metadata import build_model_schema
 from ..state import (
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
-    _SCHEMA_IR_BY_MODEL,
-    _SCHEMA_IR_FINGERPRINT_BY_MODEL,
 )
 
 _IR_VERSION = 1
-
-
-def _canonical_json(value: dict[str, Any]) -> str:
-    """Serialize an IR artifact with deterministic key ordering."""
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
-
-
-def _fingerprint(value: dict[str, Any]) -> str:
-    """Return the canonical SHA-256 fingerprint for an IR artifact."""
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _resolve_ref(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, Any]:
@@ -372,9 +354,13 @@ def compile_schema_ir_payload(
 
 
 def _persist_schema_ir_envelope(model_name: str, envelope: dict[str, Any]) -> None:
-    """Store one model's compiled SchemaIR envelope and fingerprint."""
-    _SCHEMA_IR_BY_MODEL[model_name] = envelope
-    _SCHEMA_IR_FINGERPRINT_BY_MODEL[model_name] = _fingerprint(envelope)
+    """Store one model's compiled SchemaIR envelope and fingerprint.
+
+    Routes through the single ``ferro.state`` envelope-write entrypoint so every
+    per-model store mutation lives at the store-owning layer (#243); the
+    fingerprint is derived from the envelope inside that entrypoint.
+    """
+    ferro_state.persist_model_envelope(model_name, envelope)
 
 
 def register_model_with_ir(
@@ -467,10 +453,10 @@ def compile_registry_schema_ir() -> dict[str, Any]:
     }
 
     ferro_state._SCHEMA_IR_MODELSET = envelope
-    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = _fingerprint(envelope)
+    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = ferro_state.ir_fingerprint(envelope)
     return envelope
 
 
 def schema_ir_fingerprint(ir_envelope: dict[str, Any]) -> str:
     """Return a deterministic SHA-256 fingerprint for a SchemaIR envelope."""
-    return _fingerprint(ir_envelope)
+    return ferro_state.ir_fingerprint(ir_envelope)

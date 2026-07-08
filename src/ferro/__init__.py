@@ -72,10 +72,18 @@ def clear_registry() -> None:
     models is what allows cold re-hydration after ``reset_engine`` (see
     ``tests/test_enum_cold_hydration.py``). Callers that want a full Python-side
     reset clear ``_MODEL_REGISTRY_PY`` / ``_PENDING_RELATIONS`` themselves.
+
+    Each purged join table's compiled SchemaIR envelope is also evicted from the
+    per-model envelope cache (via ``evict_model_envelope`` — envelope-only, so the
+    model registry stays intact per the promise above), keeping the two stores the
+    #153 guard depends on in agreement: a lingering join envelope would let a
+    future assemble step resurrect the stale join table.
     """
     _core_clear_registry()
-    from .state import _JOIN_TABLE_REGISTRY
+    from .state import _JOIN_TABLE_REGISTRY, evict_model_envelope
 
+    for join_table in list(_JOIN_TABLE_REGISTRY):
+        evict_model_envelope(join_table)
     _JOIN_TABLE_REGISTRY.clear()
 
 
