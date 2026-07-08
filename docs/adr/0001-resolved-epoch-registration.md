@@ -35,6 +35,15 @@ only.
 
 - Rust registration is empty until the first successful sync call; the
   operation seam makes that window invisible — absence is never a steady state.
+- The sync primitive is registration-only and emits zero DDL: table creation
+  and migration remain exclusive to `create_tables()`, `migrate()`, and
+  `connect(auto_migrate=True)` — a save or query can never alter database
+  schema.
+- The dirty-path resolve + bulk install is single-flight (a thread-safe lock
+  around confirm-dirty → resolve → install), so concurrent callers cannot
+  double-compile or install stale-then-fresh. The clean-path check is one
+  in-process generation-counter comparison with no FFI; the stored fingerprint
+  is read only inside the push path.
 - `register_model_with_ir` must not call `register_model_schema` directly.
 - Bulk push must be atomic (all models + modelset + fingerprint, or none):
   build-then-swap — the payload is constructed and validated before the lock
