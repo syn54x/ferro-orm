@@ -11,7 +11,7 @@ use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
@@ -125,6 +125,112 @@ pub fn registered_model(name: &str) -> PyResult<Arc<RegisteredModel>> {
 /// canonical Python domain IR instead of re-deriving it on the Rust side.
 pub static SCHEMA_IR_MODELSET: Lazy<RwLock<Option<IrEnvelope<SchemaIrPayload>>>> =
     Lazy::new(|| RwLock::new(None));
+
+/// Fingerprint of the modelset currently installed in the runtime.
+///
+/// Part of the atomic bulk-install unit (#244): set only on a successful
+/// [`install_registration`] and cleared by [`clear_registration`], both inside
+/// the same lock scope as [`MODEL_REGISTRY`] and [`SCHEMA_IR_MODELSET`]. The
+/// fingerprint gate reads it to skip re-installing a modelset the runtime
+/// already holds; keeping it inside the swap window means the gate can never
+/// match against schema the runtime does not actually hold.
+pub static INSTALLED_FINGERPRINT: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
+
+/// Process-wide count of actual bulk installs performed (a fingerprint-skip
+/// does not bump it). Test-only instrument mirroring the
+/// `_catalog_query_count_for_test` precedent: incremented at the single install
+/// choke point in [`install_registration`] and read from Python via
+/// `_bulk_install_count_for_test`.
+pub static BULK_INSTALL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomically install the column registry, schema modelset, and recorded
+/// fingerprint from one assembled modelset payload (#244).
+///
+/// Build-then-swap: the incoming column registry is fully constructed and
+/// validated *before* any store lock is taken, then all three stores are
+/// swapped under simultaneously-held write guards — all or nothing. A build or
+/// validation failure returns an error and leaves the previously installed
+/// registration and its fingerprint untouched (retained-last-good; never an
+/// emptied runtime).
+///
+/// Fingerprint gate: when `fingerprint` equals the recorded one this is a no-op
+/// — no swap, and the bulk-install counter is not bumped. Returns `true` when an
+/// install was performed, `false` when the gate skipped it.
+///
+/// # Errors
+/// `PyValueError` when a model's columns cannot compile a codec plan;
+/// `PyRuntimeError` when a store lock is poisoned.
+pub fn install_registration(
+    envelope: IrEnvelope<SchemaIrPayload>,
+    fingerprint: String,
+) -> PyResult<bool> {
+    // Fingerprint gate — a cheap read, released before any building begins so
+    // build-then-swap never holds a lock while constructing the new registry.
+    {
+        let recorded = INSTALLED_FINGERPRINT.read().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock installed fingerprint")
+        })?;
+        if recorded.as_deref() == Some(fingerprint.as_str()) {
+            return Ok(false);
+        }
+    }
+
+    // Build the entire new column registry up front. Any failure here aborts
+    // before a single store is touched.
+    let mut new_registry: HashMap<String, Arc<RegisteredModel>> =
+        HashMap::with_capacity(envelope.payload.models.len());
+    for model in &envelope.payload.models {
+        let registered =
+            RegisteredModel::new(model.columns.clone(), model.table_name.clone())
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        new_registry.insert(model.model_name.clone(), registered);
+    }
+
+    // Swap all three stores under simultaneously-held write guards so no reader
+    // can observe a half-installed runtime. Lock order (registry → modelset →
+    // fingerprint) is fixed and never nested-held elsewhere, so it cannot
+    // deadlock.
+    let mut registry_guard = MODEL_REGISTRY.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry")
+    })?;
+    let mut modelset_guard = SCHEMA_IR_MODELSET.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
+    })?;
+    let mut fingerprint_guard = INSTALLED_FINGERPRINT.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock installed fingerprint")
+    })?;
+
+    *registry_guard = new_registry;
+    *modelset_guard = Some(envelope);
+    *fingerprint_guard = Some(fingerprint);
+    BULK_INSTALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    Ok(true)
+}
+
+/// Clear the entire installed registration — column registry, schema modelset,
+/// and recorded fingerprint — under simultaneously-held write guards so the
+/// fingerprint is never left pointing at schema the runtime no longer holds
+/// (#244). Used by `clear_registry()` and runtime teardown.
+///
+/// # Errors
+/// `PyRuntimeError` when a store lock is poisoned.
+pub fn clear_registration() -> PyResult<()> {
+    let mut registry_guard = MODEL_REGISTRY.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry")
+    })?;
+    let mut modelset_guard = SCHEMA_IR_MODELSET.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
+    })?;
+    let mut fingerprint_guard = INSTALLED_FINGERPRINT.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock installed fingerprint")
+    })?;
+
+    registry_guard.clear();
+    *modelset_guard = None;
+    *fingerprint_guard = None;
+    Ok(())
+}
 
 /// The global runtime engine, initialized via `connect()`.
 pub static ENGINE: Lazy<RwLock<Option<Arc<EngineHandle>>>> = Lazy::new(|| RwLock::new(None));
@@ -577,6 +683,157 @@ mod session_close_tests {
                 .is_empty()
         );
         assert!(unregister_session(&session_id));
+    }
+}
+
+#[cfg(test)]
+mod install_registration_tests {
+    use super::{
+        clear_registration, install_registration, BULK_INSTALL_COUNT, INSTALLED_FINGERPRINT,
+        MODEL_REGISTRY, SCHEMA_IR_MODELSET,
+    };
+    use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
+    use std::sync::atomic::Ordering;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// These tests mutate the process-global registration stores, so they must
+    /// not run concurrently with each other. Serialize them behind one mutex.
+    fn serial_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn id_col() -> SchemaColumn {
+        SchemaColumn {
+            name: "id".to_string(),
+            logical_type: "integer".to_string(),
+            db_type: None,
+            db_type_explicit: None,
+            nullable: false,
+            primary_key: true,
+            autoincrement: true,
+            unique: false,
+            index: false,
+            default: None,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        }
+    }
+
+    fn model(name: &str, logical_type: &str) -> SchemaModel {
+        SchemaModel {
+            model_name: name.to_string(),
+            table_name: name.to_lowercase(),
+            columns: vec![
+                id_col(),
+                SchemaColumn {
+                    name: "value".to_string(),
+                    logical_type: logical_type.to_string(),
+                    db_type: None,
+                    db_type_explicit: None,
+                    nullable: true,
+                    primary_key: false,
+                    autoincrement: false,
+                    unique: false,
+                    index: false,
+                    default: None,
+                    format: None,
+                    enum_values: None,
+                    enum_type_name: None,
+                    postgres_native_enum: false,
+                },
+            ],
+            foreign_keys: vec![],
+            indexes: vec![],
+            uniques: vec![],
+            checks: vec![],
+        }
+    }
+
+    fn envelope(models: Vec<SchemaModel>) -> IrEnvelope<SchemaIrPayload> {
+        IrEnvelope {
+            ir_kind: "schema".to_string(),
+            ir_version: 1,
+            payload: SchemaIrPayload {
+                dialect_agnostic: true,
+                models,
+            },
+        }
+    }
+
+    fn registry_keys() -> Vec<String> {
+        let mut keys: Vec<String> = MODEL_REGISTRY
+            .read()
+            .expect("registry read")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    fn recorded_fingerprint() -> Option<String> {
+        INSTALLED_FINGERPRINT.read().expect("fingerprint read").clone()
+    }
+
+    #[test]
+    fn install_gate_and_build_then_swap() {
+        let _guard = serial_guard();
+        clear_registration().expect("reset");
+
+        let base_count = BULK_INSTALL_COUNT.load(Ordering::Relaxed);
+
+        // First install: two valid models — all three stores populated, counter
+        // bumped once.
+        let installed = install_registration(
+            envelope(vec![model("Alpha", "string"), model("Beta", "integer")]),
+            "fp-1".to_string(),
+        )
+        .expect("first install");
+        assert!(installed, "first install should perform a swap");
+        assert_eq!(registry_keys(), vec!["Alpha".to_string(), "Beta".to_string()]);
+        assert_eq!(recorded_fingerprint().as_deref(), Some("fp-1"));
+        assert!(SCHEMA_IR_MODELSET.read().unwrap().is_some());
+        assert_eq!(BULK_INSTALL_COUNT.load(Ordering::Relaxed) - base_count, 1);
+
+        // Fingerprint gate: same fingerprint is a no-op — no swap, no bump.
+        let skipped = install_registration(
+            envelope(vec![model("Alpha", "string"), model("Beta", "integer")]),
+            "fp-1".to_string(),
+        )
+        .expect("gated install");
+        assert!(!skipped, "matching fingerprint should skip the swap");
+        assert_eq!(BULK_INSTALL_COUNT.load(Ordering::Relaxed) - base_count, 1);
+
+        // Build-then-swap: a payload whose second model fails to compile (an
+        // unknown logical_type has no codec) must abort the whole install and
+        // leave the previous registration + fingerprint untouched.
+        let result = install_registration(
+            envelope(vec![model("Gamma", "string"), model("Broken", "not_a_type")]),
+            "fp-2".to_string(),
+        );
+        assert!(result.is_err(), "invalid model should fail the install");
+        assert_eq!(
+            registry_keys(),
+            vec!["Alpha".to_string(), "Beta".to_string()],
+            "retained-last-good: registry unchanged after a failed install"
+        );
+        assert_eq!(recorded_fingerprint().as_deref(), Some("fp-1"));
+        assert_eq!(
+            BULK_INSTALL_COUNT.load(Ordering::Relaxed) - base_count,
+            1,
+            "a failed install must not bump the push counter"
+        );
+
+        // clear_registration wipes all three stores together.
+        clear_registration().expect("clear");
+        assert!(registry_keys().is_empty());
+        assert!(recorded_fingerprint().is_none());
+        assert!(SCHEMA_IR_MODELSET.read().unwrap().is_none());
     }
 }
 

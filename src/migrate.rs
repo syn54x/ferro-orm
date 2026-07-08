@@ -60,15 +60,64 @@ pub fn _set_schema_ir_modelset(json: String) -> PyResult<()> {
     Ok(())
 }
 
-/// Test-only helper: clear the pushed SchemaIR modelset so the fail-loud path
-/// in `internal_create_tables` / `internal_migrate` can be exercised from
-/// Python (a missing modelset must raise, never silently create nothing).
+/// Atomically install the column registry, schema modelset, and modelset
+/// fingerprint from one assembled payload (#244).
+///
+/// This is the single Rust registration sync seam: `connect()`,
+/// `create_tables()`, and `migrate()` route through it instead of the
+/// modelset-only `_set_schema_ir_modelset`. The heavy lifting (build-then-swap,
+/// the fingerprint gate, the push counter) lives in
+/// [`crate::state::install_registration`]; this wrapper only parses and
+/// validates the payload envelope.
+///
+/// Returns `true` when an install was performed, `false` when the fingerprint
+/// gate skipped it.
+///
+/// # Errors
+/// `PyValueError` when the JSON is invalid, the envelope is not a `schema` IR,
+/// or a model's columns cannot compile; `PyRuntimeError` on a poisoned lock.
+#[pyfunction]
+#[pyo3(name = "_install_registration")]
+pub fn _install_registration(payload_json: String, fingerprint: String) -> PyResult<bool> {
+    let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&payload_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid registration payload json: {e}"))
+    })?;
+    if envelope.ir_kind != "schema" {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "expected ir_kind 'schema', got '{}'",
+            envelope.ir_kind
+        )));
+    }
+    crate::state::install_registration(envelope, fingerprint)
+}
+
+/// Test-only instrument: the process-wide bulk-install count (#244).
+///
+/// Mirrors `_catalog_query_count_for_test` — a single counter bumped at one
+/// choke point (`install_registration`, only on an actual swap, never on a
+/// fingerprint-skip) and read from Python to assert install cardinality.
+#[pyfunction]
+#[pyo3(name = "_bulk_install_count_for_test")]
+pub fn _bulk_install_count_for_test() -> u64 {
+    crate::state::BULK_INSTALL_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Test-only helper: clear the pushed SchemaIR modelset (and its recorded
+/// fingerprint, so the gate can never match state the runtime no longer holds)
+/// so the fail-loud path in `internal_create_tables` / `internal_migrate` can be
+/// exercised from Python (a missing modelset must raise, never silently create
+/// nothing).
 #[pyfunction]
 #[pyo3(name = "_clear_schema_ir_modelset_for_test")]
 pub fn _clear_schema_ir_modelset_for_test() -> PyResult<()> {
-    *crate::state::SCHEMA_IR_MODELSET.write().map_err(|_| {
+    let mut modelset_guard = crate::state::SCHEMA_IR_MODELSET.write().map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
-    })? = None;
+    })?;
+    let mut fingerprint_guard = crate::state::INSTALLED_FINGERPRINT.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock installed fingerprint")
+    })?;
+    *modelset_guard = None;
+    *fingerprint_guard = None;
     Ok(())
 }
 

@@ -21,7 +21,7 @@ from ._core import (
     version,
 )
 from ._core import (
-    _set_schema_ir_modelset,
+    _install_registration,
     connect as _core_connect,
 )
 from .base import DbType, DbTypeToken, FerroField, FerroNullable, ForeignKey, varchar
@@ -85,6 +85,27 @@ def clear_registry() -> None:
     for join_table in list(_JOIN_TABLE_REGISTRY):
         evict_model_envelope(join_table)
     _JOIN_TABLE_REGISTRY.clear()
+
+
+def _push_registration_to_rust() -> None:
+    """Assemble the resolved modelset and install it in the Rust runtime.
+
+    The single Rust registration sync seam (#244): compiles the full registry
+    SchemaIR, then hands the assembled modelset plus its fingerprint to the
+    atomic bulk-install FFI. Rust builds the column registry, swaps the
+    registry + modelset + fingerprint under one lock (build-then-swap,
+    retained-last-good on failure), and skips the swap entirely when the
+    fingerprint already matches — so a clean reconnect installs nothing.
+
+    Callers must have run ``resolve_relationships()`` first so join tables and
+    shadow FK columns are present in the assembled modelset. (Removing the
+    per-connect recompile in favor of an assemble-only step is slice #245.)
+    """
+    import json as _json
+    from .ir.compiler import compile_registry_schema_ir, schema_ir_fingerprint
+
+    envelope = compile_registry_schema_ir()
+    _install_registration(_json.dumps(envelope), schema_ir_fingerprint(envelope))
 
 
 class PoolConfig(BaseModel):
@@ -169,12 +190,10 @@ async def connect(
     For schema changes beyond these (renames, primary-key changes, complex
     transforms), use the Alembic bridge — see ``docs/guide/migrations.md``.
     """
-    import json as _json
-    from .ir.compiler import compile_registry_schema_ir
     from .relations import resolve_relationships
 
     resolve_relationships()
-    _set_schema_ir_modelset(_json.dumps(compile_registry_schema_ir()))
+    _push_registration_to_rust()
 
     pool_config = pool or PoolConfig()
     await _core_connect(
@@ -203,12 +222,10 @@ async def create_tables(using=None):
     Args:
         using: Named connection to create tables on, or None for the default.
     """
-    import json as _json
-    from .ir.compiler import compile_registry_schema_ir
     from .relations import resolve_relationships
 
     resolve_relationships()
-    _set_schema_ir_modelset(_json.dumps(compile_registry_schema_ir()))
+    _push_registration_to_rust()
     return await _core_create_tables(using=using)
 
 
@@ -224,12 +241,10 @@ async def migrate(using=None, updates=True, destructive=False):
         updates: If True (default), add missing columns and reconcile type/nullability drift.
         destructive: If True, also drop live columns absent from the model. Implies ``updates``.
     """
-    import json as _json
-    from .ir.compiler import compile_registry_schema_ir
     from .relations import resolve_relationships
 
     resolve_relationships()
-    _set_schema_ir_modelset(_json.dumps(compile_registry_schema_ir()))
+    _push_registration_to_rust()
     return await _core_migrate(using=using, updates=updates, destructive=destructive)
 
 
