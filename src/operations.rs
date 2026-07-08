@@ -448,7 +448,9 @@ fn engine_value_to_rust_value(
     schema: &serde_json::Value,
     col_name: &str,
 ) -> crate::state::RustValue {
-    let plan = crate::codec_plan::ModelCodecPlan::compile(schema);
+    let columns = crate::schema::infer_test_schema_columns(schema);
+    let plan = crate::codec_plan::ModelCodecPlan::compile_from_columns(&columns)
+        .expect("test schema columns should compile");
     crate::codec::decode_engine_value(value, &plan, col_name)
 }
 
@@ -2802,7 +2804,7 @@ mod m2m_value_tests {
             "properties": { "data": { "type": "string", "format": "binary" } }
         });
         let input = BindInput::Bytes(vec![0x89, 0x00, 0xff]);
-        let model = crate::state::RegisteredModel::new(schema, "test_table".to_string());
+        let model = crate::state::RegisteredModel::new_for_test(schema, "test_table".to_string());
         let expr = bind_input_to_expr(
             &model, "doc", "data", &input,
             &HashMap::new(), &HashSet::new(), &HashMap::new(), Dialect::Sqlite,
@@ -2841,7 +2843,7 @@ mod schema_value_expr_tests {
     ) -> pyo3::PyResult<(String, sea_query::Values)> {
         let enum_udt = HashMap::new();
         let ts_cast = HashMap::new();
-        let model = crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string());
+        let model = crate::state::RegisteredModel::new_for_test(schema.clone(), "test_table".to_string());
         let expr = schema_value_expr(
             &model,
             table,
@@ -3057,7 +3059,7 @@ mod schema_value_expr_tests {
             let _ = py;
 
             let err = schema_value_expr(
-                &crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string()),
+                &crate::state::RegisteredModel::new_for_test(schema.clone(), "test_table".to_string()),
                 "thing",
                 "id",
                 &serde_json::Value::String("not-a-uuid".to_string()),
@@ -3097,7 +3099,7 @@ mod schema_value_expr_tests {
         ts_cast.insert("created_at".to_string(), "timestamptz".to_string());
 
         let expr = schema_value_expr(
-            &crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string()),
+            &crate::state::RegisteredModel::new_for_test(schema.clone(), "test_table".to_string()),
             "thing",
             "created_at",
             &serde_json::Value::Null,
@@ -3128,7 +3130,7 @@ mod schema_value_expr_tests {
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
 
         let expr = schema_value_expr(
-            &crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string()),
+            &crate::state::RegisteredModel::new_for_test(schema.clone(), "test_table".to_string()),
             "thing",
             "id",
             &serde_json::Value::String(uuid_str.to_string()),
@@ -3561,7 +3563,7 @@ mod save_mode_sql_tests {
         backend: Dialect,
     ) -> (String, sea_query::Values, bool) {
         build_save_sql(
-            &crate::state::RegisteredModel::new(widget_schema(), "widget".to_string()),
+            &crate::state::RegisteredModel::new_for_test(widget_schema(), "widget".to_string()),
             "widget",
             inputs,
             Some("id"),
@@ -3582,7 +3584,7 @@ mod save_mode_sql_tests {
         backend: Dialect,
     ) -> super::PyResult<UpdateByPkSql> {
         build_update_by_pk_sql(
-            &crate::state::RegisteredModel::new(schema.clone(), "test_table".to_string()),
+            &crate::state::RegisteredModel::new_for_test(schema.clone(), "test_table".to_string()),
             "widget",
             inputs,
             pk_col,

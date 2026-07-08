@@ -342,8 +342,29 @@ pub fn canonical_from_schema_column(
     col: &SchemaColumn,
     dialect: Dialect,
 ) -> Result<CanonicalType, String> {
-    canonical_from_parts(&col.logical_type, col.format.as_deref(), col.db_type.as_deref().unwrap_or(""), dialect)
-        .map_err(|reason| format!("unresolvable type on column '{}': {reason}", col.name))
+    canonical_from_parts(
+        &col.logical_type,
+        col.format.as_deref(),
+        col.db_type.as_deref().unwrap_or(""),
+        dialect,
+    )
+    .map_err(|reason| format!("unresolvable type on column '{}': {reason}", col.name))
+}
+
+/// Resolve a [`SchemaColumn`] to its logical codec type — the Python-facing
+/// value family — without applying an explicit `db_type` override. Storage may
+/// legally widen away from this family (e.g. UUID stored as `text`); the
+/// logical canonical preserves bind/decode shapes.
+pub fn logical_canonical_from_schema_column(
+    col: &SchemaColumn,
+    dialect: Dialect,
+) -> Result<CanonicalType, String> {
+    canonical_from_parts(&col.logical_type, col.format.as_deref(), "", dialect).map_err(|reason| {
+        format!(
+            "unresolvable logical type on column '{}': {reason}",
+            col.name
+        )
+    })
 }
 
 /// A column's fully resolved storage: either a scalar [`CanonicalType`] or a
@@ -1074,6 +1095,55 @@ mod tests {
         assert_eq!(canonical_from_parts("integer", None, "", Dialect::Sqlite), Ok(CanonicalType::Integer));
         // unknown is an error (CREATE path maps this to Varchar at its call site)
         assert!(canonical_from_parts("mystery", None, "", Dialect::Postgres).is_err());
+    }
+
+    #[test]
+    fn logical_canonical_from_schema_column_ignores_explicit_db_type() {
+        let col = SchemaColumn {
+            name: "external_id".to_string(),
+            logical_type: "uuid".to_string(),
+            db_type: Some("text".to_string()),
+            db_type_explicit: Some(true),
+            nullable: false,
+            primary_key: false,
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            format: Some("uuid".to_string()),
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        };
+        assert_eq!(
+            logical_canonical_from_schema_column(&col, Dialect::Postgres),
+            Ok(CanonicalType::Uuid)
+        );
+        assert_eq!(
+            canonical_from_schema_column(&col, Dialect::Postgres),
+            Ok(CanonicalType::Text)
+        );
+    }
+
+    #[test]
+    fn logical_canonical_from_schema_column_errors_on_unknown() {
+        let col = SchemaColumn {
+            name: "mystery".to_string(),
+            logical_type: "bogus".to_string(),
+            db_type: None,
+            db_type_explicit: None,
+            nullable: true,
+            primary_key: false,
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        };
+        assert!(logical_canonical_from_schema_column(&col, Dialect::Postgres).is_err());
     }
 
     #[test]

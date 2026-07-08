@@ -19,6 +19,7 @@ from .._core import (
     _ddl_fk_name,
     _ddl_single_index_name,
     _ddl_single_unique_name,
+    register_model_schema,
 )
 from ..schema_metadata import build_model_schema
 from ..state import (
@@ -370,6 +371,34 @@ def compile_schema_ir_payload(
     return {"dialect_agnostic": True, "models": [model_payload]}
 
 
+def _persist_schema_ir_envelope(model_name: str, envelope: dict[str, Any]) -> None:
+    """Store one model's compiled SchemaIR envelope and fingerprint."""
+    _SCHEMA_IR_BY_MODEL[model_name] = envelope
+    _SCHEMA_IR_FINGERPRINT_BY_MODEL[model_name] = _fingerprint(envelope)
+
+
+def register_model_with_ir(
+    model_name: str,
+    schema: dict[str, Any],
+    table_name: str,
+) -> dict[str, Any]:
+    """Compile SchemaIR once, register Rust state, and persist the envelope.
+
+    Single registration bundle for metaclass, relationship resolution, join
+    tables, and ``Model._reregister_ferro`` (#236).
+    """
+    payload = compile_schema_ir_payload(model_name, schema, table_name=table_name)
+    register_model_schema(
+        model_name,
+        json.dumps(schema),
+        json.dumps(payload["models"][0]["columns"]),
+        table_name,
+    )
+    envelope = wrap_schema_ir(payload)
+    _persist_schema_ir_envelope(model_name, envelope)
+    return envelope
+
+
 def wrap_schema_ir(payload: dict[str, Any]) -> dict[str, Any]:
     """Wrap a SchemaIR payload with the standard IR envelope fields."""
     return {
@@ -401,8 +430,7 @@ def compile_model_schema_ir(
         table_name=getattr(model_cls, "__ferro_table__", None),
     )
     envelope = wrap_schema_ir(payload)
-    _SCHEMA_IR_BY_MODEL[model_name] = envelope
-    _SCHEMA_IR_FINGERPRINT_BY_MODEL[model_name] = _fingerprint(envelope)
+    _persist_schema_ir_envelope(model_name, envelope)
     return envelope
 
 

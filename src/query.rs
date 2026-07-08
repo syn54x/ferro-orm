@@ -369,7 +369,7 @@ mod tests {
         // nullable integer column "count" so model_column lookups succeed.
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetIntNull".to_string(),
-            crate::state::RegisteredModel::new(json!({
+            crate::state::RegisteredModel::new_for_test(json!({
                 "properties": {
                     "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
                 }
@@ -394,7 +394,7 @@ mod tests {
     fn null_rhs_emits_typed_bool_null_for_bool_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetBoolNull".to_string(),
-            crate::state::RegisteredModel::new(json!({
+            crate::state::RegisteredModel::new_for_test(json!({
                 "properties": {
                     "active": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
                 }
@@ -419,7 +419,7 @@ mod tests {
     fn null_rhs_emits_typed_uuid_null_for_uuid_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetUuidNull".to_string(),
-            crate::state::RegisteredModel::new(json!({
+            crate::state::RegisteredModel::new_for_test(json!({
                 "properties": {
                     "id": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "null"}]}
                 }
@@ -444,7 +444,7 @@ mod tests {
     fn binary_rhs_emits_typed_bytes_no_cast() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetBinary".to_string(),
-            crate::state::RegisteredModel::new(json!({
+            crate::state::RegisteredModel::new_for_test(json!({
                 "properties": {
                     "blob": {"type": "string", "format": "binary"}
                 }
@@ -496,7 +496,7 @@ mod tests {
     fn enum_rhs_skips_cast_without_native_enum_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetTextColor".to_string(),
-            crate::state::RegisteredModel::new(json!({
+            crate::state::RegisteredModel::new_for_test(json!({
                 "properties": {
                     "color": {"enum_type_name": "color", "db_type": "text"}
                 }
@@ -525,7 +525,7 @@ mod tests {
         // Decimal still uses CAST AS numeric on Postgres.
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetDecimal".to_string(),
-            crate::state::RegisteredModel::new(json!({
+            crate::state::RegisteredModel::new_for_test(json!({
                 "properties": {
                     "amount": {
                         // The enriched shape registration emits for Decimal

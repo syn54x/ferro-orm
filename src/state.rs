@@ -5,7 +5,7 @@
 
 use crate::backend::{EngineConnection, EngineHandle};
 use dashmap::DashMap;
-use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
+use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use once_cell::sync::Lazy;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
@@ -33,6 +33,20 @@ pub struct ModelMeta {
 }
 
 impl ModelMeta {
+    /// Scan SchemaIR columns for primary-key metadata (FF-G G2 / #236).
+    pub fn from_columns(columns: &[SchemaColumn]) -> Self {
+        let mut pk_col = None;
+        let mut pk_autoincrement = true;
+        for col in columns {
+            if col.primary_key {
+                pk_col = Some(col.name.clone());
+                pk_autoincrement = col.autoincrement;
+                break;
+            }
+        }
+        ModelMeta { pk_col, pk_autoincrement }
+    }
+
     pub fn from_schema(schema: &serde_json::Value) -> Self {
         let mut pk_col = None;
         let mut pk_autoincrement = true;
@@ -75,10 +89,32 @@ pub struct RegisteredModel {
 
 impl RegisteredModel {
     /// Compile the codec plan and wrap the registration for the registry.
-    pub fn new(schema: serde_json::Value, table_name: String) -> Arc<Self> {
-        let codec_plan = crate::codec_plan::ModelCodecPlan::compile(&schema);
-        let meta = ModelMeta::from_schema(&schema);
-        Arc::new(RegisteredModel { schema, table_name, codec_plan, meta })
+    pub fn new(
+        schema: serde_json::Value,
+        columns: Vec<SchemaColumn>,
+        table_name: String,
+    ) -> Result<Arc<Self>, String> {
+        let codec_plan = crate::codec_plan::ModelCodecPlan::compile_from_columns(&columns)?;
+        let meta = ModelMeta::from_columns(&columns);
+        Ok(Arc::new(RegisteredModel {
+            schema,
+            table_name,
+            codec_plan,
+            meta,
+        }))
+    }
+}
+
+#[cfg(test)]
+impl RegisteredModel {
+    /// Test-only registration when only a JSON schema fixture is available.
+    pub fn new_for_test(schema: serde_json::Value, table_name: String) -> Arc<Self> {
+        Self::new(
+            schema.clone(),
+            crate::schema::infer_test_schema_columns(&schema),
+            table_name,
+        )
+        .expect("test model registration")
     }
 }
 
@@ -580,7 +616,114 @@ mod session_close_tests {
 #[cfg(test)]
 mod model_meta_tests {
     use super::ModelMeta;
+    use ferro_schema_ir::SchemaColumn;
     use serde_json::json;
+
+    #[test]
+    fn from_columns_no_primary_key_yields_none_and_default_autoincrement() {
+        let meta = ModelMeta::from_columns(&[SchemaColumn {
+            name: "name".to_string(),
+            logical_type: "string".to_string(),
+            db_type: None,
+            db_type_explicit: None,
+            nullable: true,
+            primary_key: false,
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        }]);
+        assert_eq!(meta.pk_col, None);
+        assert!(meta.pk_autoincrement);
+    }
+
+    #[test]
+    fn from_columns_pk_without_autoincrement_key_defaults_true() {
+        let meta = ModelMeta::from_columns(&[SchemaColumn {
+            name: "id".to_string(),
+            logical_type: "integer".to_string(),
+            db_type: None,
+            db_type_explicit: None,
+            nullable: false,
+            primary_key: true,
+            autoincrement: true,
+            unique: false,
+            index: false,
+            default: None,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        }]);
+        assert_eq!(meta.pk_col.as_deref(), Some("id"));
+        assert!(meta.pk_autoincrement);
+    }
+
+    #[test]
+    fn from_columns_pk_with_autoincrement_false_is_preserved() {
+        let meta = ModelMeta::from_columns(&[SchemaColumn {
+            name: "id".to_string(),
+            logical_type: "string".to_string(),
+            db_type: None,
+            db_type_explicit: None,
+            nullable: false,
+            primary_key: true,
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+        }]);
+        assert_eq!(meta.pk_col.as_deref(), Some("id"));
+        assert!(!meta.pk_autoincrement);
+    }
+
+    #[test]
+    fn from_columns_first_flagged_column_in_declaration_order_wins() {
+        let meta = ModelMeta::from_columns(&[
+            SchemaColumn {
+                name: "b_id".to_string(),
+                logical_type: "integer".to_string(),
+                db_type: None,
+                db_type_explicit: None,
+                nullable: false,
+                primary_key: true,
+                autoincrement: false,
+                unique: false,
+                index: false,
+                default: None,
+                format: None,
+                enum_values: None,
+                enum_type_name: None,
+                postgres_native_enum: false,
+            },
+            SchemaColumn {
+                name: "a_id".to_string(),
+                logical_type: "integer".to_string(),
+                db_type: None,
+                db_type_explicit: None,
+                nullable: false,
+                primary_key: true,
+                autoincrement: true,
+                unique: false,
+                index: false,
+                default: None,
+                format: None,
+                enum_values: None,
+                enum_type_name: None,
+                postgres_native_enum: false,
+            },
+        ]);
+        assert_eq!(meta.pk_col.as_deref(), Some("b_id"));
+        assert!(!meta.pk_autoincrement);
+    }
 
     #[test]
     fn no_primary_key_yields_none_and_default_autoincrement() {

@@ -460,25 +460,34 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
 /// # Errors
 /// Returns a `PyErr` if the schema is invalid or if the registry is locked.
 #[pyfunction]
-#[pyo3(signature = (name, schema, table_name))]
-pub fn register_model_schema(name: String, schema: String, table_name: String) -> PyResult<()> {
+#[pyo3(signature = (name, schema, columns, table_name))]
+pub fn register_model_schema(
+    name: String,
+    schema: String,
+    columns: String,
+    table_name: String,
+) -> PyResult<()> {
     let parsed_schema: serde_json::Value = serde_json::from_str(&schema).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON schema: {}", e))
     })?;
+    let parsed_columns: Vec<ferro_schema_ir::SchemaColumn> =
+        serde_json::from_str(&columns).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR columns: {}", e))
+        })?;
     if table_name.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "table_name must be a non-empty string",
         ));
     }
 
+    let registered = crate::state::RegisteredModel::new(parsed_schema, parsed_columns, table_name)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
     let mut registry = MODEL_REGISTRY
         .write()
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?;
 
-    registry.insert(
-        name.clone(),
-        crate::state::RegisteredModel::new(parsed_schema, table_name),
-    );
+    registry.insert(name.clone(), registered);
     crate::log_debug(format!("⚙️  Ferro Engine: Map generated for '{}'", name));
     Ok(())
 }
@@ -558,6 +567,63 @@ pub fn _render_create_table_sql_for_test(
         emission.post_create_sqls,
         emission.pre_create_sqls,
     ))
+}
+
+/// Build minimal SchemaIR columns from a JSON schema fixture for Rust unit tests.
+#[cfg(test)]
+pub fn infer_test_schema_columns(schema: &serde_json::Value) -> Vec<ferro_schema_ir::SchemaColumn> {
+    use ferro_schema_ir::SchemaColumn;
+
+    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut columns = Vec::new();
+    for (name, raw_col) in properties {
+        let resolved = resolve_ref(schema, raw_col);
+        let (json_type, format) = property_json_type_and_format(resolved);
+        let logical_type =
+            json_schema_logical_type(json_type.unwrap_or(""), format).to_string();
+        let db_type = raw_col
+            .get("db_type")
+            .or_else(|| resolved.get("db_type"))
+            .and_then(|v| v.as_str());
+        let db_type_explicit = db_type.is_some_and(|token| !token.is_empty());
+        let primary_key = column_bool_metadata(raw_col, resolved, "primary_key").unwrap_or(false);
+        let autoincrement = if primary_key {
+            column_bool_metadata(raw_col, resolved, "autoincrement").unwrap_or(true)
+        } else {
+            false
+        };
+        let enum_values = resolved
+            .get("enum")
+            .or_else(|| raw_col.get("enum"))
+            .and_then(|v| v.as_array())
+            .filter(|v| !v.is_empty())
+            .cloned();
+        let enum_type_name = raw_col
+            .get("enum_type_name")
+            .or_else(|| resolved.get("enum_type_name"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        columns.push(SchemaColumn {
+            name: name.clone(),
+            logical_type,
+            db_type: db_type.map(str::to_string),
+            db_type_explicit: db_type_explicit.then_some(true),
+            nullable: !primary_key,
+            primary_key,
+            autoincrement,
+            unique: column_bool_metadata(raw_col, resolved, "unique").unwrap_or(false),
+            index: column_bool_metadata(raw_col, resolved, "index").unwrap_or(false),
+            default: None,
+            format: format.map(str::to_string),
+            enum_values,
+            enum_type_name,
+            postgres_native_enum: false,
+        });
+    }
+    columns
 }
 
 #[cfg(test)]
