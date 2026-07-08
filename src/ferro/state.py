@@ -35,8 +35,25 @@ def _ensure_active_session(session: SessionLike | None) -> None:
     if session is not None and session.session_id is None:
         raise RuntimeError(_SESSION_CLOSED_MESSAGE)
 
+class FerroModelClass(Protocol):
+    """Structural type for a registrable Ferro model class.
+
+    The registry keys by ``__ferro_identity__`` (what ``register_model``
+    derives its key from) and resolves bare references against ``__name__`` /
+    ``__qualname__``. Typed as a ``Protocol`` rather than ``type[Model]`` so
+    ``state`` — which ``models`` and ``metaclass`` import — does not import back
+    into them (circular import); a non-Ferro class handed to ``register_model``
+    is then a type error at the call site instead of a raw ``AttributeError``
+    at runtime.
+    """
+
+    __ferro_identity__: str
+    __name__: str
+    __qualname__: str
+
+
 # Global registry for models (Python side)
-_MODEL_REGISTRY_PY = {}
+_MODEL_REGISTRY_PY: dict[str, FerroModelClass] = {}
 
 _UNSET = object()
 
@@ -99,7 +116,7 @@ def ir_fingerprint(value: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_ir_json(value).encode("utf-8")).hexdigest()
 
 
-def register_model(cls: type) -> None:
+def register_model(cls: FerroModelClass) -> None:
     """Record a model class in the Python registry (provisional registration).
 
     Single entrypoint for every per-model ``_MODEL_REGISTRY_PY`` write. Today the
@@ -150,6 +167,12 @@ def deregister_model(name: str) -> None:
     Single deregistration entrypoint: removes the class-registry entry plus the
     compiled SchemaIR envelope and its fingerprint. Idempotent — absent keys are
     ignored — so it is safe for teardown paths and re-runs.
+
+    Takes a ``name`` (the canonical identity) rather than a class, unlike
+    :func:`register_model` which derives the key from ``cls``. The asymmetry is
+    deliberate: teardown paths iterate registry keys (e.g. evicting every
+    function-local model added during a test) and hold the identity string, not
+    the class object.
     """
     _MODEL_REGISTRY_PY.pop(name, None)
     evict_model_envelope(name)
