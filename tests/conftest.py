@@ -210,6 +210,34 @@ def cleanup_models():
     reset_engine()
 
 
+@pytest.fixture()
+def clean_registry():
+    """Fully wipe every per-model store before and after the test.
+
+    Shared home for the registry-wipe pattern that several suites previously
+    hand-rolled (e.g. ``test_ir_vectors_contract``'s ``clean_model_registry``,
+    the ``test_registry_entrypoints`` guard). Threading a newly added store into
+    the reset now happens once here instead of in each copy.
+    """
+    from ferro import clear_registry, reset_engine
+    from ferro import state as ferro_state
+
+    def _wipe() -> None:
+        reset_engine()
+        clear_registry()
+        ferro_state._MODEL_REGISTRY_PY.clear()
+        ferro_state._PENDING_RELATIONS.clear()
+        ferro_state._JOIN_TABLE_REGISTRY.clear()
+        ferro_state._SCHEMA_IR_BY_MODEL.clear()
+        ferro_state._SCHEMA_IR_FINGERPRINT_BY_MODEL.clear()
+        ferro_state._SCHEMA_IR_MODELSET = None
+        ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = None
+
+    _wipe()
+    yield
+    _wipe()
+
+
 @pytest.fixture(autouse=True)
 def _ferro_registry_isolation():
     """Snapshot/restore the global model registries around every test (FF-E).
@@ -221,12 +249,22 @@ def _ferro_registry_isolation():
     captured in the baseline snapshot and survive; function-local models are
     dropped when the test ends.
     """
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.state import (
+        _JOIN_TABLE_REGISTRY,
+        _MODEL_REGISTRY_PY,
+        _PENDING_RELATIONS,
+        deregister_model,
+    )
 
     models_snapshot = dict(_MODEL_REGISTRY_PY)
     pending_snapshot = list(_PENDING_RELATIONS)
     joins_snapshot = dict(_JOIN_TABLE_REGISTRY)
     yield
+    # Deregister function-local models through the entrypoint so their envelope
+    # + fingerprint are evicted too — a bare `.clear()`/restore of the registry
+    # would leave those caches disagreeing (the divergence #243 eliminates).
+    for name in set(_MODEL_REGISTRY_PY) - set(models_snapshot):
+        deregister_model(name)
     _MODEL_REGISTRY_PY.clear()
     _MODEL_REGISTRY_PY.update(models_snapshot)
     _PENDING_RELATIONS.clear()

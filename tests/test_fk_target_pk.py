@@ -30,11 +30,15 @@ def _isolate_relation_state():
     relation, including these stale ones, and blows up because their
     target models never declared the matching `BackRef()`.
     """
-    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS, deregister_model
 
     models_snapshot = dict(_MODEL_REGISTRY_PY)
     relations_snapshot = list(_PENDING_RELATIONS)
     yield
+    # Evict test-local models through the entrypoint so their envelope caches go
+    # with them, then restore the baseline snapshot (bulk teardown restore).
+    for name in set(_MODEL_REGISTRY_PY) - set(models_snapshot):
+        deregister_model(name)
     _MODEL_REGISTRY_PY.clear()
     _MODEL_REGISTRY_PY.update(models_snapshot)
     _PENDING_RELATIONS.clear()

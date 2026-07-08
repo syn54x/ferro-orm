@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from ferro import FerroField, Model, clear_registry, connect, engines, reset_engine
-from ferro.state import _MODEL_REGISTRY_PY
+from ferro.state import _MODEL_REGISTRY_PY, deregister_model, register_model
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -28,14 +28,15 @@ class BillingRow(Model):
 def cleanup():
     registered_before = set(_MODEL_REGISTRY_PY)
     # Other tests (e.g. test_sqlite_alembic_reconnect_hydration) clear the Python registry.
-    _MODEL_REGISTRY_PY.setdefault(BillingRow.__ferro_identity__, BillingRow)
+    if BillingRow.__ferro_identity__ not in _MODEL_REGISTRY_PY:
+        register_model(BillingRow.__ferro_identity__, BillingRow)
     reset_engine()
     clear_registry()
     yield
     reset_engine()
     clear_registry()
     for name in set(_MODEL_REGISTRY_PY) - registered_before:
-        del _MODEL_REGISTRY_PY[name]
+        deregister_model(name)
 
 
 def test_enum_fields_populated_for_deferred_annotations():

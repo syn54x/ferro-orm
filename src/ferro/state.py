@@ -1,3 +1,5 @@
+import hashlib
+import json
 from contextvars import ContextVar
 
 from typing import Any, Protocol
@@ -80,6 +82,74 @@ _SCHEMA_IR_MODELSET_FINGERPRINT: str | None = None
 # Per-model compiled SchemaIR artifacts and fingerprints.
 _SCHEMA_IR_BY_MODEL: dict[str, dict[str, Any]] = {}
 _SCHEMA_IR_FINGERPRINT_BY_MODEL: dict[str, str] = {}
+
+
+def canonical_ir_json(value: dict[str, Any]) -> str:
+    """Serialize an IR artifact with deterministic key ordering."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def ir_fingerprint(value: dict[str, Any]) -> str:
+    """Return the canonical SHA-256 fingerprint for an IR artifact.
+
+    Single source of the fingerprint function so a stored fingerprint is always
+    a pure function of the envelope it accompanies (the ADR fingerprint gate
+    reads these; a mismatched pair would serve stale schema silently).
+    """
+    return hashlib.sha256(canonical_ir_json(value).encode("utf-8")).hexdigest()
+
+
+def register_model(key: str, cls: type) -> None:
+    """Record a model class in the Python registry (provisional registration).
+
+    Single entrypoint for every per-model ``_MODEL_REGISTRY_PY`` write. Today the
+    writers are the metaclass (class-body registration, keyed by
+    ``__ferro_identity__``) and a handful of test fixtures that re-add models
+    after a registry wipe. Centralizing the write is the prefactor (#243) that
+    lets a later slice (#242) hook one site — e.g. a generation counter —
+    instead of chasing scattered dict assignments. Idempotent by construction.
+
+    ``key`` is passed explicitly rather than derived from ``cls`` so behavior is
+    identical to the direct writes this replaced (some marker-model fixtures
+    deliberately register under a bare ``__name__`` that a raw-FFI test relies
+    on); normalizing that key is a behavior change out of scope for this slice.
+    """
+    _MODEL_REGISTRY_PY[key] = cls
+
+
+def persist_model_envelope(name: str, envelope: dict[str, Any]) -> None:
+    """Store one model's (or join table's) compiled SchemaIR envelope + fingerprint.
+
+    The envelope-cache half of registration. The fingerprint is computed here
+    from the envelope — it is a pure function of it, so no caller can persist a
+    stale envelope/fingerprint pair. Keyed by the same ``name`` the IR compiler
+    uses (a model's ``__ferro_identity__`` or a join-table name).
+    """
+    _SCHEMA_IR_BY_MODEL[name] = envelope
+    _SCHEMA_IR_FINGERPRINT_BY_MODEL[name] = ir_fingerprint(envelope)
+
+
+def evict_model_envelope(name: str) -> None:
+    """Evict one entry from the SchemaIR envelope + fingerprint caches only.
+
+    The envelope-only counterpart of :func:`persist_model_envelope`. Used by the
+    join-table cleanup path (``clear_registry``), where the model registry must
+    stay untouched — join tables never live there, and ``clear_registry`` promises
+    declared models survive so they can cold-rehydrate.
+    """
+    _SCHEMA_IR_BY_MODEL.pop(name, None)
+    _SCHEMA_IR_FINGERPRINT_BY_MODEL.pop(name, None)
+
+
+def deregister_model(name: str) -> None:
+    """Evict one model from every per-model store (registry + envelope caches).
+
+    Single deregistration entrypoint: removes the class-registry entry plus the
+    compiled SchemaIR envelope and its fingerprint. Idempotent — absent keys are
+    ignored — so it is safe for teardown paths and re-runs.
+    """
+    _MODEL_REGISTRY_PY.pop(name, None)
+    evict_model_envelope(name)
 
 
 _NO_ROUTE_MESSAGE = (
