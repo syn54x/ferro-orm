@@ -22,7 +22,7 @@ use crate::introspect::{
     LiveColumn, LiveIndex, live_table_columns, live_table_indexes, quote_ident,
     sqlite_indexes_covering_column,
 };
-use crate::schema::{internal_create_tables, order_schemas_for_creation};
+use crate::schema::{internal_create_tables, order_models_for_migration};
 use crate::state::{MODEL_REGISTRY, engine_for_connection};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -362,7 +362,7 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
     let mut warnings = Vec::new();
     let mut ddl_ran = false;
 
-    for (_name, model) in order_schemas_for_creation(schemas) {
+    for (_name, model) in order_models_for_migration(schemas, &modelset) {
         let table_lower = model.table_name.clone();
         let Some(live) = live_table_columns(&engine, &table_lower).await? else {
             // Freshly created (or otherwise absent) tables have nothing to diff.

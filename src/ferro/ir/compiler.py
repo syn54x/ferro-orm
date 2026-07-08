@@ -390,7 +390,6 @@ def register_model_with_ir(
     payload = compile_schema_ir_payload(model_name, schema, table_name=table_name)
     register_model_schema(
         model_name,
-        json.dumps(schema),
         json.dumps(payload["models"][0]["columns"]),
         table_name,
     )
