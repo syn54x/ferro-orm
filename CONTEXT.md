@@ -32,6 +32,18 @@ _Avoid_: Select SQL, view definition, query body
 A `MaterializedView` that can be queried but never mutated. `save()`, `delete()`, and `create()` raise a clear error.
 _Avoid_: Immutable model, snapshot model
 
+**Storage token**:
+A word in the canonical `db_type` vocabulary (`text`, `bigint`, `timestamptz`, `jsonb`, …) naming how a column is stored. One shared vocabulary feeds every emitter; a token never means different things to different emitters.
+_Avoid_: SQL type string, dialect type, column type name
+
+**Storage lowering**:
+The dialect-side degrade of a storage token to the nearest type a backend supports (e.g. `jsonb` stores as plain JSON on SQLite). Lowering is silent and documented; it never changes value semantics — only the on-disk representation.
+_Avoid_: Fallback type, emulation, downgrade
+
+**Json-family field**:
+A field whose values Ferro stores as JSON documents: `dict`, `list` (any element type, including nested models), or a nested Pydantic model. Only json-family fields may opt into JSON storage tokens such as `jsonb`.
+_Avoid_: Object field, blob field, document column
+
 **Column spec**:
 The single authoritative record of one column's facts — identity, type, and constraints — derived exactly once from the field declaration. Provisional at class-body time; authoritative once relationship resolution completes.
 _Avoid_: Column metadata, enriched schema property, field dict
