@@ -125,7 +125,7 @@ def test_cross_thread_dirty_path_single_bulk_install(db_url, clean_registry) -> 
         try:
 
             async def run() -> None:
-                barrier.wait()
+                barrier.wait(timeout=10)
                 async with ferro.engines.session():
                     await OsThread.create(slot=slot)
 
