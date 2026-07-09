@@ -94,9 +94,11 @@ class Query(Generic[T]):
         self._offset: int | None = None
         self._m2m_context: dict[str, Any] | None = None
 
-    def _transaction_or_using(self) -> "RouteHandle":
+    async def _transaction_or_using(self) -> "RouteHandle":
+        from .. import _ensure_rust_registration_synced_for_operation
         from ..state import resolve_operation_scope
 
+        await _ensure_rust_registration_synced_for_operation()
         return resolve_operation_scope(using=self._using, session=self._session)
 
     def _clone(self) -> Self:
@@ -294,7 +296,7 @@ class Query(Generic[T]):
             "offset": self._offset,
             "m2m": self._m2m_context,
         }
-        route = self._transaction_or_using()
+        route = await self._transaction_or_using()
         return await fetch_filtered(
             self.model_cls,
             _query_ir_payload_to_json(query_def),
@@ -320,7 +322,7 @@ class Query(Generic[T]):
             "offset": None,
             "m2m": self._m2m_context,
         }
-        route = self._transaction_or_using()
+        route = await self._transaction_or_using()
         return await count_filtered(
             _model_identity(self.model_cls),
             _query_ir_payload_to_json(query_def),
@@ -345,7 +347,7 @@ class Query(Generic[T]):
             True
         """
         query_def = self._mutating_query_def("update")
-        route = self._transaction_or_using()
+        route = await self._transaction_or_using()
         return await update_filtered(
             _model_identity(self.model_cls),
             _query_ir_payload_to_json(query_def),
@@ -382,7 +384,7 @@ class Query(Generic[T]):
             True
         """
         query_def = self._mutating_query_def("delete")
-        route = self._transaction_or_using()
+        route = await self._transaction_or_using()
         return await delete_filtered(
             _model_identity(self.model_cls),
             _query_ir_payload_to_json(query_def),
@@ -427,7 +429,7 @@ class Query(Generic[T]):
             # Assume 'id' for now
             ids.append(getattr(inst, "id"))
 
-        route = self._transaction_or_using()
+        route = await self._transaction_or_using()
         await add_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
@@ -460,7 +462,7 @@ class Query(Generic[T]):
         for inst in instances:
             ids.append(getattr(inst, "id"))
 
-        route = self._transaction_or_using()
+        route = await self._transaction_or_using()
         await remove_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],
@@ -485,7 +487,7 @@ class Query(Generic[T]):
                 "'.clear()' can only be used on Many-to-Many relationships"
             )
 
-        route = self._transaction_or_using()
+        route = await self._transaction_or_using()
         await clear_m2m_links(
             self._m2m_context["join_table"],
             self._m2m_context["source_col"],

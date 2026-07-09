@@ -58,6 +58,29 @@ if not _logger.handlers:
 
 
 _RESOLVED_MODELSET_LOCK = threading.Lock()
+_OPERATION_REGISTRATION_SYNC_LOCK = threading.Lock()
+
+
+async def _ensure_rust_registration_synced_for_operation() -> None:
+    """Registration-only sync before ORM operations touch Rust (#247).
+
+    Clean path (O(1)): in-process generation comparison only — no FFI.
+    Dirty path: resolve + bulk install under a threading single-flight guard
+    (``_OPERATION_REGISTRATION_SYNC_LOCK``), matching ``_RESOLVED_MODELSET_LOCK``
+    two functions up. The guarded section is fully synchronous — no ``await``
+    inside — so a ``threading.Lock`` gives real cross-thread single-flight
+    without the cross-loop hang of a module-global ``asyncio.Lock``. Under
+    contention the event loop blocks for one resolve+install per generation; do
+    not offload this to a thread pool — that would reintroduce interleaving.
+    """
+    from .state import is_modelset_dirty
+
+    if not is_modelset_dirty():
+        return
+
+    with _OPERATION_REGISTRATION_SYNC_LOCK:
+        if is_modelset_dirty():
+            _ensure_rust_registration_synced()
 
 
 def ensure_resolved_modelset() -> dict[str, Any]:
