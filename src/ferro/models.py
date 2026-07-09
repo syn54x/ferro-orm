@@ -350,8 +350,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             if not spec.primary_key:
                 continue
             pk_field_name = field_name
-            assigns_new_id = spec.autoincrement
-            if assigns_new_id and getattr(self, field_name) is None and new_id is not None:
+            if spec.autoincrement and getattr(self, field_name) is None and new_id is not None:
                 setattr(self, field_name, new_id)
             pk_val = getattr(self, field_name)
             break

@@ -300,19 +300,25 @@ def compile_model_schema_ir(
     """
     if specs is None:
         specs = build_column_specs(model_cls)
-    model_cls.__ferro_columns__ = specs
     column_names = frozenset(specs)
     uniques = normalized_composite_uniques(model_cls, column_names)
     indexes = drop_overlap_with_uniques(
         normalized_composite_indexes(model_cls, column_names), uniques, model_name
     )
-    return _compile_and_persist_model_envelope(
+    envelope = _compile_and_persist_model_envelope(
         model_name,
         tuple(specs.values()),
         table_name=getattr(model_cls, "__ferro_table__", None),
         composite_uniques=uniques,
         composite_indexes=indexes,
     )
+    # Publish specs onto the class only after compile + persist succeed, so a
+    # composite-validation or persist failure leaves the prior specs in place
+    # (never fresh specs with no matching persisted envelope). This is the
+    # "``__ferro_columns__`` can never go stale relative to the envelope"
+    # invariant, made atomic.
+    model_cls.__ferro_columns__ = specs
+    return envelope
 
 
 def _model_payload_from_envelope(name: str) -> dict[str, Any]:

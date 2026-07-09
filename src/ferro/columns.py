@@ -42,6 +42,11 @@ class ColumnSpec:
     index: bool
     default: Any
     format: str | None
+    # The scalar Python type, ``Annotated``-stripped. NOTE: producers differ —
+    # ``build_column_specs`` stores the stripped annotation, which may still be
+    # a union (e.g. ``int | None`` for an optional PK); ``pk_spec`` /
+    # ``fk_shadow_spec`` store the fully-unwrapped scalar. Consumers that need a
+    # bare scalar must unwrap (``_scalar_part_of_annotation`` / union handling).
     python_type: Any
     enum_values: tuple[Any, ...] | None = None
     enum_type_name: str | None = None
@@ -72,7 +77,13 @@ def _derive_nullable(
     fk_nullable: bool | None,
     allows_none: bool,
 ) -> bool:
-    """Single derivation site for nullability (PK clamp included, FF-B B5)."""
+    """Single derivation site for nullability (PK clamp included, FF-B B5).
+
+    Precedence: PK clamp (NOT NULL) > FK-derived > explicit > annotation. FK
+    outranks ``explicit`` only nominally — a shadow ``{fk}_id`` column has no
+    ``FerroField`` of its own, so its ``explicit`` is always ``None`` and the
+    two never compete; ordering FK first keeps the FK branch self-contained.
+    """
     if primary_key:
         return False
     if fk_nullable is not None:
