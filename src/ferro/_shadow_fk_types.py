@@ -26,21 +26,18 @@ def _scalar_part_of_annotation(ann: Any) -> Any:
 
 
 def pk_python_type_for_model(target: type[Any]) -> Any | None:
-    """Return the PK field's scalar annotation (inner ``T`` of ``Annotated[T, ...]``), or None."""
-    ferro_fields = getattr(target, "ferro_fields", None)
-    if not ferro_fields:
+    """Return the PK column's scalar python type from the target's specs.
+
+    Consults ferro-declared PKs only — the raw json_schema_extra path keeps
+    its historical invisibility here until ADR-0002's parity commit.
+    """
+    specs = getattr(target, "__ferro_columns__", None)
+    if not specs:
         return None
-    pk_name = None
-    for fname, fmeta in ferro_fields.items():
-        if getattr(fmeta, "primary_key", False):
-            pk_name = fname
-            break
-    if pk_name is None:
-        return None
-    mf = getattr(target, "model_fields", {}).get(pk_name)
-    if mf is None:
-        return None
-    return _scalar_part_of_annotation(mf.annotation)
+    for spec in specs.values():
+        if spec.primary_key and spec.declared_via == "ferro":
+            return spec.python_type
+    return None
 
 
 def shadow_annotation_for_pk(pk_ann: Any) -> Any:

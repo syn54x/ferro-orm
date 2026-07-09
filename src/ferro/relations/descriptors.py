@@ -40,11 +40,10 @@ class RelationshipDescriptor(BaseModel):
 
         # Find the primary key value of the current instance
         pk_field = "id"
-        if hasattr(instance.__class__, "ferro_fields"):
-            for f_name, f_meta in instance.__class__.ferro_fields.items():
-                if f_meta.primary_key:
-                    pk_field = f_name
-                    break
+        for f_name, spec in getattr(instance.__class__, "__ferro_columns__", {}).items():
+            if spec.primary_key and spec.declared_via == "ferro":
+                pk_field = f_name
+                break
         pk_val = getattr(instance, pk_field)
 
         if self.is_m2m:
@@ -54,16 +53,6 @@ class RelationshipDescriptor(BaseModel):
                 self._target_model,
                 using=_instance_origin_outside_transaction(instance),
             )._m2m(self.join_table, self.source_col, self.target_col, pk_val)
-
-        # Find the primary key value of the current instance
-        pk_field = "id"
-        if hasattr(instance.__class__, "ferro_fields"):
-            for f_name, f_meta in instance.__class__.ferro_fields.items():
-                if f_meta.primary_key:
-                    pk_field = f_name
-                    break
-
-        pk_val = getattr(instance, pk_field)
 
         fk_field = f"{self.field_name}_id"
         if self.is_one_to_one:

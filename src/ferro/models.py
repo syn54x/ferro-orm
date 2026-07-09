@@ -344,34 +344,18 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         pk_val = None
         pk_field_name = None
 
-        for field_name, metadata in self.__class__.ferro_fields.items():
-            if metadata.primary_key:
-                pk_field_name = field_name
-                # Autoincrement is resolved once, at compile time, onto the
-                # column spec (ColumnSpec.autoincrement) — the single
-                # derivation site (#153). ``metadata.autoincrement`` (the
-                # FerroField the user declared) is often left ``None`` when
-                # unset, so read the resolved fact here instead.
-                column_spec = self.__class__.__ferro_columns__.get(field_name)
-                autoincrement = (
-                    column_spec.autoincrement
-                    if column_spec is not None
-                    else bool(metadata.autoincrement)
-                )
-                if autoincrement and getattr(self, field_name) is None:
-                    if new_id is not None:
-                        setattr(self, field_name, new_id)
-                pk_val = getattr(self, field_name)
-                break
-
-        if pk_field_name is None:
-            for field_name, field in self.__class__.model_fields.items():
-                if getattr(field, "json_schema_extra", {}).get("primary_key"):
-                    pk_field_name = field_name
-                    if getattr(self, field_name) is None and new_id is not None:
-                        setattr(self, field_name, new_id)
-                    pk_val = getattr(self, field_name)
-                    break
+        for field_name, spec in self.__class__.__ferro_columns__.items():
+            if not spec.primary_key:
+                continue
+            pk_field_name = field_name
+            # The raw json_schema_extra path historically assigned the new id
+            # whenever the PK was unset, autoincrement or not; the ferro path
+            # gated on autoincrement. Preserved until ADR-0002's parity commit.
+            assigns_new_id = spec.autoincrement if spec.declared_via == "ferro" else True
+            if assigns_new_id and getattr(self, field_name) is None and new_id is not None:
+                setattr(self, field_name, new_id)
+            pk_val = getattr(self, field_name)
+            break
 
         if pk_val is not None:
             register_instance(
@@ -412,14 +396,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     @classmethod
     def _primary_key_field_name(cls) -> str | None:
-        for field_name, metadata in cls.ferro_fields.items():
-            if metadata.primary_key:
+        for field_name, spec in cls.__ferro_columns__.items():
+            if spec.primary_key:
                 return field_name
-
-        for field_name, field in cls.model_fields.items():
-            if getattr(field, "json_schema_extra", {}).get("primary_key"):
-                return field_name
-
         return None
 
     @classmethod
