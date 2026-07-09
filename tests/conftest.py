@@ -232,6 +232,10 @@ def clean_registry():
         ferro_state._SCHEMA_IR_FINGERPRINT_BY_MODEL.clear()
         ferro_state._SCHEMA_IR_MODELSET = None
         ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = None
+        ferro_state.reset_registration_generations_for_test()
+        from ferro.ir.compiler import reset_schema_ir_compile_count_for_test
+
+        reset_schema_ir_compile_count_for_test()
 
     _wipe()
     yield

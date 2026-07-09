@@ -1,13 +1,15 @@
 """FF-E E4: resolve_relationships' schema re-registration pass fails loudly.
 
-The second pass used to wrap every re-registration in `except Exception:
-pass`, leaving a model that failed to rebuild silently on its
-pre-relationship schema.
+The selective re-registration pass used to wrap every re-registration in
+``except Exception: pass``, leaving a model that failed to rebuild silently
+on its pre-relationship schema.
 """
+
+from typing import Annotated
 
 import pytest
 
-from ferro import Model
+from ferro import BackRef, ForeignKey, Model, Relation
 from ferro.relations import resolve_relationships
 
 
@@ -28,6 +30,12 @@ def test_second_pass_rebuild_failure_aborts_with_model_named(monkeypatch):
     class E4Broken(Model):
         id: int | None = None
         name: str
+        peers: Relation[list["E4Peer"]] = BackRef()
+
+    class E4Peer(Model):
+        id: int | None = None
+        broken_id: int | None = None
+        broken: Annotated[E4Broken, ForeignKey(related_name="peers")]
 
     import ferro.relations as relations_mod
 

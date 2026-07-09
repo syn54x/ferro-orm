@@ -18,15 +18,29 @@ from .._core import (
     _ddl_fk_name,
     _ddl_single_index_name,
     _ddl_single_unique_name,
-    register_model_schema,
 )
 from ..schema_metadata import build_model_schema
 from ..state import (
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
+    _SCHEMA_IR_BY_MODEL,
 )
 
 _IR_VERSION = 1
+
+# Test-only counter bumped at the single SchemaIR compile choke point (#245).
+_SCHEMA_IR_COMPILE_COUNT_FOR_TEST = 0
+
+
+def schema_ir_compile_count_for_test() -> int:
+    """Return how many per-model SchemaIR compiles have run (test instrument)."""
+    return _SCHEMA_IR_COMPILE_COUNT_FOR_TEST
+
+
+def reset_schema_ir_compile_count_for_test() -> None:
+    """Reset the compile counter (``clean_registry`` fixture)."""
+    global _SCHEMA_IR_COMPILE_COUNT_FOR_TEST
+    _SCHEMA_IR_COMPILE_COUNT_FOR_TEST = 0
 
 
 def _resolve_ref(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, Any]:
@@ -363,25 +377,47 @@ def _persist_schema_ir_envelope(model_name: str, envelope: dict[str, Any]) -> No
     ferro_state.persist_model_envelope(model_name, envelope)
 
 
+def _compile_and_persist_model_envelope(
+    model_name: str,
+    schema: dict[str, Any],
+    *,
+    table_name: str | None = None,
+    model_cls: type[Any] | None = None,
+) -> dict[str, Any]:
+    """Compile one model or join table to SchemaIR and persist its envelope.
+
+    Single compile choke point for the test instrument and for every producer
+    of per-model envelopes (#245).
+    """
+    global _SCHEMA_IR_COMPILE_COUNT_FOR_TEST
+    _SCHEMA_IR_COMPILE_COUNT_FOR_TEST += 1
+    resolved_table_name = table_name
+    if resolved_table_name is None and model_cls is not None:
+        resolved_table_name = getattr(model_cls, "__ferro_table__", None)
+    payload = compile_schema_ir_payload(
+        model_name,
+        schema,
+        table_name=resolved_table_name,
+    )
+    envelope = wrap_schema_ir(payload)
+    _persist_schema_ir_envelope(model_name, envelope)
+    return envelope
+
+
 def register_model_with_ir(
     model_name: str,
     schema: dict[str, Any],
     table_name: str,
 ) -> dict[str, Any]:
-    """Compile SchemaIR once, register Rust state, and persist the envelope.
+    """Compile SchemaIR once and persist the envelope.
 
     Single registration bundle for metaclass, relationship resolution, join
-    tables, and ``Model._reregister_ferro`` (#236).
+    tables, and ``Model._reregister_ferro`` (#236). Rust registration is
+    installed only via the bulk push seam (ADR #242 / #245).
     """
-    payload = compile_schema_ir_payload(model_name, schema, table_name=table_name)
-    register_model_schema(
-        model_name,
-        json.dumps(payload["models"][0]["columns"]),
-        table_name,
+    return _compile_and_persist_model_envelope(
+        model_name, schema, table_name=table_name
     )
-    envelope = wrap_schema_ir(payload)
-    _persist_schema_ir_envelope(model_name, envelope)
-    return envelope
 
 
 def wrap_schema_ir(payload: dict[str, Any]) -> dict[str, Any]:
@@ -409,39 +445,41 @@ def compile_model_schema_ir(
     """
     if schema is None:
         schema = build_model_schema(model_cls)
-    payload = compile_schema_ir_payload(
-        model_name,
-        schema,
-        table_name=getattr(model_cls, "__ferro_table__", None),
+    return _compile_and_persist_model_envelope(
+        model_name, schema, model_cls=model_cls
     )
-    envelope = wrap_schema_ir(payload)
-    _persist_schema_ir_envelope(model_name, envelope)
-    return envelope
 
 
-def compile_registry_schema_ir() -> dict[str, Any]:
-    """Compile and persist a deterministic SchemaIR envelope for all models.
+def _model_payload_from_envelope(name: str) -> dict[str, Any]:
+    """Return one model's SchemaIR payload object from the envelope cache.
 
-    Returns:
-        The compiled model-set SchemaIR envelope, sorted by model name.
+    The returned dict is a live reference into ``_SCHEMA_IR_BY_MODEL`` — the
+    assembled modelset shares these payload objects. Treat them as read-only;
+    in-place mutation corrupts the per-model cache and survives clean-path
+    re-assembles indefinitely (#245).
     """
+    envelope = _SCHEMA_IR_BY_MODEL.get(name)
+    if envelope is None:
+        raise RuntimeError(
+            f"Missing SchemaIR envelope for '{name}'. "
+            "Compile the model (or run relationship resolution) before assembling "
+            "the modelset."
+        )
+    return envelope["payload"]["models"][0]
+
+
+def _assemble_modelset_envelope() -> dict[str, Any]:
+    """Stitch per-model envelopes into one sorted modelset envelope."""
     models: list[dict[str, Any]] = []
-    for model_name, model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
-        model_envelope = compile_model_schema_ir(model_name, model_cls)
-        model_payload = model_envelope["payload"]["models"][0]
-        models.append(model_payload)
+    for model_name, _model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
+        models.append(_model_payload_from_envelope(model_name))
 
     for table_name, table_schema in sorted(
         _JOIN_TABLE_REGISTRY.items(), key=lambda item: item[0]
     ):
         if not isinstance(table_schema, dict):
             continue
-        join_payload = compile_schema_ir_payload(
-            table_name,
-            table_schema,
-            table_name=table_name,
-        )["models"][0]
-        models.append(join_payload)
+        models.append(_model_payload_from_envelope(table_name))
 
     envelope = {
         "ir_kind": "schema",
@@ -455,6 +493,65 @@ def compile_registry_schema_ir() -> dict[str, Any]:
     ferro_state._SCHEMA_IR_MODELSET = envelope
     ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = ferro_state.ir_fingerprint(envelope)
     return envelope
+
+
+def _missing_registry_envelope_names() -> list[str]:
+    missing: list[str] = []
+    for name in _MODEL_REGISTRY_PY:
+        if name not in _SCHEMA_IR_BY_MODEL:
+            missing.append(name)
+    for table_name, table_schema in _JOIN_TABLE_REGISTRY.items():
+        if isinstance(table_schema, dict) and table_name not in _SCHEMA_IR_BY_MODEL:
+            missing.append(table_name)
+    return missing
+
+
+def _recompile_missing_registry_envelopes() -> None:
+    for model_name in _missing_registry_envelope_names():
+        model_cls = _MODEL_REGISTRY_PY.get(model_name)
+        if model_cls is not None:
+            compile_model_schema_ir(model_name, model_cls)
+            continue
+        table_schema = _JOIN_TABLE_REGISTRY.get(model_name)
+        if isinstance(table_schema, dict):
+            register_model_with_ir(model_name, table_schema, model_name)
+
+
+def _recompile_all_registered_envelopes() -> None:
+    """Recompile every registered model and join-table envelope.
+
+    Used when ``compile_registry_schema_ir()`` is invoked on a dirty registry
+    without going through ``resolve_relationships()`` — direct callers (tests,
+    Alembic-adjacent tooling) historically relied on compile-not-assemble here.
+    The connect/reconnect clean path never hits this (#245).
+    """
+    for model_name, model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
+        compile_model_schema_ir(model_name, model_cls)
+    for table_name, table_schema in sorted(
+        _JOIN_TABLE_REGISTRY.items(), key=lambda item: item[0]
+    ):
+        if isinstance(table_schema, dict):
+            register_model_with_ir(table_name, table_schema, table_name)
+
+
+def compile_registry_schema_ir() -> dict[str, Any]:
+    """Assemble and persist a deterministic SchemaIR envelope for all models.
+
+    Stitches already-compiled per-model envelopes from ``_SCHEMA_IR_BY_MODEL``
+    for every entry in ``_MODEL_REGISTRY_PY`` and ``_JOIN_TABLE_REGISTRY``.
+    On a dirty registry, recompiles envelopes first so direct callers that
+    bypass ``resolve_relationships()`` still observe current registry state.
+    After ``ensure_resolved_modelset()`` on the clean path, this is
+    assemble-only (#245).
+
+    Returns:
+        The assembled model-set SchemaIR envelope, sorted by model name.
+    """
+    if ferro_state.is_modelset_dirty():
+        _recompile_all_registered_envelopes()
+    else:
+        _recompile_missing_registry_envelopes()
+    return _assemble_modelset_envelope()
 
 
 def schema_ir_fingerprint(ir_envelope: dict[str, Any]) -> str:

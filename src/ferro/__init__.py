@@ -6,6 +6,8 @@ to provide a seamless, high-performance database experience.
 """
 
 import logging
+import threading
+from typing import Any
 
 from . import _deprecations as _deprecations  # noqa: F401 — enable deprecation visibility
 
@@ -55,6 +57,45 @@ if not _logger.handlers:
     _logger.propagate = False
 
 
+_RESOLVED_MODELSET_LOCK = threading.Lock()
+
+
+def ensure_resolved_modelset() -> dict[str, Any]:
+    """Ensure the SchemaIR modelset reflects the current registry.
+
+    Clean path (O(1)): one in-process generation comparison, then assemble
+    already-compiled envelopes without recompiling. Dirty path: run
+    ``resolve_relationships()`` (which clears the generation counter on success),
+    then assemble (#245).
+
+    Defining model classes concurrently with ``connect``/``create_tables``/``migrate``
+    is unsupported: a registry entry can become visible before its envelope is
+    persisted, producing a transient missing-envelope error on the unlocked fast
+    path.
+    """
+    from .ir.compiler import compile_registry_schema_ir
+    from .relations import resolve_relationships
+    from .state import is_modelset_dirty
+
+    if not is_modelset_dirty():
+        return compile_registry_schema_ir()
+
+    with _RESOLVED_MODELSET_LOCK:
+        if is_modelset_dirty():
+            resolve_relationships()
+        return compile_registry_schema_ir()
+
+
+def _ensure_rust_registration_synced() -> None:
+    """Resolve the modelset if needed, then push it to the Rust runtime."""
+    from . import state as ferro_state
+
+    envelope = ensure_resolved_modelset()
+    _push_registration_to_rust(
+        envelope, fingerprint=ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT
+    )
+
+
 def clear_registry() -> None:
     """Reset the compiled/registered schema state.
 
@@ -87,25 +128,42 @@ def clear_registry() -> None:
     _JOIN_TABLE_REGISTRY.clear()
 
 
-def _push_registration_to_rust() -> None:
-    """Assemble the resolved modelset and install it in the Rust runtime.
+def _push_registration_to_rust(
+    envelope: dict[str, Any] | None = None,
+    *,
+    fingerprint: str | None = None,
+) -> None:
+    """Install an assembled modelset in the Rust runtime.
 
-    The single Rust registration sync seam (#244): compiles the full registry
-    SchemaIR, then hands the assembled modelset plus its fingerprint to the
-    atomic bulk-install FFI. Rust builds the column registry, swaps the
-    registry + modelset + fingerprint under one lock (build-then-swap,
-    retained-last-good on failure), and skips the swap entirely when the
-    fingerprint already matches — so a clean reconnect installs nothing.
+    The single Rust registration sync seam (#244): hands the assembled modelset
+    plus its fingerprint to the atomic bulk-install FFI. Rust builds the column
+    registry, swaps the registry + modelset + fingerprint under one lock
+    (build-then-swap, retained-last-good on failure), and skips the swap
+    entirely when the fingerprint already matches — so a clean reconnect installs
+    nothing.
 
-    Callers must have run ``resolve_relationships()`` first so join tables and
-    shadow FK columns are present in the assembled modelset. (Removing the
-    per-connect recompile in favor of an assemble-only step is slice #245.)
+    When called from ``_ensure_rust_registration_synced``, pass the envelope and
+    cached fingerprint returned by ``ensure_resolved_modelset()`` so the clean
+    path performs one assemble and one fingerprint. With no arguments, assembles
+    (or re-assembles) the current registry for direct callers such as tests.
     """
     import json as _json
+
+    from . import state as ferro_state
     from .ir.compiler import compile_registry_schema_ir, schema_ir_fingerprint
 
-    envelope = compile_registry_schema_ir()
-    _install_registration(_json.dumps(envelope), schema_ir_fingerprint(envelope))
+    if envelope is None:
+        envelope = compile_registry_schema_ir()
+    if fingerprint is None:
+        cached = ferro_state._SCHEMA_IR_MODELSET
+        if (
+            cached is envelope
+            and ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT is not None
+        ):
+            fingerprint = ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT
+        else:
+            fingerprint = schema_ir_fingerprint(envelope)
+    _install_registration(_json.dumps(envelope), fingerprint)
 
 
 class PoolConfig(BaseModel):
@@ -190,10 +248,7 @@ async def connect(
     For schema changes beyond these (renames, primary-key changes, complex
     transforms), use the Alembic bridge — see ``docs/guide/migrations.md``.
     """
-    from .relations import resolve_relationships
-
-    resolve_relationships()
-    _push_registration_to_rust()
+    _ensure_rust_registration_synced()
 
     pool_config = pool or PoolConfig()
     await _core_connect(
@@ -222,10 +277,7 @@ async def create_tables(using=None):
     Args:
         using: Named connection to create tables on, or None for the default.
     """
-    from .relations import resolve_relationships
-
-    resolve_relationships()
-    _push_registration_to_rust()
+    _ensure_rust_registration_synced()
     return await _core_create_tables(using=using)
 
 
@@ -241,10 +293,7 @@ async def migrate(using=None, updates=True, destructive=False):
         updates: If True (default), add missing columns and reconcile type/nullability drift.
         destructive: If True, also drop live columns absent from the model. Implies ``updates``.
     """
-    from .relations import resolve_relationships
-
-    resolve_relationships()
-    _push_registration_to_rust()
+    _ensure_rust_registration_synced()
     return await _core_migrate(using=using, updates=updates, destructive=destructive)
 
 
@@ -278,6 +327,7 @@ __all__ = [
     "reset_engine",
     "set_default_connection",
     "clear_registry",
+    "ensure_resolved_modelset",
     "evict_instance",
     "transaction",
     "execute",

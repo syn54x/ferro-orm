@@ -1,4 +1,3 @@
-import json
 from typing import ForwardRef
 
 from ..ir import register_model_with_ir
@@ -8,12 +7,12 @@ from .._shadow_fk_types import (
     schema_fragment_for_pk,
 )
 from ..base import ForeignKey, ManyToManyRelation
-from ..ir import compile_registry_schema_ir
 from ..schema_metadata import build_model_schema
 from ..state import (  # noqa: F401
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
     _PENDING_RELATIONS,
+    mark_modelset_resolved,
     resolve_model_reference,
 )
 from .descriptors import RelationshipDescriptor
@@ -34,7 +33,10 @@ def resolve_relationships():
     to_process = list(_PENDING_RELATIONS)
     _PENDING_RELATIONS.clear()
 
+    recompile_targets: set[str] = set()
+
     for model_name, field_name, rel in to_process:
+        recompile_targets.add(model_name)
         # 1. Resolve 'to' model
         if isinstance(rel.to, (str, ForwardRef)):
             to_name = rel.to if isinstance(rel.to, str) else rel.to.__forward_arg__
@@ -47,6 +49,7 @@ def resolve_relationships():
 
         # 2. Cross-validate with declared reverse relation field.
         target_model = rel.to
+        recompile_targets.add(target_model.__ferro_identity__)
         if not hasattr(target_model, rel.related_name):
             raise RuntimeError(
                 f"Model '{model_name}' defines a relationship to '{target_model.__name__}' "
@@ -151,12 +154,16 @@ def resolve_relationships():
             register_model_with_ir(join_table, join_schema, join_table)
             _JOIN_TABLE_REGISTRY[join_table] = join_schema
 
-    reconcile_shadow_fk_types(_MODEL_REGISTRY_PY)
+    rebuilt = reconcile_shadow_fk_types(_MODEL_REGISTRY_PY)
+    for model_cls in rebuilt:
+        recompile_targets.add(model_cls.__ferro_identity__)
 
-    # Second pass: Re-register schemas — loudly (FF-E E4). A model whose
-    # schema fails to rebuild here would otherwise be silently left on its
-    # pre-relationship schema.
-    for model_name, model_cls in _MODEL_REGISTRY_PY.items():
+    # Second pass: recompile only models whose schema changed during resolution
+    # (relationship sources/targets and shadow-FK reconciliation targets).
+    for model_name in sorted(recompile_targets):
+        model_cls = _MODEL_REGISTRY_PY.get(model_name)
+        if model_cls is None:
+            continue
         try:
             schema = build_model_schema(model_cls)
         except Exception as exc:
@@ -168,5 +175,5 @@ def resolve_relationships():
             model_name, schema, model_cls.__ferro_table__
         )
 
-    compile_registry_schema_ir()
+    mark_modelset_resolved()
     _PENDING_RELATIONS.clear()
