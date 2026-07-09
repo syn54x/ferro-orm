@@ -5,12 +5,11 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import Model, Relation, connect, create_tables, reset_engine
+from ferro import Model, Relation, connect, reset_engine
 from ferro._core import _bulk_install_count_for_test
 from ferro.base import FerroField, ForeignKey
 from ferro.fields import BackRef
 from ferro.ir.compiler import (
-    compile_registry_schema_ir,
     reset_schema_ir_compile_count_for_test,
     schema_ir_compile_count_for_test,
 )
@@ -139,5 +138,7 @@ async def test_ensure_rust_registration_synced_routes_connect(db_url, clean_regi
         value: str
 
     await connect(db_url, auto_migrate=True)
-    assert ferro_state._SCHEMA_IR_MODELSET is not None
-    assert ensure_resolved_modelset() == ferro_state._SCHEMA_IR_MODELSET
+    reset_schema_ir_compile_count_for_test()
+    modelset = ensure_resolved_modelset()
+    assert schema_ir_compile_count_for_test() == 0
+    assert modelset is ferro_state._SCHEMA_IR_MODELSET

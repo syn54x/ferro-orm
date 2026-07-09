@@ -451,6 +451,13 @@ def compile_model_schema_ir(
 
 
 def _model_payload_from_envelope(name: str) -> dict[str, Any]:
+    """Return one model's SchemaIR payload object from the envelope cache.
+
+    The returned dict is a live reference into ``_SCHEMA_IR_BY_MODEL`` — the
+    assembled modelset shares these payload objects. Treat them as read-only;
+    in-place mutation corrupts the per-model cache and survives clean-path
+    re-assembles indefinitely (#245).
+    """
     envelope = _SCHEMA_IR_BY_MODEL.get(name)
     if envelope is None:
         raise RuntimeError(
