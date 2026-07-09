@@ -1,13 +1,9 @@
 from typing import ForwardRef
 
-from ..ir import register_model_with_ir
-from .._shadow_fk_types import (
-    pk_python_type_for_model,
-    reconcile_shadow_fk_types,
-    schema_fragment_for_pk,
-)
+from .._shadow_fk_types import pk_python_type_for_model, reconcile_shadow_fk_types
 from ..base import ForeignKey, ManyToManyRelation
-from ..schema_metadata import build_model_schema
+from ..columns import fk_shadow_spec
+from ..ir.compiler import compile_model_schema_ir, register_model_with_ir
 from ..state import (  # noqa: F401
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
@@ -121,59 +117,53 @@ def resolve_relationships():
             )
 
             # 4. Register Join Table schema with Rust
-            source_schema = schema_fragment_for_pk(
-                pk_python_type_for_model(source_model)
+            join_columns = (
+                fk_shadow_spec(
+                    source_col,
+                    python_type=pk_python_type_for_model(source_model),
+                    to_table=source_table,
+                ),
+                fk_shadow_spec(
+                    target_col,
+                    python_type=pk_python_type_for_model(target_model),
+                    to_table=target_table,
+                ),
             )
-            target_schema = schema_fragment_for_pk(
-                pk_python_type_for_model(target_model)
+            composite_uniques = ((source_col, target_col),)
+            composite_indexes = (
+                ((target_col, source_col),) if rel.reverse_index else ()
             )
-            join_schema = {
-                "properties": {
-                    source_col: {
-                        **source_schema,
-                        "ferro_nullable": False,
-                        "foreign_key": {
-                            "to_table": source_table,
-                            "on_delete": "CASCADE",
-                        },
-                    },
-                    target_col: {
-                        **target_schema,
-                        "ferro_nullable": False,
-                        "foreign_key": {
-                            "to_table": target_table,
-                            "on_delete": "CASCADE",
-                        },
-                    },
-                },
-                "required": [source_col, target_col],
-                "ferro_composite_uniques": [[source_col, target_col]],
+            register_model_with_ir(
+                join_table,
+                join_columns,
+                join_table,
+                composite_uniques=composite_uniques,
+                composite_indexes=composite_indexes,
+            )
+            _JOIN_TABLE_REGISTRY[join_table] = {
+                "columns": join_columns,
+                "composite_uniques": composite_uniques,
+                "composite_indexes": composite_indexes,
             }
-            if rel.reverse_index:
-                join_schema["ferro_composite_indexes"] = [[target_col, source_col]]
-            register_model_with_ir(join_table, join_schema, join_table)
-            _JOIN_TABLE_REGISTRY[join_table] = join_schema
 
     rebuilt = reconcile_shadow_fk_types(_MODEL_REGISTRY_PY)
     for model_cls in rebuilt:
         recompile_targets.add(model_cls.__ferro_identity__)
 
-    # Second pass: recompile only models whose schema changed during resolution
-    # (relationship sources/targets and shadow-FK reconciliation targets).
+    # Second pass: rebuild specs only for models whose schema changed during
+    # resolution (relationship sources/targets and shadow-FK reconciliation
+    # targets). Replacement, never mutation (grilling Q3).
     for model_name in sorted(recompile_targets):
         model_cls = _MODEL_REGISTRY_PY.get(model_name)
         if model_cls is None:
             continue
         try:
-            schema = build_model_schema(model_cls)
+            compile_model_schema_ir(model_name, model_cls)
         except Exception as exc:
             raise RuntimeError(
                 f"Ferro failed to rebuild the schema for model '{model_name}' "
                 f"while resolving relationships: {exc}"
             ) from exc
-        register_model_with_ir(
-            model_name, schema, model_cls.__ferro_table__
-        )
 
     mark_modelset_resolved()
     _PENDING_RELATIONS.clear()

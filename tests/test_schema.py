@@ -1,11 +1,12 @@
+from decimal import Decimal
+from enum import StrEnum
+from typing import Annotated, Dict, List
+
 import pytest
+from pydantic import Field
+
 import ferro
 from ferro import FerroField, Model
-from pydantic import Field
-from typing import Annotated
-from enum import StrEnum
-from decimal import Decimal
-from typing import Dict, List
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -101,10 +102,10 @@ async def test_auto_migrate_runtime_ddl_uses_logical_decimal_and_json_types(db_u
         metadata: Dict[str, str]
         tags: List[str]
 
-    props = LogicalTypeRow.__ferro_schema__["properties"]
-    assert props["price"]["format"] == "decimal"
-    assert props["metadata"]["type"] == "object"
-    assert props["tags"]["type"] == "array"
+    columns = LogicalTypeRow.__ferro_columns__
+    assert columns["price"].format == "decimal"
+    assert columns["metadata"].logical_type == "json"
+    assert columns["tags"].logical_type == "json"
 
     await ferro.connect(db_url, auto_migrate=True)
 

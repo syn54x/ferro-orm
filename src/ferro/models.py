@@ -1,6 +1,5 @@
 """Define the core ORM model base and transaction helpers for Ferro."""
 
-import json
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import (
@@ -21,7 +20,6 @@ from ._bind_payload import save_bind_payload
 from ._core import (
     begin_transaction,
     commit_transaction,
-    evict_instance as _core_evict_instance,
     fetch_all,
     register_instance,
     rollback_transaction,
@@ -30,19 +28,21 @@ from ._core import (
     transaction_connection_name,
     update_record,
 )
+from ._core import (
+    evict_instance as _core_evict_instance,
+)
 from .base import ForeignKey, foreign_key_allows_none
 from .exceptions import ModelDoesNotExist
 from .metaclass import ModelMetaclass
 from .query import Predicate, Query
 from .state import (
-    RouteHandle,
     _CURRENT_TRANSACTION,
     _CURRENT_TRANSACTION_CONNECTION,
+    RouteHandle,
     resolve_operation_scope,
     resolve_transaction_scope,
     route_for_transaction,
 )
-
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
 _FERRO_PERSISTED_ATTR = "__ferro_persisted"
@@ -213,13 +213,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     @classmethod
     def _reregister_ferro(cls) -> None:
         """Re-persist this model's SchemaIR envelope (e.g. after envelope eviction)."""
-        schema = getattr(cls, "__ferro_schema__", None)
-        if schema is not None:
-            from .ir import register_model_with_ir
+        from .ir.compiler import compile_model_schema_ir
 
-            register_model_with_ir(
-                cls.__ferro_identity__, schema, cls.__ferro_table__
-            )
+        compile_model_schema_ir(cls.__ferro_identity__, cls)
 
     model_config = ConfigDict(
         from_attributes=True,
@@ -351,7 +347,18 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         for field_name, metadata in self.__class__.ferro_fields.items():
             if metadata.primary_key:
                 pk_field_name = field_name
-                if metadata.autoincrement and getattr(self, field_name) is None:
+                # Autoincrement is resolved once, at compile time, onto the
+                # column spec (ColumnSpec.autoincrement) — the single
+                # derivation site (#153). ``metadata.autoincrement`` (the
+                # FerroField the user declared) is often left ``None`` when
+                # unset, so read the resolved fact here instead.
+                column_spec = self.__class__.__ferro_columns__.get(field_name)
+                autoincrement = (
+                    column_spec.autoincrement
+                    if column_spec is not None
+                    else bool(metadata.autoincrement)
+                )
+                if autoincrement and getattr(self, field_name) is None:
                     if new_id is not None:
                         setattr(self, field_name, new_id)
                 pk_val = getattr(self, field_name)

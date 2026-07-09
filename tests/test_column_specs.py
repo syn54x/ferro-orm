@@ -1,0 +1,106 @@
+"""ColumnSpec builder: one derivation site per column fact (grilling 2026-07-08)."""
+from typing import Annotated
+from uuid import UUID
+
+from pydantic import Field as PydanticField
+
+from ferro import Model
+from ferro.base import FerroField
+from ferro.columns import build_column_specs, fk_shadow_spec, pk_spec
+
+
+class TestAutoincrementDerivation:
+    """Pins BOTH historical defaulting rules (#153). Unified in commit 3 / ADR-0002."""
+
+    def test_ferro_path_integer_pk_defaults_true(self, clean_registry):
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+
+        assert build_column_specs(M)["id"].autoincrement is True
+
+    def test_ferro_path_str_pk_defaults_false(self, clean_registry):
+        class M(Model):
+            id: Annotated[str, FerroField(primary_key=True)]
+
+        assert build_column_specs(M)["id"].autoincrement is False
+
+    def test_raw_path_integer_pk_defaults_true(self, clean_registry):
+        class M(Model):
+            id: int = PydanticField(default=None, json_schema_extra={"primary_key": True})
+
+        assert build_column_specs(M)["id"].autoincrement is True
+
+    def test_raw_path_str_pk_defaults_true_preserving_153(self, clean_registry):
+        # Divergence preserved in commit 1; commit 3 flips this to False (ADR-0002).
+        class M(Model):
+            id: str = PydanticField(default=None, json_schema_extra={"primary_key": True})
+
+        assert build_column_specs(M)["id"].autoincrement is True
+
+    def test_explicit_always_wins(self, clean_registry):
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True, autoincrement=False)]
+
+        assert build_column_specs(M)["id"].autoincrement is False
+
+
+class TestNullableDerivation:
+    def test_pk_clamped_not_null_despite_optional_annotation(self, clean_registry):
+        class M(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+        spec = build_column_specs(M)["id"]
+        assert spec.nullable is False and spec.python_type == (int | None)
+
+    def test_explicit_nullable_overrides_annotation(self, clean_registry):
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            note: Annotated[str | None, FerroField(nullable=False)] = None
+
+        assert build_column_specs(M)["note"].nullable is False
+
+    def test_infer_from_annotation(self, clean_registry):
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            a: str
+            b: str | None = None
+
+        specs = build_column_specs(M)
+        assert specs["a"].nullable is False and specs["b"].nullable is True
+
+
+class TestTypeFacts:
+    def test_decimal_format_and_logical_type(self, clean_registry):
+        from decimal import Decimal
+
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            price: Decimal
+
+        spec = build_column_specs(M)["price"]
+        assert spec.format == "decimal" and spec.logical_type == "decimal"
+
+    def test_db_type_explicit(self, clean_registry):
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            title: Annotated[str, FerroField(db_type="varchar(255)")]
+
+        spec = build_column_specs(M)["title"]
+        assert spec.db_type == "varchar(255)" and spec.db_type_explicit is True
+
+
+class TestJoinTableProducers:
+    def test_pk_spec_uuid(self):
+        spec = pk_spec("user_id", UUID)
+        assert spec.logical_type == "uuid" and spec.format == "uuid"
+        assert spec.primary_key is False and spec.nullable is False
+
+    def test_fk_shadow_spec(self):
+        spec = fk_shadow_spec("user_id", python_type=int, to_table="user")
+        assert spec.foreign_key.to_table == "user"
+        assert spec.foreign_key.on_delete == "CASCADE"
+        assert spec.nullable is False and spec.logical_type == "integer"
+
+    def test_pk_spec_unknown_type_falls_back_to_string(self):
+        # Mirrors schema_fragment_for_pk's historical fallback.
+        assert pk_spec("x", None).logical_type == "string"

@@ -45,8 +45,7 @@ def test_enum_fields_populated_for_deferred_annotations():
 
 
 def test_enum_type_name_unchanged_for_deferred_annotated_strenum():
-    props = BillingRow.__ferro_schema__["properties"]
-    assert props["billing_mode"].get("enum_type_name") == "billingmode"
+    assert BillingRow.__ferro_columns__["billing_mode"].enum_type_name == "billingmode"
 
 
 @pytest.mark.asyncio

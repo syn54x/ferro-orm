@@ -1,12 +1,10 @@
 import re
-import types
 from enum import Enum
 from typing import (
     Annotated,
     Any,
     ClassVar,
     ForwardRef,
-    Union,
     get_args,
     get_origin,
     get_type_hints,
@@ -17,17 +15,20 @@ from pydantic import Field as PydanticField
 from pydantic.fields import FieldInfo
 
 from ._annotation_utils import (
+    _strip_optional_union as _annotation_utils_strip_optional_union,
+)
+from ._annotation_utils import (
     db_type_is_compatible,
+    enum_subclass_from_annotation,
     is_closed_domain_annotation,
     is_valid_db_type_token,
 )
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyRelation
 from .fields import FERRO_FIELD_EXTRA_KEY
-from .ir import register_model_with_ir
+from .ir import compile_model_schema_ir
 from .query import Relation
 from .relations.descriptors import ForwardDescriptor
-from .schema_metadata import _enum_subclass_from_annotation, build_model_schema
 from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS, register_model
 
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -91,9 +92,7 @@ class ModelMetaclass(type(BaseModel)):
         mcs._validate_db_type_options(cls, ferro_fields)
         mcs._register_enum_fields(cls)
         mcs._inject_relation_descriptors(cls, local_relations)
-        mcs._generate_and_register_schema(
-            cls, cls.__ferro_identity__, ferro_fields, local_relations
-        )
+        mcs._generate_and_register_schema(cls, cls.__ferro_identity__)
 
         return cls
 
@@ -135,15 +134,7 @@ class ModelMetaclass(type(BaseModel)):
     @staticmethod
     def _strip_optional_union(hint: Any) -> Any:
         """Unwrap ``T | None`` / ``Optional[T]`` to ``T`` for relationship detection."""
-        while True:
-            origin = get_origin(hint)
-            if origin is Union or origin is types.UnionType:
-                args = get_args(hint)
-                non_none = [a for a in args if a is not type(None)]
-                if len(non_none) == 1:
-                    hint = non_none[0]
-                    continue
-            return hint
+        return _annotation_utils_strip_optional_union(hint)
 
     @staticmethod
     def _relationship_marker_from_annotation(hint: Any) -> Any:
@@ -506,7 +497,7 @@ class ModelMetaclass(type(BaseModel)):
             annotation = finfo.annotation
             if isinstance(annotation, str):
                 annotation = resolved.get(field_name, annotation)
-            enum_cls = _enum_subclass_from_annotation(annotation)
+            enum_cls = enum_subclass_from_annotation(annotation)
             if enum_cls is not None:
                 enum_fields[field_name] = enum_cls
         cls._enum_fields = enum_fields
@@ -615,23 +606,16 @@ class ModelMetaclass(type(BaseModel)):
                 setattr(cls, field_name, None)
 
     @staticmethod
-    def _generate_and_register_schema(
-        cls, name: str, ferro_fields: dict, local_relations: dict
-    ) -> None:
-        """
-        Generate JSON schema with Ferro metadata and persist the SchemaIR envelope.
+    def _generate_and_register_schema(cls, name: str) -> None:
+        """Build column specs and persist the SchemaIR envelope.
 
-        Mutates cls in place (adds __ferro_schema__). Rust registration is deferred
-        to the bulk install seam at connect time (#246).
+        Sets ``cls.__ferro_columns__`` (via the compile choke point). Rust
+        registration is deferred to the bulk install seam at connect time (#246).
 
         Raises:
-            RuntimeError: If schema generation or registration fails
+            RuntimeError: If spec build or registration fails
         """
         try:
-            schema = build_model_schema(cls)
-
-            if schema:
-                setattr(cls, "__ferro_schema__", schema)
-                register_model_with_ir(name, schema, cls.__ferro_table__)
+            compile_model_schema_ir(name, cls)
         except Exception as e:
             raise RuntimeError(f"Ferro failed to register model '{name}': {e}")

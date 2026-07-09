@@ -5,9 +5,45 @@ from __future__ import annotations
 import datetime as _dt
 import re
 import types
+from decimal import Decimal
 from enum import Enum, IntEnum
 from typing import Annotated, Any, Union, get_args, get_origin
 from uuid import UUID
+
+
+def _strip_optional_union(hint: Any) -> Any:
+    """Unwrap ``T | None`` to ``T`` (same as ``ModelMetaclass``)."""
+    while True:
+        origin = get_origin(hint)
+        if origin is Union or origin is types.UnionType:
+            args = get_args(hint)
+            non_none = [a for a in args if a is not type(None)]
+            if len(non_none) == 1:
+                hint = non_none[0]
+                continue
+        return hint
+
+
+def enum_subclass_from_annotation(hint: Any) -> type[Enum] | None:
+    hint = _strip_optional_union(hint)
+    if get_origin(hint) is Annotated:
+        args = get_args(hint)
+        if args:
+            return enum_subclass_from_annotation(args[0])
+        return None
+    if isinstance(hint, type) and issubclass(hint, Enum):
+        return hint
+    return None
+
+
+def annotation_is_decimal(hint: Any) -> bool:
+    hint = _strip_optional_union(hint)
+    if get_origin(hint) is Annotated:
+        args = get_args(hint)
+        if args:
+            return annotation_is_decimal(args[0])
+        return False
+    return hint is Decimal
 
 
 def annotation_allows_none(annotation: Any) -> bool:

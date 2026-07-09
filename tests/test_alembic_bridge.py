@@ -6,8 +6,8 @@ import sqlalchemy as sa
 
 from ferro import (
     BackRef,
-    Field,
     FerroField,
+    Field,
     ForeignKey,
     ManyToMany,
     Model,
@@ -16,7 +16,6 @@ from ferro import (
     reset_engine,
 )
 from ferro.migrations import get_metadata
-from ferro.schema_metadata import build_model_schema
 
 
 @pytest.fixture(autouse=True)
@@ -210,12 +209,11 @@ def test_explicit_foreign_key_shadow_id_no_duplicate_alembic_columns():
 
     assert list(TyShadowFkScorecard.model_fields).count("job_role_id") == 1
 
-    schema = build_model_schema(TyShadowFkScorecard)
-    props = schema["properties"]
-    assert "job_role_id" in props
-    assert sum(1 for k in props if k == "job_role_id") == 1
-    fk_meta = props["job_role_id"].get("foreign_key") or {}
-    assert fk_meta.get("to_table") == "tyshadowfkjobrole"
+    specs = TyShadowFkScorecard.__ferro_columns__
+    assert "job_role_id" in specs
+    assert sum(1 for k in specs if k == "job_role_id") == 1
+    fk = specs["job_role_id"].foreign_key
+    assert fk is not None and fk.to_table == "tyshadowfkjobrole"
 
     metadata = get_metadata()
     tbl = metadata.tables["tyshadowfkscorecard"]

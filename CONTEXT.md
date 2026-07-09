@@ -32,6 +32,10 @@ _Avoid_: Select SQL, view definition, query body
 A `MaterializedView` that can be queried but never mutated. `save()`, `delete()`, and `create()` raise a clear error.
 _Avoid_: Immutable model, snapshot model
 
+**Column spec**:
+The single authoritative record of one column's facts — identity, type, and constraints — derived exactly once from the field declaration. Provisional at class-body time; authoritative once relationship resolution completes.
+_Avoid_: Column metadata, enriched schema property, field dict
+
 **Provisional registration**:
 The per-model state installed when a class body finishes executing — enough for runtime codec and PK metadata, but relationships may still be pending and the modelset is not yet authoritative for DDL.
 _Avoid_: Import-time registration, partial registry

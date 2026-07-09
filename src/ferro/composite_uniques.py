@@ -60,21 +60,39 @@ def _normalized_groups(cls: type[Any]) -> tuple[tuple[str, ...], ...]:
     return tuple(deduped)
 
 
+def _validate_groups_against_columns(
+    cls: type[Any], groups: tuple[tuple[str, ...], ...], column_names: frozenset[str]
+) -> None:
+    """Ensure each referenced column exists in ``column_names``."""
+    for group in groups:
+        for col in group:
+            if col not in column_names:
+                raise ValueError(
+                    f"{cls.__qualname__}.{FERRO_COMPOSITE_UNIQUES} references unknown column "
+                    f"{col!r}; known properties: {sorted(column_names)}"
+                )
+
+
+def normalized_composite_uniques(
+    cls: type[Any], column_names: frozenset[str]
+) -> tuple[tuple[str, ...], ...]:
+    """Return validated, de-duplicated composite-unique column groups for ``cls``.
+
+    The single validate-and-normalize choke point for composite uniques: both
+    the SchemaIR compiler and the legacy dict pipeline route through this.
+    """
+    groups = _normalized_groups(cls)
+    if not groups:
+        return ()
+    _validate_groups_against_columns(cls, groups, column_names)
+    return groups
+
+
 def validate_composite_uniques_against_properties(
     cls: type[Any], properties: dict[str, Any]
 ) -> None:
     """Ensure each referenced column exists on the JSON schema ``properties``."""
-    groups = _normalized_groups(cls)
-    if not groups:
-        return
-    keys = set(properties.keys())
-    for group in groups:
-        for col in group:
-            if col not in keys:
-                raise ValueError(
-                    f"{cls.__qualname__}.{FERRO_COMPOSITE_UNIQUES} references unknown column "
-                    f"{col!r}; known properties: {sorted(keys)}"
-                )
+    normalized_composite_uniques(cls, frozenset(properties.keys()))
 
 
 def ferro_composite_uniques_for_json(cls: type[Any]) -> list[list[str]] | None:
@@ -83,16 +101,3 @@ def ferro_composite_uniques_for_json(cls: type[Any]) -> list[list[str]] | None:
     if not groups:
         return None
     return [list(g) for g in groups]
-
-
-def apply_composite_uniques_to_schema(cls: type[Any], schema: dict[str, Any]) -> None:
-    """Mutate ``schema`` with ``ferro_composite_uniques`` when the model declares any."""
-    props = schema.get("properties")
-    if not isinstance(props, dict):
-        return
-    validate_composite_uniques_against_properties(cls, props)
-    payload = ferro_composite_uniques_for_json(cls)
-    if payload:
-        schema["ferro_composite_uniques"] = payload
-    else:
-        schema.pop("ferro_composite_uniques", None)

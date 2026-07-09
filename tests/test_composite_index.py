@@ -16,6 +16,12 @@ from ferro import (
     engines,
     reset_engine,
 )
+from ferro.composite_indexes import (
+    drop_overlap_with_uniques,
+    ferro_composite_indexes_for_json,
+    normalized_composite_indexes,
+)
+from ferro.composite_uniques import normalized_composite_uniques
 from ferro.migrations import get_metadata
 
 pytestmark = pytest.mark.backend_matrix
@@ -122,8 +128,10 @@ def test_empty_default_is_noop():
         id: int | None = Field(default=None, primary_key=True)
         name: str
 
-    schema = NoIndexes.__ferro_schema__
-    assert "ferro_composite_indexes" not in schema
+    assert (
+        normalized_composite_indexes(NoIndexes, frozenset(NoIndexes.__ferro_columns__))
+        == ()
+    )
 
 
 def test_duplicate_ordered_tuple_dedupes_silently():
@@ -138,8 +146,9 @@ def test_duplicate_ordered_tuple_dedupes_silently():
         a: int
         b: int
 
-    schema = Dup.__ferro_schema__
-    assert schema["ferro_composite_indexes"] == [["a", "b"]]
+    assert normalized_composite_indexes(Dup, frozenset(Dup.__ferro_columns__)) == (
+        ("a", "b"),
+    )
 
 
 def test_three_column_composite_index():
@@ -154,8 +163,9 @@ def test_three_column_composite_index():
         b: int
         c: int
 
-    schema = Triple.__ferro_schema__
-    assert schema["ferro_composite_indexes"] == [["a", "b", "c"]]
+    assert normalized_composite_indexes(Triple, frozenset(Triple.__ferro_columns__)) == (
+        ("a", "b", "c"),
+    )
 
 
 def test_schema_json_uses_lists_not_tuples():
@@ -170,11 +180,10 @@ def test_schema_json_uses_lists_not_tuples():
         a: int
         b: int
 
-    schema = WireFmt.__ferro_schema__
-    payload = schema["ferro_composite_indexes"]
+    payload = ferro_composite_indexes_for_json(WireFmt)
     assert isinstance(payload, list)
     assert all(isinstance(g, list) for g in payload)
-    json.loads(json.dumps(schema))
+    json.loads(json.dumps(payload))
 
 
 # === Group B (subset): overlap handling ===
@@ -198,9 +207,11 @@ def test_overlap_with_unique_warns_and_drops():
             a: int
             b: int
 
-    schema = Dup.__ferro_schema__
-    assert "ferro_composite_indexes" not in schema
-    assert schema["ferro_composite_uniques"] == [["a", "b"]]
+    column_names = frozenset(Dup.__ferro_columns__)
+    uniques = normalized_composite_uniques(Dup, column_names)
+    indexes = normalized_composite_indexes(Dup, column_names)
+    assert uniques == (("a", "b"),)
+    assert drop_overlap_with_uniques(indexes, uniques, "Dup") == ()
 
 
 def test_overlap_reordered_does_not_warn():
@@ -221,9 +232,14 @@ def test_overlap_reordered_does_not_warn():
             a: int
             b: int
 
-    schema = Reordered.__ferro_schema__
-    assert schema["ferro_composite_uniques"] == [["a", "b"]]
-    assert schema["ferro_composite_indexes"] == [["b", "a"]]
+    column_names = frozenset(Reordered.__ferro_columns__)
+    uniques = normalized_composite_uniques(Reordered, column_names)
+    indexes = normalized_composite_indexes(Reordered, column_names)
+    assert uniques == (("a", "b"),)
+    assert indexes == (("b", "a"),)
+    with warnings_mod.catch_warnings():
+        warnings_mod.simplefilter("error", UserWarning)
+        assert drop_overlap_with_uniques(indexes, uniques, "Reordered") == (("b", "a"),)
 
 
 def test_overlap_with_unique_partial_match_does_not_warn():
@@ -245,9 +261,14 @@ def test_overlap_with_unique_partial_match_does_not_warn():
             b: int
             c: int
 
-    schema = Partial.__ferro_schema__
-    assert schema["ferro_composite_uniques"] == [["a", "b", "c"]]
-    assert schema["ferro_composite_indexes"] == [["a", "b"]]
+    column_names = frozenset(Partial.__ferro_columns__)
+    uniques = normalized_composite_uniques(Partial, column_names)
+    indexes = normalized_composite_indexes(Partial, column_names)
+    assert uniques == (("a", "b", "c"),)
+    assert indexes == (("a", "b"),)
+    with warnings_mod.catch_warnings():
+        warnings_mod.simplefilter("error", UserWarning)
+        assert drop_overlap_with_uniques(indexes, uniques, "Partial") == (("a", "b"),)
 
 
 # === Group B: schema-bridge correctness (Alembic) ===

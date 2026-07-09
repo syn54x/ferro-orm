@@ -48,7 +48,7 @@ def test_complex_type_mapping():
     assert set(table.c.status.type.enums) == {"active", "inactive"}
 
     # Numeric/Decimal
-    assert ComplexModel.__ferro_schema__["properties"]["price"]["format"] == "decimal"
+    assert ComplexModel.__ferro_columns__["price"].format == "decimal"
     assert isinstance(table.c.price.type, sa.Numeric)
 
     # UUID
@@ -74,7 +74,9 @@ def test_list_of_nested_pydantic_models_maps_to_json_column():
     table = meta.tables["modelwithnestedlistjson"]
     assert isinstance(table.c.parts.type, sa.JSON)
 
-    props = ModelWithNestedListJson.__ferro_schema__["properties"]["parts"]
+    # Raw pydantic JSON schema shape (not a Ferro-enriched fact): a plain
+    # array-of-model field, unrelated to ColumnSpec derivation.
+    props = ModelWithNestedListJson.model_json_schema()["properties"]["parts"]
     assert props.get("type") == "array"
     assert props.get("items", {}).get("$ref") == "#/$defs/JsonListPart"
 
