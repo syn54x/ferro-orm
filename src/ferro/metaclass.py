@@ -19,7 +19,6 @@ from ._annotation_utils import (
 )
 from ._annotation_utils import (
     db_type_is_compatible,
-    enum_subclass_from_annotation,
     is_closed_domain_annotation,
     is_valid_db_type_token,
 )
@@ -485,7 +484,7 @@ class ModelMetaclass(type(BaseModel)):
         """Populate ``cls._enum_fields`` from column-spec python types."""
         enum_fields: dict[str, type[Enum]] = {}
         for field_name, spec in cls.__ferro_columns__.items():
-            enum_cls = enum_subclass_from_annotation(spec.python_type)
+            enum_cls = spec.enum_class
             if enum_cls is not None:
                 enum_fields[field_name] = enum_cls
         cls._enum_fields = enum_fields

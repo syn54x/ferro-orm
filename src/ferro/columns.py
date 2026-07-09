@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import types
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any, ForwardRef, Union, get_args, get_origin, get_type_hints
 from uuid import UUID
 
@@ -20,6 +21,8 @@ from ._annotation_utils import (
 )
 from ._shadow_fk_types import _scalar_part_of_annotation
 from .base import ForeignKey, foreign_key_allows_none
+
+__all__ = ["ColumnSpec", "ForeignKeyRef", "build_column_specs", "fk_shadow_spec", "pk_spec"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,13 +45,14 @@ class ColumnSpec:
     python_type: Any
     enum_values: tuple[Any, ...] | None = None
     enum_type_name: str | None = None
+    enum_class: type[Enum] | None = None
     db_type: str | None = None
     db_type_explicit: bool = False
     db_check: bool = False
     foreign_key: ForeignKeyRef | None = None
 
 
-def derive_autoincrement(
+def _derive_autoincrement(
     explicit: bool | None, primary_key: bool, integer_typed: bool
 ) -> bool:
     """Single derivation rule for autoincrement (ADR-0002).
@@ -61,7 +65,7 @@ def derive_autoincrement(
     return primary_key and integer_typed
 
 
-def derive_nullable(
+def _derive_nullable(
     *,
     explicit: bool | None,
     primary_key: bool,
@@ -265,7 +269,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             if declared is not None
             else (raw_autoincrement if isinstance(raw_autoincrement, bool) else None)
         )
-        autoincrement = derive_autoincrement(
+        autoincrement = _derive_autoincrement(
             explicit_autoincrement, is_pk, _property_is_integer(prop)
         )
 
@@ -301,7 +305,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             if field_info is not None
             else field_name not in required
         )
-        nullable = derive_nullable(
+        nullable = _derive_nullable(
             explicit=explicit_nullable,
             primary_key=is_pk,
             fk_nullable=fk_nullable,
@@ -344,6 +348,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             python_type=python_type,
             enum_values=tuple(enum_values) if isinstance(enum_values, list) else None,
             enum_type_name=enum_type_name,
+            enum_class=enum_cls,
             db_type=db_type,
             db_type_explicit=bool(db_type),
             db_check=db_check,
