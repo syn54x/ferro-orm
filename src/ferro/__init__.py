@@ -5,6 +5,7 @@ Ferro combines the speed of a Rust engine with the ergonomics of Pydantic models
 to provide a seamless, high-performance database experience.
 """
 
+import asyncio
 import logging
 import threading
 from typing import Any
@@ -58,6 +59,32 @@ if not _logger.handlers:
 
 
 _RESOLVED_MODELSET_LOCK = threading.Lock()
+_OPERATION_REGISTRATION_SYNC_LOCK: asyncio.Lock | None = None
+
+
+def _operation_registration_sync_lock() -> asyncio.Lock:
+    global _OPERATION_REGISTRATION_SYNC_LOCK
+    if _OPERATION_REGISTRATION_SYNC_LOCK is None:
+        _OPERATION_REGISTRATION_SYNC_LOCK = asyncio.Lock()
+    return _OPERATION_REGISTRATION_SYNC_LOCK
+
+
+async def _ensure_rust_registration_synced_for_operation() -> None:
+    """Registration-only sync before ORM operations touch Rust (#247).
+
+    Clean path (O(1)): in-process generation comparison only — no FFI.
+    Dirty path: resolve + bulk install under an async single-flight guard so
+    concurrent coroutines cannot double-compile or install out of order.
+    """
+    from .state import is_modelset_dirty
+
+    if not is_modelset_dirty():
+        return
+
+    async with _operation_registration_sync_lock():
+        if not is_modelset_dirty():
+            return
+        _ensure_rust_registration_synced()
 
 
 def ensure_resolved_modelset() -> dict[str, Any]:

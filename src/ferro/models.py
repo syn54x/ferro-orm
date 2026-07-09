@@ -66,13 +66,16 @@ def _field_eq(field_name: str, value: Any) -> Predicate[Any]:
     return lambda t, f=field_name, v=value: getattr(t, f) == v
 
 
-def _transaction_or_using(
+async def _transaction_or_using(
     using: str | None, session: "Session | None"
 ) -> RouteHandle:
+    from . import _ensure_rust_registration_synced_for_operation
+
+    await _ensure_rust_registration_synced_for_operation()
     return resolve_operation_scope(using=using, session=session)
 
 
-def _instance_transaction_route(
+async def _instance_transaction_route(
     instance: object, using: str | None, session: "Session | None"
 ) -> tuple[RouteHandle, str]:
     """Resolve the route for an instance method (`save`/`delete`/`refresh`).
@@ -89,7 +92,7 @@ def _instance_transaction_route(
 
     # Origin is the instance's implicit route (FF-D D4): it participates in
     # session-conflict checks instead of silently bypassing the session.
-    route = _transaction_or_using(using or origin, session)
+    route = await _transaction_or_using(using or origin, session)
     return route, route.connection_name
 
 
@@ -310,7 +313,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise ValueError(
                 f'on_conflict must be None or "update", got {on_conflict!r}'
             )
-        route, identity_using = _instance_transaction_route(self, using, session)
+        route, identity_using = await _instance_transaction_route(self, using, session)
         new_id = None
         if on_conflict == "update":
             new_id = await save_record(
@@ -388,7 +391,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         pk_field_name = self.__class__._primary_key_field_name()
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
-        route, _identity_using = _instance_transaction_route(self, using, session)
+        route, _identity_using = await _instance_transaction_route(self, using, session)
 
         if pk_val is not None:
             name = self.__class__.__ferro_identity__
@@ -426,7 +429,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> isinstance(users, list)
             True
         """
-        route = _transaction_or_using(using, session)
+        route = await _transaction_or_using(using, session)
         return await fetch_all(cls, route)
 
     @classmethod
@@ -493,7 +496,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise RuntimeError("Cannot refresh a model without a primary key")
 
         name = self.__class__.__ferro_identity__
-        route, identity_using = _instance_transaction_route(self, using, session)
+        route, identity_using = await _instance_transaction_route(self, using, session)
 
         _core_evict_instance(name, str(pk_val), route)
         query = Query(self.__class__, using=route.connection_name).where(
@@ -632,7 +635,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if not instances:
             return 0
         data = [save_bind_payload(i) for i in instances]
-        route = _transaction_or_using(using, session)
+        route = await _transaction_or_using(using, session)
         return await save_bulk_records(cls.__ferro_identity__, data, route)
 
     @classmethod
