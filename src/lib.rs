@@ -133,6 +133,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(migrate::_install_registration, m)?)?;
     m.add_function(wrap_pyfunction!(migrate::_bulk_install_count_for_test, m)?)?;
     m.add_function(wrap_pyfunction!(
+        migrate::_rust_model_registry_count_for_test,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         migrate::_clear_schema_ir_modelset_for_test,
         m
     )?)?;

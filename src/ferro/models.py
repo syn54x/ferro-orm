@@ -174,8 +174,9 @@ async def transaction(using: str | None = None, *, session: "Session | None" = N
 class Model(BaseModel, metaclass=ModelMetaclass):
     """Provide the base class for all Ferro models
 
-    Inheriting from this class registers schema metadata with the Rust core and
-    exposes high-performance CRUD and query entrypoints.
+    Inheriting from this class provisionally registers schema metadata in Python
+    caches and exposes high-performance CRUD and query entrypoints. The Rust
+    runtime is populated on first ``connect()`` via bulk install (#246).
 
     **Composite unique constraints:** declare a ``typing.ClassVar`` named
     ``__ferro_composite_uniques__`` as a tuple of tuples of column names
@@ -208,7 +209,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     @classmethod
     def _reregister_ferro(cls) -> None:
-        """Re-register this model's schema with the Rust core (e.g. after clear_registry)."""
+        """Re-persist this model's SchemaIR envelope (e.g. after envelope eviction)."""
         schema = getattr(cls, "__ferro_schema__", None)
         if schema is not None:
             from .ir import register_model_with_ir
