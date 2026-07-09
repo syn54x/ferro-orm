@@ -5,7 +5,6 @@ Ferro combines the speed of a Rust engine with the ergonomics of Pydantic models
 to provide a seamless, high-performance database experience.
 """
 
-import asyncio
 import logging
 import threading
 from typing import Any
@@ -59,32 +58,29 @@ if not _logger.handlers:
 
 
 _RESOLVED_MODELSET_LOCK = threading.Lock()
-_OPERATION_REGISTRATION_SYNC_LOCK: asyncio.Lock | None = None
-
-
-def _operation_registration_sync_lock() -> asyncio.Lock:
-    global _OPERATION_REGISTRATION_SYNC_LOCK
-    if _OPERATION_REGISTRATION_SYNC_LOCK is None:
-        _OPERATION_REGISTRATION_SYNC_LOCK = asyncio.Lock()
-    return _OPERATION_REGISTRATION_SYNC_LOCK
+_OPERATION_REGISTRATION_SYNC_LOCK = threading.Lock()
 
 
 async def _ensure_rust_registration_synced_for_operation() -> None:
     """Registration-only sync before ORM operations touch Rust (#247).
 
     Clean path (O(1)): in-process generation comparison only — no FFI.
-    Dirty path: resolve + bulk install under an async single-flight guard so
-    concurrent coroutines cannot double-compile or install out of order.
+    Dirty path: resolve + bulk install under a threading single-flight guard
+    (``_OPERATION_REGISTRATION_SYNC_LOCK``), matching ``_RESOLVED_MODELSET_LOCK``
+    two functions up. The guarded section is fully synchronous — no ``await``
+    inside — so a ``threading.Lock`` gives real cross-thread single-flight
+    without the cross-loop hang of a module-global ``asyncio.Lock``. Under
+    contention the event loop blocks for one resolve+install per generation; do
+    not offload this to a thread pool — that would reintroduce interleaving.
     """
     from .state import is_modelset_dirty
 
     if not is_modelset_dirty():
         return
 
-    async with _operation_registration_sync_lock():
-        if not is_modelset_dirty():
-            return
-        _ensure_rust_registration_synced()
+    with _OPERATION_REGISTRATION_SYNC_LOCK:
+        if is_modelset_dirty():
+            _ensure_rust_registration_synced()
 
 
 def ensure_resolved_modelset() -> dict[str, Any]:

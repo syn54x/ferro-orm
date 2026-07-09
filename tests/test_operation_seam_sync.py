@@ -1,6 +1,7 @@
 """Operation-seam registration sync: single-flight, zero-DDL, clean path (#247)."""
 
 import asyncio
+import threading
 from typing import Annotated
 
 import pytest
@@ -91,6 +92,54 @@ async def test_concurrent_first_operations_single_bulk_install(
             await OsConcurrent.create(score=score)
 
     await asyncio.gather(*(first_save(i) for i in range(8)))
+    assert _bulk_install_count_for_test() - baseline == 1
+
+
+def test_cross_thread_dirty_path_single_bulk_install(db_url, clean_registry) -> None:
+    """Two threads on separate event loops serialize dirty-path install via threading.Lock."""
+
+    class OsThreadBase(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+
+    async def setup() -> None:
+        await connect(db_url, auto_migrate=True)
+        async with ferro.engines.session():
+            await execute(
+                'CREATE TABLE IF NOT EXISTS "osthread" ( '
+                '"id" integer PRIMARY KEY AUTOINCREMENT NOT NULL, '
+                '"slot" integer NOT NULL )'
+            )
+
+    asyncio.run(setup())
+
+    class OsThread(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        slot: int
+
+    baseline = _bulk_install_count_for_test()
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def thread_worker(slot: int) -> None:
+        try:
+
+            async def run() -> None:
+                barrier.wait()
+                async with ferro.engines.session():
+                    await OsThread.create(slot=slot)
+
+            asyncio.run(run())
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=thread_worker, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
     assert _bulk_install_count_for_test() - baseline == 1
 
 
