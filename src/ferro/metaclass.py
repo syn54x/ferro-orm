@@ -52,7 +52,11 @@ def _assert_weakref_support(cls: type) -> None:
 
 class ModelMetaclass(type(BaseModel)):
     """
-    Metaclass for Ferro models that automatically registers the model schema with the Rust core.
+    Metaclass for Ferro models that provisionally registers schema in Python caches.
+
+    Class-body registration writes the Python registry, SchemaIR envelope cache,
+    and generation counter only. Rust registration is installed at the first
+    bulk sync (``connect``/``create_tables``/``migrate``) — ADR #242 / #246.
     """
 
     def __new__(mcs, name, bases, namespace, **kwargs):
@@ -615,9 +619,10 @@ class ModelMetaclass(type(BaseModel)):
         cls, name: str, ferro_fields: dict, local_relations: dict
     ) -> None:
         """
-        Generate JSON schema with Ferro metadata and register with Rust core.
+        Generate JSON schema with Ferro metadata and persist the SchemaIR envelope.
 
-        Mutates cls in place (adds __ferro_schema__).
+        Mutates cls in place (adds __ferro_schema__). Rust registration is deferred
+        to the bulk install seam at connect time (#246).
 
         Raises:
             RuntimeError: If schema generation or registration fails

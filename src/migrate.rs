@@ -86,6 +86,20 @@ pub fn _bulk_install_count_for_test() -> u64 {
     crate::state::BULK_INSTALL_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Test-only instrument: count of models in the Rust column registry (#246).
+///
+/// Mirrors `_bulk_install_count_for_test` — a single read at the registry
+/// store so tests can assert provisional import leaves Rust empty until the
+/// first bulk install.
+#[pyfunction]
+#[pyo3(name = "_rust_model_registry_count_for_test")]
+pub fn _rust_model_registry_count_for_test() -> PyResult<usize> {
+    let registry = MODEL_REGISTRY.read().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry")
+    })?;
+    Ok(registry.len())
+}
+
 /// Test-only helper: clear the pushed SchemaIR modelset (and its recorded
 /// fingerprint, so the gate can never match state the runtime no longer holds)
 /// so the fail-loud path in `internal_create_tables` / `internal_migrate` can be

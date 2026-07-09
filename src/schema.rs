@@ -150,10 +150,11 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
     Ok(())
 }
 
-/// Registers a model with the Rust core from its SchemaIR column slice.
+/// Legacy per-model Rust registration from a SchemaIR column slice.
 ///
-/// This is typically called automatically by the `ModelMetaclass` when
-/// a Pydantic model is defined.
+/// Class-body registration no longer calls this (#246); the bulk install seam
+/// at `connect()`/`create_tables()`/`migrate()` is the sole population path.
+/// Retained for direct test callers and backward-compatible FFI exposure.
 ///
 /// # Errors
 /// Returns a `PyErr` if the columns JSON is invalid or if the registry is locked.
