@@ -378,6 +378,33 @@ def test_primary_key_autoincrements_by_default(clean_model_registry: None) -> No
     assert cols["id"]["autoincrement"] is True, cols["id"]
 
 
+def test_raw_path_non_integer_pk_autoincrement_false_unified(
+    clean_model_registry: None,
+) -> None:
+    """ADR-0002: a raw-declared (json_schema_extra) non-integer PK without an
+    explicit autoincrement is False under the unified rule — the raw path no
+    longer diverges from the FerroField path (was True, #153). Pins the golden
+    vector ``schema_raw_str_pk_autoincrement_v1``.
+    """
+    from ferro.columns import build_column_specs
+    from ferro.ir.compiler import compile_schema_ir_payload, wrap_schema_ir
+
+    class RawStrPk(Model):
+        id: str = Field(json_schema_extra={"primary_key": True})
+        label: str
+
+    cols = list(build_column_specs(RawStrPk).values())
+    payload = compile_schema_ir_payload("RawStrPk", cols, table_name="raw_str_pk")
+    ir = wrap_schema_ir(payload)
+
+    fixture = _load_vector(VECTORS_DIR / "schema_raw_str_pk_autoincrement_v1.json")
+    assert ir == fixture["ir"]
+
+    id_col = next(c for c in payload["models"][0]["columns"] if c["name"] == "id")
+    assert id_col["primary_key"] is True
+    assert id_col["autoincrement"] is False, id_col
+
+
 def test_clear_registry_clears_join_table_registry(clean_model_registry: None) -> None:
     """clear_registry() must clear the join-table registry, not only models.
 

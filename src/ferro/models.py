@@ -348,10 +348,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             if not spec.primary_key:
                 continue
             pk_field_name = field_name
-            # The raw json_schema_extra path historically assigned the new id
-            # whenever the PK was unset, autoincrement or not; the ferro path
-            # gated on autoincrement. Preserved until ADR-0002's parity commit.
-            assigns_new_id = spec.autoincrement if spec.declared_via == "ferro" else True
+            assigns_new_id = spec.autoincrement
             if assigns_new_id and getattr(self, field_name) is None and new_id is not None:
                 setattr(self, field_name, new_id)
             pk_val = getattr(self, field_name)

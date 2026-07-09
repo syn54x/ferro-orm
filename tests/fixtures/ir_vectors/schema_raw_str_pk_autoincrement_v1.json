@@ -1,0 +1,46 @@
+{
+  "vector_name": "schema_raw_str_pk_autoincrement_v1",
+  "domain": "schema",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "schema",
+    "ir_version": 1,
+    "payload": {
+      "dialect_agnostic": true,
+      "models": [
+        {
+          "model_name": "RawStrPk",
+          "table_name": "raw_str_pk",
+          "columns": [
+            {
+              "name": "id",
+              "logical_type": "string",
+              "nullable": false,
+              "primary_key": true,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "label",
+              "logical_type": "string",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            }
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "uniques": [],
+          "checks": []
+        }
+      ]
+    }
+  }
+}

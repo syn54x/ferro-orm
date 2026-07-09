@@ -10,7 +10,7 @@ from ferro.columns import build_column_specs, fk_shadow_spec, pk_spec
 
 
 class TestAutoincrementDerivation:
-    """Pins BOTH historical defaulting rules (#153). Unified in commit 3 / ADR-0002."""
+    """Pins the unified autoincrement rule (ADR-0002): explicit, else pk AND integer-typed."""
 
     def test_ferro_path_integer_pk_defaults_true(self, clean_registry):
         class M(Model):
@@ -30,12 +30,12 @@ class TestAutoincrementDerivation:
 
         assert build_column_specs(M)["id"].autoincrement is True
 
-    def test_raw_path_str_pk_defaults_true_preserving_153(self, clean_registry):
-        # Divergence preserved in commit 1; commit 3 flips this to False (ADR-0002).
+    def test_raw_path_str_pk_defaults_false_unified(self, clean_registry):
+        # ADR-0002: one rule for both paths - explicit, else (pk AND integer).
         class M(Model):
             id: str = PydanticField(default=None, json_schema_extra={"primary_key": True})
 
-        assert build_column_specs(M)["id"].autoincrement is True
+        assert build_column_specs(M)["id"].autoincrement is False
 
     def test_explicit_always_wins(self, clean_registry):
         class M(Model):

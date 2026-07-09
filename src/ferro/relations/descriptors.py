@@ -41,7 +41,7 @@ class RelationshipDescriptor(BaseModel):
         # Find the primary key value of the current instance
         pk_field = "id"
         for f_name, spec in getattr(instance.__class__, "__ferro_columns__", {}).items():
-            if spec.primary_key and spec.declared_via == "ferro":
+            if spec.primary_key:
                 pk_field = f_name
                 break
         pk_val = getattr(instance, pk_field)

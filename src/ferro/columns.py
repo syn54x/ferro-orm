@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import types
 from dataclasses import dataclass, replace
-from typing import Any, ForwardRef, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Any, ForwardRef, Union, get_args, get_origin, get_type_hints
 from uuid import UUID
 
 from ._annotation_utils import (
@@ -46,30 +46,19 @@ class ColumnSpec:
     db_type_explicit: bool = False
     db_check: bool = False
     foreign_key: ForeignKeyRef | None = None
-    # Which declaration path produced this spec. Exists ONLY to represent the
-    # historical per-path divergences faithfully (#153); deleted in ADR-0002's
-    # unification commit. Do not add consumers.
-    declared_via: Literal["ferro", "raw", "synthetic"] = "synthetic"
 
 
 def derive_autoincrement(
-    explicit: bool | None,
-    primary_key: bool,
-    integer_typed: bool,
-    declared_via: str,
+    explicit: bool | None, primary_key: bool, integer_typed: bool
 ) -> bool:
-    """Single derivation site for autoincrement.
+    """Single derivation rule for autoincrement (ADR-0002).
 
-    Preserves the two historical defaulting rules verbatim (see #153):
-    - FerroField path: default ``pk and integer_typed`` (enriched-schema legacy)
-    - raw json_schema_extra path: default ``pk`` (compiler legacy)
-    Unified to ``pk and integer_typed`` for both paths in ADR-0002.
+    Explicit declaration wins; otherwise a primary key auto-increments iff it
+    is integer-typed. Supersedes the raw-path ``pk``-only fallback from #153.
     """
     if explicit is not None:
         return explicit
-    if declared_via == "ferro":
-        return primary_key and integer_typed
-    return primary_key
+    return primary_key and integer_typed
 
 
 def derive_nullable(
@@ -263,7 +252,6 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
         python_type = _scalar_part_of_annotation(ann) if ann is not None else None
 
         declared = ferro_fields.get(field_name)
-        declared_via = "ferro" if declared is not None else "raw"
         fk_meta = fk_by_shadow.get(field_name)
 
         is_pk = (
@@ -278,7 +266,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             else (raw_autoincrement if isinstance(raw_autoincrement, bool) else None)
         )
         autoincrement = derive_autoincrement(
-            explicit_autoincrement, is_pk, _property_is_integer(prop), declared_via
+            explicit_autoincrement, is_pk, _property_is_integer(prop)
         )
 
         if fk_meta is not None:
@@ -360,7 +348,6 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             db_type_explicit=bool(db_type),
             db_check=db_check,
             foreign_key=fk_ref,
-            declared_via=declared_via,
         )
     return specs
 

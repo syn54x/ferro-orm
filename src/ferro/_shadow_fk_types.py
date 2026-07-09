@@ -26,16 +26,12 @@ def _scalar_part_of_annotation(ann: Any) -> Any:
 
 
 def pk_python_type_for_model(target: type[Any]) -> Any | None:
-    """Return the PK column's scalar python type from the target's specs.
-
-    Consults ferro-declared PKs only — the raw json_schema_extra path keeps
-    its historical invisibility here until ADR-0002's parity commit.
-    """
+    """Return the PK column's scalar python type from the target's specs."""
     specs = getattr(target, "__ferro_columns__", None)
     if not specs:
         return None
     for spec in specs.values():
-        if spec.primary_key and spec.declared_via == "ferro":
+        if spec.primary_key:
             return spec.python_type
     return None
 
