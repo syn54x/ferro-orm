@@ -10,12 +10,69 @@ import json
 import pytest
 
 from ferro._core import _render_migration_sql_for_test
+from ferro.columns import ColumnSpec, ForeignKeyRef, _enum_values, _logical_type
 from ferro.ir.compiler import compile_schema_ir_payload, wrap_schema_ir
+
+
+def _prop_to_spec(name: str, prop: dict) -> ColumnSpec:
+    """Convert one ad-hoc ``schema_with()``-style property dict into a ColumnSpec.
+
+    Mirrors the pre-ColumnSpec ``compile_schema_ir_payload``'s own defaulting
+    rules exactly (git history: ``_column_ir``/``_is_nullable`` on the
+    dict-based compiler), since these tests exercise the migrate planner from
+    a hand-built resolved schema, not from a live Model class:
+    - nullable: explicit ``ferro_nullable`` if present, else True (these ad-hoc
+      schemas never populate a ``required`` list) — PK always clamps to False.
+    - autoincrement: explicit ``autoincrement`` if present, else ``is_pk``.
+    - unique/index: explicit or False.
+    """
+    is_pk = bool(prop.get("primary_key", False))
+    nullable_hint = prop.get("ferro_nullable")
+    nullable = nullable_hint if isinstance(nullable_hint, bool) else True
+    if is_pk:
+        nullable = False
+    db_type_value = prop.get("db_type")
+    db_type_explicit = isinstance(db_type_value, str) and bool(db_type_value)
+    enum_type_name = prop.get("enum_type_name")
+    enum_values = _enum_values(prop)
+    fk_info = prop.get("foreign_key")
+    foreign_key = (
+        ForeignKeyRef(to_table=fk_info.get("to_table"), on_delete=fk_info.get("on_delete"))
+        if isinstance(fk_info, dict)
+        else None
+    )
+    return ColumnSpec(
+        name=name,
+        logical_type=_logical_type(prop),
+        nullable=nullable,
+        primary_key=is_pk,
+        autoincrement=bool(prop.get("autoincrement", is_pk)),
+        unique=bool(prop.get("unique", False)),
+        index=bool(prop.get("index", False)),
+        default=prop.get("default"),
+        format=prop.get("format"),
+        python_type=None,
+        enum_values=tuple(enum_values) if isinstance(enum_values, list) else None,
+        enum_type_name=enum_type_name if isinstance(enum_type_name, str) and enum_type_name else None,
+        db_type=db_type_value if db_type_explicit else None,
+        db_type_explicit=db_type_explicit,
+        foreign_key=foreign_key,
+    )
 
 
 def _compile_schema_ir_json(schema: dict, name: str) -> str:
     """Compile an ad-hoc schema dict into a SchemaIR envelope JSON string."""
-    payload = compile_schema_ir_payload(name, schema)
+    properties = schema.get("properties", {})
+    specs = [_prop_to_spec(col_name, prop) for col_name, prop in properties.items()]
+    composite_indexes = schema.get("ferro_composite_indexes") or []
+    composite_uniques = schema.get("ferro_composite_uniques") or []
+    payload = compile_schema_ir_payload(
+        name,
+        specs,
+        table_name=name,
+        composite_indexes=composite_indexes,
+        composite_uniques=composite_uniques,
+    )
     return json.dumps(wrap_schema_ir(payload))
 
 

@@ -255,11 +255,11 @@ def test_m2m_join_artifacts_follow_custom_table_names():
     resolve_relationships()
 
     assert "wiki_pages_tags" in _JOIN_TABLE_REGISTRY
-    join_schema = _JOIN_TABLE_REGISTRY["wiki_pages_tags"]
-    props = join_schema["properties"]
-    assert set(props) == {"wiki_pages_id", "wiki_tags_id"}
-    assert props["wiki_pages_id"]["foreign_key"]["to_table"] == "wiki_pages"
-    assert props["wiki_tags_id"]["foreign_key"]["to_table"] == "wiki_tags"
+    bundle = _JOIN_TABLE_REGISTRY["wiki_pages_tags"]
+    columns_by_name = {spec.name: spec for spec in bundle["columns"]}
+    assert set(columns_by_name) == {"wiki_pages_id", "wiki_tags_id"}
+    assert columns_by_name["wiki_pages_id"].foreign_key.to_table == "wiki_pages"
+    assert columns_by_name["wiki_tags_id"].foreign_key.to_table == "wiki_tags"
 
 
 def test_forward_declared_fk_to_custom_table_model_resolves_configured_table():
@@ -306,7 +306,7 @@ def test_target_table_name_unresolvable_string_falls_back_to_lowercase():
     """An unregistered forward-ref string keeps the provisional .lower()
     fallback; resolve_relationships' loud second pass (FF-E E4) re-registers
     with the real table before any DDL consumer runs."""
-    from ferro.schema_metadata import _target_table_name
+    from ferro.columns import _target_table_name
 
     assert _target_table_name("NotRegisteredAnywhere") == "notregisteredanywhere"
     assert (

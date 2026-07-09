@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import types
 from typing import Annotated, Any, Union, get_args, get_origin
-from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -27,21 +26,14 @@ def _scalar_part_of_annotation(ann: Any) -> Any:
 
 
 def pk_python_type_for_model(target: type[Any]) -> Any | None:
-    """Return the PK field's scalar annotation (inner ``T`` of ``Annotated[T, ...]``), or None."""
-    ferro_fields = getattr(target, "ferro_fields", None)
-    if not ferro_fields:
+    """Return the PK column's scalar python type from the target's specs."""
+    specs = getattr(target, "__ferro_columns__", None)
+    if not specs:
         return None
-    pk_name = None
-    for fname, fmeta in ferro_fields.items():
-        if getattr(fmeta, "primary_key", False):
-            pk_name = fname
-            break
-    if pk_name is None:
-        return None
-    mf = getattr(target, "model_fields", {}).get(pk_name)
-    if mf is None:
-        return None
-    return _scalar_part_of_annotation(mf.annotation)
+    for spec in specs.values():
+        if spec.primary_key:
+            return spec.python_type
+    return None
 
 
 def shadow_annotation_for_pk(pk_ann: Any) -> Any:
@@ -55,35 +47,6 @@ def shadow_annotation_for_pk(pk_ann: Any) -> Any:
         if type(None) in args:
             return pk_ann
     return pk_ann | None
-
-
-def schema_fragment_for_pk(pk_ann: Any) -> dict[str, Any]:
-    """JSON-schema fragment for a primary-key scalar annotation."""
-    if pk_ann is None:
-        return {"type": "string"}
-
-    pk_ann = _scalar_part_of_annotation(pk_ann)
-    origin = get_origin(pk_ann)
-    args = get_args(pk_ann)
-    if origin is Union or origin is types.UnionType:
-        non_none = [arg for arg in args if arg is not type(None)]
-        if len(non_none) == 1:
-            pk_ann = _scalar_part_of_annotation(non_none[0])
-
-    if pk_ann is int:
-        return {"type": "integer"}
-    if pk_ann is str:
-        return {"type": "string"}
-    if pk_ann is UUID:
-        return {"type": "string", "format": "uuid"}
-    if pk_ann is float:
-        return {"type": "number"}
-    if pk_ann is bool:
-        return {"type": "boolean"}
-    if pk_ann is bytes:
-        return {"type": "string", "format": "binary"}
-
-    return {"type": "string"}
 
 
 def shadow_annotation_for_foreign_key(metadata: Any) -> Any:

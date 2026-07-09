@@ -62,21 +62,39 @@ def _normalized_groups(cls: type[Any]) -> tuple[tuple[str, ...], ...]:
     return tuple(deduped)
 
 
+def _validate_groups_against_columns(
+    cls: type[Any], groups: tuple[tuple[str, ...], ...], column_names: frozenset[str]
+) -> None:
+    """Ensure each referenced column exists in ``column_names``."""
+    for group in groups:
+        for col in group:
+            if col not in column_names:
+                raise ValueError(
+                    f"{cls.__qualname__}.{FERRO_COMPOSITE_INDEXES} references unknown column "
+                    f"{col!r}; known properties: {sorted(column_names)}"
+                )
+
+
+def normalized_composite_indexes(
+    cls: type[Any], column_names: frozenset[str]
+) -> tuple[tuple[str, ...], ...]:
+    """Return validated, de-duplicated composite-index column groups for ``cls``.
+
+    The single validate-and-normalize choke point for composite indexes: both
+    the SchemaIR compiler and the legacy dict pipeline route through this.
+    """
+    groups = _normalized_groups(cls)
+    if not groups:
+        return ()
+    _validate_groups_against_columns(cls, groups, column_names)
+    return groups
+
+
 def validate_composite_indexes_against_properties(
     cls: type[Any], properties: dict[str, Any]
 ) -> None:
     """Ensure each referenced column exists on the JSON schema ``properties``."""
-    groups = _normalized_groups(cls)
-    if not groups:
-        return
-    keys = set(properties.keys())
-    for group in groups:
-        for col in group:
-            if col not in keys:
-                raise ValueError(
-                    f"{cls.__qualname__}.{FERRO_COMPOSITE_INDEXES} references unknown column "
-                    f"{col!r}; known properties: {sorted(keys)}"
-                )
+    normalized_composite_indexes(cls, frozenset(properties.keys()))
 
 
 def ferro_composite_indexes_for_json(cls: type[Any]) -> list[list[str]] | None:
@@ -87,38 +105,25 @@ def ferro_composite_indexes_for_json(cls: type[Any]) -> list[list[str]] | None:
     return [list(g) for g in groups]
 
 
-def apply_composite_indexes_to_schema(cls: type[Any], schema: dict[str, Any]) -> None:
-    """Mutate ``schema`` with ``ferro_composite_indexes`` when the model declares any."""
-    props = schema.get("properties")
-    if not isinstance(props, dict):
-        return
-    validate_composite_indexes_against_properties(cls, props)
-    payload = ferro_composite_indexes_for_json(cls)
-    if payload:
-        schema["ferro_composite_indexes"] = payload
-    else:
-        schema.pop("ferro_composite_indexes", None)
-
-
-def warn_and_drop_overlap_with_uniques(cls: type[Any], schema: dict[str, Any]) -> None:
+def drop_overlap_with_uniques(
+    indexes: tuple[tuple[str, ...], ...],
+    uniques: tuple[tuple[str, ...], ...],
+    model_name: str,
+) -> tuple[tuple[str, ...], ...]:
     """Warn and drop any composite index that duplicates an existing composite unique.
 
-    Same ordered column tuple in both ``ferro_composite_uniques`` and
-    ``ferro_composite_indexes`` is redundant: the unique constraint already
-    creates an underlying index. Reordered tuples are kept (different
-    leftmost-prefix optimization).
+    Same ordered column tuple in both the composite-unique and composite-index
+    groups is redundant: the unique constraint already creates an underlying
+    index. Reordered tuples are kept (different leftmost-prefix optimization).
     """
-    indexes = schema.get("ferro_composite_indexes")
-    uniques = schema.get("ferro_composite_uniques")
     if not indexes or not uniques:
-        return
-    unique_set = {tuple(g) for g in uniques}
-    kept: list[list[str]] = []
+        return tuple(indexes)
+    unique_set = set(uniques)
+    kept: list[tuple[str, ...]] = []
     for group in indexes:
-        ordered = tuple(group)
-        if ordered in unique_set:
+        if group in unique_set:
             warnings.warn(
-                f"{cls.__qualname__}.{FERRO_COMPOSITE_INDEXES} entry {ordered!r} "
+                f"{model_name}.{FERRO_COMPOSITE_INDEXES} entry {group!r} "
                 f"duplicates an existing __ferro_composite_uniques__ group; the unique "
                 f"constraint already provides this index. Dropping the redundant "
                 f"composite index.",
@@ -127,7 +132,4 @@ def warn_and_drop_overlap_with_uniques(cls: type[Any], schema: dict[str, Any]) -
             )
             continue
         kept.append(group)
-    if kept:
-        schema["ferro_composite_indexes"] = kept
-    else:
-        schema.pop("ferro_composite_indexes", None)
+    return tuple(kept)

@@ -99,10 +99,16 @@ def test_dirty_resolve_recompiles_only_affected_subset(clean_registry, monkeypat
     compile_calls: list[str] = []
     real_compile = ferro.ir.compiler._compile_and_persist_model_envelope
 
-    def tracking_compile(model_name, schema, *, table_name=None, model_cls=None):
+    def tracking_compile(
+        model_name, columns, *, table_name=None, composite_uniques=(), composite_indexes=()
+    ):
         compile_calls.append(model_name)
         return real_compile(
-            model_name, schema, table_name=table_name, model_cls=model_cls
+            model_name,
+            columns,
+            table_name=table_name,
+            composite_uniques=composite_uniques,
+            composite_indexes=composite_indexes,
         )
 
     monkeypatch.setattr(

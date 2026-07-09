@@ -9,7 +9,6 @@ import pytest
 
 from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
-
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
 SUPPORTED_IR_VERSION = 1
@@ -224,7 +223,6 @@ def _load_vector(path: Path) -> dict[str, Any]:
 def test_phase1_schema_compiler_matches_snapshot(clean_model_registry: None) -> None:
     from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
     from ferro.relations import resolve_relationships
-
     from tests.test_cross_emitter_parity import _build_fixture_models
 
     _build_fixture_models()
@@ -240,7 +238,6 @@ def test_phase1_schema_compiler_matches_snapshot(clean_model_registry: None) -> 
 def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> None:
     from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
     from ferro.relations import resolve_relationships
-
     from tests.test_cross_emitter_parity import _build_fixture_models
 
     _build_fixture_models()
@@ -261,7 +258,6 @@ def test_compile_registry_schema_ir_persists_modelset_cache(
     from ferro import state as ferro_state
     from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
     from ferro.relations import resolve_relationships
-
     from tests.test_cross_emitter_parity import _build_fixture_models
 
     _build_fixture_models()
@@ -297,8 +293,8 @@ def test_schema_ir_compiler_emits_db_check_expression_for_closed_domain(
 
 
 def test_compiler_omits_db_type_for_non_explicit_columns(clean_model_registry: None) -> None:
-    from ferro import Model, Field, clear_registry
-    from ferro.schema_metadata import build_model_schema
+    from ferro import Field, Model, clear_registry
+    from ferro.columns import build_column_specs
     from ferro.ir.compiler import compile_schema_ir_payload
 
     clear_registry()
@@ -307,7 +303,12 @@ def test_compiler_omits_db_type_for_non_explicit_columns(clean_model_registry: N
         "id": Field(default=None, primary_key=True),
         "code": Field(db_type="varchar(32)"),
     })
-    cols = {c["name"]: c for c in compile_schema_ir_payload("Acct", build_model_schema(M))["models"][0]["columns"]}
+    cols = {
+        c["name"]: c
+        for c in compile_schema_ir_payload(
+            "Acct", list(build_column_specs(M).values()), table_name="acct"
+        )["models"][0]["columns"]
+    }
     assert "db_type" not in cols["balance"], cols["balance"]   # non-explicit -> omitted
     assert "db_type" not in cols["id"], cols["id"]             # non-explicit -> omitted
     assert cols["code"]["db_type"] == "varchar(32)"            # explicit -> kept
@@ -315,8 +316,8 @@ def test_compiler_omits_db_type_for_non_explicit_columns(clean_model_registry: N
 
 
 def test_compiler_bytes_field_emits_binary_logical_type(clean_model_registry: None) -> None:
-    from ferro import Model, Field, clear_registry
-    from ferro.schema_metadata import build_model_schema
+    from ferro import Field, Model, clear_registry
+    from ferro.columns import build_column_specs
     from ferro.ir.compiler import compile_schema_ir_payload
 
     clear_registry()
@@ -324,7 +325,12 @@ def test_compiler_bytes_field_emits_binary_logical_type(clean_model_registry: No
         "__annotations__": {"id": int | None, "contents": bytes},
         "id": Field(default=None, primary_key=True),
     })
-    cols = {c["name"]: c for c in compile_schema_ir_payload("Blob", build_model_schema(M))["models"][0]["columns"]}
+    cols = {
+        c["name"]: c
+        for c in compile_schema_ir_payload(
+            "Blob", list(build_column_specs(M).values()), table_name="blob"
+        )["models"][0]["columns"]
+    }
     assert cols["contents"]["logical_type"] == "binary", cols["contents"]
 
 
@@ -355,8 +361,8 @@ def test_primary_key_autoincrements_by_default(clean_model_registry: None) -> No
     insert). uuid PKs set autoincrement=False explicitly and are covered by the
     uuid tests. (#153)
     """
+    from ferro.columns import build_column_specs
     from ferro.ir.compiler import compile_schema_ir_payload
-    from ferro.schema_metadata import build_model_schema
 
     class IntPk(Model):
         id: int = Field(json_schema_extra={"primary_key": True})
@@ -364,10 +370,39 @@ def test_primary_key_autoincrements_by_default(clean_model_registry: None) -> No
 
     cols = {
         c["name"]: c
-        for c in compile_schema_ir_payload("IntPk", build_model_schema(IntPk))["models"][0]["columns"]
+        for c in compile_schema_ir_payload(
+            "IntPk", list(build_column_specs(IntPk).values()), table_name="intpk"
+        )["models"][0]["columns"]
     }
     assert cols["id"]["primary_key"] is True
     assert cols["id"]["autoincrement"] is True, cols["id"]
+
+
+def test_raw_path_non_integer_pk_autoincrement_false_unified(
+    clean_model_registry: None,
+) -> None:
+    """ADR-0002: a raw-declared (json_schema_extra) non-integer PK without an
+    explicit autoincrement is False under the unified rule — the raw path no
+    longer diverges from the FerroField path (was True, #153). Pins the golden
+    vector ``schema_raw_str_pk_autoincrement_v1``.
+    """
+    from ferro.columns import build_column_specs
+    from ferro.ir.compiler import compile_schema_ir_payload, wrap_schema_ir
+
+    class RawStrPk(Model):
+        id: str = Field(json_schema_extra={"primary_key": True})
+        label: str
+
+    cols = list(build_column_specs(RawStrPk).values())
+    payload = compile_schema_ir_payload("RawStrPk", cols, table_name="raw_str_pk")
+    ir = wrap_schema_ir(payload)
+
+    fixture = _load_vector(VECTORS_DIR / "schema_raw_str_pk_autoincrement_v1.json")
+    assert ir == fixture["ir"]
+
+    id_col = next(c for c in payload["models"][0]["columns"] if c["name"] == "id")
+    assert id_col["primary_key"] is True
+    assert id_col["autoincrement"] is False, id_col
 
 
 def test_clear_registry_clears_join_table_registry(clean_model_registry: None) -> None:

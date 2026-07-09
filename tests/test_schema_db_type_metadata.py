@@ -1,4 +1,4 @@
-"""U1: db_type / db_check propagate from Field() to FerroField and __ferro_schema__.
+"""U1: db_type / db_check propagate from Field() to FerroField and ColumnSpec.
 
 These tests cover the plumbing layer only -- no validation, no DDL emission.
 Validation lives in U2 (metaclass), emitter dispatch lives in U3/U4.
@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated
 
-from ferro import Field, FerroField, Model
+from ferro import FerroField, Field, Model
 
 
 class FileFormat(StrEnum):
@@ -28,9 +28,9 @@ def test_db_type_propagates_to_ferro_fields_and_schema():
     assert metadata.db_type == "text"
     assert metadata.db_check is False
 
-    props = Doc.__ferro_schema__["properties"]
-    assert props["format"].get("db_type") == "text"
-    assert "db_check" not in props["format"] or props["format"]["db_check"] is False
+    spec = Doc.__ferro_columns__["format"]
+    assert spec.db_type == "text"
+    assert spec.db_check is False
 
 
 def test_db_check_propagates_to_ferro_fields_and_schema():
@@ -44,9 +44,9 @@ def test_db_check_propagates_to_ferro_fields_and_schema():
     assert metadata.db_type == "text"
     assert metadata.db_check is True
 
-    props = Doc.__ferro_schema__["properties"]
-    assert props["format"].get("db_type") == "text"
-    assert props["format"].get("db_check") is True
+    spec = Doc.__ferro_columns__["format"]
+    assert spec.db_type == "text"
+    assert spec.db_check is True
 
 
 def test_default_field_has_no_db_type_or_db_check():
@@ -63,9 +63,9 @@ def test_default_field_has_no_db_type_or_db_check():
     assert metadata.db_type is None
     assert metadata.db_check is False
 
-    props = User.__ferro_schema__["properties"]
-    assert "db_type" not in props["email"]
-    assert "db_check" not in props["email"]
+    spec = User.__ferro_columns__["email"]
+    assert spec.db_type is None
+    assert spec.db_check is False
 
 
 def test_annotated_ferro_field_supports_db_type_and_db_check():
@@ -79,6 +79,6 @@ def test_annotated_ferro_field_supports_db_type_and_db_check():
     assert metadata.db_type == "text"
     assert metadata.db_check is True
 
-    props = Doc.__ferro_schema__["properties"]
-    assert props["format"].get("db_type") == "text"
-    assert props["format"].get("db_check") is True
+    spec = Doc.__ferro_columns__["format"]
+    assert spec.db_type == "text"
+    assert spec.db_check is True

@@ -1,6 +1,5 @@
 """Define the core ORM model base and transaction helpers for Ferro."""
 
-import json
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import (
@@ -12,6 +11,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from .columns import ColumnSpec
     from .query import Predicate
     from .session import Session
 
@@ -21,7 +21,6 @@ from ._bind_payload import save_bind_payload
 from ._core import (
     begin_transaction,
     commit_transaction,
-    evict_instance as _core_evict_instance,
     fetch_all,
     register_instance,
     rollback_transaction,
@@ -30,19 +29,21 @@ from ._core import (
     transaction_connection_name,
     update_record,
 )
+from ._core import (
+    evict_instance as _core_evict_instance,
+)
 from .base import ForeignKey, foreign_key_allows_none
 from .exceptions import ModelDoesNotExist
 from .metaclass import ModelMetaclass
 from .query import Predicate, Query
 from .state import (
-    RouteHandle,
     _CURRENT_TRANSACTION,
     _CURRENT_TRANSACTION_CONNECTION,
+    RouteHandle,
     resolve_operation_scope,
     resolve_transaction_scope,
     route_for_transaction,
 )
-
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
 _FERRO_PERSISTED_ATTR = "__ferro_persisted"
@@ -208,18 +209,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = ()
     __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = ()
+    __ferro_columns__: ClassVar[dict[str, "ColumnSpec"]] = {}
     _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
 
     @classmethod
     def _reregister_ferro(cls) -> None:
         """Re-persist this model's SchemaIR envelope (e.g. after envelope eviction)."""
-        schema = getattr(cls, "__ferro_schema__", None)
-        if schema is not None:
-            from .ir import register_model_with_ir
+        from .ir.compiler import compile_model_schema_ir
 
-            register_model_with_ir(
-                cls.__ferro_identity__, schema, cls.__ferro_table__
-            )
+        compile_model_schema_ir(cls.__ferro_identity__, cls)
 
     model_config = ConfigDict(
         from_attributes=True,
@@ -348,23 +346,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         pk_val = None
         pk_field_name = None
 
-        for field_name, metadata in self.__class__.ferro_fields.items():
-            if metadata.primary_key:
-                pk_field_name = field_name
-                if metadata.autoincrement and getattr(self, field_name) is None:
-                    if new_id is not None:
-                        setattr(self, field_name, new_id)
-                pk_val = getattr(self, field_name)
-                break
-
-        if pk_field_name is None:
-            for field_name, field in self.__class__.model_fields.items():
-                if getattr(field, "json_schema_extra", {}).get("primary_key"):
-                    pk_field_name = field_name
-                    if getattr(self, field_name) is None and new_id is not None:
-                        setattr(self, field_name, new_id)
-                    pk_val = getattr(self, field_name)
-                    break
+        for field_name, spec in self.__class__.__ferro_columns__.items():
+            if not spec.primary_key:
+                continue
+            pk_field_name = field_name
+            if spec.autoincrement and getattr(self, field_name) is None and new_id is not None:
+                setattr(self, field_name, new_id)
+            pk_val = getattr(self, field_name)
+            break
 
         if pk_val is not None:
             register_instance(
@@ -405,14 +394,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     @classmethod
     def _primary_key_field_name(cls) -> str | None:
-        for field_name, metadata in cls.ferro_fields.items():
-            if metadata.primary_key:
+        for field_name, spec in cls.__ferro_columns__.items():
+            if spec.primary_key:
                 return field_name
-
-        for field_name, field in cls.model_fields.items():
-            if getattr(field, "json_schema_extra", {}).get("primary_key"):
-                return field_name
-
         return None
 
     @classmethod

@@ -1,13 +1,13 @@
 """SchemaIR compilation and fingerprint helpers for Phase 1.
 
-This module compiles the canonical Ferro-enriched JSON schema metadata into
+This module compiles column specs (:class:`ferro.columns.ColumnSpec`) into
 RFC-shaped SchemaIR envelopes and persists deterministic fingerprints for
 individual models and full model sets.
 """
 
 from __future__ import annotations
 
-import json
+from collections.abc import Sequence
 from typing import Any
 
 from .. import state as ferro_state
@@ -19,7 +19,9 @@ from .._core import (
     _ddl_single_index_name,
     _ddl_single_unique_name,
 )
-from ..schema_metadata import build_model_schema
+from ..columns import ColumnSpec, build_column_specs
+from ..composite_indexes import drop_overlap_with_uniques, normalized_composite_indexes
+from ..composite_uniques import normalized_composite_uniques
 from ..state import (
     _JOIN_TABLE_REGISTRY,
     _MODEL_REGISTRY_PY,
@@ -43,148 +45,26 @@ def reset_schema_ir_compile_count_for_test() -> None:
     _SCHEMA_IR_COMPILE_COUNT_FOR_TEST = 0
 
 
-def _resolve_ref(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, Any]:
-    """Inline a local ``#/$defs/...`` reference into a property schema."""
-    ref_path = col_info.get("$ref")
-    if not isinstance(ref_path, str):
-        return col_info
-    if not ref_path.startswith("#/$defs/"):
-        return col_info
-    def_name = ref_path.split("/")[-1]
-    resolved = schema.get("$defs", {}).get(def_name)
-    if not isinstance(resolved, dict):
-        return col_info
-    return {
-        **resolved,
-        **{k: v for k, v in col_info.items() if k != "$ref"},
+def _column_ir_from_spec(spec: ColumnSpec) -> dict[str, Any]:
+    """Render one ColumnSpec into the locked SchemaIR ``columns[]`` shape."""
+    column_ir: dict[str, Any] = {
+        "name": spec.name,
+        "logical_type": spec.logical_type,
+        "nullable": spec.nullable,
+        "primary_key": spec.primary_key,
+        "autoincrement": spec.autoincrement,
+        "unique": spec.unique,
+        "index": spec.index,
+        "default": spec.default,
+        "format": spec.format,
     }
-
-
-def _resolve_nested_refs(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, Any]:
-    """Resolve local refs in one-level nested ``anyOf`` entries."""
-    any_of = col_info.get("anyOf")
-    if not isinstance(any_of, list):
-        return col_info
-    resolved_any_of: list[Any] = []
-    changed = False
-    for candidate in any_of:
-        if not isinstance(candidate, dict):
-            resolved_any_of.append(candidate)
-            continue
-        resolved_candidate = _resolve_ref(schema, candidate)
-        if resolved_candidate is not candidate:
-            changed = True
-        resolved_any_of.append(resolved_candidate)
-    if not changed:
-        return col_info
-    return {**col_info, "anyOf": resolved_any_of}
-
-
-def _logical_type(col_info: dict[str, Any]) -> str:
-    """Map schema type metadata to SchemaIR ``logical_type``."""
-    field_type, field_format = _effective_type_and_format(col_info)
-    if field_type == "integer":
-        return "integer"
-    if field_type == "number":
-        return "decimal" if field_format == "decimal" else "number"
-    if field_type == "boolean":
-        return "boolean"
-    if field_type == "string":
-        if field_format == "date-time":
-            return "datetime"
-        if field_format == "date":
-            return "date"
-        if field_format == "time":
-            return "time"
-        if field_format == "uuid":
-            return "uuid"
-        if field_format == "binary":
-            return "binary"
-        return "string"
-    if field_type in {"object", "array"}:
-        return "json"
-    return "unknown"
-
-
-
-def _effective_type_and_format(col_info: dict[str, Any]) -> tuple[Any, Any]:
-    """Resolve concrete type/format from direct fields or ``anyOf`` unions."""
-    field_type = col_info.get("type")
-    field_format = col_info.get("format")
-    if field_type is not None:
-        return field_type, field_format
-    any_of = col_info.get("anyOf")
-    if isinstance(any_of, list):
-        for candidate in any_of:
-            if not isinstance(candidate, dict):
-                continue
-            candidate_type = candidate.get("type")
-            if candidate_type is None or candidate_type == "null":
-                continue
-            return candidate_type, candidate.get("format") or field_format
-    return field_type, field_format
-
-
-def _enum_values(col_info: dict[str, Any]) -> list[Any] | None:
-    direct = col_info.get("enum")
-    if isinstance(direct, list):
-        return direct
-    any_of = col_info.get("anyOf")
-    if isinstance(any_of, list):
-        for candidate in any_of:
-            if not isinstance(candidate, dict):
-                continue
-            enum_values = candidate.get("enum")
-            if isinstance(enum_values, list):
-                return enum_values
-    return None
-
-
-def _is_nullable(col_name: str, col_info: dict[str, Any], required_fields: set[str]) -> bool:
-    """Determine nullability from explicit Ferro hint or required-field fallback."""
-    nullable_hint = col_info.get("ferro_nullable")
-    if isinstance(nullable_hint, bool):
-        return nullable_hint
-    return col_name not in required_fields
-
-
-def _column_ir(
-    col_name: str, col_info: dict[str, Any], required_fields: set[str]
-) -> dict[str, Any]:
-    """Compile one schema property into a SchemaIR ``columns[]`` entry."""
-    db_type_value = col_info.get("db_type")
-    db_type_explicit = isinstance(db_type_value, str) and bool(db_type_value)
-    is_pk = bool(col_info.get("primary_key", False))
-    column_ir = {
-        "name": col_name,
-        "logical_type": _logical_type(col_info),
-        # PK columns are NOT NULL by SQL semantics regardless of an Optional
-        # annotation (used only for the autoincrement-default ergonomics);
-        # clamping here keeps the IR truthful so the Alembic bridge and the
-        # Rust emitter agree without per-consumer special cases (FF-B B5).
-        "nullable": False if is_pk else _is_nullable(col_name, col_info, required_fields),
-        "primary_key": is_pk,
-        # A primary key auto-increments by default unless the field explicitly
-        # disables it (e.g. a uuid PK sets autoincrement=False). Mirrors the
-        # historical create-path default (build_column_plan used unwrap_or(true)
-        # for PK columns); without it, a PK declared without an explicit
-        # autoincrement (e.g. json_schema_extra={"primary_key": True}) renders as a
-        # plain INTEGER on Postgres with no SERIAL and fails inserts. (#153)
-        "autoincrement": bool(col_info.get("autoincrement", is_pk)),
-        "unique": bool(col_info.get("unique", False)),
-        "index": bool(col_info.get("index", False)),
-        "default": col_info.get("default"),
-        "format": col_info.get("format"),
-    }
-    enum_values = _enum_values(col_info)
-    if isinstance(enum_values, list):
-        column_ir["enum_values"] = list(enum_values)
-    if db_type_explicit:
-        column_ir["db_type"] = db_type_value
+    if spec.enum_values is not None:
+        column_ir["enum_values"] = list(spec.enum_values)
+    if spec.db_type_explicit:
+        column_ir["db_type"] = spec.db_type
         column_ir["db_type_explicit"] = True
-    enum_type_name = col_info.get("enum_type_name")
-    if isinstance(enum_type_name, str) and enum_type_name:
-        column_ir["enum_type_name"] = enum_type_name
+    if spec.enum_type_name:
+        column_ir["enum_type_name"] = spec.enum_type_name
     return column_ir
 
 
@@ -219,150 +99,114 @@ def _composite_unique_name(table_name: str, columns: list[str]) -> str:
     return _ddl_composite_unique_name(table_name, columns)
 
 
-def _checks_from_columns(table_name: str, columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Compile per-column ``db_check`` markers into SchemaIR ``checks[]`` entries."""
-    checks: list[dict[str, Any]] = []
-    for col in columns:
-        if col.get("db_check") is not True:
-            continue
-        col_name = col.get("name")
-        if not isinstance(col_name, str) or not col_name:
-            continue
-        enum_values = _enum_values(col)
-        if not isinstance(enum_values, list) or not enum_values:
-            continue
-        rendered: list[str] = []
-        for value in enum_values:
-            if isinstance(value, bool):
-                rendered.append(str(value).lower())
-            elif isinstance(value, (int, float)):
-                rendered.append(str(value))
-            else:
-                escaped = str(value).replace("'", "''")
-                rendered.append(f"'{escaped}'")
-        checks.append(
-            {
-                "name": _ddl_check_constraint_name(table_name, col_name),
-                "column": col_name,
-                "values": rendered,
-            }
-        )
-    return checks
-
-
 def compile_schema_ir_payload(
     model_name: str,
-    schema: dict[str, Any],
+    columns: Sequence[ColumnSpec],
     *,
     table_name: str | None = None,
+    composite_uniques: Sequence[Sequence[str]] = (),
+    composite_indexes: Sequence[Sequence[str]] = (),
 ) -> dict[str, Any]:
-    """Compile one model schema dict into a SchemaIR payload object.
+    """Compile column specs into a SchemaIR payload object (locked shape).
 
     Args:
         model_name: Registered model class name.
-        schema: Canonical Ferro-enriched model schema.
+        columns: One ColumnSpec per column.
+        table_name: Physical table name (defaults to ``model_name.lower()``).
+        composite_uniques: Validated composite-unique column groups.
+        composite_indexes: Validated composite-index column groups.
 
     Returns:
         A SchemaIR payload object ready to be wrapped in an IR envelope.
     """
     resolved_table_name = table_name or model_name.lower()
-    properties = schema.get("properties", {})
-    if not isinstance(properties, dict):
-        properties = {}
-    required_fields = schema.get("required", [])
-    required = set(required_fields) if isinstance(required_fields, list) else set()
+    # Collapse same-named specs, last one wins — mirrors the historical
+    # ``properties`` dict-literal merge (a self-referential M2M join table
+    # derives an identical ``{table}_id`` name for both its source and target
+    # shadow-FK columns; the dict pipeline silently collapsed that duplicate
+    # key, so specs must too, or the compiled table gains a duplicate column).
+    deduped: dict[str, ColumnSpec] = {}
+    for spec in columns:
+        deduped[spec.name] = spec
+    ordered = sorted(deduped.values(), key=lambda spec: spec.name)
 
-    ordered_props = sorted(properties.items(), key=lambda item: item[0])
-    resolved_columns: list[dict[str, Any]] = []
-    for col_name, col_info in ordered_props:
-        if not isinstance(col_info, dict):
-            continue
-        resolved = _resolve_ref(schema, col_info)
-        resolved = _resolve_nested_refs(schema, resolved)
-        resolved_with_name = {"name": col_name, **resolved}
-        resolved_columns.append(resolved_with_name)
-
-    columns = [
-        _column_ir(col["name"], col, required)
-        for col in resolved_columns
-        if isinstance(col.get("name"), str)
-    ]
+    column_entries = [_column_ir_from_spec(spec) for spec in ordered]
 
     foreign_keys: list[dict[str, Any]] = []
     indexes: list[dict[str, Any]] = []
     uniques: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
 
-    for col in resolved_columns:
-        col_name = col.get("name")
-        if not isinstance(col_name, str) or not col_name:
-            continue
-        fk = col.get("foreign_key")
-        if isinstance(fk, dict):
-            to_table = fk.get("to_table")
-            if isinstance(to_table, str) and to_table:
-                foreign_keys.append(
-                    {
-                        "column": col_name,
-                        "to_table": to_table,
-                        "to_column": "id",
-                        "on_delete": fk.get("on_delete"),
-                        "name": _fk_name(resolved_table_name, col_name, to_table),
-                    }
-                )
-        if bool(col.get("index", False)):
+    for spec in ordered:
+        if spec.foreign_key is not None and spec.foreign_key.to_table:
+            foreign_keys.append(
+                {
+                    "column": spec.name,
+                    "to_table": spec.foreign_key.to_table,
+                    "to_column": "id",
+                    "on_delete": spec.foreign_key.on_delete,
+                    "name": _fk_name(
+                        resolved_table_name, spec.name, spec.foreign_key.to_table
+                    ),
+                }
+            )
+        if spec.index:
             indexes.append(
                 {
-                    "name": _single_index_name(resolved_table_name, col_name),
-                    "columns": [col_name],
+                    "name": _single_index_name(resolved_table_name, spec.name),
+                    "columns": [spec.name],
                     "unique": False,
                 }
             )
-        if bool(col.get("unique", False)):
+        if spec.unique:
             uniques.append(
                 {
-                    "name": _single_unique_name(resolved_table_name, col_name),
-                    "columns": [col_name],
+                    "name": _single_unique_name(resolved_table_name, spec.name),
+                    "columns": [spec.name],
+                }
+            )
+        if spec.db_check and spec.enum_values:
+            rendered: list[str] = []
+            for value in spec.enum_values:
+                if isinstance(value, bool):
+                    rendered.append(str(value).lower())
+                elif isinstance(value, (int, float)):
+                    rendered.append(str(value))
+                else:
+                    escaped = str(value).replace("'", "''")
+                    rendered.append(f"'{escaped}'")
+            checks.append(
+                {
+                    "name": _ddl_check_constraint_name(resolved_table_name, spec.name),
+                    "column": spec.name,
+                    "values": rendered,
                 }
             )
 
-    for composite in schema.get("ferro_composite_indexes") or []:
-        if not isinstance(composite, list) or not composite:
-            continue
-        cols = [c for c in composite if isinstance(c, str) and c]
-        if len(cols) != len(composite):
-            continue
+    for cols in composite_indexes:
         indexes.append(
             {
-                "name": _composite_index_name(resolved_table_name, cols),
-                "columns": cols,
+                "name": _composite_index_name(resolved_table_name, list(cols)),
+                "columns": list(cols),
                 "unique": False,
             }
         )
-
-    for composite in schema.get("ferro_composite_uniques") or []:
-        if not isinstance(composite, list) or not composite:
-            continue
-        cols = [c for c in composite if isinstance(c, str) and c]
-        if len(cols) != len(composite):
-            continue
+    for cols in composite_uniques:
         uniques.append(
-            {"name": _composite_unique_name(resolved_table_name, cols), "columns": cols}
+            {"name": _composite_unique_name(resolved_table_name, list(cols)), "columns": list(cols)}
         )
 
     model_payload = {
         "model_name": model_name,
         "table_name": resolved_table_name,
-        "columns": columns,
+        "columns": column_entries,
         "foreign_keys": sorted(
             foreign_keys,
             key=lambda item: (item["column"], item["to_table"], item["to_column"]),
         ),
         "indexes": sorted(indexes, key=lambda item: item["name"]),
         "uniques": sorted(uniques, key=lambda item: item["name"]),
-        "checks": sorted(
-            _checks_from_columns(resolved_table_name, resolved_columns),
-            key=lambda item: item["name"],
-        ),
+        "checks": sorted(checks, key=lambda item: item["name"]),
     }
     return {"dialect_agnostic": True, "models": [model_payload]}
 
@@ -379,10 +223,11 @@ def _persist_schema_ir_envelope(model_name: str, envelope: dict[str, Any]) -> No
 
 def _compile_and_persist_model_envelope(
     model_name: str,
-    schema: dict[str, Any],
+    columns: Sequence[ColumnSpec],
     *,
     table_name: str | None = None,
-    model_cls: type[Any] | None = None,
+    composite_uniques: Sequence[Sequence[str]] = (),
+    composite_indexes: Sequence[Sequence[str]] = (),
 ) -> dict[str, Any]:
     """Compile one model or join table to SchemaIR and persist its envelope.
 
@@ -391,13 +236,12 @@ def _compile_and_persist_model_envelope(
     """
     global _SCHEMA_IR_COMPILE_COUNT_FOR_TEST
     _SCHEMA_IR_COMPILE_COUNT_FOR_TEST += 1
-    resolved_table_name = table_name
-    if resolved_table_name is None and model_cls is not None:
-        resolved_table_name = getattr(model_cls, "__ferro_table__", None)
     payload = compile_schema_ir_payload(
         model_name,
-        schema,
-        table_name=resolved_table_name,
+        columns,
+        table_name=table_name,
+        composite_uniques=composite_uniques,
+        composite_indexes=composite_indexes,
     )
     envelope = wrap_schema_ir(payload)
     _persist_schema_ir_envelope(model_name, envelope)
@@ -406,17 +250,23 @@ def _compile_and_persist_model_envelope(
 
 def register_model_with_ir(
     model_name: str,
-    schema: dict[str, Any],
+    columns: Sequence[ColumnSpec],
     table_name: str,
+    *,
+    composite_uniques: Sequence[Sequence[str]] = (),
+    composite_indexes: Sequence[Sequence[str]] = (),
 ) -> dict[str, Any]:
-    """Compile SchemaIR once and persist the envelope.
+    """Compile SchemaIR once from column specs and persist the envelope.
 
-    Single registration bundle for metaclass, relationship resolution, join
-    tables, and ``Model._reregister_ferro`` (#236). Rust registration is
-    installed only via the bulk push seam (ADR #242 / #245).
+    Single registration bundle for join tables and any other producer that
+    already has fully-formed column specs in hand (#236).
     """
     return _compile_and_persist_model_envelope(
-        model_name, schema, table_name=table_name
+        model_name,
+        columns,
+        table_name=table_name,
+        composite_uniques=composite_uniques,
+        composite_indexes=composite_indexes,
     )
 
 
@@ -430,24 +280,45 @@ def wrap_schema_ir(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def compile_model_schema_ir(
-    model_name: str, model_cls: type[Any], schema: dict[str, Any] | None = None
+    model_name: str, model_cls: type[Any], specs: dict[str, ColumnSpec] | None = None
 ) -> dict[str, Any]:
-    """Compile and persist a single model's SchemaIR envelope + fingerprint.
+    """Build (or accept) specs for one model, refresh the class attr, register.
+
+    The single recompile source: metaclass registration, relationship
+    resolution's second pass, envelope re-registration, and the dirty
+    recompile paths all come through here, so ``__ferro_columns__`` can never
+    go stale relative to the persisted envelope.
 
     Args:
         model_name: Registry key / model class name.
         model_cls: Python model class to compile.
-        schema: Optional prebuilt canonical schema — avoids a redundant
-            build_model_schema pass when the caller just built it (FF-E E3).
+        specs: Optional prebuilt column specs — avoids a redundant
+            ``build_column_specs`` pass when the caller just built it.
 
     Returns:
         The compiled SchemaIR envelope for ``model_cls``.
     """
-    if schema is None:
-        schema = build_model_schema(model_cls)
-    return _compile_and_persist_model_envelope(
-        model_name, schema, model_cls=model_cls
+    if specs is None:
+        specs = build_column_specs(model_cls)
+    column_names = frozenset(specs)
+    uniques = normalized_composite_uniques(model_cls, column_names)
+    indexes = drop_overlap_with_uniques(
+        normalized_composite_indexes(model_cls, column_names), uniques, model_name
     )
+    envelope = _compile_and_persist_model_envelope(
+        model_name,
+        tuple(specs.values()),
+        table_name=getattr(model_cls, "__ferro_table__", None),
+        composite_uniques=uniques,
+        composite_indexes=indexes,
+    )
+    # Publish specs onto the class only after compile + persist succeed, so a
+    # composite-validation or persist failure leaves the prior specs in place
+    # (never fresh specs with no matching persisted envelope). This is the
+    # "``__ferro_columns__`` can never go stale relative to the envelope"
+    # invariant, made atomic.
+    model_cls.__ferro_columns__ = specs
+    return envelope
 
 
 def _model_payload_from_envelope(name: str) -> dict[str, Any]:
@@ -474,10 +345,10 @@ def _assemble_modelset_envelope() -> dict[str, Any]:
     for model_name, _model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
         models.append(_model_payload_from_envelope(model_name))
 
-    for table_name, table_schema in sorted(
+    for table_name, bundle in sorted(
         _JOIN_TABLE_REGISTRY.items(), key=lambda item: item[0]
     ):
-        if not isinstance(table_schema, dict):
+        if not isinstance(bundle, dict):
             continue
         models.append(_model_payload_from_envelope(table_name))
 
@@ -500,10 +371,20 @@ def _missing_registry_envelope_names() -> list[str]:
     for name in _MODEL_REGISTRY_PY:
         if name not in _SCHEMA_IR_BY_MODEL:
             missing.append(name)
-    for table_name, table_schema in _JOIN_TABLE_REGISTRY.items():
-        if isinstance(table_schema, dict) and table_name not in _SCHEMA_IR_BY_MODEL:
+    for table_name, bundle in _JOIN_TABLE_REGISTRY.items():
+        if isinstance(bundle, dict) and table_name not in _SCHEMA_IR_BY_MODEL:
             missing.append(table_name)
     return missing
+
+
+def _register_join_table_bundle(table_name: str, bundle: dict[str, Any]) -> None:
+    register_model_with_ir(
+        table_name,
+        bundle["columns"],
+        table_name,
+        composite_uniques=bundle["composite_uniques"],
+        composite_indexes=bundle["composite_indexes"],
+    )
 
 
 def _recompile_missing_registry_envelopes() -> None:
@@ -512,9 +393,9 @@ def _recompile_missing_registry_envelopes() -> None:
         if model_cls is not None:
             compile_model_schema_ir(model_name, model_cls)
             continue
-        table_schema = _JOIN_TABLE_REGISTRY.get(model_name)
-        if isinstance(table_schema, dict):
-            register_model_with_ir(model_name, table_schema, model_name)
+        bundle = _JOIN_TABLE_REGISTRY.get(model_name)
+        if isinstance(bundle, dict):
+            _register_join_table_bundle(model_name, bundle)
 
 
 def _recompile_all_registered_envelopes() -> None:
@@ -527,11 +408,11 @@ def _recompile_all_registered_envelopes() -> None:
     """
     for model_name, model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
         compile_model_schema_ir(model_name, model_cls)
-    for table_name, table_schema in sorted(
+    for table_name, bundle in sorted(
         _JOIN_TABLE_REGISTRY.items(), key=lambda item: item[0]
     ):
-        if isinstance(table_schema, dict):
-            register_model_with_ir(table_name, table_schema, table_name)
+        if isinstance(bundle, dict):
+            _register_join_table_bundle(table_name, bundle)
 
 
 def compile_registry_schema_ir() -> dict[str, Any]:

@@ -24,9 +24,9 @@ from sqlalchemy.schema import CreateTable
 
 from ferro import Field, Model, clear_registry, reset_engine
 from ferro._core import _render_create_table_sql_for_test
+from ferro.columns import build_column_specs
 from ferro.ir.compiler import compile_schema_ir_payload
 from ferro.migrations import get_metadata
-from ferro.schema_metadata import build_model_schema
 
 
 def _render_create_table_via_ir(
@@ -35,8 +35,10 @@ def _render_create_table_via_ir(
     """Compile ``model_cls`` to a SchemaIR payload and render the runtime CREATE
     TABLE through the shared emitter (the same path the runtime uses).
     Returns ``(create_sql, post_create_sqls, pre_create_sqls)``."""
-    schema = build_model_schema(model_cls)
-    payload = compile_schema_ir_payload(name, schema)
+    specs = build_column_specs(model_cls)
+    payload = compile_schema_ir_payload(
+        name, list(specs.values()), table_name=name.lower()
+    )
     return _render_create_table_sql_for_test(name, json.dumps(payload), dialect_name)
 
 

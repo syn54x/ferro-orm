@@ -39,14 +39,14 @@ def test_second_pass_rebuild_failure_aborts_with_model_named(monkeypatch):
 
     import ferro.relations as relations_mod
 
-    real_build = relations_mod.build_model_schema
+    real_compile = relations_mod.compile_model_schema_ir
 
-    def failing_build(model_cls, schema=None):
+    def failing_compile(model_name, model_cls, specs=None):
         if model_cls.__name__ == "E4Broken":
             raise ValueError("boom: schema rebuild failed")
-        return real_build(model_cls)
+        return real_compile(model_name, model_cls, specs)
 
-    monkeypatch.setattr(relations_mod, "build_model_schema", failing_build)
+    monkeypatch.setattr(relations_mod, "compile_model_schema_ir", failing_compile)
 
     with pytest.raises(RuntimeError) as excinfo:
         resolve_relationships()
