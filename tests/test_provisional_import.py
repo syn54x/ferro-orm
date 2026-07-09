@@ -47,7 +47,11 @@ class _ColdPiRow(Model):
 
 @pytest.fixture(autouse=True)
 def _cold_pi_row_survives_registry_wipe():
-    """Keep the module-level cold-rehydration model registered across wipes."""
+    """Keep the module-level cold-rehydration model registered across wipes.
+
+    Runs before ``clean_registry`` (autouse precedes explicit fixtures), so
+    ``clean_registry`` tests still start from a truly empty registry.
+    """
     if _ColdPiRow.__ferro_identity__ not in ferro_state._MODEL_REGISTRY_PY:
         ferro_state.register_model(_ColdPiRow)
     yield
@@ -56,7 +60,12 @@ def _cold_pi_row_survives_registry_wipe():
 def test_class_body_does_not_call_register_model_schema(
     clean_registry, monkeypatch
 ) -> None:
-    """Metaclass registration must not push schema to Rust at import time."""
+    """Metaclass registration must not push schema to Rust at import time.
+
+    Guards the attribute-access path (``ferro._core.register_model_schema``).
+    The AST repo scan catches module-level ``from ._core import`` bindings
+    this monkeypatch cannot intercept.
+    """
 
     calls: list[tuple[object, ...]] = []
 
