@@ -249,9 +249,12 @@ Rules:
   checking (`User.age >= 18` types as `bool`; `where()` expects
   `QueryNode | Predicate`). Docs say so explicitly wherever the style is
   shown.
-- **`order_by` is not a predicate** and keeps attribute style
-  (`order_by(User.age, "desc")`). Passing a lambda to `order_by` silently
-  produces a junk column name — never show it.
+- **`order_by` is not a predicate**, but its lambda selector
+  (`order_by(lambda u: u.age, "desc")`) is validated and is the documented
+  style — and it is the ONLY way to order by a related column
+  (`order_by(lambda t: t.account.label)`), which relation traversal requires.
+  Attribute style is not accepted — `order_by` takes a column-name string or
+  a lambda selector (anything else raises `TypeError`).
 
 The canonical comparisons live in `docs/pages/guide/queries.md`
 ("Predicate Styles") and `docs/pages/concepts/query-typing.md`; everywhere

@@ -688,7 +688,12 @@ class Query(Generic[T]):
             The number of records updated.
 
         Raises:
-            ValueError: If ``limit()`` or ``offset()`` was set on this query.
+            ValueError: If ``limit()`` or ``offset()`` was set on this query, or
+                if the query traverses a relation (a ``where()`` predicate on a
+                related column, or an explicit ``join()``/``left_join()``) —
+                multi-table mutation has no portable SQL. Filter by a column on
+                the target model, or resolve the related primary keys first and
+                update by primary-key set.
 
         Examples:
             >>> updated = await User.where(lambda user: user.id == 1).update(name="Taylor")
@@ -725,7 +730,12 @@ class Query(Generic[T]):
             The number of records deleted.
 
         Raises:
-            ValueError: If ``limit()`` or ``offset()`` was set on this query.
+            ValueError: If ``limit()`` or ``offset()`` was set on this query, or
+                if the query traverses a relation (a ``where()`` predicate on a
+                related column, or an explicit ``join()``/``left_join()``) —
+                multi-table mutation has no portable SQL. Filter by a column on
+                the target model, or resolve the related primary keys first and
+                delete by primary-key set.
 
         Examples:
             >>> deleted = await User.where(lambda user: user.disabled == True).delete()  # noqa: E712

@@ -216,6 +216,8 @@ The practical consequence of INNER-everywhere: **traversing a relation narrows t
 
 This is deliberate and stable. A hop's nullability never changes the join type, so making a foreign key nullable later never silently rewrites the meaning of an existing query, and an N-hop path is trivial to reason about — no hop poisons the ones after it. Keeping the relation-less rows is an explicit opt-in (`left_join`, below).
 
+The narrowing is query-wide, not per-clause: the join is rendered once for the whole statement, so a traversal branch inside an `|` still narrows the entire result. `(note.account.ledger_id == 1) | (note.body == "orphan")` drops every relation-less note — the INNER `account` join removes it before the `OR` is ever evaluated, so the `body == "orphan"` branch can never rescue it. Reach for `left_join` when a traversal branch of an `|` must keep relation-less rows.
+
 `count()` and the other terminals see exactly this narrowed set — a many-to-one join never multiplies root rows, so `.count()` equals the number of matching transactions, not the number of joined pairs:
 
 ```python
