@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 import re
 import types
+import pydantic
 from decimal import Decimal
 from enum import Enum, IntEnum
 from typing import Annotated, Any, Union, get_args, get_origin
@@ -89,6 +90,8 @@ CANONICAL_DB_TYPES: frozenset[str] = frozenset(
         "timestamptz",
         "date",
         "time",
+        "json",
+        "jsonb",
     }
 )
 
@@ -190,6 +193,20 @@ def _is_time(hint: Any) -> bool:
     return hint is _dt.time
 
 
+def _is_json_family(hint: Any) -> bool:
+    """Json-family field (see ``CONTEXT.md``): ``dict``/``list`` in any
+    parameterization — element type unrestricted, so ``list[NestedModel]``
+    qualifies — or a nested Pydantic model. Deliberately narrow (ADR-0004):
+    wider object-schema shapes (``TypedDict``, dataclass, ``set``, ``tuple``)
+    are rejected until a real workload asks; loosening is non-breaking.
+    """
+    if hint is dict or hint is list:
+        return True
+    if get_origin(hint) in (dict, list):
+        return True
+    return isinstance(hint, type) and issubclass(hint, pydantic.BaseModel)
+
+
 def validate_db_type_declaration(
     field_name: str, db_type: Any, annotation: Any
 ) -> str | None:
@@ -243,6 +260,8 @@ def db_type_is_compatible(token: str, annotation: Any) -> bool:
         return _is_date(hint)
     if token == "time":
         return _is_time(hint)
+    if token in {"json", "jsonb"}:
+        return _is_json_family(hint)
     return False
 
 

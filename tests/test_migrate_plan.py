@@ -365,3 +365,38 @@ def test_derived_uuid_column_does_not_drift_when_consuming_python_ir(dialect):
     stmts, warns = _render_migration_sql_for_test("acct", schema_ir, live, dialect)
     assert stmts == [], f"unexpected DDL: {stmts}"
     assert warns == [], f"unexpected drift warning: {warns}"
+
+
+class TestJsonStorageTokens:
+    """ADR-0004: jsonb is a Postgres-only canonical; SQLite lowers to JSON."""
+
+    def test_jsonb_add_column_renders_jsonb_on_postgres(self):
+        schema = schema_with(
+            {"payload": {"type": "object", "db_type": "jsonb", "ferro_nullable": True}}
+        )
+        stmts, warns = render(schema, PK_ONLY_LIVE, "postgres")
+        assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "payload" jsonb']
+        assert warns == []
+
+    def test_jsonb_add_column_lowers_to_json_on_sqlite(self):
+        schema = schema_with(
+            {"payload": {"type": "object", "db_type": "jsonb", "ferro_nullable": True}}
+        )
+        stmts, warns = render(schema, PK_ONLY_LIVE, "sqlite")
+        assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "payload" JSON']
+        assert warns == []
+
+    def test_explicit_json_add_column_renders_json_on_postgres(self):
+        schema = schema_with(
+            {"payload": {"type": "object", "db_type": "json", "ferro_nullable": True}}
+        )
+        stmts, warns = render(schema, PK_ONLY_LIVE, "postgres")
+        assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "payload" json']
+        assert warns == []
+
+    def test_jsonb_array_add_column_renders_jsonb_on_postgres(self):
+        schema = schema_with(
+            {"entries": {"type": "array", "db_type": "jsonb", "ferro_nullable": True}}
+        )
+        stmts, _ = render(schema, PK_ONLY_LIVE, "postgres")
+        assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "entries" jsonb']

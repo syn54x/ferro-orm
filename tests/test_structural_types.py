@@ -438,3 +438,87 @@ async def test_native_timestamp_without_time_zone_null_and_value(
         f2 = await RowWithTs.get(row2.id)
         assert f2 is not None
         assert f2.scrubbed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_jsonb_declared_fields_roundtrip(db_url):
+    """jsonb-declared json-family fields round-trip by Python `==` equality.
+
+    The payload dict is intentionally order-scrambled (keys not sorted):
+    Postgres jsonb does not preserve key order, and the contract is value
+    equality, not representation fidelity (ADR-0004 / #262).
+    """
+
+    class Payment(BaseModel):
+        currency: str
+        amount: int
+
+    class JsonbDoc(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        payload: Annotated[Dict, FerroField(db_type="jsonb")]
+        entries: Annotated[List[Payment], FerroField(db_type="jsonb")]
+        plain: Dict[str, str]  # default json storage, untouched by opt-in
+
+    # Deliberately unsorted keys — jsonb returns them sorted; == must hold.
+    scrambled = {"zeta": 1, "alpha": {"nested": [3, 1, 2]}, "mid": None}
+    entries = [Payment(currency="USD", amount=5), Payment(currency="EUR", amount=9)]
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        item = await JsonbDoc.create(
+            payload=scrambled, entries=entries, plain={"k": "v"}
+        )
+        item_id = item.id
+
+        from ferro import evict_instance
+
+        evict_instance("JsonbDoc", str(item_id))
+
+        fetched = await JsonbDoc.get(item_id)
+        assert fetched is not None
+        assert fetched.payload == scrambled
+        # Established json-family contract: reload yields dicts (see
+        # test_json_column_list_of_nested_pydantic_models_roundtrip).
+        assert fetched.entries == [e.model_dump() for e in entries]
+        assert fetched.plain == {"k": "v"}
+
+        # Storage assertion (Postgres only): the live column type is jsonb —
+        # and the default-storage neighbor stayed plain json.
+        if db_url.startswith(("postgres://", "postgresql://")):
+            from ferro.raw import fetch_all
+
+            rows = await fetch_all(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_name = 'jsonbdoc' AND column_name IN "
+                "('payload', 'entries', 'plain') ORDER BY column_name"
+            )
+            types = {r["column_name"]: r["data_type"] for r in rows}
+            assert types["payload"] == "jsonb"
+            assert types["entries"] == "jsonb"
+            assert types["plain"] == "json"
+
+
+@pytest.mark.asyncio
+async def test_jsonb_update_persists(db_url):
+    """UPDATE binds against a jsonb column work.
+
+    The unchanged ``::json`` bind coerces into jsonb via Postgres's
+    assignment cast (ADR-0004) -- pins that INSERT *and* UPDATE both
+    survive the storage opt-in with no codec change.
+    """
+
+    class JsonbNote(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        body: Annotated[Dict, FerroField(db_type="jsonb")]
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        note = await JsonbNote.create(body={"v": 1})
+        note.body = {"v": 2, "extra": [True, None]}
+        await note.save()
+
+        from ferro import evict_instance
+
+        evict_instance("JsonbNote", str(note.id))
+        fetched = await JsonbNote.get(note.id)
+        assert fetched.body == {"v": 2, "extra": [True, None]}

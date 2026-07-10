@@ -182,7 +182,7 @@ fn type_family(canonical: CanonicalType) -> TypeFamily {
         }
         CanonicalType::Date => TypeFamily::Date,
         CanonicalType::Time => TypeFamily::Time,
-        CanonicalType::Json => TypeFamily::Json,
+        CanonicalType::Json | CanonicalType::Jsonb => TypeFamily::Json,
     }
 }
 
@@ -204,7 +204,9 @@ fn scalar_codec(canonical: CanonicalType) -> ColumnCodec {
         }
         CanonicalType::Date => ColumnCodec::Date,
         CanonicalType::Time => ColumnCodec::Time,
-        CanonicalType::Json => ColumnCodec::Json,
+        // One logical codec for both JSON storages (ADR-0004): decode/hydrate
+        // are identical; only the bind cast is storage-aware.
+        CanonicalType::Json | CanonicalType::Jsonb => ColumnCodec::Json,
     }
 }
 
