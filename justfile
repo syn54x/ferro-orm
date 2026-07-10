@@ -1,8 +1,14 @@
-release:
-    gh workflow run release.yml
+# Cut a release. Pass optional markdown to prepend to the top of the GitHub
+# Release body (the auto-generated changelog stays beneath it):
+#
+#   just release "## Query joins have landed 🎉  See the [guide](https://…)."
+#   just release "$(cat /tmp/notes.md)"
+#   just release $'## Query joins\n\nTraverse relations in `where()` …\n\nDocs: https://…'
+release notes="":
+    gh workflow run release.yml -f highlights={{ quote(notes) }}
 
-prerelease:
-    gh workflow run release.yml -f prerelease=true
+prerelease notes="":
+    gh workflow run release.yml -f prerelease=true -f highlights={{ quote(notes) }}
 
 docs:
     gh workflow run publish-docs.yml
