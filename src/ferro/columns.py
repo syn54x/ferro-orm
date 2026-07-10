@@ -23,13 +23,38 @@ from ._annotation_utils import (
 from ._shadow_fk_types import _scalar_part_of_annotation
 from .base import ForeignKey, foreign_key_allows_none
 
-__all__ = ["ColumnSpec", "ForeignKeyRef", "build_column_specs", "fk_shadow_spec", "pk_spec"]
+__all__ = [
+    "ColumnSpec",
+    "ForeignKeyRef",
+    "RelationSpec",
+    "build_column_specs",
+    "build_relation_specs",
+    "fk_shadow_spec",
+    "pk_spec",
+]
 
 
 @dataclass(frozen=True, slots=True)
 class ForeignKeyRef:
     to_table: str
     on_delete: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RelationSpec:
+    """One declared forward-FK relation's traversal facts (#268).
+
+    Built alongside ``ColumnSpec`` at the same compile choke point
+    (``compile_model_schema_ir``) and exposed as
+    ``cls.__ferro_relation_specs__``. Relation-traversal query planning (PRD
+    #267) resolves an attribute access like ``t.account`` to its target model
+    and shadow FK column via this lookup, hop by hop.
+    """
+
+    field_name: str
+    target: type
+    shadow_column: str
+    nullable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +392,47 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             db_type_explicit=bool(db_type),
             db_check=db_check,
             foreign_key=fk_ref,
+        )
+    return specs
+
+
+def build_relation_specs(
+    model_cls: type[Any], columns: dict[str, ColumnSpec]
+) -> dict[str, RelationSpec]:
+    """Build one RelationSpec per declared forward-FK relation (#268).
+
+    Reads ``ferro_relations`` (the same class-body-registered relation
+    metadata ``build_column_specs`` reads via ``fk_by_shadow``) and pairs each
+    entry with its already-compiled shadow ``{field}_id`` ColumnSpec — the
+    single-source nullability derivation lives there, not here (design pin:
+    do not re-derive). ``ManyToManyRelation`` and BackRef entries in
+    ``ferro_relations`` are not ``ForeignKey`` instances and are skipped.
+
+    A relation whose target hasn't been resolved to a concrete class yet
+    (provisional, class-body time, before ``resolve_relationships()``) is
+    omitted here; the resolved second pass recompiles with real targets so
+    the lookup is complete once resolution finishes.
+
+    Callers store the result on ``cls.__ferro_relation_specs__`` and must
+    replace, never mutate — same convention as ``__ferro_columns__``.
+    """
+    ferro_relations = getattr(model_cls, "ferro_relations", {}) or {}
+    specs: dict[str, RelationSpec] = {}
+    for field_name, meta in ferro_relations.items():
+        if not isinstance(meta, ForeignKey):
+            continue
+        target = meta.to
+        if not isinstance(target, type):
+            continue
+        shadow_column = f"{field_name}_id"
+        shadow_spec = columns.get(shadow_column)
+        if shadow_spec is None:
+            continue
+        specs[field_name] = RelationSpec(
+            field_name=field_name,
+            target=target,
+            shadow_column=shadow_column,
+            nullable=shadow_spec.nullable,
         )
     return specs
 

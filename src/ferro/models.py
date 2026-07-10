@@ -11,7 +11,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from .columns import ColumnSpec
+    from .columns import ColumnSpec, RelationSpec
     from .query import Predicate
     from .session import Session
 
@@ -210,6 +210,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = ()
     __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = ()
     __ferro_columns__: ClassVar[dict[str, "ColumnSpec"]] = {}
+    __ferro_relation_specs__: ClassVar[dict[str, "RelationSpec"]] = {}
     _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
 
     @classmethod
