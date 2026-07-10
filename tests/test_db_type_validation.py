@@ -290,8 +290,6 @@ def test_db_check_on_literal_is_accepted():
 
 
 def test_raw_path_unknown_token_raises():
-    import pydantic
-
     with pytest.raises(TypeError, match="banana"):
 
         class Doc(Model):
@@ -300,8 +298,6 @@ def test_raw_path_unknown_token_raises():
 
 
 def test_raw_path_incompatible_token_raises():
-    import pydantic
-
     with pytest.raises(TypeError, match="value.*db_type"):
 
         class Doc(Model):
@@ -310,8 +306,6 @@ def test_raw_path_incompatible_token_raises():
 
 
 def test_raw_path_non_string_token_raises():
-    import pydantic
-
     with pytest.raises(TypeError, match="string token"):
 
         class Doc(Model):
@@ -320,8 +314,6 @@ def test_raw_path_non_string_token_raises():
 
 
 def test_raw_path_compatible_token_is_accepted():
-    import pydantic
-
     class Doc(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str = pydantic.Field(json_schema_extra={"db_type": "text"})
@@ -329,15 +321,19 @@ def test_raw_path_compatible_token_is_accepted():
     assert Doc.__ferro_columns__["name"].db_type == "text"
 
 
-def test_raw_path_empty_token_is_absent():
-    """Empty string means no declaration -- preserved pre-ADR-0003 behavior."""
-    import pydantic
+def test_empty_token_raises_on_both_paths():
+    """An empty db_type is a do-nothing declaration -- loud, not silent."""
+    with pytest.raises(TypeError, match="canonical vocabulary"):
 
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str = pydantic.Field(json_schema_extra={"db_type": ""})
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str = pydantic.Field(json_schema_extra={"db_type": ""})
 
-    assert Doc.__ferro_columns__["name"].db_type is None
+    with pytest.raises(TypeError, match="canonical vocabulary"):
+
+        class Doc2(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str = Field(db_type="")
 
 
 # ---------------------------------------------------------------------------

@@ -5,11 +5,12 @@ from __future__ import annotations
 import datetime as _dt
 import re
 import types
-import pydantic
 from decimal import Decimal
 from enum import Enum, IntEnum
 from typing import Annotated, Any, Union, get_args, get_origin
 from uuid import UUID
+
+import pydantic
 
 
 def _strip_optional_union(hint: Any) -> Any:
@@ -217,10 +218,11 @@ def validate_db_type_declaration(
     converge — so incoherent declarations raise ``TypeError`` at
     class-definition time regardless of declaration syntax.
 
-    Returns the normalized token, or ``None`` when the declaration is absent
-    (``None`` or empty string).
+    Returns the normalized token, or ``None`` when the declaration is absent.
+    An empty string is not "absent" — it is a declaration that does nothing,
+    and do-nothing declarations fail loudly (#260 story 14).
     """
-    if db_type is None or db_type == "":
+    if db_type is None:
         return None
     if not isinstance(db_type, str):
         raise TypeError(

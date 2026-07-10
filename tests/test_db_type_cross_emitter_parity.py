@@ -15,14 +15,17 @@ import datetime as dt
 import json
 import re
 from enum import IntEnum, StrEnum
+from typing import Annotated
 from uuid import UUID
 
 import pytest
 import sqlalchemy as sa
+from pydantic import BaseModel
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.schema import CreateTable
 
 from ferro import Field, Model, clear_registry, reset_engine
+from ferro.base import FerroField
 from ferro._core import _render_create_table_sql_for_test
 from ferro.columns import build_column_specs
 from ferro.ir.compiler import compile_schema_ir_payload
@@ -78,6 +81,11 @@ class _Format(StrEnum):
 class _Priority(IntEnum):
     LOW = 1
     HIGH = 2
+
+
+class _Payment(BaseModel):
+    currency: str
+    amount: int
 
 
 _TOKEN_CASES = [
@@ -440,3 +448,27 @@ def test_unknown_logical_type_raises_at_ffi_boundary(dialect: str):
     }
     with pytest.raises(RuntimeError):
         _render_create_table_sql_for_test("Widget", json.dumps(payload), dialect)
+
+
+def test_jsonb_all_json_family_shapes_render_jsonb_on_postgres():
+    """#262 AC1: dict, list[NestedModel], and nested-model fields — declared in
+    the Annotated style — all render JSONB at the CREATE TABLE render seam."""
+
+    class JsonbShapes(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        payload: Annotated[dict, FerroField(db_type="jsonb")]
+        entries: Annotated[list[_Payment], FerroField(db_type="jsonb")]
+        detail: Annotated[_Payment, FerroField(db_type="jsonb")]
+
+    rust_sql = _render_rust_sql(JsonbShapes, "postgres")
+    for col in ("payload", "entries", "detail"):
+        assert f'"{col}" jsonb' in rust_sql, (col, rust_sql)
+
+    alembic_sql = _render_alembic_sql(JsonbShapes, "postgres")
+    for col in ("payload", "entries", "detail"):
+        assert "JSONB" in _extract_col_type(alembic_sql, col), (col, alembic_sql)
+
+    # SQLite lowering holds for every shape in both emitters.
+    rust_sqlite = _render_rust_sql(JsonbShapes, "sqlite")
+    for col in ("payload", "entries", "detail"):
+        assert f'"{col}" JSON' in rust_sqlite, (col, rust_sqlite)

@@ -205,7 +205,8 @@ fn scalar_codec(canonical: CanonicalType) -> ColumnCodec {
         CanonicalType::Date => ColumnCodec::Date,
         CanonicalType::Time => ColumnCodec::Time,
         // One logical codec for both JSON storages (ADR-0004): decode/hydrate
-        // are identical; only the bind cast is storage-aware.
+        // are identical, and the ::json bind cast is unchanged (Postgres
+        // assignment-casts json into jsonb columns).
         CanonicalType::Json | CanonicalType::Jsonb => ColumnCodec::Json,
     }
 }
