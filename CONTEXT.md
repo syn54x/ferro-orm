@@ -48,6 +48,18 @@ _Avoid_: Object field, blob field, document column
 The single authoritative record of one column's facts — identity, type, and constraints — derived exactly once from the field declaration. Provisional at class-body time; authoritative once relationship resolution completes.
 _Avoid_: Column metadata, enriched schema property, field dict
 
+**Relation traversal**:
+Attribute access on a declared forward-FK field inside a query lambda (`lambda t: t.account.ledger_id`), reaching a related model's columns from the root. Traversal narrows the result to rows where the relation exists; keeping rows without the relation requires an explicit left join.
+_Avoid_: Join inference, nested filter, path lookup, string path
+
+**Relation path**:
+The ordered sequence of forward-FK hops a traversal walks (`account`, or `account → owner`). A path is the identity of a join: the same path referenced anywhere in a query is one join, and distinct paths to the same model are distinct joins. Left-join requests apply to a whole path.
+_Avoid_: Join alias, lookup chain, dotted path string
+
+**Shape-preserving query**:
+The invariant that filtering and ordering never change what a query returns — a query over Transaction yields Transaction instances regardless of which relations its predicates traverse. Only an explicit projection operation may change the result shape.
+_Avoid_: Implicit projection, row narrowing
+
 **Provisional registration**:
 The per-model state installed when a class body finishes executing — enough for runtime codec and PK metadata, but relationships may still be pending and the modelset is not yet authoritative for DDL.
 _Avoid_: Import-time registration, partial registry
