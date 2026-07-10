@@ -18,6 +18,7 @@ from .nodes import (
     Predicate,
     QueryNode,
     QueryProxy,
+    RelationProxy,
     _serialize_query_value,
     validate_query_column,
 )
@@ -68,6 +69,84 @@ def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNo
     return result
 
 
+def _register_join_paths(node: QueryNode, joins: dict[tuple[str, ...], str]) -> None:
+    """Register every relation path a resolved WHERE node references (#270).
+
+    Walks the node tree depth-first, left-to-right; each leaf with a non-empty
+    ``path`` registers that FULL path once (``setdefault`` keeps the first
+    occurrence's order). Only full paths are stored — the Rust walker dedups
+    shared prefixes when it renders JOINs, so a ``["account", "owner"]`` leaf
+    and an ``["account"]`` leaf still yield exactly two JOINs. Dedup across
+    ``&``/``|`` trees and across multiple ``where()`` calls falls out of the
+    dict.
+    """
+    if node.is_compound:
+        if node.left is not None:
+            _register_join_paths(node.left, joins)
+        if node.right is not None:
+            _register_join_paths(node.right, joins)
+        return
+    if node.path:
+        joins.setdefault(tuple(node.path), "inner")
+
+
+def _target_pk_column(model_cls: type) -> str:
+    """Return the single primary-key column name of a relation target (#270).
+
+    Raises:
+        ValueError: If ``model_cls`` has zero or multiple primary-key columns —
+            relation traversal joins against exactly one PK column, so an
+            ambiguous target is a loud error naming the model, never a guess.
+    """
+    pks = [
+        name
+        for name, spec in getattr(model_cls, "__ferro_columns__", {}).items()
+        if spec.primary_key
+    ]
+    if len(pks) != 1:
+        raise ValueError(
+            f"Relation traversal into {model_cls.__name__!r} requires exactly one "
+            f"primary-key column, found {len(pks)}: {sorted(pks)}."
+        )
+    return pks[0]
+
+
+def _resolve_join_hops(
+    model_cls: type, path: tuple[str, ...]
+) -> list[dict[str, str]]:
+    """Resolve a relation path into ordered hop facts for the QueryIR ``joins``.
+
+    Each hop's ``relation``/``from_column``/``to_table``/``to_column`` is read
+    from the relation-spec chain starting at ``model_cls`` — ``from_column`` is
+    the shadow FK column on the source side, ``to_column`` the target's PK.
+
+    Raises:
+        ValueError: If a path element is not a declared relation of the current
+            model (should not happen — proxies validate at build time), or the
+            target has no single primary key (:func:`_target_pk_column`).
+    """
+    hops: list[dict[str, str]] = []
+    current = model_cls
+    for relation in path:
+        specs = getattr(current, "__ferro_relation_specs__", None) or {}
+        spec = specs.get(relation)
+        if spec is None:
+            raise ValueError(
+                f"{current.__name__!r} has no relation {relation!r} for traversal."
+            )
+        target = spec.target
+        hops.append(
+            {
+                "relation": relation,
+                "from_column": spec.shadow_column,
+                "to_table": target.__ferro_table__,
+                "to_column": _target_pk_column(target),
+            }
+        )
+        current = target
+    return hops
+
+
 class Query(Generic[T]):
     """Build and execute fluent ORM queries.
 
@@ -98,6 +177,10 @@ class Query(Generic[T]):
         self._limit: int | None = None
         self._offset: int | None = None
         self._m2m_context: dict[str, Any] | None = None
+        # Relation paths traversed by where() predicates, insertion-ordered
+        # (path tuple -> join_type; always "inner" this slice). Serialized into
+        # the QueryIR ``joins`` section by all()/count() (#270).
+        self._joins: dict[tuple[str, ...], str] = {}
 
     async def _transaction_or_using(self) -> "RouteHandle":
         from .. import _ensure_rust_registration_synced_for_operation
@@ -119,6 +202,7 @@ class Query(Generic[T]):
         new._m2m_context = (
             dict(self._m2m_context) if self._m2m_context is not None else None
         )
+        new._joins = dict(self._joins)
         return new
 
     def _m2m(
@@ -149,6 +233,12 @@ class Query(Generic[T]):
         ``AttributeError`` naming the closest valid match, before any query
         is sent to the database.
 
+        Attribute access on a declared forward-FK field traverses the relation
+        (``lambda t: t.account.ledger_id == lid``): each hop resolves against
+        the related model, and every distinct traversed path renders one INNER
+        join (ADR-0006) when the query runs. Every hop is validated at build
+        time with the same did-you-mean naming the hop's model.
+
         Args:
             predicate: A callable that takes a :class:`QueryProxy` and
                 returns a :class:`QueryNode`.
@@ -167,7 +257,9 @@ class Query(Generic[T]):
             True
         """
         new = self._clone()
-        new.where_clause.append(_resolve_where_node(predicate, self.model_cls))
+        node = _resolve_where_node(predicate, self.model_cls)
+        new.where_clause.append(node)
+        _register_join_paths(node, new._joins)
         return new
 
     def order_by(
@@ -206,10 +298,25 @@ class Query(Generic[T]):
             col_name = validate_query_column(self.model_cls, field)
         elif callable(field):
             selected = field(QueryProxy(self.model_cls))
+            # Relation-traversal ordering (a RelationProxy, or a FieldProxy with
+            # a non-empty relation path) is slice #271 — reject it loudly now
+            # rather than emitting an order_by the SELECT walker cannot render.
+            if isinstance(selected, RelationProxy):
+                raise TypeError(
+                    "order_by() does not support relation traversal yet "
+                    "(ordering by a related column arrives in a later release); "
+                    "order by a column on the queried model instead."
+                )
             if not isinstance(selected, FieldProxy):
                 raise TypeError(
                     "order_by() selector must return a FieldProxy "
                     f"(e.g. `lambda u: u.created_at`), got {type(selected).__name__}"
+                )
+            if selected.path:
+                raise TypeError(
+                    "order_by() does not support relation traversal yet "
+                    "(ordering by a related column arrives in a later release); "
+                    "order by a column on the queried model instead."
                 )
             col_name = selected.column
         else:
@@ -260,6 +367,19 @@ class Query(Generic[T]):
         new._offset = value
         return new
 
+    def _serialize_joins(self) -> list[dict[str, Any]]:
+        """Serialize collected relation paths into QueryIR ``joins`` entries.
+
+        Emits one entry per registered full path, in insertion order, each
+        carrying its ordered hop facts (:func:`_resolve_join_hops`). The Rust
+        SELECT walkers assign deterministic ``j{i}_{relation}`` aliases and
+        dedup shared prefixes at render time (#270).
+        """
+        return [
+            {"join_type": join_type, "path": _resolve_join_hops(self.model_cls, path)}
+            for path, join_type in self._joins.items()
+        ]
+
     def _mutating_query_def(self, operation: str) -> dict[str, Any]:
         """Build the QueryIR payload for a mutating operation (update/delete).
 
@@ -303,7 +423,7 @@ class Query(Generic[T]):
             "limit": self._limit,
             "offset": self._offset,
             "m2m": self._m2m_context,
-            "joins": [],
+            "joins": self._serialize_joins(),
         }
         route = await self._transaction_or_using()
         return await fetch_filtered(
@@ -330,7 +450,7 @@ class Query(Generic[T]):
             "limit": None,
             "offset": None,
             "m2m": self._m2m_context,
-            "joins": [],
+            "joins": self._serialize_joins(),
         }
         route = await self._transaction_or_using()
         return await count_filtered(

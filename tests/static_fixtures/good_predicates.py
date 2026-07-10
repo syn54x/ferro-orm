@@ -2,7 +2,7 @@
 
 from typing import Annotated, assert_type
 
-from ferro import FerroField, Model
+from ferro import FerroField, ForeignKey, Model
 from ferro.query import FieldProxy, Predicate, QueryNode, QueryProxy
 
 
@@ -18,3 +18,33 @@ pred_in: Predicate[GoodUser] = lambda u: u.age.in_([1, 2, 3])
 
 assert_type(pred_compare(QueryProxy[GoodUser](GoodUser)), QueryNode)
 assert_type(FieldProxy("age") >= 18, QueryNode)
+
+
+# Relation traversal (#270): attribute access on a forward-FK field is
+# statically chainable, and a comparison at any hop still yields a QueryNode.
+class GoodLedger(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+
+class GoodOwner(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    email: str = ""
+
+
+class GoodAccount(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    ledger: Annotated[GoodLedger, ForeignKey(related_name="accounts")]
+    owner: Annotated[GoodOwner, ForeignKey(related_name="accounts")]
+
+
+class GoodTxn(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    account: Annotated[GoodAccount, ForeignKey(related_name="txns")]
+
+
+pred_hop1: Predicate[GoodTxn] = lambda t: t.account.ledger_id == 1
+pred_hop_multi: Predicate[GoodTxn] = lambda t: t.account.owner.email == "a@b.com"
+pred_hop_compound: Predicate[GoodTxn] = lambda t: (t.account.ledger_id == 1) & (
+    t.account.owner.email == "a@b.com"
+)
+assert_type(pred_hop1(QueryProxy[GoodTxn](GoodTxn)), QueryNode)

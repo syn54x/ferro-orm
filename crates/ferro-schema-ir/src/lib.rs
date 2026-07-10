@@ -311,6 +311,28 @@ mod tests {
     }
 
     #[test]
+    fn query_traversal_fixture_roundtrip() {
+        // Multi-hop `joins` section + path-carrying leaves must survive a
+        // deserialize/serialize round-trip without drift (#270 wire stability).
+        let fixture = include_str!(
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v2.json"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query traversal fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query traversal IR must deserialize");
+        // The joins section must actually carry the multi-hop path.
+        assert_eq!(envelope.payload.joins.len(), 2);
+        assert_eq!(envelope.payload.joins[1].path.len(), 2);
+        let encoded = serde_json::to_value(&envelope).expect("query traversal IR must serialize");
+        assert_eq!(encoded, ir, "query traversal round-trip must not drift");
+    }
+
+    #[test]
     fn codec_fixture_roundtrip() {
         let fixture =
             include_str!("../../../tests/fixtures/ir_vectors/codec_registry_core_v1.json");

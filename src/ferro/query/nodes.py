@@ -4,7 +4,7 @@ import difflib
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeAlias, TypeVar
 
 TField = TypeVar("TField")
 TModel = TypeVar("TModel")
@@ -187,6 +187,21 @@ class FieldProxy(Generic[TField]):
         self.column = column
         self.path = path
 
+    if TYPE_CHECKING:
+
+        def __getattr__(self, name: str) -> "FieldProxy[Any]":
+            """Statically model relation-traversal chaining (#270).
+
+            Only visible to type checkers: ``t.account.ledger_id`` types each
+            hop as ``FieldProxy[Any]`` so a traversal comparison still yields a
+            ``QueryNode`` while a *bare* proxy (``lambda t: t.account``) stays a
+            non-``QueryNode`` and fails predicate typing. At runtime the actual
+            resolution lives on :class:`QueryProxy` / :class:`RelationProxy`
+            (relation → deeper proxy, column → this ``FieldProxy``); this
+            declaration is never executed.
+            """
+            ...
+
     def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
@@ -289,8 +304,9 @@ def validate_query_column(model_cls: type, name: str) -> str:
     Raises:
         AttributeError: If ``name`` is not a declared field or shadow
             ``{fk}_id`` column of ``model_cls``. The message names the bad
-            column, suggests the closest valid one, and lists all valid
-            columns.
+            column, suggests the closest valid one across BOTH columns and
+            declared forward-relation names (#270), and lists the valid
+            columns and relations.
     """
     valid = getattr(model_cls, "__ferro_query_columns__", None)
     if valid is None:
@@ -300,11 +316,19 @@ def validate_query_column(model_cls: type, name: str) -> str:
         )
     if name in valid:
         return name
-    close = difflib.get_close_matches(name, sorted(valid), n=1)
+    # A valid relation name never reaches here (proxies resolve relations
+    # before column validation), but relation field names still enrich the
+    # did-you-mean pool so a typo close to a relation gets the right hint.
+    relations = getattr(model_cls, "__ferro_relation_specs__", None) or {}
+    suggestions = sorted(set(valid) | set(relations))
+    close = difflib.get_close_matches(name, suggestions, n=1)
     hint = f" Did you mean {close[0]!r}?" if close else ""
+    relation_note = (
+        f" Valid relations: {', '.join(sorted(relations))}." if relations else ""
+    )
     raise AttributeError(
         f"{model_cls.__name__} has no queryable column {name!r}.{hint} "
-        f"Valid columns: {', '.join(sorted(valid))}."
+        f"Valid columns: {', '.join(sorted(valid))}.{relation_note}"
     )
 
 
@@ -334,9 +358,76 @@ class QueryProxy(Generic[TModel]):
         self._model_cls = model_cls
 
     def __getattr__(self, name: str) -> "FieldProxy[Any]":
-        """Validate ``name`` and return a ``FieldProxy`` for it."""
+        """Resolve ``name`` on the root model.
+
+        Relation specs are consulted FIRST (#270): a declared forward-FK field
+        name yields a :class:`RelationProxy` for traversal (``t.account`` →
+        proxy → ``.ledger_id``); every other name falls through to column
+        validation and returns a :class:`FieldProxy`.
+        """
+        relations = getattr(self._model_cls, "__ferro_relation_specs__", None) or {}
+        spec = relations.get(name)
+        if spec is not None:
+            # Statically typed as FieldProxy[Any] (chainable shape) even though a
+            # relation resolves to a RelationProxy at runtime — a bare relation
+            # proxy is intentionally not a QueryNode, so predicate typing still
+            # rejects `lambda t: t.account` (design pin, PRD #267).
+            return RelationProxy(  # ty: ignore[invalid-return-type]
+                self._model_cls, (name,), spec.target
+            )
         validate_query_column(self._model_cls, name)
         return FieldProxy(name)
+
+
+class RelationProxy:
+    """Traversal proxy for a declared forward-FK relation path (#270).
+
+    Returned by attribute access on a :class:`QueryProxy` (or a deeper
+    ``RelationProxy``) when the accessed name is a declared forward relation.
+    It carries the *root* model, the relation ``path`` walked so far (a tuple
+    of relation field names), and the ``target`` model that path resolves to.
+
+    Attribute access resolves against the CURRENT TARGET model, recursively at
+    any depth:
+
+    - a relation name yields a deeper ``RelationProxy`` (``path + (name,)``);
+    - a column name yields a :class:`FieldProxy` carrying this proxy's ``path``,
+      so ``t.account.ledger_id == lid`` builds a path-qualified comparison node;
+    - an unknown name raises ``AttributeError`` naming the hop's model with a
+      did-you-mean suggestion (same style as :func:`validate_query_column`).
+
+    A bare ``RelationProxy`` returned from a ``where()`` lambda is not a
+    :class:`QueryNode`; ``where()`` rejects it. Comparison/misuse sugar on a
+    relation (``== instance``, ``== None``) is a later slice (#273).
+
+    Examples:
+        >>> proxy = QueryProxy(Transaction)  # doctest: +SKIP
+        >>> node = (proxy.account.ledger_id == 7)  # doctest: +SKIP
+        >>> node.path  # doctest: +SKIP
+        ('account',)
+    """
+
+    __slots__ = ("_root_model", "_path", "_target")
+
+    def __init__(
+        self, root_model: type, path: tuple[str, ...], target: type
+    ) -> None:
+        self._root_model = root_model
+        self._path = path
+        self._target = target
+
+    def __getattr__(self, name: str) -> "RelationProxy | FieldProxy[Any]":
+        """Resolve ``name`` against the current target model (one hop deeper)."""
+        relations = getattr(self._target, "__ferro_relation_specs__", None) or {}
+        spec = relations.get(name)
+        if spec is not None:
+            return RelationProxy(self._root_model, self._path + (name,), spec.target)
+        validate_query_column(self._target, name)
+        return FieldProxy(name, path=self._path)
+
+    def __repr__(self) -> str:
+        joined = ".".join(self._path)
+        return f"RelationProxy(path={joined!r}, target={self._target.__name__!r})"
 
 
 Predicate: TypeAlias = Callable[[QueryProxy[TModel]], QueryNode]

@@ -6,7 +6,7 @@
 use crate::backend::{
     EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind, TableCatalog,
 };
-use crate::query::QueryPlan;
+use crate::query::{JoinPlan, QueryPlan};
 use crate::state::{
     Dialect, TRANSACTION_REGISTRY,
     TransactionConnection, TransactionHandle, connection_for_route, ensure_session_idle_for_close,
@@ -16,8 +16,9 @@ use dashmap::DashMap;
 use ferro_schema_ir::QueryIrPayload;
 use pyo3::prelude::*;
 use sea_query::{
-    Alias, Condition, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query,
-    SimpleExpr, SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
+    Alias, Condition, Expr, Iden, InsertStatement, JoinType, OnConflict, Order,
+    PostgresQueryBuilder, Query, SelectStatement, SimpleExpr, SqliteQueryBuilder, UpdateStatement,
+    Value as SeaValue,
 };
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -289,8 +290,11 @@ fn query_plan_from_ir_json(query_ir_json: &str) -> PyResult<QueryPlan> {
 /// Build a SeaQuery `Condition` from `plan`'s `where_clause`.
 ///
 /// `qualify_with`: `Some(root_table)` qualifies every column as `root_table.column`
-/// (required for SELECT — see [`crate::query::QueryPlan::to_condition_for_backend`]);
-/// `None` leaves columns unqualified (today's `UPDATE`/`DELETE ... WHERE` behavior).
+/// (see [`crate::query::QueryPlan::to_condition_for_backend`]). All four filtered
+/// walkers qualify with the root alias in production — the mutating `UPDATE`/`DELETE
+/// ... WHERE` paths pass `Some(root_table)` here, and the SELECT paths use
+/// [`query_condition_with_joins`] instead. `None` leaves columns unqualified and is
+/// exercised only by unit tests.
 fn query_condition_for_backend(
     plan: &QueryPlan,
     backend: Dialect,
@@ -298,6 +302,68 @@ fn query_condition_for_backend(
 ) -> PyResult<Condition> {
     plan.to_condition_for_backend(backend, qualify_with)
         .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// Build the relation-JOIN plan for a SELECT walker (#270).
+///
+/// `reserved` names (the M2M association table, when present) are protected from
+/// alias collisions alongside the root table. Errors map planner `String`s to
+/// `PyValueError` (unknown `join_type`).
+fn query_join_plan(plan: &QueryPlan, root_table: &str, reserved: &[&str]) -> PyResult<JoinPlan> {
+    plan.build_join_plan(root_table, reserved)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// Build the WHERE `Condition` with columns qualified by their relation-path
+/// JOIN alias (SELECT walkers, #270).
+fn query_condition_with_joins(
+    plan: &QueryPlan,
+    backend: Dialect,
+    root_table: &str,
+    join_plan: &JoinPlan,
+) -> PyResult<Condition> {
+    plan.to_condition_with_joins(backend, root_table, join_plan)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// Render a [`JoinPlan`]'s edges onto a SELECT as aliased INNER/LEFT joins.
+///
+/// Each edge emits `<join> <to_table> AS <alias> ON
+/// <prev_alias>.<from_column> = <alias>.<to_column>`; the join type is validated
+/// (`"inner"`/`"left"`), so an unknown type is a loud error, never a mis-render.
+fn apply_relation_joins(select: &mut SelectStatement, join_plan: &JoinPlan) -> PyResult<()> {
+    for edge in &join_plan.renders {
+        let join_type = match edge.join_type.as_str() {
+            "inner" => JoinType::InnerJoin,
+            "left" => JoinType::LeftJoin,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported join_type {other:?} while rendering relation joins"
+                )));
+            }
+        };
+        select.join_as(
+            join_type,
+            Alias::new(&edge.to_table),
+            Alias::new(&edge.alias),
+            Expr::col((Alias::new(&edge.prev_alias), Alias::new(&edge.from_column)))
+                .equals((Alias::new(&edge.alias), Alias::new(&edge.to_column))),
+        );
+    }
+    Ok(())
+}
+
+/// Reject relation traversal on a mutating operation (#270 renders joins in SELECT
+/// only). The Python builder never emits joins on a mutating payload, so a `joins`
+/// list or a path-carrying WHERE leaf here is misuse — fail loud.
+fn reject_traversal_on_mutation(plan: &QueryPlan, operation: &str) -> PyResult<()> {
+    plan.ensure_no_traversal().map_err(|detail| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "{operation}() does not support relation traversal: {detail}. \
+             Filter by a column on the target model, or resolve the related \
+             primary keys first and {operation} by primary-key set."
+        ))
+    })
 }
 
 /// Reject `limit`/`offset` on mutating operations (FF-A A1, #171).
@@ -1595,6 +1661,7 @@ pub fn fetch_filtered<'py>(
             select.column((Alias::new(&table_name), sea_query::Asterisk));
             select.from(Alias::new(&table_name));
 
+            let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
             if let Some(m2m) = &plan.m2m {
                 let join_table = Alias::new(&m2m.join_table);
                 let source_col = Alias::new(&m2m.source_col);
@@ -1618,15 +1685,20 @@ pub fn fetch_filtered<'py>(
                 ));
             }
 
-            // SELECT columns are qualified by the root table alias (#269): every leaf
-            // and order_by path is guaranteed empty (root model) by
-            // `QueryPlan::from_ir_payload`'s defensive-loudness check, so qualifying
-            // here is always correct — #270 will thread real join paths through
-            // instead of the root table for non-root references.
-            select.cond_where(query_condition_for_backend(
+            // Relation-traversal JOINs (#270): the M2M association table (when
+            // present) is reserved so a relation alias can never collide with it.
+            let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
+            let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
+            apply_relation_joins(&mut select, &join_plan)?;
+
+            // WHERE columns are qualified by their relation-path alias (root leaf ->
+            // root table, path leaf -> its JOIN alias). A path with no matching join
+            // entry is a loud error, never a silently unqualified column.
+            select.cond_where(query_condition_with_joins(
                 &plan,
                 backend,
-                Some(&table_name),
+                &table_name,
+                &join_plan,
             )?);
             for order in &plan.order_by {
                 let col = (Alias::new(&table_name), Alias::new(&order.column));
@@ -1756,6 +1828,7 @@ pub fn count_filtered(
             let mut select = Query::select();
             select.expr(Expr::cust("COUNT(*)"));
 
+            let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
             if let Some(m2m) = &plan.m2m {
                 let join_table = Alias::new(&m2m.join_table);
                 let source_col = Alias::new(&m2m.source_col);
@@ -1786,12 +1859,19 @@ pub fn count_filtered(
                 select.from(Alias::new(&table_name));
             }
 
-            // Qualified by the root table alias (#269) — see the matching comment in
-            // `fetch_filtered` for why this is always correct in this slice.
-            select.cond_where(query_condition_for_backend(
+            // Relation-traversal JOINs render into the COUNT the same as the SELECT
+            // (#270). Plain COUNT(*), no DISTINCT: forward-FK hops are many-to-one and
+            // never multiply root rows, so count() equals the matching root-row count.
+            let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
+            let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
+            apply_relation_joins(&mut select, &join_plan)?;
+
+            // WHERE columns qualified by their relation-path alias (see fetch_filtered).
+            select.cond_where(query_condition_with_joins(
                 &plan,
                 backend,
-                Some(&table_name),
+                &table_name,
+                &join_plan,
             )?);
             sea_query_build_for_backend!(select, backend)
         };
@@ -1946,6 +2026,7 @@ pub fn delete_filtered(
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     reject_pagination_on_mutation(&plan, "delete")?;
+    reject_traversal_on_mutation(&plan, "delete")?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -2020,6 +2101,7 @@ pub fn update_filtered<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     reject_pagination_on_mutation(&plan, "update")?;
+    reject_traversal_on_mutation(&plan, "update")?;
     let update_inputs = bind_inputs_from_py(&updates)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
