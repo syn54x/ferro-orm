@@ -353,6 +353,39 @@ fn apply_relation_joins(select: &mut SelectStatement, join_plan: &JoinPlan) -> P
     Ok(())
 }
 
+/// Resolve, for every table a relation JOIN reaches, the owning model's
+/// registration and native-enum catalog so a traversed WHERE leaf binds against
+/// its OWN model — not the root's codec plan / enum catalog (#270 critical).
+///
+/// Both maps are keyed by physical table name (root and joined columns cannot
+/// collide on the enum-UDT lookup). Registration resolution is route (a):
+/// `MODEL_REGISTRY` is scanned by `table_name` (one model per table, so
+/// unambiguous), and a joined table with NO registration is a loud error — never
+/// a silent fallback to root/generic binds. The enum catalog reuses the
+/// per-table `postgres_table_catalog` cache (one probe per table per schema
+/// epoch), so steady-state traversal queries add no extra round-trips.
+async fn populate_hop_bind_context(
+    plan: &mut QueryPlan,
+    join_plan: &JoinPlan,
+    engine: &EngineHandle,
+    exec: Executor<'_>,
+    backend: Dialect,
+) -> PyResult<()> {
+    for edge in &join_plan.renders {
+        let table = &edge.to_table;
+        if !plan.hop_registrations.contains_key(table) {
+            let registration = crate::state::registration_for_table(table)?;
+            plan.hop_registrations.insert(table.clone(), registration);
+        }
+        if !plan.hop_enum_udt.contains_key(table) {
+            let catalog = postgres_table_catalog(table, engine, exec, backend).await?;
+            plan.hop_enum_udt
+                .insert(table.clone(), catalog.enum_udt.clone());
+        }
+    }
+    Ok(())
+}
+
 /// Reject relation traversal on a mutating operation (#270 renders joins in SELECT
 /// only). The Python builder never emits joins on a mutating payload, so a `joins`
 /// list or a path-carrying WHERE leaf here is misuse — fail loud.
@@ -1653,6 +1686,15 @@ pub fn fetch_filtered<'py>(
         let table_name = schema.table_name.clone();
         let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         plan.postgres_enum_udt = catalog.enum_udt.clone();
+
+        // Relation-traversal JOINs (#270): the M2M association table (when
+        // present) is reserved so a relation alias can never collide with it.
+        // The join plan is built up front so each hop table's registration +
+        // enum catalog can be resolved before conditions bind (#270 critical).
+        let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
+        let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
+        let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
+        populate_hop_bind_context(&mut plan, &join_plan, &engine, exec, backend).await?;
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
             let pk = schema.meta.pk_col.clone();
@@ -1661,7 +1703,6 @@ pub fn fetch_filtered<'py>(
             select.column((Alias::new(&table_name), sea_query::Asterisk));
             select.from(Alias::new(&table_name));
 
-            let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
             if let Some(m2m) = &plan.m2m {
                 let join_table = Alias::new(&m2m.join_table);
                 let source_col = Alias::new(&m2m.source_col);
@@ -1685,10 +1726,6 @@ pub fn fetch_filtered<'py>(
                 ));
             }
 
-            // Relation-traversal JOINs (#270): the M2M association table (when
-            // present) is reserved so a relation alias can never collide with it.
-            let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
-            let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
             apply_relation_joins(&mut select, &join_plan)?;
 
             // WHERE columns are qualified by their relation-path alias (root leaf ->
@@ -1834,12 +1871,21 @@ pub fn count_filtered(
             .await?
             .enum_udt
             .clone();
+
+        // Relation-traversal JOINs render into the COUNT the same as the SELECT
+        // (#270). Plain COUNT(*), no DISTINCT: forward-FK hops are many-to-one and
+        // never multiply root rows, so count() equals the matching root-row count.
+        // Build the plan up front and resolve each hop table's registration +
+        // enum catalog before conditions bind (#270 critical).
+        let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
+        let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
+        let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
+        populate_hop_bind_context(&mut plan, &join_plan, &engine, exec, backend).await?;
         // ... sql ...
         let (sql, bind_values) = {
             let mut select = Query::select();
             select.expr(Expr::cust("COUNT(*)"));
 
-            let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
             if let Some(m2m) = &plan.m2m {
                 let join_table = Alias::new(&m2m.join_table);
                 let source_col = Alias::new(&m2m.source_col);
@@ -1870,11 +1916,6 @@ pub fn count_filtered(
                 select.from(Alias::new(&table_name));
             }
 
-            // Relation-traversal JOINs render into the COUNT the same as the SELECT
-            // (#270). Plain COUNT(*), no DISTINCT: forward-FK hops are many-to-one and
-            // never multiply root rows, so count() equals the matching root-row count.
-            let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
-            let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
             apply_relation_joins(&mut select, &join_plan)?;
 
             // WHERE columns qualified by their relation-path alias (see fetch_filtered).
@@ -3896,7 +3937,21 @@ mod select_join_render_tests {
 
     #[test]
     fn rendered_select_pins_join_clause_and_dedups_shared_where_order_by_path() {
-        let plan = shared_path_plan();
+        let mut plan = shared_path_plan();
+        // The walkers resolve each joined table's registration + enum catalog
+        // before building conditions; mirror that for the traversed `label` leaf
+        // (path [account] -> table "account").
+        plan.hop_registrations.insert(
+            "account".to_string(),
+            crate::state::RegisteredModel::new_for_test(
+                serde_json::json!({
+                    "properties": {"label": {"type": "string"}, "name": {"type": "string"}}
+                }),
+                "account".to_string(),
+            ),
+        );
+        plan.hop_enum_udt
+            .insert("account".to_string(), std::collections::HashMap::new());
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
 
         let mut select = SelectStatement::new();

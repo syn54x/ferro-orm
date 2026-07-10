@@ -48,9 +48,12 @@ enum ColumnQualifier<'a> {
     /// Qualify every column with `root_table.column` (all paths must be empty).
     RootTable(&'a str),
     /// Qualify by JOIN alias: empty path -> `root_table`, else the path's alias.
+    /// Carries the whole [`JoinPlan`] so a traversed leaf can resolve BOTH its
+    /// alias (`prefix_alias`) and its owning table (`prefix_table`) for typed
+    /// binds against the hop's model (#270).
     Joined {
         root_table: &'a str,
-        prefix_alias: &'a HashMap<Vec<String>, String>,
+        join_plan: &'a JoinPlan,
     },
 }
 
@@ -72,7 +75,7 @@ pub fn qualify_column_with_joins(
 ) -> Result<Expr, String> {
     let qualifier = ColumnQualifier::Joined {
         root_table,
-        prefix_alias: &join_plan.prefix_alias,
+        join_plan,
     };
     qualify_leaf_column(&qualifier, column, path)
 }
@@ -104,6 +107,10 @@ pub struct JoinPlan {
     /// Full relation path -> alias, for qualifying path-carrying WHERE leaves
     /// and `ORDER BY` terms.
     pub prefix_alias: HashMap<Vec<String>, String>,
+    /// Full relation path -> the hop's physical table, for resolving a
+    /// traversed leaf's typed bind against its OWNING model's codec plan and
+    /// native-enum catalog (#270). Same key set as `prefix_alias`.
+    pub prefix_table: HashMap<Vec<String>, String>,
 }
 
 /// Validate a join_type token from the IR (`"inner"`/`"left"`), erroring loudly
@@ -150,12 +157,12 @@ fn qualify_leaf_column(
         }
         ColumnQualifier::Joined {
             root_table,
-            prefix_alias,
+            join_plan,
         } => {
             if path.is_empty() {
                 return Ok(Expr::col((Alias::new(*root_table), Alias::new(column))));
             }
-            let alias = prefix_alias.get(path).ok_or_else(|| {
+            let alias = join_plan.prefix_alias.get(path).ok_or_else(|| {
                 format!(
                     "column {column:?} carries relation path {path:?} with no \
                      matching join entry"
@@ -208,6 +215,19 @@ pub struct QueryPlan {
     /// per query from `MODEL_REGISTRY` — no per-value registry locks. `None`
     /// when the model is not registered (fallback generic binds).
     pub registration: Option<std::sync::Arc<crate::state::RegisteredModel>>,
+    /// Per-joined-table registration for typed binds on TRAVERSED columns
+    /// (#270), keyed by physical table name. Populated by the SELECT walkers
+    /// (`fetch_filtered`/`count_filtered`) once per distinct joined table from
+    /// `MODEL_REGISTRY` (table→model is unambiguous). A traversed leaf resolves
+    /// its codec plan from here — never from the root `registration`. Empty for
+    /// non-traversal queries.
+    pub hop_registrations: HashMap<String, std::sync::Arc<crate::state::RegisteredModel>>,
+    /// Per-joined-table native-enum UDT catalog for TRAVERSED columns (#270),
+    /// keyed by physical table name. Populated by the SELECT walkers from each
+    /// joined table's `postgres_table_catalog` so a root and a joined column
+    /// sharing a name cannot collide on the enum-UDT lookup. Empty for
+    /// non-traversal queries (and always empty on SQLite).
+    pub hop_enum_udt: HashMap<String, HashMap<String, String>>,
 }
 
 impl QueryPlan {
@@ -248,6 +268,8 @@ impl QueryPlan {
             m2m,
             postgres_enum_udt: HashMap::new(),
             registration,
+            hop_registrations: HashMap::new(),
+            hop_enum_udt: HashMap::new(),
         })
     }
 
@@ -310,6 +332,7 @@ impl QueryPlan {
         }
 
         let mut prefix_alias: HashMap<Vec<String>, String> = HashMap::new();
+        let mut prefix_table: HashMap<Vec<String>, String> = HashMap::new();
         let mut used: HashSet<String> = HashSet::new();
         used.insert(root_table.to_string());
         for name in reserved {
@@ -338,6 +361,7 @@ impl QueryPlan {
                 }
                 used.insert(alias.clone());
                 prefix_alias.insert(prefix.clone(), alias.clone());
+                prefix_table.insert(prefix.clone(), hop.to_table.clone());
                 renders.push(JoinRender {
                     join_type: edge_join_type.to_string(),
                     to_table: hop.to_table.clone(),
@@ -352,6 +376,7 @@ impl QueryPlan {
         Ok(JoinPlan {
             renders,
             prefix_alias,
+            prefix_table,
         })
     }
 
@@ -401,7 +426,7 @@ impl QueryPlan {
     ) -> Result<Condition, String> {
         let qualifier = ColumnQualifier::Joined {
             root_table,
-            prefix_alias: &join_plan.prefix_alias,
+            join_plan,
         };
         self.build_condition(backend, &qualifier)
     }
@@ -445,47 +470,34 @@ impl QueryPlan {
                 path,
             } => {
                 let col = qualify_leaf_column(qualifier, column, path)?;
+                // A traversed leaf binds against its OWNING model's codec plan and
+                // native-enum catalog — resolved by the hop's table, never the
+                // root's (#270). An empty path resolves the root context.
+                let (codec_plan, enum_udt) = self.leaf_bind_context(qualifier, path)?;
                 // IR always carries a value object; JSON null arrives as
                 // `QueryValue { kind: "null", value: Value::Null }`. SQL
                 // `col = NULL` is never true — use `IS NULL` / `IS NOT NULL`
                 // for `== None` / `!= None`.
                 let rhs_is_json_null = value.value.is_null();
                 let val = &value.value;
+                let bind = |v: &Value| {
+                    self.value_rhs_with_context(column, v, false, backend, codec_plan, enum_udt)
+                };
                 let expr: SimpleExpr = match operator.as_str() {
                     "==" if rhs_is_json_null => col.is_null(),
                     "!=" if rhs_is_json_null => col.is_not_null(),
-                    "==" => {
-                        col.eq(self.value_rhs_simple_expr_for_backend(column, val, false, backend))
-                    }
-                    "!=" => {
-                        col.ne(self.value_rhs_simple_expr_for_backend(column, val, false, backend))
-                    }
-                    "<" => {
-                        col.lt(self.value_rhs_simple_expr_for_backend(column, val, false, backend))
-                    }
-                    "<=" => {
-                        col.lte(self.value_rhs_simple_expr_for_backend(column, val, false, backend))
-                    }
-                    ">" => {
-                        col.gt(self.value_rhs_simple_expr_for_backend(column, val, false, backend))
-                    }
-                    ">=" => {
-                        col.gte(self.value_rhs_simple_expr_for_backend(column, val, false, backend))
-                    }
+                    "==" => col.eq(bind(val)),
+                    "!=" => col.ne(bind(val)),
+                    "<" => col.lt(bind(val)),
+                    "<=" => col.lte(bind(val)),
+                    ">" => col.gt(bind(val)),
+                    ">=" => col.gte(bind(val)),
                     "IN" => {
                         if let Some(vals) = val.as_array() {
-                            let rhs: Vec<SimpleExpr> = vals
-                                .iter()
-                                .map(|v| {
-                                    self.value_rhs_simple_expr_for_backend(
-                                        column, v, false, backend,
-                                    )
-                                })
-                                .collect();
+                            let rhs: Vec<SimpleExpr> = vals.iter().map(&bind).collect();
                             col.is_in(rhs)
                         } else {
-                            col.eq(self
-                                .value_rhs_simple_expr_for_backend(column, val, false, backend))
+                            col.eq(bind(val))
                         }
                     }
                     "LIKE" => {
@@ -495,9 +507,7 @@ impl QueryPlan {
                         };
                         col.like(pattern)
                     }
-                    _ => {
-                        col.eq(self.value_rhs_simple_expr_for_backend(column, val, false, backend))
-                    }
+                    _ => col.eq(bind(val)),
                 };
                 Ok(Condition::all().add(expr))
             }
@@ -528,14 +538,95 @@ impl QueryPlan {
         infer_uuid_without_schema: bool,
         backend: Dialect,
     ) -> SimpleExpr {
-        crate::codec::query_bind_expr(
-            self.registration.as_ref().map(|m| &m.codec_plan),
+        self.value_rhs_with_context(
             col_name,
             val,
             infer_uuid_without_schema,
             backend,
+            self.registration.as_ref().map(|m| &m.codec_plan),
             &self.postgres_enum_udt,
         )
+    }
+
+    /// Right-hand side bind for a comparison, against an EXPLICIT codec plan and
+    /// native-enum catalog rather than the root's (#270).
+    ///
+    /// The condition builder resolves `codec_plan`/`enum_udt` per leaf from its
+    /// relation path (root context for an empty path, the traversed hop's model
+    /// otherwise) via [`QueryPlan::leaf_bind_context`], so a traversed column can
+    /// never be typed by the root model's rule for a same-named column.
+    fn value_rhs_with_context(
+        &self,
+        col_name: &str,
+        val: &Value,
+        infer_uuid_without_schema: bool,
+        backend: Dialect,
+        codec_plan: Option<&crate::codec_plan::ModelCodecPlan>,
+        enum_udt: &HashMap<String, String>,
+    ) -> SimpleExpr {
+        crate::codec::query_bind_expr(
+            codec_plan,
+            col_name,
+            val,
+            infer_uuid_without_schema,
+            backend,
+            enum_udt,
+        )
+    }
+
+    /// Resolve the codec plan + native-enum UDT catalog that govern a WHERE
+    /// leaf's typed bind, keyed by the leaf's OWNING table (#270 critical).
+    ///
+    /// An empty `path` is a root-model column → the root `registration` /
+    /// `postgres_enum_udt`. A non-empty `path` is a traversed column → the hop
+    /// table's registration (`hop_registrations`) and enum catalog
+    /// (`hop_enum_udt`), looked up by the table the join plan assigns to that
+    /// path. This is the seam that stops a traversed column from being typed by
+    /// the root model's rule for a same-named column.
+    ///
+    /// # Errors
+    /// Returns `Err(String)` when a non-empty path has no join entry, or when
+    /// the SELECT walker did not populate the hop table's registration / enum
+    /// catalog — a loud failure, never a silent fallback to root/generic binds
+    /// (I-6). These are defense-in-depth: the walkers resolve both maps for
+    /// every rendered join before building conditions.
+    fn leaf_bind_context(
+        &self,
+        qualifier: &ColumnQualifier<'_>,
+        path: &[String],
+    ) -> Result<(Option<&crate::codec_plan::ModelCodecPlan>, &HashMap<String, String>), String> {
+        if path.is_empty() {
+            return Ok((
+                self.registration.as_ref().map(|m| &m.codec_plan),
+                &self.postgres_enum_udt,
+            ));
+        }
+        let ColumnQualifier::Joined { join_plan, .. } = qualifier else {
+            return Err(format!(
+                "relation path {path:?} on a statement that renders no joins; \
+                 cannot resolve typed binds"
+            ));
+        };
+        let table = join_plan.prefix_table.get(path).ok_or_else(|| {
+            format!("relation path {path:?} has no matching join entry for typed binds")
+        })?;
+        let codec_plan = self
+            .hop_registrations
+            .get(table)
+            .map(|model| &model.codec_plan)
+            .ok_or_else(|| {
+                format!(
+                    "traversed table {table:?} (path {path:?}) has no registration; \
+                     cannot resolve typed binds for the relation"
+                )
+            })?;
+        let enum_udt = self.hop_enum_udt.get(table).ok_or_else(|| {
+            format!(
+                "traversed table {table:?} (path {path:?}) has no native-enum catalog; \
+                 fetch its postgres_table_catalog before building conditions"
+            )
+        })?;
+        Ok((Some(codec_plan), enum_udt))
     }
 }
 
@@ -562,6 +653,8 @@ mod tests {
             m2m: None,
             postgres_enum_udt: HashMap::new(),
             registration,
+            hop_registrations: HashMap::new(),
+            hop_enum_udt: HashMap::new(),
         }
     }
 
@@ -771,7 +864,18 @@ mod tests {
 
     #[test]
     fn traversal_where_qualifies_leaf_with_join_alias() {
-        let plan = QueryPlan::from_ir_payload(traversal_payload()).expect("plan builds");
+        let mut plan = QueryPlan::from_ir_payload(traversal_payload()).expect("plan builds");
+        // The SELECT walkers resolve a hop table's registration + enum catalog
+        // before building conditions; mirror that for the traversed `email` leaf
+        // (path [account, owner] -> table "owner").
+        plan.hop_registrations.insert(
+            "owner".to_string(),
+            crate::state::RegisteredModel::new_for_test(
+                json!({"properties": {"email": {"type": "string"}}}),
+                "owner".to_string(),
+            ),
+        );
+        plan.hop_enum_udt.insert("owner".to_string(), HashMap::new());
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
         let sql = plan
             .to_condition_with_joins(Dialect::Postgres, "transaction", &join_plan)
@@ -979,7 +1083,14 @@ mod tests {
         let err = plan
             .to_condition_with_joins(Dialect::Sqlite, "transaction", &join_plan)
             .expect_err("leaf path with no join entry must error");
-        assert!(err.contains("no"), "got {err}");
+        // The message must name the offending column AND its unresolved path, not
+        // just vaguely mention "no".
+        assert!(err.contains("email"), "must name the column: {err}");
+        assert!(err.contains("account"), "must name the path: {err}");
+        assert!(
+            err.contains("no matching join entry"),
+            "must state the failure: {err}"
+        );
     }
 
     #[test]
@@ -1074,7 +1185,13 @@ mod tests {
             &["unregistered".to_string()],
         )
         .expect_err("an order_by path with no matching join entry must error");
-        assert!(err.contains("no"), "got {err}");
+        // The message must name the offending column AND its unresolved path.
+        assert!(err.contains("name"), "must name the column: {err}");
+        assert!(err.contains("unregistered"), "must name the path: {err}");
+        assert!(
+            err.contains("no matching join entry"),
+            "must state the failure: {err}"
+        );
     }
 
     #[test]
