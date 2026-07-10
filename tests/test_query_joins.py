@@ -10,7 +10,11 @@ composition, query immutability, and order_by traversal sharing joins with
 where() (#271).
 """
 
+from datetime import datetime, timezone
+from decimal import Decimal
+from enum import StrEnum
 from typing import Annotated
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -124,6 +128,77 @@ class QJMPost(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str = ""
     tags: Relation[list["QJMTag"]] = ManyToMany(related_name="posts")
+
+
+# Typed-bind matrix (#270 critical): a related model carrying datetime, uuid,
+# decimal, native-enum, and nullable columns, reached by traversal from a root
+# model whose `tag` column collides by NAME with the related `tag` but is a
+# DIFFERENT type (native enum on the root, plain text on the related). These pin
+# that a traversed leaf's typed bind resolves against its OWN table's model, not
+# the root's codec plan / enum catalog.
+
+
+class QJTBTier(StrEnum):
+    FREE = "free"
+    PRO = "pro"
+
+
+class QJTBProfile(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    created_at: datetime
+    external_id: UUID
+    balance: Decimal | None = None
+    tier: QJTBTier = QJTBTier.FREE
+    nickname: str | None = None
+    # Plain-text column; collides by name with QJTBUser.tag (a native enum).
+    tag: str = ""
+    users: Relation[list["QJTBUser"]] = BackRef()
+
+
+class QJTBUser(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    # Native-enum column named identically to the related plain-text QJTBProfile.tag.
+    tag: QJTBTier = QJTBTier.FREE
+    profile: Annotated[QJTBProfile, ForeignKey(related_name="users")]
+
+
+_TB_T1 = datetime(2020, 1, 1, tzinfo=timezone.utc)
+_TB_T2 = datetime(2030, 6, 15, tzinfo=timezone.utc)
+_TB_UID1 = UUID("11111111-1111-1111-1111-111111111111")
+_TB_UID2 = UUID("22222222-2222-2222-2222-222222222222")
+
+
+async def _seed_typed_bind_matrix():
+    """Two profiles with distinct typed values, each owned by one user.
+
+    P1 (user U1): created_at=T1, external_id=UID1, balance=100, tier=PRO,
+        nickname="alice", tag="vip".
+    P2 (user U2): created_at=T2, external_id=UID2, balance=10, tier=FREE,
+        nickname=None, tag="basic".
+    """
+    p1 = QJTBProfile(
+        id=1,
+        created_at=_TB_T1,
+        external_id=_TB_UID1,
+        balance=Decimal("100.00"),
+        tier=QJTBTier.PRO,
+        nickname="alice",
+        tag="vip",
+    )
+    p2 = QJTBProfile(
+        id=2,
+        created_at=_TB_T2,
+        external_id=_TB_UID2,
+        balance=Decimal("10.00"),
+        tier=QJTBTier.FREE,
+        nickname=None,
+        tag="basic",
+    )
+    for row in (p1, p2):
+        await row.save()
+    await QJTBUser(id=1, tag=QJTBTier.PRO, profile=p1).save()
+    await QJTBUser(id=2, tag=QJTBTier.FREE, profile=p2).save()
+    return {"p1": p1, "p2": p2}
 
 
 async def _seed_core():
@@ -268,6 +343,30 @@ async def test_join_dedup_across_where_calls_and_boolean_tree(db_url):
         assert list(q_and._joins) == [("account",)]
         rows_and = await q_and.all()
         assert {r.id for r in rows_and} == {1, 2, 3}
+
+
+@pytest.mark.asyncio
+async def test_or_composition_still_renders_inner_join_narrowing_query_wide(db_url):
+    """ADR-0006 narrowing is query-wide: a traversal branch inside an ``|`` still
+    renders the INNER join, so a relation-less row is dropped even when the OTHER
+    branch (a root-column predicate) would have matched it."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        await QJNote(id=1, body="attached", account=core["a1"]).save()
+        await QJNote(id=2, body="orphan", account=None).save()
+
+        rows = await QJNote.where(
+            lambda n: (n.account.ledger_id == 1) | (n.body == "orphan")
+        ).all()
+        # The INNER account join drops the NULL-FK orphan BEFORE the WHERE, so it
+        # never reaches the `n.body == "orphan"` branch — only the attached note
+        # (ledger 1) survives.
+        assert {r.id for r in rows} == {1}
+        count = await QJNote.where(
+            lambda n: (n.account.ledger_id == 1) | (n.body == "orphan")
+        ).count()
+        assert count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +793,16 @@ class TestExplicitJoinChainers:
                 lambda t: t.account.owner
             )
 
+    def test_contradictory_join_types_overlapping_paths_raise_reverse_order(self):
+        """Mirror of the overlap conflict: ``.left_join(t.account.owner)`` THEN
+        ``.join(t.account)`` conflicts on the same shared ``account`` edge — the
+        whole-path LEFT mark and the later INNER mark disagree regardless of which
+        chainer ran first (#272)."""
+        with pytest.raises(ValueError, match="account"):
+            Query(QJTransaction).left_join(lambda t: t.account.owner).join(
+                lambda t: t.account
+            )
+
     def test_remarking_same_direction_is_idempotent(self):
         q = Query(QJTransaction).join(lambda t: t.account).join(lambda t: t.account)
         assert q._explicit_edges == {("account",): "inner"}
@@ -955,3 +1064,114 @@ async def test_m2m_context_composes_with_forward_fk_traversal(db_url):
         assert (
             await post.tags.where(lambda t: t.created_by.role == "admin").count() == 1
         )
+
+
+# ---------------------------------------------------------------------------
+# Typed binds on TRAVERSED columns (#270 critical): a filter on a related
+# datetime / uuid / decimal / native-enum column must bind against the traversed
+# hop's model, not the root's codec plan / enum catalog. Before the fix these
+# resolved every leaf against the root model and failed on Postgres (e.g.
+# `operator does not exist: timestamp with time zone >= text`).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_traversed_datetime_filter_binds_against_hop_model(db_url):
+    """`u.profile.created_at >= dt` casts the bind to the hop table's temporal
+    type — the RED case: on Postgres the root-keyed bug sent an un-cast `text`."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_typed_bind_matrix()
+
+        rows = await QJTBUser.where(
+            lambda u: u.profile.created_at >= datetime(2025, 1, 1, tzinfo=timezone.utc)
+        ).all()
+        # Only P2 (created_at=T2, 2030) is at/after 2025 -> its user U2.
+        assert {r.id for r in rows} == {2}
+        assert (
+            await QJTBUser.where(
+                lambda u: u.profile.created_at
+                >= datetime(2025, 1, 1, tzinfo=timezone.utc)
+            ).count()
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+async def test_traversed_uuid_filter_binds_against_hop_model(db_url):
+    """`u.profile.external_id == uuid` sends a typed uuid bind for the hop table
+    (root-keyed bug: `operator does not exist: uuid = text`)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_typed_bind_matrix()
+
+        rows = await QJTBUser.where(
+            lambda u: u.profile.external_id == _TB_UID1
+        ).all()
+        assert {r.id for r in rows} == {1}
+
+
+@pytest.mark.asyncio
+async def test_traversed_decimal_filter_binds_against_hop_model(db_url):
+    """`u.profile.balance >= Decimal(...)` casts the bind to numeric for the hop
+    table (root-keyed bug: `operator does not exist: numeric >= text`)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_typed_bind_matrix()
+
+        rows = await QJTBUser.where(
+            lambda u: u.profile.balance >= Decimal("50.00")
+        ).all()
+        # Only P1 (balance=100) clears 50 -> user U1.
+        assert {r.id for r in rows} == {1}
+
+
+@pytest.mark.asyncio
+async def test_traversed_native_enum_filter_binds_against_hop_model(db_url):
+    """`u.profile.tier == QJTBTier.PRO` casts to the hop table's native enum UDT
+    (root-keyed bug: no UDT cast -> `operator does not exist: qjtbtier = text`)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_typed_bind_matrix()
+
+        rows = await QJTBUser.where(lambda u: u.profile.tier == QJTBTier.PRO).all()
+        assert {r.id for r in rows} == {1}
+
+
+@pytest.mark.asyncio
+async def test_traversed_typed_null_filter_binds_against_hop_model(db_url):
+    """`u.profile.nickname == None` lowers to IS NULL on the hop alias column and
+    returns exactly the rows whose related nickname is NULL."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_typed_bind_matrix()
+
+        rows = await QJTBUser.where(
+            lambda u: u.profile.nickname == None  # noqa: E711
+        ).all()
+        # Only P2 has nickname NULL -> user U2.
+        assert {r.id for r in rows} == {2}
+
+
+@pytest.mark.asyncio
+async def test_name_collision_root_and_traversed_column_bind_independently(db_url):
+    """`tag` names a NATIVE ENUM on the root (QJTBUser) and PLAIN TEXT on the
+    related (QJTBProfile). Both must bind against their OWN table: the root-keyed
+    bug applied the root's enum-UDT cast to the traversed text column
+    (`invalid input value for enum qjtbtier: "vip"`)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_typed_bind_matrix()
+
+        # Root enum column: filters by the native-enum bind.
+        root_rows = await QJTBUser.where(lambda u: u.tag == QJTBTier.PRO).all()
+        assert {r.id for r in root_rows} == {1}
+
+        # Traversed text column of the SAME name: plain-text bind, no enum cast.
+        traversed_rows = await QJTBUser.where(lambda u: u.profile.tag == "vip").all()
+        assert {r.id for r in traversed_rows} == {1}
+
+        # A value that is NOT a valid enum label must simply not match (never
+        # blow up as an enum cast against the text column).
+        empty = await QJTBUser.where(lambda u: u.profile.tag == "nope").all()
+        assert empty == []

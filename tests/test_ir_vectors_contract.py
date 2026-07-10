@@ -126,6 +126,16 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
             f"{join_label}.join_type invalid: {join['join_type']!r}"
         )
         assert isinstance(join["path"], list), f"{join_label}.path must be a list"
+        for h, hop in enumerate(join["path"]):
+            hop_label = f"{join_label}.path[{h}]"
+            assert isinstance(hop, dict), f"{hop_label} must be object"
+            _require_keys(
+                hop,
+                {"relation", "from_column", "to_table", "to_column"},
+                hop_label,
+            )
+            for key in ("relation", "from_column", "to_table", "to_column"):
+                assert isinstance(hop[key], str), f"{hop_label}.{key} must be a str"
 
 
 def _validate_codec_payload(payload: dict[str, Any], label: str) -> None:
