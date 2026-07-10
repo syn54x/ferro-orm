@@ -3974,6 +3974,55 @@ mod select_join_render_tests {
         .expect("v2 envelope parses")
     }
 
+    /// `t.account == instance` desugars to a shadow-FK leaf (`account_id`) with
+    /// an EMPTY path and NO joins entry — the join-free proof (#273). The
+    /// rendered SELECT must contain no JOIN and a WHERE qualified by the ROOT
+    /// table's `account_id`, never a relation alias.
+    #[test]
+    fn rendered_select_instance_equality_is_join_free() {
+        let plan = query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 2,
+                "payload": {
+                    "model_name": "Transaction",
+                    "where": [{
+                        "node_kind": "leaf",
+                        "operator": "==",
+                        "column": "account_id",
+                        "value": {"kind": "int", "value": 7},
+                        "path": []
+                    }],
+                    "order_by": [], "limit": null, "offset": null, "m2m": null,
+                    "joins": []
+                }
+            })
+            .to_string(),
+        )
+        .expect("v2 envelope parses");
+
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+        let mut select = SelectStatement::new();
+        select
+            .column((Alias::new("transaction"), sea_query::Asterisk))
+            .from(Alias::new("transaction"));
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.cond_where(
+            query_condition_with_joins(&plan, Dialect::Postgres, "transaction", &join_plan)
+                .expect("condition builds"),
+        );
+        let sql = select.to_string(PostgresQueryBuilder);
+
+        assert!(
+            !sql.contains("JOIN"),
+            "instance equality must be join-free: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE \"transaction\".\"account_id\""),
+            "WHERE must filter the ROOT-qualified shadow FK: {sql}"
+        );
+    }
+
     /// A `.left_join(t.account)` renders a LEFT JOIN clause (#272 NULL retention).
     #[test]
     fn rendered_select_pins_left_join_clause() {

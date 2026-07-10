@@ -15,8 +15,9 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
-from ferro.query import Query
+from ferro import BackRef, FerroField, ForeignKey, ManyToMany, Model, Relation
+from ferro.query import Query, QueryNode
+from ferro.query.nodes import FieldProxy, QueryProxy
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -99,6 +100,30 @@ class QJDoc(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str = ""
     folder: Annotated[QJFolder | None, ForeignKey(related_name="docs")] = None
+
+
+# M2M pair whose TARGET model carries a forward FK, so an M2M association
+# query can traverse it: `post.tags.where(lambda t: t.created_by.role == ...)`
+# (#273 M2M-composition acceptance criterion).
+
+
+class QJMAuthor(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    role: str = ""
+    tags: Relation[list["QJMTag"]] = BackRef()
+
+
+class QJMTag(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str = ""
+    created_by: Annotated[QJMAuthor, ForeignKey(related_name="tags")]
+    posts: Relation[list["QJMPost"]] = BackRef()
+
+
+class QJMPost(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    title: str = ""
+    tags: Relation[list["QJMTag"]] = ManyToMany(related_name="posts")
 
 
 async def _seed_core():
@@ -443,16 +468,147 @@ async def test_order_by_related_column_drops_null_fk_rows(db_url):
 
 def test_order_by_bare_relation_proxy_is_rejected():
     """A bare relation (no column selected) is meaningless as a sort key —
-    rejected at build time (comparison sugar is slice #273's scope)."""
-    with pytest.raises(TypeError, match="relation"):
+    rejected at build time with a pointed message naming the relation (#273)."""
+    with pytest.raises(
+        TypeError, match="order_by.*bare relation 'account'.*t.account.<column>"
+    ):
         Query(QJTransaction).order_by(lambda t: t.account)  # type: ignore[arg-type,return-value]
 
 
 def test_bare_relation_proxy_predicate_is_rejected():
-    """A where() lambda returning a bare relation (no comparison) is not a
-    QueryNode — rejected at build time (comparison sugar is slice #273)."""
-    with pytest.raises(TypeError, match="must return QueryNode"):
+    """A where() lambda returning a bare relation is not a QueryNode — rejected
+    at build time with a pointed message naming the relation (#273)."""
+    with pytest.raises(
+        TypeError, match="bare relation 'account'.*== None / == an instance"
+    ):
         Query(QJTransaction).where(lambda t: t.account)  # type: ignore[arg-type,return-value]
+
+
+# ---------------------------------------------------------------------------
+# Relation-proxy sugar and guardrails (#273): build-time desugaring, error
+# taxonomy, boolean-coercion trap, and update()/delete() traversal rejection.
+# These are build-time-only (no DB round-trip).
+# ---------------------------------------------------------------------------
+
+
+def _persisted_account(pk: int = 7) -> QJAccount:
+    return QJAccount(id=pk, label="x", ledger=QJLedger(id=1), owner=QJOwner(id=1))
+
+
+class TestRelationProxySugar:
+    def _proxy(self) -> QueryProxy:
+        return QueryProxy(QJTransaction)
+
+    def test_instance_equality_desugars_to_shadow_fk_join_free(self):
+        node = self._proxy().account == _persisted_account(7)
+        assert isinstance(node, QueryNode)
+        assert node.column == "account_id"
+        assert node.operator == "=="
+        assert node.value == 7
+        assert node.path == ()  # genuinely join-free (path minus last hop)
+
+    def test_instance_inequality_operator(self):
+        node = self._proxy().account != _persisted_account(7)
+        assert node.operator == "!="
+        assert node.column == "account_id"
+        assert node.value == 7
+        assert node.path == ()
+
+    def test_deep_instance_equality_uses_last_hop_shadow_and_prefix_path(self):
+        owner = QJOwner(id=3, email="o@ferro.dev")
+        node = self._proxy().account.owner == owner
+        # Shadow column of the LAST hop (owner_id, on the account table), with
+        # the proxy path MINUS that hop -> the ("account",) prefix join only.
+        assert node.column == "owner_id"
+        assert node.value == 3
+        assert node.path == ("account",)
+
+    def test_equals_none_builds_null_leaf_join_free(self):
+        node = self._proxy().account == None  # noqa: E711
+        assert node.column == "account_id"
+        assert node.value is None
+        assert node.operator == "=="
+        assert node.path == ()
+
+    def test_not_equals_none_operator(self):
+        node = self._proxy().account != None  # noqa: E711
+        assert node.operator == "!="
+        assert node.value is None
+        assert node.path == ()
+
+    def test_unpersisted_instance_raises_value_error_naming_model(self):
+        unsaved = QJAccount(label="x", ledger=QJLedger(id=1), owner=QJOwner(id=1))
+        with pytest.raises(
+            ValueError, match="unpersisted QJAccount instance .primary key not set"
+        ):
+            self._proxy().account == unsaved
+
+    def test_wrong_model_instance_raises_type_error(self):
+        with pytest.raises(
+            TypeError, match="relation 'account'.*expected a QJAccount instance or None"
+        ):
+            self._proxy().account == QJLedger(id=1)
+
+    def test_scalar_comparison_raises_type_error(self):
+        with pytest.raises(
+            TypeError, match="relation 'account'.*expected a QJAccount instance or None"
+        ):
+            self._proxy().account == 5
+
+    def test_non_equality_operators_are_rejected(self):
+        proxy = self._proxy()
+        for build in (
+            lambda: proxy.account < 5,
+            lambda: proxy.account <= 5,
+            lambda: proxy.account > 5,
+            lambda: proxy.account >= 5,
+            lambda: proxy.account.in_([1, 2]),
+            lambda: proxy.account.like("x"),
+            lambda: proxy.account << [1, 2],
+        ):
+            with pytest.raises(TypeError, match="supports only == / !="):
+                build()
+
+
+def test_query_node_boolean_coercion_raises():
+    """`and`/`or` misuse coerces a QueryNode to bool; that raises pointedly."""
+    node = FieldProxy("age") >= 18
+    with pytest.raises(TypeError, match="boolean context.*use & / |"):
+        bool(node)
+    with pytest.raises(TypeError, match="use & / |"):
+        _ = (FieldProxy("age") >= 18) and (FieldProxy("age") <= 30)
+
+
+class TestMutatingTraversalRejection:
+    """update()/delete() reject relation traversal at the shared choke point
+    (:meth:`Query._mutating_query_def`), before any serialization or DB."""
+
+    def test_traversed_predicate_rejected_for_update_and_delete(self):
+        q = Query(QJTransaction).where(lambda t: t.account.label == "a1")
+        for operation in ("update", "delete"):
+            with pytest.raises(ValueError, match="does not support relation traversal"):
+                q._mutating_query_def(operation)
+
+    def test_explicit_join_rejected(self):
+        q = Query(QJTransaction).join(lambda t: t.account)
+        with pytest.raises(ValueError, match="relation traversal"):
+            q._mutating_query_def("update")
+
+    def test_join_free_relation_filter_is_allowed(self):
+        q = Query(QJTransaction).where(lambda t: t.account == _persisted_account(1))
+        payload = q._mutating_query_def("update")  # must NOT raise
+        assert payload["where"][0]["column"] == "account_id"
+        assert payload["where"][0]["path"] == []
+
+
+@pytest.mark.asyncio
+async def test_update_and_delete_reject_traversal_before_db():
+    """The rejection fires before any DB round-trip — no connection is made."""
+    q = Query(QJTransaction).where(lambda t: t.account.owner.email == "x@y.z")
+    with pytest.raises(ValueError, match="relation traversal"):
+        await q.update(amount=0)
+    with pytest.raises(ValueError, match="relation traversal"):
+        await q.delete()
 
 
 # ---------------------------------------------------------------------------
@@ -720,3 +876,82 @@ async def test_explicit_left_plus_implicit_traversal_renders_left(db_url):
             .all()
         )
         assert {r.id for r in rows} == {2}
+
+
+# ---------------------------------------------------------------------------
+# Relation-proxy equality sugar — behavioral (#273): instance-eq filters by the
+# shadow FK join-free; == None / != None lower to IS NULL / IS NOT NULL; the
+# M2M association context composes with forward-FK traversal on the target.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_instance_equality_filters_by_shadow_fk(db_url):
+    """`t.account == a1` filters by `account_id` join-free; `!=` complements."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        a1 = core["a1"]
+
+        eq_rows = await QJTransaction.where(lambda t: t.account == a1).all()
+        assert {r.id for r in eq_rows} == {1, 2, 3}
+        assert await QJTransaction.where(lambda t: t.account == a1).count() == 3
+
+        ne_rows = await QJTransaction.where(lambda t: t.account != a1).all()
+        assert {r.id for r in ne_rows} == {4, 5, 6}
+
+
+@pytest.mark.asyncio
+async def test_deep_instance_equality_traverses_prefix_join(db_url):
+    """`t.account.owner == o2` compares `owner_id` under the account prefix join
+    (the shadow column lives one hop up, not the final target's PK column)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        o2 = core["o2"]
+
+        rows = await QJTransaction.where(lambda t: t.account.owner == o2).all()
+        # Only account a2 has owner o2; a2 has one transaction (id=4).
+        assert {r.id for r in rows} == {4}
+
+
+@pytest.mark.asyncio
+async def test_relation_equals_none_renders_is_null(db_url):
+    """`n.account == None` / `!= None` lower to IS NULL / IS NOT NULL on the
+    shadow FK, join-free."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        await _seed_notes(core)
+
+        null_rows = await QJNote.where(lambda n: n.account == None).all()  # noqa: E711
+        assert {r.id for r in null_rows} == {2}
+
+        present_rows = await QJNote.where(
+            lambda n: n.account != None  # noqa: E711
+        ).all()
+        assert {r.id for r in present_rows} == {1}
+
+
+@pytest.mark.asyncio
+async def test_m2m_context_composes_with_forward_fk_traversal(db_url):
+    """An M2M association query (`post.tags`) whose where() traverses a forward
+    FK on the target model composes: the association join and the traversal join
+    coexist in one statement (#273)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        admin = await QJMAuthor.create(id=1, role="admin")
+        member = await QJMAuthor.create(id=2, role="member")
+        tag_admin = await QJMTag.create(id=1, name="urgent", created_by=admin)
+        tag_member = await QJMTag.create(id=2, name="chill", created_by=member)
+        post = await QJMPost.create(id=1, title="p1")
+        await post.tags.add(tag_admin, tag_member)
+
+        # Sanity: the unfiltered association returns both tags.
+        assert {t.id for t in await post.tags.all()} == {1, 2}
+
+        admin_tags = await post.tags.where(lambda t: t.created_by.role == "admin").all()
+        assert {t.id for t in admin_tags} == {1}
+        assert (
+            await post.tags.where(lambda t: t.created_by.role == "admin").count() == 1
+        )

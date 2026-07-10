@@ -61,6 +61,13 @@ def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNo
             f"(e.g. `lambda user: user.age >= 18`), got {type(predicate).__name__}"
         )
     result = predicate(QueryProxy(model_cls))
+    if isinstance(result, RelationProxy):
+        relation = result._path[-1]
+        raise TypeError(
+            f"where() predicate returned the bare relation {relation!r}; compare "
+            f"a column (e.g. t.{relation}.<column> == ...) or use == None / "
+            "== an instance to filter by the relation."
+        )
     if not isinstance(result, QueryNode):
         raise TypeError(
             "where() predicate callable must return QueryNode, "
@@ -88,6 +95,20 @@ def _register_join_paths(node: QueryNode, joins: dict[tuple[str, ...], str]) -> 
         return
     if node.path:
         joins.setdefault(tuple(node.path), "inner")
+
+
+def _where_node_traverses(node: QueryNode) -> bool:
+    """True if any leaf under ``node`` carries a non-empty relation path (#273).
+
+    Used by :meth:`Query._mutating_query_def` to reject relation traversal on
+    ``update()``/``delete()``. A join-free shadow-FK leaf (``t.account ==
+    instance`` desugars to ``path=()``) is NOT traversal and stays allowed.
+    """
+    if node.is_compound:
+        return (node.left is not None and _where_node_traverses(node.left)) or (
+            node.right is not None and _where_node_traverses(node.right)
+        )
+    return bool(node.path)
 
 
 def _resolve_join_selector(
@@ -369,10 +390,11 @@ class Query(Generic[T]):
             # walker cannot render. Ordering by a related COLUMN (a FieldProxy
             # with a non-empty path) is valid traversal (#271).
             if isinstance(selected, RelationProxy):
+                relation = selected._path[-1]
                 raise TypeError(
-                    "order_by() selector resolved to a relation, not a column "
-                    "(e.g. `lambda t: t.account`); order by a column on the "
-                    "relation instead (e.g. `lambda t: t.account.name`)."
+                    f"order_by() selector returned the bare relation {relation!r}, "
+                    "not a column; order by a column on it instead "
+                    f"(e.g. t.{relation}.<column>)."
                 )
             if not isinstance(selected, FieldProxy):
                 raise TypeError(
@@ -567,7 +589,13 @@ class Query(Generic[T]):
         rejected loudly instead of being silently ignored.
 
         Raises:
-            ValueError: If ``limit()`` or ``offset()`` was set on this query.
+            ValueError: If ``limit()``/``offset()`` was set, or if the query
+                traverses a relation (a joined/explicit-edge path, or a
+                where-clause leaf carrying a non-empty path). Portable SQL has
+                no ``UPDATE/DELETE ... JOIN``; a join-free shadow-FK filter
+                (``t.account == instance``) stays allowed. Rejected here, before
+                any DB round-trip (the Rust guard from #270 stays as boundary
+                defense).
         """
         if self._limit is not None or self._offset is not None:
             raise ValueError(
@@ -575,6 +603,18 @@ class Query(Generic[T]):
                 f"no {operation.upper()} ... LIMIT. Remove the .limit()/.offset() "
                 f"call, or fetch primary keys first and {operation} by "
                 "primary-key set."
+            )
+        if (
+            self._joins
+            or self._explicit_edges
+            or any(_where_node_traverses(node) for node in self.where_clause)
+        ):
+            raise ValueError(
+                f"{operation}() does not support relation traversal: portable SQL "
+                f"has no {operation.upper()} ... JOIN. Fetch primary keys via the "
+                f"joined query first, then {operation} by primary-key set. "
+                "(A join-free relation filter like `t.account == instance` is "
+                "allowed.)"
             )
         return {
             "model_name": _model_identity(self.model_cls),

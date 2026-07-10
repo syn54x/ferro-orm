@@ -113,10 +113,31 @@ class QueryNode:
             }
         return {
             "node_kind": "compound",
+            # Identity checks, never truthiness: ``__bool__`` raises to catch
+            # ``and``/``or`` misuse, so every internal test of a QueryNode uses
+            # ``is (not) None`` (audited for #273).
             "operator": self.operator,
-            "left": self.left.to_ir_dict() if self.left else None,
-            "right": self.right.to_ir_dict() if self.right else None,
+            "left": self.left.to_ir_dict() if self.left is not None else None,
+            "right": self.right.to_ir_dict() if self.right is not None else None,
         }
+
+    def __bool__(self) -> bool:
+        """Reject boolean coercion of a query node (#273).
+
+        Python evaluates ``and``/``or`` by calling ``bool()`` on the operands,
+        so ``(u.age >= 18) and (u.active == True)`` would silently collapse to
+        one branch instead of building a compound predicate. Raising here turns
+        that mistake into a pointed error at build time; combine predicates with
+        the bitwise ``&`` / ``|`` operators instead.
+
+        Raises:
+            TypeError: Always — a ``QueryNode`` has no truth value.
+        """
+        raise TypeError(
+            "QueryNode cannot be used in a boolean context; use & / | to "
+            "combine predicates, not and/or "
+            "(e.g. (u.age >= 18) & (u.active == True))."
+        )
 
     def __repr__(self):
         """Return a developer-friendly representation of the node"""
@@ -397,8 +418,13 @@ class RelationProxy:
       did-you-mean suggestion (same style as :func:`validate_query_column`).
 
     A bare ``RelationProxy`` returned from a ``where()`` lambda is not a
-    :class:`QueryNode`; ``where()`` rejects it. Comparison/misuse sugar on a
-    relation (``== instance``, ``== None``) is a later slice (#273).
+    :class:`QueryNode`; ``where()`` rejects it. Equality sugar against a
+    persisted target instance or ``None`` desugars **join-free** to a
+    shadow-FK comparison (#273): ``t.account == acct`` builds
+    ``QueryNode(column="account_id", operator="==", value=<acct.pk>, path=())``
+    — the shadow column of the LAST hop, with the proxy path MINUS that hop, so
+    a deep proxy (``t.account.owner == o``) compares ``owner_id`` under the
+    ``("account",)`` prefix joins only.
 
     Examples:
         >>> proxy = QueryProxy(Transaction)  # doctest: +SKIP
@@ -424,6 +450,109 @@ class RelationProxy:
             return RelationProxy(self._root_model, self._path + (name,), spec.target)
         validate_query_column(self._target, name)
         return FieldProxy(name, path=self._path)
+
+    def _relation_name(self) -> str:
+        """The last-hop relation field name (the one being compared)."""
+        return self._path[-1]
+
+    def _last_hop_shadow_column(self) -> str:
+        """Shadow FK column of the LAST hop, resolved along the spec chain.
+
+        For ``t.account`` this is ``account_id`` on the root table; for
+        ``t.account.owner`` it is ``owner_id`` on the hop-1 (account) table.
+        """
+        current = self._root_model
+        spec = None
+        for name in self._path:
+            specs = getattr(current, "__ferro_relation_specs__", None) or {}
+            spec = specs[name]
+            current = spec.target
+        assert spec is not None  # a RelationProxy always has ≥ 1 hop
+        return spec.shadow_column
+
+    def _instance_comparison(self, other: object, operator: str) -> QueryNode:
+        """Desugar ``== instance`` / ``== None`` to a shadow-FK leaf (#273).
+
+        The node targets the last hop's shadow FK column with the proxy path
+        MINUS that hop, so it registers only the PREFIX joins (none for a
+        one-hop proxy — genuinely join-free).
+
+        Raises:
+            ValueError: If ``other`` is a target-model instance whose primary
+                key is unset (unpersisted) — naming the model, save-first.
+            TypeError: If ``other`` is neither the target model nor ``None`` —
+                the relation-vs-scalar guardrail, suggesting a column compare.
+        """
+        relation = self._relation_name()
+        shadow = self._last_hop_shadow_column()
+        prefix_path = self._path[:-1]
+        if other is None:
+            return QueryNode(
+                column=shadow, operator=operator, value=None, path=prefix_path
+            )
+        if isinstance(other, self._target):
+            # Reuse the Task 3 PK resolver (loud on zero/multiple PKs); local
+            # import avoids a builder <-> nodes import cycle at module load.
+            from .builder import _target_pk_column
+
+            pk_column = _target_pk_column(self._target)
+            pk_value = getattr(other, pk_column, None)
+            if pk_value is None:
+                raise ValueError(
+                    f"cannot compare relation {relation!r} to an unpersisted "
+                    f"{self._target.__name__} instance (primary key not set); "
+                    "save it first"
+                )
+            return QueryNode(
+                column=shadow, operator=operator, value=pk_value, path=prefix_path
+            )
+        raise TypeError(
+            f"cannot compare relation {relation!r} to {other!r}: expected a "
+            f"{self._target.__name__} instance or None. To filter by a column, "
+            f"compare it directly (e.g. t.{relation}.<column> == ...)."
+        )
+
+    def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        self, other: object
+    ) -> QueryNode:
+        """Desugar ``t.<relation> == instance`` / ``== None`` (join-free, #273)."""
+        return self._instance_comparison(other, "==")
+
+    def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        self, other: object
+    ) -> QueryNode:
+        """Desugar ``t.<relation> != instance`` / ``!= None`` (join-free, #273)."""
+        return self._instance_comparison(other, "!=")
+
+    def _reject_operator(self, symbol: str) -> "QueryNode":
+        """Reject a non-equality operator on a bare relation (#273)."""
+        relation = self._relation_name()
+        raise TypeError(
+            f"relation {relation!r} supports only == / != against a "
+            f"{self._target.__name__} instance or None; to compare a column use "
+            f"t.{relation}.<column> (e.g. t.{relation}.<column> {symbol} ...)."
+        )
+
+    def __lt__(self, other: object) -> "QueryNode":
+        return self._reject_operator("<")
+
+    def __le__(self, other: object) -> "QueryNode":
+        return self._reject_operator("<=")
+
+    def __gt__(self, other: object) -> "QueryNode":
+        return self._reject_operator(">")
+
+    def __ge__(self, other: object) -> "QueryNode":
+        return self._reject_operator(">=")
+
+    def in_(self, other: object) -> "QueryNode":
+        return self._reject_operator("in_")
+
+    def like(self, other: object) -> "QueryNode":
+        return self._reject_operator("like")
+
+    def __lshift__(self, other: object) -> "QueryNode":
+        return self._reject_operator("<<")
 
     def __repr__(self) -> str:
         joined = ".".join(self._path)
