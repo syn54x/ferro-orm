@@ -113,10 +113,69 @@ When the inferred type isn't what you want — for example `varchar(255)` instea
         body: Annotated[str, Field(db_type="text")]
     ```
 
-Valid values are the `DbTypeToken` literals — `"text"`, `"smallint"`, `"int"`, `"bigint"`, `"uuid"`, `"timestamp"`, `"timestamptz"`, `"date"`, `"time"` — plus `varchar(n)` built with `ferro.varchar`. Prefer `varchar(255)` over the raw string `"varchar(255)"` so type checkers see a deliberate vocabulary choice. The override is validated against the Python annotation at class-definition time, so an incompatible combination fails immediately.
+Valid values are the `DbTypeToken` literals — `"text"`, `"smallint"`, `"int"`, `"bigint"`, `"uuid"`, `"timestamp"`, `"timestamptz"`, `"date"`, `"time"`, `"json"`, `"jsonb"` — plus `varchar(n)` built with `ferro.varchar`. Prefer `varchar(255)` over the raw string `"varchar(255)"` so type checkers see a deliberate vocabulary choice. The override is validated against the Python annotation at class-definition time — on both declaration styles and on raw `json_schema_extra` declarations alike — so an incompatible combination fails immediately.
 
 !!! note "Enum storage"
     `enum.Enum` fields are stored as text on SQLite and as named native `ENUM` types on PostgreSQL (via the [Alembic bridge](migrations.md)). For closed-domain string columns with a DB-side `CHECK` constraint, combine `db_type` with `db_check=True`.
+
+### JSON storage: `json` and `jsonb`
+
+Json-family fields — `dict`, `list` (any element type, including `list[SomeNestedModel]`), and nested Pydantic models — store as JSON documents. On PostgreSQL the default is a plain `json` column; opt into **JSONB** (binary storage, GIN-indexable, containment operators) per column with `db_type="jsonb"`:
+
+=== "Assignment"
+
+    ```python
+    from typing import Any
+
+    from pydantic import BaseModel
+
+    from ferro import Field, Model
+
+
+    class Payment(BaseModel):
+        currency: str
+        amount: int
+
+
+    class Transaction(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        raw_payload: dict[str, Any] = Field(db_type="jsonb")
+        line_items: list[Payment] = Field(db_type="jsonb")
+        audit_note: dict[str, str] = Field(db_type="json")  # explicit plain json
+    ```
+
+=== "Annotated"
+
+    ```python
+    from typing import Annotated, Any
+
+    from pydantic import BaseModel
+
+    from ferro import Field, Model
+
+
+    class Payment(BaseModel):
+        currency: str
+        amount: int
+
+
+    class Transaction(Model):
+        id: Annotated[int | None, Field(default=None, primary_key=True)]
+        raw_payload: Annotated[dict[str, Any], Field(db_type="jsonb")]
+        line_items: Annotated[list[Payment], Field(db_type="jsonb")]
+        audit_note: Annotated[dict[str, str], Field(db_type="json")]  # explicit plain json
+    ```
+
+Declaring `db_type="jsonb"` on anything outside the json family (an `int`, a `set`, ...) fails at class-definition time.
+
+**SQLite lowering.** On SQLite both tokens store as plain JSON text — one model definition runs on both backends, and switching between `json` and `jsonb` never changes SQLite behavior.
+
+**Round-trip contract is value equality, not byte fidelity.** PostgreSQL's `jsonb` does not preserve dict key order (keys come back sorted), duplicate keys, or whitespace — that's inherent to the storage type, not Ferro. Values compare equal with Python `==` (dict equality ignores order), but if you iterate keys and need insertion order — or need the stored text byte-for-byte — keep the default `json` storage.
+
+**Migrating between `json` and `jsonb` is a declaration edit.** With [`migrate_updates`](migrations.md) enabled, adding `db_type="jsonb"` to an existing json column emits exactly one `ALTER TABLE ... TYPE jsonb USING ...` on PostgreSQL (existing values survive the cast); removing the opt-in emits the mirror `ALTER` back to `json`. The [Alembic bridge](migrations.md) renders the same DDL. On SQLite the same edit is a no-op.
+
+!!! note "Querying inside JSONB"
+    Containment and path operators (`@>`, `->`, `#>>`) and GIN index declarations are not in the query builder yet — they're planned follow-ups. Today JSONB gives you honest storage and round-tripping; query the column as a whole.
 
 ## Field Options
 

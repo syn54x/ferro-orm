@@ -32,3 +32,17 @@ def test_field_accepts_varchar_helper():
         code: str = Field(db_type=varchar(64))
 
     assert Doc.ferro_fields["code"].db_type == "varchar(64)"
+
+
+def test_json_tokens_are_dbtypetoken_literals():
+    """json/jsonb are first-class vocabulary for type checkers (#262)."""
+    jsonb: DbTypeToken = "jsonb"
+    json_token: DbTypeToken = "json"
+
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        payload: dict = Field(db_type=jsonb)
+        plain: dict = Field(db_type=json_token)
+
+    assert Doc.__ferro_columns__["payload"].db_type == "jsonb"
+    assert Doc.__ferro_columns__["plain"].db_type == "json"
