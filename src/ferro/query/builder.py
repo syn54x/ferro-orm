@@ -30,13 +30,18 @@ E = TypeVar("E")
 
 
 def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
-    """Serialize a QueryIR payload into a versioned IR envelope JSON string."""
+    """Serialize a QueryIR payload into a versioned IR envelope JSON string.
+
+    Always emits ``ir_version: 2`` (#269 — unconditional bump; there is no v1
+    envelope left anywhere). Python and Rust ship in one wheel, so a single
+    supported version is the whole contract (#267 Implementation Decisions).
+    """
     import json
 
     return json.dumps(
         {
             "ir_kind": "query",
-            "ir_version": 1,
+            "ir_version": 2,
             "payload": _serialize_query_value(query_payload),
         }
     )
@@ -89,7 +94,7 @@ class Query(Generic[T]):
         self._using = using
         self._session = session
         self.where_clause: list["QueryNode"] = []
-        self.order_by_clause: list[dict[str, str]] = []
+        self.order_by_clause: list[dict[str, Any]] = []
         self._limit: int | None = None
         self._offset: int | None = None
         self._m2m_context: dict[str, Any] | None = None
@@ -214,7 +219,9 @@ class Query(Generic[T]):
             )
 
         new = self._clone()
-        new.order_by_clause.append({"column": col_name, "direction": direction.lower()})
+        new.order_by_clause.append(
+            {"column": col_name, "direction": direction.lower(), "path": []}
+        )
         return new
 
     def limit(self, value: int) -> Self:
@@ -275,6 +282,7 @@ class Query(Generic[T]):
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": [],
             "m2m": None,
+            "joins": [],
         }
 
     async def all(self) -> list[T]:
@@ -295,6 +303,7 @@ class Query(Generic[T]):
             "limit": self._limit,
             "offset": self._offset,
             "m2m": self._m2m_context,
+            "joins": [],
         }
         route = await self._transaction_or_using()
         return await fetch_filtered(
@@ -321,6 +330,7 @@ class Query(Generic[T]):
             "limit": None,
             "offset": None,
             "m2m": self._m2m_context,
+            "joins": [],
         }
         route = await self._transaction_or_using()
         return await count_filtered(

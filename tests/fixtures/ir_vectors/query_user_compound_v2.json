@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_user_compound_v1",
+  "vector_name": "query_user_compound_v2",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 1,
+    "ir_version": 2,
     "payload": {
       "model_name": "User",
       "where": [
@@ -18,7 +18,8 @@
             "value": {
               "kind": "bool",
               "value": true
-            }
+            },
+            "path": []
           },
           "right": {
             "node_kind": "compound",
@@ -30,7 +31,8 @@
               "value": {
                 "kind": "string",
                 "value": "%@ferro.dev"
-              }
+              },
+              "path": []
             },
             "right": {
               "node_kind": "leaf",
@@ -39,7 +41,8 @@
               "value": {
                 "kind": "list",
                 "value": ["admin", "owner"]
-              }
+              },
+              "path": []
             }
           }
         }
@@ -47,12 +50,14 @@
       "order_by": [
         {
           "column": "id",
-          "direction": "asc"
+          "direction": "asc",
+          "path": []
         }
       ],
       "limit": 100,
       "offset": 0,
-      "m2m": null
+      "m2m": null,
+      "joins": []
     }
   }
 }

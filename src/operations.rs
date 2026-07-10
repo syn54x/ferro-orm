@@ -242,11 +242,23 @@ fn tx_remove(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<Transacti
     Ok(TRANSACTION_REGISTRY.remove(tx_id).map(|(_, handle)| handle))
 }
 
+/// The only QueryIR version this build accepts (#269, #267 Implementation Decisions).
+///
+/// Python and Rust ship in one wheel, so there is exactly one supported version at any
+/// time — no negotiation, no fallback. A mismatch can only mean a mixed build (a stale
+/// `.so` next to a rebuilt Python package, or vice versa).
+const SUPPORTED_QUERY_IR_VERSION: u32 = 2;
+
+/// Envelope shell used only to read `ir_kind`/`ir_version` before committing to a strict
+/// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real v1 payload (no
+/// `joins`/`path` fields) must fail on the version check below with an actionable
+/// message, not on a generic "missing field" serde error from parsing a payload shape
+/// this build no longer understands.
 #[derive(Debug, Clone, Deserialize)]
 struct QueryIrEnvelope {
     ir_kind: String,
     ir_version: u32,
-    payload: QueryIrPayload,
+    payload: serde_json::Value,
 }
 
 fn query_plan_from_ir_json(query_ir_json: &str) -> PyResult<QueryPlan> {
@@ -259,21 +271,32 @@ fn query_plan_from_ir_json(query_ir_json: &str) -> PyResult<QueryPlan> {
             envelope.ir_kind
         )));
     }
-    if envelope.ir_version != 1 {
+    if envelope.ir_version != SUPPORTED_QUERY_IR_VERSION {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Unsupported QueryIR version {}; expected 1",
-            envelope.ir_version
+            "Unsupported QueryIR version {}: this build of ferro accepts only version {}. \
+             Python and Rust ship in one wheel, so a version mismatch means mixed builds — \
+             reinstall/rebuild ferro so the Python package and the compiled extension match.",
+            envelope.ir_version, SUPPORTED_QUERY_IR_VERSION
         )));
     }
-    QueryPlan::from_ir_payload(envelope.payload)
+    let payload: QueryIrPayload = serde_json::from_value(envelope.payload).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR JSON: {}", e))
+    })?;
+    QueryPlan::from_ir_payload(payload)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR: {e}")))
 }
 
+/// Build a SeaQuery `Condition` from `plan`'s `where_clause`.
+///
+/// `qualify_with`: `Some(root_table)` qualifies every column as `root_table.column`
+/// (required for SELECT — see [`crate::query::QueryPlan::to_condition_for_backend`]);
+/// `None` leaves columns unqualified (today's `UPDATE`/`DELETE ... WHERE` behavior).
 fn query_condition_for_backend(
     plan: &QueryPlan,
     backend: Dialect,
+    qualify_with: Option<&str>,
 ) -> PyResult<Condition> {
-    plan.to_condition_for_backend(backend)
+    plan.to_condition_for_backend(backend, qualify_with)
         .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
@@ -1595,9 +1618,18 @@ pub fn fetch_filtered<'py>(
                 ));
             }
 
-            select.cond_where(query_condition_for_backend(&plan, backend)?);
+            // SELECT columns are qualified by the root table alias (#269): every leaf
+            // and order_by path is guaranteed empty (root model) by
+            // `QueryPlan::from_ir_payload`'s defensive-loudness check, so qualifying
+            // here is always correct — #270 will thread real join paths through
+            // instead of the root table for non-root references.
+            select.cond_where(query_condition_for_backend(
+                &plan,
+                backend,
+                Some(&table_name),
+            )?);
             for order in &plan.order_by {
-                let col = Alias::new(&order.column);
+                let col = (Alias::new(&table_name), Alias::new(&order.column));
                 let dir = if order.direction.to_lowercase() == "desc" {
                     Order::Desc
                 } else {
@@ -1754,7 +1786,13 @@ pub fn count_filtered(
                 select.from(Alias::new(&table_name));
             }
 
-            select.cond_where(query_condition_for_backend(&plan, backend)?);
+            // Qualified by the root table alias (#269) — see the matching comment in
+            // `fetch_filtered` for why this is always correct in this slice.
+            select.cond_where(query_condition_for_backend(
+                &plan,
+                backend,
+                Some(&table_name),
+            )?);
             sea_query_build_for_backend!(select, backend)
         };
 
@@ -1923,9 +1961,17 @@ pub fn delete_filtered(
         // ... sql ...
         let (sql, bind_values) = {
             let mut delete = Query::delete();
+            // Qualified by the root table alias (#269): both dialects accept
+            // `table.column` in `DELETE ... WHERE`, and uniform qualification across
+            // every walker avoids retrofitting the mutating paths when joins reach
+            // them later.
             delete
                 .from_table(Alias::new(&table_name))
-                .cond_where(query_condition_for_backend(&plan, backend)?);
+                .cond_where(query_condition_for_backend(
+                    &plan,
+                    backend,
+                    Some(&table_name),
+                )?);
             sea_query_build_for_backend!(delete, backend)
         };
 
@@ -1989,9 +2035,16 @@ pub fn update_filtered<'py>(
         plan.postgres_enum_udt = enum_udt.clone();
         // ... sql ...
         let (sql, bind_values) = {
+            // Qualified by the root table alias (#269) — same rationale as
+            // `delete_filtered` above. SET columns stay bare: SQL forbids
+            // qualified column names on the left of `SET` assignments.
             let mut update = UpdateStatement::new()
                 .table(Alias::new(&table_name))
-                .cond_where(query_condition_for_backend(&plan, backend)?)
+                .cond_where(query_condition_for_backend(
+                    &plan,
+                    backend,
+                    Some(&table_name),
+                )?)
                 .to_owned();
             for (key, input) in &update_inputs {
                 update.value(
@@ -3468,17 +3521,19 @@ mod mutation_pagination_guard_tests {
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 1,
+            "ir_version": 2,
             "payload": {
                 "model_name": "Widget",
                 "where": [{
                     "node_kind": "leaf",
                     "operator": "==",
                     "column": "name",
-                    "value": {"kind": "string", "value": "a"}
+                    "value": {"kind": "string", "value": "a"},
+                    "path": []
                 }],
                 "order_by": [],
-                "m2m": null
+                "m2m": null,
+                "joins": []
             }
         })
         .to_string()
@@ -3529,6 +3584,174 @@ mod mutation_pagination_guard_tests {
                 "message should name the operation and offset: {msg}"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod query_ir_version_gate_tests {
+    use super::query_plan_from_ir_json;
+
+    fn v2_envelope() -> serde_json::Value {
+        serde_json::json!({
+            "ir_kind": "query",
+            "ir_version": 2,
+            "payload": {
+                "model_name": "Widget",
+                "where": [],
+                "order_by": [],
+                "limit": null,
+                "offset": null,
+                "m2m": null,
+                "joins": []
+            }
+        })
+    }
+
+    #[test]
+    fn accepts_version_2() {
+        query_plan_from_ir_json(&v2_envelope().to_string())
+            .expect("a well-formed v2 envelope must be accepted");
+    }
+
+    /// Contract test (#269 acceptance criteria): a v1 envelope — including one
+    /// that predates the `joins`/`path` fields entirely, as any real v1 emitter
+    /// would produce — must be rejected with a message naming the version
+    /// actually received, this build's supported version, and that Python/Rust
+    /// ship in one wheel (so a mismatch means mixed builds).
+    #[test]
+    fn rejects_v1_envelope_with_actionable_message() {
+        let v1_envelope = serde_json::json!({
+            "ir_kind": "query",
+            "ir_version": 1,
+            "payload": {
+                "model_name": "Widget",
+                "where": [],
+                "order_by": [],
+                "limit": null,
+                "offset": null,
+                "m2m": null
+            }
+        });
+
+        let err = query_plan_from_ir_json(&v1_envelope.to_string())
+            .expect_err("a v1 envelope must be rejected");
+        pyo3::Python::attach(|py| {
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        });
+        let msg = err.to_string();
+        assert!(
+            msg.contains('1'),
+            "message should name the received version: {msg}"
+        );
+        assert!(
+            msg.contains('2'),
+            "message should name the supported version: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("one wheel"),
+            "message should explain Python/Rust ship in one wheel: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("reinstall") || msg.to_lowercase().contains("rebuild"),
+            "message should tell the caller how to fix a mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_future_version() {
+        let mut envelope = v2_envelope();
+        envelope["ir_version"] = serde_json::json!(3);
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("an unsupported future version must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains('3'),
+            "message should name the received version: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mutation_qualification_tests {
+    //! Pin root-alias qualification in mutating WHERE clauses (#269).
+    //!
+    //! `update_filtered`/`delete_filtered` assemble their statements inside async
+    //! pyfunctions with no directly callable seam, so these tests rebuild the same
+    //! statement shape (`Query::delete()` / `UpdateStatement` +
+    //! `query_condition_for_backend(.., Some(&table_name))`) and assert the rendered
+    //! SQL qualifies the WHERE column on both dialects.
+
+    use super::{query_condition_for_backend, query_plan_from_ir_json};
+    use crate::state::Dialect;
+    use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, UpdateStatement};
+
+    fn widget_plan() -> crate::query::QueryPlan {
+        query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 2,
+                "payload": {
+                    "model_name": "Widget",
+                    "where": [{
+                        "node_kind": "leaf",
+                        "operator": "==",
+                        "column": "name",
+                        "value": {"kind": "string", "value": "a"},
+                        "path": []
+                    }],
+                    "order_by": [],
+                    "m2m": null,
+                    "joins": []
+                }
+            })
+            .to_string(),
+        )
+        .expect("v2 envelope parses")
+    }
+
+    #[test]
+    fn delete_where_column_is_root_qualified_on_both_dialects() {
+        let plan = widget_plan();
+        for backend in [Dialect::Sqlite, Dialect::Postgres] {
+            let mut delete = Query::delete();
+            delete
+                .from_table(Alias::new("widget"))
+                .cond_where(query_condition_for_backend(&plan, backend, Some("widget")).unwrap());
+            let sql = match backend {
+                Dialect::Postgres => delete.to_string(PostgresQueryBuilder),
+                Dialect::Sqlite => delete.to_string(SqliteQueryBuilder),
+            };
+            assert!(
+                sql.contains("\"widget\".\"name\"") || sql.contains("`widget`.`name`"),
+                "DELETE WHERE column must be root-qualified on {backend:?}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_where_column_is_root_qualified_on_both_dialects() {
+        let plan = widget_plan();
+        for backend in [Dialect::Sqlite, Dialect::Postgres] {
+            let mut update = UpdateStatement::new()
+                .table(Alias::new("widget"))
+                .cond_where(query_condition_for_backend(&plan, backend, Some("widget")).unwrap())
+                .to_owned();
+            update.value(Alias::new("name"), "b");
+            let sql = match backend {
+                Dialect::Postgres => update.to_string(PostgresQueryBuilder),
+                Dialect::Sqlite => update.to_string(SqliteQueryBuilder),
+            };
+            assert!(
+                sql.contains("\"widget\".\"name\" =") || sql.contains("`widget`.`name` ="),
+                "UPDATE WHERE column must be root-qualified on {backend:?}: {sql}"
+            );
+            // SET assignment column must stay bare (SQL forbids qualified SET targets).
+            assert!(
+                sql.contains("SET \"name\"") || sql.contains("SET `name`"),
+                "UPDATE SET column must stay unqualified on {backend:?}: {sql}"
+            );
+        }
     }
 }
 

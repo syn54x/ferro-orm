@@ -134,7 +134,11 @@ pub struct SchemaCheck {
     pub values: Vec<String>,
 }
 
-/// Query IR: filter, sort, pagination, and optional M2M join context.
+/// Query IR: filter, sort, pagination, joins, and optional M2M join context.
+///
+/// `ir_version: 2` (unconditional, no v1 emitted anywhere — #269). `joins` is
+/// required and always present (`[]` until #270 renders real JOINs); every leaf
+/// and `order_by` entry carries a `path` (required, `[]` = root model).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryIrPayload {
     /// Model class name the query targets.
@@ -150,6 +154,30 @@ pub struct QueryIrPayload {
     pub offset: Option<u64>,
     /// Many-to-many join metadata JSON, deserialized into [`M2mContext`] downstream.
     pub m2m: Option<Value>,
+    /// Relation joins collected from traversal (`[]` until #270 renders them).
+    pub joins: Vec<QueryJoin>,
+}
+
+/// One relation JOIN collected from query-time traversal (#270 lands rendering).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueryJoin {
+    /// `"inner"` (default traversal semantics) or `"left"` (`.left_join`).
+    pub join_type: String,
+    /// Relation hops from the root model to the joined table, in traversal order.
+    pub path: Vec<QueryJoinHop>,
+}
+
+/// One hop in a [`QueryJoin`] path: a single FK edge between two tables.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueryJoinHop {
+    /// Relation field name on the source side of this hop.
+    pub relation: String,
+    /// Local column the hop joins from (shadow `*_id` for `ForeignKey`).
+    pub from_column: String,
+    /// Table this hop joins into.
+    pub to_table: String,
+    /// Column on `to_table` the hop joins against (usually the target PK).
+    pub to_column: String,
 }
 
 /// One `ORDER BY` term.
@@ -159,6 +187,9 @@ pub struct QueryOrderBy {
     pub column: String,
     /// Sort direction (`"asc"` or `"desc"`, case-insensitive in the planner).
     pub direction: String,
+    /// Relation field names from the root model to the ordered column's table;
+    /// `[]` = root model (#269 requires this empty until #270 renders joins).
+    pub path: Vec<String>,
 }
 
 /// Predicate tree node in query IR (leaf comparison or compound AND/OR).
@@ -174,6 +205,9 @@ pub enum QueryNode {
         column: String,
         /// Typed right-hand value.
         value: QueryValue,
+        /// Relation field names from the root model to `column`'s table;
+        /// `[]` = root model (#269 requires this empty until #270 renders joins).
+        path: Vec<String>,
     },
     /// Binary boolean combination of two child nodes.
     #[serde(rename = "compound")]
@@ -263,7 +297,7 @@ mod tests {
     #[test]
     fn query_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v1.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v2.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query fixture must parse");
         let ir = parsed

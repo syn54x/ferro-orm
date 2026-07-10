@@ -11,7 +11,9 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-SUPPORTED_IR_VERSION = 1
+# `query` is on ir_version 2 (#269 — unconditional bump, path-qualified column
+# references); `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 2, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 
 
@@ -40,13 +42,14 @@ def _validate_query_node(node: dict[str, Any], label: str) -> None:
     assert operator in QUERY_OPERATORS, f"{label}.operator invalid: {operator!r}"
 
     if node_kind == "leaf":
-        _require_keys(node, {"column", "value"}, label)
+        _require_keys(node, {"column", "value", "path"}, label)
         assert isinstance(node["column"], str) and node["column"], (
             f"{label}.column must be non-empty string"
         )
         value = node["value"]
         assert isinstance(value, dict), f"{label}.value must be object"
         _require_keys(value, {"kind", "value"}, f"{label}.value")
+        assert isinstance(node["path"], list), f"{label}.path must be a list"
         return
 
     _require_keys(node, {"left", "right"}, label)
@@ -83,7 +86,11 @@ def _validate_schema_payload(payload: dict[str, Any], label: str) -> None:
 
 
 def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
-    _require_keys(payload, {"model_name", "where", "order_by", "limit", "offset", "m2m"}, label)
+    _require_keys(
+        payload,
+        {"model_name", "where", "order_by", "limit", "offset", "m2m", "joins"},
+        label,
+    )
     assert isinstance(payload["model_name"], str) and payload["model_name"], (
         f"{label}.model_name must be non-empty string"
     )
@@ -94,6 +101,11 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         assert isinstance(node, dict), f"{node_label} must be object"
         _validate_query_node(node, node_label)
     assert isinstance(payload["order_by"], list), f"{label}.order_by must be list"
+    for i, order in enumerate(payload["order_by"]):
+        order_label = f"{label}.order_by[{i}]"
+        assert isinstance(order, dict), f"{order_label} must be object"
+        _require_keys(order, {"column", "direction", "path"}, order_label)
+        assert isinstance(order["path"], list), f"{order_label}.path must be a list"
     if payload["limit"] is not None:
         assert isinstance(payload["limit"], int) and payload["limit"] >= 0, (
             f"{label}.limit must be null or non-negative int"
@@ -104,6 +116,16 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         )
     if payload["m2m"] is not None:
         assert isinstance(payload["m2m"], dict), f"{label}.m2m must be null or object"
+    joins = payload["joins"]
+    assert isinstance(joins, list), f"{label}.joins must be a list"
+    for i, join in enumerate(joins):
+        join_label = f"{label}.joins[{i}]"
+        assert isinstance(join, dict), f"{join_label} must be object"
+        _require_keys(join, {"join_type", "path"}, join_label)
+        assert join["join_type"] in {"inner", "left"}, (
+            f"{join_label}.join_type invalid: {join['join_type']!r}"
+        )
+        assert isinstance(join["path"], list), f"{join_label}.path must be a list"
 
 
 def _validate_codec_payload(payload: dict[str, Any], label: str) -> None:
@@ -202,8 +224,9 @@ def test_ir_vectors_match_phase0_contract_envelope() -> None:
         assert ir["ir_kind"] == vector["domain"], (
             f"{label}.ir.ir_kind ({ir['ir_kind']!r}) must match domain ({vector['domain']!r})"
         )
-        assert ir["ir_version"] == SUPPORTED_IR_VERSION, (
-            f"{label}.ir.ir_version must equal {SUPPORTED_IR_VERSION}"
+        expected_version = SUPPORTED_IR_VERSIONS[vector["domain"]]
+        assert ir["ir_version"] == expected_version, (
+            f"{label}.ir.ir_version must equal {expected_version} for domain {vector['domain']!r}"
         )
         assert isinstance(ir["payload"], dict), f"{label}.ir.payload must be object"
         _validate_domain_payload(vector["domain"], ir["payload"], f"{label}.ir.payload")

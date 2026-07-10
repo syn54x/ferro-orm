@@ -37,6 +37,7 @@ class QueryNode:
         left: "QueryNode | None" = None,
         right: "QueryNode | None" = None,
         is_compound: bool = False,
+        path: tuple[str, ...] = (),
     ):
         """Initialize a query expression node
 
@@ -47,6 +48,10 @@ class QueryNode:
             left: Left child node for compound expressions.
             right: Right child node for compound expressions.
             is_compound: Set to True for logical expressions with child nodes.
+            path: Relation field names from the root model to ``column``'s
+                table; empty (default) means the root model. Plumbed through
+                so relation traversal (#270) can populate it — this slice
+                never produces a non-empty path.
         """
         self.column = column
         self.operator = operator
@@ -54,6 +59,7 @@ class QueryNode:
         self.left = left
         self.right = right
         self.is_compound = is_compound
+        self.path = path
 
     def __or__(self, other: "QueryNode") -> "QueryNode":
         """Combine two nodes with logical OR
@@ -103,6 +109,7 @@ class QueryNode:
                 "column": self.column,
                 "operator": self.operator,
                 "value": {"kind": _query_value_kind(serialized), "value": serialized},
+                "path": list(self.path),
             }
         return {
             "node_kind": "compound",
@@ -167,41 +174,46 @@ class FieldProxy(Generic[TField]):
         True
     """
 
-    def __init__(self, column: str):
+    def __init__(self, column: str, path: tuple[str, ...] = ()):
         """Initialize a field proxy for a specific column
 
         Args:
             column: Database column name to target in expressions.
+            path: Relation field names from the root model to this column's
+                table; empty (default) means the root model. Plumbed through
+                so relation traversal (#270) can populate it — this slice
+                never produces a non-empty path.
         """
         self.column = column
+        self.path = path
 
     def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an equality comparison node"""
-        return QueryNode(self.column, "==", other)
+        return QueryNode(self.column, "==", other, path=self.path)
 
     def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an inequality comparison node"""
-        return QueryNode(self.column, "!=", other)
+        return QueryNode(self.column, "!=", other, path=self.path)
 
     def __lt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than comparison node"""
-        return QueryNode(self.column, "<", other)
+        return QueryNode(self.column, "<", other, path=self.path)
 
     def __le__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than-or-equal comparison node"""
-        return QueryNode(self.column, "<=", other)
+        return QueryNode(self.column, "<=", other, path=self.path)
 
     def __gt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than comparison node"""
-        return QueryNode(self.column, ">", other)
+        return QueryNode(self.column, ">", other, path=self.path)
 
     def __ge__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than-or-equal comparison node"""
-        return QueryNode(self.column, ">=", other)
+        return QueryNode(self.column, ">=", other, path=self.path)
 
     def in_(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
@@ -226,7 +238,7 @@ class FieldProxy(Generic[TField]):
             raise TypeError(
                 f"The 'in_' operator expects a list, tuple, or set, got {type(other).__name__}"
             )
-        return QueryNode(self.column, "IN", list(other))
+        return QueryNode(self.column, "IN", list(other), path=self.path)
 
     def like(self: "FieldProxy[str]", pattern: str) -> QueryNode:
         """Build a ``LIKE`` comparison node
@@ -246,7 +258,7 @@ class FieldProxy(Generic[TField]):
             >>> email_filter.operator
             'LIKE'
         """
-        return QueryNode(self.column, "LIKE", pattern)
+        return QueryNode(self.column, "LIKE", pattern, path=self.path)
 
     def __lshift__(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"

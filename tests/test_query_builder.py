@@ -64,6 +64,7 @@ def test_query_ir_payload_to_json_serializes_m2m_context_without_mutating_query_
         "limit": None,
         "offset": None,
         "m2m": query._m2m_context,
+        "joins": [],
     }
 
     query_json = _query_ir_payload_to_json(query_def)
@@ -72,7 +73,7 @@ def test_query_ir_payload_to_json_serializes_m2m_context_without_mutating_query_
     assert query._m2m_context["source_id"] == source_id
     assert isinstance(query._m2m_context["source_id"], uuid.UUID)
     assert payload["ir_kind"] == "query"
-    assert payload["ir_version"] == 1
+    assert payload["ir_version"] == 2
     assert payload["payload"]["m2m"]["source_id"] == str(source_id)
 
 
@@ -92,6 +93,28 @@ def test_query_node_to_ir_dict_uses_query_ir_shape():
     assert payload["column"] == "age"
     assert payload["operator"] == ">="
     assert payload["value"] == {"kind": "int", "value": 18}
+    assert payload["path"] == []
+
+
+def test_query_node_to_ir_dict_emits_field_proxy_path():
+    """A leaf built from a ``FieldProxy`` carries its ``path`` into IR (#269);
+    this slice only ever emits ``[]`` (root model) — #270 populates it via
+    relation traversal."""
+    node = FieldProxy("age", path=("account",)) >= 18
+    payload = node.to_ir_dict()
+
+    assert payload["path"] == ["account"]
+
+
+def test_query_node_to_ir_dict_compound_node_has_no_path_key():
+    left = FieldProxy("age") >= 18
+    right = FieldProxy("name") == "a"
+    compound = left & right
+
+    payload = compound.to_ir_dict()
+
+    assert payload["node_kind"] == "compound"
+    assert "path" not in payload
 
 
 def test_field_proxy_operator_overloading():

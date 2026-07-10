@@ -11,6 +11,58 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Reject relation-traversal shape this build cannot render yet (#269 defensive loudness).
+///
+/// Every leaf and `order_by` entry in v2 QueryIR carries a `path` (empty = root model),
+/// and every payload carries a `joins` list (empty for now). Until #270 lands JOIN
+/// rendering in the SELECT walkers, a non-empty `joins` list or any non-empty `path`
+/// describes a query this build cannot lower correctly — silently ignoring it would mean
+/// mis-rendered SQL (dropping a filter the caller believes is applied). Fail loud instead.
+///
+/// # Errors
+/// Returns `Err(String)` naming the unsupported `joins`/`path` content.
+fn reject_unsupported_traversal(payload: &QueryIrPayload) -> Result<(), String> {
+    if !payload.joins.is_empty() {
+        return Err(format!(
+            "QueryIR joins are not yet supported by this build (received {} join(s)); \
+             relation traversal ships in a later release",
+            payload.joins.len()
+        ));
+    }
+    for node in &payload.where_clause {
+        reject_non_empty_leaf_path(node)?;
+    }
+    for order in &payload.order_by {
+        if !order.path.is_empty() {
+            return Err(format!(
+                "QueryIR order_by path is not yet supported by this build (column {:?} \
+                 carries path {:?}); relation traversal ships in a later release",
+                order.column, order.path
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_non_empty_leaf_path(node: &QueryNode) -> Result<(), String> {
+    match node {
+        QueryNode::Leaf { column, path, .. } => {
+            if !path.is_empty() {
+                return Err(format!(
+                    "QueryIR leaf path is not yet supported by this build (column {:?} \
+                     carries path {:?}); relation traversal ships in a later release",
+                    column, path
+                ));
+            }
+            Ok(())
+        }
+        QueryNode::Compound { left, right, .. } => {
+            reject_non_empty_leaf_path(left)?;
+            reject_non_empty_leaf_path(right)
+        }
+    }
+}
+
 /// Many-to-many join context for filtered relation loads.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct M2mContext {
@@ -63,8 +115,12 @@ impl QueryPlan {
     /// from catalog before building SQL) and the model registration resolved.
     ///
     /// # Errors
-    /// Returns `Err(String)` when the `m2m` JSON blob cannot deserialize into [`M2mContext`].
+    /// Returns `Err(String)` when the `m2m` JSON blob cannot deserialize into [`M2mContext`],
+    /// or when the payload carries relation-traversal shape (`joins`, or a `path` on any leaf
+    /// or `order_by` entry) that this build cannot render yet (see
+    /// [`reject_unsupported_traversal`]).
     pub fn from_ir_payload(payload: QueryIrPayload) -> Result<QueryPlan, String> {
+        reject_unsupported_traversal(&payload)?;
         let m2m: Option<M2mContext> = match payload.m2m {
             Some(value) => serde_json::from_value(value)
                 .map(Some)
@@ -91,6 +147,12 @@ impl QueryPlan {
     ///
     /// # Arguments
     /// * `backend` — Dialect for typed binds and operator lowering.
+    /// * `qualify_with` — When `Some(root_table)`, every column reference is qualified
+    ///   as `root_table.column` (sea_query `Expr::col((Alias::new(root_table),
+    ///   Alias::new(column)))`) — required for SELECT (`fetch_filtered`/`count_filtered`)
+    ///   so bare columns can't collide with a future JOINed table (#270). `None` leaves
+    ///   columns unqualified, which mutating statements (`UPDATE`/`DELETE ... WHERE`) use
+    ///   today (single-table target, no JOIN to disambiguate against).
     ///
     /// # Returns
     /// `Condition::all()` with each `where_clause` node applied.
@@ -100,10 +162,12 @@ impl QueryPlan {
     pub fn to_condition_for_backend(
         &self,
         backend: Dialect,
+        qualify_with: Option<&str>,
     ) -> Result<Condition, String> {
         let mut condition = Condition::all();
         for node in &self.where_clause {
-            condition = condition.add(self.node_to_condition_for_backend(node, backend)?);
+            condition =
+                condition.add(self.node_to_condition_for_backend(node, backend, qualify_with)?);
         }
         Ok(condition)
     }
@@ -112,6 +176,7 @@ impl QueryPlan {
         &self,
         node: &QueryNode,
         backend: Dialect,
+        qualify_with: Option<&str>,
     ) -> Result<Condition, String> {
         match node {
             QueryNode::Compound {
@@ -119,8 +184,9 @@ impl QueryPlan {
                 left,
                 right,
             } => {
-                let left_cond = self.node_to_condition_for_backend(left, backend)?;
-                let right_cond = self.node_to_condition_for_backend(right, backend)?;
+                let left_cond = self.node_to_condition_for_backend(left, backend, qualify_with)?;
+                let right_cond =
+                    self.node_to_condition_for_backend(right, backend, qualify_with)?;
                 Ok(match operator.as_str() {
                     "OR" => Condition::any().add(left_cond).add(right_cond),
                     "AND" => Condition::all().add(left_cond).add(right_cond),
@@ -131,8 +197,15 @@ impl QueryPlan {
                 operator,
                 column,
                 value,
+                // Always `[]` here: `from_ir_payload` rejects a non-empty leaf `path`
+                // before a `QueryPlan` ever exists (#269 defensive loudness; #270
+                // will thread this into JOIN-qualified column lowering).
+                path: _,
             } => {
-                let col = Expr::col(Alias::new(column));
+                let col = match qualify_with {
+                    Some(root_table) => Expr::col((Alias::new(root_table), Alias::new(column))),
+                    None => Expr::col(Alias::new(column)),
+                };
                 // IR always carries a value object; JSON null arrives as
                 // `QueryValue { kind: "null", value: Value::Null }`. SQL
                 // `col = NULL` is never true — use `IS NULL` / `IS NOT NULL`
@@ -267,15 +340,15 @@ mod tests {
             "model_name": "Pending",
             "where": [
                 {"node_kind": "leaf", "column": "attached_at", "operator": "==",
-                 "value": {"kind": "null", "value": null}},
+                 "value": {"kind": "null", "value": null}, "path": []},
                 {"node_kind": "compound", "operator": "OR",
                  "left": {"node_kind": "leaf", "column": "age", "operator": ">=",
-                          "value": {"kind": "int", "value": 18}},
+                          "value": {"kind": "int", "value": 18}, "path": []},
                  "right": {"node_kind": "leaf", "column": "name", "operator": "LIKE",
-                           "value": {"kind": "string", "value": "a%"}}}
+                           "value": {"kind": "string", "value": "a%"}, "path": []}}
             ],
-            "order_by": [{"column": "age", "direction": "desc"}],
-            "limit": 10, "offset": 5, "m2m": null
+            "order_by": [{"column": "age", "direction": "desc", "path": []}],
+            "limit": 10, "offset": 5, "m2m": null, "joins": []
         }))
         .expect("payload deserializes");
         let plan = super::QueryPlan::from_ir_payload(payload).expect("plan builds");
@@ -284,10 +357,14 @@ mod tests {
 
         let mut select = Query::select();
         select.from(Alias::new("pending")).cond_where(
-            plan.to_condition_for_backend(Dialect::Sqlite).expect("valid"),
+            plan.to_condition_for_backend(Dialect::Sqlite, None)
+                .expect("valid"),
         );
         let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
-        assert!(sql.contains("is null"), "IR null eq must lower to IS NULL: {sql}");
+        assert!(
+            sql.contains("is null"),
+            "IR null eq must lower to IS NULL: {sql}"
+        );
         assert!(!sql.contains("= null"), "must not emit = NULL: {sql}");
         assert!(sql.contains("or"), "compound OR preserved: {sql}");
     }
@@ -298,22 +375,182 @@ mod tests {
             "model_name": "Pending",
             "where": [
                 {"node_kind": "leaf", "column": "payload", "operator": "!=",
-                 "value": {"kind": "null", "value": null}}
+                 "value": {"kind": "null", "value": null}, "path": []}
             ],
             "order_by": [],
-            "limit": null, "offset": null, "m2m": null
+            "limit": null, "offset": null, "m2m": null, "joins": []
         }))
         .expect("payload deserializes");
         let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
         let mut select = Query::select();
         select.from(Alias::new("pending")).cond_where(
-            plan.to_condition_for_backend(Dialect::Sqlite)
+            plan.to_condition_for_backend(Dialect::Sqlite, None)
                 .expect("valid test query"),
         );
         let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
         assert!(
             sql.contains("is not null"),
             "expected IS NOT NULL, got {sql}"
+        );
+    }
+
+    #[test]
+    fn to_condition_for_backend_qualifies_column_with_root_table_when_requested() {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [
+                {"node_kind": "leaf", "column": "age", "operator": ">=",
+                 "value": {"kind": "int", "value": 18}, "path": []}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+
+        let mut select = Query::select();
+        select.from(Alias::new("pending")).cond_where(
+            plan.to_condition_for_backend(Dialect::Sqlite, Some("pending"))
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(
+            sql.contains("\"pending\".\"age\"") || sql.contains("`pending`.`age`"),
+            "expected the root table alias to qualify the WHERE column, got {sql}"
+        );
+    }
+
+    /// Same qualification, rendered through the Postgres builder (acceptance criteria:
+    /// "Rendered SQL qualifies all column references by the root alias on both backends").
+    #[test]
+    fn to_condition_for_backend_qualifies_column_with_root_table_on_postgres() {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [
+                {"node_kind": "leaf", "column": "age", "operator": ">=",
+                 "value": {"kind": "int", "value": 18}, "path": []}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+
+        let mut select = Query::select();
+        select.from(Alias::new("pending")).cond_where(
+            plan.to_condition_for_backend(Dialect::Postgres, Some("pending"))
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(PostgresQueryBuilder).to_lowercase();
+        assert!(
+            sql.contains("\"pending\".\"age\""),
+            "expected the root table alias to qualify the WHERE column on Postgres, got {sql}"
+        );
+    }
+
+    #[test]
+    fn to_condition_for_backend_leaves_column_unqualified_without_root_table() {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [
+                {"node_kind": "leaf", "column": "age", "operator": ">=",
+                 "value": {"kind": "int", "value": 18}, "path": []}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+
+        let mut select = Query::select();
+        select.from(Alias::new("pending")).cond_where(
+            plan.to_condition_for_backend(Dialect::Sqlite, None)
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(
+            !sql.contains("\"pending\".\"age\"") && !sql.contains("`pending`.`age`"),
+            "unqualified request must not qualify the WHERE column, got {sql}"
+        );
+    }
+
+    #[test]
+    fn from_ir_payload_rejects_non_empty_joins() {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+            "joins": [{"join_type": "inner", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]}]
+        }))
+        .expect("payload deserializes");
+
+        let err = QueryPlan::from_ir_payload(payload)
+            .expect_err("non-empty joins must be rejected until #270 renders them");
+        assert!(
+            err.contains("join"),
+            "error should mention joins are unsupported: {err}"
+        );
+    }
+
+    #[test]
+    fn from_ir_payload_rejects_non_empty_leaf_path() {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [
+                {"node_kind": "leaf", "column": "name", "operator": "==",
+                 "value": {"kind": "string", "value": "a"}, "path": ["account"]}
+            ],
+            "order_by": [], "limit": null, "offset": null, "m2m": null, "joins": []
+        }))
+        .expect("payload deserializes");
+
+        let err = QueryPlan::from_ir_payload(payload)
+            .expect_err("a non-empty leaf path must be rejected until #270 renders joins");
+        assert!(
+            err.contains("path"),
+            "error should mention the unsupported path: {err}"
+        );
+    }
+
+    #[test]
+    fn from_ir_payload_rejects_non_empty_leaf_path_nested_in_compound() {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [
+                {"node_kind": "compound", "operator": "AND",
+                 "left": {"node_kind": "leaf", "column": "active", "operator": "==",
+                          "value": {"kind": "bool", "value": true}, "path": []},
+                 "right": {"node_kind": "leaf", "column": "name", "operator": "==",
+                           "value": {"kind": "string", "value": "a"}, "path": ["account"]}}
+            ],
+            "order_by": [], "limit": null, "offset": null, "m2m": null, "joins": []
+        }))
+        .expect("payload deserializes");
+
+        let err = QueryPlan::from_ir_payload(payload)
+            .expect_err("a non-empty path nested in a compound node must be rejected");
+        assert!(
+            err.contains("path"),
+            "error should mention the unsupported path: {err}"
+        );
+    }
+
+    #[test]
+    fn from_ir_payload_rejects_non_empty_order_by_path() {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [], "limit": null, "offset": null, "m2m": null, "joins": [],
+            "order_by": [{"column": "name", "direction": "asc", "path": ["account"]}]
+        }))
+        .expect("payload deserializes");
+
+        let err = QueryPlan::from_ir_payload(payload)
+            .expect_err("a non-empty order_by path must be rejected until #270 renders joins");
+        assert!(
+            err.contains("path"),
+            "error should mention the unsupported path: {err}"
         );
     }
 
