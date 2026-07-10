@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      highlights:
+        description: 'Markdown prepended to the top of the GitHub Release body'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
@@ -184,6 +189,20 @@ jobs:
 
           echo "release_ref=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "Using release ref: $RELEASE_TAG"
+
+      - name: Prepend highlights to GitHub Release
+        if: steps.verify_release.outputs.release_created == 'true' && inputs.highlights != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          # Passed via env (not inline ${{ }}) so backticks, $, and quotes in the
+          # prose can't break the script or inject shell.
+          HIGHLIGHTS: ${{ inputs.highlights }}
+        shell: bash
+        run: |
+          TAG="${{ steps.release_ref.outputs.release_ref }}"
+          BODY="$(gh release view "$TAG" --json body -q .body)"
+          { printf '%s\n' "$HIGHLIGHTS"; printf '\n---\n\n'; printf '%s\n' "$BODY"; } > /tmp/notes.md
+          gh release edit "$TAG" --notes-file /tmp/notes.md
 
       - name: Release summary
         if: always()
