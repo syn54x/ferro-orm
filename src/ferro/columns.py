@@ -18,6 +18,7 @@ from ._annotation_utils import (
     annotation_allows_none,
     annotation_is_decimal,
     enum_subclass_from_annotation,
+    validate_db_type_declaration,
 )
 from ._shadow_fk_types import _scalar_part_of_annotation
 from .base import ForeignKey, foreign_key_allows_none
@@ -323,12 +324,14 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             allows_none=allows_none,
         )
 
+        # Path-blind db_type validation (ADR-0003): both declaration paths
+        # converge here, so token validity and annotation compatibility are
+        # checked once, syntax-blind, at class-definition time.
         if declared is not None:
-            db_type = declared.db_type
+            db_type = validate_db_type_declaration(field_name, declared.db_type, ann)
             db_check = bool(declared.db_check)
         else:
-            raw_db_type = prop.get("db_type")
-            db_type = raw_db_type if isinstance(raw_db_type, str) and raw_db_type else None
+            db_type = validate_db_type_declaration(field_name, prop.get("db_type"), ann)
             db_check = prop.get("db_check") is True
 
         fmt = "decimal" if annotation_is_decimal(ann) else prop.get("format")

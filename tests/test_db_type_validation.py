@@ -280,3 +280,60 @@ def test_db_check_on_literal_is_accepted():
         status: Literal["draft", "live"] = Field(db_type="text", db_check=True)
 
     assert Doc.ferro_fields["status"].db_check is True
+
+
+# ---------------------------------------------------------------------------
+# Path-blind validation (ADR-0003) -- the raw json_schema_extra path validates
+# identically to the ferro path, at class-definition time.
+# ---------------------------------------------------------------------------
+
+
+def test_raw_path_unknown_token_raises():
+    import pydantic
+
+    with pytest.raises(TypeError, match="banana"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str = pydantic.Field(json_schema_extra={"db_type": "banana"})
+
+
+def test_raw_path_incompatible_token_raises():
+    import pydantic
+
+    with pytest.raises(TypeError, match="value.*db_type"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            value: int = pydantic.Field(json_schema_extra={"db_type": "text"})
+
+
+def test_raw_path_non_string_token_raises():
+    import pydantic
+
+    with pytest.raises(TypeError, match="string token"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str = pydantic.Field(json_schema_extra={"db_type": 123})
+
+
+def test_raw_path_compatible_token_is_accepted():
+    import pydantic
+
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str = pydantic.Field(json_schema_extra={"db_type": "text"})
+
+    assert Doc.__ferro_columns__["name"].db_type == "text"
+
+
+def test_raw_path_empty_token_is_absent():
+    """Empty string means no declaration -- preserved pre-ADR-0003 behavior."""
+    import pydantic
+
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str = pydantic.Field(json_schema_extra={"db_type": ""})
+
+    assert Doc.__ferro_columns__["name"].db_type is None

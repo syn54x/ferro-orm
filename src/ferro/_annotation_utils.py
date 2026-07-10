@@ -190,6 +190,41 @@ def _is_time(hint: Any) -> bool:
     return hint is _dt.time
 
 
+def validate_db_type_declaration(
+    field_name: str, db_type: Any, annotation: Any
+) -> str | None:
+    """Validate a ``db_type`` declaration from either declaration path (ADR-0003).
+
+    Runs at spec compilation — the single site where the ferro path
+    (``Field``/``FerroField``) and the raw path (``json_schema_extra``)
+    converge — so incoherent declarations raise ``TypeError`` at
+    class-definition time regardless of declaration syntax.
+
+    Returns the normalized token, or ``None`` when the declaration is absent
+    (``None`` or empty string).
+    """
+    if db_type is None or db_type == "":
+        return None
+    if not isinstance(db_type, str):
+        raise TypeError(
+            f"Field '{field_name}' db_type must be a string token, "
+            f"got {type(db_type).__name__}."
+        )
+    if not is_valid_db_type_token(db_type):
+        valid = ", ".join(sorted(CANONICAL_DB_TYPES))
+        raise TypeError(
+            f"Field '{field_name}' db_type={db_type!r} is not in the "
+            f"canonical vocabulary. Valid tokens: {valid}, varchar(N)."
+        )
+    if annotation is not None and not db_type_is_compatible(db_type, annotation):
+        raise TypeError(
+            f"Field '{field_name}' db_type={db_type!r} is incompatible "
+            f"with annotation {annotation!r}. See the canonical "
+            f"compatibility matrix in src/ferro/_annotation_utils.py."
+        )
+    return db_type
+
+
 def db_type_is_compatible(token: str, annotation: Any) -> bool:
     """True if ``token`` is a legal storage choice for the Python ``annotation``.
 

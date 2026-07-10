@@ -17,11 +17,7 @@ from pydantic.fields import FieldInfo
 from ._annotation_utils import (
     _strip_optional_union as _annotation_utils_strip_optional_union,
 )
-from ._annotation_utils import (
-    db_type_is_compatible,
-    is_closed_domain_annotation,
-    is_valid_db_type_token,
-)
+from ._annotation_utils import is_closed_domain_annotation
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyRelation
 from .fields import FERRO_FIELD_EXTRA_KEY
@@ -517,28 +513,9 @@ class ModelMetaclass(type(BaseModel)):
                 if field_info is not None:
                     annotation = field_info.annotation
 
-            if db_type is not None:
-                if not isinstance(db_type, str):
-                    raise TypeError(
-                        f"Field '{field_name}' db_type must be a string token, "
-                        f"got {type(db_type).__name__}."
-                    )
-                if not is_valid_db_type_token(db_type):
-                    raise TypeError(
-                        f"Field '{field_name}' db_type={db_type!r} is not in the "
-                        f"canonical vocabulary. Valid tokens: text, varchar(N), "
-                        f"smallint, int, bigint, uuid, timestamp, timestamptz, "
-                        f"date, time."
-                    )
-                if annotation is not None and not db_type_is_compatible(
-                    db_type, annotation
-                ):
-                    raise TypeError(
-                        f"Field '{field_name}' db_type={db_type!r} is incompatible "
-                        f"with annotation {annotation!r}. See the canonical "
-                        f"compatibility matrix in src/ferro/_annotation_utils.py."
-                    )
-
+            # Token validity + annotation compatibility validate path-blind at
+            # spec compilation (ADR-0003; ``ferro.columns``). Only the
+            # ferro-path-only db_check combinations live here.
             if db_check:
                 if db_type is None:
                     raise TypeError(
@@ -604,5 +581,10 @@ class ModelMetaclass(type(BaseModel)):
         """
         try:
             compile_model_schema_ir(name, cls)
+        except TypeError:
+            # Declaration errors (db_type validation, ADR-0003) are the
+            # class-definition contract — surface unwrapped, never disguised
+            # as a registration failure.
+            raise
         except Exception as e:
             raise RuntimeError(f"Ferro failed to register model '{name}': {e}")
