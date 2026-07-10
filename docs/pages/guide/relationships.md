@@ -35,6 +35,8 @@ The most common shape: a `ForeignKey` on the "child" model, declared as `Annotat
 
 For every `ForeignKey` field (e.g. `team`), Ferro creates a shadow scalar column and matching Pydantic field named `{field}_id` (e.g. `team_id`) holding the related row's primary key. Its Python type follows the target model's primary-key annotation. Read it or filter on it like any other column — `Player.where(lambda t: t.team_id == team.id)` — with no extra query.
 
+To filter or order by a column on the *related* model, a query lambda can traverse the relation itself (`Player.where(lambda player: player.team.name == "Rustaceans")`) — see [Querying Across Relationships](queries.md#querying-across-relationships).
+
 ## One-to-One
 
 Add `unique=True` to the `ForeignKey` to enforce at most one child per parent. The reverse side is a plain (non-list) `BackRef` that resolves to a single instance:
@@ -235,6 +237,6 @@ One-to-one relations (`unique=True`) already get an index; for multi-column inde
 ## See Also
 
 - [Models & Fields](models-and-fields.md) — field declaration styles and constraints
-- [Queries](queries.md) — filtering on shadow FK columns and reverse relations
+- [Queries](queries.md) — filtering on shadow FK columns, traversing relations, and reverse relations
 - [Mutations](mutations.md) — creating related records, cascade implications
 - [Schema Migrations](migrations.md) — how relationships appear in Alembic metadata

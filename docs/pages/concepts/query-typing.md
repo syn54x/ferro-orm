@@ -38,6 +38,16 @@ What isn't checked yet is the *right-hand side* of a comparison: the proxy attri
 published = await author.posts.where(lambda post: post.published == True).all()
 ```
 
+## Traversing Relations
+
+Reaching through a foreign key inside a predicate — `lambda transaction: transaction.account.ledger_id == 1` — type-checks as a predicate for the same reason a plain comparison does: attribute access on the proxy keeps returning a chainable proxy, and the terminal comparison returns `QueryNode`. The checker sees a valid `Predicate[Transaction]`; the [Queries guide](../guide/queries.md#querying-across-relationships) covers what the traversal *means* (one INNER join per relation path).
+
+The static gate checks the **shape** of the predicate, not the **names** in it:
+
+- **A traversal that ends in a comparison type-checks.** `transaction.account.ledger_id == 1` is a `QueryNode`, so it satisfies `where()`.
+- **A bare relation as a predicate fails the checker.** `lambda transaction: transaction.account` returns a proxy, not a `QueryNode`, so it is a type error — the same failure mode as `lambda user: True`.
+- **Name typos are caught at build time, not by the checker.** A misspelled hop (`transaction.accont`, `account.emial`) is `FieldProxy[Any]` to the type checker, so it type-checks; at build time the proxy validates every hop against the real model and raises `AttributeError` with a did-you-mean naming that hop's model. The static gate guarantees shape; the runtime proxy guarantees names.
+
 ## What This Doesn't Change
 
 - Your model annotations. `archived: bool = False` stays exactly as it is.

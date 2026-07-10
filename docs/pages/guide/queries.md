@@ -148,13 +148,212 @@ Queries are lazy — nothing hits the database until you await a terminal:
 
 ## Querying Across Relationships
 
-Every `ForeignKey` field gets a shadow `*_id` column you can filter on like any scalar:
+A `where()` or `order_by()` lambda can reach *through* a `ForeignKey` to a column on the related model. Write the relation field, then keep going:
+
+```python
+ledger_a = await Ledger.get(1)
+
+rows = await Transaction.where(
+    lambda transaction: transaction.account.ledger_id == ledger_a.id
+).all()
+```
+
+That is one SQL statement — a `SELECT` over `transactions` with a join to `accounts` — and it returns the transactions whose account belongs to ledger A. You never write the join; the relation you traverse (`transaction.account`) *is* the join.
+
+The examples below use this schema — a `Transaction` points at an `Account`, and an `Account` points at both a `Ledger` and an `Owner`:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/traversal.py:schema"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/traversal_annotated.py:schema"
+    ```
+
+### Traversing at any depth
+
+Each hop resolves against the related model, so you can chain as many as the schema allows. `transaction.account.owner.email` walks `Transaction → Account → Owner` in a single statement with two joins:
+
+```python
+--8<-- "docs/examples/traversal.py:multi-hop"
+```
+
+Every hop is validated when you build the query — before anything reaches the database. A misspelled column or relation raises `AttributeError` naming the model at that hop and the closest match, and the suggestion pool spans both columns *and* relations:
+
+```text
+>>> Transaction.where(lambda transaction: transaction.accont.ledger_id == 1)
+AttributeError: Transaction has no queryable column 'accont'. Did you mean 'account'? Valid columns: account_id, amount, id. Valid relations: account.
+
+>>> Transaction.where(lambda transaction: transaction.account.owner.emial == "x")
+AttributeError: Owner has no queryable column 'emial'. Did you mean 'email'? Valid columns: email, id.
+```
+
+### Every traversed hop is an INNER join
+
+Traversal always renders an **INNER** join, at every hop, no matter whether the foreign key is nullable (ADR-0006). To see what that means for nullable relations, the narrowing examples in this and the following sections add a `Note` model whose `account` relation is **optional** — a note may or may not be attached to an account:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/traversal.py:note-model"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/traversal_annotated.py:note-model"
+    ```
+
+The practical consequence of INNER-everywhere: **traversing a relation narrows the result to rows where that relation exists**. A `Note` whose `account` FK is `NULL` simply does not appear in a query that filters through `note.account`:
+
+```python
+--8<-- "docs/examples/traversal.py:inner-narrows"
+```
+
+This is deliberate and stable. A hop's nullability never changes the join type, so making a foreign key nullable later never silently rewrites the meaning of an existing query, and an N-hop path is trivial to reason about — no hop poisons the ones after it. Keeping the relation-less rows is an explicit opt-in (`left_join`, below).
+
+`count()` and the other terminals see exactly this narrowed set — a many-to-one join never multiplies root rows, so `.count()` equals the number of matching transactions, not the number of joined pairs:
+
+```python
+--8<-- "docs/examples/traversal.py:count"
+```
+
+### Ordering by a related column
+
+`order_by()` traverses the same way, to any depth, and shares its joins with `where()`:
+
+```python
+--8<-- "docs/examples/traversal.py:order-by"
+```
+
+Because the sort join is INNER too, ordering by a related column drops relation-less rows — the same narrowing as `where()`. (Use `left_join` to keep them; see below.)
+
+### One join per relation path
+
+The relation path is the join's identity. Reference the same path in two `where()` calls, in an `&`/`|` tree, or across `where()` and `order_by()`, and it renders as **one** join. Distinct paths — even to the same table — render as distinct joins. There is no alias to name and none to manage; the path does that job.
+
+That is what lets a traversal filter compose cleanly with plain root-column clauses — the motivating query pairs one `account` join with a root-column filter, ordering, and a limit, all in a single statement:
+
+```python
+--8<-- "docs/examples/traversal.py:pinch"
+```
+
+### Comparing to a related instance
+
+Every `ForeignKey` also exposes a shadow `{fk}_id` column, so you can filter by a related row's primary key directly — no join at all:
 
 ```python
 posts = await Post.where(lambda post: post.author_id == user.id).all()
 ```
 
-Reverse relations (`BackRef`) are chainable queries themselves — filter, order, and slice them before executing:
+Comparing the relation itself to a **persisted** instance is sugar for exactly that shadow-column check — still join-free:
+
+```python
+--8<-- "docs/examples/traversal.py:instance-eq"
+```
+
+Deep instance equality compares the shadow column of the *last* hop under the prefix join: `transaction.account.owner == some_owner` filters `owner_id` on the joined `accounts` row.
+
+```python
+--8<-- "docs/examples/traversal.py:deep-instance-eq"
+```
+
+Comparing an **unpersisted** instance is a build-time error naming the model (`cannot compare relation 'account' to an unpersisted Account instance …`) — there is no primary key to match on yet.
+
+### Testing for existence or absence
+
+A bare `.join()` with no predicate is a meaningful **existence filter** on a nullable relation — it narrows to rows where the relation is present (the same INNER narrowing traversal gives you, expressed directly):
+
+```python
+--8<-- "docs/examples/traversal.py:existence"
+```
+
+For the opposite question — "has *no* related row" — compare the relation to `None`. `relation == None` / `!= None` lower to `IS NULL` / `IS NOT NULL` on the shadow column, join-free, so "has no account" needs no `left_join`:
+
+```python
+--8<-- "docs/examples/traversal.py:is-null"
+```
+
+### Keeping rows that have no relation
+
+When you want the relation-less rows *kept* rather than filtered out, opt into a `left_join`. It marks **every edge of its path** LEFT (the whole-path rule), so a left-marked two-hop path retains rows missing the relation at either hop:
+
+```python
+--8<-- "docs/examples/traversal.py:left-join"
+```
+
+A bare `left_join` on a path also traversed by `where()` lifts the shared edge to LEFT — an explicit LEFT always beats an implicit INNER on the same edge (declaring `join` **and** `left_join` on one edge is a build-time `ValueError`).
+
+!!! note "NULL ordering diverges by dialect under `left_join`"
+    Once relation-less rows survive into an `order_by` on a related column, their `NULL` sort key lands in a dialect-specific spot: **PostgreSQL sorts `NULL`s last on an ascending sort; SQLite sorts them first.** This divergence only appears because you opted into `left_join` — plain INNER traversal drops those rows, so it never surfaces (ADR-0006).
+
+### Two foreign keys to the same table
+
+Distinct relation paths are distinct joins even when they point at the same table, so two FKs to one model just work — no alias ceremony:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/traversal.py:two-fk-model"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/traversal_annotated.py:two-fk-model"
+    ```
+
+```python
+--8<-- "docs/examples/traversal.py:two-fk-query"
+```
+
+### Self-referential traversal
+
+A self-referencing FK traverses like any other — the join target is the same table, reached by a distinct path:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/traversal.py:self-fk-model"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/traversal_annotated.py:self-fk-model"
+    ```
+
+```python
+--8<-- "docs/examples/traversal.py:self-fk-query"
+```
+
+### Traversing from a many-to-many
+
+An association query (`post.tags`) composes with forward-FK traversal on the target model: the association join and the traversal join coexist in one statement.
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/traversal.py:m2m-model"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/traversal_annotated.py:m2m-model"
+    ```
+
+```python
+--8<-- "docs/examples/traversal.py:m2m-query"
+```
+
+### Filtering reverse relations
+
+Reverse relations (`BackRef`) are chainable queries in their own right — filter, order, and slice them before executing, and their predicates can traverse too:
 
 ```python
 published = await author.posts.where(lambda post: post.published == True).all()  # noqa: E712
@@ -162,7 +361,31 @@ latest = await author.posts.order_by(lambda post: post.created_at, "desc").limit
 n = await author.posts.count()
 ```
 
-Joins across relations inside a single `where()` are not supported — filter on shadow FK columns or use the reverse-relation query. See [Relationships](relationships.md) for the full picture.
+### Results are plain root instances
+
+A traversed query is **shape-preserving**: filtering `Transaction` through `transaction.account.ledger_id` still returns `Transaction` instances, no matter how deep the predicate reaches. Traversal does *not* pre-load the related rows onto the results — `await transaction.account` still issues its own query, exactly as it does without any traversal. (Eager loading is separate future work; see [Not Yet Supported](#not-yet-supported).)
+
+### `update()` and `delete()` cannot traverse
+
+Portable SQL has no `UPDATE … JOIN` / `DELETE … JOIN`, so a traversed predicate on `update()`/`delete()` is rejected **before any SQL runs**:
+
+```text
+>>> await Transaction.where(lambda transaction: transaction.account.label == "a1").delete()
+ValueError: delete() does not support relation traversal: portable SQL has no DELETE ... JOIN. Fetch primary keys via the joined query first, then delete by primary-key set. (A join-free relation filter like `t.account == instance` is allowed.)
+```
+
+Do the two-step: fetch the primary keys with the joined query, then mutate by that key set (a join-free `relation == instance` or `== None` filter *is* allowed on mutations):
+
+```python
+--8<-- "docs/examples/traversal.py:mutate-limitation"
+```
+
+### Guardrails
+
+- A predicate lambda that returns a **bare relation** (`lambda transaction: transaction.account`) is meaningless as a filter and raises `TypeError` pointing you at `== None`, `== an instance`, or a column comparison. The same bare relation in `order_by()` is likewise rejected.
+- Combining predicates with Python's `and`/`or` (instead of `&`/`|`) coerces a node to `bool` and raises `TypeError: QueryNode cannot be used in a boolean context; use & / |`. Always parenthesize and use the bitwise operators.
+
+See [Relationships](relationships.md) for the schema-declaration side of foreign keys and reverse relations.
 
 ## Not Yet Supported
 
