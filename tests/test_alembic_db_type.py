@@ -155,6 +155,29 @@ def test_time_on_time_renders_sa_time():
     assert isinstance(col.type, sa.Time)
 
 
+def test_jsonb_on_dict_renders_json_with_postgres_jsonb_variant():
+    """ADR-0004: one SA type per token; SA carries the dialect split."""
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        payload: dict = Field(db_type="jsonb")
+
+    col = get_metadata().tables["doc"].c.payload
+    assert isinstance(col.type, sa.JSON)
+    assert "JSONB" in str(col.type.compile(dialect=postgresql.dialect()))
+    assert str(col.type.compile(dialect=sqlite.dialect())).upper() == "JSON"
+
+
+def test_explicit_json_on_dict_renders_sa_json():
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        payload: dict = Field(db_type="json")
+
+    col = get_metadata().tables["doc"].c.payload
+    assert isinstance(col.type, sa.JSON)
+
+
 # ---------------------------------------------------------------------------
 # db_check constraint
 # ---------------------------------------------------------------------------

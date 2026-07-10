@@ -121,6 +121,14 @@ _TOKEN_CASES = [
     ),
     pytest.param("date", dt.date, {"postgres": "DATE", "sqlite": "DATE"}, id="date"),
     pytest.param("time", dt.time, {"postgres": "TIME", "sqlite": "TIME"}, id="time"),
+    # ADR-0004: jsonb renders JSONB on Postgres and lowers to JSON on SQLite;
+    # explicit json is the symmetric partner (both emitters, both dialects).
+    pytest.param(
+        "jsonb", dict, {"postgres": "JSONB", "sqlite": "JSON"}, id="jsonb-dict"
+    ),
+    pytest.param(
+        "json", dict, {"postgres": "JSON", "sqlite": "JSON"}, id="json-dict"
+    ),
 ]
 
 
