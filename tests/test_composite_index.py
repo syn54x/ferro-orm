@@ -89,8 +89,8 @@ def test_empty_inner_tuple_raises():
 
 
 def test_non_string_column_entry_raises():
-    """A4: non-string entry -> RuntimeError."""
-    with pytest.raises(RuntimeError, match="must be a non-empty str"):
+    """A4: non-string entry -> TypeError (declaration errors surface unwrapped; #261)."""
+    with pytest.raises(TypeError, match="must be a non-empty str"):
 
         class BadType(Model):
             __ferro_composite_indexes__: ClassVar = (("col_a", 42),)
@@ -99,8 +99,8 @@ def test_non_string_column_entry_raises():
 
 
 def test_outer_not_a_tuple_raises():
-    """A5: outer not a tuple -> RuntimeError."""
-    with pytest.raises(RuntimeError, match="must be a tuple of tuples"):
+    """A5: outer not a tuple -> TypeError (declaration errors surface unwrapped; #261)."""
+    with pytest.raises(TypeError, match="must be a tuple of tuples"):
 
         class BadOuter(Model):
             __ferro_composite_indexes__: ClassVar = "not_a_tuple"
@@ -109,8 +109,8 @@ def test_outer_not_a_tuple_raises():
 
 
 def test_inner_not_a_tuple_raises():
-    """A6: inner element not a tuple -> RuntimeError."""
-    with pytest.raises(RuntimeError, match="must be a tuple of str"):
+    """A6: inner element not a tuple -> TypeError (declaration errors surface unwrapped; #261)."""
+    with pytest.raises(TypeError, match="must be a tuple of str"):
 
         class BadInner(Model):
             __ferro_composite_indexes__: ClassVar = (("a", "b"), ["c", "d"])

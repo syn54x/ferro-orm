@@ -17,19 +17,28 @@ Three companion decisions bound the variant's reach:
    on SQLite and `Jsonb` on Postgres — exactly how `boolean→Integer` and
    `uuid→Char(32)` already lower. No SQLite renderer, drift-class, or codec
    code ever sees a `Jsonb`.
-2. **No `ColumnCodec::Jsonb`.** Hydration and decode are identical for json and
-   jsonb (the driver seam already decodes both wire formats to
-   `serde_json::Value`), so the logical codec stays `ColumnCodec::Json`. Only
-   the Postgres bind cast is storage-aware: it casts to the column's resolved
-   storage token (`::jsonb` for jsonb columns) instead of a hard-coded
-   `::json`, because Postgres will not coerce a `json`-typed parameter into a
-   `jsonb` column. The PRD's "codec unchanged" holds for the logical codec, not
-   the bind cast.
+2. **No `ColumnCodec::Jsonb` — the codec is genuinely unchanged.** Hydration
+   and decode are identical for json and jsonb (the driver seam already
+   decodes both wire formats to `serde_json::Value`), so the logical codec
+   stays `ColumnCodec::Json`. The existing `::json` bind cast also stays:
+   Postgres ships an assignment cast `json → jsonb` (`pg_cast` castcontext
+   `a`), so INSERT/UPDATE parameters cast as `json` coerce server-side into a
+   jsonb column — verified empirically against a prepared INSERT during
+   implementation, falsifying this ADR's earlier draft claim that the bind
+   cast had to become storage-aware. Operator contexts (`WHERE col = $1`) have
+   no `jsonb = json` operator, but whole-column equality has no `json = json`
+   operator either — both live with the deferred query-operators work, not
+   here.
 3. **Introspection stops collapsing.** `information_schema_to_db_type_token`
    maps live `jsonb` to `"jsonb"` (previously folded into `"json"`), so
    declared-vs-live diffs are honest: a jsonb declaration matches a live jsonb
    column, and a `json↔jsonb` edit is exactly one ALTER on Postgres. On SQLite
    both tokens lower to the same canonical, so the same edit is a no-op there.
+
+> **Superseded in part by ADR-0005**: the opt-in-only framing below is
+> historical — derived json-family storage now defaults to JSONB on Postgres,
+> with `db_type="json"` as the explicit opt-out. The type-system shape,
+> lowering, codec, and introspection decisions in this ADR are unchanged.
 
 Both `json` and `jsonb` join the declarable vocabulary with a single
 json-family eligibility predicate (`dict`/`list` in any parameterization,

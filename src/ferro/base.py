@@ -27,6 +27,8 @@ DbTypeToken = Literal[
     "timestamptz",
     "date",
     "time",
+    "json",
+    "jsonb",
 ]
 """Fixed canonical SQL storage tokens accepted by :func:`~ferro.Field` ``db_type=``."""
 

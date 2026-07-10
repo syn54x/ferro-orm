@@ -249,6 +249,14 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
         return sa.Numeric()
     if token == "json":
         return sa.JSON()
+    if token == "jsonb":
+        # One SA type per token, SQLAlchemy carrying the dialect split
+        # (ADR-0004): JSONB on Postgres, plain JSON on SQLite — mirroring the
+        # Rust emitter's token-seam lowering. A bare postgresql.JSONB() would
+        # fail to compile on SQLite.
+        from sqlalchemy.dialects import postgresql
+
+        return sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
     if token in {"bytea", "blob"}:
         return sa.LargeBinary()
     if token == "varchar":

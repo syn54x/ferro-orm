@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import datetime as dt
 from enum import Enum, IntEnum, StrEnum
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
+import pydantic
 import pytest
 
 from ferro import Field, Model
@@ -280,3 +281,151 @@ def test_db_check_on_literal_is_accepted():
         status: Literal["draft", "live"] = Field(db_type="text", db_check=True)
 
     assert Doc.ferro_fields["status"].db_check is True
+
+
+# ---------------------------------------------------------------------------
+# Path-blind validation (ADR-0003) -- the raw json_schema_extra path validates
+# identically to the ferro path, at class-definition time.
+# ---------------------------------------------------------------------------
+
+
+def test_raw_path_unknown_token_raises():
+    with pytest.raises(TypeError, match="banana"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str = pydantic.Field(json_schema_extra={"db_type": "banana"})
+
+
+def test_raw_path_incompatible_token_raises():
+    with pytest.raises(TypeError, match="value.*db_type"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            value: int = pydantic.Field(json_schema_extra={"db_type": "text"})
+
+
+def test_raw_path_non_string_token_raises():
+    with pytest.raises(TypeError, match="string token"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str = pydantic.Field(json_schema_extra={"db_type": 123})
+
+
+def test_raw_path_compatible_token_is_accepted():
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str = pydantic.Field(json_schema_extra={"db_type": "text"})
+
+    assert Doc.__ferro_columns__["name"].db_type == "text"
+
+
+def test_empty_token_raises_on_both_paths():
+    """An empty db_type is a do-nothing declaration -- loud, not silent."""
+    with pytest.raises(TypeError, match="canonical vocabulary"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str = pydantic.Field(json_schema_extra={"db_type": ""})
+
+    with pytest.raises(TypeError, match="canonical vocabulary"):
+
+        class Doc2(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str = Field(db_type="")
+
+
+# ---------------------------------------------------------------------------
+# json / jsonb tokens (ADR-0004) -- json-family fields only
+# ---------------------------------------------------------------------------
+
+
+class Payload(pydantic.BaseModel):
+    kind: str
+    amount: int
+
+
+def test_jsonb_on_dict_is_accepted():
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        data: dict = Field(db_type="jsonb")
+
+    assert Doc.__ferro_columns__["data"].db_type == "jsonb"
+
+
+def test_jsonb_on_parameterized_dict_is_accepted():
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        data: dict[str, Any] = Field(db_type="jsonb")
+
+    assert Doc.__ferro_columns__["data"].db_type == "jsonb"
+
+
+def test_jsonb_on_list_of_nested_models_is_accepted():
+    """list[BaseModel] eligibility is contract, not accident (#262)."""
+
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        entries: list[Payload] = Field(db_type="jsonb")
+
+    assert Doc.__ferro_columns__["entries"].db_type == "jsonb"
+
+
+def test_jsonb_on_nested_model_is_accepted():
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        payload: Payload = Field(db_type="jsonb")
+
+    assert Doc.__ferro_columns__["payload"].db_type == "jsonb"
+
+
+def test_json_on_dict_is_accepted():
+    """Explicit plain-json declaration -- the jsonb->json edit is symmetric."""
+
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        data: dict = Field(db_type="json")
+
+    assert Doc.__ferro_columns__["data"].db_type == "json"
+
+
+def test_jsonb_on_raw_path_is_accepted():
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        data: dict = pydantic.Field(json_schema_extra={"db_type": "jsonb"})
+
+    assert Doc.__ferro_columns__["data"].db_type == "jsonb"
+
+
+def test_jsonb_on_int_raises():
+    with pytest.raises(TypeError, match="value.*db_type"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            value: int = Field(db_type="jsonb")
+
+
+def test_jsonb_on_int_raw_path_raises():
+    with pytest.raises(TypeError, match="value.*db_type"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            value: int = pydantic.Field(json_schema_extra={"db_type": "jsonb"})
+
+
+def test_jsonb_on_set_raises():
+    """Narrow json-family predicate: set is rejected until asked for."""
+    with pytest.raises(TypeError, match="tags.*db_type"):
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            tags: set[str] = Field(db_type="jsonb")
+
+
+def test_jsonb_on_optional_dict_is_accepted():
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        data: dict | None = Field(default=None, db_type="jsonb")
+
+    assert Doc.__ferro_columns__["data"].db_type == "jsonb"

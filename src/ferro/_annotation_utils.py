@@ -10,6 +10,8 @@ from enum import Enum, IntEnum
 from typing import Annotated, Any, Union, get_args, get_origin
 from uuid import UUID
 
+import pydantic
+
 
 def _strip_optional_union(hint: Any) -> Any:
     """Unwrap ``T | None`` to ``T`` (same as ``ModelMetaclass``)."""
@@ -89,6 +91,8 @@ CANONICAL_DB_TYPES: frozenset[str] = frozenset(
         "timestamptz",
         "date",
         "time",
+        "json",
+        "jsonb",
     }
 )
 
@@ -190,6 +194,56 @@ def _is_time(hint: Any) -> bool:
     return hint is _dt.time
 
 
+def _is_json_family(hint: Any) -> bool:
+    """Json-family field (see ``CONTEXT.md``): ``dict``/``list`` in any
+    parameterization — element type unrestricted, so ``list[NestedModel]``
+    qualifies — or a nested Pydantic model. Deliberately narrow (ADR-0004):
+    wider object-schema shapes (``TypedDict``, dataclass, ``set``, ``tuple``)
+    are rejected until a real workload asks; loosening is non-breaking.
+    """
+    if hint is dict or hint is list:
+        return True
+    if get_origin(hint) in (dict, list):
+        return True
+    return isinstance(hint, type) and issubclass(hint, pydantic.BaseModel)
+
+
+def validate_db_type_declaration(
+    field_name: str, db_type: Any, annotation: Any
+) -> str | None:
+    """Validate a ``db_type`` declaration from either declaration path (ADR-0003).
+
+    Runs at spec compilation — the single site where the ferro path
+    (``Field``/``FerroField``) and the raw path (``json_schema_extra``)
+    converge — so incoherent declarations raise ``TypeError`` at
+    class-definition time regardless of declaration syntax.
+
+    Returns the normalized token, or ``None`` when the declaration is absent.
+    An empty string is not "absent" — it is a declaration that does nothing,
+    and do-nothing declarations fail loudly (#260 story 14).
+    """
+    if db_type is None:
+        return None
+    if not isinstance(db_type, str):
+        raise TypeError(
+            f"Field '{field_name}' db_type must be a string token, "
+            f"got {type(db_type).__name__}."
+        )
+    if not is_valid_db_type_token(db_type):
+        valid = ", ".join(sorted(CANONICAL_DB_TYPES))
+        raise TypeError(
+            f"Field '{field_name}' db_type={db_type!r} is not in the "
+            f"canonical vocabulary. Valid tokens: {valid}, varchar(N)."
+        )
+    if annotation is not None and not db_type_is_compatible(db_type, annotation):
+        raise TypeError(
+            f"Field '{field_name}' db_type={db_type!r} is incompatible "
+            f"with annotation {annotation!r}. See the canonical "
+            f"compatibility matrix in src/ferro/_annotation_utils.py."
+        )
+    return db_type
+
+
 def db_type_is_compatible(token: str, annotation: Any) -> bool:
     """True if ``token`` is a legal storage choice for the Python ``annotation``.
 
@@ -208,6 +262,8 @@ def db_type_is_compatible(token: str, annotation: Any) -> bool:
         return _is_date(hint)
     if token == "time":
         return _is_time(hint)
+    if token in {"json", "jsonb"}:
+        return _is_json_family(hint)
     return False
 
 

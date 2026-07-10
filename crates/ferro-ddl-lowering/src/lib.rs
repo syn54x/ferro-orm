@@ -27,6 +27,10 @@ pub enum CanonicalType {
     Decimal,
     Boolean,
     Json,
+    /// Postgres JSONB. Never constructed for SQLite — the `jsonb` token
+    /// lowers to [`CanonicalType::Json`] at the token→canonical seam
+    /// (ADR-0004), like `boolean`→`Integer` and `uuid`→`Char(32)`.
+    Jsonb,
     Text,
     Varchar(Option<u32>),
     Char(u32),
@@ -59,7 +63,9 @@ pub fn apply_canonical_type_for(
             CanonicalType::Date => Some("DATE"),
             CanonicalType::Time => Some("TIME"),
             CanonicalType::Uuid => Some("CHAR(32)"),
-            CanonicalType::Json => Some("JSON"),
+            // Jsonb is unreachable on SQLite (lowered at the token seam);
+            // the arm keeps the match exhaustive and honest if it ever leaks.
+            CanonicalType::Json | CanonicalType::Jsonb => Some("JSON"),
             CanonicalType::Decimal => Some("NUMERIC"),
             _ => None,
         };
@@ -94,6 +100,9 @@ pub fn apply_canonical_type(col_def: &mut ColumnDef, canonical: CanonicalType) {
         }
         CanonicalType::Json => {
             col_def.json();
+        }
+        CanonicalType::Jsonb => {
+            col_def.json_binary();
         }
         CanonicalType::Text => {
             col_def.text();
@@ -171,6 +180,12 @@ pub fn db_type_token_to_canonical(token: &str, dialect: Dialect) -> Option<Canon
         "double" => Some(CanonicalType::Double),
         "numeric" => Some(CanonicalType::Decimal),
         "json" => Some(CanonicalType::Json),
+        "jsonb" => Some(match dialect {
+            // Storage lowering (ADR-0004): SQLite stores jsonb-declared
+            // columns as plain JSON; Jsonb never exists on SQLite.
+            Dialect::Sqlite => CanonicalType::Json,
+            Dialect::Postgres => CanonicalType::Jsonb,
+        }),
         "bytea" => Some(CanonicalType::Blob),
         "blob" => Some(CanonicalType::Blob),
         "varchar" => Some(CanonicalType::Varchar(None)),
@@ -191,6 +206,7 @@ pub fn canonical_to_db_type_token(canonical: CanonicalType, dialect: Dialect) ->
         CanonicalType::Decimal => "numeric".to_string(),
         CanonicalType::Boolean => "boolean".to_string(),
         CanonicalType::Json => "json".to_string(),
+        CanonicalType::Jsonb => "jsonb".to_string(),
         CanonicalType::Text => "text".to_string(),
         CanonicalType::Varchar(None) => "varchar".to_string(),
         CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
@@ -222,7 +238,15 @@ pub fn information_schema_to_db_type_token(
         },
         "double precision" | "real" => "double",
         "numeric" => "numeric",
-        "json" | "jsonb" => "json",
+        "json" => "json",
+        // Honest introspection (ADR-0004): live jsonb reads back as jsonb on
+        // Postgres so declared-vs-live diffs are truthful. On SQLite the
+        // jsonb token has no storage of its own (Storage lowering), so any
+        // hand-created JSONB spelling normalizes to json.
+        "jsonb" => match dialect {
+            Dialect::Postgres => "jsonb",
+            Dialect::Sqlite => "json",
+        },
         "bytea" => "bytea",
         "blob" => "blob",
         "text" => "text",
@@ -322,7 +346,14 @@ pub fn canonical_from_parts(
         // FF-B B2: `datetime.time` stores as `time` on both dialects.
         ("time", _) => Ok(CanonicalType::Time),
         ("uuid", _) => Ok(CanonicalType::Uuid),
-        ("json", _) => Ok(CanonicalType::Json),
+        // Default flip (ADR-0005): derived json-family storage is JSONB on
+        // Postgres — the type Postgres itself recommends. Explicit
+        // db_type="json" (handled above, token wins) is the opt-out for
+        // key-order/byte fidelity. SQLite lowers to JSON either way.
+        ("json", _) => Ok(match dialect {
+            Dialect::Sqlite => CanonicalType::Json,
+            Dialect::Postgres => CanonicalType::Jsonb,
+        }),
         ("decimal", _) => Ok(CanonicalType::Decimal),
         // Raw JSON Schema primitive types (introspection / token round-trip).
         ("integer", _) => Ok(CanonicalType::Integer),
@@ -332,7 +363,11 @@ pub fn canonical_from_parts(
             Dialect::Sqlite => CanonicalType::Integer,
             Dialect::Postgres => CanonicalType::Boolean,
         }),
-        ("object" | "array", _) => Ok(CanonicalType::Json),
+        ("object" | "array", _) => Ok(match dialect {
+            // Same default flip as the compiled `"json"` token above.
+            Dialect::Sqlite => CanonicalType::Json,
+            Dialect::Postgres => CanonicalType::Jsonb,
+        }),
         _ => Err(format!("unknown logical_type '{logical_type}'")),
     }
 }
@@ -609,6 +644,7 @@ pub fn pg_alter_type_target(canonical: CanonicalType) -> String {
         CanonicalType::Decimal => "numeric".to_string(),
         CanonicalType::Boolean => "boolean".to_string(),
         CanonicalType::Json => "json".to_string(),
+        CanonicalType::Jsonb => "jsonb".to_string(),
         CanonicalType::Text => "text".to_string(),
         CanonicalType::Varchar(None) => "varchar".to_string(),
         CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
@@ -734,7 +770,9 @@ pub fn sqlite_declared_type(canonical: CanonicalType) -> String {
         CanonicalType::Double => "double".to_string(),
         CanonicalType::Decimal => "NUMERIC".to_string(),
         CanonicalType::Boolean => "boolean".to_string(),
-        CanonicalType::Json => "JSON".to_string(),
+        // Jsonb is unreachable on SQLite (lowered at the token seam); the arm
+        // keeps the match exhaustive and matches apply_canonical_type_for.
+        CanonicalType::Json | CanonicalType::Jsonb => "JSON".to_string(),
         CanonicalType::Text => "text".to_string(),
         CanonicalType::Varchar(None) => "varchar".to_string(),
         CanonicalType::Varchar(Some(n)) => format!("varchar({n})"),
@@ -871,8 +909,19 @@ mod tests {
             information_schema_to_db_type_token("character varying", Some(40), Dialect::Postgres),
             "varchar(40)"
         );
+        // Intentional flip (#263, ADR-0004): live jsonb no longer collapses
+        // to json on Postgres — introspection is honest per storage token.
         assert_eq!(
             information_schema_to_db_type_token("jsonb", None, Dialect::Postgres),
+            "jsonb"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("json", None, Dialect::Postgres),
+            "json"
+        );
+        // SQLite has no jsonb storage of its own — lowering normalizes it.
+        assert_eq!(
+            information_schema_to_db_type_token("jsonb", None, Dialect::Sqlite),
             "json"
         );
         assert_eq!(
