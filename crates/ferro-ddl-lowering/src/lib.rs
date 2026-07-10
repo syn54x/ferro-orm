@@ -238,7 +238,15 @@ pub fn information_schema_to_db_type_token(
         },
         "double precision" | "real" => "double",
         "numeric" => "numeric",
-        "json" | "jsonb" => "json",
+        "json" => "json",
+        // Honest introspection (ADR-0004): live jsonb reads back as jsonb on
+        // Postgres so declared-vs-live diffs are truthful. On SQLite the
+        // jsonb token has no storage of its own (Storage lowering), so any
+        // hand-created JSONB spelling normalizes to json.
+        "jsonb" => match dialect {
+            Dialect::Postgres => "jsonb",
+            Dialect::Sqlite => "json",
+        },
         "bytea" => "bytea",
         "blob" => "blob",
         "text" => "text",
@@ -890,8 +898,19 @@ mod tests {
             information_schema_to_db_type_token("character varying", Some(40), Dialect::Postgres),
             "varchar(40)"
         );
+        // Intentional flip (#263, ADR-0004): live jsonb no longer collapses
+        // to json on Postgres — introspection is honest per storage token.
         assert_eq!(
             information_schema_to_db_type_token("jsonb", None, Dialect::Postgres),
+            "jsonb"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("json", None, Dialect::Postgres),
+            "json"
+        );
+        // SQLite has no jsonb storage of its own — lowering normalizes it.
+        assert_eq!(
+            information_schema_to_db_type_token("jsonb", None, Dialect::Sqlite),
             "json"
         );
         assert_eq!(

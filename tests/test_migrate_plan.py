@@ -400,3 +400,70 @@ class TestJsonStorageTokens:
         )
         stmts, _ = render(schema, PK_ONLY_LIVE, "postgres")
         assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "entries" jsonb']
+
+
+class TestJsonStorageDiff:
+    """#263: introspection distinguishes jsonb; json<->jsonb is one ALTER on
+    Postgres and a no-op on SQLite (ADR-0004)."""
+
+    def test_live_jsonb_column_produces_no_phantom_diff(self):
+        schema = schema_with(
+            {"payload": {"type": "object", "db_type": "jsonb", "ferro_nullable": True}}
+        )
+        live = PK_ONLY_LIVE + [
+            {"name": "payload", "declared_type": "jsonb", "is_nullable": True}
+        ]
+        stmts, warns = render(schema, live, "postgres")
+        assert stmts == []
+        assert warns == []
+
+    def test_live_json_column_with_default_declaration_no_diff(self):
+        """Existing plain-json columns stay untouched — defaults don't change."""
+        schema = schema_with(
+            {"payload": {"type": "object", "ferro_nullable": True}}
+        )
+        live = PK_ONLY_LIVE + [
+            {"name": "payload", "declared_type": "json", "is_nullable": True}
+        ]
+        stmts, warns = render(schema, live, "postgres")
+        assert stmts == []
+        assert warns == []
+
+    def test_json_to_jsonb_declaration_edit_is_exactly_one_alter(self):
+        schema = schema_with(
+            {"payload": {"type": "object", "db_type": "jsonb", "ferro_nullable": True}}
+        )
+        live = PK_ONLY_LIVE + [
+            {"name": "payload", "declared_type": "json", "is_nullable": True}
+        ]
+        stmts, warns = render(schema, live, "postgres")
+        assert stmts == [
+            'ALTER TABLE "invoice" ALTER COLUMN "payload" TYPE jsonb USING "payload"::jsonb'
+        ]
+        assert warns == []
+
+    def test_jsonb_to_json_declaration_edit_is_the_mirror_alter(self):
+        """Removing the jsonb opt-in (back to default json) is the reverse edit."""
+        schema = schema_with(
+            {"payload": {"type": "object", "ferro_nullable": True}}
+        )
+        live = PK_ONLY_LIVE + [
+            {"name": "payload", "declared_type": "jsonb", "is_nullable": True}
+        ]
+        stmts, warns = render(schema, live, "postgres")
+        assert stmts == [
+            'ALTER TABLE "invoice" ALTER COLUMN "payload" TYPE json USING "payload"::json'
+        ]
+        assert warns == []
+
+    def test_json_jsonb_edit_is_noop_on_sqlite(self):
+        """Both tokens lower to the same SQLite storage — no drift either way."""
+        schema = schema_with(
+            {"payload": {"type": "object", "db_type": "jsonb", "ferro_nullable": True}}
+        )
+        live = PK_ONLY_LIVE + [
+            {"name": "payload", "declared_type": "JSON", "is_nullable": True}
+        ]
+        stmts, warns = render(schema, live, "sqlite")
+        assert stmts == []
+        assert warns == []

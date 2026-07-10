@@ -1311,3 +1311,68 @@ async def test_pg_failed_migration_rolls_back_whole_table_plan(db_url, clean_reg
         by_name = {c["column_name"]: c["data_type"] for c in cols}
         assert "added" not in by_name, "ADD COLUMN must be rolled back"
         assert by_name["amount"] == "character varying", "failed cast must not commit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_pg_jsonb_column_no_phantom_diff_on_reconnect(
+    db_url, postgres_base_url, db_schema_name, clean_registry
+):
+    """A jsonb-declared column reads back as jsonb — reconnect is quiet (#263).
+
+    Before ADR-0004, introspection collapsed live jsonb to json, so every
+    reconnect proposed a phantom ALTER back toward the declared type.
+    """
+    import warnings
+
+    class JsonbEvent(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        payload: Annotated[dict, FerroField(db_type="jsonb")]
+
+    await ferro.connect(db_url, migrate_updates=True)  # creates payload -> jsonb
+    ferro.reset_engine()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        await ferro.connect(db_url, migrate_updates=True)  # must be quiet
+    drift = [str(w.message) for w in caught if "json" in str(w.message).lower()]
+    assert not drift, f"unexpected jsonb drift warning(s): {drift}"
+
+    assert (
+        _pg_live_type(postgres_base_url, db_schema_name, "jsonbevent", "payload")
+        == "jsonb"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_pg_json_to_jsonb_declaration_edit_alters_in_place(
+    db_url, postgres_base_url, db_schema_name, clean_registry
+):
+    """A live json column + jsonb declaration = one executed ALTER with the
+    USING cast; existing row values survive the storage change (#263)."""
+
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute(
+            'CREATE TABLE "jsonbmigrated" '
+            '("id" serial PRIMARY KEY, "payload" json)'
+        )
+        await execute(
+            'INSERT INTO "jsonbmigrated" ("payload") VALUES (\'{"kept": true}\')'
+        )
+    ferro.reset_engine()
+
+    class JsonbMigrated(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        payload: Annotated[dict | None, FerroField(db_type="jsonb")] = None
+
+    await ferro.connect(db_url, migrate_updates=True)
+
+    assert (
+        _pg_live_type(postgres_base_url, db_schema_name, "jsonbmigrated", "payload")
+        == "jsonb"
+    )
+    async with ferro.engines.session():
+        migrated = await JsonbMigrated.get(1)
+    assert migrated.payload == {"kept": True}
