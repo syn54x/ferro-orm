@@ -335,6 +335,33 @@ mod tests {
     }
 
     #[test]
+    fn query_left_join_fixture_roundtrip() {
+        // A LEFT-marked path plus a deeper INNER entry sharing its prefix
+        // (mixed LEFT-prefix/INNER-suffix, #272) must survive a
+        // deserialize/serialize round-trip without drift, and the join_type
+        // tokens must reach Rust exactly as written on the wire.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v2.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query left_join fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query left_join IR must deserialize");
+        // The wire carries the mixed edge types: a "left" 1-hop prefix and an
+        // "inner" 2-hop entry sharing it.
+        assert_eq!(envelope.payload.joins.len(), 2);
+        assert_eq!(envelope.payload.joins[0].join_type, "left");
+        assert_eq!(envelope.payload.joins[0].path.len(), 1);
+        assert_eq!(envelope.payload.joins[1].join_type, "inner");
+        assert_eq!(envelope.payload.joins[1].path.len(), 2);
+        let encoded = serde_json::to_value(&envelope).expect("query left_join IR must serialize");
+        assert_eq!(encoded, ir, "query left_join round-trip must not drift");
+    }
+
+    #[test]
     fn codec_fixture_roundtrip() {
         let fixture =
             include_str!("../../../tests/fixtures/ir_vectors/codec_registry_core_v1.json");

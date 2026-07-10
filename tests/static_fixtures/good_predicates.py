@@ -3,7 +3,7 @@
 from typing import Annotated, assert_type
 
 from ferro import FerroField, ForeignKey, Model
-from ferro.query import FieldProxy, Predicate, QueryNode, QueryProxy
+from ferro.query import FieldProxy, Predicate, Query, QueryNode, QueryProxy
 
 
 class GoodUser(Model):
@@ -48,3 +48,12 @@ pred_hop_compound: Predicate[GoodTxn] = lambda t: (t.account.ledger_id == 1) & (
     t.account.owner.email == "a@b.com"
 )
 assert_type(pred_hop1(QueryProxy[GoodTxn](GoodTxn)), QueryNode)
+
+
+# Explicit join()/left_join() chainers (#272): the selector names a RELATION
+# path (`lambda t: t.account`) using the same chainable proxy shape, and the
+# chainers return a Query of the same row type.
+join_query: Query[GoodTxn] = GoodTxn.select().join(lambda t: t.account)
+left_join_query: Query[GoodTxn] = GoodTxn.select().left_join(lambda t: t.account.owner)
+assert_type(join_query, Query[GoodTxn])
+assert_type(left_join_query, Query[GoodTxn])

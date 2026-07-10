@@ -267,7 +267,8 @@ impl QueryPlan {
         Ok(())
     }
 
-    /// Assign deterministic aliases and build the ordered JOIN render plan (#270).
+    /// Assign deterministic aliases and build the ordered JOIN render plan (#270,
+    /// with per-edge LEFT/INNER resolution #272).
     ///
     /// Walks each `joins` entry's hops in order, keeping a `prefix -> alias` map so
     /// the first-unseen prefix emits exactly one edge and shared prefixes across
@@ -277,6 +278,15 @@ impl QueryPlan {
     /// `reserved` name (the M2M association table), or an already-assigned alias
     /// appends `_x` until unique.
     ///
+    /// Each rendered edge's join type is resolved at the EDGE level, not per
+    /// entry: an edge is `LEFT` iff some `"left"` entry covers it, else `INNER`
+    /// (ADR-0006 whole-path rule — `.left_join` marks its whole path, so every
+    /// prefix of a `"left"` entry is a LEFT edge). Resolving before render keeps
+    /// the rendered type independent of entry order and of which entry first
+    /// materializes a shared prefix; e.g. a `"left"` `[account]` entry and an
+    /// `"inner"` `[account, owner]` entry render the `account` edge LEFT and the
+    /// `owner` edge INNER regardless of their order on the wire (#272).
+    ///
     /// # Errors
     /// Returns `Err(String)` for an unknown `join_type` (see [`validate_join_type`]).
     pub fn build_join_plan(
@@ -284,6 +294,21 @@ impl QueryPlan {
         root_table: &str,
         reserved: &[&str],
     ) -> Result<JoinPlan, String> {
+        // Validate every entry's join_type and collect the set of LEFT edges.
+        // A `"left"` entry is whole-path, so every one of its prefixes is a LEFT
+        // edge; an edge is LEFT iff any `"left"` entry contains it.
+        let mut left_edges: HashSet<Vec<String>> = HashSet::new();
+        for join in &self.joins {
+            let join_type = validate_join_type(&join.join_type)?;
+            if join_type == "left" {
+                let mut prefix: Vec<String> = Vec::new();
+                for hop in &join.path {
+                    prefix.push(hop.relation.clone());
+                    left_edges.insert(prefix.clone());
+                }
+            }
+        }
+
         let mut prefix_alias: HashMap<Vec<String>, String> = HashMap::new();
         let mut used: HashSet<String> = HashSet::new();
         used.insert(root_table.to_string());
@@ -293,7 +318,6 @@ impl QueryPlan {
         let mut renders: Vec<JoinRender> = Vec::new();
         let mut next_index = 1usize;
         for join in &self.joins {
-            let join_type = validate_join_type(&join.join_type)?;
             let mut prefix: Vec<String> = Vec::new();
             let mut prev_alias = root_table.to_string();
             for hop in &join.path {
@@ -302,6 +326,11 @@ impl QueryPlan {
                     prev_alias = existing.clone();
                     continue;
                 }
+                let edge_join_type = if left_edges.contains(&prefix) {
+                    "left"
+                } else {
+                    "inner"
+                };
                 let mut alias = format!("j{}_{}", next_index, hop.relation);
                 next_index += 1;
                 while used.contains(&alias) {
@@ -310,7 +339,7 @@ impl QueryPlan {
                 used.insert(alias.clone());
                 prefix_alias.insert(prefix.clone(), alias.clone());
                 renders.push(JoinRender {
-                    join_type: join_type.to_string(),
+                    join_type: edge_join_type.to_string(),
                     to_table: hop.to_table.clone(),
                     alias: alias.clone(),
                     prev_alias: prev_alias.clone(),
@@ -826,6 +855,110 @@ mod tests {
             .build_join_plan("thing", &[])
             .expect_err("unknown join_type must be rejected");
         assert!(err.contains("join_type"), "got {err}");
+    }
+
+    #[test]
+    fn build_join_plan_marks_single_left_edge() {
+        // A lone `"left"` 1-hop entry renders its edge LEFT (#272).
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Note",
+            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+            "joins": [
+                {"join_type": "left", "path": [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"}
+                ]}
+            ]
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let join_plan = plan.build_join_plan("note", &[]).expect("join plan");
+        assert_eq!(join_plan.renders.len(), 1);
+        assert_eq!(join_plan.renders[0].join_type, "left");
+        assert_eq!(join_plan.renders[0].alias, "j1_account");
+    }
+
+    #[test]
+    fn build_join_plan_marks_whole_path_left_at_every_hop() {
+        // Whole-path rule: a `"left"` 2-hop entry marks BOTH edges LEFT (#272).
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Transaction",
+            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+            "joins": [
+                {"join_type": "left", "path": [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"},
+                    {"relation": "owner", "from_column": "owner_id",
+                     "to_table": "owner", "to_column": "id"}
+                ]}
+            ]
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+        assert_eq!(join_plan.renders.len(), 2);
+        assert_eq!(join_plan.renders[0].join_type, "left", "hop-1 edge LEFT");
+        assert_eq!(join_plan.renders[1].join_type, "left", "hop-2 edge LEFT");
+    }
+
+    #[test]
+    fn build_join_plan_mixed_left_prefix_inner_suffix_is_order_independent() {
+        // The pinned mixed case (#272): a `"left"` `[account]` entry shares its
+        // prefix with an `"inner"` `[account, owner]` entry. Edge-level
+        // resolution yields the account edge LEFT and the owner edge INNER — and
+        // that verdict must not depend on entry order on the wire.
+        let left_first = json!([
+            {"join_type": "left", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]},
+            {"join_type": "inner", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"},
+                {"relation": "owner", "from_column": "owner_id",
+                 "to_table": "owner", "to_column": "id"}
+            ]}
+        ]);
+        let inner_first = json!([
+            {"join_type": "inner", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"},
+                {"relation": "owner", "from_column": "owner_id",
+                 "to_table": "owner", "to_column": "id"}
+            ]},
+            {"join_type": "left", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]}
+        ]);
+        for joins in [left_first, inner_first] {
+            let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+                "model_name": "Transaction",
+                "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+                "joins": joins
+            }))
+            .expect("payload deserializes");
+            let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+            let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+            // Two edges total (shared account prefix dedups).
+            assert_eq!(
+                join_plan.renders.len(),
+                2,
+                "shared prefix dedups to 2 edges"
+            );
+            let account = join_plan
+                .renders
+                .iter()
+                .find(|r| r.alias == "j1_account" || r.to_table == "account")
+                .expect("account edge rendered");
+            let owner = join_plan
+                .renders
+                .iter()
+                .find(|r| r.to_table == "owner")
+                .expect("owner edge rendered");
+            assert_eq!(account.join_type, "left", "account edge is LEFT");
+            assert_eq!(owner.join_type, "inner", "owner edge is INNER");
+        }
     }
 
     #[test]

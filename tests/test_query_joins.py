@@ -77,6 +77,30 @@ class QJNote(Model):
     account: Annotated[QJAccount | None, ForeignKey(related_name="notes")] = None
 
 
+# Nullable-FK chain at BOTH hops (Doc -> Folder -> FolderOwner) so whole-path
+# LEFT retention is observable for rows missing the relation at either hop
+# (#272 acceptance criterion 3).
+
+
+class QJFolderOwner(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str = ""
+    folders: Relation[list["QJFolder"]] = BackRef()
+
+
+class QJFolder(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    label: str = ""
+    owner: Annotated[QJFolderOwner | None, ForeignKey(related_name="folders")] = None
+    docs: Relation[list["QJDoc"]] = BackRef()
+
+
+class QJDoc(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    title: str = ""
+    folder: Annotated[QJFolder | None, ForeignKey(related_name="docs")] = None
+
+
 async def _seed_core():
     """Two ledgers, two owners, accounts, and fan-in transactions.
 
@@ -429,3 +453,270 @@ def test_bare_relation_proxy_predicate_is_rejected():
     QueryNode — rejected at build time (comparison sugar is slice #273)."""
     with pytest.raises(TypeError, match="must return QueryNode"):
         Query(QJTransaction).where(lambda t: t.account)  # type: ignore[arg-type,return-value]
+
+
+# ---------------------------------------------------------------------------
+# Explicit join()/left_join() chainers (#272): state model, conflict rules,
+# the pinned mixed LEFT-prefix/INNER-suffix serialization, and immutability.
+# These are build-time-only (no DB round-trip).
+# ---------------------------------------------------------------------------
+
+
+def _serialized_join_types(query) -> list[tuple[tuple[str, ...], str]]:
+    """(path, join_type) for each serialized ``joins`` entry, in wire order."""
+    return [
+        (tuple(hop["relation"] for hop in entry["path"]), entry["join_type"])
+        for entry in query._serialize_joins()
+    ]
+
+
+class TestExplicitJoinChainers:
+    def test_join_marks_edges_inner_and_registers_path(self):
+        q = Query(QJTransaction).join(lambda t: t.account)
+        assert q._explicit_edges == {("account",): "inner"}
+        assert list(q._joins) == [("account",)]
+        assert _serialized_join_types(q) == [(("account",), "inner")]
+
+    def test_left_join_marks_whole_path_left(self):
+        q = Query(QJTransaction).left_join(lambda t: t.account.owner)
+        # Whole-path rule: BOTH edges are LEFT-marked (ADR-0006).
+        assert q._explicit_edges == {
+            ("account",): "left",
+            ("account", "owner"): "left",
+        }
+        assert list(q._joins) == [("account", "owner")]
+        assert _serialized_join_types(q) == [(("account", "owner"), "left")]
+
+    def test_left_join_prefix_inner_suffix_serializes_mixed_edges(self):
+        """The pinned mixed case: ``left_join(t.account)`` + a deeper INNER
+        traversal ``where(t.account.owner.email == x)`` → wire entries
+        ``["account"]→left`` and ``["account","owner"]→inner`` (#272)."""
+        q = (
+            Query(QJTransaction)
+            .left_join(lambda t: t.account)
+            .where(lambda t: t.account.owner.email == "o1@ferro.dev")
+        )
+        assert q._explicit_edges == {("account",): "left"}
+        assert list(q._joins) == [("account",), ("account", "owner")]
+        assert _serialized_join_types(q) == [
+            (("account",), "left"),
+            (("account", "owner"), "inner"),
+        ]
+
+    def test_explicit_left_beats_implicit_inner_same_path(self):
+        """A where()-registered INNER path re-marked LEFT by left_join renders
+        LEFT — regardless of chainer order (#272)."""
+        after = (
+            Query(QJTransaction)
+            .where(lambda t: t.account.label == "a1")
+            .left_join(lambda t: t.account)
+        )
+        assert _serialized_join_types(after) == [(("account",), "left")]
+
+        before = (
+            Query(QJTransaction)
+            .left_join(lambda t: t.account)
+            .where(lambda t: t.account.label == "a1")
+        )
+        assert _serialized_join_types(before) == [(("account",), "left")]
+
+    def test_contradictory_join_types_same_edge_raise(self):
+        with pytest.raises(ValueError, match="conflicting explicit join"):
+            Query(QJTransaction).join(lambda t: t.account).left_join(
+                lambda t: t.account
+            )
+        with pytest.raises(ValueError, match="conflicting explicit join"):
+            Query(QJTransaction).left_join(lambda t: t.account).join(
+                lambda t: t.account
+            )
+
+    def test_contradictory_join_types_overlapping_paths_raise(self):
+        """``.join(t.account)`` + ``.left_join(t.account.owner)`` conflict on the
+        shared ``account`` edge (whole-path LEFT marks it) — build-time error."""
+        with pytest.raises(ValueError, match="account"):
+            Query(QJTransaction).join(lambda t: t.account).left_join(
+                lambda t: t.account.owner
+            )
+
+    def test_remarking_same_direction_is_idempotent(self):
+        q = Query(QJTransaction).join(lambda t: t.account).join(lambda t: t.account)
+        assert q._explicit_edges == {("account",): "inner"}
+        assert list(q._joins) == [("account",)]
+
+    def test_join_selector_rejecting_column_and_non_relation(self):
+        with pytest.raises(TypeError, match="not a relation"):
+            Query(QJTransaction).join(lambda t: t.account.label)  # type: ignore[arg-type,return-value]
+        with pytest.raises(TypeError, match="must return a relation path"):
+            Query(QJTransaction).left_join(lambda t: 5)  # type: ignore[arg-type,return-value]
+
+    def test_chainers_are_immutable(self):
+        base = Query(QJTransaction).where(lambda t: t.amount >= 10)
+        branched = base.left_join(lambda t: t.account)
+        assert base._joins == {}
+        assert base._explicit_edges == {}
+        assert list(branched._joins) == [("account",)]
+        assert branched._explicit_edges == {("account",): "left"}
+        assert base._explicit_edges is not branched._explicit_edges
+
+
+# ---------------------------------------------------------------------------
+# Explicit join()/left_join() behavior against real backends (#272): existence
+# filtering, NULL retention in ordered results and traversal predicates, and
+# whole-path LEFT retaining rows missing the relation at either hop.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_notes(core):
+    """One note attached to a1, one orphan (nullable FK left NULL)."""
+    await QJNote(id=1, body="attached", account=core["a1"]).save()
+    await QJNote(id=2, body="orphan", account=None).save()
+
+
+@pytest.mark.asyncio
+async def test_bare_join_is_existence_filter(db_url):
+    """``.join(lambda n: n.account)`` with no predicate narrows to rows where
+    the nullable relation exists; count() agrees."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        await _seed_notes(core)
+
+        rows = await QJNote.select().join(lambda n: n.account).all()
+        assert {r.id for r in rows} == {1}
+        count = await QJNote.select().join(lambda n: n.account).count()
+        assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_left_join_retains_relation_less_rows(db_url):
+    """A bare ``.left_join`` retains the orphan row (NULL-FK), unlike ``.join``."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        await _seed_notes(core)
+
+        rows = await QJNote.select().left_join(lambda n: n.account).all()
+        assert {r.id for r in rows} == {1, 2}
+        assert await QJNote.select().left_join(lambda n: n.account).count() == 2
+
+
+@pytest.mark.asyncio
+async def test_left_join_null_retention_in_ordered_results(db_url):
+    """left_join + order_by on a RELATED column retains the NULL-FK row. NULL
+    placement diverges by dialect (ADR-0006: Postgres NULLs last on ASC, SQLite
+    first), so assert the full row set + the non-NULL order per-backend."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        # Two attached notes (a1 "a1", a2 "a2") + one orphan → non-NULL order a1,a2.
+        await QJNote(id=1, body="attached-a1", account=core["a1"]).save()
+        await QJNote(id=2, body="attached-a2", account=core["a2"]).save()
+        await QJNote(id=3, body="orphan", account=None).save()
+
+        rows = await (
+            QJNote.select()
+            .left_join(lambda n: n.account)
+            .order_by(lambda n: n.account.label)
+            .all()
+        )
+        ids = [r.id for r in rows]
+        # Full set retained (orphan kept by LEFT join).
+        assert set(ids) == {1, 2, 3}
+        # Non-NULL rows keep their relative order (label a1 < a2 → id 1 before 2).
+        assert ids.index(1) < ids.index(2)
+        # NULL-FK row's position is dialect-specific but deterministic.
+        if db_url.startswith("postgres"):
+            assert ids == [1, 2, 3]  # NULLs last on ASC
+        else:
+            assert ids == [3, 1, 2]  # SQLite sorts NULLs first
+
+
+@pytest.mark.asyncio
+async def test_left_join_null_retention_in_traversal_predicate(db_url):
+    """left_join + ``where(n.account.name == None)`` returns exactly the
+    relation-less rows (IS NULL on the joined alias column)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        await _seed_notes(core)
+
+        rows = await (
+            QJNote.select()
+            .left_join(lambda n: n.account)
+            .where(lambda n: n.account.label == None)  # noqa: E711
+            .all()
+        )
+        assert {r.id for r in rows} == {2}
+
+
+async def _seed_docs():
+    """Three docs spanning every hole a 2-hop path can have.
+
+    Doc 1 -> folder f1 -> owner ow (relation present at both hops);
+    doc 2 -> no folder (missing at hop 1);
+    doc 3 -> folder f2 whose owner FK is NULL (missing at hop 2).
+    """
+    ow = QJFolderOwner(id=1, name="ow")
+    await ow.save()
+    f1 = QJFolder(id=1, label="owned", owner=ow)
+    f2 = QJFolder(id=2, label="ownerless", owner=None)
+    await f1.save()
+    await f2.save()
+    await QJDoc(id=1, title="both-hops", folder=f1).save()
+    await QJDoc(id=2, title="no-folder", folder=None).save()
+    await QJDoc(id=3, title="folder-no-owner", folder=f2).save()
+
+
+@pytest.mark.asyncio
+async def test_whole_path_left_retains_rows_missing_at_either_hop(db_url):
+    """A left-marked 2-hop path retains rows missing the relation at hop 1 AND
+    rows missing at hop 2 (whole-path LEFT, ADR-0006)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_docs()
+
+        rows = await QJDoc.select().left_join(lambda d: d.folder.owner).all()
+        # Whole-path LEFT: both edges LEFT → the hop-1-missing doc (no folder)
+        # AND the hop-2-missing doc (folder without owner) are retained.
+        assert {r.id for r in rows} == {1, 2, 3}
+        count = await QJDoc.select().left_join(lambda d: d.folder.owner).count()
+        assert count == 3
+
+
+@pytest.mark.asyncio
+async def test_whole_path_left_traversal_predicate_matches_either_hop_holes(db_url):
+    """left_join(2-hop) + ``where(d.folder.owner.name == None)`` returns exactly
+    the rows missing the relation at either hop (IS NULL on the hop-2 alias)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_docs()
+
+        rows = await (
+            QJDoc.select()
+            .left_join(lambda d: d.folder.owner)
+            .where(lambda d: d.folder.owner.name == None)  # noqa: E711
+            .all()
+        )
+        # Missing at hop 1 (doc 2) and missing at hop 2 (doc 3); doc 1 resolves
+        # a non-NULL owner name and is excluded.
+        assert {r.id for r in rows} == {2, 3}
+
+
+@pytest.mark.asyncio
+async def test_explicit_left_plus_implicit_traversal_renders_left(db_url):
+    """Explicit ``.left_join`` on a path also traversed implicitly by ``where``
+    renders LEFT — the IS NULL predicate keeps the NULL-FK row (#272)."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        await _seed_notes(core)
+
+        # where() alone would render INNER and drop the orphan; left_join lifts
+        # the shared edge to LEFT so the IS NULL match survives.
+        rows = await (
+            QJNote.select()
+            .where(lambda n: n.account.label == None)  # noqa: E711
+            .left_join(lambda n: n.account)
+            .all()
+        )
+        assert {r.id for r in rows} == {2}

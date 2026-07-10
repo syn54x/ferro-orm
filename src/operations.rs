@@ -3943,6 +3943,137 @@ mod select_join_render_tests {
             "ORDER BY must qualify by the shared join alias: {sql}"
         );
     }
+
+    /// Build a plain `SELECT * FROM <root>` with the plan's relation joins
+    /// rendered — the exact seam both `fetch_filtered` and `count_filtered`
+    /// call (`apply_relation_joins`), so a rendered-SQL pin here covers both.
+    fn render_joined_select(plan: &crate::query::QueryPlan, root_table: &str) -> String {
+        let join_plan = query_join_plan(plan, root_table, &[]).expect("join plan");
+        let mut select = SelectStatement::new();
+        select
+            .column((Alias::new(root_table), sea_query::Asterisk))
+            .from(Alias::new(root_table));
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.to_string(PostgresQueryBuilder)
+    }
+
+    fn joined_plan(joins: serde_json::Value, model_name: &str) -> crate::query::QueryPlan {
+        query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 2,
+                "payload": {
+                    "model_name": model_name,
+                    "where": [], "order_by": [],
+                    "limit": null, "offset": null, "m2m": null,
+                    "joins": joins
+                }
+            })
+            .to_string(),
+        )
+        .expect("v2 envelope parses")
+    }
+
+    /// A `.left_join(t.account)` renders a LEFT JOIN clause (#272 NULL retention).
+    #[test]
+    fn rendered_select_pins_left_join_clause() {
+        let plan = joined_plan(
+            serde_json::json!([
+                {"join_type": "left", "path": [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"}
+                ]}
+            ]),
+            "Note",
+        );
+        let sql = render_joined_select(&plan, "note");
+        let expected = "LEFT JOIN \"account\" AS \"j1_account\" ON \
+             \"note\".\"account_id\" = \"j1_account\".\"id\"";
+        assert!(
+            sql.contains(expected),
+            "expected LEFT JOIN clause, got: {sql}"
+        );
+        assert_eq!(sql.matches("LEFT JOIN").count(), 1, "one LEFT JOIN: {sql}");
+        assert_eq!(sql.matches("INNER JOIN").count(), 0, "no INNER JOIN: {sql}");
+    }
+
+    /// Whole-path LEFT: a 2-hop `.left_join` renders BOTH edges LEFT (#272).
+    #[test]
+    fn rendered_select_whole_path_left_renders_both_hops_left() {
+        let plan = joined_plan(
+            serde_json::json!([
+                {"join_type": "left", "path": [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"},
+                    {"relation": "owner", "from_column": "owner_id",
+                     "to_table": "owner", "to_column": "id"}
+                ]}
+            ]),
+            "Transaction",
+        );
+        let sql = render_joined_select(&plan, "transaction");
+        assert!(
+            sql.contains("LEFT JOIN \"account\" AS \"j1_account\""),
+            "hop-1 LEFT JOIN: {sql}"
+        );
+        assert!(
+            sql.contains(
+                "LEFT JOIN \"owner\" AS \"j2_owner\" ON \
+                 \"j1_account\".\"owner_id\" = \"j2_owner\".\"id\""
+            ),
+            "hop-2 LEFT JOIN chained off hop-1 alias: {sql}"
+        );
+        assert_eq!(sql.matches("LEFT JOIN").count(), 2, "two LEFT JOINs: {sql}");
+        assert_eq!(sql.matches("INNER JOIN").count(), 0, "no INNER JOIN: {sql}");
+    }
+
+    /// Mixed case (#272 pin): a `"left"` `[account]` entry and an `"inner"`
+    /// `[account, owner]` entry render TWO joins (shared prefix dedups) — the
+    /// account edge LEFT, the owner edge INNER — regardless of entry order.
+    #[test]
+    fn rendered_select_mixed_left_prefix_inner_suffix_is_order_independent() {
+        let left_first = serde_json::json!([
+            {"join_type": "left", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]},
+            {"join_type": "inner", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"},
+                {"relation": "owner", "from_column": "owner_id",
+                 "to_table": "owner", "to_column": "id"}
+            ]}
+        ]);
+        let inner_first = serde_json::json!([
+            {"join_type": "inner", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"},
+                {"relation": "owner", "from_column": "owner_id",
+                 "to_table": "owner", "to_column": "id"}
+            ]},
+            {"join_type": "left", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]}
+        ]);
+        for joins in [left_first, inner_first] {
+            let plan = joined_plan(joins, "Transaction");
+            let sql = render_joined_select(&plan, "transaction");
+            assert_eq!(
+                sql.matches(" JOIN ").count(),
+                2,
+                "shared prefix dedups to exactly two joins: {sql}"
+            );
+            assert!(
+                sql.contains("LEFT JOIN \"account\" AS \"j1_account\""),
+                "account edge LEFT: {sql}"
+            );
+            assert!(
+                sql.contains("INNER JOIN \"owner\" AS \"j2_owner\""),
+                "owner edge INNER: {sql}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

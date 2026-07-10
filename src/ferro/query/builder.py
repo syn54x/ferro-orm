@@ -90,6 +90,51 @@ def _register_join_paths(node: QueryNode, joins: dict[tuple[str, ...], str]) -> 
         joins.setdefault(tuple(node.path), "inner")
 
 
+def _resolve_join_selector(
+    selector: "Callable[[QueryProxy[Any]], Any]", model_cls: type
+) -> tuple[str, ...]:
+    """Resolve a join-chainer selector into a relation path (#272).
+
+    ``selector`` is a lambda receiving a validating :class:`QueryProxy` and
+    naming a RELATION path (``lambda t: t.account``, ``lambda t: t.account.owner``)
+    — i.e. it must return a :class:`RelationProxy`. Each hop is validated against
+    the relevant model at build time (the proxy raises ``AttributeError`` with a
+    did-you-mean for a bad hop, same as ``where()``).
+
+    Returns:
+        The relation ``path`` tuple the selector names (length ≥ 1).
+
+    Raises:
+        TypeError: If ``selector`` is not callable, resolves to a column
+            (:class:`FieldProxy`) rather than a relation, or returns any other
+            non-relation value — a join selector names a relation path, not a
+            column.
+    """
+    if not callable(selector):
+        raise TypeError(
+            "join()/left_join() expected a selector callable "
+            f"(e.g. `lambda t: t.account`), got {type(selector).__name__}"
+        )
+    result = selector(QueryProxy(model_cls))
+    if isinstance(result, FieldProxy):
+        raise TypeError(
+            "join()/left_join() selector resolved to a column, not a relation "
+            "(e.g. `lambda t: t.account.name`); a join selector names a relation "
+            "path (e.g. `lambda t: t.account`)."
+        )
+    if not isinstance(result, RelationProxy):
+        raise TypeError(
+            "join()/left_join() selector must return a relation path "
+            f"(e.g. `lambda t: t.account`), got {type(result).__name__}"
+        )
+    return result._path
+
+
+def _path_edges(path: tuple[str, ...]) -> list[tuple[str, ...]]:
+    """Every edge (prefix of length ≥ 1) of a relation ``path`` (#272)."""
+    return [path[:i] for i in range(1, len(path) + 1)]
+
+
 def _target_pk_column(model_cls: type) -> str:
     """Return the single primary-key column name of a relation target (#270).
 
@@ -177,10 +222,19 @@ class Query(Generic[T]):
         self._limit: int | None = None
         self._offset: int | None = None
         self._m2m_context: dict[str, Any] | None = None
-        # Relation paths traversed by where() predicates, insertion-ordered
-        # (path tuple -> join_type; always "inner" this slice). Serialized into
-        # the QueryIR ``joins`` section by all()/count() (#270).
+        # Relation paths that must render a join, insertion-ordered (full path
+        # tuple -> registered join_type). Populated by where()/order_by()
+        # traversal ("inner") and by the explicit join()/left_join() chainers
+        # ("inner"/"left"). Serialized into the QueryIR ``joins`` section by
+        # all()/count() (#270, #272).
         self._joins: dict[tuple[str, ...], str] = {}
+        # Edges (path prefixes, length ≥ 1) whose join type was fixed by an
+        # explicit chainer, insertion-ordered (edge tuple -> "inner"|"left").
+        # ``.left_join`` marks every edge of its path "left" (whole-path rule,
+        # ADR-0006); ``.join`` marks them "inner". The single source of truth
+        # for LEFT on the wire — implicit where()/order_by() traversal never
+        # touches this, so explicit always beats implicit (#272).
+        self._explicit_edges: dict[tuple[str, ...], str] = {}
 
     async def _transaction_or_using(self) -> "RouteHandle":
         from .. import _ensure_rust_registration_synced_for_operation
@@ -203,6 +257,7 @@ class Query(Generic[T]):
             dict(self._m2m_context) if self._m2m_context is not None else None
         )
         new._joins = dict(self._joins)
+        new._explicit_edges = dict(self._explicit_edges)
         return new
 
     def _m2m(
@@ -344,6 +399,97 @@ class Query(Generic[T]):
             new._joins.setdefault(path, "inner")
         return new
 
+    def join(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
+        """Force an INNER join on a relation path and return a new query.
+
+        ``selector`` is a lambda naming a RELATION path
+        (``lambda t: t.account``, ``lambda t: t.account.owner``) — the same
+        traversal syntax as ``where()``, but resolving to the relation itself,
+        not a column on it. A bare ``.join(lambda t: t.account)`` with no
+        predicate is a meaningful **existence filter** on a nullable relation:
+        it narrows the result to rows where the relation exists (ADR-0006).
+
+        Every edge of the path is marked explicit-INNER; combining it with an
+        explicit ``.left_join`` on the same edge is a build-time error (see
+        :meth:`left_join`).
+
+        Args:
+            selector: A lambda receiving a :class:`QueryProxy` and returning a
+                relation path (a ``RelationProxy``).
+
+        Returns:
+            A new ``Query`` with the join registered; ``self`` is unchanged.
+
+        Raises:
+            TypeError: If ``selector`` is not callable or does not resolve to a
+                relation path (a column selector is rejected — join names a
+                relation, not a column).
+            ValueError: If an edge of the path is already marked explicit-LEFT.
+
+        Examples:
+            >>> with_account = QJTransaction.select().join(lambda t: t.account)
+        """
+        return self._add_explicit_join(selector, "inner")
+
+    def left_join(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
+        """Mark a relation path LEFT (whole-path) and return a new query.
+
+        ``selector`` names a RELATION path exactly like :meth:`join`. Every edge
+        of the path is marked LEFT (the **whole-path rule**, ADR-0006), so a
+        left-marked 2-hop path retains rows missing the relation at either hop.
+        Relation-less rows are retained (NULL retention), observable both in
+        ordered results and in traversal predicates on related columns (e.g.
+        ``where(lambda t: t.account.name == None)``).
+
+        Conflict rules: an explicit LEFT beats implicit ``where()``/``order_by()``
+        traversal on a shared edge (the path renders LEFT); an explicit ``.join``
+        plus an explicit ``.left_join`` on the same edge is a build-time error.
+
+        Args:
+            selector: A lambda receiving a :class:`QueryProxy` and returning a
+                relation path (a ``RelationProxy``).
+
+        Returns:
+            A new ``Query`` with the LEFT join registered; ``self`` is unchanged.
+
+        Raises:
+            TypeError: If ``selector`` is not callable or does not resolve to a
+                relation path.
+            ValueError: If an edge of the path is already marked explicit-INNER.
+
+        Examples:
+            >>> keep_orphans = QJNote.select().left_join(lambda n: n.account)
+        """
+        return self._add_explicit_join(selector, "left")
+
+    def _add_explicit_join(
+        self, selector: "Callable[[QueryProxy[T]], Any]", join_type: str
+    ) -> Self:
+        """Shared body of :meth:`join`/:meth:`left_join` (#272).
+
+        Resolves the selector to a relation path, checks every edge for a
+        contradictory explicit mark (INNER vs LEFT), then records the marks and
+        registers the full path so it renders. Re-marking an edge the same
+        direction is idempotent.
+        """
+        path = _resolve_join_selector(selector, self.model_cls)
+        edges = _path_edges(path)
+        new = self._clone()
+        for edge in edges:
+            existing = new._explicit_edges.get(edge)
+            if existing is not None and existing != join_type:
+                relation_path = ".".join(edge)
+                raise ValueError(
+                    f"conflicting explicit join types on relation edge "
+                    f"{relation_path!r}: already marked {existing!r} by a prior "
+                    f"join()/left_join(), cannot re-mark {join_type!r}. Use one "
+                    "join type per edge."
+                )
+        for edge in edges:
+            new._explicit_edges[edge] = join_type
+        new._joins.setdefault(path, join_type)
+        return new
+
     def limit(self, value: int) -> Self:
         """Limit the number of records returned
 
@@ -387,11 +533,31 @@ class Query(Generic[T]):
         carrying its ordered hop facts (:func:`_resolve_join_hops`). The Rust
         SELECT walkers assign deterministic ``j{i}_{relation}`` aliases and
         dedup shared prefixes at render time (#270).
+
+        The wire ``join_type`` is resolved from ``_explicit_edges`` at the EDGE
+        level so it is already unambiguous (#272): an entry is ``"left"`` iff
+        ALL of its edges are explicitly LEFT-marked, else ``"inner"``. Because
+        ``.left_join`` is whole-path and the only source of LEFT, a proper
+        prefix of a longer path can be LEFT while the deeper hop is INNER — that
+        prefix is itself a registered ``_joins`` entry (``left_join`` registers
+        its full path) and is emitted as its own ``"left"`` entry; the longer
+        entry is emitted ``"inner"``. The Rust edge resolver then renders the
+        prefix edges LEFT and the deeper edges INNER (a pure double-check of
+        this wire). This also makes "explicit LEFT beats implicit INNER on a
+        shared edge" visible in the IR itself.
         """
-        return [
-            {"join_type": join_type, "path": _resolve_join_hops(self.model_cls, path)}
-            for path, join_type in self._joins.items()
-        ]
+        entries: list[dict[str, Any]] = []
+        for path in self._joins:
+            is_left = all(
+                self._explicit_edges.get(edge) == "left" for edge in _path_edges(path)
+            )
+            entries.append(
+                {
+                    "join_type": "left" if is_left else "inner",
+                    "path": _resolve_join_hops(self.model_cls, path),
+                }
+            )
+        return entries
 
     def _mutating_query_def(self, operation: str) -> dict[str, Any]:
         """Build the QueryIR payload for a mutating operation (update/delete).
