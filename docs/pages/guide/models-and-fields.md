@@ -81,7 +81,7 @@ Ferro maps Python annotations to backend-appropriate column types:
 | `decimal.Decimal` | `NUMERIC` | `NUMERIC` | For money and other exact values |
 | `bytes` | `BLOB` | `BYTEA` | |
 | `enum.Enum` | `TEXT` | native `ENUM` | See note below |
-| `dict` / `list` | `TEXT` (JSON) | `JSON` / `JSONB` | |
+| `dict` / `list` | `TEXT` (JSON) | `JSONB` (default) | `db_type="json"` opts out |
 
 ### Overriding the column type with `db_type`
 
@@ -120,7 +120,7 @@ Valid values are the `DbTypeToken` literals — `"text"`, `"smallint"`, `"int"`,
 
 ### JSON storage: `json` and `jsonb`
 
-Json-family fields — `dict`, `list` (any element type, including `list[SomeNestedModel]`), and nested Pydantic models — store as JSON documents. On PostgreSQL the default is a plain `json` column; opt into **JSONB** (binary storage, GIN-indexable, containment operators) per column with `db_type="jsonb"`:
+Json-family fields — `dict`, `list` (any element type, including `list[SomeNestedModel]`), and nested Pydantic models — store as JSON documents. On PostgreSQL the default is **JSONB** (binary storage, GIN-indexable, containment operators — the type PostgreSQL itself recommends); declare `db_type="json"` per column to opt out into plain `json` when you need representation fidelity:
 
 === "Assignment"
 
@@ -139,9 +139,9 @@ Json-family fields — `dict`, `list` (any element type, including `list[SomeNes
 
     class Transaction(Model):
         id: int | None = Field(default=None, primary_key=True)
-        raw_payload: dict[str, Any] = Field(db_type="jsonb")
-        line_items: list[Payment] = Field(db_type="jsonb")
-        audit_note: dict[str, str] = Field(db_type="json")  # explicit plain json
+        raw_payload: dict[str, Any] = Field()                # JSONB (the default)
+        line_items: list[Payment] = Field(db_type="jsonb")   # explicit, same as default
+        audit_note: dict[str, str] = Field(db_type="json")   # plain-json opt-out
     ```
 
 === "Annotated"
@@ -161,18 +161,21 @@ Json-family fields — `dict`, `list` (any element type, including `list[SomeNes
 
     class Transaction(Model):
         id: Annotated[int | None, Field(default=None, primary_key=True)]
-        raw_payload: Annotated[dict[str, Any], Field(db_type="jsonb")]
-        line_items: Annotated[list[Payment], Field(db_type="jsonb")]
-        audit_note: Annotated[dict[str, str], Field(db_type="json")]  # explicit plain json
+        raw_payload: Annotated[dict[str, Any], Field()]                # JSONB (the default)
+        line_items: Annotated[list[Payment], Field(db_type="jsonb")]  # explicit, same as default
+        audit_note: Annotated[dict[str, str], Field(db_type="json")]  # plain-json opt-out
     ```
 
 Declaring `db_type="jsonb"` on anything outside the json family (an `int`, a `set`, ...) fails at class-definition time.
 
 **SQLite lowering.** On SQLite both tokens store as plain JSON text — one model definition runs on both backends, and switching between `json` and `jsonb` never changes SQLite behavior.
 
-**Round-trip contract is value equality, not byte fidelity.** PostgreSQL's `jsonb` does not preserve dict key order (keys come back sorted), duplicate keys, or whitespace — that's inherent to the storage type, not Ferro. Values compare equal with Python `==` (dict equality ignores order), but if you iterate keys and need insertion order — or need the stored text byte-for-byte — keep the default `json` storage.
+**Round-trip contract is value equality, not byte fidelity.** PostgreSQL's `jsonb` does not preserve dict key order (keys come back sorted), duplicate keys, or whitespace — that's inherent to the storage type, not Ferro. Values compare equal with Python `==` (dict equality ignores order), but if you iterate keys and need insertion order — or need the stored text byte-for-byte — opt out with `db_type="json"`.
 
-**Migrating between `json` and `jsonb` is a declaration edit.** With [`migrate_updates`](migrations.md) enabled, adding `db_type="jsonb"` to an existing json column emits exactly one `ALTER TABLE ... TYPE jsonb USING ...` on PostgreSQL (existing values survive the cast); removing the opt-in emits the mirror `ALTER` back to `json`. The [Alembic bridge](migrations.md) renders the same DDL. On SQLite the same edit is a no-op.
+**Migrating between `json` and `jsonb` is a declaration edit.** With [`migrate_updates`](migrations.md) enabled, a storage change emits exactly one `ALTER TABLE ... TYPE ... USING ...` on PostgreSQL in either direction (existing values survive the cast). The [Alembic bridge](migrations.md) renders the same DDL. On SQLite the same edit is a no-op.
+
+!!! warning "Upgrading from a pre-JSONB-default release"
+    Databases created before the JSONB default carry plain `json` columns for derived `dict`/`list` fields. On your first connect with `migrate_updates=True`, each such column upgrades in place with one `ALTER ... TYPE jsonb USING ...` — values survive, but dict key order stops being preserved. To keep a column as plain `json`, add `db_type="json"` to its declaration **before** upgrading; the diff is then zero operations.
 
 !!! note "Querying inside JSONB"
     Containment and path operators (`@>`, `->`, `#>>`) and GIN index declarations are not in the query builder yet — they're planned follow-ups. Today JSONB gives you honest storage and round-tripping; query the column as a whole.

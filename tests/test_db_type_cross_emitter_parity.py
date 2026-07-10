@@ -248,7 +248,9 @@ _DERIVED_CASES = [
     pytest.param(dt.time, {"postgres": "TIME", "sqlite": "TIME"}, id="derived-time"),
     pytest.param(UUID, {"postgres": "UUID"}, id="derived-uuid-pg"),
     pytest.param(bytes, {"postgres": "BYTEA", "sqlite": "BLOB"}, id="derived-bytes"),
-    pytest.param(dict, {"postgres": "JSON", "sqlite": "JSON"}, id="derived-json"),
+    # Default flip (ADR-0005): derived json-family storage is JSONB on
+    # Postgres; SQLite lowers to JSON either way.
+    pytest.param(dict, {"postgres": "JSONB", "sqlite": "JSON"}, id="derived-json"),
     # sea-query renders `bool`, SA renders `BOOLEAN` — BOOL is the shared stem.
     pytest.param(bool, {"postgres": "BOOL"}, id="derived-bool-pg"),
     pytest.param(
@@ -472,3 +474,34 @@ def test_jsonb_all_json_family_shapes_render_jsonb_on_postgres():
     rust_sqlite = _render_rust_sql(JsonbShapes, "sqlite")
     for col in ("payload", "entries", "detail"):
         assert f'"{col}" JSON' in rust_sqlite, (col, rust_sqlite)
+
+
+def test_explicit_json_token_stays_plain_json_on_postgres():
+    """db_type="json" is the opt-out from the JSONB default (ADR-0005).
+
+    Pinned with exact equality: the parametrized substring assertions cannot
+    tell JSON from JSONB ("JSON" in "JSONB" is True), so the opt-out gets its
+    own exactness pin on both emitters.
+    """
+    namespace = {
+        "__annotations__": {"id": int | None, "x": dict},
+        "id": Field(default=None, primary_key=True),
+        "x": Field(db_type="json"),
+    }
+    Model_x = type("JsonOptOutModel", (Model,), namespace)
+
+    assert _extract_col_type(_render_rust_sql(Model_x, "postgres"), "x") == "JSON"
+    assert _extract_col_type(_render_alembic_sql(Model_x, "postgres"), "x") == "JSON"
+
+
+def test_derived_json_family_defaults_to_jsonb_exact_on_postgres():
+    """Default flip (ADR-0005): a plain dict field with NO db_type stores as
+    JSONB on Postgres — exact equality, both emitters."""
+    namespace = {
+        "__annotations__": {"id": int | None, "x": dict},
+        "id": Field(default=None, primary_key=True),
+    }
+    Model_x = type("JsonbDefaultModel", (Model,), namespace)
+
+    assert _extract_col_type(_render_rust_sql(Model_x, "postgres"), "x") == "JSONB"
+    assert _extract_col_type(_render_alembic_sql(Model_x, "postgres"), "x") == "JSONB"

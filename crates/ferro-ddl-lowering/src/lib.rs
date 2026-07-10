@@ -346,7 +346,14 @@ pub fn canonical_from_parts(
         // FF-B B2: `datetime.time` stores as `time` on both dialects.
         ("time", _) => Ok(CanonicalType::Time),
         ("uuid", _) => Ok(CanonicalType::Uuid),
-        ("json", _) => Ok(CanonicalType::Json),
+        // Default flip (ADR-0005): derived json-family storage is JSONB on
+        // Postgres — the type Postgres itself recommends. Explicit
+        // db_type="json" (handled above, token wins) is the opt-out for
+        // key-order/byte fidelity. SQLite lowers to JSON either way.
+        ("json", _) => Ok(match dialect {
+            Dialect::Sqlite => CanonicalType::Json,
+            Dialect::Postgres => CanonicalType::Jsonb,
+        }),
         ("decimal", _) => Ok(CanonicalType::Decimal),
         // Raw JSON Schema primitive types (introspection / token round-trip).
         ("integer", _) => Ok(CanonicalType::Integer),
@@ -356,7 +363,11 @@ pub fn canonical_from_parts(
             Dialect::Sqlite => CanonicalType::Integer,
             Dialect::Postgres => CanonicalType::Boolean,
         }),
-        ("object" | "array", _) => Ok(CanonicalType::Json),
+        ("object" | "array", _) => Ok(match dialect {
+            // Same default flip as the compiled `"json"` token above.
+            Dialect::Sqlite => CanonicalType::Json,
+            Dialect::Postgres => CanonicalType::Jsonb,
+        }),
         _ => Err(format!("unknown logical_type '{logical_type}'")),
     }
 }

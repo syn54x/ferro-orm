@@ -457,7 +457,7 @@ async def test_jsonb_declared_fields_roundtrip(db_url):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         payload: Annotated[Dict, FerroField(db_type="jsonb")]
         entries: Annotated[List[Payment], FerroField(db_type="jsonb")]
-        plain: Dict[str, str]  # default json storage, untouched by opt-in
+        plain: Annotated[Dict[str, str], FerroField(db_type="json")]  # explicit opt-out
 
     # Deliberately unsorted keys — jsonb returns them sorted; == must hold.
     scrambled = {"zeta": 1, "alpha": {"nested": [3, 1, 2]}, "mid": None}
@@ -483,7 +483,7 @@ async def test_jsonb_declared_fields_roundtrip(db_url):
         assert fetched.plain == {"k": "v"}
 
         # Storage assertion (Postgres only): the live column type is jsonb —
-        # and the default-storage neighbor stayed plain json.
+        # and the explicit db_type="json" opt-out stayed plain json (ADR-0005).
         if db_url.startswith(("postgres://", "postgresql://")):
             from ferro.raw import fetch_all
 

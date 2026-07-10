@@ -35,6 +35,11 @@ Three companion decisions bound the variant's reach:
    column, and a `json↔jsonb` edit is exactly one ALTER on Postgres. On SQLite
    both tokens lower to the same canonical, so the same edit is a no-op there.
 
+> **Superseded in part by ADR-0005**: the opt-in-only framing below is
+> historical — derived json-family storage now defaults to JSONB on Postgres,
+> with `db_type="json"` as the explicit opt-out. The type-system shape,
+> lowering, codec, and introspection decisions in this ADR are unchanged.
+
 Both `json` and `jsonb` join the declarable vocabulary with a single
 json-family eligibility predicate (`dict`/`list` in any parameterization,
 `BaseModel` subclasses); wider shapes (`TypedDict`, dataclass, `set`, `tuple`)

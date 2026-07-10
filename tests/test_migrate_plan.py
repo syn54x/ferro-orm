@@ -417,13 +417,41 @@ class TestJsonStorageDiff:
         assert stmts == []
         assert warns == []
 
-    def test_live_json_column_with_default_declaration_no_diff(self):
-        """Existing plain-json columns stay untouched — defaults don't change."""
+    def test_live_json_column_with_default_declaration_upgrades_to_jsonb(self):
+        """Default flip (ADR-0005): a derived json-family field now means jsonb
+        on Postgres, so a pre-flip live json column upgrades with one ALTER."""
         schema = schema_with(
             {"payload": {"type": "object", "ferro_nullable": True}}
         )
         live = PK_ONLY_LIVE + [
             {"name": "payload", "declared_type": "json", "is_nullable": True}
+        ]
+        stmts, warns = render(schema, live, "postgres")
+        assert stmts == [
+            'ALTER TABLE "invoice" ALTER COLUMN "payload" TYPE jsonb USING "payload"::jsonb'
+        ]
+        assert warns == []
+
+    def test_live_json_column_with_explicit_json_opt_out_no_diff(self):
+        """db_type="json" is the opt-out — existing plain-json columns keep
+        their storage with zero operations."""
+        schema = schema_with(
+            {"payload": {"type": "object", "db_type": "json", "ferro_nullable": True}}
+        )
+        live = PK_ONLY_LIVE + [
+            {"name": "payload", "declared_type": "json", "is_nullable": True}
+        ]
+        stmts, warns = render(schema, live, "postgres")
+        assert stmts == []
+        assert warns == []
+
+    def test_live_jsonb_column_with_default_declaration_no_diff(self):
+        """The post-flip steady state: derived declaration + live jsonb agree."""
+        schema = schema_with(
+            {"payload": {"type": "object", "ferro_nullable": True}}
+        )
+        live = PK_ONLY_LIVE + [
+            {"name": "payload", "declared_type": "jsonb", "is_nullable": True}
         ]
         stmts, warns = render(schema, live, "postgres")
         assert stmts == []
@@ -443,9 +471,10 @@ class TestJsonStorageDiff:
         assert warns == []
 
     def test_jsonb_to_json_declaration_edit_is_the_mirror_alter(self):
-        """Removing the jsonb opt-in (back to default json) is the reverse edit."""
+        """Declaring the explicit json opt-out over a live jsonb column is the
+        reverse edit (post-ADR-0005, the bare declaration means jsonb)."""
         schema = schema_with(
-            {"payload": {"type": "object", "ferro_nullable": True}}
+            {"payload": {"type": "object", "db_type": "json", "ferro_nullable": True}}
         )
         live = PK_ONLY_LIVE + [
             {"name": "payload", "declared_type": "jsonb", "is_nullable": True}

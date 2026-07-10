@@ -21,6 +21,8 @@ the API does now, and what you change to get there.
 
 | You are on | Read |
 | --- | --- |
+| `0.14.x`, upgrading to `0.15` | [Upgrading to 0.15](#upgrading-to-015) |
+| `0.12.x` or `0.13.x`, upgrading to `0.15` | Both sections, top to bottom |
 | `0.12.x` or `0.13.x`, upgrading to `0.14` | [Upgrading to 0.14](#upgrading-to-014) |
 | `0.11.x` or earlier, upgrading to `0.14` | Both sections, top to bottom |
 | `0.11.x` or earlier, stopping at `0.12` | [Upgrading to 0.12](#upgrading-to-012) |
@@ -43,6 +45,49 @@ This catches every **deprecation-based** change. It does **not** catch the silen
 behavioral changes in `0.14` (`create()`/`save()` no longer upsert;
 `limit()`/`offset()` on a mutation now raise) — those emit no warning and must be
 reviewed by reading the relevant section below.
+
+## Upgrading to 0.15
+
+`0.15` adds JSONB support and makes **JSONB the default storage** for derived
+json-family fields (`dict`/`list`/nested-model with no explicit `db_type`) on
+PostgreSQL. Your model definitions do not change; your PostgreSQL columns might.
+SQLite users are unaffected — both JSON tokens store identically there.
+
+<!-- MAINTAINERS: keep this prompt in sync with the subsections below it. -->
+
+??? example "Automate this: copy this prompt to your coding agent"
+
+    ```text
+    You are helping upgrade a Python codebase from Ferro ORM 0.14.x to 0.15.
+    Reference: https://ferro-orm.x54.sh/howto/upgrade-guide/#upgrading-to-015
+
+    The one breaking change: derived dict/list/nested-model fields now store as
+    JSONB on PostgreSQL (previously plain json). On the first connect with
+    migrate_updates=True, each existing plain-json column with a derived
+    declaration is rewritten in place with ALTER ... TYPE jsonb USING ... —
+    values survive, but jsonb does not preserve dict key order.
+
+    For each model field whose annotation is dict/list/a nested Pydantic model
+    and which has NO explicit db_type:
+    1. If the code iterates that field's keys relying on insertion order, or
+       compares stored JSON text byte-for-byte, add db_type="json" to keep
+       plain-json storage (zero migration).
+    2. Otherwise leave it — the one-time ALTER upgrades it to JSONB.
+
+    List every affected field as file:line with your keep/upgrade call and let
+    me review before connecting to production with migrate_updates=True.
+    Alembic users: autogenerate will propose the same type changes; review the
+    migration instead.
+    ```
+
+### Derived JSON storage is JSONB on PostgreSQL
+
+A bare `payload: dict` field now creates (and migrates to) a `jsonb` column.
+`db_type="json"` is the explicit opt-out and produces no migration for
+existing plain-json columns; `db_type="jsonb"` stays valid and simply states
+the default. Key-order-sensitive workloads should opt out **before** upgrading.
+See [JSON storage](../guide/models-and-fields.md#json-storage-json-and-jsonb)
+and ADR-0005.
 
 ## Upgrading to 0.14
 
