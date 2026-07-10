@@ -1700,14 +1700,25 @@ pub fn fetch_filtered<'py>(
                 &table_name,
                 &join_plan,
             )?);
+            // ORDER BY terms are qualified the same way as WHERE leaves: an empty
+            // path qualifies by the root table, a relation path by its JOIN alias
+            // (#271). A path with no matching join entry is a loud error — the
+            // Python builder always registers the join for an order_by path, so
+            // this is defense-in-depth, never reachable in normal use.
             for order in &plan.order_by {
-                let col = (Alias::new(&table_name), Alias::new(&order.column));
+                let col = crate::query::qualify_column_with_joins(
+                    &table_name,
+                    &join_plan,
+                    &order.column,
+                    &order.path,
+                )
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
                 let dir = if order.direction.to_lowercase() == "desc" {
                     Order::Desc
                 } else {
                     Order::Asc
                 };
-                select.order_by(col, dir);
+                select.order_by_expr(col.into(), dir);
             }
             if let Some(limit) = plan.limit {
                 select.limit(limit);
@@ -3834,6 +3845,103 @@ mod mutation_qualification_tests {
                 "UPDATE SET column must stay unqualified on {backend:?}: {sql}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod select_join_render_tests {
+    //! Pin the FULL rendered SELECT SQL for a joined query (#271) — including the
+    //! `INNER JOIN <table> AS <alias> ON <prev>.<from_column> = <alias>.<to_column>`
+    //! clause text `apply_relation_joins` renders. Task 3 (#270) only pinned the
+    //! `JoinPlan` struct's alias fields at the unit level; the reviewer flagged the
+    //! missing rendered-SQL pin, closed here since this slice extends the exact
+    //! same SELECT-walker seam to `ORDER BY`.
+
+    use super::{
+        apply_relation_joins, query_condition_with_joins, query_join_plan, query_plan_from_ir_json,
+    };
+    use crate::state::Dialect;
+    use sea_query::{Alias, Order, PostgresQueryBuilder, SelectStatement};
+
+    /// `Transaction -> account` traversed by BOTH a `where()` leaf and an
+    /// `order_by` term on the same path — the one-join acceptance criterion.
+    fn shared_path_plan() -> crate::query::QueryPlan {
+        query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 2,
+                "payload": {
+                    "model_name": "Transaction",
+                    "where": [{
+                        "node_kind": "leaf",
+                        "operator": "==",
+                        "column": "label",
+                        "value": {"kind": "string", "value": "a1"},
+                        "path": ["account"]
+                    }],
+                    "order_by": [{"column": "name", "direction": "asc", "path": ["account"]}],
+                    "limit": null, "offset": null, "m2m": null,
+                    "joins": [
+                        {"join_type": "inner", "path": [
+                            {"relation": "account", "from_column": "account_id",
+                             "to_table": "account", "to_column": "id"}
+                        ]}
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("v2 envelope parses")
+    }
+
+    #[test]
+    fn rendered_select_pins_join_clause_and_dedups_shared_where_order_by_path() {
+        let plan = shared_path_plan();
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+
+        let mut select = SelectStatement::new();
+        select
+            .column((Alias::new("transaction"), sea_query::Asterisk))
+            .from(Alias::new("transaction"));
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.cond_where(
+            query_condition_with_joins(&plan, Dialect::Postgres, "transaction", &join_plan)
+                .expect("condition builds"),
+        );
+        for order in &plan.order_by {
+            let col = crate::query::qualify_column_with_joins(
+                "transaction",
+                &join_plan,
+                &order.column,
+                &order.path,
+            )
+            .expect("order_by column qualifies by its join alias");
+            select.order_by_expr(col.into(), Order::Asc);
+        }
+
+        let sql = select.to_string(PostgresQueryBuilder);
+
+        let expected_join = "INNER JOIN \"account\" AS \"j1_account\" ON \
+             \"transaction\".\"account_id\" = \"j1_account\".\"id\"";
+        assert!(
+            sql.contains(expected_join),
+            "expected the exact rendered JOIN clause, got: {sql}"
+        );
+        // Same relation path referenced by both the WHERE leaf and the order_by
+        // term must still render exactly ONE join (#270/#271 acceptance).
+        assert_eq!(
+            sql.matches("INNER JOIN").count(),
+            1,
+            "shared where()/order_by path must render exactly one JOIN: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE \"j1_account\".\"label\""),
+            "WHERE leaf must qualify by the shared join alias: {sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY \"j1_account\".\"name\""),
+            "ORDER BY must qualify by the shared join alias: {sql}"
+        );
     }
 }
 

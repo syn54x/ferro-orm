@@ -1,11 +1,13 @@
-"""Backend-matrix integration tests for relation traversal in where() (#270).
+"""Backend-matrix integration tests for relation traversal in where() and
+order_by() (#270, #271).
 
 Declares FK-related models, inserts rows, and asserts result sets against real
 SQLite and isolated-schema Postgres backends — no SQL-string snapshots at this
 layer (the rendered-SQL pins live in the Rust walker unit tests). Covers the
 motivating Pinch query, multi-hop traversal, per-hop did-you-mean, INNER-drops-
 NULL semantics (ADR-0006), join dedup, two-FKs-to-one-target, self-FK, verb
-composition, and query immutability.
+composition, query immutability, and order_by traversal sharing joins with
+where() (#271).
 """
 
 from typing import Annotated
@@ -324,14 +326,106 @@ async def test_query_immutability_with_joins(db_url):
         assert {r.id for r in branched_rows} == {5, 6}
 
 
+# ---------------------------------------------------------------------------
+# order_by() relation traversal (#271): shares joins with where(), any depth,
+# asc/desc, INNER-drops-NULL, and a same-path dedup with where().
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_order_by_related_column_asc_and_desc(db_url):
+    """1-hop `order_by(lambda t: t.account.label)`, both directions, with a
+    root-column tiebreaker so ties can never make the assertion flaky."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        asc_rows = await (
+            QJTransaction.select()
+            .order_by(lambda t: t.account.label)
+            .order_by(lambda t: t.id)
+            .all()
+        )
+        # Labels ascending a1 < a2 < b1; ties broken by id.
+        assert [r.id for r in asc_rows] == [1, 2, 3, 4, 5, 6]
+
+        desc_rows = await (
+            QJTransaction.select()
+            .order_by(lambda t: t.account.label, "desc")
+            .order_by(lambda t: t.id)
+            .all()
+        )
+        # Labels descending b1 > a2 > a1; ties broken by id ascending within
+        # each label group — proves the sort key is the related column, not id.
+        assert [r.id for r in desc_rows] == [5, 6, 4, 1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_order_by_multi_hop_shares_join_with_where_same_path(db_url):
+    """`order_by(lambda t: t.account.owner.email)` composed with a `where()`
+    traversal of the SAME path -> exactly one join entry, and correct rows."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        q = (
+            QJTransaction.where(lambda t: t.account.owner.email == "o1@ferro.dev")
+            .order_by(lambda t: t.account.owner.email)
+            .order_by(lambda t: t.id)
+        )
+        # Behavioral half of the one-join acceptance criterion.
+        assert list(q._joins) == [("account", "owner")]
+
+        rows = await q.all()
+        # Owner o1 owns a1 (txns 1,2,3) and b1 (txns 5,6); ordered by email
+        # (constant "o1@ferro.dev" within this filtered set) then id.
+        assert [r.id for r in rows] == [1, 2, 3, 5, 6]
+
+
+@pytest.mark.asyncio
+async def test_order_by_related_column_composed_with_where_different_path(db_url):
+    """`where()` traversing one path and `order_by()` traversing a DIFFERENT
+    path -> two distinct join entries, both effective on the result."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        q = (
+            QJTransaction.where(lambda t: t.account.ledger_id == 1)
+            .order_by(lambda t: t.account.owner.email)
+            .order_by(lambda t: t.id)
+        )
+        assert list(q._joins) == [("account",), ("account", "owner")]
+
+        rows = await q.all()
+        # Ledger A -> accounts a1 (owner o1, txns 1,2,3), a2 (owner o2, txn 4).
+        # Owner email ascending (o1 < o2) with id tiebreaker.
+        assert [r.id for r in rows] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_order_by_related_column_drops_null_fk_rows(db_url):
+    """INNER ordering drops relation-less rows (nullable FK left NULL) — the
+    same ADR-0006 semantics `where()` traversal already has, now for order_by."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        core = await _seed_core()
+        await QJNote(id=1, body="attached", account=core["a1"]).save()
+        await QJNote(id=2, body="orphan", account=None).save()
+
+        rows = await QJNote.select().order_by(lambda n: n.account.label).all()
+        assert [r.id for r in rows] == [1]
+
+
+def test_order_by_bare_relation_proxy_is_rejected():
+    """A bare relation (no column selected) is meaningless as a sort key —
+    rejected at build time (comparison sugar is slice #273's scope)."""
+    with pytest.raises(TypeError, match="relation"):
+        Query(QJTransaction).order_by(lambda t: t.account)  # type: ignore[arg-type,return-value]
+
+
 def test_bare_relation_proxy_predicate_is_rejected():
     """A where() lambda returning a bare relation (no comparison) is not a
     QueryNode — rejected at build time (comparison sugar is slice #273)."""
     with pytest.raises(TypeError, match="must return QueryNode"):
         Query(QJTransaction).where(lambda t: t.account)  # type: ignore[arg-type,return-value]
-
-
-def test_order_by_relation_traversal_is_rejected():
-    """order_by relation traversal is slice #271 — a clear build-time error now."""
-    with pytest.raises(TypeError, match="relation traversal"):
-        Query(QJTransaction).order_by(lambda t: t.account.owner.email)

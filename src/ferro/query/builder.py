@@ -274,6 +274,15 @@ class Query(Generic[T]):
         column-name string (``order_by("created_at", "desc")``). Both forms are
         validated against the model's queryable columns at build time.
 
+        A lambda selector may traverse a declared forward-FK relation
+        (``order_by(lambda t: t.account.name)``) exactly like ``where()``: each
+        hop resolves against the related model, and the traversed path renders
+        one INNER join (ADR-0006), shared with any ``where()`` traversal of the
+        same path in the same query — the same path referenced in both yields
+        exactly one join. String selectors do not traverse: ``"account.name"``
+        is looked up as a literal (unqualified) column name on the queried
+        model.
+
         Args:
             field: Column selector — lambda receiving a :class:`QueryProxy`,
                 or a column-name string.
@@ -285,7 +294,8 @@ class Query(Generic[T]):
         Raises:
             AttributeError: If the column is not a queryable column.
             TypeError: If a lambda selector returns something other than a
-                single column reference.
+                single column reference (a bare relation, e.g.
+                ``lambda t: t.account``, is meaningless as a sort key).
             ValueError: If ``direction`` is not ``"asc"`` or ``"desc"``.
 
         Examples:
@@ -294,31 +304,28 @@ class Query(Generic[T]):
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
 
+        path: tuple[str, ...] = ()
         if isinstance(field, str):
             col_name = validate_query_column(self.model_cls, field)
         elif callable(field):
             selected = field(QueryProxy(self.model_cls))
-            # Relation-traversal ordering (a RelationProxy, or a FieldProxy with
-            # a non-empty relation path) is slice #271 — reject it loudly now
-            # rather than emitting an order_by the SELECT walker cannot render.
+            # Ordering by a bare relation (no column selected) is meaningless —
+            # reject it loudly rather than emitting an order_by the SELECT
+            # walker cannot render. Ordering by a related COLUMN (a FieldProxy
+            # with a non-empty path) is valid traversal (#271).
             if isinstance(selected, RelationProxy):
                 raise TypeError(
-                    "order_by() does not support relation traversal yet "
-                    "(ordering by a related column arrives in a later release); "
-                    "order by a column on the queried model instead."
+                    "order_by() selector resolved to a relation, not a column "
+                    "(e.g. `lambda t: t.account`); order by a column on the "
+                    "relation instead (e.g. `lambda t: t.account.name`)."
                 )
             if not isinstance(selected, FieldProxy):
                 raise TypeError(
                     "order_by() selector must return a FieldProxy "
                     f"(e.g. `lambda u: u.created_at`), got {type(selected).__name__}"
                 )
-            if selected.path:
-                raise TypeError(
-                    "order_by() does not support relation traversal yet "
-                    "(ordering by a related column arrives in a later release); "
-                    "order by a column on the queried model instead."
-                )
             col_name = selected.column
+            path = selected.path
         else:
             raise TypeError(
                 "order_by() expected a column-name string or a lambda selector, "
@@ -327,8 +334,14 @@ class Query(Generic[T]):
 
         new = self._clone()
         new.order_by_clause.append(
-            {"column": col_name, "direction": direction.lower(), "path": []}
+            {
+                "column": col_name,
+                "direction": direction.lower(),
+                "path": list(path),
+            }
         )
+        if path:
+            new._joins.setdefault(path, "inner")
         return new
 
     def limit(self, value: int) -> Self:

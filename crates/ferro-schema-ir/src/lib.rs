@@ -328,6 +328,8 @@ mod tests {
         // The joins section must actually carry the multi-hop path.
         assert_eq!(envelope.payload.joins.len(), 2);
         assert_eq!(envelope.payload.joins[1].path.len(), 2);
+        // An order_by entry carrying a relation path (#271) survives round-trip too.
+        assert_eq!(envelope.payload.order_by[0].path, vec!["account".to_string()]);
         let encoded = serde_json::to_value(&envelope).expect("query traversal IR must serialize");
         assert_eq!(encoded, ir, "query traversal round-trip must not drift");
     }

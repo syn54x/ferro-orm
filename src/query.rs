@@ -11,28 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// Reject `order_by` relation traversal, which no query shape can render yet.
-///
-/// WHERE traversal (leaf `path`s and the `joins` list) renders in the SELECT
-/// walkers as of #270, but ordering by a related column is a later slice (#271):
-/// there is no Python surface to emit it, so a non-empty `order_by` path here can
-/// only be misuse. Silently dropping it would mis-render the ORDER BY — fail loud.
-///
-/// # Errors
-/// Returns `Err(String)` naming the unsupported `order_by` path content.
-fn reject_unsupported_order_by(payload: &QueryIrPayload) -> Result<(), String> {
-    for order in &payload.order_by {
-        if !order.path.is_empty() {
-            return Err(format!(
-                "QueryIR order_by path is not yet supported by this build (column {:?} \
-                 carries path {:?}); order-by relation traversal ships in a later release",
-                order.column, order.path
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// Reject any relation-traversal shape on a WHERE tree (used by mutating walkers).
 ///
 /// UPDATE/DELETE with relation joins would need multi-table mutation semantics no
@@ -76,6 +54,29 @@ enum ColumnQualifier<'a> {
     },
 }
 
+/// Qualify a column reference (a WHERE leaf or an `ORDER BY` term) by its
+/// relation path's JOIN alias (SELECT walkers, #270/#271): an empty `path`
+/// qualifies by `root_table`, a non-empty `path` resolves through `join_plan`'s
+/// prefix map. Shared by WHERE lowering and the `ORDER BY` render loop so both
+/// clauses qualify identically against the same join plan.
+///
+/// # Errors
+/// Returns `Err(String)` when `path` has no matching JOIN entry — never
+/// silently unqualified (the Python builder always registers the join for a
+/// path-carrying `order_by` entry, same as `where()`; this is defense-in-depth).
+pub fn qualify_column_with_joins(
+    root_table: &str,
+    join_plan: &JoinPlan,
+    column: &str,
+    path: &[String],
+) -> Result<Expr, String> {
+    let qualifier = ColumnQualifier::Joined {
+        root_table,
+        prefix_alias: &join_plan.prefix_alias,
+    };
+    qualify_leaf_column(&qualifier, column, path)
+}
+
 /// One rendered relation JOIN edge: `<join> <to_table> AS <alias> ON
 /// <prev_alias>.<from_column> = <alias>.<to_column>`.
 #[derive(Debug, Clone)]
@@ -100,7 +101,8 @@ pub struct JoinRender {
 pub struct JoinPlan {
     /// JOIN edges in first-appearance order (shared prefixes deduped to one edge).
     pub renders: Vec<JoinRender>,
-    /// Full relation path -> alias, for qualifying path-carrying WHERE leaves.
+    /// Full relation path -> alias, for qualifying path-carrying WHERE leaves
+    /// and `ORDER BY` terms.
     pub prefix_alias: HashMap<Vec<String>, String>,
 }
 
@@ -155,7 +157,7 @@ fn qualify_leaf_column(
             }
             let alias = prefix_alias.get(path).ok_or_else(|| {
                 format!(
-                    "WHERE column {column:?} carries relation path {path:?} with no \
+                    "column {column:?} carries relation path {path:?} with no \
                      matching join entry"
                 )
             })?;
@@ -219,13 +221,13 @@ impl QueryPlan {
     /// from catalog before building SQL) and the model registration resolved.
     ///
     /// # Errors
-    /// Returns `Err(String)` when the `m2m` JSON blob cannot deserialize into [`M2mContext`],
-    /// or when an `order_by` entry carries a relation `path` — order-by traversal ships in a
-    /// later release (see [`reject_unsupported_order_by`]). WHERE `path`s and the `joins` list
-    /// are accepted here and rendered by the SELECT walkers (#270); mutating walkers reject
-    /// them separately via [`QueryPlan::ensure_no_traversal`].
+    /// Returns `Err(String)` when the `m2m` JSON blob cannot deserialize into
+    /// [`M2mContext`]. WHERE `path`s, `order_by` `path`s, and the `joins` list are all
+    /// accepted here and rendered by the SELECT walkers (#270 WHERE traversal, #271
+    /// `order_by` traversal); mutating walkers reject WHERE traversal separately via
+    /// [`QueryPlan::ensure_no_traversal`] (the Python builder never emits a path-carrying
+    /// `order_by` entry on a mutating payload, so no equivalent guard is needed there).
     pub fn from_ir_payload(payload: QueryIrPayload) -> Result<QueryPlan, String> {
-        reject_unsupported_order_by(&payload)?;
         let m2m: Option<M2mContext> = match payload.m2m {
             Some(value) => serde_json::from_value(value)
                 .map(Some)
@@ -873,20 +875,73 @@ mod tests {
     }
 
     #[test]
-    fn from_ir_payload_rejects_non_empty_order_by_path() {
+    fn from_ir_payload_accepts_non_empty_order_by_path() {
+        // #271 lifts the blanket order_by-path rejection: a path-carrying order_by
+        // entry now builds a plan like any other (the SELECT walkers render it).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
             "model_name": "Pending",
-            "where": [], "limit": null, "offset": null, "m2m": null, "joins": [],
+            "where": [], "limit": null, "offset": null, "m2m": null, "joins": [
+                {"join_type": "inner", "path": [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"}
+                ]}
+            ],
             "order_by": [{"column": "name", "direction": "asc", "path": ["account"]}]
         }))
         .expect("payload deserializes");
 
-        let err = QueryPlan::from_ir_payload(payload)
-            .expect_err("a non-empty order_by path must be rejected until #270 renders joins");
-        assert!(
-            err.contains("path"),
-            "error should mention the unsupported path: {err}"
-        );
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        assert_eq!(plan.order_by[0].path, vec!["account".to_string()]);
+    }
+
+    /// `qualify_column_with_joins` is the render-time seam shared by WHERE and
+    /// `ORDER BY` (#271): an empty path qualifies by the root table, a registered
+    /// path qualifies by its JOIN alias, and an unregistered path is a loud error.
+    #[test]
+    fn qualify_column_with_joins_qualifies_order_by_path_by_join_alias() {
+        let plan = QueryPlan::from_ir_payload(traversal_payload()).expect("plan builds");
+        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+
+        let root_col = super::qualify_column_with_joins(
+            "transaction",
+            &join_plan,
+            "id",
+            &[],
+        )
+        .expect("root column qualifies");
+        let sql = Query::select()
+            .expr(root_col)
+            .to_string(PostgresQueryBuilder)
+            .to_lowercase();
+        assert!(sql.contains("\"transaction\".\"id\""), "got {sql}");
+
+        let path_col = super::qualify_column_with_joins(
+            "transaction",
+            &join_plan,
+            "email",
+            &["account".to_string(), "owner".to_string()],
+        )
+        .expect("path column qualifies by its join alias");
+        let sql = Query::select()
+            .expr(path_col)
+            .to_string(PostgresQueryBuilder)
+            .to_lowercase();
+        assert!(sql.contains("\"j2_owner\".\"email\""), "got {sql}");
+    }
+
+    #[test]
+    fn qualify_column_with_joins_errors_on_order_by_path_without_join_entry() {
+        let plan = QueryPlan::from_ir_payload(traversal_payload()).expect("plan builds");
+        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+
+        let err = super::qualify_column_with_joins(
+            "transaction",
+            &join_plan,
+            "name",
+            &["unregistered".to_string()],
+        )
+        .expect_err("an order_by path with no matching join entry must error");
+        assert!(err.contains("no"), "got {err}");
     }
 
     #[test]

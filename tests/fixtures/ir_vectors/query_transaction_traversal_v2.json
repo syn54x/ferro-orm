@@ -35,6 +35,11 @@
       ],
       "order_by": [
         {
+          "column": "name",
+          "direction": "asc",
+          "path": ["account"]
+        },
+        {
           "column": "id",
           "direction": "asc",
           "path": []
