@@ -149,6 +149,74 @@ pub fn hydrate_model_instance<'py>(
     Ok(instance)
 }
 
+/// Hydrate a projected record (`Row`) from pre-decoded column values (#279).
+///
+/// The record flavor of [`hydrate_model_instance`]: same allocation via
+/// `cls.__new__(cls)`, same decoded-field write path
+/// ([`apply_decoded_fields`]), no `BaseModel.__init__`, no pydantic-core
+/// validation (I-2). Differences, per ADR-0007:
+///
+/// - Decoded fields land in `__pydantic_extra__`, not `__dict__`: a `Row`
+///   declares no static fields, and pydantic serializes/dumps extras (its
+///   `model_config` is `extra="allow"`), so `model_dump()` sees exactly the
+///   projected columns in selection order.
+/// - NO persistence identity: no `__ferro_connection_name`, no
+///   `__ferro_persisted` marker — a record can never masquerade as a row,
+///   and it never enters the identity map (callers must not insert it).
+///
+/// Slot initialization is driven by [`HANDLED_BASEMODEL_SLOTS`] like
+/// [`init_handled_slots`], so the record path fails as loudly as the model
+/// path if pydantic grows a slot this build does not handle.
+///
+/// # Errors
+/// Returns `PyErr` on allocation/slot failure, `RustValue` conversion
+/// failure, or an enum column value its enum class rejects.
+pub fn hydrate_record_instance<'py>(
+    py: Python<'py>,
+    record_cls: &Bound<'py, PyAny>,
+    fields: Vec<(String, RustValue)>,
+    py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
+    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let instance = record_cls.call_method1(pyo3::intern!(py, "__new__"), (record_cls,))?;
+    let extra = pyo3::types::PyDict::new(py);
+    let fields_set = pyo3::types::PySet::empty(py)?;
+
+    apply_decoded_fields(
+        py,
+        record_cls,
+        &extra,
+        &fields_set,
+        fields,
+        py_col_names,
+        enum_classes,
+    )?;
+
+    for slot in HANDLED_BASEMODEL_SLOTS {
+        match *slot {
+            // A Row's own __dict__ stays empty: projected values are pydantic
+            // extras, not declared fields.
+            "__dict__" => {}
+            "__pydantic_fields_set__" => {
+                instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), &fields_set)?;
+            }
+            "__pydantic_extra__" => {
+                instance.setattr(pyo3::intern!(py, "__pydantic_extra__"), &extra)?;
+            }
+            "__pydantic_private__" => {
+                instance.setattr(pyo3::intern!(py, "__pydantic_private__"), py.None())?;
+            }
+            other => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "HANDLED_BASEMODEL_SLOTS lists '{other}' but hydrate_record_instance has \
+                     no initializer for it — add a match arm"
+                )));
+            }
+        }
+    }
+    Ok(instance)
+}
+
 /// Write decoded column values into `dict` and record them in `fields_set`.
 ///
 /// The single materialization path for both fresh hydration and fetch-hit

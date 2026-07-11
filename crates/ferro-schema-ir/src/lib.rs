@@ -420,6 +420,34 @@ mod tests {
     }
 
     #[test]
+    fn query_record_fixture_roundtrip() {
+        // The record-plan golden vector (#279): a projected query's full
+        // payload — predicate, order, limit, and a two-field record plan —
+        // survives a deserialize/serialize round-trip without drift.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v3.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query record fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query record IR must deserialize");
+        let Materialization::Record { fields } = &envelope.payload.materialization else {
+            panic!(
+                "expected a record plan, got {:?}",
+                envelope.payload.materialization
+            );
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "id");
+        assert_eq!(fields[1].name, "amount");
+        let encoded = serde_json::to_value(&envelope).expect("query record IR must serialize");
+        assert_eq!(encoded, ir, "query record round-trip must not drift");
+    }
+
+    #[test]
     fn record_materialization_roundtrips() {
         // The `record` kind deserializes today (#278) even though the runtime
         // rejects it until #279 builds the record walker: the types are the

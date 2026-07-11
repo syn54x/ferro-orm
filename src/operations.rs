@@ -424,6 +424,81 @@ fn reject_unsupported_materialization(plan: &QueryPlan, operation: &str) -> PyRe
     )))
 }
 
+/// Resolve the fetch walker's SELECT-list plan from the query's
+/// materialization (#279).
+///
+/// `root_instances` → `None` (render the root-table asterisk, full
+/// hydration). `record` → the ordered projected column names. The Python
+/// builder validates every field at build time; the per-field checks here are
+/// boundary defense (I-6) for the shapes the record plan already declares but
+/// this epic does not render: a relation `path`, an `expr`, or an output
+/// alias (`name != column`) — all #282, all rejected loudly, never silently
+/// projected wrong.
+///
+/// # Errors
+/// `PyValueError` for `instances` (reserved for joined-row hydration,
+/// #267 stage 2), an empty `record` field list, or a field shape from #282.
+fn projected_columns(plan: &QueryPlan) -> PyResult<Option<Vec<String>>> {
+    let fields = match &plan.materialization {
+        Materialization::RootInstances => return Ok(None),
+        Materialization::Instances => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "materialization kind \"instances\" is reserved for joined-row \
+                 hydration (#267 stage 2) and is not yet implemented.",
+            ));
+        }
+        Materialization::Record { fields } => fields,
+    };
+    if fields.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "record materialization plan carries no fields; a projection must \
+             select at least one column.",
+        ));
+    }
+    let mut columns = Vec::with_capacity(fields.len());
+    for field in fields {
+        if !field.path.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "record field {:?} carries relation path {:?}: traversed \
+                 projection is not yet implemented (#282).",
+                field.name, field.path
+            )));
+        }
+        if field.expr.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "record field {:?} carries an expression: expression fields \
+                 (aggregations) are not yet implemented (#282).",
+                field.name
+            )));
+        }
+        if field.name != field.column {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "record field {:?} aliases column {:?}: output aliases are not \
+                 yet implemented (#282).",
+                field.name, field.column
+            )));
+        }
+        columns.push(field.column.clone());
+    }
+    Ok(Some(columns))
+}
+
+/// Apply a fetch SELECT list: the projected columns of a `record` plan (in
+/// selection order, root-table-qualified) or the root-table asterisk for full
+/// hydration (#279).
+fn apply_select_list(select: &mut SelectStatement, table_name: &str, projected: Option<&[String]>) {
+    match projected {
+        Some(columns) => {
+            for column in columns {
+                select.column((Alias::new(table_name), Alias::new(column.as_str())));
+            }
+        }
+        None => {
+            select.column((Alias::new(table_name), sea_query::Asterisk));
+        }
+    }
+}
+
 /// Reject `limit`/`offset` on mutating operations (FF-A A1, #171).
 ///
 /// Portable SQL has no `UPDATE/DELETE ... LIMIT`. The Python builder raises
@@ -1681,25 +1756,55 @@ pub fn save_bulk_records<'py>(
 
 /// Fetches records for a given model class based on a QueryIR-defined query.
 ///
+/// The query's materialization plan (ADR-0007) selects the result shape:
+/// `root_instances` hydrates complete model instances (identity-map aware);
+/// a `record` plan renders the projected SELECT list and hydrates
+/// `record_cls` records (#279) — no identity map, no persistence identity.
+///
 /// Args:
 ///     cls (PyAny): The Python model class.
 ///     query_ir_json (str): The serialized QueryIR envelope JSON.
+///     record_cls (PyAny | None): Record constructor for a `record` plan
+///         (`Row` today; the seam a future `into=` plugs into). Required for
+///         a record plan, forbidden otherwise.
 ///
 /// Returns:
-///     list[PyAny]: A list of hydrated model instances.
+///     list[PyAny]: Hydrated model instances, or projected records.
 #[pyfunction]
-#[pyo3(signature = (cls, query_ir_json, route))]
+#[pyo3(signature = (cls, query_ir_json, route, record_cls=None))]
 pub fn fetch_filtered<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
+    record_cls: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
 
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
-    reject_unsupported_materialization(&plan, "fetch_filtered")?;
+    let projected = projected_columns(&plan)?;
+    // The record constructor travels with the call, paired to the plan kind:
+    // a record plan requires it, a root plan must not carry one. A mismatch
+    // is a caller bug — fail loud, never fall back (I-6).
+    let record_cls_py = match (&projected, record_cls) {
+        (Some(_), Some(record_cls)) => Some(record_cls.unbind()),
+        (None, None) => None,
+        (Some(_), None) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "fetch_filtered(): a record materialization plan requires a \
+                 record_cls constructor; the Python builder always passes one \
+                 for a projection.",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "fetch_filtered(): record_cls was passed without a record \
+                 materialization plan; full hydration constructs model \
+                 instances.",
+            ));
+        }
+    };
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -1726,7 +1831,7 @@ pub fn fetch_filtered<'py>(
             let pk = schema.meta.pk_col.clone();
 
             let mut select = Query::select();
-            select.column((Alias::new(&table_name), sea_query::Asterisk));
+            apply_select_list(&mut select, &table_name, projected.as_deref());
             select.from(Alias::new(&table_name));
 
             if let Some(m2m) = &plan.m2m {
@@ -1798,7 +1903,18 @@ pub fn fetch_filtered<'py>(
             .fetch_all(&sql, &engine_bind_values)
             .await
             .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-        let parsed_data = typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref());
+        // A record plan skips PK extraction entirely: projected records carry
+        // no persistence identity and never enter the identity map (ADR-0007)
+        // — the projection may not even include the PK column. Decode itself
+        // runs through the model's codec plan either way, so a projected
+        // datetime/uuid/enum/decimal column decodes identically to full
+        // hydration on both backends.
+        let pk_for_decode = if projected.is_some() {
+            None
+        } else {
+            pk_col.as_deref()
+        };
+        let parsed_data = typed_rows_to_parsed_data(rows, &schema_for_decode, pk_for_decode);
 
         Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
@@ -1813,7 +1929,28 @@ pub fn fetch_filtered<'py>(
                     );
                 }
             }
+            // The MODEL's enum catalog, for both paths: a projected native-
+            // enum column hydrates the same enum member as the model field
+            // (decode parity, FF-C C4).
             let enum_classes = crate::hydration::enum_classes_for(py, cls);
+
+            if let Some(record_cls) = record_cls_py {
+                // Record path (#279): direct-to-dict record construction,
+                // deliberately bypassing the identity map — no lookup, no
+                // insert, no refresh of live instances.
+                let record_cls = record_cls.bind(py);
+                for (_, fields) in parsed_data {
+                    let record = crate::hydration::hydrate_record_instance(
+                        py,
+                        record_cls,
+                        fields,
+                        &py_col_names,
+                        &enum_classes,
+                    )?;
+                    results.append(record)?;
+                }
+                return Ok(results.into_any().unbind());
+            }
 
             for (row_pk_val, fields) in parsed_data {
                 if use_identity_map
@@ -3974,6 +4111,136 @@ mod materialization_walker_gate_tests {
                 "must name what the kind is reserved for: {msg}"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod record_select_list_tests {
+    //! Pin the record plan's SELECT-list resolution and rendering (#279):
+    //! projected columns render as an explicit root-qualified column list in
+    //! selection order on both dialects, and the field shapes deferred to
+    //! #282 (paths, aliases, expressions) are rejected loudly at the boundary.
+
+    use super::{apply_select_list, projected_columns, query_plan_from_ir_json};
+    use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder};
+
+    fn plan_with_materialization(materialization: serde_json::Value) -> crate::query::QueryPlan {
+        query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 3,
+                "payload": {
+                    "model_name": "Transaction",
+                    "where": [],
+                    "order_by": [],
+                    "limit": null,
+                    "offset": null,
+                    "m2m": null,
+                    "joins": [],
+                    "materialization": materialization
+                }
+            })
+            .to_string(),
+        )
+        .expect("envelope parses")
+    }
+
+    fn record_fields(fields: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"kind": "record", "fields": fields})
+    }
+
+    #[test]
+    fn record_plan_renders_subset_select_in_selection_order_on_both_dialects() {
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "id", "column": "id", "path": []},
+            {"name": "amount", "column": "amount", "path": []}
+        ])));
+        let projected = projected_columns(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects columns");
+        assert_eq!(projected, vec!["id".to_string(), "amount".to_string()]);
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", Some(&projected));
+        select.from(Alias::new("transaction"));
+
+        let pg = select.to_string(PostgresQueryBuilder);
+        assert_eq!(
+            pg,
+            "SELECT \"transaction\".\"id\", \"transaction\".\"amount\" FROM \"transaction\""
+        );
+        let sqlite = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(
+            !sqlite.contains('*'),
+            "record plan must not render an asterisk: {sqlite}"
+        );
+        let id_pos = sqlite.find("\"id\"").expect("id rendered");
+        let amount_pos = sqlite.find("\"amount\"").expect("amount rendered");
+        assert!(id_pos < amount_pos, "selection order preserved: {sqlite}");
+    }
+
+    #[test]
+    fn root_instances_plan_renders_root_asterisk() {
+        let plan = plan_with_materialization(serde_json::json!({"kind": "root_instances"}));
+        let projected = projected_columns(&plan).expect("root plan resolves");
+        assert!(projected.is_none());
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", projected.as_deref());
+        select.from(Alias::new("transaction"));
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert_eq!(sql, "SELECT \"transaction\".* FROM \"transaction\"");
+    }
+
+    #[test]
+    fn record_field_with_relation_path_is_rejected() {
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "label", "column": "label", "path": ["account"]}
+        ])));
+        let err = projected_columns(&plan).expect_err("path field must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("label"), "must name the field: {msg}");
+        assert!(msg.contains("account"), "must name the path: {msg}");
+        assert!(msg.contains("#282"), "must name the deferred slice: {msg}");
+    }
+
+    #[test]
+    fn record_field_with_alias_is_rejected() {
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "total", "column": "amount", "path": []}
+        ])));
+        let err = projected_columns(&plan).expect_err("aliased field must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("total") && msg.contains("amount"),
+            "must name alias and column: {msg}"
+        );
+    }
+
+    #[test]
+    fn record_field_with_expr_is_rejected() {
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "n", "column": "n", "path": [], "expr": {"agg": "count"}}
+        ])));
+        let err = projected_columns(&plan).expect_err("expr field must be rejected");
+        assert!(err.to_string().contains("expression"), "got {err}");
+    }
+
+    #[test]
+    fn record_plan_with_no_fields_is_rejected() {
+        let plan = plan_with_materialization(record_fields(serde_json::json!([])));
+        let err = projected_columns(&plan).expect_err("empty projection must be rejected");
+        assert!(err.to_string().contains("at least one"), "got {err}");
+    }
+
+    #[test]
+    fn instances_plan_is_rejected() {
+        let plan = plan_with_materialization(serde_json::json!({"kind": "instances"}));
+        let err = projected_columns(&plan).expect_err("instances must be rejected");
+        assert!(
+            err.to_string().contains("joined-row hydration"),
+            "got {err}"
+        );
     }
 }
 

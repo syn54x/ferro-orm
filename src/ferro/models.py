@@ -8,11 +8,12 @@ from typing import (
     ClassVar,
     Literal,
     Self,
+    overload,
 )
 
 if TYPE_CHECKING:
     from .columns import ColumnSpec, RelationSpec
-    from .query import Predicate
+    from .query import Predicate, ProjectedQuery, RowSelector
     from .session import Session
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -528,19 +529,44 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """
         return Query(cls, session=session).where(predicate)
 
+    @overload
     @classmethod
-    def select(cls, *, session: "Session | None" = None) -> Query[Self]:
-        """Start an empty fluent query for this model class
+    def select(cls, *, session: "Session | None" = None) -> Query[Self]: ...
+
+    @overload
+    @classmethod
+    def select(
+        cls, selector: "RowSelector[Self]", *, session: "Session | None" = None
+    ) -> "ProjectedQuery[Self]": ...
+
+    @classmethod
+    def select(
+        cls,
+        *selectors: "RowSelector[Self]",
+        session: "Session | None" = None,
+    ) -> "Query[Self] | ProjectedQuery[Self]":
+        """Start a fluent query, optionally projected to a column subset.
+
+        Bare ``select()`` starts a full query of complete model instances
+        (unchanged). With a lambda selector —
+        ``select(lambda t: (t.id, t.amount))``, or the single-field form
+        ``select(lambda t: t.amount)`` — the query is a projection: its
+        results are :class:`~ferro.query.Row` records in the list-like
+        :class:`~ferro.query.Rows` container, never model instances
+        (ADR-0007). Selected columns validate at build time with
+        did-you-mean.
 
         Returns:
-            A query object scoped to this model class.
+            A query object scoped to this model class; projected when a
+            selector is given.
 
         Examples:
             >>> query = User.select().limit(5)
             >>> isinstance(query, Query)
             True
+            >>> rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # doctest: +SKIP
         """
-        return Query(cls, session=session)
+        return Query(cls, session=session).select(*selectors)
 
     @classmethod
     def using(cls, name: str) -> "ModelConnection[Self]":

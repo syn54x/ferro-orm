@@ -19,15 +19,22 @@ from .nodes import (
     QueryNode,
     QueryProxy,
     RelationProxy,
+    RowSelector,
     _serialize_query_value,
     validate_query_column,
 )
+from .rows import Row, Rows
 
 if TYPE_CHECKING:
     from .._core import RouteHandle
 
 T = TypeVar("T")
 E = TypeVar("E")
+
+# The concrete container type a projected query delivers (parameterized once
+# at import; `into=` record types would parameterize per call). Construction
+# always goes through Rows._wrap — never pydantic validation (ADR-0007).
+_ROWS_OF_ROW: type[Rows[Row]] = Rows[Row]
 
 
 def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
@@ -155,6 +162,76 @@ def _resolve_join_selector(
 def _path_edges(path: tuple[str, ...]) -> list[tuple[str, ...]]:
     """Every edge (prefix of length ≥ 1) of a relation ``path`` (#272)."""
     return [path[:i] for i in range(1, len(path) + 1)]
+
+
+def _resolve_projection_selector(
+    selector: "RowSelector[Any]", model_cls: type
+) -> tuple[str, ...]:
+    """Resolve a ``select()`` lambda selector into projected column names (#279).
+
+    ``selector`` receives a validating :class:`QueryProxy` and returns one
+    column (``lambda t: t.amount``) or a tuple/list of columns
+    (``lambda t: (t.id, t.amount)``). Column names validate at build time with
+    did-you-mean, exactly like ``where()``/``order_by()`` (the proxy raises
+    ``AttributeError`` on a misspelled name before any round-trip).
+
+    Returns:
+        The projected column names, in selection order.
+
+    Raises:
+        TypeError: If an element is a bare relation (``lambda t: t.account``),
+            a comparison (``lambda t: t.id == 1``), or any other non-column
+            value — a projection selects columns.
+        ValueError: If the selection is empty or names a column twice
+            (a duplicate would silently collapse in the record).
+        NotImplementedError: If a selected column traverses a relation
+            (``lambda t: t.account.name``) — traversed projection is designed
+            together with output aliases and aggregations (#282).
+    """
+    result = selector(QueryProxy(model_cls))
+    items = tuple(result) if isinstance(result, (tuple, list)) else (result,)
+    if not items:
+        raise ValueError(
+            "select() projection selected no columns; select at least one "
+            "(e.g. `lambda t: (t.id, t.amount)`), or call select() with no "
+            "arguments for the full query."
+        )
+    columns: list[str] = []
+    for item in items:
+        if isinstance(item, RelationProxy):
+            relation = item._path[-1]
+            raise TypeError(
+                f"select() cannot project the bare relation {relation!r}; "
+                f"select a column on it instead (traversed projection like "
+                f"t.{relation}.<column> is planned, see below) or select root "
+                "columns."
+            )
+        if isinstance(item, QueryNode):
+            raise TypeError(
+                "select() selector returned a comparison, not a column "
+                "(e.g. `lambda t: t.id == 1`); projections select columns "
+                "(`lambda t: t.id`) — put predicates in where()."
+            )
+        if not isinstance(item, FieldProxy):
+            raise TypeError(
+                "select() selector must return a column or a tuple of columns "
+                f"(e.g. `lambda t: (t.id, t.amount)`), got {type(item).__name__}"
+            )
+        if item.path:
+            dotted = ".".join((*item.path, item.column))
+            raise NotImplementedError(
+                f"select() cannot project the traversed column {dotted!r} yet: "
+                "traversed projection is designed together with output aliases "
+                "and aggregations (#282). Project root columns, or fetch the "
+                "related model through its own query."
+            )
+        if item.column in columns:
+            raise ValueError(
+                f"select() projects column {item.column!r} more than once; "
+                "each projected column must be unique."
+            )
+        columns.append(item.column)
+    return tuple(columns)
 
 
 def _target_pk_column(model_cls: type) -> str:
@@ -338,6 +415,69 @@ class Query(Generic[T]):
         new.where_clause.append(node)
         _register_join_paths(node, new._joins)
         return new
+
+    @overload
+    def select(self) -> Self: ...
+
+    @overload
+    def select(self, selector: "RowSelector[T]") -> "ProjectedQuery[T]": ...
+
+    def select(
+        self, *selectors: "RowSelector[T]"
+    ) -> "Self | ProjectedQuery[T]":
+        """Project the query to a column subset, or pass through unchanged.
+
+        Bare ``select()`` keeps meaning "full query": it returns an equivalent
+        query of complete model instances. With a lambda selector
+        (``select(lambda t: (t.id, t.amount))``, or the single-field form
+        ``select(lambda t: t.amount)``) the query becomes a projection: its
+        results are :class:`Row` records in the list-like :class:`Rows`
+        container, never model instances (the complete-instance invariant,
+        ADR-0007). Selected columns validate at build time with did-you-mean,
+        like ``where()`` and ``order_by()``.
+
+        A projected query composes like any other query: ``where()``
+        (relation traversal included), ``order_by()`` (by unselected columns
+        too), ``limit()``/``offset()``, ``first()``, ``count()``, and
+        ``exists()`` all work; ``update()``/``delete()`` and a second
+        ``select()`` raise at build time.
+
+        Args:
+            *selectors: Nothing (full query), or one lambda selector naming
+                root columns.
+
+        Returns:
+            A new query; ``self`` is unchanged. Projected when a selector is
+            given.
+
+        Raises:
+            TypeError: If the selector is not callable or selects non-columns
+                (a bare relation, a comparison).
+            ValueError: If the selection is empty or repeats a column.
+            NotImplementedError: If a selected column traverses a relation
+                (traversed projection lands with #282).
+
+        Examples:
+            >>> rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # doctest: +SKIP
+            >>> rows[0].amount  # doctest: +SKIP
+            Decimal('12.50')
+        """
+        if not selectors:
+            return self._clone()
+        if len(selectors) > 1:
+            raise TypeError(
+                "select() takes a single lambda selector naming the columns "
+                "(e.g. `select(lambda t: (t.id, t.amount))`), got "
+                f"{len(selectors)} arguments"
+            )
+        selector = selectors[0]
+        if not callable(selector):
+            raise TypeError(
+                "select() expected a selector callable "
+                f"(e.g. `lambda t: (t.id, t.amount)`), got {type(selector).__name__}"
+            )
+        columns = _resolve_projection_selector(selector, self.model_cls)
+        return ProjectedQuery(self, columns)
 
     def order_by(
         self,
@@ -636,6 +776,23 @@ class Query(Generic[T]):
             "materialization": {"kind": "root_instances"},
         }
 
+    def _fetch_query_def(self) -> dict[str, Any]:
+        """Build the QueryIR payload for a fetching operation (``all()``).
+
+        Carries the query's own materialization plan — ``root_instances``
+        here, a ``record`` plan on a :class:`ProjectedQuery` (ADR-0007).
+        """
+        return {
+            "model_name": _model_identity(self.model_cls),
+            "where": [node.to_ir_dict() for node in self.where_clause],
+            "order_by": self.order_by_clause,
+            "limit": self._limit,
+            "offset": self._offset,
+            "m2m": self._m2m_context,
+            "joins": self._serialize_joins(),
+            "materialization": self._materialization_ir(),
+        }
+
     async def all(self) -> list[T]:
         """Return all model instances that match the current query
 
@@ -647,16 +804,7 @@ class Query(Generic[T]):
             >>> isinstance(users, list)
             True
         """
-        query_def = {
-            "model_name": _model_identity(self.model_cls),
-            "where": [node.to_ir_dict() for node in self.where_clause],
-            "order_by": self.order_by_clause,
-            "limit": self._limit,
-            "offset": self._offset,
-            "m2m": self._m2m_context,
-            "joins": self._serialize_joins(),
-            "materialization": self._materialization_ir(),
-        }
+        query_def = self._fetch_query_def()
         route = await self._transaction_or_using()
         return await fetch_filtered(
             self.model_cls,
@@ -874,6 +1022,88 @@ class Query(Generic[T]):
     def __repr__(self):
         """Return a developer-friendly representation of the query"""
         return f"<Query model={self.model_cls.__name__} where={self.where_clause}>"
+
+
+class ProjectedQuery(Query[T]):
+    """A query projected to a column subset: results are records, not models.
+
+    Created by ``select()`` with a selector; carries a ``record``
+    materialization plan (ADR-0007), so ``all()`` delivers :class:`Row`
+    records in the list-like :class:`Rows` container and ``first()`` a
+    ``Row | None`` — never model instances (the complete-instance invariant).
+    Projected records bypass the identity map and carry no persistence
+    identity.
+
+    Filtering, ordering, and pagination compose exactly like on
+    :class:`Query`; ``count()``/``exists()`` are unaffected by the
+    projection.
+    """
+
+    def __init__(self, source: Query[T], columns: tuple[str, ...]) -> None:
+        """Project ``source`` to ``columns`` (selection order preserved).
+
+        Copies the source query's state through ``_clone()`` (fresh mutable
+        containers, FF-F F-1); ``source`` is unchanged.
+        """
+        self.__dict__.update(source._clone().__dict__)
+        # Immutable, so chained clones share it safely.
+        self._projection: tuple[str, ...] = columns
+
+    def _materialization_ir(self) -> dict[str, Any]:
+        """Serialize the ``record`` plan: one field per projected column.
+
+        ``name`` is declared separately from ``column`` and each field
+        carries a ``path`` so output aliases and traversed projection (#282)
+        extend this shape without reshaping it; this epic only ever emits
+        ``name == column`` with an empty path.
+        """
+        return {
+            "kind": "record",
+            "fields": [
+                {"name": column, "column": column, "path": []}
+                for column in self._projection
+            ],
+        }
+
+    async def all(self) -> Rows[Row]:  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        """Return the projected records for every matching row.
+
+        Returns:
+            A :class:`Rows` of :class:`Row` records, fields in selection
+            order, wrapped without validation.
+
+        Examples:
+            >>> rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # doctest: +SKIP
+            >>> [r.amount for r in rows]  # doctest: +SKIP
+            [Decimal('12.50'), Decimal('7.00')]
+        """
+        query_def = self._fetch_query_def()
+        route = await self._transaction_or_using()
+        records = await fetch_filtered(
+            self.model_cls,
+            _query_ir_payload_to_json(query_def),
+            route,
+            record_cls=Row,
+        )
+        return _ROWS_OF_ROW._wrap(records)
+
+    async def first(self) -> Row | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        """Return the first matching projected record, or None.
+
+        Examples:
+            >>> row = await Transaction.select(lambda t: t.amount).order_by("id").first()  # doctest: +SKIP
+            >>> row is None or isinstance(row, Row)  # doctest: +SKIP
+            True
+        """
+        results = await self.limit(1).all()
+        return results[0] if results else None
+
+    def __repr__(self):
+        """Return a developer-friendly representation of the projection"""
+        return (
+            f"<ProjectedQuery model={self.model_cls.__name__} "
+            f"columns={list(self._projection)} where={self.where_clause}>"
+        )
 
 
 class Relation(Query[T]):

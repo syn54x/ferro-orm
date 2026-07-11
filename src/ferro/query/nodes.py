@@ -561,3 +561,15 @@ class RelationProxy:
 
 Predicate: TypeAlias = Callable[[QueryProxy[TModel]], QueryNode]
 """Type alias for lambda predicates accepted by :meth:`Query.where`."""
+
+RowSelector: TypeAlias = Callable[
+    [QueryProxy[TModel]],
+    "FieldProxy[Any] | tuple[FieldProxy[Any], ...] | list[FieldProxy[Any]]",
+]
+"""Type alias for lambda selectors accepted by ``select()`` projections.
+
+A selector names root columns — one (``lambda t: t.amount``) or several
+(``lambda t: (t.id, t.amount)``). Returning a comparison (a
+:class:`QueryNode`) fails the static gate: a projection selects columns,
+a predicate belongs in ``where()``.
+"""
