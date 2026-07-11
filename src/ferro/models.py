@@ -539,10 +539,16 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         cls, selector: "RowSelector[Self]", *, session: "Session | None" = None
     ) -> "ProjectedQuery[Self]": ...
 
+    @overload
+    @classmethod
+    def select(
+        cls, *columns: str, session: "Session | None" = None
+    ) -> "ProjectedQuery[Self]": ...
+
     @classmethod
     def select(
         cls,
-        *selectors: "RowSelector[Self]",
+        *selectors: "RowSelector[Self] | str",
         session: "Session | None" = None,
     ) -> "Query[Self] | ProjectedQuery[Self]":
         """Start a fluent query, optionally projected to a column subset.
@@ -553,8 +559,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         ``select(lambda t: t.amount)`` — the query is a projection: its
         results are :class:`~ferro.query.Row` records in the list-like
         :class:`~ferro.query.Rows` container, never model instances
-        (ADR-0007). Selected columns validate at build time with
-        did-you-mean.
+        (ADR-0007). Column-name strings (``select("id", "amount")``) follow
+        ``order_by``'s string contract: root columns only, never mixed with
+        a lambda. Both forms validate at build time with did-you-mean.
 
         Returns:
             A query object scoped to this model class; projected when a

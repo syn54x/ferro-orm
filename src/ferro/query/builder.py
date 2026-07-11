@@ -1,7 +1,19 @@
 """Build fluent query objects that serialize QueryIR payloads for the Rust core."""
 
 import copy
-from typing import TYPE_CHECKING, Any, Callable, Generic, Self, Type, TypeVar, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    Never,
+    NoReturn,
+    Self,
+    Type,
+    TypeVar,
+    cast,
+    overload,
+)
 
 from .._bind_payload import update_bind_payload
 from .._core import (
@@ -196,6 +208,47 @@ def _resolve_projection_selector(
             "(e.g. `lambda t: (t.id, t.amount)`), or call select() with no "
             "arguments for the full query."
         )
+    return _collect_projection_columns(items)
+
+
+def _resolve_projection_strings(
+    names: tuple[str, ...], model_cls: type
+) -> tuple[str, ...]:
+    """Resolve ``select("id", "amount")`` string selectors (#280).
+
+    Exactly ``order_by``'s string contract: root columns only (declared fields
+    plus shadow ``{fk}_id`` columns), validated at build time with
+    did-you-mean. Strings never traverse — a dotted path is rejected
+    pointedly, permanently (PRD #277); traversed projection is lambda-only
+    when it lands (#282).
+
+    Raises:
+        ValueError: For a dotted path, or a column named twice.
+        AttributeError: For a name that is not a queryable column
+            (did-you-mean, from :func:`validate_query_column`).
+    """
+    columns: list[str] = []
+    for name in names:
+        if "." in name:
+            raise ValueError(
+                f"select() string selectors name root columns only and never "
+                f"traverse: {name!r} is not a column. String paths are "
+                "rejected permanently; traversed projection will be "
+                "lambda-only when it lands (#282). Select root columns "
+                '(e.g. select("id", "amount")).'
+            )
+        validate_query_column(model_cls, name)
+        if name in columns:
+            raise ValueError(
+                f"select() projects column {name!r} more than once; "
+                "each projected column must be unique."
+            )
+        columns.append(name)
+    return tuple(columns)
+
+
+def _collect_projection_columns(items: tuple[Any, ...]) -> tuple[str, ...]:
+    """Validate a lambda selector's resolved items into column names (#279)."""
     columns: list[str] = []
     for item in items:
         if isinstance(item, RelationProxy):
@@ -422,19 +475,25 @@ class Query(Generic[T]):
     @overload
     def select(self, selector: "RowSelector[T]") -> "ProjectedQuery[T]": ...
 
+    @overload
+    def select(self, *columns: str) -> "ProjectedQuery[T]": ...
+
     def select(
-        self, *selectors: "RowSelector[T]"
+        self, *selectors: "RowSelector[T] | str"
     ) -> "Self | ProjectedQuery[T]":
         """Project the query to a column subset, or pass through unchanged.
 
         Bare ``select()`` keeps meaning "full query": it returns an equivalent
         query of complete model instances. With a lambda selector
         (``select(lambda t: (t.id, t.amount))``, or the single-field form
-        ``select(lambda t: t.amount)``) the query becomes a projection: its
-        results are :class:`Row` records in the list-like :class:`Rows`
-        container, never model instances (the complete-instance invariant,
-        ADR-0007). Selected columns validate at build time with did-you-mean,
-        like ``where()`` and ``order_by()``.
+        ``select(lambda t: t.amount)``) — the documented style — the query
+        becomes a projection: its results are :class:`Row` records in the
+        list-like :class:`Rows` container, never model instances (the
+        complete-instance invariant, ADR-0007). Column-name strings
+        (``select("id", "amount")``) follow ``order_by``'s string contract
+        exactly: root columns only, never traversal, never mixed with a
+        lambda in one call. Both forms validate at build time with
+        did-you-mean.
 
         A projected query composes like any other query: ``where()``
         (relation traversal included), ``order_by()`` (by unselected columns
@@ -443,18 +502,20 @@ class Query(Generic[T]):
         ``select()`` raise at build time.
 
         Args:
-            *selectors: Nothing (full query), or one lambda selector naming
-                root columns.
+            *selectors: Nothing (full query), one lambda selector naming root
+                columns, or column-name strings.
 
         Returns:
             A new query; ``self`` is unchanged. Projected when a selector is
             given.
 
         Raises:
-            TypeError: If the selector is not callable or selects non-columns
-                (a bare relation, a comparison).
-            ValueError: If the selection is empty or repeats a column.
-            NotImplementedError: If a selected column traverses a relation
+            TypeError: If the selector is not callable/strings, selects
+                non-columns (a bare relation, a comparison), or mixes strings
+                with a lambda in one call.
+            ValueError: If the selection is empty, repeats a column, or a
+                string is a dotted path (strings never traverse).
+            NotImplementedError: If a lambda selects a traversed column
                 (traversed projection lands with #282).
 
         Examples:
@@ -464,6 +525,17 @@ class Query(Generic[T]):
         """
         if not selectors:
             return self._clone()
+        if any(isinstance(selector, str) for selector in selectors):
+            if not all(isinstance(selector, str) for selector in selectors):
+                raise TypeError(
+                    "select() cannot mix column-name strings and a lambda "
+                    "selector in one call; use one form "
+                    '(select("id", "amount") or '
+                    "select(lambda t: (t.id, t.amount)))."
+                )
+            names: tuple[str, ...] = selectors  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+            columns = _resolve_projection_strings(names, self.model_cls)
+            return ProjectedQuery(self, columns)
         if len(selectors) > 1:
             raise TypeError(
                 "select() takes a single lambda selector naming the columns "
@@ -473,10 +545,14 @@ class Query(Generic[T]):
         selector = selectors[0]
         if not callable(selector):
             raise TypeError(
-                "select() expected a selector callable "
+                "select() expected a selector callable or column-name strings "
                 f"(e.g. `lambda t: (t.id, t.amount)`), got {type(selector).__name__}"
             )
-        columns = _resolve_projection_selector(selector, self.model_cls)
+        # Strings were dispatched above, so the lone selector is the lambda
+        # form; the tuple element type is too wide for the checker to see it.
+        columns = _resolve_projection_selector(
+            cast("RowSelector[T]", selector), self.model_cls
+        )
         return ProjectedQuery(self, columns)
 
     def order_by(
@@ -1097,6 +1173,53 @@ class ProjectedQuery(Query[T]):
         """
         results = await self.limit(1).all()
         return results[0] if results else None
+
+    def select(self, *selectors: "RowSelector[T] | str") -> NoReturn:  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        """Reject a second projection: it would change the result type
+        mid-chain (#280).
+
+        Raises:
+            ValueError: Always — build the projection in one ``select()``
+                call, or start a new query from the model.
+        """
+        raise ValueError(
+            "select() was already applied to this query; replacing a "
+            "projection changes the result type mid-chain. Name every "
+            "projected column in one select() call, or start a new query "
+            "from the model."
+        )
+
+    # `self: Never` makes mutating a projected query a STATIC error at the
+    # call site (pinned by tests/static_fixtures/bad_projections.py) while the
+    # runtime bodies raise at build time — synchronously, at the call, before
+    # any coroutine or SQL exists (#280). A projection is a read shape;
+    # silently ignoring it would make select(...) a no-op on mutations.
+
+    def update(self: Never, **fields: Any) -> NoReturn:  # type: ignore[override]
+        """Reject ``update()`` on a projected query (#280).
+
+        Raises:
+            ValueError: Always — mutate through an unprojected query
+                (``Model.where(...).update(...)``).
+        """
+        raise ValueError(
+            "update() is not supported on a projected query: a projection is "
+            "a read shape. Build the mutation from the model instead "
+            "(e.g. Model.where(...).update(...))."
+        )
+
+    def delete(self: Never) -> NoReturn:  # type: ignore[override]
+        """Reject ``delete()`` on a projected query (#280).
+
+        Raises:
+            ValueError: Always — mutate through an unprojected query
+                (``Model.where(...).delete()``).
+        """
+        raise ValueError(
+            "delete() is not supported on a projected query: a projection is "
+            "a read shape. Build the mutation from the model instead "
+            "(e.g. Model.where(...).delete())."
+        )
 
     def __repr__(self):
         """Return a developer-friendly representation of the projection"""

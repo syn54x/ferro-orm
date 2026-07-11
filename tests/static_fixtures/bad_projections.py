@@ -29,3 +29,17 @@ async def _row_where_model_expected() -> None:
     one: BadPTxn | None = await BadPTxn.select(lambda t: t.id).first()
 
     del txns, one
+
+
+# Mutating a projected query fails statically (#280): ProjectedQuery's
+# update()/delete() take `self: Never`, so each call site reports
+# invalid-argument-type. One misuse per function — an earlier NoReturn await
+# would mark the rest of the body unreachable and suppress its diagnostic.
+
+
+async def _update_on_a_projection() -> None:
+    await BadPTxn.select(lambda t: (t.id,)).update(amount=1)
+
+
+async def _delete_on_a_projection() -> None:
+    await BadPTxn.select(lambda t: (t.id,)).delete()

@@ -241,6 +241,99 @@ class TestSelectorValidation:
 
 
 # ---------------------------------------------------------------------------
+# String selectors (#280): exactly order_by's string contract.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_string_selectors_behave_identically_to_the_lambda_form(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_transactions()
+
+        via_strings = await PSTransaction.select("amount", "id").order_by("id").all()
+        via_lambda = await (
+            PSTransaction.select(lambda t: (t.amount, t.id)).order_by("id").all()
+        )
+
+        assert via_strings.model_dump() == via_lambda.model_dump()
+        assert list(via_strings[0].model_dump()) == ["amount", "id"]
+
+
+@pytest.mark.asyncio
+async def test_string_selector_projects_shadow_fk_column(db_url):
+    """Shadow ``{fk}_id`` columns are queryable columns, so they project."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_transactions()
+
+        row = await PSTransaction.select("id", "account_id").order_by("id").first()
+
+        assert row is not None
+        assert row.account_id == 1
+
+
+class TestStringSelectorValidation:
+    def test_misspelled_string_raises_with_did_you_mean(self):
+        with pytest.raises(AttributeError, match="Did you mean 'amount'"):
+            PSTransaction.select("id", "amonut")
+
+    def test_dotted_string_path_raises_pointedly(self):
+        with pytest.raises(ValueError, match="never traverse.*lambda-only"):
+            PSTransaction.select("account.label")
+
+    def test_mixing_strings_and_lambda_raises(self):
+        with pytest.raises(TypeError, match="cannot mix column-name strings"):
+            PSTransaction.select("id", lambda t: t.amount)  # type: ignore[call-overload]  # ty: ignore[no-matching-overload]
+
+    def test_mixing_lambda_and_strings_raises(self):
+        with pytest.raises(TypeError, match="cannot mix column-name strings"):
+            PSTransaction.select(lambda t: t.amount, "id")  # type: ignore[call-overload]  # ty: ignore[no-matching-overload]
+
+    def test_duplicate_string_column_raises(self):
+        with pytest.raises(ValueError, match="'id' more than once"):
+            PSTransaction.select("id", "id")
+
+
+# ---------------------------------------------------------------------------
+# Mutation and double-select guardrails (#280): build-time, before any SQL.
+# ---------------------------------------------------------------------------
+
+
+class TestProjectedQueryGuardrails:
+    """These misuses raise synchronously at the call — no coroutine, no
+    connection, no DB round-trip (no ``ferro.connect`` in this class)."""
+
+    def test_update_on_projected_query_raises_before_any_round_trip(self):
+        projected = PSTransaction.select(lambda t: (t.id,))
+        with pytest.raises(
+            ValueError, match=r"update\(\) is not supported on a projected query"
+        ):
+            projected.update(note="x")  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+    def test_delete_on_projected_query_raises_before_any_round_trip(self):
+        projected = PSTransaction.select(lambda t: (t.id,))
+        with pytest.raises(
+            ValueError, match=r"delete\(\) is not supported on a projected query"
+        ):
+            projected.delete()  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+    def test_double_select_raises_at_build_time(self):
+        projected = PSTransaction.select(lambda t: (t.id,))
+        with pytest.raises(
+            ValueError, match=r"select\(\) was already applied to this query"
+        ):
+            projected.select(lambda t: (t.amount,))
+
+    def test_double_select_with_strings_raises_too(self):
+        projected = PSTransaction.select("id")
+        with pytest.raises(
+            ValueError, match=r"select\(\) was already applied to this query"
+        ):
+            projected.select("amount")
+
+
+# ---------------------------------------------------------------------------
 # Verb composition (PRD #277 verb table).
 # ---------------------------------------------------------------------------
 
