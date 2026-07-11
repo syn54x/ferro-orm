@@ -6,7 +6,7 @@ Ferro connects models with foreign keys, zero-boilerplate reverse lookups, and a
 
 Relationships are **lazy** — nothing is fetched until you ask for it:
 
-- **Forward relations** (a `ForeignKey` field): `await post.author` performs one query and returns the related instance.
+- **Forward relations** (a `ForeignKey` field): `await post.author` performs one query and returns the related instance. A query can also deliver the relation already **populated** — `Post.select().include(lambda p: p.author)` makes `post.author` a plain attribute, no await, no extra query (see [Populated relations](#populated-relations)).
 - **Reverse relations** (a `BackRef` field): `author.posts` is a chainable query — filter, order, and slice it before awaiting a terminal.
 
 A forward `ForeignKey(related_name="x")` always pairs with a reverse field named `x` on the target model. The pairing is **required and checked at `connect()`** — a `ForeignKey` whose `related_name` has no matching `BackRef()` on the target raises at connect time.
@@ -36,6 +36,18 @@ The most common shape: a `ForeignKey` on the "child" model, declared as `Annotat
 For every `ForeignKey` field (e.g. `team`), Ferro creates a shadow scalar column and matching Pydantic field named `{field}_id` (e.g. `team_id`) holding the related row's primary key. Its Python type follows the target model's primary-key annotation. Read it or filter on it like any other column — `Player.where(lambda t: t.team_id == team.id)` — with no extra query.
 
 To filter or order by a column on the *related* model, a query lambda can traverse the relation itself (`Player.where(lambda player: player.team.name == "Rustaceans")`) — see [Querying Across Relationships](queries.md#querying-across-relationships).
+
+### Populated relations
+
+Awaiting a forward relation in a loop is the classic N+1 pattern — each access is a query. When a query knows it will read a relation, ask for it up front with `include()` and the relation arrives **populated**: a plain attribute holding the complete related instance, fetched in the same single statement as the roots:
+
+```python
+--8<-- "docs/examples/populated_relations.py:basic"
+```
+
+A relation is populated only on instances an including query delivered (or refreshed); everywhere else the awaitable form above keeps working, unchanged. Nullable FKs populate truthfully — `transaction.account` is `None` (not a coroutine) when the row has no account. The full semantics — membership preservation, multi-hop paths, identity-map behavior, and the refresh rule — live in [Populating Relations with include()](queries.md#populating-relations-with-include).
+
+`include()` covers **forward** foreign keys only. Populating a `BackRef` collection or an M2M set is a separate future mechanism; until it lands, reverse relations stay chainable queries (`await author.posts.all()`).
 
 ## One-to-One
 

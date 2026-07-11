@@ -70,9 +70,9 @@ class INTransaction(Model):
     amount: int = 0
     note: str = ""
     account: Annotated[INAccount | None, ForeignKey(related_name="transactions")] = None
-    category: Annotated[INCategory | None, ForeignKey(related_name="transactions")] = (
-        None
-    )
+    category: Annotated[
+        INCategory | None, ForeignKey(related_name="transactions")
+    ] = None
 
 
 class INMAuthor(Model):
@@ -319,9 +319,7 @@ async def test_populated_typed_columns_equal_a_direct_query(db_url):
 
     # Sessionless on purpose: distinct objects, so equality is decode parity,
     # not identity.
-    user = await (
-        INTyUser.using("default").select().include(lambda u: u.profile).first()
-    )
+    user = await INTyUser.using("default").select().include(lambda u: u.profile).first()
     direct = await INTyProfile.using("default").select().first()
 
     assert user is not None and direct is not None
