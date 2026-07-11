@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_transaction_record_v3",
+  "vector_name": "query_transaction_record_v4",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 3,
+    "ir_version": 4,
     "payload": {
       "model_name": "Transaction",
       "where": [

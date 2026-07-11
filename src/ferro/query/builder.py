@@ -52,17 +52,18 @@ _ROWS_OF_ROW: type[Rows[Row]] = Rows[Row]
 def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
     """Serialize a QueryIR payload into a versioned IR envelope JSON string.
 
-    Always emits ``ir_version: 3`` (#278 — unconditional bump, exactly like v2
-    at #269; there is no v1 or v2 envelope left anywhere). Python and Rust ship
-    in one wheel, so a single supported version is the whole contract
-    (#267 Implementation Decisions).
+    Always emits ``ir_version: 4`` (#285 — unconditional bump, exactly like v3
+    at #278 and v2 at #269; there is no earlier envelope left anywhere). v4
+    gives the ``instances`` materialization kind its field shape (``paths`` of
+    hop facts). Python and Rust ship in one wheel, so a single supported
+    version is the whole contract (#267 Implementation Decisions).
     """
     import json
 
     return json.dumps(
         {
             "ir_kind": "query",
-            "ir_version": 3,
+            "ir_version": 4,
             "payload": _serialize_query_value(query_payload),
         }
     )
