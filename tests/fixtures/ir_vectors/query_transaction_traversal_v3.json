@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_transaction_traversal_v2",
+  "vector_name": "query_transaction_traversal_v3",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 2,
+    "ir_version": 3,
     "payload": {
       "model_name": "Transaction",
       "where": [
@@ -19,7 +19,10 @@
               "kind": "string",
               "value": "owner@ferro.dev"
             },
-            "path": ["account", "owner"]
+            "path": [
+              "account",
+              "owner"
+            ]
           },
           "right": {
             "node_kind": "leaf",
@@ -37,7 +40,9 @@
         {
           "column": "name",
           "direction": "asc",
-          "path": ["account"]
+          "path": [
+            "account"
+          ]
         },
         {
           "column": "id",
@@ -77,7 +82,10 @@
             }
           ]
         }
-      ]
+      ],
+      "materialization": {
+        "kind": "root_instances"
+      }
     }
   }
 }

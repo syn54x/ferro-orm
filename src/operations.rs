@@ -13,7 +13,7 @@ use crate::state::{
     engine_for_connection, register_session, session_state, unregister_session,
 };
 use dashmap::DashMap;
-use ferro_schema_ir::QueryIrPayload;
+use ferro_schema_ir::{Materialization, QueryIrPayload};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, Condition, Expr, Iden, InsertStatement, JoinType, OnConflict, Order,
@@ -243,18 +243,18 @@ fn tx_remove(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<Transacti
     Ok(TRANSACTION_REGISTRY.remove(tx_id).map(|(_, handle)| handle))
 }
 
-/// The only QueryIR version this build accepts (#269, #267 Implementation Decisions).
+/// The only QueryIR version this build accepts (#269, #278).
 ///
 /// Python and Rust ship in one wheel, so there is exactly one supported version at any
 /// time — no negotiation, no fallback. A mismatch can only mean a mixed build (a stale
 /// `.so` next to a rebuilt Python package, or vice versa).
-const SUPPORTED_QUERY_IR_VERSION: u32 = 2;
+const SUPPORTED_QUERY_IR_VERSION: u32 = 3;
 
 /// Envelope shell used only to read `ir_kind`/`ir_version` before committing to a strict
-/// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real v1 payload (no
-/// `joins`/`path` fields) must fail on the version check below with an actionable
-/// message, not on a generic "missing field" serde error from parsing a payload shape
-/// this build no longer understands.
+/// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real v1/v2 payload
+/// (no `joins`/`path` fields, no `materialization` section) must fail on the version
+/// check below with an actionable message, not on a generic "missing field" serde error
+/// from parsing a payload shape this build no longer understands.
 #[derive(Debug, Clone, Deserialize)]
 struct QueryIrEnvelope {
     ir_kind: String,
@@ -397,6 +397,31 @@ fn reject_traversal_on_mutation(plan: &QueryPlan, operation: &str) -> PyResult<(
              primary keys first and {operation} by primary-key set."
         ))
     })
+}
+
+/// Reject a materialization plan this walker does not implement (#278).
+///
+/// Every query carries exactly one plan (ADR-0007). `root_instances` is the
+/// only kind the non-projecting walkers accept: `record` is the partial-select
+/// plan (built by the projecting fetch path, #279 — `count()`/`exists()` are
+/// unaffected by projection and mutations reject projection at build time, so
+/// the Python builder never emits `record` to any other walker); `instances`
+/// is reserved for joined-row hydration (#267 stage 2) and not yet
+/// implemented anywhere. A disallowed kind here is a loud error, never a
+/// silent fallback to full hydration (I-6).
+fn reject_unsupported_materialization(plan: &QueryPlan, operation: &str) -> PyResult<()> {
+    let kind = match &plan.materialization {
+        Materialization::RootInstances => return Ok(()),
+        Materialization::Record { .. } => "record",
+        Materialization::Instances => "instances",
+    };
+    Err(pyo3::exceptions::PyValueError::new_err(format!(
+        "{operation}() does not support materialization kind {kind:?}: this \
+         walker materializes complete root instances only (\"root_instances\"). \
+         \"record\" is the partial-select plan and applies to projecting \
+         fetches only; \"instances\" is reserved for joined-row hydration and \
+         is not yet implemented."
+    )))
 }
 
 /// Reject `limit`/`offset` on mutating operations (FF-A A1, #171).
@@ -1674,6 +1699,7 @@ pub fn fetch_filtered<'py>(
     let cls_py = cls.unbind();
 
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    reject_unsupported_materialization(&plan, "fetch_filtered")?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -1859,6 +1885,9 @@ pub fn count_filtered(
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    // count() is unaffected by projection (PRD #277 verb table): the Python
+    // builder always emits root_instances on count payloads, projected or not.
+    reject_unsupported_materialization(&plan, "count_filtered")?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -2079,6 +2108,7 @@ pub fn delete_filtered(
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     reject_pagination_on_mutation(&plan, "delete")?;
     reject_traversal_on_mutation(&plan, "delete")?;
+    reject_unsupported_materialization(&plan, "delete")?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -2154,6 +2184,7 @@ pub fn update_filtered<'py>(
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     reject_pagination_on_mutation(&plan, "update")?;
     reject_traversal_on_mutation(&plan, "update")?;
+    reject_unsupported_materialization(&plan, "update")?;
     let update_inputs = bind_inputs_from_py(&updates)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -3655,7 +3686,7 @@ mod mutation_pagination_guard_tests {
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 2,
+            "ir_version": 3,
             "payload": {
                 "model_name": "Widget",
                 "where": [{
@@ -3666,7 +3697,7 @@ mod mutation_pagination_guard_tests {
                     "path": []
                 }],
                 "order_by": [],
-                "m2m": null,
+                "m2m": null, "materialization": {"kind": "root_instances"},
                 "joins": []
             }
         })
@@ -3725,8 +3756,64 @@ mod mutation_pagination_guard_tests {
 mod query_ir_version_gate_tests {
     use super::query_plan_from_ir_json;
 
-    fn v2_envelope() -> serde_json::Value {
+    fn v3_envelope() -> serde_json::Value {
         serde_json::json!({
+            "ir_kind": "query",
+            "ir_version": 3,
+            "payload": {
+                "model_name": "Widget",
+                "where": [],
+                "order_by": [],
+                "limit": null,
+                "offset": null,
+                "m2m": null,
+                "joins": [],
+                "materialization": {"kind": "root_instances"}
+            }
+        })
+    }
+
+    /// Assert a rejected envelope's message names the received version, this
+    /// build's supported version (3), and the one-wheel fix — the actionable
+    /// shape pinned since the v1-at-v2 bump (#269), re-pinned at v3 (#278).
+    fn assert_actionable_version_rejection(err: pyo3::PyErr, received: char) {
+        pyo3::Python::attach(|py| {
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        });
+        let msg = err.to_string();
+        assert!(
+            msg.contains(received),
+            "message should name the received version: {msg}"
+        );
+        assert!(
+            msg.contains('3'),
+            "message should name the supported version: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("one wheel"),
+            "message should explain Python/Rust ship in one wheel: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("reinstall") || msg.to_lowercase().contains("rebuild"),
+            "message should tell the caller how to fix a mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_version_3() {
+        query_plan_from_ir_json(&v3_envelope().to_string())
+            .expect("a well-formed v3 envelope must be accepted");
+    }
+
+    /// Contract test (#278 acceptance criteria, mirroring the v1-at-v2
+    /// precedent): a v2 envelope — with a real v2 payload that predates the
+    /// `materialization` section entirely, as any real v2 emitter would
+    /// produce — must be rejected on the version check with an actionable
+    /// message, not on a serde "missing field" error from strict-parsing a
+    /// payload shape this build no longer understands.
+    #[test]
+    fn rejects_v2_envelope_with_actionable_message() {
+        let v2_envelope = serde_json::json!({
             "ir_kind": "query",
             "ir_version": 2,
             "payload": {
@@ -3738,20 +3825,15 @@ mod query_ir_version_gate_tests {
                 "m2m": null,
                 "joins": []
             }
-        })
+        });
+
+        let err = query_plan_from_ir_json(&v2_envelope.to_string())
+            .expect_err("a v2 envelope must be rejected");
+        assert_actionable_version_rejection(err, '2');
     }
 
-    #[test]
-    fn accepts_version_2() {
-        query_plan_from_ir_json(&v2_envelope().to_string())
-            .expect("a well-formed v2 envelope must be accepted");
-    }
-
-    /// Contract test (#269 acceptance criteria): a v1 envelope — including one
-    /// that predates the `joins`/`path` fields entirely, as any real v1 emitter
-    /// would produce — must be rejected with a message naming the version
-    /// actually received, this build's supported version, and that Python/Rust
-    /// ship in one wheel (so a mismatch means mixed builds).
+    /// A v1 envelope (no `joins`/`path`/`materialization`) stays rejected the
+    /// same way — the gate is "exactly one supported version", not a range.
     #[test]
     fn rejects_v1_envelope_with_actionable_message() {
         let v1_envelope = serde_json::json!({
@@ -3769,40 +3851,129 @@ mod query_ir_version_gate_tests {
 
         let err = query_plan_from_ir_json(&v1_envelope.to_string())
             .expect_err("a v1 envelope must be rejected");
-        pyo3::Python::attach(|py| {
-            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
-        });
-        let msg = err.to_string();
-        assert!(
-            msg.contains('1'),
-            "message should name the received version: {msg}"
-        );
-        assert!(
-            msg.contains('2'),
-            "message should name the supported version: {msg}"
-        );
-        assert!(
-            msg.to_lowercase().contains("one wheel"),
-            "message should explain Python/Rust ship in one wheel: {msg}"
-        );
-        assert!(
-            msg.to_lowercase().contains("reinstall") || msg.to_lowercase().contains("rebuild"),
-            "message should tell the caller how to fix a mismatch: {msg}"
-        );
+        assert_actionable_version_rejection(err, '1');
     }
 
     #[test]
     fn rejects_unsupported_future_version() {
-        let mut envelope = v2_envelope();
-        envelope["ir_version"] = serde_json::json!(3);
+        let mut envelope = v3_envelope();
+        envelope["ir_version"] = serde_json::json!(4);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("an unsupported future version must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains('3'),
+            msg.contains('4'),
             "message should name the received version: {msg}"
         );
+    }
+
+    /// An unknown materialization kind fails the strict payload parse loudly,
+    /// naming the bad kind and the supported ones (#278).
+    #[test]
+    fn rejects_unknown_materialization_kind() {
+        let mut envelope = v3_envelope();
+        envelope["payload"]["materialization"] = serde_json::json!({"kind": "row_dicts"});
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("an unknown materialization kind must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("row_dicts"), "must name the bad kind: {msg}");
+        assert!(
+            msg.contains("root_instances"),
+            "must name the supported kinds: {msg}"
+        );
+    }
+
+    /// A v3 payload with NO materialization section fails the strict parse:
+    /// the plan travels with the query as data (ADR-0007), never defaulted.
+    #[test]
+    fn rejects_v3_payload_missing_materialization() {
+        let mut envelope = v3_envelope();
+        envelope["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("materialization");
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v3 payload without a materialization section must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("materialization"),
+            "must name the missing section: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod materialization_walker_gate_tests {
+    //! Pin the runtime rejection of declared-but-unimplemented materialization
+    //! kinds (#278): the types deserialize, the walkers refuse.
+
+    use super::{query_plan_from_ir_json, reject_unsupported_materialization};
+
+    fn plan_with_kind(kind: serde_json::Value) -> crate::query::QueryPlan {
+        query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 3,
+                "payload": {
+                    "model_name": "Widget",
+                    "where": [],
+                    "order_by": [],
+                    "limit": null,
+                    "offset": null,
+                    "m2m": null,
+                    "joins": [],
+                    "materialization": kind
+                }
+            })
+            .to_string(),
+        )
+        .expect("envelope parses")
+    }
+
+    #[test]
+    fn root_instances_passes_every_walker_gate() {
+        let plan = plan_with_kind(serde_json::json!({"kind": "root_instances"}));
+        for operation in ["fetch_filtered", "count_filtered", "update", "delete"] {
+            assert!(reject_unsupported_materialization(&plan, operation).is_ok());
+        }
+    }
+
+    #[test]
+    fn record_kind_is_rejected_loudly_by_non_projecting_walkers() {
+        let plan = plan_with_kind(serde_json::json!({
+            "kind": "record",
+            "fields": [{"name": "id", "column": "id", "path": []}]
+        }));
+        pyo3::Python::attach(|py| {
+            let err = reject_unsupported_materialization(&plan, "count_filtered")
+                .expect_err("record must be rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let msg = err.to_string();
+            assert!(msg.contains("record"), "must name the kind: {msg}");
+            assert!(
+                msg.contains("count_filtered"),
+                "must name the operation: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn instances_kind_is_rejected_loudly() {
+        let plan = plan_with_kind(serde_json::json!({"kind": "instances"}));
+        pyo3::Python::attach(|py| {
+            let err = reject_unsupported_materialization(&plan, "fetch_filtered")
+                .expect_err("instances must be rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let msg = err.to_string();
+            assert!(msg.contains("instances"), "must name the kind: {msg}");
+            assert!(
+                msg.contains("joined-row hydration"),
+                "must name what the kind is reserved for: {msg}"
+            );
+        });
     }
 }
 
@@ -3824,7 +3995,7 @@ mod mutation_qualification_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 2,
+                "ir_version": 3,
                 "payload": {
                     "model_name": "Widget",
                     "where": [{
@@ -3835,7 +4006,7 @@ mod mutation_qualification_tests {
                         "path": []
                     }],
                     "order_by": [],
-                    "m2m": null,
+                    "m2m": null, "materialization": {"kind": "root_instances"},
                     "joins": []
                 }
             })
@@ -3910,7 +4081,7 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 2,
+                "ir_version": 3,
                 "payload": {
                     "model_name": "Transaction",
                     "where": [{
@@ -3921,7 +4092,7 @@ mod select_join_render_tests {
                         "path": ["account"]
                     }],
                     "order_by": [{"column": "name", "direction": "asc", "path": ["account"]}],
-                    "limit": null, "offset": null, "m2m": null,
+                    "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
                     "joins": [
                         {"join_type": "inner", "path": [
                             {"relation": "account", "from_column": "account_id",
@@ -4016,11 +4187,11 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 2,
+                "ir_version": 3,
                 "payload": {
                     "model_name": model_name,
                     "where": [], "order_by": [],
-                    "limit": null, "offset": null, "m2m": null,
+                    "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
                     "joins": joins
                 }
             })
@@ -4038,7 +4209,7 @@ mod select_join_render_tests {
         let plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 2,
+                "ir_version": 3,
                 "payload": {
                     "model_name": "Transaction",
                     "where": [{
@@ -4048,7 +4219,7 @@ mod select_join_render_tests {
                         "value": {"kind": "int", "value": 7},
                         "path": []
                     }],
-                    "order_by": [], "limit": null, "offset": null, "m2m": null,
+                    "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
                     "joins": []
                 }
             })

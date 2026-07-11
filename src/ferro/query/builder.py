@@ -33,16 +33,17 @@ E = TypeVar("E")
 def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
     """Serialize a QueryIR payload into a versioned IR envelope JSON string.
 
-    Always emits ``ir_version: 2`` (#269 — unconditional bump; there is no v1
-    envelope left anywhere). Python and Rust ship in one wheel, so a single
-    supported version is the whole contract (#267 Implementation Decisions).
+    Always emits ``ir_version: 3`` (#278 — unconditional bump, exactly like v2
+    at #269; there is no v1 or v2 envelope left anywhere). Python and Rust ship
+    in one wheel, so a single supported version is the whole contract
+    (#267 Implementation Decisions).
     """
     import json
 
     return json.dumps(
         {
             "ir_kind": "query",
-            "ir_version": 2,
+            "ir_version": 3,
             "payload": _serialize_query_value(query_payload),
         }
     )
@@ -548,6 +549,14 @@ class Query(Generic[T]):
         new._offset = value
         return new
 
+    def _materialization_ir(self) -> dict[str, Any]:
+        """Serialize this query's materialization plan (ADR-0007, v3).
+
+        Every fetching query carries exactly one plan on the wire; a query
+        without a projection materializes complete root instances.
+        """
+        return {"kind": "root_instances"}
+
     def _serialize_joins(self) -> list[dict[str, Any]]:
         """Serialize collected relation paths into QueryIR ``joins`` entries.
 
@@ -622,6 +631,9 @@ class Query(Generic[T]):
             "order_by": [],
             "m2m": None,
             "joins": [],
+            # A mutation never materializes a projected result; projection on
+            # a mutating query is rejected before this payload is built.
+            "materialization": {"kind": "root_instances"},
         }
 
     async def all(self) -> list[T]:
@@ -643,6 +655,7 @@ class Query(Generic[T]):
             "offset": self._offset,
             "m2m": self._m2m_context,
             "joins": self._serialize_joins(),
+            "materialization": self._materialization_ir(),
         }
         route = await self._transaction_or_using()
         return await fetch_filtered(
@@ -670,6 +683,10 @@ class Query(Generic[T]):
             "offset": None,
             "m2m": self._m2m_context,
             "joins": self._serialize_joins(),
+            # count() is unaffected by projection (PRD #277 verb table): it
+            # materializes a scalar, so the plan is root_instances even on a
+            # projected query.
+            "materialization": {"kind": "root_instances"},
         }
         route = await self._transaction_or_using()
         return await count_filtered(
