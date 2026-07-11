@@ -113,6 +113,101 @@ pub struct JoinPlan {
     pub prefix_table: HashMap<Vec<String>, String>,
 }
 
+/// How a [`JoinPlanBuilder`] types an edge it materializes for the first time.
+enum EdgeType<'a> {
+    /// A `joins`-section edge: `"left"` iff some `"left"` entry covers it
+    /// (the whole-path rule, #272), else `"inner"`.
+    Resolved(&'a HashSet<Vec<String>>),
+    /// An include-path edge no `joins` entry covers (#286): always `"left"`,
+    /// so attaching data can never narrow membership (ADR-0008).
+    IncludeOnly,
+}
+
+/// Incremental [`JoinPlan`] assembly shared by the `joins` walk and the
+/// include-path union (#286): first-unseen prefixes materialize one edge each
+/// with a deterministic `j{i}_{relation}` alias; seen prefixes just advance
+/// the previous-alias chain.
+struct JoinPlanBuilder {
+    prefix_alias: HashMap<Vec<String>, String>,
+    prefix_table: HashMap<Vec<String>, String>,
+    used: HashSet<String>,
+    renders: Vec<JoinRender>,
+    next_index: usize,
+}
+
+impl JoinPlanBuilder {
+    fn new(root_table: &str, reserved: &[&str]) -> Self {
+        let mut used: HashSet<String> = HashSet::new();
+        used.insert(root_table.to_string());
+        for name in reserved {
+            used.insert((*name).to_string());
+        }
+        JoinPlanBuilder {
+            prefix_alias: HashMap::new(),
+            prefix_table: HashMap::new(),
+            used,
+            renders: Vec::new(),
+            next_index: 1,
+        }
+    }
+
+    /// Walk one relation path, materializing every first-unseen prefix as an
+    /// edge typed by `edge_type`. Prefixes an earlier walk already
+    /// materialized keep their existing alias AND join type — this is what
+    /// makes the include union unable to touch a `joins` edge (#286).
+    fn walk_path(
+        &mut self,
+        root_table: &str,
+        path: &[ferro_schema_ir::QueryJoinHop],
+        edge_type: EdgeType<'_>,
+    ) {
+        let mut prefix: Vec<String> = Vec::new();
+        let mut prev_alias = root_table.to_string();
+        for hop in path {
+            prefix.push(hop.relation.clone());
+            if let Some(existing) = self.prefix_alias.get(&prefix) {
+                prev_alias = existing.clone();
+                continue;
+            }
+            let edge_join_type = match &edge_type {
+                EdgeType::Resolved(left_edges) => {
+                    if left_edges.contains(&prefix) {
+                        "left"
+                    } else {
+                        "inner"
+                    }
+                }
+                EdgeType::IncludeOnly => "left",
+            };
+            let mut alias = format!("j{}_{}", self.next_index, hop.relation);
+            self.next_index += 1;
+            while self.used.contains(&alias) {
+                alias.push_str("_x");
+            }
+            self.used.insert(alias.clone());
+            self.prefix_alias.insert(prefix.clone(), alias.clone());
+            self.prefix_table.insert(prefix.clone(), hop.to_table.clone());
+            self.renders.push(JoinRender {
+                join_type: edge_join_type.to_string(),
+                to_table: hop.to_table.clone(),
+                alias: alias.clone(),
+                prev_alias: prev_alias.clone(),
+                from_column: hop.from_column.clone(),
+                to_column: hop.to_column.clone(),
+            });
+            prev_alias = alias;
+        }
+    }
+
+    fn finish(self) -> JoinPlan {
+        JoinPlan {
+            renders: self.renders,
+            prefix_alias: self.prefix_alias,
+            prefix_table: self.prefix_table,
+        }
+    }
+}
+
 /// Validate a join_type token from the IR (`"inner"`/`"left"`), erroring loudly
 /// on anything else so an unknown type can never silently mis-render.
 fn validate_join_type(join_type: &str) -> Result<&'static str, String> {
@@ -294,7 +389,7 @@ impl QueryPlan {
     }
 
     /// Assign deterministic aliases and build the ordered JOIN render plan (#270,
-    /// with per-edge LEFT/INNER resolution #272).
+    /// with per-edge LEFT/INNER resolution #272 and the include edge union #286).
     ///
     /// Walks each `joins` entry's hops in order, keeping a `prefix -> alias` map so
     /// the first-unseen prefix emits exactly one edge and shared prefixes across
@@ -312,6 +407,13 @@ impl QueryPlan {
     /// materializes a shared prefix; e.g. a `"left"` `[account]` entry and an
     /// `"inner"` `[account, owner]` entry render the `account` edge LEFT and the
     /// `owner` edge INNER regardless of their order on the wire (#272).
+    ///
+    /// An `instances` materialization plan's include paths union in AFTER every
+    /// `joins` entry (#286, ADR-0008): an edge some `joins` entry already covers
+    /// keeps its stage-1 type untouched — include contributes no join-type
+    /// opinion there — and an include-only edge renders LEFT, so include is
+    /// membership-preserving by construction. Because the `joins` section is
+    /// walked first, the union is independent of entry/path order on the wire.
     ///
     /// # Errors
     /// Returns `Err(String)` for an unknown `join_type` (see [`validate_join_type`]).
@@ -335,53 +437,18 @@ impl QueryPlan {
             }
         }
 
-        let mut prefix_alias: HashMap<Vec<String>, String> = HashMap::new();
-        let mut prefix_table: HashMap<Vec<String>, String> = HashMap::new();
-        let mut used: HashSet<String> = HashSet::new();
-        used.insert(root_table.to_string());
-        for name in reserved {
-            used.insert((*name).to_string());
-        }
-        let mut renders: Vec<JoinRender> = Vec::new();
-        let mut next_index = 1usize;
+        let mut builder = JoinPlanBuilder::new(root_table, reserved);
         for join in &self.joins {
-            let mut prefix: Vec<String> = Vec::new();
-            let mut prev_alias = root_table.to_string();
-            for hop in &join.path {
-                prefix.push(hop.relation.clone());
-                if let Some(existing) = prefix_alias.get(&prefix) {
-                    prev_alias = existing.clone();
-                    continue;
-                }
-                let edge_join_type = if left_edges.contains(&prefix) {
-                    "left"
-                } else {
-                    "inner"
-                };
-                let mut alias = format!("j{}_{}", next_index, hop.relation);
-                next_index += 1;
-                while used.contains(&alias) {
-                    alias.push_str("_x");
-                }
-                used.insert(alias.clone());
-                prefix_alias.insert(prefix.clone(), alias.clone());
-                prefix_table.insert(prefix.clone(), hop.to_table.clone());
-                renders.push(JoinRender {
-                    join_type: edge_join_type.to_string(),
-                    to_table: hop.to_table.clone(),
-                    alias: alias.clone(),
-                    prev_alias: prev_alias.clone(),
-                    from_column: hop.from_column.clone(),
-                    to_column: hop.to_column.clone(),
-                });
-                prev_alias = alias;
+            builder.walk_path(root_table, &join.path, EdgeType::Resolved(&left_edges));
+        }
+        // Include edge union (#286): only edges no `joins` entry materialized
+        // above are new here, and those render LEFT (never narrowing).
+        if let Materialization::Instances { paths } = &self.materialization {
+            for path in paths {
+                builder.walk_path(root_table, path, EdgeType::IncludeOnly);
             }
         }
-        Ok(JoinPlan {
-            renders,
-            prefix_alias,
-            prefix_table,
-        })
+        Ok(builder.finish())
     }
 
     /// Combine all root predicates into one SeaQuery `Condition` (AND of nodes).
@@ -1068,6 +1135,67 @@ mod tests {
             assert_eq!(account.join_type, "left", "account edge is LEFT");
             assert_eq!(owner.join_type, "inner", "owner edge is INNER");
         }
+    }
+
+    /// Include edge union (#286, ADR-0008): a payload with `joins` entries
+    /// and/or `instances` paths.
+    fn union_plan(joins: serde_json::Value, paths: serde_json::Value) -> QueryPlan {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Transaction",
+            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+            "joins": joins,
+            "materialization": {"kind": "instances", "paths": paths}
+        }))
+        .expect("payload deserializes");
+        QueryPlan::from_ir_payload(payload).expect("plan builds")
+    }
+
+    fn account_hop() -> serde_json::Value {
+        json!({"relation": "account", "from_column": "account_id",
+               "to_table": "account", "to_column": "id"})
+    }
+
+    #[test]
+    fn build_join_plan_include_only_edge_renders_left() {
+        // An edge only include references renders LEFT (never narrowing);
+        // include paths ride the materialization plan, `joins` stays empty.
+        let plan = union_plan(json!([]), json!([[account_hop()]]));
+        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+        assert_eq!(join_plan.renders.len(), 1);
+        assert_eq!(join_plan.renders[0].join_type, "left");
+        assert_eq!(join_plan.renders[0].alias, "j1_account");
+        assert_eq!(join_plan.renders[0].prev_alias, "transaction");
+        assert_eq!(
+            join_plan.prefix_alias.get(&vec!["account".to_string()]),
+            Some(&"j1_account".to_string())
+        );
+    }
+
+    #[test]
+    fn build_join_plan_include_shared_edge_keeps_stage1_inner() {
+        // Include contributes NO join-type opinion on an edge a `joins` entry
+        // covers: a where()-traversed (implicit INNER) edge stays INNER when
+        // the same path is also included — one edge total, predicate
+        // semantics untouched.
+        let plan = union_plan(
+            json!([{"join_type": "inner", "path": [account_hop()]}]),
+            json!([[account_hop()]]),
+        );
+        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+        assert_eq!(join_plan.renders.len(), 1, "shared edge dedups to one JOIN");
+        assert_eq!(join_plan.renders[0].join_type, "inner");
+    }
+
+    #[test]
+    fn build_join_plan_include_shared_edge_keeps_stage1_left() {
+        // An explicit `.left_join` edge stays LEFT when also included.
+        let plan = union_plan(
+            json!([{"join_type": "left", "path": [account_hop()]}]),
+            json!([[account_hop()]]),
+        );
+        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+        assert_eq!(join_plan.renders.len(), 1);
+        assert_eq!(join_plan.renders[0].join_type, "left");
     }
 
     #[test]

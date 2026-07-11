@@ -58,6 +58,11 @@ pub struct RegisteredModel {
     pub codec_plan: crate::codec_plan::ModelCodecPlan,
     /// Primary-key metadata, scanned once at registration (FF-G G2).
     pub meta: ModelMeta,
+    /// Column names in SchemaIR declaration order (#286): the instances
+    /// fetch walker enumerates each included hop's complete column list to
+    /// widen the SELECT deterministically (every populated hop is a complete
+    /// row — the complete-instance invariant, ADR-0008).
+    pub column_names: Vec<String>,
 }
 
 impl RegisteredModel {
@@ -65,10 +70,12 @@ impl RegisteredModel {
     pub fn new(columns: Vec<SchemaColumn>, table_name: String) -> Result<Arc<Self>, String> {
         let codec_plan = crate::codec_plan::ModelCodecPlan::compile_from_columns(&columns)?;
         let meta = ModelMeta::from_columns(&columns);
+        let column_names = columns.iter().map(|col| col.name.clone()).collect();
         Ok(Arc::new(RegisteredModel {
             table_name,
             codec_plan,
             meta,
+            column_names,
         }))
     }
 }

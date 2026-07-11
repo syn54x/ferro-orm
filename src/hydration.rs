@@ -303,6 +303,30 @@ pub fn refresh_model_instance<'py>(
     Ok(())
 }
 
+/// Populate a forward-FK relation on a hydrated instance (#286, ADR-0008).
+///
+/// The population contract: the relation field name enters the instance's
+/// `__dict__`, shadowing the class-level non-data `ForwardDescriptor`, so
+/// access is a plain attribute returning the complete related instance —
+/// no await, no query. `value: None` is a *populated* `None` (a nullable FK
+/// with no target): the key is present, so access returns `None` instead of
+/// the awaitable. An instance with no entry under the relation name keeps
+/// today's awaitable contract untouched.
+pub fn set_populated_relation<'py>(
+    py: Python<'py>,
+    instance: &Bound<'py, PyAny>,
+    relation: &str,
+    value: Option<&Bound<'py, PyAny>>,
+) -> PyResult<()> {
+    let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
+    let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+    match value {
+        Some(obj) => dict.set_item(relation, obj)?,
+        None => dict.set_item(relation, py.None())?,
+    }
+    Ok(())
+}
+
 /// Diff a class's `__slots__` against [`HANDLED_BASEMODEL_SLOTS`].
 ///
 /// # Errors
