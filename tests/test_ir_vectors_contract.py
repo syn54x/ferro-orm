@@ -11,10 +11,11 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 2 (#269 — unconditional bump, path-qualified column
-# references); `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 2, "codec": 1}
+# `query` is on ir_version 3 (#278 — unconditional bump, required
+# `materialization` section, ADR-0007); `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 3, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
+MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 
 
 class _DocFormat(StrEnum):
@@ -85,12 +86,46 @@ def _validate_schema_payload(payload: dict[str, Any], label: str) -> None:
         )
 
 
+def _validate_materialization(plan: dict[str, Any], label: str) -> None:
+    """Validate the v3 `materialization` section's required keys (#278)."""
+    _require_keys(plan, {"kind"}, label)
+    kind = plan["kind"]
+    assert kind in MATERIALIZATION_KINDS, f"{label}.kind invalid: {kind!r}"
+    if kind != "record":
+        return
+    _require_keys(plan, {"fields"}, label)
+    fields = plan["fields"]
+    assert isinstance(fields, list) and fields, f"{label}.fields must be non-empty list"
+    for i, field in enumerate(fields):
+        field_label = f"{label}.fields[{i}]"
+        assert isinstance(field, dict), f"{field_label} must be object"
+        _require_keys(field, {"name", "column", "path"}, field_label)
+        for key in ("name", "column"):
+            assert isinstance(field[key], str) and field[key], (
+                f"{field_label}.{key} must be non-empty string"
+            )
+        assert isinstance(field["path"], list), f"{field_label}.path must be a list"
+
+
 def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
     _require_keys(
         payload,
-        {"model_name", "where", "order_by", "limit", "offset", "m2m", "joins"},
+        {
+            "model_name",
+            "where",
+            "order_by",
+            "limit",
+            "offset",
+            "m2m",
+            "joins",
+            "materialization",
+        },
         label,
     )
+    assert isinstance(payload["materialization"], dict), (
+        f"{label}.materialization must be object"
+    )
+    _validate_materialization(payload["materialization"], f"{label}.materialization")
     assert isinstance(payload["model_name"], str) and payload["model_name"], (
         f"{label}.model_name must be non-empty string"
     )

@@ -3,7 +3,16 @@
 from typing import Annotated, assert_type
 
 from ferro import FerroField, ForeignKey, Model
-from ferro.query import FieldProxy, Predicate, Query, QueryNode, QueryProxy
+from ferro.query import (
+    FieldProxy,
+    Predicate,
+    ProjectedQuery,
+    Query,
+    QueryNode,
+    QueryProxy,
+    Row,
+    Rows,
+)
 
 
 class GoodUser(Model):
@@ -57,3 +66,22 @@ join_query: Query[GoodTxn] = GoodTxn.select().join(lambda t: t.account)
 left_join_query: Query[GoodTxn] = GoodTxn.select().left_join(lambda t: t.account.owner)
 assert_type(join_query, Query[GoodTxn])
 assert_type(left_join_query, Query[GoodTxn])
+
+
+# Partial selects (#279): a projection flips the query's static shape —
+# `.all()` types as Rows[Row], `.first()` as Row | None; the bare form stays
+# a full query of model instances (shape, not names).
+proj_tuple: ProjectedQuery[GoodTxn] = GoodTxn.select(lambda t: (t.id, t.account_id))
+proj_single: ProjectedQuery[GoodTxn] = GoodTxn.select(lambda t: t.id)
+proj_with_traversal_pred: ProjectedQuery[GoodTxn] = GoodTxn.select(
+    lambda t: (t.id,)
+).where(lambda t: t.account.owner.email == "a@b.com")
+
+
+async def _projected_shapes() -> None:
+    rows = await GoodTxn.select(lambda t: (t.id,)).all()
+    assert_type(rows, Rows[Row])
+    row = await GoodTxn.select(lambda t: t.id).first()
+    assert_type(row, Row | None)
+    full = await GoodTxn.select().all()
+    assert_type(full, list[GoodTxn])

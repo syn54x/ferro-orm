@@ -28,9 +28,9 @@ Rules:
 
 - `domain` and `ir.ir_kind` must match.
 - `ir.ir_version` must equal `1` for `schema` and `codec` vectors. `query`
-  vectors are on `ir_version: 2` (#269 — unconditional bump, path-qualified
-  column references, empty `joins: []` until #270 renders real JOINs); there
-  is no v1 `query` vector left.
+  vectors are on `ir_version: 3` (#278 — unconditional bump; the payload
+  carries a required `materialization` section, ADR-0007); there is no v1 or
+  v2 `query` vector left.
 - `expect_valid` currently supports only `true` fixtures (negative vectors can be added later).
 - Fixture file names use `<domain>_<scenario>_v<version>.json` (matching that
   domain's current `ir_version`).

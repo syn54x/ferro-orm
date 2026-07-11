@@ -48,6 +48,32 @@ The static gate checks the **shape** of the predicate, not the **names** in it:
 - **A bare relation as a predicate fails the checker.** `lambda transaction: transaction.account` returns a proxy, not a `QueryNode`, so it is a type error — the same failure mode as `lambda user: True`.
 - **Name typos are caught at build time, not by the checker.** A misspelled hop (`transaction.accont`, `account.emial`) is `FieldProxy[Any]` to the type checker, so it type-checks; at build time the proxy validates every hop against the real model and raises `AttributeError` with a did-you-mean naming that hop's model. The static gate guarantees shape; the runtime proxy guarantees names.
 
+## Projected Queries
+
+Partial selects extend the same shape-not-names promise through projection.
+`select(...)` with a selector flips the query's static type from
+`Query[Model]` to `ProjectedQuery[Model]`, so the terminals change shape:
+`.all()` checks as `Rows[Row]` and `.first()` as `Row | None` — never
+`list[Model]`:
+
+```python
+rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # Rows[Row]
+row = await Transaction.select(lambda t: t.amount).first()  # Row | None
+full = await Transaction.select().all()  # list[Transaction] — bare form unchanged
+```
+
+The gate divides the work exactly like predicates do:
+
+- **Shape is checked statically.** Passing a `Row` where a model instance is
+  expected fails the checker (`list[Transaction] = await
+  Transaction.select(lambda t: (t.id,)).all()` is an `invalid-assignment`),
+  and mutating a projected query (`.update()` / `.delete()`) is a static
+  error at the call site as well as a build-time `ValueError`.
+- **Names are checked at build time.** A selected column is `FieldProxy[Any]`
+  to the checker; a misspelled column raises `AttributeError` with a
+  did-you-mean when the query is built, before any round-trip — the same
+  runtime validation as `where()` and `order_by()`.
+
 ## What This Doesn't Change
 
 - Your model annotations. `archived: bool = False` stays exactly as it is.
@@ -59,6 +85,8 @@ The static gate checks the **shape** of the predicate, not the **names** in it:
 - `ferro.query.QueryProxy` — validating attribute proxy passed to lambda predicates.
 - `ferro.query.Predicate` — `Callable[[QueryProxy[TModel]], QueryNode]`, the type of any lambda predicate.
 - `ferro.query.FieldProxy` — generic over the column's Python type (`FieldProxy[T]`); the mechanism a `QueryProxy` attribute access returns.
+- `ferro.query.RowSelector` — the type of a `select()` lambda selector: a callable returning one column or a tuple of columns.
+- `ferro.query.Row` / `ferro.query.Rows` — projected records and their list-like container, the result shape of a projected query.
 
 ## See Also
 

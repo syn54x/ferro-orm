@@ -4,8 +4,7 @@ Ferro is pre-1.0 and under active development. The items below are known gaps we
 
 ## Query Features
 
-- **Aggregations beyond `count()`/`exists()`** — `sum`, `avg`, `min`, `max` on the query builder. Today you either compute in Python after fetching or drop to raw SQL.
-- **Partial selects** — loading a subset of columns (`User.select(User.id, User.username)`-style) instead of full models, for wide tables and hot read paths.
+- **Aggregations beyond `count()`/`exists()`** — `sum`, `avg`, `min`, `max` on the query builder, plus output aliases and traversed projection (`select(lambda t: t.account.name)`), designed together on the [partial-select](guide/queries.md#selecting-a-column-subset) substrate. Today you either compute in Python after fetching or drop to raw SQL.
 - **Eager loading** — `prefetch_related`/`select_related`-style relationship loading to eliminate N+1 query patterns. Today each awaited relationship attribute is its own query.
 - **`ilike()`** — case-insensitive pattern matching. Workaround: `like()` with normalized case.
 - **`not_in_()`** — NOT IN exclusion lists. Workaround: combine `!=` comparisons with `&`.

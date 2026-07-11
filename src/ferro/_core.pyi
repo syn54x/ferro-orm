@@ -95,6 +95,7 @@ async def fetch_filtered(
     cls: object,
     query_ir_json: str,
     route: RouteHandle,
+    record_cls: type | None = None,
 ) -> list[Any]: ...
 async def count_filtered(
     name: str,

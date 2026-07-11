@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_user_compound_v2",
+  "vector_name": "query_user_compound_v3",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 2,
+    "ir_version": 3,
     "payload": {
       "model_name": "User",
       "where": [
@@ -40,7 +40,10 @@
               "operator": "IN",
               "value": {
                 "kind": "list",
-                "value": ["admin", "owner"]
+                "value": [
+                  "admin",
+                  "owner"
+                ]
               },
               "path": []
             }
@@ -57,7 +60,10 @@
       "limit": 100,
       "offset": 0,
       "m2m": null,
-      "joins": []
+      "joins": [],
+      "materialization": {
+        "kind": "root_instances"
+      }
     }
   }
 }

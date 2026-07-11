@@ -65,6 +65,7 @@ def test_query_ir_payload_to_json_serializes_m2m_context_without_mutating_query_
         "offset": None,
         "m2m": query._m2m_context,
         "joins": [],
+        "materialization": {"kind": "root_instances"},
     }
 
     query_json = _query_ir_payload_to_json(query_def)
@@ -73,8 +74,14 @@ def test_query_ir_payload_to_json_serializes_m2m_context_without_mutating_query_
     assert query._m2m_context["source_id"] == source_id
     assert isinstance(query._m2m_context["source_id"], uuid.UUID)
     assert payload["ir_kind"] == "query"
-    assert payload["ir_version"] == 2
+    assert payload["ir_version"] == 3
     assert payload["payload"]["m2m"]["source_id"] == str(source_id)
+
+
+def test_query_carries_root_instances_materialization_by_default():
+    """Every query without a projection materializes complete root instances
+    (ADR-0007): the v3 plan is explicit data on the wire, never inferred."""
+    assert Query(Model)._materialization_ir() == {"kind": "root_instances"}
 
 
 def test_query_node_to_dict_serializes_uuid_values_inside_in_filters():

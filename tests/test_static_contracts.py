@@ -164,6 +164,18 @@ def test_junk_lambda_predicates_fail_the_type_checker():
     assert "invalid-assignment" in result.stdout
 
 
+def test_projected_shape_misuse_fails_the_type_checker():
+    """A `Row` where a model instance is expected must be rejected statically
+    (#279), and mutating a projected query is a static error at the call site
+    (#280, the `self: Never` pin)."""
+    result = _run_ty(FIXTURES / "bad_projections.py")
+    assert result.returncode != 0, "bad_projections.py must fail ty"
+    assert "invalid-assignment" in result.stdout
+    assert result.stdout.count("invalid-argument-type") >= 2, (
+        "update() and delete() on a projected query must each be a static error"
+    )
+
+
 def test_query_ir_is_the_only_query_shape_in_rust():
     """FF-F F-4 exit gate: no `struct QueryNode` outside the IR crate."""
     repo = Path(__file__).parent.parent

@@ -5,7 +5,7 @@
 //! null/UUID/enum binds via [`crate::codec`].
 
 use crate::state::Dialect;
-use ferro_schema_ir::{QueryIrPayload, QueryJoin, QueryNode, QueryOrderBy};
+use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoin, QueryNode, QueryOrderBy};
 use sea_query::{Alias, Condition, Expr, SimpleExpr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -208,6 +208,9 @@ pub struct QueryPlan {
     pub joins: Vec<QueryJoin>,
     /// M2M join filter when loading through an association table.
     pub m2m: Option<M2mContext>,
+    /// The query's materialization plan (ADR-0007, required in v3): what its
+    /// result columns become. Each walker enforces the kinds it implements.
+    pub materialization: Materialization,
     /// Populated from `pg_catalog` before building filter SQL. Not part of the
     /// Python query IR payload.
     pub postgres_enum_udt: HashMap<String, String>,
@@ -266,6 +269,7 @@ impl QueryPlan {
             offset: payload.offset,
             joins: payload.joins,
             m2m,
+            materialization: payload.materialization,
             postgres_enum_udt: HashMap::new(),
             registration,
             hop_registrations: HashMap::new(),
@@ -651,6 +655,7 @@ mod tests {
             offset: None,
             joins: Vec::new(),
             m2m: None,
+            materialization: ferro_schema_ir::Materialization::RootInstances,
             postgres_enum_udt: HashMap::new(),
             registration,
             hop_registrations: HashMap::new(),
@@ -681,7 +686,7 @@ mod tests {
                            "value": {"kind": "string", "value": "a%"}, "path": []}}
             ],
             "order_by": [{"column": "age", "direction": "desc", "path": []}],
-            "limit": 10, "offset": 5, "m2m": null, "joins": []
+            "limit": 10, "offset": 5, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
         }))
         .expect("payload deserializes");
         let plan = super::QueryPlan::from_ir_payload(payload).expect("plan builds");
@@ -711,7 +716,7 @@ mod tests {
                  "value": {"kind": "null", "value": null}, "path": []}
             ],
             "order_by": [],
-            "limit": null, "offset": null, "m2m": null, "joins": []
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
         }))
         .expect("payload deserializes");
         let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
@@ -736,7 +741,7 @@ mod tests {
                  "value": {"kind": "int", "value": 18}, "path": []}
             ],
             "order_by": [],
-            "limit": null, "offset": null, "m2m": null, "joins": []
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
         }))
         .expect("payload deserializes");
         let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
@@ -764,7 +769,7 @@ mod tests {
                  "value": {"kind": "int", "value": 18}, "path": []}
             ],
             "order_by": [],
-            "limit": null, "offset": null, "m2m": null, "joins": []
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
         }))
         .expect("payload deserializes");
         let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
@@ -790,7 +795,7 @@ mod tests {
                  "value": {"kind": "int", "value": 18}, "path": []}
             ],
             "order_by": [],
-            "limit": null, "offset": null, "m2m": null, "joins": []
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
         }))
         .expect("payload deserializes");
         let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
@@ -822,7 +827,7 @@ mod tests {
                            "value": {"kind": "int", "value": 100}, "path": []}}
             ],
             "order_by": [{"column": "id", "direction": "asc", "path": []}],
-            "limit": 50, "offset": 0, "m2m": null,
+            "limit": 50, "offset": 0, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
                 {"join_type": "inner", "path": [
                     {"relation": "account", "from_column": "account_id",
@@ -895,7 +900,7 @@ mod tests {
         // Transfer(from_account, to_account) -> two FKs into the same table.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
             "model_name": "Transfer",
-            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
                 {"join_type": "inner", "path": [
                     {"relation": "from_account", "from_column": "from_account_id",
@@ -925,7 +930,7 @@ mod tests {
         // table name gets `_x` appended until unique.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
             "model_name": "Thing",
-            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
                 {"join_type": "inner", "path": [
                     {"relation": "account", "from_column": "account_id",
@@ -945,7 +950,7 @@ mod tests {
     fn build_join_plan_rejects_unknown_join_type() {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
             "model_name": "Thing",
-            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
                 {"join_type": "cross", "path": [
                     {"relation": "account", "from_column": "account_id",
@@ -966,7 +971,7 @@ mod tests {
         // A lone `"left"` 1-hop entry renders its edge LEFT (#272).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
             "model_name": "Note",
-            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
                 {"join_type": "left", "path": [
                     {"relation": "account", "from_column": "account_id",
@@ -987,7 +992,7 @@ mod tests {
         // Whole-path rule: a `"left"` 2-hop entry marks BOTH edges LEFT (#272).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
             "model_name": "Transaction",
-            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+            "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
                 {"join_type": "left", "path": [
                     {"relation": "account", "from_column": "account_id",
@@ -1038,7 +1043,7 @@ mod tests {
         for joins in [left_first, inner_first] {
             let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
                 "model_name": "Transaction",
-                "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
+                "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
                 "joins": joins
             }))
             .expect("payload deserializes");
@@ -1075,7 +1080,7 @@ mod tests {
                 {"node_kind": "leaf", "column": "email", "operator": "==",
                  "value": {"kind": "string", "value": "a"}, "path": ["account"]}
             ],
-            "order_by": [], "limit": null, "offset": null, "m2m": null, "joins": []
+            "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
         }))
         .expect("payload deserializes");
         let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
@@ -1108,7 +1113,7 @@ mod tests {
                 {"node_kind": "leaf", "column": "email", "operator": "==",
                  "value": {"kind": "string", "value": "a"}, "path": ["account"]}
             ],
-            "order_by": [], "limit": null, "offset": null, "m2m": null, "joins": []
+            "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
         }))
         .expect("payload deserializes");
         let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
@@ -1124,7 +1129,7 @@ mod tests {
         // entry now builds a plan like any other (the SELECT walkers render it).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
             "model_name": "Pending",
-            "where": [], "limit": null, "offset": null, "m2m": null, "joins": [
+            "where": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": [
                 {"join_type": "inner", "path": [
                     {"relation": "account", "from_column": "account_id",
                      "to_table": "account", "to_column": "id"}
