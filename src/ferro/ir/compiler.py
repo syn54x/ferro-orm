@@ -19,7 +19,7 @@ from .._core import (
     _ddl_single_index_name,
     _ddl_single_unique_name,
 )
-from ..columns import ColumnSpec, build_column_specs
+from ..columns import ColumnSpec, build_column_specs, build_relation_specs
 from ..composite_indexes import drop_overlap_with_uniques, normalized_composite_indexes
 from ..composite_uniques import normalized_composite_uniques
 from ..state import (
@@ -318,6 +318,11 @@ def compile_model_schema_ir(
     # "``__ferro_columns__`` can never go stale relative to the envelope"
     # invariant, made atomic.
     model_cls.__ferro_columns__ = specs
+    # Same choke point compiles relation-traversal facts (#268): every
+    # ``__ferro_columns__`` refresh (provisional class-body registration and
+    # the resolved second pass) refreshes ``__ferro_relation_specs__`` too, so
+    # the latter is never stale relative to the former.
+    model_cls.__ferro_relation_specs__ = build_relation_specs(model_cls, specs)
     return envelope
 
 

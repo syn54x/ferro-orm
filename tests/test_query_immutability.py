@@ -48,7 +48,7 @@ class TestImmutableChaining:
         assert (q1._limit, q1._offset, q1.order_by_clause) == (None, None, [])
         assert q2._limit == 5 and q2._offset is None
         assert q3._offset == 10
-        assert q4.order_by_clause == [{"column": "age", "direction": "desc"}]
+        assert q4.order_by_clause == [{"column": "age", "direction": "desc", "path": []}]
         assert q3.order_by_clause == []
 
     def test_m2m_context_is_not_shared_between_clones(self):

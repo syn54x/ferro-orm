@@ -4,7 +4,7 @@ import difflib
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeAlias, TypeVar
 
 TField = TypeVar("TField")
 TModel = TypeVar("TModel")
@@ -37,6 +37,7 @@ class QueryNode:
         left: "QueryNode | None" = None,
         right: "QueryNode | None" = None,
         is_compound: bool = False,
+        path: tuple[str, ...] = (),
     ):
         """Initialize a query expression node
 
@@ -47,6 +48,10 @@ class QueryNode:
             left: Left child node for compound expressions.
             right: Right child node for compound expressions.
             is_compound: Set to True for logical expressions with child nodes.
+            path: Relation field names from the root model to ``column``'s
+                table; empty (default) means the root model. Plumbed through
+                so relation traversal (#270) can populate it — this slice
+                never produces a non-empty path.
         """
         self.column = column
         self.operator = operator
@@ -54,6 +59,7 @@ class QueryNode:
         self.left = left
         self.right = right
         self.is_compound = is_compound
+        self.path = path
 
     def __or__(self, other: "QueryNode") -> "QueryNode":
         """Combine two nodes with logical OR
@@ -103,13 +109,35 @@ class QueryNode:
                 "column": self.column,
                 "operator": self.operator,
                 "value": {"kind": _query_value_kind(serialized), "value": serialized},
+                "path": list(self.path),
             }
         return {
             "node_kind": "compound",
+            # Identity checks, never truthiness: ``__bool__`` raises to catch
+            # ``and``/``or`` misuse, so every internal test of a QueryNode uses
+            # ``is (not) None`` (audited for #273).
             "operator": self.operator,
-            "left": self.left.to_ir_dict() if self.left else None,
-            "right": self.right.to_ir_dict() if self.right else None,
+            "left": self.left.to_ir_dict() if self.left is not None else None,
+            "right": self.right.to_ir_dict() if self.right is not None else None,
         }
+
+    def __bool__(self) -> bool:
+        """Reject boolean coercion of a query node (#273).
+
+        Python evaluates ``and``/``or`` by calling ``bool()`` on the operands,
+        so ``(u.age >= 18) and (u.active == True)`` would silently collapse to
+        one branch instead of building a compound predicate. Raising here turns
+        that mistake into a pointed error at build time; combine predicates with
+        the bitwise ``&`` / ``|`` operators instead.
+
+        Raises:
+            TypeError: Always — a ``QueryNode`` has no truth value.
+        """
+        raise TypeError(
+            "QueryNode cannot be used in a boolean context; use & / | to "
+            "combine predicates, not and/or "
+            "(e.g. (u.age >= 18) & (u.active == True))."
+        )
 
     def __repr__(self):
         """Return a developer-friendly representation of the node"""
@@ -167,41 +195,61 @@ class FieldProxy(Generic[TField]):
         True
     """
 
-    def __init__(self, column: str):
+    def __init__(self, column: str, path: tuple[str, ...] = ()):
         """Initialize a field proxy for a specific column
 
         Args:
             column: Database column name to target in expressions.
+            path: Relation field names from the root model to this column's
+                table; empty (default) means the root model. Plumbed through
+                so relation traversal (#270) can populate it — this slice
+                never produces a non-empty path.
         """
         self.column = column
+        self.path = path
+
+    if TYPE_CHECKING:
+
+        def __getattr__(self, name: str) -> "FieldProxy[Any]":
+            """Statically model relation-traversal chaining (#270).
+
+            Only visible to type checkers: ``t.account.ledger_id`` types each
+            hop as ``FieldProxy[Any]`` so a traversal comparison still yields a
+            ``QueryNode`` while a *bare* proxy (``lambda t: t.account``) stays a
+            non-``QueryNode`` and fails predicate typing. At runtime the actual
+            resolution lives on :class:`QueryProxy` / :class:`RelationProxy`
+            (relation → deeper proxy, column → this ``FieldProxy``); this
+            declaration is never executed.
+            """
+            ...
 
     def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an equality comparison node"""
-        return QueryNode(self.column, "==", other)
+        return QueryNode(self.column, "==", other, path=self.path)
 
     def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an inequality comparison node"""
-        return QueryNode(self.column, "!=", other)
+        return QueryNode(self.column, "!=", other, path=self.path)
 
     def __lt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than comparison node"""
-        return QueryNode(self.column, "<", other)
+        return QueryNode(self.column, "<", other, path=self.path)
 
     def __le__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than-or-equal comparison node"""
-        return QueryNode(self.column, "<=", other)
+        return QueryNode(self.column, "<=", other, path=self.path)
 
     def __gt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than comparison node"""
-        return QueryNode(self.column, ">", other)
+        return QueryNode(self.column, ">", other, path=self.path)
 
     def __ge__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than-or-equal comparison node"""
-        return QueryNode(self.column, ">=", other)
+        return QueryNode(self.column, ">=", other, path=self.path)
 
     def in_(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
@@ -226,7 +274,7 @@ class FieldProxy(Generic[TField]):
             raise TypeError(
                 f"The 'in_' operator expects a list, tuple, or set, got {type(other).__name__}"
             )
-        return QueryNode(self.column, "IN", list(other))
+        return QueryNode(self.column, "IN", list(other), path=self.path)
 
     def like(self: "FieldProxy[str]", pattern: str) -> QueryNode:
         """Build a ``LIKE`` comparison node
@@ -246,7 +294,7 @@ class FieldProxy(Generic[TField]):
             >>> email_filter.operator
             'LIKE'
         """
-        return QueryNode(self.column, "LIKE", pattern)
+        return QueryNode(self.column, "LIKE", pattern, path=self.path)
 
     def __lshift__(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
@@ -277,8 +325,9 @@ def validate_query_column(model_cls: type, name: str) -> str:
     Raises:
         AttributeError: If ``name`` is not a declared field or shadow
             ``{fk}_id`` column of ``model_cls``. The message names the bad
-            column, suggests the closest valid one, and lists all valid
-            columns.
+            column, suggests the closest valid one across BOTH columns and
+            declared forward-relation names (#270), and lists the valid
+            columns and relations.
     """
     valid = getattr(model_cls, "__ferro_query_columns__", None)
     if valid is None:
@@ -288,11 +337,19 @@ def validate_query_column(model_cls: type, name: str) -> str:
         )
     if name in valid:
         return name
-    close = difflib.get_close_matches(name, sorted(valid), n=1)
+    # A valid relation name never reaches here (proxies resolve relations
+    # before column validation), but relation field names still enrich the
+    # did-you-mean pool so a typo close to a relation gets the right hint.
+    relations = getattr(model_cls, "__ferro_relation_specs__", None) or {}
+    suggestions = sorted(set(valid) | set(relations))
+    close = difflib.get_close_matches(name, suggestions, n=1)
     hint = f" Did you mean {close[0]!r}?" if close else ""
+    relation_note = (
+        f" Valid relations: {', '.join(sorted(relations))}." if relations else ""
+    )
     raise AttributeError(
         f"{model_cls.__name__} has no queryable column {name!r}.{hint} "
-        f"Valid columns: {', '.join(sorted(valid))}."
+        f"Valid columns: {', '.join(sorted(valid))}.{relation_note}"
     )
 
 
@@ -322,9 +379,184 @@ class QueryProxy(Generic[TModel]):
         self._model_cls = model_cls
 
     def __getattr__(self, name: str) -> "FieldProxy[Any]":
-        """Validate ``name`` and return a ``FieldProxy`` for it."""
+        """Resolve ``name`` on the root model.
+
+        Relation specs are consulted FIRST (#270): a declared forward-FK field
+        name yields a :class:`RelationProxy` for traversal (``t.account`` →
+        proxy → ``.ledger_id``); every other name falls through to column
+        validation and returns a :class:`FieldProxy`.
+        """
+        relations = getattr(self._model_cls, "__ferro_relation_specs__", None) or {}
+        spec = relations.get(name)
+        if spec is not None:
+            # Statically typed as FieldProxy[Any] (chainable shape) even though a
+            # relation resolves to a RelationProxy at runtime — a bare relation
+            # proxy is intentionally not a QueryNode, so predicate typing still
+            # rejects `lambda t: t.account` (design pin, PRD #267).
+            return RelationProxy(  # ty: ignore[invalid-return-type]
+                self._model_cls, (name,), spec.target
+            )
         validate_query_column(self._model_cls, name)
         return FieldProxy(name)
+
+
+class RelationProxy:
+    """Traversal proxy for a declared forward-FK relation path (#270).
+
+    Returned by attribute access on a :class:`QueryProxy` (or a deeper
+    ``RelationProxy``) when the accessed name is a declared forward relation.
+    It carries the *root* model, the relation ``path`` walked so far (a tuple
+    of relation field names), and the ``target`` model that path resolves to.
+
+    Attribute access resolves against the CURRENT TARGET model, recursively at
+    any depth:
+
+    - a relation name yields a deeper ``RelationProxy`` (``path + (name,)``);
+    - a column name yields a :class:`FieldProxy` carrying this proxy's ``path``,
+      so ``t.account.ledger_id == lid`` builds a path-qualified comparison node;
+    - an unknown name raises ``AttributeError`` naming the hop's model with a
+      did-you-mean suggestion (same style as :func:`validate_query_column`).
+
+    A bare ``RelationProxy`` returned from a ``where()`` lambda is not a
+    :class:`QueryNode`; ``where()`` rejects it. Equality sugar against a
+    persisted target instance or ``None`` desugars **join-free** to a
+    shadow-FK comparison (#273): ``t.account == acct`` builds
+    ``QueryNode(column="account_id", operator="==", value=<acct.pk>, path=())``
+    — the shadow column of the LAST hop, with the proxy path MINUS that hop, so
+    a deep proxy (``t.account.owner == o``) compares ``owner_id`` under the
+    ``("account",)`` prefix joins only.
+
+    Examples:
+        >>> proxy = QueryProxy(Transaction)  # doctest: +SKIP
+        >>> node = (proxy.account.ledger_id == 7)  # doctest: +SKIP
+        >>> node.path  # doctest: +SKIP
+        ('account',)
+    """
+
+    __slots__ = ("_root_model", "_path", "_target")
+
+    def __init__(
+        self, root_model: type, path: tuple[str, ...], target: type
+    ) -> None:
+        self._root_model = root_model
+        self._path = path
+        self._target = target
+
+    def __getattr__(self, name: str) -> "RelationProxy | FieldProxy[Any]":
+        """Resolve ``name`` against the current target model (one hop deeper)."""
+        relations = getattr(self._target, "__ferro_relation_specs__", None) or {}
+        spec = relations.get(name)
+        if spec is not None:
+            return RelationProxy(self._root_model, self._path + (name,), spec.target)
+        validate_query_column(self._target, name)
+        return FieldProxy(name, path=self._path)
+
+    def _relation_name(self) -> str:
+        """The last-hop relation field name (the one being compared)."""
+        return self._path[-1]
+
+    def _last_hop_shadow_column(self) -> str:
+        """Shadow FK column of the LAST hop, resolved along the spec chain.
+
+        For ``t.account`` this is ``account_id`` on the root table; for
+        ``t.account.owner`` it is ``owner_id`` on the hop-1 (account) table.
+        """
+        current = self._root_model
+        spec = None
+        for name in self._path:
+            specs = getattr(current, "__ferro_relation_specs__", None) or {}
+            spec = specs[name]
+            current = spec.target
+        assert spec is not None  # a RelationProxy always has ≥ 1 hop
+        return spec.shadow_column
+
+    def _instance_comparison(self, other: object, operator: str) -> QueryNode:
+        """Desugar ``== instance`` / ``== None`` to a shadow-FK leaf (#273).
+
+        The node targets the last hop's shadow FK column with the proxy path
+        MINUS that hop, so it registers only the PREFIX joins (none for a
+        one-hop proxy — genuinely join-free).
+
+        Raises:
+            ValueError: If ``other`` is a target-model instance whose primary
+                key is unset (unpersisted) — naming the model, save-first.
+            TypeError: If ``other`` is neither the target model nor ``None`` —
+                the relation-vs-scalar guardrail, suggesting a column compare.
+        """
+        relation = self._relation_name()
+        shadow = self._last_hop_shadow_column()
+        prefix_path = self._path[:-1]
+        if other is None:
+            return QueryNode(
+                column=shadow, operator=operator, value=None, path=prefix_path
+            )
+        if isinstance(other, self._target):
+            # Reuse the Task 3 PK resolver (loud on zero/multiple PKs); local
+            # import avoids a builder <-> nodes import cycle at module load.
+            from .builder import _target_pk_column
+
+            pk_column = _target_pk_column(self._target)
+            pk_value = getattr(other, pk_column, None)
+            if pk_value is None:
+                raise ValueError(
+                    f"cannot compare relation {relation!r} to an unpersisted "
+                    f"{self._target.__name__} instance (primary key not set); "
+                    "save it first"
+                )
+            return QueryNode(
+                column=shadow, operator=operator, value=pk_value, path=prefix_path
+            )
+        raise TypeError(
+            f"cannot compare relation {relation!r} to {other!r}: expected a "
+            f"{self._target.__name__} instance or None. To filter by a column, "
+            f"compare it directly (e.g. t.{relation}.<column> == ...)."
+        )
+
+    def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        self, other: object
+    ) -> QueryNode:
+        """Desugar ``t.<relation> == instance`` / ``== None`` (join-free, #273)."""
+        return self._instance_comparison(other, "==")
+
+    def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        self, other: object
+    ) -> QueryNode:
+        """Desugar ``t.<relation> != instance`` / ``!= None`` (join-free, #273)."""
+        return self._instance_comparison(other, "!=")
+
+    def _reject_operator(self, symbol: str) -> "QueryNode":
+        """Reject a non-equality operator on a bare relation (#273)."""
+        relation = self._relation_name()
+        raise TypeError(
+            f"relation {relation!r} supports only == / != against a "
+            f"{self._target.__name__} instance or None; to compare a column use "
+            f"t.{relation}.<column> (e.g. t.{relation}.<column> {symbol} ...)."
+        )
+
+    def __lt__(self, other: object) -> "QueryNode":
+        return self._reject_operator("<")
+
+    def __le__(self, other: object) -> "QueryNode":
+        return self._reject_operator("<=")
+
+    def __gt__(self, other: object) -> "QueryNode":
+        return self._reject_operator(">")
+
+    def __ge__(self, other: object) -> "QueryNode":
+        return self._reject_operator(">=")
+
+    def in_(self, other: object) -> "QueryNode":
+        return self._reject_operator("in_")
+
+    def like(self, other: object) -> "QueryNode":
+        return self._reject_operator("like")
+
+    def __lshift__(self, other: object) -> "QueryNode":
+        return self._reject_operator("<<")
+
+    def __repr__(self) -> str:
+        joined = ".".join(self._path)
+        return f"RelationProxy(path={joined!r}, target={self._target.__name__!r})"
 
 
 Predicate: TypeAlias = Callable[[QueryProxy[TModel]], QueryNode]

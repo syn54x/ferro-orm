@@ -18,6 +18,7 @@ from .nodes import (
     Predicate,
     QueryNode,
     QueryProxy,
+    RelationProxy,
     _serialize_query_value,
     validate_query_column,
 )
@@ -30,13 +31,18 @@ E = TypeVar("E")
 
 
 def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
-    """Serialize a QueryIR payload into a versioned IR envelope JSON string."""
+    """Serialize a QueryIR payload into a versioned IR envelope JSON string.
+
+    Always emits ``ir_version: 2`` (#269 — unconditional bump; there is no v1
+    envelope left anywhere). Python and Rust ship in one wheel, so a single
+    supported version is the whole contract (#267 Implementation Decisions).
+    """
     import json
 
     return json.dumps(
         {
             "ir_kind": "query",
-            "ir_version": 1,
+            "ir_version": 2,
             "payload": _serialize_query_value(query_payload),
         }
     )
@@ -55,12 +61,156 @@ def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNo
             f"(e.g. `lambda user: user.age >= 18`), got {type(predicate).__name__}"
         )
     result = predicate(QueryProxy(model_cls))
+    if isinstance(result, RelationProxy):
+        relation = result._path[-1]
+        raise TypeError(
+            f"where() predicate returned the bare relation {relation!r}; compare "
+            f"a column (e.g. t.{relation}.<column> == ...) or use == None / "
+            "== an instance to filter by the relation."
+        )
     if not isinstance(result, QueryNode):
         raise TypeError(
             "where() predicate callable must return QueryNode, "
             f"got {type(result).__name__}"
         )
     return result
+
+
+def _register_join_paths(node: QueryNode, joins: dict[tuple[str, ...], str]) -> None:
+    """Register every relation path a resolved WHERE node references (#270).
+
+    Walks the node tree depth-first, left-to-right; each leaf with a non-empty
+    ``path`` registers that FULL path once (``setdefault`` keeps the first
+    occurrence's order). Only full paths are stored — the Rust walker dedups
+    shared prefixes when it renders JOINs, so a ``["account", "owner"]`` leaf
+    and an ``["account"]`` leaf still yield exactly two JOINs. Dedup across
+    ``&``/``|`` trees and across multiple ``where()`` calls falls out of the
+    dict.
+    """
+    if node.is_compound:
+        if node.left is not None:
+            _register_join_paths(node.left, joins)
+        if node.right is not None:
+            _register_join_paths(node.right, joins)
+        return
+    if node.path:
+        joins.setdefault(tuple(node.path), "inner")
+
+
+def _where_node_traverses(node: QueryNode) -> bool:
+    """True if any leaf under ``node`` carries a non-empty relation path (#273).
+
+    Used by :meth:`Query._mutating_query_def` to reject relation traversal on
+    ``update()``/``delete()``. A join-free shadow-FK leaf (``t.account ==
+    instance`` desugars to ``path=()``) is NOT traversal and stays allowed.
+    """
+    if node.is_compound:
+        return (node.left is not None and _where_node_traverses(node.left)) or (
+            node.right is not None and _where_node_traverses(node.right)
+        )
+    return bool(node.path)
+
+
+def _resolve_join_selector(
+    selector: "Callable[[QueryProxy[Any]], Any]", model_cls: type
+) -> tuple[str, ...]:
+    """Resolve a join-chainer selector into a relation path (#272).
+
+    ``selector`` is a lambda receiving a validating :class:`QueryProxy` and
+    naming a RELATION path (``lambda t: t.account``, ``lambda t: t.account.owner``)
+    — i.e. it must return a :class:`RelationProxy`. Each hop is validated against
+    the relevant model at build time (the proxy raises ``AttributeError`` with a
+    did-you-mean for a bad hop, same as ``where()``).
+
+    Returns:
+        The relation ``path`` tuple the selector names (length ≥ 1).
+
+    Raises:
+        TypeError: If ``selector`` is not callable, resolves to a column
+            (:class:`FieldProxy`) rather than a relation, or returns any other
+            non-relation value — a join selector names a relation path, not a
+            column.
+    """
+    if not callable(selector):
+        raise TypeError(
+            "join()/left_join() expected a selector callable "
+            f"(e.g. `lambda t: t.account`), got {type(selector).__name__}"
+        )
+    result = selector(QueryProxy(model_cls))
+    if isinstance(result, FieldProxy):
+        raise TypeError(
+            "join()/left_join() selector resolved to a column, not a relation "
+            "(e.g. `lambda t: t.account.name`); a join selector names a relation "
+            "path (e.g. `lambda t: t.account`)."
+        )
+    if not isinstance(result, RelationProxy):
+        raise TypeError(
+            "join()/left_join() selector must return a relation path "
+            f"(e.g. `lambda t: t.account`), got {type(result).__name__}"
+        )
+    return result._path
+
+
+def _path_edges(path: tuple[str, ...]) -> list[tuple[str, ...]]:
+    """Every edge (prefix of length ≥ 1) of a relation ``path`` (#272)."""
+    return [path[:i] for i in range(1, len(path) + 1)]
+
+
+def _target_pk_column(model_cls: type) -> str:
+    """Return the single primary-key column name of a relation target (#270).
+
+    Raises:
+        ValueError: If ``model_cls`` has zero or multiple primary-key columns —
+            relation traversal joins against exactly one PK column, so an
+            ambiguous target is a loud error naming the model, never a guess.
+    """
+    pks = [
+        name
+        for name, spec in getattr(model_cls, "__ferro_columns__", {}).items()
+        if spec.primary_key
+    ]
+    if len(pks) != 1:
+        raise ValueError(
+            f"Relation traversal into {model_cls.__name__!r} requires exactly one "
+            f"primary-key column, found {len(pks)}: {sorted(pks)}."
+        )
+    return pks[0]
+
+
+def _resolve_join_hops(
+    model_cls: type, path: tuple[str, ...]
+) -> list[dict[str, str]]:
+    """Resolve a relation path into ordered hop facts for the QueryIR ``joins``.
+
+    Each hop's ``relation``/``from_column``/``to_table``/``to_column`` is read
+    from the relation-spec chain starting at ``model_cls`` — ``from_column`` is
+    the shadow FK column on the source side, ``to_column`` the target's PK.
+
+    Raises:
+        ValueError: If a path element is not a declared relation of the current
+            model (should not happen — proxies validate at build time), or the
+            target has no single primary key (:func:`_target_pk_column`).
+    """
+    hops: list[dict[str, str]] = []
+    current = model_cls
+    for relation in path:
+        specs = getattr(current, "__ferro_relation_specs__", None) or {}
+        spec = specs.get(relation)
+        if spec is None:
+            raise ValueError(
+                f"{current.__name__!r} has no relation {relation!r} for traversal."
+            )
+        target = spec.target
+        hops.append(
+            {
+                "relation": relation,
+                "from_column": spec.shadow_column,
+                "to_table": target.__ferro_table__,
+                "to_column": _target_pk_column(target),
+            }
+        )
+        current = target
+    return hops
 
 
 class Query(Generic[T]):
@@ -89,10 +239,23 @@ class Query(Generic[T]):
         self._using = using
         self._session = session
         self.where_clause: list["QueryNode"] = []
-        self.order_by_clause: list[dict[str, str]] = []
+        self.order_by_clause: list[dict[str, Any]] = []
         self._limit: int | None = None
         self._offset: int | None = None
         self._m2m_context: dict[str, Any] | None = None
+        # Relation paths that must render a join, insertion-ordered (full path
+        # tuple -> registered join_type). Populated by where()/order_by()
+        # traversal ("inner") and by the explicit join()/left_join() chainers
+        # ("inner"/"left"). Serialized into the QueryIR ``joins`` section by
+        # all()/count() (#270, #272).
+        self._joins: dict[tuple[str, ...], str] = {}
+        # Edges (path prefixes, length ≥ 1) whose join type was fixed by an
+        # explicit chainer, insertion-ordered (edge tuple -> "inner"|"left").
+        # ``.left_join`` marks every edge of its path "left" (whole-path rule,
+        # ADR-0006); ``.join`` marks them "inner". The single source of truth
+        # for LEFT on the wire — implicit where()/order_by() traversal never
+        # touches this, so explicit always beats implicit (#272).
+        self._explicit_edges: dict[tuple[str, ...], str] = {}
 
     async def _transaction_or_using(self) -> "RouteHandle":
         from .. import _ensure_rust_registration_synced_for_operation
@@ -114,6 +277,8 @@ class Query(Generic[T]):
         new._m2m_context = (
             dict(self._m2m_context) if self._m2m_context is not None else None
         )
+        new._joins = dict(self._joins)
+        new._explicit_edges = dict(self._explicit_edges)
         return new
 
     def _m2m(
@@ -144,6 +309,12 @@ class Query(Generic[T]):
         ``AttributeError`` naming the closest valid match, before any query
         is sent to the database.
 
+        Attribute access on a declared forward-FK field traverses the relation
+        (``lambda t: t.account.ledger_id == lid``): each hop resolves against
+        the related model, and every distinct traversed path renders one INNER
+        join (ADR-0006) when the query runs. Every hop is validated at build
+        time with the same did-you-mean naming the hop's model.
+
         Args:
             predicate: A callable that takes a :class:`QueryProxy` and
                 returns a :class:`QueryNode`.
@@ -162,7 +333,9 @@ class Query(Generic[T]):
             True
         """
         new = self._clone()
-        new.where_clause.append(_resolve_where_node(predicate, self.model_cls))
+        node = _resolve_where_node(predicate, self.model_cls)
+        new.where_clause.append(node)
+        _register_join_paths(node, new._joins)
         return new
 
     def order_by(
@@ -177,6 +350,15 @@ class Query(Generic[T]):
         column-name string (``order_by("created_at", "desc")``). Both forms are
         validated against the model's queryable columns at build time.
 
+        A lambda selector may traverse a declared forward-FK relation
+        (``order_by(lambda t: t.account.name)``) exactly like ``where()``: each
+        hop resolves against the related model, and the traversed path renders
+        one INNER join (ADR-0006), shared with any ``where()`` traversal of the
+        same path in the same query — the same path referenced in both yields
+        exactly one join. String selectors do not traverse: ``"account.name"``
+        is looked up as a literal (unqualified) column name on the queried
+        model.
+
         Args:
             field: Column selector — lambda receiving a :class:`QueryProxy`,
                 or a column-name string.
@@ -188,7 +370,8 @@ class Query(Generic[T]):
         Raises:
             AttributeError: If the column is not a queryable column.
             TypeError: If a lambda selector returns something other than a
-                single column reference.
+                single column reference (a bare relation, e.g.
+                ``lambda t: t.account``, is meaningless as a sort key).
             ValueError: If ``direction`` is not ``"asc"`` or ``"desc"``.
 
         Examples:
@@ -197,16 +380,29 @@ class Query(Generic[T]):
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
 
+        path: tuple[str, ...] = ()
         if isinstance(field, str):
             col_name = validate_query_column(self.model_cls, field)
         elif callable(field):
             selected = field(QueryProxy(self.model_cls))
+            # Ordering by a bare relation (no column selected) is meaningless —
+            # reject it loudly rather than emitting an order_by the SELECT
+            # walker cannot render. Ordering by a related COLUMN (a FieldProxy
+            # with a non-empty path) is valid traversal (#271).
+            if isinstance(selected, RelationProxy):
+                relation = selected._path[-1]
+                raise TypeError(
+                    f"order_by() selector returned the bare relation {relation!r}, "
+                    "not a column; order by a column on it instead "
+                    f"(e.g. t.{relation}.<column>)."
+                )
             if not isinstance(selected, FieldProxy):
                 raise TypeError(
                     "order_by() selector must return a FieldProxy "
                     f"(e.g. `lambda u: u.created_at`), got {type(selected).__name__}"
                 )
             col_name = selected.column
+            path = selected.path
         else:
             raise TypeError(
                 "order_by() expected a column-name string or a lambda selector, "
@@ -214,7 +410,106 @@ class Query(Generic[T]):
             )
 
         new = self._clone()
-        new.order_by_clause.append({"column": col_name, "direction": direction.lower()})
+        new.order_by_clause.append(
+            {
+                "column": col_name,
+                "direction": direction.lower(),
+                "path": list(path),
+            }
+        )
+        if path:
+            new._joins.setdefault(path, "inner")
+        return new
+
+    def join(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
+        """Force an INNER join on a relation path and return a new query.
+
+        ``selector`` is a lambda naming a RELATION path
+        (``lambda t: t.account``, ``lambda t: t.account.owner``) — the same
+        traversal syntax as ``where()``, but resolving to the relation itself,
+        not a column on it. A bare ``.join(lambda t: t.account)`` with no
+        predicate is a meaningful **existence filter** on a nullable relation:
+        it narrows the result to rows where the relation exists (ADR-0006).
+
+        Every edge of the path is marked explicit-INNER; combining it with an
+        explicit ``.left_join`` on the same edge is a build-time error (see
+        :meth:`left_join`).
+
+        Args:
+            selector: A lambda receiving a :class:`QueryProxy` and returning a
+                relation path (a ``RelationProxy``).
+
+        Returns:
+            A new ``Query`` with the join registered; ``self`` is unchanged.
+
+        Raises:
+            TypeError: If ``selector`` is not callable or does not resolve to a
+                relation path (a column selector is rejected — join names a
+                relation, not a column).
+            ValueError: If an edge of the path is already marked explicit-LEFT.
+
+        Examples:
+            >>> with_account = QJTransaction.select().join(lambda t: t.account)
+        """
+        return self._add_explicit_join(selector, "inner")
+
+    def left_join(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
+        """Mark a relation path LEFT (whole-path) and return a new query.
+
+        ``selector`` names a RELATION path exactly like :meth:`join`. Every edge
+        of the path is marked LEFT (the **whole-path rule**, ADR-0006), so a
+        left-marked 2-hop path retains rows missing the relation at either hop.
+        Relation-less rows are retained (NULL retention), observable both in
+        ordered results and in traversal predicates on related columns (e.g.
+        ``where(lambda t: t.account.name == None)``).
+
+        Conflict rules: an explicit LEFT beats implicit ``where()``/``order_by()``
+        traversal on a shared edge (the path renders LEFT); an explicit ``.join``
+        plus an explicit ``.left_join`` on the same edge is a build-time error.
+
+        Args:
+            selector: A lambda receiving a :class:`QueryProxy` and returning a
+                relation path (a ``RelationProxy``).
+
+        Returns:
+            A new ``Query`` with the LEFT join registered; ``self`` is unchanged.
+
+        Raises:
+            TypeError: If ``selector`` is not callable or does not resolve to a
+                relation path.
+            ValueError: If an edge of the path is already marked explicit-INNER.
+
+        Examples:
+            >>> keep_orphans = QJNote.select().left_join(lambda n: n.account)
+        """
+        return self._add_explicit_join(selector, "left")
+
+    def _add_explicit_join(
+        self, selector: "Callable[[QueryProxy[T]], Any]", join_type: str
+    ) -> Self:
+        """Shared body of :meth:`join`/:meth:`left_join` (#272).
+
+        Resolves the selector to a relation path, checks every edge for a
+        contradictory explicit mark (INNER vs LEFT), then records the marks and
+        registers the full path so it renders. Re-marking an edge the same
+        direction is idempotent.
+        """
+        path = _resolve_join_selector(selector, self.model_cls)
+        edges = _path_edges(path)
+        new = self._clone()
+        for edge in edges:
+            existing = new._explicit_edges.get(edge)
+            if existing is not None and existing != join_type:
+                relation_path = ".".join(edge)
+                raise ValueError(
+                    f"conflicting explicit join types on relation edge "
+                    f"{relation_path!r}: already marked {existing!r} by a prior "
+                    f"join()/left_join(), cannot re-mark {join_type!r}. Use one "
+                    "join type per edge."
+                )
+        for edge in edges:
+            new._explicit_edges[edge] = join_type
+        new._joins.setdefault(path, join_type)
         return new
 
     def limit(self, value: int) -> Self:
@@ -253,6 +548,39 @@ class Query(Generic[T]):
         new._offset = value
         return new
 
+    def _serialize_joins(self) -> list[dict[str, Any]]:
+        """Serialize collected relation paths into QueryIR ``joins`` entries.
+
+        Emits one entry per registered full path, in insertion order, each
+        carrying its ordered hop facts (:func:`_resolve_join_hops`). The Rust
+        SELECT walkers assign deterministic ``j{i}_{relation}`` aliases and
+        dedup shared prefixes at render time (#270).
+
+        The wire ``join_type`` is resolved from ``_explicit_edges`` at the EDGE
+        level so it is already unambiguous (#272): an entry is ``"left"`` iff
+        ALL of its edges are explicitly LEFT-marked, else ``"inner"``. Because
+        ``.left_join`` is whole-path and the only source of LEFT, a proper
+        prefix of a longer path can be LEFT while the deeper hop is INNER — that
+        prefix is itself a registered ``_joins`` entry (``left_join`` registers
+        its full path) and is emitted as its own ``"left"`` entry; the longer
+        entry is emitted ``"inner"``. The Rust edge resolver then renders the
+        prefix edges LEFT and the deeper edges INNER (a pure double-check of
+        this wire). This also makes "explicit LEFT beats implicit INNER on a
+        shared edge" visible in the IR itself.
+        """
+        entries: list[dict[str, Any]] = []
+        for path in self._joins:
+            is_left = all(
+                self._explicit_edges.get(edge) == "left" for edge in _path_edges(path)
+            )
+            entries.append(
+                {
+                    "join_type": "left" if is_left else "inner",
+                    "path": _resolve_join_hops(self.model_cls, path),
+                }
+            )
+        return entries
+
     def _mutating_query_def(self, operation: str) -> dict[str, Any]:
         """Build the QueryIR payload for a mutating operation (update/delete).
 
@@ -261,7 +589,13 @@ class Query(Generic[T]):
         rejected loudly instead of being silently ignored.
 
         Raises:
-            ValueError: If ``limit()`` or ``offset()`` was set on this query.
+            ValueError: If ``limit()``/``offset()`` was set, or if the query
+                traverses a relation (a joined/explicit-edge path, or a
+                where-clause leaf carrying a non-empty path). Portable SQL has
+                no ``UPDATE/DELETE ... JOIN``; a join-free shadow-FK filter
+                (``t.account == instance``) stays allowed. Rejected here, before
+                any DB round-trip (the Rust guard from #270 stays as boundary
+                defense).
         """
         if self._limit is not None or self._offset is not None:
             raise ValueError(
@@ -270,11 +604,24 @@ class Query(Generic[T]):
                 f"call, or fetch primary keys first and {operation} by "
                 "primary-key set."
             )
+        if (
+            self._joins
+            or self._explicit_edges
+            or any(_where_node_traverses(node) for node in self.where_clause)
+        ):
+            raise ValueError(
+                f"{operation}() does not support relation traversal: portable SQL "
+                f"has no {operation.upper()} ... JOIN. Fetch primary keys via the "
+                f"joined query first, then {operation} by primary-key set. "
+                "(A join-free relation filter like `t.account == instance` is "
+                "allowed.)"
+            )
         return {
             "model_name": _model_identity(self.model_cls),
             "where": [node.to_ir_dict() for node in self.where_clause],
             "order_by": [],
             "m2m": None,
+            "joins": [],
         }
 
     async def all(self) -> list[T]:
@@ -295,6 +642,7 @@ class Query(Generic[T]):
             "limit": self._limit,
             "offset": self._offset,
             "m2m": self._m2m_context,
+            "joins": self._serialize_joins(),
         }
         route = await self._transaction_or_using()
         return await fetch_filtered(
@@ -321,6 +669,7 @@ class Query(Generic[T]):
             "limit": None,
             "offset": None,
             "m2m": self._m2m_context,
+            "joins": self._serialize_joins(),
         }
         route = await self._transaction_or_using()
         return await count_filtered(
@@ -339,7 +688,12 @@ class Query(Generic[T]):
             The number of records updated.
 
         Raises:
-            ValueError: If ``limit()`` or ``offset()`` was set on this query.
+            ValueError: If ``limit()`` or ``offset()`` was set on this query, or
+                if the query traverses a relation (a ``where()`` predicate on a
+                related column, or an explicit ``join()``/``left_join()``) —
+                multi-table mutation has no portable SQL. Filter by a column on
+                the target model, or resolve the related primary keys first and
+                update by primary-key set.
 
         Examples:
             >>> updated = await User.where(lambda user: user.id == 1).update(name="Taylor")
@@ -376,7 +730,12 @@ class Query(Generic[T]):
             The number of records deleted.
 
         Raises:
-            ValueError: If ``limit()`` or ``offset()`` was set on this query.
+            ValueError: If ``limit()`` or ``offset()`` was set on this query, or
+                if the query traverses a relation (a ``where()`` predicate on a
+                related column, or an explicit ``join()``/``left_join()``) —
+                multi-table mutation has no portable SQL. Filter by a column on
+                the target model, or resolve the related primary keys first and
+                delete by primary-key set.
 
         Examples:
             >>> deleted = await User.where(lambda user: user.disabled == True).delete()  # noqa: E712

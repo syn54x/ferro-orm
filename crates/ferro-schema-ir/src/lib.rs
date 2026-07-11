@@ -134,7 +134,11 @@ pub struct SchemaCheck {
     pub values: Vec<String>,
 }
 
-/// Query IR: filter, sort, pagination, and optional M2M join context.
+/// Query IR: filter, sort, pagination, joins, and optional M2M join context.
+///
+/// `ir_version: 2` (unconditional, no v1 emitted anywhere — #269). `joins` is
+/// required and always present (`[]` until #270 renders real JOINs); every leaf
+/// and `order_by` entry carries a `path` (required, `[]` = root model).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryIrPayload {
     /// Model class name the query targets.
@@ -150,6 +154,30 @@ pub struct QueryIrPayload {
     pub offset: Option<u64>,
     /// Many-to-many join metadata JSON, deserialized into [`M2mContext`] downstream.
     pub m2m: Option<Value>,
+    /// Relation joins collected from traversal (`[]` until #270 renders them).
+    pub joins: Vec<QueryJoin>,
+}
+
+/// One relation JOIN collected from query-time traversal (#270 lands rendering).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueryJoin {
+    /// `"inner"` (default traversal semantics) or `"left"` (`.left_join`).
+    pub join_type: String,
+    /// Relation hops from the root model to the joined table, in traversal order.
+    pub path: Vec<QueryJoinHop>,
+}
+
+/// One hop in a [`QueryJoin`] path: a single FK edge between two tables.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueryJoinHop {
+    /// Relation field name on the source side of this hop.
+    pub relation: String,
+    /// Local column the hop joins from (shadow `*_id` for `ForeignKey`).
+    pub from_column: String,
+    /// Table this hop joins into.
+    pub to_table: String,
+    /// Column on `to_table` the hop joins against (usually the target PK).
+    pub to_column: String,
 }
 
 /// One `ORDER BY` term.
@@ -159,6 +187,9 @@ pub struct QueryOrderBy {
     pub column: String,
     /// Sort direction (`"asc"` or `"desc"`, case-insensitive in the planner).
     pub direction: String,
+    /// Relation field names from the root model to the ordered column's table;
+    /// `[]` = root model (#269 requires this empty until #270 renders joins).
+    pub path: Vec<String>,
 }
 
 /// Predicate tree node in query IR (leaf comparison or compound AND/OR).
@@ -174,6 +205,9 @@ pub enum QueryNode {
         column: String,
         /// Typed right-hand value.
         value: QueryValue,
+        /// Relation field names from the root model to `column`'s table;
+        /// `[]` = root model (#269 requires this empty until #270 renders joins).
+        path: Vec<String>,
     },
     /// Binary boolean combination of two child nodes.
     #[serde(rename = "compound")]
@@ -263,7 +297,7 @@ mod tests {
     #[test]
     fn query_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v1.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v2.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query fixture must parse");
         let ir = parsed
@@ -274,6 +308,57 @@ mod tests {
             serde_json::from_value(ir.clone()).expect("query IR must deserialize");
         let encoded = serde_json::to_value(&envelope).expect("query IR must serialize");
         assert_eq!(encoded, ir, "query round-trip must not drift");
+    }
+
+    #[test]
+    fn query_traversal_fixture_roundtrip() {
+        // Multi-hop `joins` section + path-carrying leaves must survive a
+        // deserialize/serialize round-trip without drift (#270 wire stability).
+        let fixture = include_str!(
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v2.json"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query traversal fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query traversal IR must deserialize");
+        // The joins section must actually carry the multi-hop path.
+        assert_eq!(envelope.payload.joins.len(), 2);
+        assert_eq!(envelope.payload.joins[1].path.len(), 2);
+        // An order_by entry carrying a relation path (#271) survives round-trip too.
+        assert_eq!(envelope.payload.order_by[0].path, vec!["account".to_string()]);
+        let encoded = serde_json::to_value(&envelope).expect("query traversal IR must serialize");
+        assert_eq!(encoded, ir, "query traversal round-trip must not drift");
+    }
+
+    #[test]
+    fn query_left_join_fixture_roundtrip() {
+        // A LEFT-marked path plus a deeper INNER entry sharing its prefix
+        // (mixed LEFT-prefix/INNER-suffix, #272) must survive a
+        // deserialize/serialize round-trip without drift, and the join_type
+        // tokens must reach Rust exactly as written on the wire.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v2.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query left_join fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query left_join IR must deserialize");
+        // The wire carries the mixed edge types: a "left" 1-hop prefix and an
+        // "inner" 2-hop entry sharing it.
+        assert_eq!(envelope.payload.joins.len(), 2);
+        assert_eq!(envelope.payload.joins[0].join_type, "left");
+        assert_eq!(envelope.payload.joins[0].path.len(), 1);
+        assert_eq!(envelope.payload.joins[1].join_type, "inner");
+        assert_eq!(envelope.payload.joins[1].path.len(), 2);
+        let encoded = serde_json::to_value(&envelope).expect("query left_join IR must serialize");
+        assert_eq!(encoded, ir, "query left_join round-trip must not drift");
     }
 
     #[test]

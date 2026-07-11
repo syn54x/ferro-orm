@@ -119,6 +119,34 @@ pub fn registered_model(name: &str) -> PyResult<Arc<RegisteredModel>> {
         })
 }
 
+/// Look up the registration whose physical table is `table_name` (#270 relation
+/// traversal): the owning model of a joined hop table, for typed binds on
+/// traversed columns.
+///
+/// Models cannot share a table — the metaclass enforces one table per model — so
+/// a table→registration resolution is unambiguous. Used once per distinct joined
+/// table per query (not per value), mirroring [`registered_model`]'s single
+/// resolution for the root.
+///
+/// # Errors
+/// `PyRuntimeError` when the registry lock fails or no registered model owns the
+/// table (a loud error — a traversed hop must never fall back to root/generic
+/// binds).
+pub fn registration_for_table(table_name: &str) -> PyResult<Arc<RegisteredModel>> {
+    MODEL_REGISTRY
+        .read()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?
+        .values()
+        .find(|model| model.table_name == table_name)
+        .cloned()
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "No registered model owns table '{table_name}'; cannot resolve typed \
+                 binds for a traversed relation"
+            ))
+        })
+}
+
 /// Python-compiled SchemaIR modelset pushed by the `connect`/`migrate` wrappers.
 ///
 /// Populated before `internal_migrate` runs so the runtime diff can consume the

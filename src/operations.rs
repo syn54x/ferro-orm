@@ -6,7 +6,7 @@
 use crate::backend::{
     EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind, TableCatalog,
 };
-use crate::query::QueryPlan;
+use crate::query::{JoinPlan, QueryPlan};
 use crate::state::{
     Dialect, TRANSACTION_REGISTRY,
     TransactionConnection, TransactionHandle, connection_for_route, ensure_session_idle_for_close,
@@ -16,8 +16,9 @@ use dashmap::DashMap;
 use ferro_schema_ir::QueryIrPayload;
 use pyo3::prelude::*;
 use sea_query::{
-    Alias, Condition, Expr, Iden, InsertStatement, OnConflict, Order, PostgresQueryBuilder, Query,
-    SimpleExpr, SqliteQueryBuilder, UpdateStatement, Value as SeaValue,
+    Alias, Condition, Expr, Iden, InsertStatement, JoinType, OnConflict, Order,
+    PostgresQueryBuilder, Query, SelectStatement, SimpleExpr, SqliteQueryBuilder, UpdateStatement,
+    Value as SeaValue,
 };
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -242,11 +243,23 @@ fn tx_remove(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<Transacti
     Ok(TRANSACTION_REGISTRY.remove(tx_id).map(|(_, handle)| handle))
 }
 
+/// The only QueryIR version this build accepts (#269, #267 Implementation Decisions).
+///
+/// Python and Rust ship in one wheel, so there is exactly one supported version at any
+/// time — no negotiation, no fallback. A mismatch can only mean a mixed build (a stale
+/// `.so` next to a rebuilt Python package, or vice versa).
+const SUPPORTED_QUERY_IR_VERSION: u32 = 2;
+
+/// Envelope shell used only to read `ir_kind`/`ir_version` before committing to a strict
+/// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real v1 payload (no
+/// `joins`/`path` fields) must fail on the version check below with an actionable
+/// message, not on a generic "missing field" serde error from parsing a payload shape
+/// this build no longer understands.
 #[derive(Debug, Clone, Deserialize)]
 struct QueryIrEnvelope {
     ir_kind: String,
     ir_version: u32,
-    payload: QueryIrPayload,
+    payload: serde_json::Value,
 }
 
 fn query_plan_from_ir_json(query_ir_json: &str) -> PyResult<QueryPlan> {
@@ -259,22 +272,131 @@ fn query_plan_from_ir_json(query_ir_json: &str) -> PyResult<QueryPlan> {
             envelope.ir_kind
         )));
     }
-    if envelope.ir_version != 1 {
+    if envelope.ir_version != SUPPORTED_QUERY_IR_VERSION {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Unsupported QueryIR version {}; expected 1",
-            envelope.ir_version
+            "Unsupported QueryIR version {}: this build of ferro accepts only version {}. \
+             Python and Rust ship in one wheel, so a version mismatch means mixed builds — \
+             reinstall/rebuild ferro so the Python package and the compiled extension match.",
+            envelope.ir_version, SUPPORTED_QUERY_IR_VERSION
         )));
     }
-    QueryPlan::from_ir_payload(envelope.payload)
+    let payload: QueryIrPayload = serde_json::from_value(envelope.payload).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR JSON: {}", e))
+    })?;
+    QueryPlan::from_ir_payload(payload)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid QueryIR: {e}")))
 }
 
+/// Build a SeaQuery `Condition` from `plan`'s `where_clause`.
+///
+/// `qualify_with`: `Some(root_table)` qualifies every column as `root_table.column`
+/// (see [`crate::query::QueryPlan::to_condition_for_backend`]). All four filtered
+/// walkers qualify with the root alias in production — the mutating `UPDATE`/`DELETE
+/// ... WHERE` paths pass `Some(root_table)` here, and the SELECT paths use
+/// [`query_condition_with_joins`] instead. `None` leaves columns unqualified and is
+/// exercised only by unit tests.
 fn query_condition_for_backend(
     plan: &QueryPlan,
     backend: Dialect,
+    qualify_with: Option<&str>,
 ) -> PyResult<Condition> {
-    plan.to_condition_for_backend(backend)
+    plan.to_condition_for_backend(backend, qualify_with)
         .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// Build the relation-JOIN plan for a SELECT walker (#270).
+///
+/// `reserved` names (the M2M association table, when present) are protected from
+/// alias collisions alongside the root table. Errors map planner `String`s to
+/// `PyValueError` (unknown `join_type`).
+fn query_join_plan(plan: &QueryPlan, root_table: &str, reserved: &[&str]) -> PyResult<JoinPlan> {
+    plan.build_join_plan(root_table, reserved)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// Build the WHERE `Condition` with columns qualified by their relation-path
+/// JOIN alias (SELECT walkers, #270).
+fn query_condition_with_joins(
+    plan: &QueryPlan,
+    backend: Dialect,
+    root_table: &str,
+    join_plan: &JoinPlan,
+) -> PyResult<Condition> {
+    plan.to_condition_with_joins(backend, root_table, join_plan)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// Render a [`JoinPlan`]'s edges onto a SELECT as aliased INNER/LEFT joins.
+///
+/// Each edge emits `<join> <to_table> AS <alias> ON
+/// <prev_alias>.<from_column> = <alias>.<to_column>`; the join type is validated
+/// (`"inner"`/`"left"`), so an unknown type is a loud error, never a mis-render.
+fn apply_relation_joins(select: &mut SelectStatement, join_plan: &JoinPlan) -> PyResult<()> {
+    for edge in &join_plan.renders {
+        let join_type = match edge.join_type.as_str() {
+            "inner" => JoinType::InnerJoin,
+            "left" => JoinType::LeftJoin,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported join_type {other:?} while rendering relation joins"
+                )));
+            }
+        };
+        select.join_as(
+            join_type,
+            Alias::new(&edge.to_table),
+            Alias::new(&edge.alias),
+            Expr::col((Alias::new(&edge.prev_alias), Alias::new(&edge.from_column)))
+                .equals((Alias::new(&edge.alias), Alias::new(&edge.to_column))),
+        );
+    }
+    Ok(())
+}
+
+/// Resolve, for every table a relation JOIN reaches, the owning model's
+/// registration and native-enum catalog so a traversed WHERE leaf binds against
+/// its OWN model — not the root's codec plan / enum catalog (#270 critical).
+///
+/// Both maps are keyed by physical table name (root and joined columns cannot
+/// collide on the enum-UDT lookup). Registration resolution is route (a):
+/// `MODEL_REGISTRY` is scanned by `table_name` (one model per table, so
+/// unambiguous), and a joined table with NO registration is a loud error — never
+/// a silent fallback to root/generic binds. The enum catalog reuses the
+/// per-table `postgres_table_catalog` cache (one probe per table per schema
+/// epoch), so steady-state traversal queries add no extra round-trips.
+async fn populate_hop_bind_context(
+    plan: &mut QueryPlan,
+    join_plan: &JoinPlan,
+    engine: &EngineHandle,
+    exec: Executor<'_>,
+    backend: Dialect,
+) -> PyResult<()> {
+    for edge in &join_plan.renders {
+        let table = &edge.to_table;
+        if !plan.hop_registrations.contains_key(table) {
+            let registration = crate::state::registration_for_table(table)?;
+            plan.hop_registrations.insert(table.clone(), registration);
+        }
+        if !plan.hop_enum_udt.contains_key(table) {
+            let catalog = postgres_table_catalog(table, engine, exec, backend).await?;
+            plan.hop_enum_udt
+                .insert(table.clone(), catalog.enum_udt.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Reject relation traversal on a mutating operation (#270 renders joins in SELECT
+/// only). The Python builder never emits joins on a mutating payload, so a `joins`
+/// list or a path-carrying WHERE leaf here is misuse — fail loud.
+fn reject_traversal_on_mutation(plan: &QueryPlan, operation: &str) -> PyResult<()> {
+    plan.ensure_no_traversal().map_err(|detail| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "{operation}() does not support relation traversal: {detail}. \
+             Filter by a column on the target model, or resolve the related \
+             primary keys first and {operation} by primary-key set."
+        ))
+    })
 }
 
 /// Reject `limit`/`offset` on mutating operations (FF-A A1, #171).
@@ -1564,6 +1686,15 @@ pub fn fetch_filtered<'py>(
         let table_name = schema.table_name.clone();
         let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         plan.postgres_enum_udt = catalog.enum_udt.clone();
+
+        // Relation-traversal JOINs (#270): the M2M association table (when
+        // present) is reserved so a relation alias can never collide with it.
+        // The join plan is built up front so each hop table's registration +
+        // enum catalog can be resolved before conditions bind (#270 critical).
+        let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
+        let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
+        let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
+        populate_hop_bind_context(&mut plan, &join_plan, &engine, exec, backend).await?;
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
             let pk = schema.meta.pk_col.clone();
@@ -1595,15 +1726,36 @@ pub fn fetch_filtered<'py>(
                 ));
             }
 
-            select.cond_where(query_condition_for_backend(&plan, backend)?);
+            apply_relation_joins(&mut select, &join_plan)?;
+
+            // WHERE columns are qualified by their relation-path alias (root leaf ->
+            // root table, path leaf -> its JOIN alias). A path with no matching join
+            // entry is a loud error, never a silently unqualified column.
+            select.cond_where(query_condition_with_joins(
+                &plan,
+                backend,
+                &table_name,
+                &join_plan,
+            )?);
+            // ORDER BY terms are qualified the same way as WHERE leaves: an empty
+            // path qualifies by the root table, a relation path by its JOIN alias
+            // (#271). A path with no matching join entry is a loud error — the
+            // Python builder always registers the join for an order_by path, so
+            // this is defense-in-depth, never reachable in normal use.
             for order in &plan.order_by {
-                let col = Alias::new(&order.column);
+                let col = crate::query::qualify_column_with_joins(
+                    &table_name,
+                    &join_plan,
+                    &order.column,
+                    &order.path,
+                )
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
                 let dir = if order.direction.to_lowercase() == "desc" {
                     Order::Desc
                 } else {
                     Order::Asc
                 };
-                select.order_by(col, dir);
+                select.order_by_expr(col.into(), dir);
             }
             if let Some(limit) = plan.limit {
                 select.limit(limit);
@@ -1719,6 +1871,16 @@ pub fn count_filtered(
             .await?
             .enum_udt
             .clone();
+
+        // Relation-traversal JOINs render into the COUNT the same as the SELECT
+        // (#270). Plain COUNT(*), no DISTINCT: forward-FK hops are many-to-one and
+        // never multiply root rows, so count() equals the matching root-row count.
+        // Build the plan up front and resolve each hop table's registration +
+        // enum catalog before conditions bind (#270 critical).
+        let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
+        let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
+        let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
+        populate_hop_bind_context(&mut plan, &join_plan, &engine, exec, backend).await?;
         // ... sql ...
         let (sql, bind_values) = {
             let mut select = Query::select();
@@ -1754,7 +1916,15 @@ pub fn count_filtered(
                 select.from(Alias::new(&table_name));
             }
 
-            select.cond_where(query_condition_for_backend(&plan, backend)?);
+            apply_relation_joins(&mut select, &join_plan)?;
+
+            // WHERE columns qualified by their relation-path alias (see fetch_filtered).
+            select.cond_where(query_condition_with_joins(
+                &plan,
+                backend,
+                &table_name,
+                &join_plan,
+            )?);
             sea_query_build_for_backend!(select, backend)
         };
 
@@ -1908,6 +2078,7 @@ pub fn delete_filtered(
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     reject_pagination_on_mutation(&plan, "delete")?;
+    reject_traversal_on_mutation(&plan, "delete")?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -1923,9 +2094,17 @@ pub fn delete_filtered(
         // ... sql ...
         let (sql, bind_values) = {
             let mut delete = Query::delete();
+            // Qualified by the root table alias (#269): both dialects accept
+            // `table.column` in `DELETE ... WHERE`, and uniform qualification across
+            // every walker avoids retrofitting the mutating paths when joins reach
+            // them later.
             delete
                 .from_table(Alias::new(&table_name))
-                .cond_where(query_condition_for_backend(&plan, backend)?);
+                .cond_where(query_condition_for_backend(
+                    &plan,
+                    backend,
+                    Some(&table_name),
+                )?);
             sea_query_build_for_backend!(delete, backend)
         };
 
@@ -1974,6 +2153,7 @@ pub fn update_filtered<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     reject_pagination_on_mutation(&plan, "update")?;
+    reject_traversal_on_mutation(&plan, "update")?;
     let update_inputs = bind_inputs_from_py(&updates)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1989,9 +2169,16 @@ pub fn update_filtered<'py>(
         plan.postgres_enum_udt = enum_udt.clone();
         // ... sql ...
         let (sql, bind_values) = {
+            // Qualified by the root table alias (#269) — same rationale as
+            // `delete_filtered` above. SET columns stay bare: SQL forbids
+            // qualified column names on the left of `SET` assignments.
             let mut update = UpdateStatement::new()
                 .table(Alias::new(&table_name))
-                .cond_where(query_condition_for_backend(&plan, backend)?)
+                .cond_where(query_condition_for_backend(
+                    &plan,
+                    backend,
+                    Some(&table_name),
+                )?)
                 .to_owned();
             for (key, input) in &update_inputs {
                 update.value(
@@ -3468,17 +3655,19 @@ mod mutation_pagination_guard_tests {
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 1,
+            "ir_version": 2,
             "payload": {
                 "model_name": "Widget",
                 "where": [{
                     "node_kind": "leaf",
                     "operator": "==",
                     "column": "name",
-                    "value": {"kind": "string", "value": "a"}
+                    "value": {"kind": "string", "value": "a"},
+                    "path": []
                 }],
                 "order_by": [],
-                "m2m": null
+                "m2m": null,
+                "joins": []
             }
         })
         .to_string()
@@ -3529,6 +3718,465 @@ mod mutation_pagination_guard_tests {
                 "message should name the operation and offset: {msg}"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod query_ir_version_gate_tests {
+    use super::query_plan_from_ir_json;
+
+    fn v2_envelope() -> serde_json::Value {
+        serde_json::json!({
+            "ir_kind": "query",
+            "ir_version": 2,
+            "payload": {
+                "model_name": "Widget",
+                "where": [],
+                "order_by": [],
+                "limit": null,
+                "offset": null,
+                "m2m": null,
+                "joins": []
+            }
+        })
+    }
+
+    #[test]
+    fn accepts_version_2() {
+        query_plan_from_ir_json(&v2_envelope().to_string())
+            .expect("a well-formed v2 envelope must be accepted");
+    }
+
+    /// Contract test (#269 acceptance criteria): a v1 envelope — including one
+    /// that predates the `joins`/`path` fields entirely, as any real v1 emitter
+    /// would produce — must be rejected with a message naming the version
+    /// actually received, this build's supported version, and that Python/Rust
+    /// ship in one wheel (so a mismatch means mixed builds).
+    #[test]
+    fn rejects_v1_envelope_with_actionable_message() {
+        let v1_envelope = serde_json::json!({
+            "ir_kind": "query",
+            "ir_version": 1,
+            "payload": {
+                "model_name": "Widget",
+                "where": [],
+                "order_by": [],
+                "limit": null,
+                "offset": null,
+                "m2m": null
+            }
+        });
+
+        let err = query_plan_from_ir_json(&v1_envelope.to_string())
+            .expect_err("a v1 envelope must be rejected");
+        pyo3::Python::attach(|py| {
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        });
+        let msg = err.to_string();
+        assert!(
+            msg.contains('1'),
+            "message should name the received version: {msg}"
+        );
+        assert!(
+            msg.contains('2'),
+            "message should name the supported version: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("one wheel"),
+            "message should explain Python/Rust ship in one wheel: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("reinstall") || msg.to_lowercase().contains("rebuild"),
+            "message should tell the caller how to fix a mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_future_version() {
+        let mut envelope = v2_envelope();
+        envelope["ir_version"] = serde_json::json!(3);
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("an unsupported future version must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains('3'),
+            "message should name the received version: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mutation_qualification_tests {
+    //! Pin root-alias qualification in mutating WHERE clauses (#269).
+    //!
+    //! `update_filtered`/`delete_filtered` assemble their statements inside async
+    //! pyfunctions with no directly callable seam, so these tests rebuild the same
+    //! statement shape (`Query::delete()` / `UpdateStatement` +
+    //! `query_condition_for_backend(.., Some(&table_name))`) and assert the rendered
+    //! SQL qualifies the WHERE column on both dialects.
+
+    use super::{query_condition_for_backend, query_plan_from_ir_json};
+    use crate::state::Dialect;
+    use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, UpdateStatement};
+
+    fn widget_plan() -> crate::query::QueryPlan {
+        query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 2,
+                "payload": {
+                    "model_name": "Widget",
+                    "where": [{
+                        "node_kind": "leaf",
+                        "operator": "==",
+                        "column": "name",
+                        "value": {"kind": "string", "value": "a"},
+                        "path": []
+                    }],
+                    "order_by": [],
+                    "m2m": null,
+                    "joins": []
+                }
+            })
+            .to_string(),
+        )
+        .expect("v2 envelope parses")
+    }
+
+    #[test]
+    fn delete_where_column_is_root_qualified_on_both_dialects() {
+        let plan = widget_plan();
+        for backend in [Dialect::Sqlite, Dialect::Postgres] {
+            let mut delete = Query::delete();
+            delete
+                .from_table(Alias::new("widget"))
+                .cond_where(query_condition_for_backend(&plan, backend, Some("widget")).unwrap());
+            let sql = match backend {
+                Dialect::Postgres => delete.to_string(PostgresQueryBuilder),
+                Dialect::Sqlite => delete.to_string(SqliteQueryBuilder),
+            };
+            assert!(
+                sql.contains("\"widget\".\"name\"") || sql.contains("`widget`.`name`"),
+                "DELETE WHERE column must be root-qualified on {backend:?}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_where_column_is_root_qualified_on_both_dialects() {
+        let plan = widget_plan();
+        for backend in [Dialect::Sqlite, Dialect::Postgres] {
+            let mut update = UpdateStatement::new()
+                .table(Alias::new("widget"))
+                .cond_where(query_condition_for_backend(&plan, backend, Some("widget")).unwrap())
+                .to_owned();
+            update.value(Alias::new("name"), "b");
+            let sql = match backend {
+                Dialect::Postgres => update.to_string(PostgresQueryBuilder),
+                Dialect::Sqlite => update.to_string(SqliteQueryBuilder),
+            };
+            assert!(
+                sql.contains("\"widget\".\"name\" =") || sql.contains("`widget`.`name` ="),
+                "UPDATE WHERE column must be root-qualified on {backend:?}: {sql}"
+            );
+            // SET assignment column must stay bare (SQL forbids qualified SET targets).
+            assert!(
+                sql.contains("SET \"name\"") || sql.contains("SET `name`"),
+                "UPDATE SET column must stay unqualified on {backend:?}: {sql}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod select_join_render_tests {
+    //! Pin the FULL rendered SELECT SQL for a joined query (#271) — including the
+    //! `INNER JOIN <table> AS <alias> ON <prev>.<from_column> = <alias>.<to_column>`
+    //! clause text `apply_relation_joins` renders. Task 3 (#270) only pinned the
+    //! `JoinPlan` struct's alias fields at the unit level; the reviewer flagged the
+    //! missing rendered-SQL pin, closed here since this slice extends the exact
+    //! same SELECT-walker seam to `ORDER BY`.
+
+    use super::{
+        apply_relation_joins, query_condition_with_joins, query_join_plan, query_plan_from_ir_json,
+    };
+    use crate::state::Dialect;
+    use sea_query::{Alias, Order, PostgresQueryBuilder, SelectStatement};
+
+    /// `Transaction -> account` traversed by BOTH a `where()` leaf and an
+    /// `order_by` term on the same path — the one-join acceptance criterion.
+    fn shared_path_plan() -> crate::query::QueryPlan {
+        query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 2,
+                "payload": {
+                    "model_name": "Transaction",
+                    "where": [{
+                        "node_kind": "leaf",
+                        "operator": "==",
+                        "column": "label",
+                        "value": {"kind": "string", "value": "a1"},
+                        "path": ["account"]
+                    }],
+                    "order_by": [{"column": "name", "direction": "asc", "path": ["account"]}],
+                    "limit": null, "offset": null, "m2m": null,
+                    "joins": [
+                        {"join_type": "inner", "path": [
+                            {"relation": "account", "from_column": "account_id",
+                             "to_table": "account", "to_column": "id"}
+                        ]}
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("v2 envelope parses")
+    }
+
+    #[test]
+    fn rendered_select_pins_join_clause_and_dedups_shared_where_order_by_path() {
+        let mut plan = shared_path_plan();
+        // The walkers resolve each joined table's registration + enum catalog
+        // before building conditions; mirror that for the traversed `label` leaf
+        // (path [account] -> table "account").
+        plan.hop_registrations.insert(
+            "account".to_string(),
+            crate::state::RegisteredModel::new_for_test(
+                serde_json::json!({
+                    "properties": {"label": {"type": "string"}, "name": {"type": "string"}}
+                }),
+                "account".to_string(),
+            ),
+        );
+        plan.hop_enum_udt
+            .insert("account".to_string(), std::collections::HashMap::new());
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+
+        let mut select = SelectStatement::new();
+        select
+            .column((Alias::new("transaction"), sea_query::Asterisk))
+            .from(Alias::new("transaction"));
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.cond_where(
+            query_condition_with_joins(&plan, Dialect::Postgres, "transaction", &join_plan)
+                .expect("condition builds"),
+        );
+        for order in &plan.order_by {
+            let col = crate::query::qualify_column_with_joins(
+                "transaction",
+                &join_plan,
+                &order.column,
+                &order.path,
+            )
+            .expect("order_by column qualifies by its join alias");
+            select.order_by_expr(col.into(), Order::Asc);
+        }
+
+        let sql = select.to_string(PostgresQueryBuilder);
+
+        let expected_join = "INNER JOIN \"account\" AS \"j1_account\" ON \
+             \"transaction\".\"account_id\" = \"j1_account\".\"id\"";
+        assert!(
+            sql.contains(expected_join),
+            "expected the exact rendered JOIN clause, got: {sql}"
+        );
+        // Same relation path referenced by both the WHERE leaf and the order_by
+        // term must still render exactly ONE join (#270/#271 acceptance).
+        assert_eq!(
+            sql.matches("INNER JOIN").count(),
+            1,
+            "shared where()/order_by path must render exactly one JOIN: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE \"j1_account\".\"label\""),
+            "WHERE leaf must qualify by the shared join alias: {sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY \"j1_account\".\"name\""),
+            "ORDER BY must qualify by the shared join alias: {sql}"
+        );
+    }
+
+    /// Build a plain `SELECT * FROM <root>` with the plan's relation joins
+    /// rendered — the exact seam both `fetch_filtered` and `count_filtered`
+    /// call (`apply_relation_joins`), so a rendered-SQL pin here covers both.
+    fn render_joined_select(plan: &crate::query::QueryPlan, root_table: &str) -> String {
+        let join_plan = query_join_plan(plan, root_table, &[]).expect("join plan");
+        let mut select = SelectStatement::new();
+        select
+            .column((Alias::new(root_table), sea_query::Asterisk))
+            .from(Alias::new(root_table));
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.to_string(PostgresQueryBuilder)
+    }
+
+    fn joined_plan(joins: serde_json::Value, model_name: &str) -> crate::query::QueryPlan {
+        query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 2,
+                "payload": {
+                    "model_name": model_name,
+                    "where": [], "order_by": [],
+                    "limit": null, "offset": null, "m2m": null,
+                    "joins": joins
+                }
+            })
+            .to_string(),
+        )
+        .expect("v2 envelope parses")
+    }
+
+    /// `t.account == instance` desugars to a shadow-FK leaf (`account_id`) with
+    /// an EMPTY path and NO joins entry — the join-free proof (#273). The
+    /// rendered SELECT must contain no JOIN and a WHERE qualified by the ROOT
+    /// table's `account_id`, never a relation alias.
+    #[test]
+    fn rendered_select_instance_equality_is_join_free() {
+        let plan = query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 2,
+                "payload": {
+                    "model_name": "Transaction",
+                    "where": [{
+                        "node_kind": "leaf",
+                        "operator": "==",
+                        "column": "account_id",
+                        "value": {"kind": "int", "value": 7},
+                        "path": []
+                    }],
+                    "order_by": [], "limit": null, "offset": null, "m2m": null,
+                    "joins": []
+                }
+            })
+            .to_string(),
+        )
+        .expect("v2 envelope parses");
+
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+        let mut select = SelectStatement::new();
+        select
+            .column((Alias::new("transaction"), sea_query::Asterisk))
+            .from(Alias::new("transaction"));
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.cond_where(
+            query_condition_with_joins(&plan, Dialect::Postgres, "transaction", &join_plan)
+                .expect("condition builds"),
+        );
+        let sql = select.to_string(PostgresQueryBuilder);
+
+        assert!(
+            !sql.contains("JOIN"),
+            "instance equality must be join-free: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE \"transaction\".\"account_id\""),
+            "WHERE must filter the ROOT-qualified shadow FK: {sql}"
+        );
+    }
+
+    /// A `.left_join(t.account)` renders a LEFT JOIN clause (#272 NULL retention).
+    #[test]
+    fn rendered_select_pins_left_join_clause() {
+        let plan = joined_plan(
+            serde_json::json!([
+                {"join_type": "left", "path": [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"}
+                ]}
+            ]),
+            "Note",
+        );
+        let sql = render_joined_select(&plan, "note");
+        let expected = "LEFT JOIN \"account\" AS \"j1_account\" ON \
+             \"note\".\"account_id\" = \"j1_account\".\"id\"";
+        assert!(
+            sql.contains(expected),
+            "expected LEFT JOIN clause, got: {sql}"
+        );
+        assert_eq!(sql.matches("LEFT JOIN").count(), 1, "one LEFT JOIN: {sql}");
+        assert_eq!(sql.matches("INNER JOIN").count(), 0, "no INNER JOIN: {sql}");
+    }
+
+    /// Whole-path LEFT: a 2-hop `.left_join` renders BOTH edges LEFT (#272).
+    #[test]
+    fn rendered_select_whole_path_left_renders_both_hops_left() {
+        let plan = joined_plan(
+            serde_json::json!([
+                {"join_type": "left", "path": [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"},
+                    {"relation": "owner", "from_column": "owner_id",
+                     "to_table": "owner", "to_column": "id"}
+                ]}
+            ]),
+            "Transaction",
+        );
+        let sql = render_joined_select(&plan, "transaction");
+        assert!(
+            sql.contains("LEFT JOIN \"account\" AS \"j1_account\""),
+            "hop-1 LEFT JOIN: {sql}"
+        );
+        assert!(
+            sql.contains(
+                "LEFT JOIN \"owner\" AS \"j2_owner\" ON \
+                 \"j1_account\".\"owner_id\" = \"j2_owner\".\"id\""
+            ),
+            "hop-2 LEFT JOIN chained off hop-1 alias: {sql}"
+        );
+        assert_eq!(sql.matches("LEFT JOIN").count(), 2, "two LEFT JOINs: {sql}");
+        assert_eq!(sql.matches("INNER JOIN").count(), 0, "no INNER JOIN: {sql}");
+    }
+
+    /// Mixed case (#272 pin): a `"left"` `[account]` entry and an `"inner"`
+    /// `[account, owner]` entry render TWO joins (shared prefix dedups) — the
+    /// account edge LEFT, the owner edge INNER — regardless of entry order.
+    #[test]
+    fn rendered_select_mixed_left_prefix_inner_suffix_is_order_independent() {
+        let left_first = serde_json::json!([
+            {"join_type": "left", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]},
+            {"join_type": "inner", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"},
+                {"relation": "owner", "from_column": "owner_id",
+                 "to_table": "owner", "to_column": "id"}
+            ]}
+        ]);
+        let inner_first = serde_json::json!([
+            {"join_type": "inner", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"},
+                {"relation": "owner", "from_column": "owner_id",
+                 "to_table": "owner", "to_column": "id"}
+            ]},
+            {"join_type": "left", "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]}
+        ]);
+        for joins in [left_first, inner_first] {
+            let plan = joined_plan(joins, "Transaction");
+            let sql = render_joined_select(&plan, "transaction");
+            assert_eq!(
+                sql.matches(" JOIN ").count(),
+                2,
+                "shared prefix dedups to exactly two joins: {sql}"
+            );
+            assert!(
+                sql.contains("LEFT JOIN \"account\" AS \"j1_account\""),
+                "account edge LEFT: {sql}"
+            );
+            assert!(
+                sql.contains("INNER JOIN \"owner\" AS \"j2_owner\""),
+                "owner edge INNER: {sql}"
+            );
+        }
     }
 }
 

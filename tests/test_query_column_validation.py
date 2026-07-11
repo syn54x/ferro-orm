@@ -86,7 +86,9 @@ class TestOrderByValidation:
             created_at: str = ""
 
         q = ObUser.select().order_by(lambda u: u.created_at, "desc")
-        assert q.order_by_clause == [{"column": "created_at", "direction": "desc"}]
+        assert q.order_by_clause == [
+            {"column": "created_at", "direction": "desc", "path": []}
+        ]
 
     def test_order_by_string_is_validated(self):
         class ObUser2(Model):
@@ -94,7 +96,7 @@ class TestOrderByValidation:
             age: int = 0
 
         q = ObUser2.select().order_by("age")
-        assert q.order_by_clause == [{"column": "age", "direction": "asc"}]
+        assert q.order_by_clause == [{"column": "age", "direction": "asc", "path": []}]
 
     def test_order_by_misspelled_string_raises(self):
         class ObUser3(Model):

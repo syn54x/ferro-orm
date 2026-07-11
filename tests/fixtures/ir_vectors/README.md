@@ -27,9 +27,13 @@ Each vector is one JSON file with this envelope:
 Rules:
 
 - `domain` and `ir.ir_kind` must match.
-- `ir.ir_version` must equal `1` for Phase 0 vectors.
+- `ir.ir_version` must equal `1` for `schema` and `codec` vectors. `query`
+  vectors are on `ir_version: 2` (#269 — unconditional bump, path-qualified
+  column references, empty `joins: []` until #270 renders real JOINs); there
+  is no v1 `query` vector left.
 - `expect_valid` currently supports only `true` fixtures (negative vectors can be added later).
-- Fixture file names use `<domain>_<scenario>_v1.json`.
+- Fixture file names use `<domain>_<scenario>_v<version>.json` (matching that
+  domain's current `ir_version`).
 
 ## Coverage requirements (Phase 0 minimum)
 

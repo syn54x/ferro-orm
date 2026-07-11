@@ -1,0 +1,83 @@
+{
+  "vector_name": "query_transaction_traversal_v2",
+  "domain": "query",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "query",
+    "ir_version": 2,
+    "payload": {
+      "model_name": "Transaction",
+      "where": [
+        {
+          "node_kind": "compound",
+          "operator": "AND",
+          "left": {
+            "node_kind": "leaf",
+            "column": "email",
+            "operator": "==",
+            "value": {
+              "kind": "string",
+              "value": "owner@ferro.dev"
+            },
+            "path": ["account", "owner"]
+          },
+          "right": {
+            "node_kind": "leaf",
+            "column": "amount",
+            "operator": ">=",
+            "value": {
+              "kind": "int",
+              "value": 100
+            },
+            "path": []
+          }
+        }
+      ],
+      "order_by": [
+        {
+          "column": "name",
+          "direction": "asc",
+          "path": ["account"]
+        },
+        {
+          "column": "id",
+          "direction": "asc",
+          "path": []
+        }
+      ],
+      "limit": 50,
+      "offset": 0,
+      "m2m": null,
+      "joins": [
+        {
+          "join_type": "inner",
+          "path": [
+            {
+              "relation": "account",
+              "from_column": "account_id",
+              "to_table": "account",
+              "to_column": "id"
+            }
+          ]
+        },
+        {
+          "join_type": "inner",
+          "path": [
+            {
+              "relation": "account",
+              "from_column": "account_id",
+              "to_table": "account",
+              "to_column": "id"
+            },
+            {
+              "relation": "owner",
+              "from_column": "owner_id",
+              "to_table": "owner",
+              "to_column": "id"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
