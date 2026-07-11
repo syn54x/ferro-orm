@@ -23,7 +23,15 @@ from uuid import UUID
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation, execute
+from ferro import (
+    BackRef,
+    FerroField,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    execute,
+)
 from ferro.query import builder as builder_module
 
 pytestmark = pytest.mark.backend_matrix
@@ -31,8 +39,10 @@ pytestmark = pytest.mark.backend_matrix
 
 # ---------------------------------------------------------------------------
 # Schema: Transaction -> Account -> Owner (both FKs nullable, so populated-
-# `None` and mid-chain NULL are observable), plus a typed-column pair with a
-# root/hop name collision for decode-parity pins.
+# `None` and mid-chain NULL are observable), a second Transaction FK
+# (Category) so accumulation across includes is observable, a typed-column
+# pair with a root/hop name collision for decode-parity pins, and an M2M trio
+# whose target model carries a forward FK.
 # ---------------------------------------------------------------------------
 
 
@@ -49,11 +59,39 @@ class INAccount(Model):
     transactions: Relation[list["INTransaction"]] = BackRef()
 
 
+class INCategory(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str = ""
+    transactions: Relation[list["INTransaction"]] = BackRef()
+
+
 class INTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
     note: str = ""
     account: Annotated[INAccount | None, ForeignKey(related_name="transactions")] = None
+    category: Annotated[INCategory | None, ForeignKey(related_name="transactions")] = (
+        None
+    )
+
+
+class INMAuthor(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    role: str = ""
+    tags: Relation[list["INMTag"]] = BackRef()
+
+
+class INMTag(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str = ""
+    created_by: Annotated[INMAuthor, ForeignKey(related_name="tags")]
+    posts: Relation[list["INMPost"]] = BackRef()
+
+
+class INMPost(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    title: str = ""
+    tags: Relation[list["INMTag"]] = ManyToMany(related_name="posts")
 
 
 class INTier(StrEnum):
@@ -85,23 +123,25 @@ _TY_UID1 = UUID("11111111-1111-1111-1111-111111111111")
 
 async def _seed_core():
     """Owner o1 <- accounts a1 (2 txns) and a2 (1 txn); account b1 with no
-    owner (1 txn); and one transaction with no account at all (NULL FK)."""
+    owner (1 txn); one transaction with no account at all (NULL FK); txn 1
+    additionally categorized (the second FK, for accumulation pins)."""
     o1 = INOwner(id=1, name="o1")
     await o1.save()
     a1 = INAccount(id=1, label="a1", owner=o1)
     a2 = INAccount(id=2, label="a2", owner=o1)
     b1 = INAccount(id=3, label="b1", owner=None)
-    for row in (a1, a2, b1):
+    c1 = INCategory(id=1, name="groceries")
+    for row in (a1, a2, b1, c1):
         await row.save()
     for txn in (
-        INTransaction(id=1, amount=10, note="n1", account=a1),
+        INTransaction(id=1, amount=10, note="n1", account=a1, category=c1),
         INTransaction(id=2, amount=20, note="n2", account=a1),
         INTransaction(id=3, amount=30, note="n3", account=a2),
         INTransaction(id=4, amount=40, note="n4", account=b1),
         INTransaction(id=5, amount=50, note="n5", account=None),
     ):
         await txn.save()
-    return {"o1": o1, "a1": a1, "a2": a2, "b1": b1}
+    return {"o1": o1, "a1": a1, "a2": a2, "b1": b1, "c1": c1}
 
 
 async def _seed_typed():
@@ -495,3 +535,288 @@ def test_include_selector_validation():
         INTransaction.select().include(lambda t: 42)
     with pytest.raises(TypeError, match="selector callable"):
         INTransaction.select().include(42)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+
+# ---------------------------------------------------------------------------
+# Multi-hop (#287): whole-path population, prefix dedup, order freedom, NULL
+# mid-chain.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_multi_hop_include_populates_every_hop(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        txn = await (
+            INTransaction.select()
+            .include(lambda t: t.account.owner)
+            .where(lambda t: t.id == 1)
+            .first()
+        )
+
+        assert txn is not None
+        # Whole-path population: a populated graph is never missing its
+        # intermediate nodes.
+        assert isinstance(txn.account, INAccount) and txn.account.label == "a1"
+        assert isinstance(txn.account.owner, INOwner) and txn.account.owner.name == "o1"
+
+
+@pytest.mark.asyncio
+async def test_shared_prefix_includes_dedup_and_are_order_free(db_url):
+    """`.include(account)` + `.include(account.owner)` — in either chain
+    order — populates exactly what `.include(account.owner)` alone does."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        base = INTransaction.select().where(lambda t: t.id == 1)
+        variants = (
+            base.include(lambda t: t.account).include(lambda t: t.account.owner),
+            base.include(lambda t: t.account.owner).include(lambda t: t.account),
+            base.include(lambda t: t.account.owner),
+        )
+        for q in variants:
+            txn = await q.first()
+            assert txn is not None
+            assert txn.account.label == "a1"
+            assert txn.account.owner.name == "o1"
+
+
+@pytest.mark.asyncio
+async def test_null_mid_chain_ends_the_chain_as_populated_none(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        txns = await (
+            INTransaction.select()
+            .include(lambda t: t.account.owner)
+            .order_by("id")
+            .all()
+        )
+
+        assert [t.id for t in txns] == [1, 2, 3, 4, 5], "roots retained"
+        # b1 has no owner: hop 1 populated, hop 2 populated-None.
+        ownerless = txns[3]
+        assert ownerless.account.label == "b1"
+        assert ownerless.account.owner is None
+        # No account at all: hop 1 populated-None, the chain ends there.
+        orphan = txns[4]
+        assert orphan.account is None
+
+
+# ---------------------------------------------------------------------------
+# The refresh rule (#287, ADR-0008): keep iff the FK still matches; drop on
+# change; accumulate across a session's queries.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_population_survives_a_refresh_with_unchanged_fk(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        txn = await (
+            INTransaction.select()
+            .include(lambda t: t.account)
+            .where(lambda t: t.id == 1)
+            .first()
+        )
+        assert txn is not None and txn.account.label == "a1"
+
+        again = await INTransaction.get(1)
+
+        assert again is txn, "refresh hit the same identity-mapped object"
+        assert isinstance(txn.account, INAccount), "population survived"
+        assert txn.account.label == "a1"
+
+
+@pytest.mark.asyncio
+async def test_populations_accumulate_across_a_sessions_queries(db_url):
+    """An account include and a later category include both stick: queries
+    compose instead of clobbering each other."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        first = await (
+            INTransaction.select()
+            .include(lambda t: t.account)
+            .where(lambda t: t.id == 1)
+            .first()
+        )
+        second = await (
+            INTransaction.select()
+            .include(lambda t: t.category)
+            .where(lambda t: t.id == 1)
+            .first()
+        )
+
+        assert second is first
+        assert isinstance(first.account, INAccount), "earlier population kept"
+        assert isinstance(first.category, INCategory), "later population added"
+        assert first.category.name == "groceries"
+
+
+@pytest.mark.asyncio
+async def test_refresh_drops_population_when_the_fk_changed(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        txn = await (
+            INTransaction.select()
+            .include(lambda t: t.account)
+            .where(lambda t: t.id == 1)
+            .first()
+        )
+        assert txn is not None and txn.account.id == 1
+
+        # External write: the row now points at a different account.
+        await execute(
+            f"UPDATE intransaction SET account_id = {_ph(db_url, 1)} "
+            f"WHERE id = {_ph(db_url, 2)}",
+            2,
+            1,
+        )
+        again = await INTransaction.get(1)
+        assert again is txn
+
+        # The population would lie now — it was dropped, so access reverts
+        # to the awaitable and resolves to the CURRENT row.
+        pending = txn.account
+        assert inspect.iscoroutine(pending)
+        fresh = await pending
+        assert fresh.id == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_drops_population_when_the_fk_went_null(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        txn = await (
+            INTransaction.select()
+            .include(lambda t: t.account)
+            .where(lambda t: t.id == 1)
+            .first()
+        )
+        assert txn is not None and isinstance(txn.account, INAccount)
+
+        await execute(
+            f"UPDATE intransaction SET account_id = NULL WHERE id = {_ph(db_url, 1)}",
+            1,
+        )
+        again = await INTransaction.get(1)
+        assert again is txn
+
+        pending = txn.account
+        assert inspect.iscoroutine(pending), "population dropped on NULLed FK"
+        assert await pending is None
+
+
+@pytest.mark.asyncio
+async def test_populated_none_survives_while_the_fk_stays_null(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+
+        txn = await (
+            INTransaction.select()
+            .include(lambda t: t.account)
+            .where(lambda t: t.id == 5)
+            .first()
+        )
+        assert txn is not None and txn.account is None
+
+        again = await INTransaction.get(5)
+        assert again is txn
+        assert txn.account is None, "populated-None kept: the FK is still NULL"
+
+
+# ---------------------------------------------------------------------------
+# M2M association context (#287): include composes with `post.tags`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_m2m_association_query_composes_with_include(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        author = INMAuthor(id=1, role="editor")
+        await author.save()
+        t1 = INMTag(id=1, name="rust", created_by=author)
+        t2 = INMTag(id=2, name="python", created_by=author)
+        for tag in (t1, t2):
+            await tag.save()
+        post = INMPost(id=1, title="ferro")
+        await post.save()
+        await post.tags.add(t1, t2)
+
+        tags = await post.tags.include(lambda tag: tag.created_by).order_by("id").all()
+
+        assert [t.name for t in tags] == ["rust", "python"]
+        assert all(isinstance(t.created_by, INMAuthor) for t in tags)
+        assert tags[0].created_by is tags[1].created_by, "identity-mapped"
+        assert tags[0].created_by.role == "editor"
+
+
+# ---------------------------------------------------------------------------
+# Guardrails (#287): loud, pointed, before any round-trip.
+# ---------------------------------------------------------------------------
+
+
+def test_string_include_selector_names_the_lambda_form():
+    with pytest.raises(
+        TypeError,
+        match=r"not a string.*include\(lambda t: t\.account\)",
+    ):
+        INTransaction.select().include("account")  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+
+@pytest.mark.asyncio
+async def test_backref_include_selector_names_the_future_mechanism(db_url):
+    # connect() resolves relationships, injecting the reverse descriptors the
+    # guardrail identifies.
+    await ferro.connect(db_url, auto_migrate=True)
+    with pytest.raises(
+        TypeError,
+        match=r"reverse \(BackRef\) or many-to-many.*batched second query",
+    ):
+        INAccount.select().include(lambda a: a.transactions)
+
+
+@pytest.mark.asyncio
+async def test_m2m_include_selector_names_the_future_mechanism(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    with pytest.raises(
+        TypeError,
+        match=r"reverse \(BackRef\) or many-to-many.*batched second query",
+    ):
+        INMPost.select().include(lambda p: p.tags)
+
+
+def test_include_and_projection_raise_in_both_chain_orders():
+    with pytest.raises(ValueError, match=r"exactly one materialization plan.*#282"):
+        INTransaction.select().include(lambda t: t.account).select(
+            lambda t: (t.id, t.amount)
+        )
+    with pytest.raises(ValueError, match=r"exactly one materialization plan.*#282"):
+        INTransaction.select(lambda t: (t.id, t.amount)).include(  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+            lambda t: t.account
+        )
+
+
+@pytest.mark.asyncio
+async def test_mutations_on_an_included_query_raise_before_any_round_trip():
+    """No ferro.connect in scope: the build-time guard fires before any
+    route or SQL exists."""
+    included = INTransaction.select().include(lambda t: t.account)
+    with pytest.raises(ValueError, match=r"update\(\) does not support include\(\)"):
+        await included.update(note="x")
+    with pytest.raises(ValueError, match=r"delete\(\) does not support include\(\)"):
+        await included.delete()

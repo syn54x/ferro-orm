@@ -1186,6 +1186,45 @@ mod tests {
         assert_eq!(join_plan.renders[0].join_type, "inner");
     }
 
+    fn owner_hop() -> serde_json::Value {
+        json!({"relation": "owner", "from_column": "owner_id",
+               "to_table": "owner", "to_column": "id"})
+    }
+
+    #[test]
+    fn build_join_plan_include_paths_dedup_shared_prefixes() {
+        // `.include(account)` + `.include(account.owner)` renders the same
+        // two joins as `.include(account.owner)` alone (#287): shared
+        // prefixes dedup by path identity, every include-only edge LEFT.
+        let expanded = union_plan(json!([]), json!([[account_hop()], [account_hop(), owner_hop()]]));
+        let collapsed = union_plan(json!([]), json!([[account_hop(), owner_hop()]]));
+        let reversed = union_plan(json!([]), json!([[account_hop(), owner_hop()], [account_hop()]]));
+        for plan in [expanded, collapsed, reversed] {
+            let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+            assert_eq!(join_plan.renders.len(), 2, "shared prefix dedups");
+            assert_eq!(join_plan.renders[0].alias, "j1_account");
+            assert_eq!(join_plan.renders[0].join_type, "left");
+            assert_eq!(join_plan.renders[1].alias, "j2_owner");
+            assert_eq!(join_plan.renders[1].join_type, "left");
+            assert_eq!(join_plan.renders[1].prev_alias, "j1_account");
+        }
+    }
+
+    #[test]
+    fn build_join_plan_include_deeper_hop_is_left_beyond_a_joins_prefix() {
+        // A predicate traverses [account] (INNER); the include continues to
+        // [account, owner]. The shared prefix keeps its stage-1 INNER; only
+        // the include-only deeper edge renders LEFT.
+        let plan = union_plan(
+            json!([{"join_type": "inner", "path": [account_hop()]}]),
+            json!([[account_hop(), owner_hop()]]),
+        );
+        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+        assert_eq!(join_plan.renders.len(), 2);
+        assert_eq!(join_plan.renders[0].join_type, "inner", "shared prefix untouched");
+        assert_eq!(join_plan.renders[1].join_type, "left", "include-only edge LEFT");
+    }
+
     #[test]
     fn build_join_plan_include_shared_edge_keeps_stage1_left() {
         // An explicit `.left_join` edge stays LEFT when also included.

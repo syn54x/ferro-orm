@@ -300,6 +300,67 @@ pub fn refresh_model_instance<'py>(
         enum_classes,
     )?;
     instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set)?;
+    prune_stale_populations(py, cls, dict)?;
+    Ok(())
+}
+
+/// The refresh rule for populated relations (#287, ADR-0008): keep each
+/// population iff it is still true.
+///
+/// After a refresh overwrites the decoded columns, every populated relation
+/// (a `__dict__` entry under a relation field name) is checked against the
+/// freshly decoded shadow FK: the population survives iff the FK still
+/// equals the populated instance's primary key (a populated `None` survives
+/// iff the FK is still NULL) — so populations accumulate across a session's
+/// queries. An FK that changed or went NULL drops the entry: access reverts
+/// to the awaitable — never silently wrong, and never "repaired" from
+/// whatever the identity map happens to hold.
+fn prune_stale_populations<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    dict: &Bound<'py, pyo3::types::PyDict>,
+) -> PyResult<()> {
+    let Ok(specs) = cls.getattr(pyo3::intern!(py, "__ferro_relation_specs__")) else {
+        return Ok(());
+    };
+    let Ok(specs) = specs.cast::<pyo3::types::PyDict>() else {
+        return Ok(());
+    };
+    for (relation, spec) in specs.iter() {
+        let Some(population) = dict.get_item(&relation)? else {
+            continue; // unpopulated: nothing to check
+        };
+        let shadow_column = spec.getattr(pyo3::intern!(py, "shadow_column"))?;
+        let new_fk = dict.get_item(&shadow_column)?;
+        let keep = match (&new_fk, population.is_none()) {
+            // Populated `None` stays truthful while the FK stays NULL.
+            (Some(fk), true) => fk.is_none(),
+            // A live population survives iff the fresh FK equals its PK.
+            (Some(fk), false) if !fk.is_none() => {
+                let target = spec.getattr(pyo3::intern!(py, "target"))?;
+                let identity = crate::state::model_identity(&target)?;
+                let pk_col = crate::state::registered_model(&identity)?
+                    .meta
+                    .pk_col
+                    .clone()
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "populated relation target '{identity}' has no \
+                             primary key; cannot evaluate the refresh rule"
+                        ))
+                    })?;
+                let pk_val = population.getattr(pk_col.as_str())?;
+                fk.eq(pk_val)?
+            }
+            // FK went NULL under a live population, or the shadow column is
+            // missing from the refreshed row (cannot happen on a full-row
+            // decode — the refresh precondition): drop, never guess.
+            _ => false,
+        };
+        if !keep {
+            dict.del_item(&relation)?;
+        }
+    }
     Ok(())
 }
 

@@ -177,6 +177,35 @@ def _path_edges(path: tuple[str, ...]) -> list[tuple[str, ...]]:
     return [path[:i] for i in range(1, len(path) + 1)]
 
 
+def _reject_reverse_relation_include(exc: AttributeError) -> None:
+    """Raise pointedly when an include selector names a BackRef/M2M (#287).
+
+    The validating proxies raise ``AttributeError`` for any name that is not
+    a column or a forward relation; when the failing name (carried
+    structurally on the exception) is a declared reverse or many-to-many
+    relation of the hop's model, include() has a sharper story than
+    "no queryable column": reverse population is a separate future mechanism
+    — a batched second query stitched onto the results — deliberately not
+    ``include()``.
+    """
+    from ..relations.descriptors import RelationshipDescriptor
+
+    name = getattr(exc, "name", None)
+    model = getattr(exc, "obj", None)
+    if not name or model is None:
+        return
+    if isinstance(getattr(model, name, None), RelationshipDescriptor):
+        raise TypeError(
+            f"include() cannot populate {name!r}: it is a reverse (BackRef) "
+            "or many-to-many relation, and include() populates forward "
+            "foreign-key paths only (e.g. lambda t: t.account). Reverse and "
+            "M2M population will be a separate mechanism — a batched second "
+            "query stitched onto the results — not include(). Until it "
+            f"lands, fetch the collection through the relation itself "
+            f"(await instance.{name}.all())."
+        ) from None
+
+
 def _resolve_include_selector(
     selector: "Callable[[QueryProxy[Any]], Any]", model_cls: type
 ) -> tuple[str, ...]:
@@ -196,7 +225,8 @@ def _resolve_include_selector(
         TypeError: If ``selector`` is a string or otherwise not callable
             (strings never traverse, #280 — include is lambda-selector only),
             resolves to a column (:class:`FieldProxy`) rather than a relation,
-            or returns any other non-relation value.
+            names a BackRef/M2M relation (reverse population is a separate
+            future mechanism, #287), or returns any other non-relation value.
     """
     if isinstance(selector, str):
         raise TypeError(
@@ -209,7 +239,11 @@ def _resolve_include_selector(
             "include() expected a selector callable "
             f"(e.g. `lambda t: t.account`), got {type(selector).__name__}"
         )
-    result = selector(QueryProxy(model_cls))
+    try:
+        result = selector(QueryProxy(model_cls))
+    except AttributeError as exc:
+        _reject_reverse_relation_include(exc)
+        raise
     if isinstance(result, FieldProxy):
         dotted = ".".join((*result.path, result.column))
         raise TypeError(
@@ -571,8 +605,10 @@ class Query(Generic[T]):
             TypeError: If the selector is not callable/strings, selects
                 non-columns (a bare relation, a comparison), or mixes strings
                 with a lambda in one call.
-            ValueError: If the selection is empty, repeats a column, or a
-                string is a dotted path (strings never traverse).
+            ValueError: If the selection is empty, repeats a column, a
+                string is a dotted path (strings never traverse), or the
+                query already carries an ``include()`` (one materialization
+                plan per query — include × projection is #282).
             NotImplementedError: If a lambda selects a traversed column
                 (traversed projection lands with #282).
 
@@ -583,6 +619,15 @@ class Query(Generic[T]):
         """
         if not selectors:
             return self._clone()
+        if self._includes:
+            raise ValueError(
+                "select() with a projection cannot be combined with "
+                "include(): a query carries exactly one materialization plan "
+                "— projected records or populated instances, not both. The "
+                "flattened-vs-nested design for record+relation results is "
+                "#282; until it lands, drop the include() or project through "
+                "a separate query."
+            )
         if any(isinstance(selector, str) for selector in selectors):
             if not all(isinstance(selector, str) for selector in selectors):
                 raise TypeError(
@@ -985,6 +1030,13 @@ class Query(Generic[T]):
                 "(A join-free relation filter like `t.account == instance` is "
                 "allowed.)"
             )
+        if self._includes:
+            raise ValueError(
+                f"{operation}() does not support include(): a mutation is a "
+                "single-table write shape and returns no instances to "
+                "populate. Drop the .include(...) call, or fetch the "
+                "populated rows first and mutate by primary-key set."
+            )
         return {
             "model_name": _model_identity(self.model_cls),
             "where": [node.to_ir_dict() for node in self.where_clause],
@@ -1338,6 +1390,27 @@ class ProjectedQuery(Query[T]):
             "projection changes the result type mid-chain. Name every "
             "projected column in one select() call, or start a new query "
             "from the model."
+        )
+
+    def include(self: Never, selector: Any) -> NoReturn:  # type: ignore[override]
+        """Reject ``include()`` on a projected query (#287).
+
+        One materialization plan per query (ADR-0007/ADR-0008): projected
+        records and populated instances cannot ride one result shape until
+        #282 designs flattened-vs-nested record+relation results. The
+        ``self: Never`` pin makes this a STATIC error at the call site
+        (tests/static_fixtures/bad_includes.py), mirroring the mutation pins.
+
+        Raises:
+            ValueError: Always — include through an unprojected query, or
+                wait for #282.
+        """
+        raise ValueError(
+            "include() cannot be combined with a projection: a query carries "
+            "exactly one materialization plan — projected records or "
+            "populated instances, not both. The flattened-vs-nested design "
+            "for record+relation results is #282; until it lands, drop the "
+            "projection or populate through a separate query."
         )
 
     # `self: Never` makes mutating a projected query a STATIC error at the

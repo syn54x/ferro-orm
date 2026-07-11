@@ -186,6 +186,16 @@ def test_projected_shape_misuse_fails_the_type_checker():
     )
 
 
+def test_include_misuse_fails_the_type_checker():
+    """include() on a projected query (the `self: Never` pin, #287) and a
+    string include selector are static errors at the call site."""
+    result = _run_ty(FIXTURES / "bad_includes.py")
+    assert result.returncode != 0, "bad_includes.py must fail ty"
+    assert result.stdout.count("invalid-argument-type") >= 2, (
+        "projected include() and a string selector must each be a static error"
+    )
+
+
 def test_query_ir_is_the_only_query_shape_in_rust():
     """FF-F F-4 exit gate: no `struct QueryNode` outside the IR crate."""
     repo = Path(__file__).parent.parent
