@@ -13,7 +13,7 @@ use crate::state::{
     engine_for_connection, register_session, session_state, unregister_session,
 };
 use dashmap::DashMap;
-use ferro_schema_ir::{Materialization, QueryIrPayload};
+use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoinHop};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, Condition, Expr, Iden, InsertStatement, JoinType, OnConflict, Order,
@@ -243,18 +243,19 @@ fn tx_remove(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<Transacti
     Ok(TRANSACTION_REGISTRY.remove(tx_id).map(|(_, handle)| handle))
 }
 
-/// The only QueryIR version this build accepts (#269, #278).
+/// The only QueryIR version this build accepts (#269, #278, #285).
 ///
 /// Python and Rust ship in one wheel, so there is exactly one supported version at any
 /// time — no negotiation, no fallback. A mismatch can only mean a mixed build (a stale
 /// `.so` next to a rebuilt Python package, or vice versa).
-const SUPPORTED_QUERY_IR_VERSION: u32 = 3;
+const SUPPORTED_QUERY_IR_VERSION: u32 = 4;
 
 /// Envelope shell used only to read `ir_kind`/`ir_version` before committing to a strict
-/// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real v1/v2 payload
-/// (no `joins`/`path` fields, no `materialization` section) must fail on the version
-/// check below with an actionable message, not on a generic "missing field" serde error
-/// from parsing a payload shape this build no longer understands.
+/// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real earlier-version
+/// payload (a v3 unit `instances` kind, or a v1/v2 payload with no `joins`/`path`/
+/// `materialization` at all) must fail on the version check below with an actionable
+/// message, not on a generic "missing field" serde error from parsing a payload shape
+/// this build no longer understands.
 #[derive(Debug, Clone, Deserialize)]
 struct QueryIrEnvelope {
     ir_kind: String,
@@ -403,24 +404,25 @@ fn reject_traversal_on_mutation(plan: &QueryPlan, operation: &str) -> PyResult<(
 ///
 /// Every query carries exactly one plan (ADR-0007). `root_instances` is the
 /// only kind the non-projecting walkers accept: `record` is the partial-select
-/// plan (built by the projecting fetch path, #279 — `count()`/`exists()` are
-/// unaffected by projection and mutations reject projection at build time, so
-/// the Python builder never emits `record` to any other walker); `instances`
-/// is reserved for joined-row hydration (#267 stage 2) and not yet
-/// implemented anywhere. A disallowed kind here is a loud error, never a
-/// silent fallback to full hydration (I-6).
+/// plan (built by the projecting fetch path, #279) and `instances` is the
+/// joined-row hydration plan (built by the instance-graph fetch path, #286) —
+/// `count()`/`exists()` are unaffected by projection AND include (their
+/// payloads emit `root_instances`), and mutations reject both at build time,
+/// so the Python builder never emits either kind to any other walker. A
+/// disallowed kind here is a loud error, never a silent fallback to full
+/// hydration (I-6).
 fn reject_unsupported_materialization(plan: &QueryPlan, operation: &str) -> PyResult<()> {
     let kind = match &plan.materialization {
         Materialization::RootInstances => return Ok(()),
         Materialization::Record { .. } => "record",
-        Materialization::Instances => "instances",
+        Materialization::Instances { .. } => "instances",
     };
     Err(pyo3::exceptions::PyValueError::new_err(format!(
         "{operation}() does not support materialization kind {kind:?}: this \
          walker materializes complete root instances only (\"root_instances\"). \
          \"record\" is the partial-select plan and applies to projecting \
-         fetches only; \"instances\" is reserved for joined-row hydration and \
-         is not yet implemented."
+         fetches only; \"instances\" is the joined-row hydration plan and \
+         applies to instance-graph fetches only."
     )))
 }
 
@@ -436,15 +438,18 @@ fn reject_unsupported_materialization(plan: &QueryPlan, operation: &str) -> PyRe
 /// projected wrong.
 ///
 /// # Errors
-/// `PyValueError` for `instances` (reserved for joined-row hydration,
-/// #267 stage 2), an empty `record` field list, or a field shape from #282.
+/// `PyValueError` for `instances` (the joined-row hydration plan resolves no
+/// projected SELECT list — the instances fetch path widens the SELECT itself,
+/// #286, and dispatches before calling this), an empty `record` field list,
+/// or a field shape from #282.
 fn projected_columns(plan: &QueryPlan) -> PyResult<Option<Vec<String>>> {
     let fields = match &plan.materialization {
         Materialization::RootInstances => return Ok(None),
-        Materialization::Instances => {
+        Materialization::Instances { .. } => {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "materialization kind \"instances\" is reserved for joined-row \
-                 hydration (#267 stage 2) and is not yet implemented.",
+                "materialization kind \"instances\" resolves no projected \
+                 SELECT list; the joined-row hydration fetch path widens the \
+                 SELECT itself and must dispatch before the record resolver.",
             ));
         }
         Materialization::Record { fields } => fields,
@@ -497,6 +502,235 @@ fn apply_select_list(select: &mut SelectStatement, table_name: &str, projected: 
             select.column((Alias::new(table_name), sea_query::Asterisk));
         }
     }
+}
+
+/// One included hop of an `instances` plan, resolved against the query's
+/// [`JoinPlan`] and the hop table's registration (#286).
+///
+/// Hops are ordered parent-before-child (each path's prefixes are walked in
+/// order and deduped across paths), so the graph hydrator can attach every
+/// hop to an already-materialized parent in one forward pass.
+struct IncludeHop {
+    /// Full relation path from the root model to this hop.
+    path: Vec<String>,
+    /// The relation field name populated on the parent (the path's last hop).
+    relation: String,
+    /// The parent's relation path (`[]` = the root instance).
+    parent_path: Vec<String>,
+    /// The hop's JOIN alias; its SELECT columns are aliased `{alias}__{col}`.
+    alias: String,
+    /// The hop's physical table.
+    table: String,
+    /// The hop model's registration: codec plan (per-hop decode uses the hop
+    /// model's own plan, never the root's), ordered column list, PK metadata.
+    registration: Arc<crate::state::RegisteredModel>,
+}
+
+/// The aliased output-column name of one hop column in the widened SELECT.
+///
+/// `__` cannot collide with the root's unaliased columns in practice (join
+/// aliases are internal `j{i}_{relation}` names); the decode side partitions
+/// result columns by these exact strings, so render and decode cannot drift.
+fn include_column_alias(hop_alias: &str, column: &str) -> String {
+    format!("{hop_alias}__{column}")
+}
+
+/// Resolve an `instances` plan's paths into ordered [`IncludeHop`]s (#286).
+///
+/// # Errors
+/// `PyValueError` when a path's prefix has no join-plan entry (cannot happen
+/// with a [`QueryPlan::build_join_plan`]-built plan — defense in depth), no
+/// registration (the walker populates every rendered join's table first), or
+/// the hop model has no primary key (population runs the identity protocol
+/// per hop, which needs one; Python validates this at build time too).
+fn resolve_include_hops(
+    paths: &[Vec<QueryJoinHop>],
+    join_plan: &JoinPlan,
+    plan: &QueryPlan,
+) -> PyResult<Vec<IncludeHop>> {
+    let mut hops: Vec<IncludeHop> = Vec::new();
+    let mut seen: HashSet<Vec<String>> = HashSet::new();
+    for path in paths {
+        let mut prefix: Vec<String> = Vec::new();
+        for hop in path {
+            let parent_path = prefix.clone();
+            prefix.push(hop.relation.clone());
+            if !seen.insert(prefix.clone()) {
+                continue;
+            }
+            let alias = join_plan.prefix_alias.get(&prefix).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "include path {prefix:?} has no join-plan entry; the \
+                     instances edge union must render every included edge"
+                ))
+            })?;
+            let table = join_plan.prefix_table.get(&prefix).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "include path {prefix:?} has no join-plan table; the \
+                     instances edge union must render every included edge"
+                ))
+            })?;
+            let registration = plan.hop_registrations.get(table).cloned().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "included table {table:?} (path {prefix:?}) has no \
+                     registration; resolve every hop's bind context before \
+                     hydrating the graph"
+                ))
+            })?;
+            if registration.meta.pk_col.is_none() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "included table {table:?} (path {prefix:?}) has no primary \
+                     key; population runs the identity protocol per hop and \
+                     requires one"
+                )));
+            }
+            hops.push(IncludeHop {
+                path: prefix.clone(),
+                relation: hop.relation.clone(),
+                parent_path,
+                alias: alias.clone(),
+                table: table.clone(),
+                registration,
+            });
+        }
+    }
+    Ok(hops)
+}
+
+/// Widen an instances SELECT with every included hop's complete, aliased
+/// column list (#286): `<alias>.<col> AS "<alias>__<col>"` per column, in the
+/// hop's declaration order. Aliasing is what keeps a hop column from
+/// colliding with a same-named root (or sibling-hop) column in the result
+/// set — the reason `SELECT root.*, hop.*` cannot work here.
+fn apply_include_select_list(select: &mut SelectStatement, hops: &[IncludeHop]) {
+    for hop in hops {
+        for column in &hop.registration.column_names {
+            select.expr_as(
+                Expr::col((Alias::new(&hop.alias), Alias::new(column.as_str()))),
+                Alias::new(include_column_alias(&hop.alias, column)),
+            );
+        }
+    }
+}
+
+/// Decode instances-plan rows: each [`EngineRow`] is partitioned into the
+/// root's columns (unaliased) and one column slice per included hop (by the
+/// exact `{alias}__{col}` names the widened SELECT rendered), then every
+/// slice is decoded against its OWN model's codec plan — root via the root
+/// plan, each hop via the hop registration's plan (#286).
+///
+/// Returns one `(root, hop_rows)` pair per input row; `hop_rows` aligns with
+/// `hops` by index. A hop whose row the LEFT join did not match decodes to a
+/// `(None, all-NULL fields)` parsed row — the graph hydrator turns that into
+/// a populated `None` (the hop PK is NULL exactly when the FK is NULL).
+fn instances_rows_to_parsed_data(
+    rows: Vec<EngineRow>,
+    root: &crate::state::RegisteredModel,
+    root_pk: Option<&str>,
+    hops: &[IncludeHop],
+) -> Vec<(ParsedRow, Vec<ParsedRow>)> {
+    let mut aliased: HashMap<String, (usize, String)> = HashMap::new();
+    for (i, hop) in hops.iter().enumerate() {
+        for column in &hop.registration.column_names {
+            aliased.insert(include_column_alias(&hop.alias, column), (i, column.clone()));
+        }
+    }
+    rows.into_iter()
+        .map(|row| {
+            let mut root_values: Vec<(String, EngineValue)> = Vec::new();
+            let mut hop_values: Vec<Vec<(String, EngineValue)>> =
+                (0..hops.len()).map(|_| Vec::new()).collect();
+            for (name, value) in row.values {
+                match aliased.get(&name) {
+                    Some((i, column)) => hop_values[*i].push((column.clone(), value)),
+                    None => root_values.push((name, value)),
+                }
+            }
+            let root_parsed =
+                crate::codec::typed_row_values_to_parsed(root_values, &root.codec_plan, root_pk);
+            let hop_parsed = hops
+                .iter()
+                .zip(hop_values)
+                .map(|(hop, values)| {
+                    crate::codec::typed_row_values_to_parsed(
+                        values,
+                        &hop.registration.codec_plan,
+                        hop.registration.meta.pk_col.as_deref(),
+                    )
+                })
+                .collect();
+            (root_parsed, hop_parsed)
+        })
+        .collect()
+}
+
+/// Materialize one model row through the full identity-map protocol (FF-D):
+/// map hit → refresh in place + reuse; miss → hydrate + insert. Sessionless
+/// (or identity map disabled) always hydrates a fresh instance — no
+/// query-local dedup (ADR-0008). The factored seam behind both the root
+/// result loop and the per-hop graph hydration (#286); `fields` must be a
+/// FULL row decode (the `refresh_model_instance` precondition — every caller
+/// here selects complete rows).
+#[allow(clippy::too_many_arguments)]
+fn materialize_model_row<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    connection_name: &str,
+    model_identity: &str,
+    session_id: Option<&str>,
+    use_identity_map: bool,
+    row_pk_val: Option<String>,
+    fields: Vec<(String, crate::state::RustValue)>,
+    py_col_names: &HashMap<String, Py<pyo3::types::PyString>>,
+    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if use_identity_map
+        && let Some(ref pk_val) = row_pk_val
+        && let Some(existing_obj) = identity_map_get(
+            py,
+            session_id,
+            &(
+                connection_name.to_string(),
+                model_identity.to_string(),
+                pk_val.clone(),
+            ),
+        )?
+    {
+        let existing = existing_obj.bind(py).clone();
+        crate::hydration::refresh_model_instance(
+            py,
+            cls,
+            &existing,
+            fields,
+            py_col_names,
+            enum_classes,
+        )?;
+        return Ok(existing);
+    }
+
+    let instance = crate::hydration::hydrate_model_instance(
+        py,
+        cls,
+        connection_name,
+        fields,
+        py_col_names,
+        enum_classes,
+    )?;
+
+    if use_identity_map && let Some(pk_val) = row_pk_val {
+        identity_map_insert(
+            py,
+            session_id,
+            (
+                connection_name.to_string(),
+                model_identity.to_string(),
+                pk_val,
+            ),
+            &instance,
+        )?;
+    }
+
+    Ok(instance)
 }
 
 /// Reject `limit`/`offset` on mutating operations (FF-A A1, #171).
@@ -1759,7 +1993,9 @@ pub fn save_bulk_records<'py>(
 /// The query's materialization plan (ADR-0007) selects the result shape:
 /// `root_instances` hydrates complete model instances (identity-map aware);
 /// a `record` plan renders the projected SELECT list and hydrates
-/// `record_cls` records (#279) — no identity map, no persistence identity.
+/// `record_cls` records (#279) — no identity map, no persistence identity;
+/// an `instances` plan widens the SELECT with every included hop's complete
+/// aliased row and hydrates a populated instance graph (#286, ADR-0008).
 ///
 /// Args:
 ///     cls (PyAny): The Python model class.
@@ -1767,23 +2003,36 @@ pub fn save_bulk_records<'py>(
 ///     record_cls (PyAny | None): Record constructor for a `record` plan
 ///         (`Row` today; the seam a future `into=` plugs into). Required for
 ///         a record plan, forbidden otherwise.
+///     hop_classes (dict[str, type] | None): Included hop model classes keyed
+///         by physical table name, for an `instances` plan. Required for an
+///         instances plan, forbidden otherwise.
 ///
 /// Returns:
-///     list[PyAny]: Hydrated model instances, or projected records.
+///     list[PyAny]: Hydrated model instances (populated when included), or
+///     projected records.
 #[pyfunction]
-#[pyo3(signature = (cls, query_ir_json, route, record_cls=None))]
+#[pyo3(signature = (cls, query_ir_json, route, record_cls=None, hop_classes=None))]
 pub fn fetch_filtered<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
     record_cls: Option<Bound<'py, PyAny>>,
+    hop_classes: Option<Bound<'py, pyo3::types::PyDict>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
 
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
-    let projected = projected_columns(&plan)?;
+    let include_paths: Option<Vec<Vec<QueryJoinHop>>> = match &plan.materialization {
+        Materialization::Instances { paths } => Some(paths.clone()),
+        _ => None,
+    };
+    let projected = if include_paths.is_some() {
+        None
+    } else {
+        projected_columns(&plan)?
+    };
     // The record constructor travels with the call, paired to the plan kind:
     // a record plan requires it, a root plan must not carry one. A mismatch
     // is a caller bug — fail loud, never fall back (I-6).
@@ -1802,6 +2051,26 @@ pub fn fetch_filtered<'py>(
                 "fetch_filtered(): record_cls was passed without a record \
                  materialization plan; full hydration constructs model \
                  instances.",
+            ));
+        }
+    };
+    // The hop-class map travels the same way, paired to the instances plan
+    // (#286): population hydrates every hop through the full model protocol,
+    // so each included table's Python class must arrive with the call.
+    let hop_classes_py = match (&include_paths, hop_classes) {
+        (Some(_), Some(hop_classes)) => Some(hop_classes.unbind()),
+        (None, None) => None,
+        (Some(_), None) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "fetch_filtered(): an instances materialization plan requires \
+                 hop_classes; the Python builder always passes the included \
+                 hop model classes.",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "fetch_filtered(): hop_classes was passed without an \
+                 instances materialization plan.",
             ));
         }
     };
@@ -1826,12 +2095,19 @@ pub fn fetch_filtered<'py>(
         let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
         let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
         populate_hop_bind_context(&mut plan, &join_plan, &engine, exec, backend).await?;
+        // Included hops (#286): resolved after the bind context, so every
+        // include-edge table's registration is already in place.
+        let include_hops = match &include_paths {
+            Some(paths) => resolve_include_hops(paths, &join_plan, &plan)?,
+            None => Vec::new(),
+        };
         // ...
         let (sql, bind_values, pk_col, schema_for_decode) = {
             let pk = schema.meta.pk_col.clone();
 
             let mut select = Query::select();
             apply_select_list(&mut select, &table_name, projected.as_deref());
+            apply_include_select_list(&mut select, &include_hops);
             select.from(Alias::new(&table_name));
 
             if let Some(m2m) = &plan.m2m {
@@ -1914,6 +2190,142 @@ pub fn fetch_filtered<'py>(
         } else {
             pk_col.as_deref()
         };
+
+        if include_paths.is_some() {
+            // Instances path (#286): decode root + hops (each against its own
+            // model's codec plan), then hydrate the populated graph — every
+            // node through the full identity-map protocol.
+            let parsed_data =
+                instances_rows_to_parsed_data(rows, &schema_for_decode, pk_for_decode, &include_hops);
+            let hop_classes_py = hop_classes_py
+                .expect("validated above: an instances plan carries hop_classes");
+
+            return Python::attach(|py| {
+                let results = pyo3::types::PyList::empty(py);
+                let cls = cls_py.bind(py);
+                let hop_classes = hop_classes_py.bind(py);
+
+                // Per-hop Python context, resolved once per fetch (not per
+                // row): class, registry identity, enum catalog, interned
+                // column names.
+                struct HopPyCtx<'py> {
+                    cls: Bound<'py, PyAny>,
+                    identity: String,
+                    enum_classes: HashMap<String, Bound<'py, PyAny>>,
+                    py_col_names: HashMap<String, Py<pyo3::types::PyString>>,
+                }
+                let mut hop_ctx: Vec<HopPyCtx<'_>> = Vec::with_capacity(include_hops.len());
+                for (i, hop) in include_hops.iter().enumerate() {
+                    let hop_cls =
+                        hop_classes.get_item(hop.table.as_str())?.ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "fetch_filtered(): hop_classes has no model class \
+                                 for included table {:?}.",
+                                hop.table
+                            ))
+                        })?;
+                    let identity = crate::state::model_identity(&hop_cls)?;
+                    let enum_classes = crate::hydration::enum_classes_for(py, &hop_cls);
+                    let mut py_col_names = HashMap::new();
+                    if let Some((_, first_hops)) = parsed_data.first() {
+                        for (col_name, _) in &first_hops[i].1 {
+                            py_col_names.insert(
+                                col_name.clone(),
+                                pyo3::types::PyString::new(py, col_name).unbind(),
+                            );
+                        }
+                    }
+                    hop_ctx.push(HopPyCtx {
+                        cls: hop_cls,
+                        identity,
+                        enum_classes,
+                        py_col_names,
+                    });
+                }
+
+                let mut py_col_names = HashMap::new();
+                if let Some((first_root, _)) = parsed_data.first() {
+                    for (col_name, _) in &first_root.1 {
+                        py_col_names.insert(
+                            col_name.clone(),
+                            pyo3::types::PyString::new(py, col_name).unbind(),
+                        );
+                    }
+                }
+                let enum_classes = crate::hydration::enum_classes_for(py, cls);
+
+                for ((root_pk, root_fields), hop_rows) in parsed_data {
+                    let root_obj = materialize_model_row(
+                        py,
+                        cls,
+                        &connection_name,
+                        &name,
+                        session_id.as_deref(),
+                        use_identity_map,
+                        root_pk,
+                        root_fields,
+                        &py_col_names,
+                        &enum_classes,
+                    )?;
+
+                    // Walk the hops parent-before-child, tracking this row's
+                    // materialized node per path. A populated-`None` (or a
+                    // parent skipped under one) ends its chain: deeper hops
+                    // have nothing to attach to.
+                    let mut populated: HashMap<&[String], Option<Bound<'_, PyAny>>> =
+                        HashMap::new();
+                    for ((hop, ctx), (hop_pk, hop_fields)) in
+                        include_hops.iter().zip(&hop_ctx).zip(hop_rows)
+                    {
+                        let parent = if hop.parent_path.is_empty() {
+                            Some(root_obj.clone())
+                        } else {
+                            match populated.get(hop.parent_path.as_slice()) {
+                                Some(Some(obj)) => Some(obj.clone()),
+                                _ => None,
+                            }
+                        };
+                        let Some(parent) = parent else { continue };
+                        if hop_pk.is_none() {
+                            // The LEFT join matched no row ⟺ the FK is NULL:
+                            // populate `None` (truthful to the declared
+                            // `| None` type), root row retained.
+                            crate::hydration::set_populated_relation(
+                                py,
+                                &parent,
+                                &hop.relation,
+                                None,
+                            )?;
+                            populated.insert(hop.path.as_slice(), None);
+                            continue;
+                        }
+                        let instance = materialize_model_row(
+                            py,
+                            &ctx.cls,
+                            &connection_name,
+                            &ctx.identity,
+                            session_id.as_deref(),
+                            use_identity_map,
+                            hop_pk,
+                            hop_fields,
+                            &ctx.py_col_names,
+                            &ctx.enum_classes,
+                        )?;
+                        crate::hydration::set_populated_relation(
+                            py,
+                            &parent,
+                            &hop.relation,
+                            Some(&instance),
+                        )?;
+                        populated.insert(hop.path.as_slice(), Some(instance));
+                    }
+
+                    results.append(root_obj)?;
+                }
+                Ok(results.into_any().unbind())
+            });
+        }
+
         let parsed_data = typed_rows_to_parsed_data(rows, &schema_for_decode, pk_for_decode);
 
         Python::attach(|py| {
@@ -1953,45 +2365,18 @@ pub fn fetch_filtered<'py>(
             }
 
             for (row_pk_val, fields) in parsed_data {
-                if use_identity_map
-                    && let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) = identity_map_get(
-                        py,
-                        session_id.as_deref(),
-                        &(connection_name.clone(), name.clone(), pk_val.clone()),
-                    )?
-                {
-                    let existing = existing_obj.bind(py);
-                    crate::hydration::refresh_model_instance(
-                        py,
-                        cls,
-                        existing,
-                        fields,
-                        &py_col_names,
-                        &enum_classes,
-                    )?;
-                    results.append(existing)?;
-                    continue;
-                }
-
-                let instance = crate::hydration::hydrate_model_instance(
+                let instance = materialize_model_row(
                     py,
                     cls,
                     &connection_name,
+                    &name,
+                    session_id.as_deref(),
+                    use_identity_map,
+                    row_pk_val,
                     fields,
                     &py_col_names,
                     &enum_classes,
                 )?;
-
-                if use_identity_map && let Some(pk_val) = row_pk_val {
-                    identity_map_insert(
-                        py,
-                        session_id.as_deref(),
-                        (connection_name.clone(), name.clone(), pk_val),
-                        &instance,
-                    )?;
-                }
-
                 results.append(instance)?;
             }
             Ok(results.into_any().unbind())
@@ -3823,7 +4208,7 @@ mod mutation_pagination_guard_tests {
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 3,
+            "ir_version": 4,
             "payload": {
                 "model_name": "Widget",
                 "where": [{
@@ -3893,10 +4278,10 @@ mod mutation_pagination_guard_tests {
 mod query_ir_version_gate_tests {
     use super::query_plan_from_ir_json;
 
-    fn v3_envelope() -> serde_json::Value {
+    fn v4_envelope() -> serde_json::Value {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 3,
+            "ir_version": 4,
             "payload": {
                 "model_name": "Widget",
                 "where": [],
@@ -3911,8 +4296,9 @@ mod query_ir_version_gate_tests {
     }
 
     /// Assert a rejected envelope's message names the received version, this
-    /// build's supported version (3), and the one-wheel fix — the actionable
-    /// shape pinned since the v1-at-v2 bump (#269), re-pinned at v3 (#278).
+    /// build's supported version (4), and the one-wheel fix — the actionable
+    /// shape pinned since the v1-at-v2 bump (#269), re-pinned at v3 (#278)
+    /// and at v4 (#285).
     fn assert_actionable_version_rejection(err: pyo3::PyErr, received: char) {
         pyo3::Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
@@ -3923,7 +4309,7 @@ mod query_ir_version_gate_tests {
             "message should name the received version: {msg}"
         );
         assert!(
-            msg.contains('3'),
+            msg.contains('4'),
             "message should name the supported version: {msg}"
         );
         assert!(
@@ -3937,9 +4323,37 @@ mod query_ir_version_gate_tests {
     }
 
     #[test]
-    fn accepts_version_3() {
-        query_plan_from_ir_json(&v3_envelope().to_string())
-            .expect("a well-formed v3 envelope must be accepted");
+    fn accepts_version_4() {
+        query_plan_from_ir_json(&v4_envelope().to_string())
+            .expect("a well-formed v4 envelope must be accepted");
+    }
+
+    /// Contract test (#285 acceptance criteria, mirroring the v2-at-v3
+    /// precedent): a v3 envelope — with a real v3 payload whose `instances`
+    /// kind is the unit shape this build's strict parse no longer accepts —
+    /// must be rejected on the version check with the actionable one-wheel
+    /// message, not on a serde "missing field `paths`" error. The version
+    /// check fires before strict payload parsing.
+    #[test]
+    fn rejects_v3_envelope_with_actionable_message() {
+        let v3_envelope = serde_json::json!({
+            "ir_kind": "query",
+            "ir_version": 3,
+            "payload": {
+                "model_name": "Widget",
+                "where": [],
+                "order_by": [],
+                "limit": null,
+                "offset": null,
+                "m2m": null,
+                "joins": [],
+                "materialization": {"kind": "instances"}
+            }
+        });
+
+        let err = query_plan_from_ir_json(&v3_envelope.to_string())
+            .expect_err("a v3 envelope must be rejected");
+        assert_actionable_version_rejection(err, '3');
     }
 
     /// Contract test (#278 acceptance criteria, mirroring the v1-at-v2
@@ -3993,14 +4407,14 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_unsupported_future_version() {
-        let mut envelope = v3_envelope();
-        envelope["ir_version"] = serde_json::json!(4);
+        let mut envelope = v4_envelope();
+        envelope["ir_version"] = serde_json::json!(5);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("an unsupported future version must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains('4'),
+            msg.contains('5'),
             "message should name the received version: {msg}"
         );
     }
@@ -4009,7 +4423,7 @@ mod query_ir_version_gate_tests {
     /// naming the bad kind and the supported ones (#278).
     #[test]
     fn rejects_unknown_materialization_kind() {
-        let mut envelope = v3_envelope();
+        let mut envelope = v4_envelope();
         envelope["payload"]["materialization"] = serde_json::json!({"kind": "row_dicts"});
 
         let err = query_plan_from_ir_json(&envelope.to_string())
@@ -4022,18 +4436,18 @@ mod query_ir_version_gate_tests {
         );
     }
 
-    /// A v3 payload with NO materialization section fails the strict parse:
+    /// A v4 payload with NO materialization section fails the strict parse:
     /// the plan travels with the query as data (ADR-0007), never defaulted.
     #[test]
-    fn rejects_v3_payload_missing_materialization() {
-        let mut envelope = v3_envelope();
+    fn rejects_v4_payload_missing_materialization() {
+        let mut envelope = v4_envelope();
         envelope["payload"]
             .as_object_mut()
             .unwrap()
             .remove("materialization");
 
         let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v3 payload without a materialization section must be rejected");
+            .expect_err("a v4 payload without a materialization section must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("materialization"),
@@ -4053,7 +4467,7 @@ mod materialization_walker_gate_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 3,
+                "ir_version": 4,
                 "payload": {
                     "model_name": "Widget",
                     "where": [],
@@ -4099,7 +4513,13 @@ mod materialization_walker_gate_tests {
 
     #[test]
     fn instances_kind_is_rejected_loudly() {
-        let plan = plan_with_kind(serde_json::json!({"kind": "instances"}));
+        let plan = plan_with_kind(serde_json::json!({
+            "kind": "instances",
+            "paths": [[
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]]
+        }));
         pyo3::Python::attach(|py| {
             let err = reject_unsupported_materialization(&plan, "fetch_filtered")
                 .expect_err("instances must be rejected");
@@ -4128,7 +4548,7 @@ mod record_select_list_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 3,
+                "ir_version": 4,
                 "payload": {
                     "model_name": "Transaction",
                     "where": [],
@@ -4235,12 +4655,183 @@ mod record_select_list_tests {
 
     #[test]
     fn instances_plan_is_rejected() {
-        let plan = plan_with_materialization(serde_json::json!({"kind": "instances"}));
+        let plan = plan_with_materialization(serde_json::json!({
+            "kind": "instances",
+            "paths": [[
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]]
+        }));
         let err = projected_columns(&plan).expect_err("instances must be rejected");
         assert!(
             err.to_string().contains("joined-row hydration"),
             "got {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod instances_select_list_tests {
+    //! Pin the instances plan's widened SELECT (#286): the root asterisk plus
+    //! every included hop's complete column list, aliased `{alias}__{col}` so
+    //! a hop column can never collide with a same-named root column in the
+    //! result set — and the include edge rendered LEFT via the edge union.
+
+    use super::{
+        apply_include_select_list, apply_relation_joins, apply_select_list,
+        instances_rows_to_parsed_data, query_join_plan, query_plan_from_ir_json,
+        resolve_include_hops,
+    };
+    use crate::backend::{EngineRow, EngineValue};
+    use sea_query::{Alias, PostgresQueryBuilder, Query};
+
+    /// `Transaction.select().include(lambda t: t.account)` as it arrives on
+    /// the wire: empty `joins`, a one-path instances plan.
+    fn include_plan() -> crate::query::QueryPlan {
+        let mut plan = query_plan_from_ir_json(
+            &serde_json::json!({
+                "ir_kind": "query",
+                "ir_version": 4,
+                "payload": {
+                    "model_name": "Transaction",
+                    "where": [], "order_by": [], "limit": null, "offset": null,
+                    "m2m": null,
+                    "joins": [],
+                    "materialization": {"kind": "instances", "paths": [[
+                        {"relation": "account", "from_column": "account_id",
+                         "to_table": "account", "to_column": "id"}
+                    ]]}
+                }
+            })
+            .to_string(),
+        )
+        .expect("envelope parses");
+        // The walkers resolve each included table's registration before
+        // hydrating; mirror that (columns sort alphabetically here: id, label).
+        plan.hop_registrations.insert(
+            "account".to_string(),
+            crate::state::RegisteredModel::new_for_test(
+                serde_json::json!({
+                    "properties": {
+                        "id": {"type": "integer", "primary_key": true},
+                        "label": {"type": "string"}
+                    }
+                }),
+                "account".to_string(),
+            ),
+        );
+        plan
+    }
+
+    #[test]
+    fn rendered_select_widens_with_aliased_hop_columns_and_left_join() {
+        let plan = include_plan();
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization
+        else {
+            panic!("include plan expected");
+        };
+        let hops = resolve_include_hops(paths, &join_plan, &plan).expect("hops resolve");
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].relation, "account");
+        assert_eq!(hops[0].alias, "j1_account");
+        assert!(hops[0].parent_path.is_empty());
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", None);
+        apply_include_select_list(&mut select, &hops);
+        select.from(Alias::new("transaction"));
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert_eq!(
+            sql,
+            "SELECT \"transaction\".*, \
+             \"j1_account\".\"id\" AS \"j1_account__id\", \
+             \"j1_account\".\"label\" AS \"j1_account__label\" \
+             FROM \"transaction\" \
+             LEFT JOIN \"account\" AS \"j1_account\" ON \
+             \"transaction\".\"account_id\" = \"j1_account\".\"id\""
+        );
+    }
+
+    #[test]
+    fn instances_rows_partition_and_decode_root_and_hop_independently() {
+        // One fetched row splits into the root's unaliased columns (decoded by
+        // the root plan) and the hop's aliased columns (decoded by the HOP
+        // model's own codec plan), with the hop PK extracted for the identity
+        // protocol.
+        let plan = include_plan();
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization
+        else {
+            panic!("include plan expected");
+        };
+        let hops = resolve_include_hops(paths, &join_plan, &plan).expect("hops resolve");
+        let root = crate::state::RegisteredModel::new_for_test(
+            serde_json::json!({
+                "properties": {
+                    "amount": {"type": "integer"},
+                    "id": {"type": "integer", "primary_key": true}
+                }
+            }),
+            "transaction".to_string(),
+        );
+
+        let rows = vec![EngineRow {
+            values: vec![
+                ("id".to_string(), EngineValue::I64(7)),
+                ("amount".to_string(), EngineValue::I64(120)),
+                ("account_id".to_string(), EngineValue::I64(3)),
+                ("j1_account__id".to_string(), EngineValue::I64(3)),
+                (
+                    "j1_account__label".to_string(),
+                    EngineValue::String("a1".to_string()),
+                ),
+            ],
+        }];
+        let parsed = instances_rows_to_parsed_data(rows, &root, Some("id"), &hops);
+        assert_eq!(parsed.len(), 1);
+        let (root_row, hop_rows) = &parsed[0];
+        assert_eq!(root_row.0.as_deref(), Some("7"));
+        assert_eq!(root_row.1.len(), 3, "root keeps its unaliased columns");
+        assert_eq!(hop_rows.len(), 1);
+        assert_eq!(hop_rows[0].0.as_deref(), Some("3"), "hop PK extracted");
+        // Hop columns arrive under their BARE names (alias prefix stripped).
+        let hop_cols: Vec<&str> = hop_rows[0].1.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(hop_cols, vec!["id", "label"]);
+    }
+
+    #[test]
+    fn left_missed_hop_row_decodes_to_pk_none() {
+        // A LEFT join that matched no row (NULL FK) yields a hop slice whose
+        // PK is None — the graph hydrator's populated-`None` signal.
+        let plan = include_plan();
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization
+        else {
+            panic!("include plan expected");
+        };
+        let hops = resolve_include_hops(paths, &join_plan, &plan).expect("hops resolve");
+        let root = crate::state::RegisteredModel::new_for_test(
+            serde_json::json!({
+                "properties": {"id": {"type": "integer", "primary_key": true}}
+            }),
+            "transaction".to_string(),
+        );
+
+        let rows = vec![EngineRow {
+            values: vec![
+                ("id".to_string(), EngineValue::I64(9)),
+                ("account_id".to_string(), EngineValue::Null),
+                ("j1_account__id".to_string(), EngineValue::Null),
+                ("j1_account__label".to_string(), EngineValue::Null),
+            ],
+        }];
+        let parsed = instances_rows_to_parsed_data(rows, &root, Some("id"), &hops);
+        let (root_row, hop_rows) = &parsed[0];
+        assert_eq!(root_row.0.as_deref(), Some("9"), "root row retained");
+        assert!(hop_rows[0].0.is_none(), "missed hop has no PK");
     }
 }
 
@@ -4262,7 +4853,7 @@ mod mutation_qualification_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 3,
+                "ir_version": 4,
                 "payload": {
                     "model_name": "Widget",
                     "where": [{
@@ -4348,7 +4939,7 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 3,
+                "ir_version": 4,
                 "payload": {
                     "model_name": "Transaction",
                     "where": [{
@@ -4454,7 +5045,7 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 3,
+                "ir_version": 4,
                 "payload": {
                     "model_name": model_name,
                     "where": [], "order_by": [],
@@ -4476,7 +5067,7 @@ mod select_join_render_tests {
         let plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 3,
+                "ir_version": 4,
                 "payload": {
                     "model_name": "Transaction",
                     "where": [{

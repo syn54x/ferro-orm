@@ -74,6 +74,39 @@ The gate divides the work exactly like predicates do:
   did-you-mean when the query is built, before any round-trip — the same
   runtime validation as `where()` and `order_by()`.
 
+## Included Queries
+
+`include()` deliberately does **not** flip the query's type the way `select()`
+does. An included query stays `Query[Model]`-shaped: `.all()` checks as
+`list[Transaction]`, `.first()` as `Transaction | None`, and populated access
+(`txns[0].account.label`) type-checks through the field's ordinary declared
+annotation. There is no `Loaded[Transaction]`.
+
+That is a decision, not a gap, for two reasons:
+
+- **A per-query "loaded" type is unsound under the identity map.** In a
+  session, the instance an included query returns is the *same object* a
+  plain query returns — populations attach to shared instances and accumulate
+  across queries. A static brand that says "this object's `account` is
+  populated" asserts something the runtime cannot pin to a type: the next
+  refresh may drop the population (see the
+  [refresh rule](../guide/queries.md#refreshes-drop-populations-that-stopped-being-true)),
+  and a plain query can hand you the already-populated object. The honest
+  static type of every instance is the model itself.
+- **The declared annotation already claims the instance.** The field says
+  `account: Account`; a distinct loaded type would need to *transform*
+  per-field types on the unloaded side instead (`account: Awaitable[Account]`
+  → `Account`), which requires TypeScript-style mapped types —
+  [PEP 827](https://peps.python.org/pep-0827/) (draft, targeting
+  Python 3.16). Population is what makes the declared annotation *true* at
+  runtime, exactly where the user opted in.
+
+When PEP 827 lands, typing can sharpen with zero runtime change — precisely
+because the runtime type stayed single. Meanwhile the statically catchable
+misuses do fail the gate: `include()` on a projected query is an error at the
+call site (the `self: Never` pin), and a string selector fails the callable
+parameter type.
+
 ## What This Doesn't Change
 
 - Your model annotations. `archived: bool = False` stays exactly as it is.

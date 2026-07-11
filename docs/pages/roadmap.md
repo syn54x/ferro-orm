@@ -5,7 +5,7 @@ Ferro is pre-1.0 and under active development. The items below are known gaps we
 ## Query Features
 
 - **Aggregations beyond `count()`/`exists()`** — `sum`, `avg`, `min`, `max` on the query builder, plus output aliases and traversed projection (`select(lambda t: t.account.name)`), designed together on the [partial-select](guide/queries.md#selecting-a-column-subset) substrate. Today you either compute in Python after fetching or drop to raw SQL.
-- **Eager loading** — `prefetch_related`/`select_related`-style relationship loading to eliminate N+1 query patterns. Today each awaited relationship attribute is its own query.
+- **Reverse and many-to-many population** — [`include()`](guide/queries.md#populating-relations-with-include) populates forward-FK paths in one statement; populating `BackRef` collections and M2M sets is a separate future mechanism (a batched second query stitched onto the results). Today each awaited collection is its own query.
 - **`ilike()`** — case-insensitive pattern matching. Workaround: `like()` with normalized case.
 - **`not_in_()`** — NOT IN exclusion lists. Workaround: combine `!=` comparisons with `&`.
 - **Atomic update expressions** — database-side expressions in batch updates, e.g. `update(view_count=Post.view_count + 1)`, avoiding the read-modify-write race. Workaround today: load, mutate, `save()` (or raw SQL).

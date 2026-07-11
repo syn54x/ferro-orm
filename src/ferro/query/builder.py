@@ -52,17 +52,18 @@ _ROWS_OF_ROW: type[Rows[Row]] = Rows[Row]
 def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
     """Serialize a QueryIR payload into a versioned IR envelope JSON string.
 
-    Always emits ``ir_version: 3`` (#278 — unconditional bump, exactly like v2
-    at #269; there is no v1 or v2 envelope left anywhere). Python and Rust ship
-    in one wheel, so a single supported version is the whole contract
-    (#267 Implementation Decisions).
+    Always emits ``ir_version: 4`` (#285 — unconditional bump, exactly like v3
+    at #278 and v2 at #269; there is no earlier envelope left anywhere). v4
+    gives the ``instances`` materialization kind its field shape (``paths`` of
+    hop facts). Python and Rust ship in one wheel, so a single supported
+    version is the whole contract (#267 Implementation Decisions).
     """
     import json
 
     return json.dumps(
         {
             "ir_kind": "query",
-            "ir_version": 3,
+            "ir_version": 4,
             "payload": _serialize_query_value(query_payload),
         }
     )
@@ -174,6 +175,89 @@ def _resolve_join_selector(
 def _path_edges(path: tuple[str, ...]) -> list[tuple[str, ...]]:
     """Every edge (prefix of length ≥ 1) of a relation ``path`` (#272)."""
     return [path[:i] for i in range(1, len(path) + 1)]
+
+
+def _reject_reverse_relation_include(exc: AttributeError) -> None:
+    """Raise pointedly when an include selector names a BackRef/M2M (#287).
+
+    The validating proxies raise ``AttributeError`` for any name that is not
+    a column or a forward relation; when the failing name (carried
+    structurally on the exception) is a declared reverse or many-to-many
+    relation of the hop's model, include() has a sharper story than
+    "no queryable column": reverse population is a separate future mechanism
+    — a batched second query stitched onto the results — deliberately not
+    ``include()``.
+    """
+    from ..relations.descriptors import RelationshipDescriptor
+
+    name = getattr(exc, "name", None)
+    model = getattr(exc, "obj", None)
+    if not name or model is None:
+        return
+    if isinstance(getattr(model, name, None), RelationshipDescriptor):
+        raise TypeError(
+            f"include() cannot populate {name!r}: it is a reverse (BackRef) "
+            "or many-to-many relation, and include() populates forward "
+            "foreign-key paths only (e.g. lambda t: t.account). Reverse and "
+            "M2M population will be a separate mechanism — a batched second "
+            "query stitched onto the results — not include(). Until it "
+            f"lands, fetch the collection through the relation itself "
+            f"(await instance.{name}.all())."
+        ) from None
+
+
+def _resolve_include_selector(
+    selector: "Callable[[QueryProxy[Any]], Any]", model_cls: type
+) -> tuple[str, ...]:
+    """Resolve an ``include()`` selector into a relation path (#286).
+
+    ``selector`` is a lambda receiving a validating :class:`QueryProxy` and
+    naming a forward-FK RELATION path (``lambda t: t.account``,
+    ``lambda t: t.account.owner``) — the same traversal syntax as ``join()``,
+    resolving to a :class:`RelationProxy`. Each hop is validated against the
+    relevant model at build time (the proxy raises ``AttributeError`` with a
+    did-you-mean for a bad hop, exactly like ``where()``).
+
+    Returns:
+        The relation ``path`` tuple the selector names (length ≥ 1).
+
+    Raises:
+        TypeError: If ``selector`` is a string or otherwise not callable
+            (strings never traverse, #280 — include is lambda-selector only),
+            resolves to a column (:class:`FieldProxy`) rather than a relation,
+            names a BackRef/M2M relation (reverse population is a separate
+            future mechanism, #287), or returns any other non-relation value.
+    """
+    if isinstance(selector, str):
+        raise TypeError(
+            f"include() takes a lambda selector naming a relation path, not a "
+            f"string: include({selector!r}) is not supported (strings never "
+            f"traverse). Use include(lambda t: t.{selector})."
+        )
+    if not callable(selector):
+        raise TypeError(
+            "include() expected a selector callable "
+            f"(e.g. `lambda t: t.account`), got {type(selector).__name__}"
+        )
+    try:
+        result = selector(QueryProxy(model_cls))
+    except AttributeError as exc:
+        _reject_reverse_relation_include(exc)
+        raise
+    if isinstance(result, FieldProxy):
+        dotted = ".".join((*result.path, result.column))
+        raise TypeError(
+            f"include() selector resolved to the column {dotted!r}, not a "
+            "relation; include() populates whole related instances "
+            "(e.g. `lambda t: t.account`) — every populated hop is a complete "
+            "row, so there is nothing to select per column."
+        )
+    if not isinstance(result, RelationProxy):
+        raise TypeError(
+            "include() selector must return a relation path "
+            f"(e.g. `lambda t: t.account`), got {type(result).__name__}"
+        )
+    return result._path
 
 
 def _resolve_projection_selector(
@@ -387,6 +471,13 @@ class Query(Generic[T]):
         # for LEFT on the wire — implicit where()/order_by() traversal never
         # touches this, so explicit always beats implicit (#272).
         self._explicit_edges: dict[tuple[str, ...], str] = {}
+        # Relation paths to populate (#286, ADR-0008), insertion-ordered and
+        # deduped by path identity (dict-as-ordered-set). CRITICAL: include
+        # paths never enter ``_joins``/``_serialize_joins`` — they ride the
+        # ``instances`` materialization plan, so the ``joins`` wire section
+        # keeps its stage-1 semantics untouched and include contributes no
+        # join-type opinion on any edge another clause references.
+        self._includes: dict[tuple[str, ...], None] = {}
 
     async def _transaction_or_using(self) -> "RouteHandle":
         from .. import _ensure_rust_registration_synced_for_operation
@@ -410,6 +501,7 @@ class Query(Generic[T]):
         )
         new._joins = dict(self._joins)
         new._explicit_edges = dict(self._explicit_edges)
+        new._includes = dict(self._includes)
         return new
 
     def _m2m(
@@ -513,8 +605,10 @@ class Query(Generic[T]):
             TypeError: If the selector is not callable/strings, selects
                 non-columns (a bare relation, a comparison), or mixes strings
                 with a lambda in one call.
-            ValueError: If the selection is empty, repeats a column, or a
-                string is a dotted path (strings never traverse).
+            ValueError: If the selection is empty, repeats a column, a
+                string is a dotted path (strings never traverse), or the
+                query already carries an ``include()`` (one materialization
+                plan per query — include × projection is #282).
             NotImplementedError: If a lambda selects a traversed column
                 (traversed projection lands with #282).
 
@@ -525,6 +619,15 @@ class Query(Generic[T]):
         """
         if not selectors:
             return self._clone()
+        if self._includes:
+            raise ValueError(
+                "select() with a projection cannot be combined with "
+                "include(): a query carries exactly one materialization plan "
+                "— projected records or populated instances, not both. The "
+                "flattened-vs-nested design for record+relation results is "
+                "#282; until it lands, drop the include() or project through "
+                "a separate query."
+            )
         if any(isinstance(selector, str) for selector in selectors):
             if not all(isinstance(selector, str) for selector in selectors):
                 raise TypeError(
@@ -701,6 +804,54 @@ class Query(Generic[T]):
         """
         return self._add_explicit_join(selector, "left")
 
+    def include(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
+        """Populate a relation path on every result and return a new query.
+
+        ``selector`` is a lambda naming a forward-FK RELATION path
+        (``lambda t: t.account``, ``lambda t: t.account.owner``) — the same
+        traversal syntax as :meth:`join`. Results are the same ``list[T]``
+        the query always returned, in one SQL statement, with each included
+        relation **populated**: access is a plain attribute
+        (``txn.account.label`` — no await, no query) returning the complete
+        related instance, exactly as the field's declared annotation claims
+        (ADR-0008). Unpopulated relations keep the awaitable contract
+        unchanged; a nullable FK with no target populates as ``None`` with
+        the root row retained.
+
+        Include decides attached data only — joins decide membership,
+        projection decides shape. Adding ``.include(...)`` to any query
+        returns exactly the rows that query returned without it: include
+        contributes no join-type opinion on any edge a predicate or explicit
+        chainer references, and renders LEFT only on edges nothing else
+        touches. ``count()``/``exists()`` are unaffected.
+
+        Cumulative, order-free, and idempotent: chained includes accumulate,
+        shared prefixes dedup by path identity, and including a path
+        populates every hop along it.
+
+        Args:
+            selector: A lambda receiving a :class:`QueryProxy` and returning
+                a relation path (a ``RelationProxy``).
+
+        Returns:
+            A new ``Query`` with the population registered; ``self`` is
+            unchanged.
+
+        Raises:
+            TypeError: If ``selector`` is a string or not callable, resolves
+                to a column rather than a relation, or names a BackRef/M2M
+                relation (reverse population is a separate future mechanism).
+
+        Examples:
+            >>> txns = await Transaction.select().include(lambda t: t.account).all()  # doctest: +SKIP
+            >>> txns[0].account.label  # doctest: +SKIP
+            'checking'
+        """
+        path = _resolve_include_selector(selector, self.model_cls)
+        new = self._clone()
+        new._includes.setdefault(path, None)
+        return new
+
     def _add_explicit_join(
         self, selector: "Callable[[QueryProxy[T]], Any]", join_type: str
     ) -> Self:
@@ -766,12 +917,50 @@ class Query(Generic[T]):
         return new
 
     def _materialization_ir(self) -> dict[str, Any]:
-        """Serialize this query's materialization plan (ADR-0007, v3).
+        """Serialize this query's materialization plan (ADR-0007, v4).
 
-        Every fetching query carries exactly one plan on the wire; a query
-        without a projection materializes complete root instances.
+        Every fetching query carries exactly one plan on the wire. A query
+        without a projection or includes materializes complete root
+        instances; an included query carries the ``instances`` plan — one
+        ordered hop-fact list per include path (#286), the same hop shape as
+        the ``joins`` section but deliberately separate from it (ADR-0008):
+        the fetch walker unions include-only edges in as LEFT, so include
+        can never change membership or a shared edge's join type.
         """
+        if self._includes:
+            return {
+                "kind": "instances",
+                "paths": [
+                    _resolve_join_hops(self.model_cls, path)
+                    for path in self._includes
+                ],
+            }
         return {"kind": "root_instances"}
+
+    def _include_hop_classes(self) -> dict[str, type]:
+        """Map each included hop's physical table to its model class (#286).
+
+        The Rust fetch walker hydrates every included hop through the full
+        model protocol (codec plan, enum classes, identity map), so it needs
+        the hop's Python class — resolved here, where the relation-spec chain
+        lives, and passed across the FFI keyed by ``to_table`` (one model per
+        table, enforced at registration).
+        """
+        hop_classes: dict[str, type] = {}
+        for path in self._includes:
+            current = self.model_cls
+            for relation in path:
+                specs = getattr(current, "__ferro_relation_specs__", None) or {}
+                spec = specs.get(relation)
+                if spec is None:
+                    raise ValueError(
+                        f"{current.__name__!r} has no relation {relation!r} "
+                        "for population."
+                    )
+                target = spec.target
+                hop_classes[target.__ferro_table__] = target
+                current = target
+        return hop_classes
 
     def _serialize_joins(self) -> list[dict[str, Any]]:
         """Serialize collected relation paths into QueryIR ``joins`` entries.
@@ -841,6 +1030,13 @@ class Query(Generic[T]):
                 "(A join-free relation filter like `t.account == instance` is "
                 "allowed.)"
             )
+        if self._includes:
+            raise ValueError(
+                f"{operation}() does not support include(): a mutation is a "
+                "single-table write shape and returns no instances to "
+                "populate. Drop the .include(...) call, or fetch the "
+                "populated rows first and mutate by primary-key set."
+            )
         return {
             "model_name": _model_identity(self.model_cls),
             "where": [node.to_ir_dict() for node in self.where_clause],
@@ -882,6 +1078,13 @@ class Query(Generic[T]):
         """
         query_def = self._fetch_query_def()
         route = await self._transaction_or_using()
+        if self._includes:
+            return await fetch_filtered(
+                self.model_cls,
+                _query_ir_payload_to_json(query_def),
+                route,
+                hop_classes=self._include_hop_classes(),
+            )
         return await fetch_filtered(
             self.model_cls,
             _query_ir_payload_to_json(query_def),
@@ -1187,6 +1390,27 @@ class ProjectedQuery(Query[T]):
             "projection changes the result type mid-chain. Name every "
             "projected column in one select() call, or start a new query "
             "from the model."
+        )
+
+    def include(self: Never, selector: Any) -> NoReturn:  # type: ignore[override]
+        """Reject ``include()`` on a projected query (#287).
+
+        One materialization plan per query (ADR-0007/ADR-0008): projected
+        records and populated instances cannot ride one result shape until
+        #282 designs flattened-vs-nested record+relation results. The
+        ``self: Never`` pin makes this a STATIC error at the call site
+        (tests/static_fixtures/bad_includes.py), mirroring the mutation pins.
+
+        Raises:
+            ValueError: Always — include through an unprojected query, or
+                wait for #282.
+        """
+        raise ValueError(
+            "include() cannot be combined with a projection: a query carries "
+            "exactly one materialization plan — projected records or "
+            "populated instances, not both. The flattened-vs-nested design "
+            "for record+relation results is #282; until it lands, drop the "
+            "projection or populate through a separate query."
         )
 
     # `self: Never` makes mutating a projected query a STATIC error at the

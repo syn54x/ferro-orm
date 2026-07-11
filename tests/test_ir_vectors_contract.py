@@ -11,9 +11,10 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 3 (#278 — unconditional bump, required
-# `materialization` section, ADR-0007); `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 3, "codec": 1}
+# `query` is on ir_version 4 (#285 — unconditional bump; the `instances`
+# materialization kind carries `paths` of hop facts, ADR-0008 on the
+# ADR-0007 plan substrate); `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 4, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 
@@ -86,11 +87,39 @@ def _validate_schema_payload(payload: dict[str, Any], label: str) -> None:
         )
 
 
+def _validate_hop(hop: dict[str, Any], label: str) -> None:
+    """Validate one relation-hop fact (the shared `joins`/`instances` shape)."""
+    assert isinstance(hop, dict), f"{label} must be object"
+    _require_keys(
+        hop,
+        {"relation", "from_column", "to_table", "to_column"},
+        label,
+    )
+    for key in ("relation", "from_column", "to_table", "to_column"):
+        assert isinstance(hop[key], str), f"{label}.{key} must be a str"
+
+
 def _validate_materialization(plan: dict[str, Any], label: str) -> None:
-    """Validate the v3 `materialization` section's required keys (#278)."""
+    """Validate the `materialization` section's required keys (#278, #285)."""
     _require_keys(plan, {"kind"}, label)
     kind = plan["kind"]
     assert kind in MATERIALIZATION_KINDS, f"{label}.kind invalid: {kind!r}"
+    if kind == "instances":
+        # v4 (#285): the instances plan carries `paths` — ordered hop-fact
+        # lists in the same hop shape as the `joins` section.
+        _require_keys(plan, {"paths"}, label)
+        paths = plan["paths"]
+        assert isinstance(paths, list) and paths, (
+            f"{label}.paths must be non-empty list"
+        )
+        for i, path in enumerate(paths):
+            path_label = f"{label}.paths[{i}]"
+            assert isinstance(path, list) and path, (
+                f"{path_label} must be a non-empty list of hops"
+            )
+            for h, hop in enumerate(path):
+                _validate_hop(hop, f"{path_label}[{h}]")
+        return
     if kind != "record":
         return
     _require_keys(plan, {"fields"}, label)
@@ -162,15 +191,7 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         )
         assert isinstance(join["path"], list), f"{join_label}.path must be a list"
         for h, hop in enumerate(join["path"]):
-            hop_label = f"{join_label}.path[{h}]"
-            assert isinstance(hop, dict), f"{hop_label} must be object"
-            _require_keys(
-                hop,
-                {"relation", "from_column", "to_table", "to_column"},
-                hop_label,
-            )
-            for key in ("relation", "from_column", "to_table", "to_column"):
-                assert isinstance(hop[key], str), f"{hop_label}.{key} must be a str"
+            _validate_hop(hop, f"{join_label}.path[{h}]")
 
 
 def _validate_codec_payload(payload: dict[str, Any], label: str) -> None:

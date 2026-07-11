@@ -1,0 +1,48 @@
+{
+  "vector_name": "query_transaction_include_v4",
+  "domain": "query",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "query",
+    "ir_version": 4,
+    "payload": {
+      "model_name": "Transaction",
+      "where": [
+        {
+          "node_kind": "leaf",
+          "column": "amount",
+          "operator": ">=",
+          "value": {
+            "kind": "int",
+            "value": 100
+          },
+          "path": []
+        }
+      ],
+      "order_by": [
+        {
+          "column": "id",
+          "direction": "asc",
+          "path": []
+        }
+      ],
+      "limit": null,
+      "offset": null,
+      "m2m": null,
+      "joins": [],
+      "materialization": {
+        "kind": "instances",
+        "paths": [
+          [
+            {
+              "relation": "account",
+              "from_column": "account_id",
+              "to_table": "account",
+              "to_column": "id"
+            }
+          ]
+        ]
+      }
+    }
+  }
+}

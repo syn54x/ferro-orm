@@ -4,6 +4,12 @@
 
 `where()` and `order_by()` lambdas may **traverse** a forward-FK relation (`lambda t: t.account.ledger_id == 1`): each hop renders one INNER join, deduplicated by relation path (ADR-0006). `join()` forces a join on a relation path (a bare `join()` is an existence filter on a nullable relation), and `left_join()` marks the whole path LEFT to keep relation-less rows. See the [Querying Across Relationships](../guide/queries.md#querying-across-relationships) guide for worked examples.
 
+## `include()` and populated relations
+
+`include(lambda t: t.account)` delivers each result with the relation **populated** (ADR-0008): access becomes a plain attribute holding the complete related instance — no await, no query — while unpopulated relations keep the awaitable contract. Include is the third orthogonal query axis (joins decide membership, projection decides shape, include decides attached data): it never changes which rows come back, `.all()` still returns `list[Model]`, and `count()`/`exists()` are unaffected. Paths populate whole (`include(lambda t: t.account.owner)` populates both hops); includes are cumulative, order-free, and idempotent; populated instances run the full session identity-map protocol, and a refresh keeps a population only while the row's FK still points at it.
+
+Loud limits, at build time: forward-FK lambda paths only (a `BackRef`/M2M selector, a string, or a column selector raises `TypeError`); combining include with a projection raises `ValueError` in either chain order (one materialization plan per query, #282); `update()`/`delete()` on an included query raise `ValueError`. See [Populating Relations with include()](../guide/queries.md#populating-relations-with-include) for worked examples.
+
 ## `select()` overloads
 
 `select()` has three forms, resolved at build time:

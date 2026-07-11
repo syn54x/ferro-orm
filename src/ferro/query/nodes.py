@@ -347,9 +347,15 @@ def validate_query_column(model_cls: type, name: str) -> str:
     relation_note = (
         f" Valid relations: {', '.join(sorted(relations))}." if relations else ""
     )
+    # `name`/`obj` carry the failing attribute and its model structurally
+    # (PEP 678-era AttributeError metadata), so callers with a sharper story
+    # for a specific name — include()'s BackRef/M2M guardrail (#287) — can
+    # re-raise pointedly without parsing this message.
     raise AttributeError(
         f"{model_cls.__name__} has no queryable column {name!r}.{hint} "
-        f"Valid columns: {', '.join(sorted(valid))}.{relation_note}"
+        f"Valid columns: {', '.join(sorted(valid))}.{relation_note}",
+        name=name,
+        obj=model_cls,
     )
 
 

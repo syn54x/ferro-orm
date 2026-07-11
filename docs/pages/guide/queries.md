@@ -367,7 +367,7 @@ n = await author.posts.count()
 
 ### Results are plain root instances
 
-A traversed query is **shape-preserving**: filtering `Transaction` through `transaction.account.ledger_id` still returns `Transaction` instances, no matter how deep the predicate reaches. Traversal does *not* pre-load the related rows onto the results — `await transaction.account` still issues its own query, exactly as it does without any traversal. (Eager loading is separate future work; see [Not Yet Supported](#not-yet-supported).)
+A traversed query is **shape-preserving**: filtering `Transaction` through `transaction.account.ledger_id` still returns `Transaction` instances, no matter how deep the predicate reaches. Traversal does *not* pre-load the related rows onto the results — `await transaction.account` still issues its own query, exactly as it does without any traversal. Attaching related data is a separate, explicit request: [`include()`](#populating-relations-with-include).
 
 ### `update()` and `delete()` cannot traverse
 
@@ -390,6 +390,115 @@ Do the two-step: fetch the primary keys with the joined query, then mutate by th
 - Combining predicates with Python's `and`/`or` (instead of `&`/`|`) coerces a node to `bool` and raises `TypeError: QueryNode cannot be used in a boolean context; use & / |`. Always parenthesize and use the bitwise operators.
 
 See [Relationships](relationships.md) for the schema-declaration side of foreign keys and reverse relations.
+
+## Populating Relations with include()
+
+Every relation access is a query. A list view that renders 100 transactions with their account labels awaits `transaction.account` 100 times — 101 statements for one screen. `include()` cures that N+1: ask the query to bring the related rows along, and each result's relation arrives **populated**:
+
+```python
+--8<-- "docs/examples/populated_relations.py:basic"
+```
+
+One SQL statement. The query still returns the same `list[Transaction]` it always did — and `transaction.account` is now a plain attribute holding the complete `Account` instance, exactly as the field's annotation (`account: Account`) always claimed. No await, no query.
+
+The examples in this section use this schema (both foreign keys nullable, so you can see what happens when a relation is absent):
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/populated_relations.py:schema"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/populated_relations_annotated.py:schema"
+    ```
+
+### The population contract
+
+A relation is in exactly one of two states on any given instance:
+
+- **Populated** (the query included it): access is a **plain attribute** returning the complete related instance. A nullable FK with no target populates as `None` — truthful to the declared `Account | None`.
+- **Unpopulated** (everything else): access keeps today's **awaitable** contract, unchanged — a coroutine that runs its own query:
+
+```python
+--8<-- "docs/examples/populated_relations.py:awaitable"
+```
+
+!!! warning "Awaiting a populated relation is a hard break"
+    `await transaction.account` on a *populated* instance raises `TypeError: 'Account' object can't be awaited` — the attribute is the instance itself, not a coroutine. Code that must handle both states cheaply can check `inspect.isawaitable(...)`, but the better pattern is to decide at the query: if you are going to read the relation, include it.
+
+There is no separate "loaded" model type: `.all()` on an included query still returns `list[Transaction]`, and a populated instance is an ordinary instance of the target model. (Why no `Loaded[Transaction]`? See [Typed Query Predicates](../concepts/query-typing.md#included-queries).)
+
+### Include never changes membership
+
+Joins decide **membership**, projection decides **shape**, include decides **attached data** — three orthogonal axes. Adding `.include(...)` to any query returns exactly the rows that query returned without it:
+
+```python
+--8<-- "docs/examples/populated_relations.py:membership"
+```
+
+Under the hood, an edge only the include touches renders a LEFT join, and an edge any other clause references keeps that clause's join type. So a `where()` traversal on the same path keeps its INNER narrowing — include attaches data to the surviving rows, it never rewrites what a filter matches:
+
+```python
+--8<-- "docs/examples/populated_relations.py:interplay"
+```
+
+`count()` and `exists()` are likewise unaffected — they measure the same rows with or without the include:
+
+```python
+--8<-- "docs/examples/populated_relations.py:count"
+```
+
+### Multi-hop paths populate every hop
+
+`include(lambda t: t.account.owner)` populates the whole path — a populated graph is never missing its intermediate nodes. A `NULL` somewhere along the chain ends the chain as a populated `None`, with the root row retained:
+
+```python
+--8<-- "docs/examples/populated_relations.py:multi-hop"
+```
+
+Includes are cumulative, order-free, and idempotent: `.include(lambda t: t.account)` plus `.include(lambda t: t.account.owner)` — in either order — is the same query as `.include(lambda t: t.account.owner)` alone.
+
+### Populated instances are session instances
+
+In a session, population runs through the identity map like every other fetch: same row, same object. A populated `Account` **is** the `Account` a direct fetch returns — deduped across result rows, and attached onto instances the session already holds:
+
+```python
+--8<-- "docs/examples/populated_relations.py:identity"
+```
+
+Populations **accumulate** across a session's queries — an `account` include and a later `attachment` include both stick, so shared objects get richer, never forked:
+
+```python
+--8<-- "docs/examples/populated_relations.py:accumulate"
+```
+
+Outside a session there is no identity map, so an included query returns fresh instances per row — including a fresh related instance per row, with no query-local dedup. Sessionless Ferro keeps exactly one identity story: the session.
+
+### Refreshes drop populations that stopped being true
+
+Every fetch refreshes instances the session already holds. A refresh keeps each population **iff the row's foreign key still points at it**; if the FK changed (or went `NULL`) underneath you, the now-lying population is dropped and access reverts to the awaitable — a populated relation never points at the wrong row:
+
+```python
+--8<-- "docs/examples/populated_relations.py:refresh-rule"
+```
+
+### The loud limits
+
+Misuse raises at build time, before any SQL:
+
+- **Forward foreign keys only.** Including a `BackRef` or `ManyToMany` relation raises `TypeError`: reverse and M2M population will be a separate mechanism (a batched second query stitched onto the results), not `include()`. Until it lands, fetch collections through the relation itself (`await author.posts.all()`).
+- **Lambda selectors only.** `include("account")` raises pointing at the lambda form — strings never traverse. Selecting a *column* (`include(lambda t: t.account.label)`) raises too: every populated hop is a complete row, so there is nothing to select per column.
+- **No include × projection.** A query carries exactly one materialization plan — populated instances or projected records, not both. Either order raises `ValueError` naming [#282](https://github.com/syn54x/ferro-orm/issues/282), which designs record+relation results.
+- **No mutations.** `update()`/`delete()` on an included query raise — a mutation returns no instances to populate.
+
+```python
+--8<-- "docs/examples/populated_relations.py:limits"
+```
+
+Include composes with the M2M association context (`post.tags.include(lambda tag: tag.created_by)` populates each tag's forward FK) and with everything else a query does: `where()` (traversal included), `order_by()`, `limit()`/`offset()`, `first()`, and query branching.
 
 ## Selecting a Column Subset
 
@@ -484,7 +593,7 @@ Static typing follows the same shape promise as predicates: `select(...)` flips 
 
     - Aggregations beyond `count()` / `exists()` (`sum`, `avg`, `min`, `max`, `GROUP BY`)
     - Traversed projection and output aliases (`select(lambda t: t.account.name)`) — designed together with aggregations
-    - Eager loading (`prefetch_related` / `select_related`) — be mindful of N+1 patterns when looping over relations
+    - Reverse (`BackRef`) and many-to-many population — [`include()`](#populating-relations-with-include) covers forward FKs; collection population is a separate future mechanism
     - Case-insensitive `ilike()`
     - `not_in()` (negate with `!=` conditions combined with `&` in the meantime)
 

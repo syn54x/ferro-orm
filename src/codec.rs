@@ -497,27 +497,39 @@ pub fn typed_rows_to_parsed_data(
     pk_col: Option<&str>,
 ) -> Vec<ParsedRow> {
     rows.into_iter()
-        .map(|row| {
-            let mut row_pk_val = None;
-            let mut fields = Vec::with_capacity(row.values.len());
-
-            for (col_name, value) in row.values {
-                if pk_col == Some(col_name.as_str()) {
-                    row_pk_val = match &value {
-                        EngineValue::I64(v) => Some(v.to_string()),
-                        EngineValue::String(v) => Some(v.clone()),
-                        // Native uuid PKs stringify to the same canonical
-                        // lowercase-hyphenated form SQLite stores as text, so
-                        // identity-map keys agree across backends.
-                        EngineValue::Uuid(v) => Some(v.hyphenated().to_string()),
-                        _ => None,
-                    };
-                }
-                let value = decode_engine_value(value, plan, &col_name);
-                fields.push((col_name, value));
-            }
-
-            (row_pk_val, fields)
-        })
+        .map(|row| typed_row_values_to_parsed(row.values, plan, pk_col))
         .collect()
+}
+
+/// Decode one row's `(column, value)` pairs into a [`ParsedRow`].
+///
+/// The single-row seam behind [`typed_rows_to_parsed_data`], exposed so the
+/// instances fetch walker (#286) can decode each hop's column slice against
+/// that hop model's OWN codec plan — never the root's (the stage-1
+/// root-vs-hop codec lesson, #270).
+pub fn typed_row_values_to_parsed(
+    values: Vec<(String, EngineValue)>,
+    plan: &ModelCodecPlan,
+    pk_col: Option<&str>,
+) -> ParsedRow {
+    let mut row_pk_val = None;
+    let mut fields = Vec::with_capacity(values.len());
+
+    for (col_name, value) in values {
+        if pk_col == Some(col_name.as_str()) {
+            row_pk_val = match &value {
+                EngineValue::I64(v) => Some(v.to_string()),
+                EngineValue::String(v) => Some(v.clone()),
+                // Native uuid PKs stringify to the same canonical
+                // lowercase-hyphenated form SQLite stores as text, so
+                // identity-map keys agree across backends.
+                EngineValue::Uuid(v) => Some(v.hyphenated().to_string()),
+                _ => None,
+            };
+        }
+        let value = decode_engine_value(value, plan, &col_name);
+        fields.push((col_name, value));
+    }
+
+    (row_pk_val, fields)
 }

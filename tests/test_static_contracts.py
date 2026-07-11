@@ -164,6 +164,16 @@ def test_junk_lambda_predicates_fail_the_type_checker():
     assert "invalid-assignment" in result.stdout
 
 
+def test_include_chains_pass_the_type_checker():
+    """An included query stays Query[T]-shaped: .all() is list[T], .first()
+    is T | None, and populated access types as the declared annotation
+    (#286, ADR-0008 — no distinct loaded type)."""
+    result = _run_ty(FIXTURES / "good_includes.py")
+    assert result.returncode == 0, (
+        f"include chains must type-check cleanly:\n{result.stdout}\n{result.stderr}"
+    )
+
+
 def test_projected_shape_misuse_fails_the_type_checker():
     """A `Row` where a model instance is expected must be rejected statically
     (#279), and mutating a projected query is a static error at the call site
@@ -173,6 +183,16 @@ def test_projected_shape_misuse_fails_the_type_checker():
     assert "invalid-assignment" in result.stdout
     assert result.stdout.count("invalid-argument-type") >= 2, (
         "update() and delete() on a projected query must each be a static error"
+    )
+
+
+def test_include_misuse_fails_the_type_checker():
+    """include() on a projected query (the `self: Never` pin, #287) and a
+    string include selector are static errors at the call site."""
+    result = _run_ty(FIXTURES / "bad_includes.py")
+    assert result.returncode != 0, "bad_includes.py must fail ty"
+    assert result.stdout.count("invalid-argument-type") >= 2, (
+        "projected include() and a string selector must each be a static error"
     )
 
 

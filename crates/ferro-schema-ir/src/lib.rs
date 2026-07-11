@@ -137,11 +137,13 @@ pub struct SchemaCheck {
 /// Query IR: filter, sort, pagination, joins, materialization plan, and
 /// optional M2M join context.
 ///
-/// `ir_version: 3` (unconditional, no v1/v2 emitted anywhere — #269, #278).
-/// `joins` is required and always present (`[]` when the query traverses no
-/// relation); every leaf and `order_by` entry carries a `path` (required,
-/// `[]` = root model); `materialization` is required — the plan travels with
-/// the query as data (ADR-0007), never inferred from a column list.
+/// `ir_version: 4` (unconditional, no earlier version emitted anywhere —
+/// #269, #278, #285). `joins` is required and always present (`[]` when the
+/// query traverses no relation); every leaf and `order_by` entry carries a
+/// `path` (required, `[]` = root model); `materialization` is required — the
+/// plan travels with the query as data (ADR-0007), never inferred from a
+/// column list. v4 gives the `instances` kind its field shape: `paths` of
+/// hop facts (#285).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryIrPayload {
     /// Model class name the query targets.
@@ -165,13 +167,13 @@ pub struct QueryIrPayload {
 
 /// A query's materialization plan (ADR-0007): what its result columns become.
 ///
-/// Every v3 query carries exactly one plan. `root_instances` is complete
+/// Every v4 query carries exactly one plan. `root_instances` is complete
 /// root-model rows hydrated into model instances — the default and the only
 /// plan the non-projecting walkers accept. `record` is partial selects: a
-/// typed column subset decoded into projected records (#279). `instances`
-/// (populated instance graphs, joined-row hydration) is declared here so the
-/// hydration ABI grows once, but every walker rejects it loudly until
-/// #267 stage 2 builds it.
+/// typed column subset decoded into projected records (#279). `instances` is
+/// populated instance graphs (joined-row hydration, #284): the root rows plus
+/// every included relation path's complete hop rows, hydrated into a
+/// populated graph.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum Materialization {
@@ -184,10 +186,16 @@ pub enum Materialization {
         /// Projected fields in selection order.
         fields: Vec<RecordField>,
     },
-    /// Populated instance graphs (joined-row hydration, #267 stage 2).
-    /// Declared-but-rejected until that epic builds it.
+    /// Populated instance graphs (joined-row hydration, #284/#286).
     #[serde(rename = "instances")]
-    Instances,
+    Instances {
+        /// Included relation paths, each an ordered hop-fact list from the
+        /// root model (the same hop shape as the `joins` section). Nothing
+        /// else travels here: every hop of a populated graph is a complete
+        /// row, permanently (the complete-instance invariant, ADR-0008), so
+        /// there is no per-path configuration.
+        paths: Vec<Vec<QueryJoinHop>>,
+    },
 }
 
 /// One projected field in a [`Materialization::Record`] plan.
@@ -350,7 +358,7 @@ mod tests {
     #[test]
     fn query_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v3.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v4.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query fixture must parse");
         let ir = parsed
@@ -373,7 +381,7 @@ mod tests {
         // Multi-hop `joins` section + path-carrying leaves must survive a
         // deserialize/serialize round-trip without drift (#270 wire stability).
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v3.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v4.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversal fixture must parse");
@@ -399,7 +407,7 @@ mod tests {
         // deserialize/serialize round-trip without drift, and the join_type
         // tokens must reach Rust exactly as written on the wire.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v3.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v4.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query left_join fixture must parse");
         let ir = parsed
@@ -425,7 +433,7 @@ mod tests {
         // payload — predicate, order, limit, and a two-field record plan —
         // survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v3.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v4.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query record fixture must parse");
         let ir = parsed
@@ -475,15 +483,93 @@ mod tests {
 
     #[test]
     fn instances_materialization_roundtrips() {
-        // `instances` is declared-but-rejected (#267 stage 2): it must
-        // deserialize so the hydration ABI grows once, and the runtime — not
-        // the type layer — is what rejects it.
-        let wire = serde_json::json!({"kind": "instances"});
+        // v4 (#285): the `instances` kind carries `paths` — ordered hop-fact
+        // lists in the same hop shape as the `joins` section — and nothing
+        // else. The types are the contract; the walkers reject the kind until
+        // the tracer bullet (#286) builds the fetch path.
+        let wire = serde_json::json!({
+            "kind": "instances",
+            "paths": [
+                [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"},
+                    {"relation": "owner", "from_column": "owner_id",
+                     "to_table": "owner", "to_column": "id"}
+                ]
+            ]
+        });
         let plan: Materialization =
             serde_json::from_value(wire.clone()).expect("instances kind must deserialize");
-        assert_eq!(plan, Materialization::Instances);
+        let Materialization::Instances { paths } = &plan else {
+            panic!("expected Instances, got {plan:?}");
+        };
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].len(), 2);
+        assert_eq!(paths[0][0].relation, "account");
+        assert_eq!(paths[0][0].from_column, "account_id");
+        assert_eq!(paths[0][1].to_table, "owner");
         let encoded = serde_json::to_value(&plan).expect("instances kind must serialize");
         assert_eq!(encoded, wire, "instances round-trip must not drift");
+    }
+
+    #[test]
+    fn instances_fixture_roundtrip() {
+        // The instances-plan golden vector (#285): an included query's full
+        // payload — root predicate, empty `joins`, and a one-path instances
+        // plan — survives a deserialize/serialize round-trip without drift.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v4.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query include fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query include IR must deserialize");
+        let Materialization::Instances { paths } = &envelope.payload.materialization else {
+            panic!(
+                "expected an instances plan, got {:?}",
+                envelope.payload.materialization
+            );
+        };
+        // Include paths ride the materialization plan, never the `joins`
+        // section (ADR-0008): the fixture pins an include-only query with an
+        // EMPTY joins list and one single-hop path.
+        assert!(envelope.payload.joins.is_empty());
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].len(), 1);
+        assert_eq!(paths[0][0].relation, "account");
+        let encoded = serde_json::to_value(&envelope).expect("query include IR must serialize");
+        assert_eq!(encoded, ir, "query include round-trip must not drift");
+    }
+
+    #[test]
+    fn instances_without_paths_is_rejected() {
+        // v4 `instances` always carries `paths`; a bare `{"kind": "instances"}`
+        // (the v3 unit shape) must fail the strict parse loudly.
+        let err = serde_json::from_value::<Materialization>(
+            serde_json::json!({"kind": "instances"}),
+        )
+        .expect_err("instances without paths must fail to deserialize");
+        assert!(
+            err.to_string().contains("paths"),
+            "must name the missing field: {err}"
+        );
+    }
+
+    #[test]
+    fn instances_with_malformed_paths_is_rejected() {
+        // A hop missing its facts fails the strict parse loudly.
+        let err = serde_json::from_value::<Materialization>(serde_json::json!({
+            "kind": "instances",
+            "paths": [[{"relation": "account"}]]
+        }))
+        .expect_err("a malformed hop must fail to deserialize");
+        assert!(
+            err.to_string().contains("from_column"),
+            "must name the missing hop fact: {err}"
+        );
     }
 
     #[test]
