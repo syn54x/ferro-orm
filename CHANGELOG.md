@@ -1,6 +1,106 @@
 # CHANGELOG
 
 
+## v0.15.0 (2026-07-11)
+
+### Chores
+
+- ADR-0008 populated relations + include/populated-relation glossary
+  ([`a1b273d`](https://github.com/syn54x/ferro-orm/commit/a1b273dc71b2b0f77e08e69808281ab5c25ffaea))
+
+- Amend registration adr with review outcomes (operation-seam sync, build-then-swap, deregistration)
+  ([`fcb8db3`](https://github.com/syn54x/ferro-orm/commit/fcb8db385ef5c835121420b0d90c4a9bbfd8a1f8))
+
+- New adrs and context
+  ([`3ea617c`](https://github.com/syn54x/ferro-orm/commit/3ea617c2ff418aa91fdf2d72470826b0aeec7242))
+
+- Pin failed-resolve retryability in registration adr
+  ([`d5895ba`](https://github.com/syn54x/ferro-orm/commit/d5895bae311cf9a2cff230b16a975aa1a1e9a2ad))
+
+- Pin zero-DDL, single-flight, and pure-Python clean-path invariants in registration adr
+  ([`09673f3`](https://github.com/syn54x/ferro-orm/commit/09673f334128cba7af7d94db38c6f43acd241d37))
+
+- Registration adr
+  ([`05c5732`](https://github.com/syn54x/ferro-orm/commit/05c5732125370d1e2b539f83f89e200190c67bd0))
+
+- Relation traversal ADR and context
+  ([`9151856`](https://github.com/syn54x/ferro-orm/commit/9151856364ea6ccc8ca125102302b5115e6a9ae0))
+
+- Triage and update old plan statuses
+  ([`2f3e3c0`](https://github.com/syn54x/ferro-orm/commit/2f3e3c0584eec37815e2520852077b9c08885546))
+
+### Continuous Integration
+
+- **release**: Custom highlights atop the GitHub Release notes
+  ([#275](https://github.com/syn54x/ferro-orm/pull/275),
+  [`f705938`](https://github.com/syn54x/ferro-orm/commit/f70593839af93ec902a0537f0f1ae73a34c425c2))
+
+### Documentation
+
+- ADR-0007 materialization plan + complete-instance glossary
+  ([`4acc879`](https://github.com/syn54x/ferro-orm/commit/4acc879b23fcd5bc540b5ed7ee7129d95124ec77))
+
+### Features
+
+- Atomic bulk registration install with fingerprint gate (#244)
+  ([#251](https://github.com/syn54x/ferro-orm/pull/251),
+  [`20c6061`](https://github.com/syn54x/ferro-orm/commit/20c6061c376faab78a7e3dc2496e5dd3cc123115))
+
+- Compile ModelCodecPlan from SchemaIR at registration
+  ([#239](https://github.com/syn54x/ferro-orm/pull/239),
+  [`7e15fdc`](https://github.com/syn54x/ferro-orm/commit/7e15fdcb9f32938857ad21838feca978591fd044))
+
+- Generation-counter dirty tracking with assemble-not-recompile (#245)
+  ([#252](https://github.com/syn54x/ferro-orm/pull/252),
+  [`2790e56`](https://github.com/syn54x/ferro-orm/commit/2790e566437d6e67f1f5c3abe555162ebb62598d))
+
+- Joined-row hydration — QueryIR v4 + populated relations via include()
+  ([#289](https://github.com/syn54x/ferro-orm/pull/289),
+  [`4335417`](https://github.com/syn54x/ferro-orm/commit/4335417cbfd33da95b6ea52971d6f5e805af9ad7))
+
+- JSONB column support (#260) ([#266](https://github.com/syn54x/ferro-orm/pull/266),
+  [`19f8cee`](https://github.com/syn54x/ferro-orm/commit/19f8cee3b7be3a570265f1269c735ac9093ab16a))
+
+- Partial materialization — QueryIR v3 + partial selects (Rows/Row)
+  ([#283](https://github.com/syn54x/ferro-orm/pull/283),
+  [`e44129b`](https://github.com/syn54x/ferro-orm/commit/e44129bf966fa349b5bf637a5976c99b88c644b2))
+
+- Query-time joins — relation traversal for filter and sort (stage 1)
+  ([#276](https://github.com/syn54x/ferro-orm/pull/276),
+  [`55dc386`](https://github.com/syn54x/ferro-orm/commit/55dc386f087fd6506d1713c9333bc11103bc96ac))
+
+- Sync registration at ORM operation seam (#247)
+  ([#254](https://github.com/syn54x/ferro-orm/pull/254),
+  [`8409322`](https://github.com/syn54x/ferro-orm/commit/84093226a86b2cdc17afdce00d36fc4782c614c4))
+
+### Refactoring
+
+- Canonicalize registry keys — derive register_model key from model identity
+  ([#250](https://github.com/syn54x/ferro-orm/pull/250),
+  [`d835c96`](https://github.com/syn54x/ferro-orm/commit/d835c96f08094ca0a8f7df0947ba9440f956edc9))
+
+- Centralize register/deregister registry entrypoints (#243)
+  ([#248](https://github.com/syn54x/ferro-orm/pull/248),
+  [`2f2be69`](https://github.com/syn54x/ferro-orm/commit/2f2be69ac9dc859621afa5938f08b7f167af1870))
+
+- Compile ColumnSpec column facts once (#255) ([#256](https://github.com/syn54x/ferro-orm/pull/256),
+  [`75fe1de`](https://github.com/syn54x/ferro-orm/commit/75fe1de5f3aee8f870e1e189f639b7466445c6dd))
+
+- Drop RegisteredModel.schema — IR-first registry cleanup
+  ([#241](https://github.com/syn54x/ferro-orm/pull/241),
+  [`fc3b9f9`](https://github.com/syn54x/ferro-orm/commit/fc3b9f9c50bbd80f3915663e6278712df35fee96))
+
+- Remove legacy migration shims and shadow runtime
+  ([#237](https://github.com/syn54x/ferro-orm/pull/237),
+  [`c2117b3`](https://github.com/syn54x/ferro-orm/commit/c2117b3351189912436c90552e127018db438c34))
+
+### Testing
+
+- Pin provisional import — Python-only registration until connect (#246)
+  ([#253](https://github.com/syn54x/ferro-orm/pull/253),
+  [`ca111b5`](https://github.com/syn54x/ferro-orm/commit/ca111b5672c647cbb021fd63bf59038f0028f303))
+
+
 ## v0.14.0 (2026-07-07)
 
 ### Bug Fixes
