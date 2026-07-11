@@ -146,6 +146,8 @@ Queries are lazy — nothing hits the database until you await a terminal:
 
 `Model.all()` is shorthand for `Model.select().all()`.
 
+On a **projected** query (`select(lambda t: (t.id, t.amount))`), `.all()` returns `Rows[Row]` and `.first()` returns `Row | None` — records, not model instances; `count()` and `exists()` are unchanged. See [Selecting a Column Subset](#selecting-a-column-subset).
+
 ## Querying Across Relationships
 
 A `where()` or `order_by()` lambda can reach *through* a `ForeignKey` to a column on the related model. Write the relation field, then keep going:
@@ -389,13 +391,99 @@ Do the two-step: fetch the primary keys with the joined query, then mutate by th
 
 See [Relationships](relationships.md) for the schema-declaration side of foreign keys and reverse relations.
 
+## Selecting a Column Subset
+
+Every query so far loads complete rows into complete model instances. When a list view only reads two columns of a wide table, ask for less: pass `select()` a lambda naming the columns, and the query becomes a **projection**:
+
+```python
+--8<-- "docs/examples/partial_selects.py:basic"
+```
+
+The examples in this section use this schema:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/partial_selects.py:schema"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/partial_selects_annotated.py:schema"
+    ```
+
+### What you get back — and why it isn't a `Transaction`
+
+A projected query does **not** return `Transaction` instances. In Ferro, **a model instance always carries a complete row** — there is no such thing as a partial or deferred-field model instance, anywhere. If projection handed you a two-column `Transaction`, every `save()`, every refresh, and every helper that takes a model would have to wonder which query produced its argument, and touching an unselected field would blow up far from the query that caused it.
+
+So anything narrower than a full row comes back honestly typed as what it is: a **projected record** — a `Row`, delivered in the list-like `Rows` container:
+
+```python
+--8<-- "docs/examples/partial_selects.py:not-a-model"
+```
+
+A `Row` is read-only in the persistence sense: it has no `save()`, no refresh, and never enters the identity map — a record can never masquerade as a row in the database. It carries exactly the columns you selected, in selection order, decoded by the same machinery as full hydration — a projected `datetime`, `UUID`, enum, or `Decimal` column has the same Python type and value it would have on the model, on both backends. Under the hood the query declares this result shape explicitly (a *materialization plan* travels with the query), which is also why asking for less is never slower per row than asking for everything: records are built on the same zero-validation path as models.
+
+Selecting a single column needs no tuple ceremony:
+
+```python
+--8<-- "docs/examples/partial_selects.py:single"
+```
+
+### `Rows` is a list you can ship
+
+`Rows` behaves like a list — index, slice, iterate, `len()` — and both `Rows` and `Row` are pydantic-shaped: `model_dump()` yields `list[dict]`, and `Rows[Row]` drops straight into a FastAPI `response_model`:
+
+```python
+--8<-- "docs/examples/partial_selects.py:container"
+```
+
+### Column-name strings
+
+Quick scripts can pass column names as strings — the same string contract as `order_by()`: root columns only (shadow `{fk}_id` columns included), validated at build time. The lambda form remains the documented style:
+
+```python
+--8<-- "docs/examples/partial_selects.py:strings"
+```
+
+### Projections compose like any other query
+
+`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, and `first()` all work unchanged; `count()` and `exists()` are unaffected by projection — they measure the same matching rows a full query would:
+
+```python
+--8<-- "docs/examples/partial_selects.py:compose"
+```
+
+```python
+--8<-- "docs/examples/partial_selects.py:count"
+```
+
+### Build-time validation and the loud limits
+
+A misspelled column fails when you build the query, with a did-you-mean — exactly like `where()` and `order_by()`:
+
+```text
+>>> Transaction.select(lambda t: (t.id, t.amonut))
+AttributeError: Transaction has no queryable column 'amonut'. Did you mean 'amount'? Valid columns: account_id, amount, id, memo.
+```
+
+Misuse is loud, never silently ignored:
+
+- **No traversed projection yet.** `select(lambda t: t.account.label)` raises `NotImplementedError` — projecting related columns is designed together with output aliases and aggregations. Dotted strings (`select("account.label")`) are rejected permanently; traversal will be lambda-only when it lands.
+- **No mutations through a projection.** `update()` / `delete()` on a projected query raise `ValueError` at the call, before any SQL — a projection is a read shape, and silently ignoring it would make `select(...)` a no-op on mutations. Mutate through an unprojected query instead.
+- **No double `select()`.** Replacing a projection mid-chain would change the result type; name every column in one call, or start a new query from the model.
+- **No mixing forms.** Strings and a lambda in one `select()` call raise `TypeError`.
+
+Static typing follows the same shape promise as predicates: `select(...)` flips the query's type so `.all()` checks as `Rows[Row]` and `.first()` as `Row | None` — passing a `Row` where a model instance is expected fails the type checker. See [Typed Query Predicates](../concepts/query-typing.md#projected-queries).
+
 ## Not Yet Supported
 
 !!! note "On the roadmap"
     The following query features are **not yet implemented** — see the [Roadmap](../roadmap.md):
 
     - Aggregations beyond `count()` / `exists()` (`sum`, `avg`, `min`, `max`, `GROUP BY`)
-    - Partial selects (selecting specific columns; queries always load all model fields)
+    - Traversed projection and output aliases (`select(lambda t: t.account.name)`) — designed together with aggregations
     - Eager loading (`prefetch_related` / `select_related`) — be mindful of N+1 patterns when looping over relations
     - Case-insensitive `ilike()`
     - `not_in()` (negate with `!=` conditions combined with `&` in the meantime)
