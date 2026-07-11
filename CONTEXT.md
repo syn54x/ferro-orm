@@ -60,6 +60,18 @@ _Avoid_: Join alias, lookup chain, dotted path string
 The invariant that filtering and ordering never change what a query returns — a query over Transaction yields Transaction instances regardless of which relations its predicates traverse. Only an explicit projection operation may change the result shape.
 _Avoid_: Implicit projection, row narrowing
 
+**Complete-instance invariant**:
+A model instance always carries a complete row — there is no such thing as a partial or deferred-field model instance, anywhere. Anything narrower than a full row (a column subset, an aggregate) comes back as a projected record, never as the model type.
+_Avoid_: Partial instance, deferred field, lightweight model, .only()
+
+**Projected record**:
+The result of an explicit projection — a typed record of named values that is not a model instance and cannot be saved, refreshed, or identity-mapped. Column subsets and aggregation results are projected records; complete model rows are not. Realized as `Row`, delivered in the list-like `Rows` container.
+_Avoid_: Partial model, row dict, value tuple
+
+**Materialization plan**:
+A query's declaration of what its result columns become: complete root instances (every query today), a projected record of named fields, or — in the future — a populated instance graph. Every query carries exactly one plan; the plan travels with the query rather than being inferred from its column list.
+_Avoid_: Select list, projection spec, hydration mode flag
+
 **Provisional registration**:
 The per-model state installed when a class body finishes executing — enough for runtime codec and PK metadata, but relationships may still be pending and the modelset is not yet authoritative for DDL.
 _Avoid_: Import-time registration, partial registry
