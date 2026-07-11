@@ -68,6 +68,14 @@ _Avoid_: Partial instance, deferred field, lightweight model, .only()
 The result of an explicit projection — a typed record of named values that is not a model instance and cannot be saved, refreshed, or identity-mapped. Column subsets and aggregation results are projected records; complete model rows are not. Realized as `Row`, delivered in the list-like `Rows` container.
 _Avoid_: Partial model, row dict, value tuple
 
+**Include**:
+The explicit request (`.include(lambda t: t.account.owner)`) that a query populate a forward-FK relation path — the data axis of a query, distinct from joins (membership) and projection (shape). Including a path populates every hop along it and never changes which rows come back.
+_Avoid_: Eager load, select_related, prefetch, join-fetch
+
+**Populated relation**:
+A forward-FK field carrying its complete related instance, attached by an explicit include on the query. Attribute access returns the instance directly — no await, no query — matching the field's declared type. An unpopulated relation keeps the awaitable contract; population changes cost and attached data, never the result type (there is no separate "loaded" model type).
+_Avoid_: Eager-loaded field, select_related, prefetched attribute, joined attribute
+
 **Materialization plan**:
 A query's declaration of what its result columns become: complete root instances (every query today), a projected record of named fields, or — in the future — a populated instance graph. Every query carries exactly one plan; the plan travels with the query rather than being inferred from its column list.
 _Avoid_: Select list, projection spec, hydration mode flag
