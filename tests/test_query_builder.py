@@ -74,7 +74,7 @@ def test_query_ir_payload_to_json_serializes_m2m_context_without_mutating_query_
     assert query._m2m_context["source_id"] == source_id
     assert isinstance(query._m2m_context["source_id"], uuid.UUID)
     assert payload["ir_kind"] == "query"
-    assert payload["ir_version"] == 4
+    assert payload["ir_version"] == 5
     assert payload["payload"]["m2m"]["source_id"] == str(source_id)
 
 

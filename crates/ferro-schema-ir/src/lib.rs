@@ -137,13 +137,13 @@ pub struct SchemaCheck {
 /// Query IR: filter, sort, pagination, joins, materialization plan, and
 /// optional M2M join context.
 ///
-/// `ir_version: 4` (unconditional, no earlier version emitted anywhere —
-/// #269, #278, #285). `joins` is required and always present (`[]` when the
-/// query traverses no relation); every leaf and `order_by` entry carries a
+/// `ir_version: 5` (unconditional, no earlier version emitted anywhere —
+/// #269, #278, #285, #292). `joins` is required and always present (`[]` when
+/// the query traverses no relation); every leaf and `order_by` entry carries a
 /// `path` (required, `[]` = root model); `materialization` is required — the
 /// plan travels with the query as data (ADR-0007), never inferred from a
-/// column list. v4 gives the `instances` kind its field shape: `paths` of
-/// hop facts (#285).
+/// column list. v5 gives `record` fields expression sources: a field carries
+/// either a `column` + `path` or an `expr` (#292, ADR-0009).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryIrPayload {
     /// Model class name the query targets.
@@ -200,23 +200,103 @@ pub enum Materialization {
 
 /// One projected field in a [`Materialization::Record`] plan.
 ///
-/// `name` is declared separately from the source `column`, the field carries a
-/// relation `path`, and may later carry an `expr` instead of a column — so
-/// output aliases, traversed projection, and aggregations (#282) extend this
-/// shape additively without reshaping the v3 contract.
+/// `name` is declared separately from the source, so output aliases are free
+/// (`name` is the alias). A field reads from exactly one source (v5, #292,
+/// ADR-0009): a `column` + relation `path` (plain and traversed projection),
+/// or an `expr` (aggregations) — never both, never neither, enforced at
+/// deserialization via [`RecordFieldWire`]. GROUP BY never travels on the
+/// wire: the renderer derives group keys from the plan — every non-`expr`
+/// field is a key (ADR-0009).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(try_from = "RecordFieldWire")]
 pub struct RecordField {
     /// Output field name on the projected record.
     pub name: String,
-    /// Source column the value reads from (`name == column` until output
-    /// aliases land with #282).
-    pub column: String,
+    /// Source column the value reads from. `Some` iff `expr` is `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
     /// Relation path from the root model to `column`'s table (`[]` = root
-    /// model; non-empty paths are traversed projection, #282).
+    /// model; non-empty paths are traversed projection, #293). Belongs to the
+    /// `column` arm: an `expr` field carries its traversal on the expression
+    /// itself, so its outer `path` is always `[]`.
     pub path: Vec<String>,
-    /// Reserved: expression source instead of a column (aggregations, #282).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expr: Option<Value>,
+    /// Expression source instead of a column (aggregations, #294/#295).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expr: Option<RecordExpr>,
+}
+
+/// The expression source of an aggregate record field (v5, #292, ADR-0009).
+///
+/// Self-contained on the wire: `fn` travels as data (the closed aggregate
+/// set), and `path` carries the source column's traversal as ordered hop
+/// facts — the same hop shape as the `joins` section — rather than keying
+/// into it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecordExpr {
+    /// Aggregate function applied to `column`.
+    pub r#fn: AggregateFn,
+    /// Source column the aggregate reads from.
+    pub column: String,
+    /// Relation hops from the root model to `column`'s table (`[]` = root
+    /// model), in the `joins`-section hop-fact shape.
+    pub path: Vec<QueryJoinHop>,
+}
+
+/// The closed set of aggregate functions a [`RecordExpr`] may apply
+/// (ADR-0009). Carried as data on the wire; an unknown token fails the strict
+/// parse naming the supported set.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AggregateFn {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// Field-wise wire shape backing [`RecordField`] deserialization, so the
+/// exactly-one-source invariant is a parse-time rejection, not a downstream
+/// walker check.
+#[derive(Debug, Deserialize)]
+struct RecordFieldWire {
+    name: String,
+    #[serde(default)]
+    column: Option<String>,
+    path: Vec<String>,
+    #[serde(default)]
+    expr: Option<RecordExpr>,
+}
+
+impl TryFrom<RecordFieldWire> for RecordField {
+    type Error = String;
+
+    fn try_from(wire: RecordFieldWire) -> Result<Self, Self::Error> {
+        match (&wire.column, &wire.expr) {
+            (Some(_), Some(_)) => Err(format!(
+                "record field {:?} carries both `column` and `expr`; \
+                 a field reads from exactly one source",
+                wire.name
+            )),
+            (None, None) => Err(format!(
+                "record field {:?} carries neither `column` nor `expr`; \
+                 a field reads from exactly one source",
+                wire.name
+            )),
+            (None, Some(_)) if !wire.path.is_empty() => Err(format!(
+                "record field {:?} carries an `expr` and a non-empty field \
+                 `path` {:?}; an expression field's traversal travels on \
+                 `expr.path` (hop facts), so its field `path` must be empty",
+                wire.name, wire.path
+            )),
+            _ => Ok(RecordField {
+                name: wire.name,
+                column: wire.column,
+                path: wire.path,
+                expr: wire.expr,
+            }),
+        }
+    }
 }
 
 /// One relation JOIN collected from query-time traversal (#270 lands rendering).
@@ -358,7 +438,7 @@ mod tests {
     #[test]
     fn query_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v4.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v5.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query fixture must parse");
         let ir = parsed
@@ -381,7 +461,7 @@ mod tests {
         // Multi-hop `joins` section + path-carrying leaves must survive a
         // deserialize/serialize round-trip without drift (#270 wire stability).
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v4.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v5.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversal fixture must parse");
@@ -407,7 +487,7 @@ mod tests {
         // deserialize/serialize round-trip without drift, and the join_type
         // tokens must reach Rust exactly as written on the wire.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v4.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v5.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query left_join fixture must parse");
         let ir = parsed
@@ -433,7 +513,7 @@ mod tests {
         // payload — predicate, order, limit, and a two-field record plan —
         // survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v4.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v5.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query record fixture must parse");
         let ir = parsed
@@ -474,11 +554,194 @@ mod tests {
         };
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "id");
-        assert_eq!(fields[0].column, "id");
+        assert_eq!(fields[0].column.as_deref(), Some("id"));
         assert!(fields[0].path.is_empty());
-        assert!(fields[0].expr.is_none(), "expr is reserved and absent");
+        assert!(fields[0].expr.is_none(), "a column field carries no expr");
         let encoded = serde_json::to_value(&plan).expect("record kind must serialize");
         assert_eq!(encoded, wire, "record round-trip must not drift");
+    }
+
+    #[test]
+    fn traversed_record_field_roundtrips() {
+        // v5 (#292): a plain traversed record field — non-empty relation
+        // `path`, a `column`, no `expr` — is the shape the tracer-bullet
+        // slice (#293) consumes. The path stays relation names (it keys into
+        // the `joins` section, like `order_by.path`), not hop facts.
+        let wire = serde_json::json!({
+            "kind": "record",
+            "fields": [
+                {"name": "account_name", "column": "name", "path": ["account"]},
+                {"name": "owner_email", "column": "email",
+                 "path": ["account", "owner"]}
+            ]
+        });
+        let plan: Materialization =
+            serde_json::from_value(wire.clone()).expect("traversed fields must deserialize");
+        let Materialization::Record { fields } = &plan else {
+            panic!("expected Record, got {plan:?}");
+        };
+        assert_eq!(fields[0].path, vec!["account".to_string()]);
+        assert_eq!(fields[1].path.len(), 2);
+        let encoded = serde_json::to_value(&plan).expect("traversed fields must serialize");
+        assert_eq!(encoded, wire, "traversed record round-trip must not drift");
+    }
+
+    #[test]
+    fn record_expr_fields_roundtrip() {
+        // v5 (#292): expression fields — root and traversed sources. `fn`
+        // travels as data; `expr.path` carries hop facts (the `joins`-section
+        // shape), self-contained rather than keying into the joins list.
+        let wire = serde_json::json!({
+            "kind": "record",
+            "fields": [
+                {"name": "acct", "column": "account_id", "path": []},
+                {"name": "total", "path": [],
+                 "expr": {"fn": "sum", "column": "amount", "path": []}},
+                {"name": "avg_balance", "path": [],
+                 "expr": {"fn": "avg", "column": "balance", "path": [
+                     {"relation": "account", "from_column": "account_id",
+                      "to_table": "account", "to_column": "id"}
+                 ]}}
+            ]
+        });
+        let plan: Materialization =
+            serde_json::from_value(wire.clone()).expect("expr fields must deserialize");
+        let Materialization::Record { fields } = &plan else {
+            panic!("expected Record, got {plan:?}");
+        };
+        assert_eq!(fields.len(), 3);
+        // The group-key field is a plain column source.
+        assert_eq!(fields[0].column.as_deref(), Some("account_id"));
+        assert!(fields[0].expr.is_none());
+        // The root aggregate: fn as data, no column, empty hop path.
+        let total = fields[1].expr.as_ref().expect("total must carry an expr");
+        assert!(fields[1].column.is_none());
+        assert_eq!(total.r#fn, AggregateFn::Sum);
+        assert_eq!(total.column, "amount");
+        assert!(total.path.is_empty());
+        // The traversed aggregate: hop facts on the expression itself.
+        let avg = fields[2].expr.as_ref().expect("avg must carry an expr");
+        assert_eq!(avg.r#fn, AggregateFn::Avg);
+        assert_eq!(avg.path.len(), 1);
+        assert_eq!(avg.path[0].relation, "account");
+        assert_eq!(avg.path[0].from_column, "account_id");
+        let encoded = serde_json::to_value(&plan).expect("expr fields must serialize");
+        assert_eq!(encoded, wire, "expr record round-trip must not drift");
+    }
+
+    #[test]
+    fn record_field_with_both_column_and_expr_is_rejected() {
+        // Exactly-one-of is a deserialization invariant (#292): both sources
+        // present fails the strict parse naming the field.
+        let err = serde_json::from_value::<Materialization>(serde_json::json!({
+            "kind": "record",
+            "fields": [{
+                "name": "total", "column": "amount", "path": [],
+                "expr": {"fn": "sum", "column": "amount", "path": []}
+            }]
+        }))
+        .expect_err("both column and expr must fail to deserialize");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("total") && msg.contains("both"),
+            "must name the field and the violation: {msg}"
+        );
+    }
+
+    #[test]
+    fn record_field_with_neither_column_nor_expr_is_rejected() {
+        let err = serde_json::from_value::<Materialization>(serde_json::json!({
+            "kind": "record",
+            "fields": [{"name": "total", "path": []}]
+        }))
+        .expect_err("neither column nor expr must fail to deserialize");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("total") && msg.contains("neither"),
+            "must name the field and the violation: {msg}"
+        );
+    }
+
+    #[test]
+    fn record_expr_with_unknown_fn_is_rejected() {
+        // `fn` is the closed aggregate set (ADR-0009); an unknown token fails
+        // the strict parse naming the bad token and the supported set.
+        let err = serde_json::from_value::<Materialization>(serde_json::json!({
+            "kind": "record",
+            "fields": [{
+                "name": "mid", "path": [],
+                "expr": {"fn": "median", "column": "amount", "path": []}
+            }]
+        }))
+        .expect_err("an unknown aggregate fn must fail to deserialize");
+        let msg = err.to_string();
+        assert!(msg.contains("median"), "must name the bad fn: {msg}");
+        for supported in ["count", "sum", "avg", "min", "max"] {
+            assert!(
+                msg.contains(supported),
+                "must name supported fn {supported:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn record_expr_field_with_outer_path_is_rejected() {
+        // An expression field's traversal travels on `expr.path`; a non-empty
+        // field-level `path` next to an `expr` is two contradictory traversal
+        // claims and fails the strict parse.
+        let err = serde_json::from_value::<Materialization>(serde_json::json!({
+            "kind": "record",
+            "fields": [{
+                "name": "avg_balance", "path": ["account"],
+                "expr": {"fn": "avg", "column": "balance", "path": []}
+            }]
+        }))
+        .expect_err("an expr field with a field-level path must fail to deserialize");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("avg_balance") && msg.contains("expr.path"),
+            "must name the field and point at expr.path: {msg}"
+        );
+    }
+
+    #[test]
+    fn query_aggregate_fixture_roundtrip() {
+        // The aggregate-projection golden vector (#292): a grouped query's
+        // full payload — a traversed group key sharing its path with the
+        // `joins` section, a root aggregate, a traversed aggregate carrying
+        // hop facts on the expression, and an output-name ORDER BY — survives
+        // a deserialize/serialize round-trip without drift. GROUP BY does not
+        // travel: the renderer derives it from the non-expr fields (ADR-0009).
+        let fixture = include_str!(
+            "../../../tests/fixtures/ir_vectors/query_transaction_aggregate_v5.json"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query aggregate fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query aggregate IR must deserialize");
+        let Materialization::Record { fields } = &envelope.payload.materialization else {
+            panic!(
+                "expected a record plan, got {:?}",
+                envelope.payload.materialization
+            );
+        };
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].path, vec!["account".to_string()]);
+        assert_eq!(
+            fields[1].expr.as_ref().map(|e| e.r#fn),
+            Some(AggregateFn::Sum)
+        );
+        assert_eq!(
+            fields[2].expr.as_ref().map(|e| e.path.len()),
+            Some(1),
+            "the traversed aggregate carries its hop facts"
+        );
+        let encoded = serde_json::to_value(&envelope).expect("query aggregate IR must serialize");
+        assert_eq!(encoded, ir, "query aggregate round-trip must not drift");
     }
 
     #[test]
@@ -518,7 +781,7 @@ mod tests {
         // payload — root predicate, empty `joins`, and a one-path instances
         // plan — survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v4.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v5.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query include fixture must parse");
         let ir = parsed
