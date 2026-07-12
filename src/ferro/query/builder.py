@@ -6,6 +6,8 @@ from typing import (
     Any,
     Callable,
     Generic,
+    Iterable,
+    NamedTuple,
     Never,
     NoReturn,
     Self,
@@ -261,39 +263,75 @@ def _resolve_include_selector(
     return result._path
 
 
+class _ProjectedField(NamedTuple):
+    """One projected record field, resolved at build time (#279/#293).
+
+    ``name`` is the output field name on the record — the dict key when the
+    selector is dict-returning (an output alias, CONTEXT.md), the bare leaf
+    column name otherwise. ``column`` is the source column and ``path`` the
+    relation path to its table (``()`` = root model; non-empty is traversed
+    projection).
+    """
+
+    name: str
+    column: str
+    path: tuple[str, ...]
+
+    @property
+    def dotted(self) -> str:
+        """The selector expression this field came from (error messages)."""
+        return "t." + ".".join((*self.path, self.column))
+
+
 def _resolve_projection_selector(
     selector: "RowSelector[Any]", model_cls: type
-) -> tuple[str, ...]:
-    """Resolve a ``select()`` lambda selector into projected column names (#279).
+) -> tuple[_ProjectedField, ...]:
+    """Resolve a ``select()`` lambda selector into projected fields (#279/#293).
 
     ``selector`` receives a validating :class:`QueryProxy` and returns one
-    column (``lambda t: t.amount``) or a tuple/list of columns
-    (``lambda t: (t.id, t.amount)``). Column names validate at build time with
-    did-you-mean, exactly like ``where()``/``order_by()`` (the proxy raises
-    ``AttributeError`` on a misspelled name before any round-trip).
+    field (``lambda t: t.amount``), a tuple/list of fields
+    (``lambda t: (t.id, t.account.name)``), or a dict whose keys name the
+    output fields (``lambda t: {"account_name": t.account.name}`` — output
+    aliases, CONTEXT.md). Fields may traverse declared forward-FK relations
+    at any depth; every hop validates at build time with did-you-mean,
+    exactly like ``where()``/``order_by()``. Mixed nesting — a dict inside a
+    tuple, a tuple inside a dict — is rejected: one selector, one shape.
 
     Returns:
-        The projected column names, in selection order.
+        The projected fields, in selection/insertion order.
 
     Raises:
         TypeError: If an element is a bare relation (``lambda t: t.account``),
-            a comparison (``lambda t: t.id == 1``), or any other non-column
-            value — a projection selects columns.
-        ValueError: If the selection is empty or names a column twice
-            (a duplicate would silently collapse in the record).
-        NotImplementedError: If a selected column traverses a relation
-            (``lambda t: t.account.name``) — traversed projection is designed
-            together with output aliases and aggregations (#282).
+            a comparison (``lambda t: t.id == 1``), a nested dict/tuple, a
+            non-string dict key, or any other non-field value.
+        ValueError: If the selection is empty, or two fields resolve to the
+            same output name (the collision error names the dict form).
     """
     result = selector(QueryProxy(model_cls))
-    items = tuple(result) if isinstance(result, (tuple, list)) else (result,)
-    if not items:
+    if isinstance(result, dict):
+        fields = _collect_dict_projection(result)
+    else:
+        items = tuple(result) if isinstance(result, (tuple, list)) else (result,)
+        fields = _collect_tuple_projection(items)
+    if not fields:
         raise ValueError(
             "select() projection selected no columns; select at least one "
             "(e.g. `lambda t: (t.id, t.amount)`), or call select() with no "
             "arguments for the full query."
         )
-    return _collect_projection_columns(items)
+    seen: dict[str, _ProjectedField] = {}
+    for field in fields:
+        first = seen.get(field.name)
+        if first is not None:
+            raise ValueError(
+                f"select() projects two fields named {field.name!r} "
+                f"({first.dotted} and {field.dotted}); output names must be "
+                "unique. Name them explicitly with the dict selector form "
+                f'(e.g. select(lambda t: {{"{first.name}": {first.dotted}, '
+                f'"<other name>": {field.dotted}}})).'
+            )
+        seen[field.name] = field
+    return fields
 
 
 def _resolve_projection_strings(
@@ -305,7 +343,7 @@ def _resolve_projection_strings(
     plus shadow ``{fk}_id`` columns), validated at build time with
     did-you-mean. Strings never traverse — a dotted path is rejected
     pointedly, permanently (PRD #277); traversed projection is lambda-only
-    when it lands (#282).
+    (#293).
 
     Raises:
         ValueError: For a dotted path, or a column named twice.
@@ -318,8 +356,8 @@ def _resolve_projection_strings(
             raise ValueError(
                 f"select() string selectors name root columns only and never "
                 f"traverse: {name!r} is not a column. String paths are "
-                "rejected permanently; traversed projection will be "
-                "lambda-only when it lands (#282). Select root columns "
+                "rejected permanently; traversed projection is lambda-only "
+                f"(select(lambda t: t.{name})). Select root columns "
                 '(e.g. select("id", "amount")).'
             )
         validate_query_column(model_cls, name)
@@ -332,44 +370,91 @@ def _resolve_projection_strings(
     return tuple(columns)
 
 
-def _collect_projection_columns(items: tuple[Any, ...]) -> tuple[str, ...]:
-    """Validate a lambda selector's resolved items into column names (#279)."""
-    columns: list[str] = []
-    for item in items:
-        if isinstance(item, RelationProxy):
-            relation = item._path[-1]
+def _projection_item_field(item: Any, *, context: str) -> _ProjectedField:
+    """Validate one selector item into an unaliased field (#279/#293).
+
+    Shared by the single-field and tuple forms; ``context`` names the
+    selector shape in error messages. The output name defaults to the bare
+    leaf column name (CONTEXT.md: Traversed projection).
+    """
+    if isinstance(item, dict):
+        raise TypeError(
+            "select() selector cannot nest a dict inside a tuple; a selector "
+            "returns one shape — a dict, a tuple, or a single field. To name "
+            "output fields, return one dict for the whole selection "
+            '(e.g. `lambda t: {"id": t.id, "account_name": t.account.name}`).'
+        )
+    if isinstance(item, RelationProxy):
+        relation = item._path[-1]
+        raise TypeError(
+            f"select() cannot project the bare relation {relation!r}; "
+            f"select a column on it instead (e.g. t.{relation}.<column>) "
+            "or select root columns."
+        )
+    if isinstance(item, QueryNode):
+        raise TypeError(
+            "select() selector returned a comparison, not a column "
+            "(e.g. `lambda t: t.id == 1`); projections select columns "
+            "(`lambda t: t.id`) — put predicates in where()."
+        )
+    if not isinstance(item, FieldProxy):
+        raise TypeError(
+            f"select() selector must return {context} "
+            f"(e.g. `lambda t: (t.id, t.amount)`), got {type(item).__name__}"
+        )
+    return _ProjectedField(name=item.column, column=item.column, path=item.path)
+
+
+def _collect_tuple_projection(items: tuple[Any, ...]) -> tuple[_ProjectedField, ...]:
+    """Validate a single-field or tuple selector's items into fields (#293)."""
+    return tuple(
+        _projection_item_field(item, context="a column or a tuple of columns")
+        for item in items
+    )
+
+
+def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, ...]:
+    """Validate a dict selector into aliased fields (#293).
+
+    Keys are output field names (CONTEXT.md: Output alias) and must be
+    strings; values are field references and may traverse. Nesting a tuple,
+    list, or dict as a value is rejected — flat records only (ADR-0009:
+    record results are flat).
+    """
+    fields: list[_ProjectedField] = []
+    for key, value in result.items():
+        if not isinstance(key, str):
             raise TypeError(
-                f"select() cannot project the bare relation {relation!r}; "
-                f"select a column on it instead (traversed projection like "
-                f"t.{relation}.<column> is planned, see below) or select root "
-                "columns."
+                f"select() dict selector keys are output field names and must "
+                f"be strings, got {key!r} ({type(key).__name__})."
             )
-        if isinstance(item, QueryNode):
+        if isinstance(value, (dict, tuple, list)):
             raise TypeError(
-                "select() selector returned a comparison, not a column "
-                "(e.g. `lambda t: t.id == 1`); projections select columns "
-                "(`lambda t: t.id`) — put predicates in where()."
+                f"select() dict selector value for {key!r} is a "
+                f"{type(value).__name__}; a projected record is flat — each "
+                "dict value names one field (e.g. "
+                '`lambda t: {"account_name": t.account.name}`).'
             )
-        if not isinstance(item, FieldProxy):
+        if isinstance(value, RelationProxy):
+            relation = value._path[-1]
             raise TypeError(
-                "select() selector must return a column or a tuple of columns "
-                f"(e.g. `lambda t: (t.id, t.amount)`), got {type(item).__name__}"
+                f"select() cannot project the bare relation {relation!r} "
+                f"(dict key {key!r}); select a column on it instead "
+                f"(e.g. {{{key!r}: t.{relation}.<column>}})."
             )
-        if item.path:
-            dotted = ".".join((*item.path, item.column))
-            raise NotImplementedError(
-                f"select() cannot project the traversed column {dotted!r} yet: "
-                "traversed projection is designed together with output aliases "
-                "and aggregations (#282). Project root columns, or fetch the "
-                "related model through its own query."
+        if isinstance(value, QueryNode):
+            raise TypeError(
+                f"select() dict selector value for {key!r} is a comparison, "
+                "not a column; projections select columns — put predicates "
+                "in where()."
             )
-        if item.column in columns:
-            raise ValueError(
-                f"select() projects column {item.column!r} more than once; "
-                "each projected column must be unique."
+        if not isinstance(value, FieldProxy):
+            raise TypeError(
+                f"select() dict selector value for {key!r} must be a column "
+                f"reference, got {type(value).__name__}."
             )
-        columns.append(item.column)
-    return tuple(columns)
+        fields.append(_ProjectedField(name=key, column=value.column, path=value.path))
+    return tuple(fields)
 
 
 def _target_pk_column(model_cls: type) -> str:
@@ -577,16 +662,24 @@ class Query(Generic[T]):
         """Project the query to a column subset, or pass through unchanged.
 
         Bare ``select()`` keeps meaning "full query": it returns an equivalent
-        query of complete model instances. With a lambda selector
-        (``select(lambda t: (t.id, t.amount))``, or the single-field form
-        ``select(lambda t: t.amount)``) — the documented style — the query
-        becomes a projection: its results are :class:`Row` records in the
-        list-like :class:`Rows` container, never model instances (the
-        complete-instance invariant, ADR-0007). Column-name strings
-        (``select("id", "amount")``) follow ``order_by``'s string contract
-        exactly: root columns only, never traversal, never mixed with a
-        lambda in one call. Both forms validate at build time with
-        did-you-mean.
+        query of complete model instances. With a lambda selector — the
+        documented style — the query becomes a projection: its results are
+        :class:`Row` records in the list-like :class:`Rows` container, never
+        model instances (the complete-instance invariant, ADR-0007). The
+        selector returns one field (``select(lambda t: t.amount)``), a tuple
+        (``select(lambda t: (t.id, t.amount))``), or a dict whose keys name
+        the output fields (``select(lambda t: {"account_name":
+        t.account.name})`` — output aliases). Fields may traverse declared
+        forward-FK relations at any depth (``t.account.name`` — traversed
+        projection); traversal narrows exactly like a ``where()`` predicate
+        on the same path (INNER, one join per path, ADR-0006) and
+        ``left_join()`` is the opt-out — kept rows decode the traversed
+        fields as ``None``. Unaliased traversed fields take the bare leaf
+        column name; two fields resolving to the same output name raise at
+        build time. Column-name strings (``select("id", "amount")``) follow
+        ``order_by``'s string contract exactly: root columns only, never
+        traversal, never mixed with a lambda in one call. All forms validate
+        at build time with did-you-mean.
 
         A projected query composes like any other query: ``where()``
         (relation traversal included), ``order_by()`` (by unselected columns
@@ -595,8 +688,8 @@ class Query(Generic[T]):
         ``select()`` raise at build time.
 
         Args:
-            *selectors: Nothing (full query), one lambda selector naming root
-                columns, or column-name strings.
+            *selectors: Nothing (full query), one lambda selector, or
+                column-name strings.
 
         Returns:
             A new query; ``self`` is unchanged. Projected when a selector is
@@ -604,19 +697,23 @@ class Query(Generic[T]):
 
         Raises:
             TypeError: If the selector is not callable/strings, selects
-                non-columns (a bare relation, a comparison), or mixes strings
-                with a lambda in one call.
-            ValueError: If the selection is empty, repeats a column, a
-                string is a dotted path (strings never traverse), or the
-                query already carries an ``include()`` (one materialization
-                plan per query — include × projection is #282).
-            NotImplementedError: If a lambda selects a traversed column
-                (traversed projection lands with #282).
+                non-fields (a bare relation, a comparison), nests shapes
+                (a dict inside a tuple, a tuple inside a dict), uses a
+                non-string dict key, or mixes strings with a lambda in one
+                call.
+            ValueError: If the selection is empty, two fields resolve to the
+                same output name, a string is a dotted path (strings never
+                traverse), or the query already carries an ``include()``
+                (one materialization plan per query — record results are
+                flat, permanently).
 
         Examples:
             >>> rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # doctest: +SKIP
             >>> rows[0].amount  # doctest: +SKIP
             Decimal('12.50')
+            >>> named = await Transaction.select(  # doctest: +SKIP
+            ...     lambda t: {"id": t.id, "account_name": t.account.name}
+            ... ).all()
         """
         if not selectors:
             return self._clone()
@@ -624,10 +721,11 @@ class Query(Generic[T]):
             raise ValueError(
                 "select() with a projection cannot be combined with "
                 "include(): a query carries exactly one materialization plan "
-                "— projected records or populated instances, not both. The "
-                "flattened-vs-nested design for record+relation results is "
-                "#282; until it lands, drop the include() or project through "
-                "a separate query."
+                "— projected records or populated instances, never both, and "
+                "record results are flat (ADR-0009). Reach across the "
+                "relation with traversed projection instead (e.g. "
+                'select(lambda t: {"account_name": t.account.name})), or '
+                "populate instances with include() on an unprojected query."
             )
         if any(isinstance(selector, str) for selector in selectors):
             if not all(isinstance(selector, str) for selector in selectors):
@@ -639,7 +737,11 @@ class Query(Generic[T]):
                 )
             names: tuple[str, ...] = selectors  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
             columns = _resolve_projection_strings(names, self.model_cls)
-            return ProjectedQuery(self, columns)
+            fields = tuple(
+                _ProjectedField(name=column, column=column, path=())
+                for column in columns
+            )
+            return ProjectedQuery(self, fields)
         if len(selectors) > 1:
             raise TypeError(
                 "select() takes a single lambda selector naming the columns "
@@ -654,10 +756,10 @@ class Query(Generic[T]):
             )
         # Strings were dispatched above, so the lone selector is the lambda
         # form; the tuple element type is too wide for the checker to see it.
-        columns = _resolve_projection_selector(
+        fields = _resolve_projection_selector(
             cast("RowSelector[T]", selector), self.model_cls
         )
-        return ProjectedQuery(self, columns)
+        return ProjectedQuery(self, fields)
 
     def order_by(
         self,
@@ -939,16 +1041,23 @@ class Query(Generic[T]):
         return {"kind": "root_instances"}
 
     def _include_hop_classes(self) -> dict[str, type]:
-        """Map each included hop's physical table to its model class (#286).
+        """Map each included hop's physical table to its model class (#286)."""
+        return self._hop_classes_for_paths(self._includes)
 
-        The Rust fetch walker hydrates every included hop through the full
-        model protocol (codec plan, enum classes, identity map), so it needs
-        the hop's Python class — resolved here, where the relation-spec chain
-        lives, and passed across the FFI keyed by ``to_table`` (one model per
-        table, enforced at registration).
+    def _hop_classes_for_paths(
+        self, paths: "Iterable[tuple[str, ...]]"
+    ) -> dict[str, type]:
+        """Map each hop table along ``paths`` to its model class (#286/#293).
+
+        The Rust fetch walker needs a hop's Python class whenever it decodes
+        or hydrates through that model's protocol — every included hop (codec
+        plan, enum classes, identity map, #286) and every traversed
+        projection leaf (enum decode, #293). Resolved here, where the
+        relation-spec chain lives, and passed across the FFI keyed by
+        ``to_table`` (one model per table, enforced at registration).
         """
         hop_classes: dict[str, type] = {}
-        for path in self._includes:
+        for path in paths:
             current = self.model_cls
             for relation in path:
                 specs = getattr(current, "__ferro_relation_specs__", None) or {}
@@ -1319,31 +1428,50 @@ class ProjectedQuery(Query[T]):
     projection.
     """
 
-    def __init__(self, source: Query[T], columns: tuple[str, ...]) -> None:
-        """Project ``source`` to ``columns`` (selection order preserved).
+    def __init__(self, source: Query[T], fields: tuple[_ProjectedField, ...]) -> None:
+        """Project ``source`` to ``fields`` (selection order preserved).
 
         Copies the source query's state through ``_clone()`` (fresh mutable
-        containers, FF-F F-1); ``source`` is unchanged.
+        containers, FF-F F-1); ``source`` is unchanged. Every traversed
+        field's relation path registers a join (#293): projection traversal
+        narrows exactly like ``where()``/``order_by()`` traversal, sharing
+        join identity per relation path (ADR-0006) — ``setdefault`` keeps an
+        already-registered path's entry, and an explicit ``left_join()``
+        still wins at serialization via the edge marks.
         """
         self.__dict__.update(source._clone().__dict__)
         # Immutable, so chained clones share it safely.
-        self._projection: tuple[str, ...] = columns
+        self._projection: tuple[_ProjectedField, ...] = fields
+        for field in fields:
+            if field.path:
+                self._joins.setdefault(field.path, "inner")
 
     def _materialization_ir(self) -> dict[str, Any]:
-        """Serialize the ``record`` plan: one field per projected column.
+        """Serialize the ``record`` plan: one field per projected field.
 
-        ``name`` is declared separately from ``column`` and each field
-        carries a ``path`` so output aliases and traversed projection (#282)
-        extend this shape without reshaping it; this epic only ever emits
-        ``name == column`` with an empty path.
+        ``name`` is declared separately from ``column`` (output aliases) and
+        each field carries its relation ``path`` (traversed projection,
+        #293); an aggregate field will carry an ``expr`` instead (#294).
         """
         return {
             "kind": "record",
             "fields": [
-                {"name": column, "column": column, "path": []}
-                for column in self._projection
+                {"name": field.name, "column": field.column, "path": list(field.path)}
+                for field in self._projection
             ],
         }
+
+    def _traversed_hop_classes(self) -> dict[str, type] | None:
+        """Hop classes for traversed projection paths, or None if all-root.
+
+        The record decode path resolves each traversed leaf's enum catalog
+        through its owning model's class (#293) — the same per-table map the
+        instances plan travels with (#286).
+        """
+        paths = {field.path for field in self._projection if field.path}
+        if not paths:
+            return None
+        return self._hop_classes_for_paths(paths)
 
     async def all(self) -> Rows[Row]:  # type: ignore[override]  # ty: ignore[invalid-method-override]
         """Return the projected records for every matching row.
@@ -1359,12 +1487,22 @@ class ProjectedQuery(Query[T]):
         """
         query_def = self._fetch_query_def()
         route = await self._transaction_or_using()
-        records = await fetch_filtered(
-            self.model_cls,
-            _query_ir_payload_to_json(query_def),
-            route,
-            record_cls=Row,
-        )
+        hop_classes = self._traversed_hop_classes()
+        if hop_classes is not None:
+            records = await fetch_filtered(
+                self.model_cls,
+                _query_ir_payload_to_json(query_def),
+                route,
+                record_cls=Row,
+                hop_classes=hop_classes,
+            )
+        else:
+            records = await fetch_filtered(
+                self.model_cls,
+                _query_ir_payload_to_json(query_def),
+                route,
+                record_cls=Row,
+            )
         return _ROWS_OF_ROW._wrap(records)
 
     async def first(self) -> Row | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
@@ -1394,24 +1532,28 @@ class ProjectedQuery(Query[T]):
         )
 
     def include(self: Never, selector: Any) -> NoReturn:  # type: ignore[override]
-        """Reject ``include()`` on a projected query (#287).
+        """Reject ``include()`` on a projected query (#287, final at #293).
 
-        One materialization plan per query (ADR-0007/ADR-0008): projected
-        records and populated instances cannot ride one result shape until
-        #282 designs flattened-vs-nested record+relation results. The
-        ``self: Never`` pin makes this a STATIC error at the call site
-        (tests/static_fixtures/bad_includes.py), mirroring the mutation pins.
+        One materialization plan per query (ADR-0007/ADR-0008), and record
+        results are flat, permanently (ADR-0009: flattened-as-final) — a
+        record reaches across a relation with traversed projection, never by
+        nesting an instance. The ``self: Never`` pin makes this a STATIC
+        error at the call site (tests/static_fixtures/bad_includes.py),
+        mirroring the mutation pins.
 
         Raises:
-            ValueError: Always — include through an unprojected query, or
-                wait for #282.
+            ValueError: Always — reach across the relation with traversed
+                projection, or populate instances through an unprojected
+                query.
         """
         raise ValueError(
             "include() cannot be combined with a projection: a query carries "
             "exactly one materialization plan — projected records or "
-            "populated instances, not both. The flattened-vs-nested design "
-            "for record+relation results is #282; until it lands, drop the "
-            "projection or populate through a separate query."
+            "populated instances, never both, and record results are flat "
+            "(ADR-0009). Reach across the relation with traversed projection "
+            'instead (e.g. select(lambda t: {"account_name": '
+            "t.account.name})), or populate instances with include() on an "
+            "unprojected query."
         )
 
     # `self: Never` makes mutating a projected query a STATIC error at the
@@ -1450,7 +1592,8 @@ class ProjectedQuery(Query[T]):
         """Return a developer-friendly representation of the projection"""
         return (
             f"<ProjectedQuery model={self.model_cls.__name__} "
-            f"columns={list(self._projection)} where={self.where_clause}>"
+            f"fields={[field.name for field in self._projection]} "
+            f"where={self.where_clause}>"
         )
 
 

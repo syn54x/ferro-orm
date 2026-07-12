@@ -186,7 +186,7 @@ async def main() -> None:
         try:
             Transaction.select().include(lambda t: t.account).select(lambda t: (t.id,))
         except ValueError as exc:
-            assert "#282" in str(exc)
+            assert "traversed projection" in str(exc)
 
         try:
             await Transaction.select().include(lambda t: t.account).delete()

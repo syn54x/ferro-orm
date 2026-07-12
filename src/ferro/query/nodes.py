@@ -570,12 +570,18 @@ Predicate: TypeAlias = Callable[[QueryProxy[TModel]], QueryNode]
 
 RowSelector: TypeAlias = Callable[
     [QueryProxy[TModel]],
-    "FieldProxy[Any] | tuple[FieldProxy[Any], ...] | list[FieldProxy[Any]]",
+    FieldProxy[Any]
+    | tuple[FieldProxy[Any], ...]
+    | list[FieldProxy[Any]]
+    | dict[str, FieldProxy[Any]],
 ]
 """Type alias for lambda selectors accepted by ``select()`` projections.
 
-A selector names root columns — one (``lambda t: t.amount``) or several
-(``lambda t: (t.id, t.amount)``). Returning a comparison (a
-:class:`QueryNode`) fails the static gate: a projection selects columns,
+A selector names fields — one (``lambda t: t.amount``), several
+(``lambda t: (t.id, t.amount)``), or a dict whose string keys name the
+output fields (``lambda t: {"account_name": t.account.name}`` — output
+aliases, #293). Fields may traverse forward-FK relations at any depth.
+Returning a comparison (a :class:`QueryNode`), nesting shapes, or using a
+non-string dict key fails the static gate: a projection selects fields,
 a predicate belongs in ``where()``.
 """

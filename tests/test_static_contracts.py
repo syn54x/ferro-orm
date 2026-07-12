@@ -174,6 +174,16 @@ def test_include_chains_pass_the_type_checker():
     )
 
 
+def test_projected_chains_pass_the_type_checker():
+    """Every selector form — tuple, single-field, dict-aliased, traversed at
+    depth (#293) — yields Rows[Row] / Row | None and composes with the join
+    chainers, statically."""
+    result = _run_ty(FIXTURES / "good_projections.py")
+    assert result.returncode == 0, (
+        f"projected chains must type-check cleanly:\n{result.stdout}\n{result.stderr}"
+    )
+
+
 def test_projected_shape_misuse_fails_the_type_checker():
     """A `Row` where a model instance is expected must be rejected statically
     (#279), and mutating a projected query is a static error at the call site
