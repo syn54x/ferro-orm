@@ -80,6 +80,18 @@ _Avoid_: Eager-loaded field, select_related, prefetched attribute, joined attrib
 A query's declaration of what its result columns become: complete root instances (every query today), a projected record of named fields, or — in the future — a populated instance graph. Every query carries exactly one plan; the plan travels with the query rather than being inferred from its column list.
 _Avoid_: Select list, projection spec, hydration mode flag
 
+**Aggregate projection**:
+A projection containing at least one aggregate field. Each group collapses to exactly one projected record: every non-aggregate field is a group key, so grouping is derived from the projection and never declared separately. With no non-aggregate fields, the whole result collapses to a single record. Grouping collapses rows — bucketing complete instances by a key ("partitioning") is a different, client-side operation and is not grouping.
+_Avoid_: Group-by query, summary query, rollup, partition
+
+**Traversed projection**:
+A projected record field whose source column lives across a forward-FK relation path (`select(lambda t: t.account.name)`). Projection traversal narrows exactly like predicate traversal (ADR-0006). Unaliased, the field takes the bare leaf column name; two selected fields sharing an output name is a build-time error, resolved with an output alias.
+_Avoid_: Nested select, join column, related-field pull
+
+**Output alias**:
+A user-chosen name for one field of a projected record, given as the key in a dict-returning selector (`select(lambda t: {"account_name": t.account.name})`). Aliases name output fields only — never joins or tables; the relation path remains the sole join identity.
+_Avoid_: Column alias, AS label, join alias
+
 **Provisional registration**:
 The per-model state installed when a class body finishes executing — enough for runtime codec and PK metadata, but relationships may still be pending and the modelset is not yet authoritative for DDL.
 _Avoid_: Import-time registration, partial registry
