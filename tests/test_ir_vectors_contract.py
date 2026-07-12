@@ -11,12 +11,14 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 4 (#285 — unconditional bump; the `instances`
-# materialization kind carries `paths` of hop facts, ADR-0008 on the
-# ADR-0007 plan substrate); `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 4, "codec": 1}
+# `query` is on ir_version 5 (#292 — unconditional bump; `record` fields
+# carry exactly one source — `column` + `path`, or an aggregate `expr` with
+# hop-fact `path`, ADR-0009 on the ADR-0007 plan substrate); `schema`/`codec`
+# remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 5, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
+AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
 
 
 class _DocFormat(StrEnum):
@@ -128,12 +130,42 @@ def _validate_materialization(plan: dict[str, Any], label: str) -> None:
     for i, field in enumerate(fields):
         field_label = f"{label}.fields[{i}]"
         assert isinstance(field, dict), f"{field_label} must be object"
-        _require_keys(field, {"name", "column", "path"}, field_label)
-        for key in ("name", "column"):
-            assert isinstance(field[key], str) and field[key], (
-                f"{field_label}.{key} must be non-empty string"
-            )
+        _require_keys(field, {"name", "path"}, field_label)
+        assert isinstance(field["name"], str) and field["name"], (
+            f"{field_label}.name must be non-empty string"
+        )
         assert isinstance(field["path"], list), f"{field_label}.path must be a list"
+        # v5 (#292): a field reads from exactly one source — a `column` (+
+        # relation-name `path`) or an aggregate `expr` (ADR-0009).
+        has_column = "column" in field
+        has_expr = "expr" in field
+        assert has_column != has_expr, (
+            f"{field_label} must carry exactly one of column/expr"
+        )
+        if has_column:
+            assert isinstance(field["column"], str) and field["column"], (
+                f"{field_label}.column must be non-empty string"
+            )
+            continue
+        expr = field["expr"]
+        assert isinstance(expr, dict), f"{field_label}.expr must be object"
+        _require_keys(expr, {"fn", "column", "path"}, f"{field_label}.expr")
+        assert expr["fn"] in AGGREGATE_FNS, (
+            f"{field_label}.expr.fn invalid: {expr['fn']!r}"
+        )
+        assert isinstance(expr["column"], str) and expr["column"], (
+            f"{field_label}.expr.column must be non-empty string"
+        )
+        assert isinstance(expr["path"], list), (
+            f"{field_label}.expr.path must be a list"
+        )
+        for h, hop in enumerate(expr["path"]):
+            _validate_hop(hop, f"{field_label}.expr.path[{h}]")
+        # An expression field's traversal travels on expr.path (hop facts);
+        # its field-level path is always empty.
+        assert field["path"] == [], (
+            f"{field_label}.path must be empty on an expr field"
+        )
 
 
 def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
