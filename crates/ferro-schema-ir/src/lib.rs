@@ -705,6 +705,43 @@ mod tests {
     }
 
     #[test]
+    fn query_traversed_record_fixture_roundtrip() {
+        // The traversed-projection golden vector (#293): an aliased root
+        // field, a 1-hop field under a LEFT-marked path, and a 2-hop field
+        // sharing that path's prefix — the full dict-selector wire shape,
+        // joins section included — survives a deserialize/serialize
+        // round-trip without drift.
+        let fixture = include_str!(
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversed_record_v5.json"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query traversed record fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> = serde_json::from_value(ir.clone())
+            .expect("query traversed record IR must deserialize");
+        let Materialization::Record { fields } = &envelope.payload.materialization else {
+            panic!(
+                "expected a record plan, got {:?}",
+                envelope.payload.materialization
+            );
+        };
+        assert_eq!(fields.len(), 3);
+        // The root field is aliased: name and column differ.
+        assert_eq!(fields[0].name, "txn_id");
+        assert_eq!(fields[0].column.as_deref(), Some("id"));
+        // Traversed fields carry relation-name paths keying into `joins`.
+        assert_eq!(fields[1].path, vec!["account".to_string()]);
+        assert_eq!(fields[2].path.len(), 2);
+        assert_eq!(envelope.payload.joins[0].join_type, "left");
+        let encoded =
+            serde_json::to_value(&envelope).expect("query traversed record IR must serialize");
+        assert_eq!(encoded, ir, "query traversed record round-trip must not drift");
+    }
+
+    #[test]
     fn query_aggregate_fixture_roundtrip() {
         // The aggregate-projection golden vector (#292): a grouped query's
         // full payload — a traversed group key sharing its path with the

@@ -426,23 +426,31 @@ fn reject_unsupported_materialization(plan: &QueryPlan, operation: &str) -> PyRe
     )))
 }
 
-/// Resolve the fetch walker's SELECT-list plan from the query's
-/// materialization (#279).
+/// One projected record field resolved for rendering and decode (#279/#293):
+/// the output `name`, the source `column`, and the relation `path` to the
+/// source column's table (`[]` = root model).
+#[derive(Debug, Clone)]
+struct ProjectedField {
+    name: String,
+    column: String,
+    path: Vec<String>,
+}
+
+/// Resolve the fetch walker's record plan from the query's materialization
+/// (#279/#293).
 ///
 /// `root_instances` → `None` (render the root-table asterisk, full
-/// hydration). `record` → the ordered projected column names. The Python
-/// builder validates every field at build time; the per-field checks here are
-/// boundary defense (I-6) for the v5 field shapes this walker does not render
-/// yet: a relation `path` or an output alias (`name != column`) land with
-/// traversed projection (#293), an `expr` with aggregations (#294/#295) — all
-/// rejected loudly, never silently projected wrong.
+/// hydration). `record` → the ordered projected fields: plain, aliased
+/// (`name != column`), and traversed (non-empty `path`) fields all render
+/// (#293); an `expr` field is boundary defense (I-6) until aggregations land
+/// (#294) — rejected loudly, never silently projected wrong.
 ///
 /// # Errors
 /// `PyValueError` for `instances` (the joined-row hydration plan resolves no
 /// projected SELECT list — the instances fetch path widens the SELECT itself,
 /// #286, and dispatches before calling this), an empty `record` field list,
-/// or a field shape from #282.
-fn projected_columns(plan: &QueryPlan) -> PyResult<Option<Vec<String>>> {
+/// or an `expr` field (#294).
+fn projected_record_fields(plan: &QueryPlan) -> PyResult<Option<Vec<ProjectedField>>> {
     let fields = match &plan.materialization {
         Materialization::RootInstances => return Ok(None),
         Materialization::Instances { .. } => {
@@ -460,8 +468,19 @@ fn projected_columns(plan: &QueryPlan) -> PyResult<Option<Vec<String>>> {
              select at least one column.",
         ));
     }
-    let mut columns = Vec::with_capacity(fields.len());
+    let mut resolved = Vec::with_capacity(fields.len());
+    let mut names: HashSet<&str> = HashSet::with_capacity(fields.len());
     for field in fields {
+        // Output names key the record's decode map and result columns; the
+        // Python builder rejects collisions at build time, so a duplicate
+        // here is boundary defense (I-6) — loud, never a silent collapse.
+        if !names.insert(field.name.as_str()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "record plan declares two fields named {:?}; output names \
+                 must be unique.",
+                field.name
+            )));
+        }
         if field.expr.is_some() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "record field {:?} carries an expression: expression fields \
@@ -478,39 +497,184 @@ fn projected_columns(plan: &QueryPlan) -> PyResult<Option<Vec<String>>> {
                 field.name
             )));
         };
-        if !field.path.is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "record field {:?} carries relation path {:?}: traversed \
-                 projection is not yet implemented (#293).",
-                field.name, field.path
-            )));
-        }
-        if field.name != column {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "record field {:?} aliases column {:?}: output aliases are not \
-                 yet implemented (#293).",
-                field.name, column
-            )));
-        }
-        columns.push(column.to_string());
+        resolved.push(ProjectedField {
+            name: field.name.clone(),
+            column: column.to_string(),
+            path: field.path.clone(),
+        });
     }
-    Ok(Some(columns))
+    Ok(Some(resolved))
 }
 
-/// Apply a fetch SELECT list: the projected columns of a `record` plan (in
-/// selection order, root-table-qualified) or the root-table asterisk for full
-/// hydration (#279).
-fn apply_select_list(select: &mut SelectStatement, table_name: &str, projected: Option<&[String]>) {
+/// Apply a fetch SELECT list: the projected fields of a `record` plan (in
+/// selection order) or the root-table asterisk for full hydration (#279).
+///
+/// Every record field renders `<qualifier>.<column> AS "<name>"` (#293): the
+/// qualifier is the root table for an empty `path` and the path's JOIN alias
+/// otherwise, so a traversed field reads through the same join its path
+/// renders for `where()`/`order_by()` (shared join identity, ADR-0006) and
+/// the result column arrives under the output name, aliases included.
+///
+/// # Errors
+/// `PyValueError` when a field's path has no join-plan entry — the Python
+/// builder always registers the join for a traversed projection, so this is
+/// defense-in-depth, never a silently unqualified column.
+fn apply_select_list(
+    select: &mut SelectStatement,
+    table_name: &str,
+    projected: Option<&[ProjectedField]>,
+    join_plan: &JoinPlan,
+) -> PyResult<()> {
     match projected {
-        Some(columns) => {
-            for column in columns {
-                select.column((Alias::new(table_name), Alias::new(column.as_str())));
+        Some(fields) => {
+            for field in fields {
+                let qualifier = if field.path.is_empty() {
+                    table_name
+                } else {
+                    join_plan.prefix_alias.get(&field.path).ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "record field {:?} traverses relation path {:?} \
+                             but the query renders no join for that path; \
+                             the Python builder always registers projection \
+                             joins.",
+                            field.name, field.path
+                        ))
+                    })?
+                };
+                select.expr_as(
+                    Expr::col((Alias::new(qualifier), Alias::new(field.column.as_str()))),
+                    Alias::new(field.name.as_str()),
+                );
             }
         }
         None => {
             select.column((Alias::new(table_name), sea_query::Asterisk));
         }
     }
+    Ok(())
+}
+
+/// Decode record-plan rows: each result column arrives under its OUTPUT name
+/// (the rendered `AS` alias, #293) and decodes against its SOURCE column's
+/// owning model — the root's codec plan for an empty path, the hop table's
+/// registration plan otherwise (the root-vs-hop codec lesson, #270). NULL
+/// decodes to `None` unconditionally: a `left_join` keeps relation-less rows,
+/// and their traversed fields are `None` even when the source column is
+/// non-nullable (a projected record is not the related model).
+///
+/// # Errors
+/// `PyValueError` when a traversed field's hop table has no resolved
+/// registration ([`populate_hop_bind_context`] resolves every join-plan
+/// table first, so this is defense-in-depth), or a result column matches no
+/// projected field (render and decode cannot drift — the SELECT list is
+/// built from the same fields).
+fn record_rows_to_parsed_data(
+    rows: Vec<EngineRow>,
+    fields: &[ProjectedField],
+    root: &crate::state::RegisteredModel,
+    plan: &QueryPlan,
+    join_plan: &JoinPlan,
+) -> PyResult<Vec<ParsedRow>> {
+    // Output name -> (codec plan of the owning model, source column).
+    let mut decode: HashMap<&str, (&crate::codec_plan::ModelCodecPlan, &str)> = HashMap::new();
+    for field in fields {
+        let codec_plan = if field.path.is_empty() {
+            &root.codec_plan
+        } else {
+            let table = join_plan.prefix_table.get(&field.path).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "record field {:?} traverses relation path {:?} with no \
+                     join-plan table entry.",
+                    field.name, field.path
+                ))
+            })?;
+            let registration = plan.hop_registrations.get(table).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "record field {:?} decodes through table {table:?} but its \
+                     registration was not resolved before decode.",
+                    field.name
+                ))
+            })?;
+            &registration.codec_plan
+        };
+        decode.insert(field.name.as_str(), (codec_plan, field.column.as_str()));
+    }
+    let mut parsed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut decoded_fields = Vec::with_capacity(row.values.len());
+        for (name, value) in row.values {
+            let Some((codec_plan, source_column)) = decode.get(name.as_str()) else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "record decode received result column {name:?} that \
+                     matches no projected field.",
+                )));
+            };
+            let value = crate::codec::decode_engine_value(value, codec_plan, source_column);
+            decoded_fields.push((name, value));
+        }
+        // Projected records carry no persistence identity: no PK extraction.
+        parsed.push((None, decoded_fields));
+    }
+    Ok(parsed)
+}
+
+/// Build a record plan's enum catalog, keyed by OUTPUT field name (#293).
+///
+/// Each projected field's enum class (when its source column is enum-typed)
+/// resolves through the source's OWNING model — the root class for plain
+/// fields, the hop table's class (from `hop_classes`) for traversed ones — so
+/// hydration converts exactly the values full hydration of that model would,
+/// under the record's output names.
+///
+/// # Errors
+/// `PyValueError` when a traversed field's path has no join-plan table or its
+/// table is missing from `hop_classes` (the Python builder always passes
+/// every traversed path's hop classes — defense-in-depth).
+fn record_enum_classes_for<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    fields: &[ProjectedField],
+    hop_classes: Option<&Py<pyo3::types::PyDict>>,
+    join_plan: &JoinPlan,
+) -> PyResult<HashMap<String, Bound<'py, PyAny>>> {
+    let root_enums = crate::hydration::enum_classes_for(py, cls);
+    let mut hop_enums: HashMap<String, HashMap<String, Bound<'py, PyAny>>> = HashMap::new();
+    let mut out: HashMap<String, Bound<'py, PyAny>> = HashMap::new();
+    for field in fields {
+        let source_enums = if field.path.is_empty() {
+            &root_enums
+        } else {
+            let table = join_plan.prefix_table.get(&field.path).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "record field {:?} traverses relation path {:?} with no \
+                     join-plan table entry.",
+                    field.name, field.path
+                ))
+            })?;
+            if !hop_enums.contains_key(table) {
+                let hop_cls = hop_classes
+                    .and_then(|classes| {
+                        classes.bind(py).get_item(table.as_str()).ok().flatten()
+                    })
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "record field {:?} decodes through table {table:?} \
+                             but hop_classes has no model class for it.",
+                            field.name
+                        ))
+                    })?;
+                hop_enums.insert(
+                    table.clone(),
+                    crate::hydration::enum_classes_for(py, &hop_cls),
+                );
+            }
+            &hop_enums[table]
+        };
+        if let Some(enum_cls) = source_enums.get(&field.column) {
+            out.insert(field.name.clone(), enum_cls.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// One included hop of an `instances` plan, resolved against the query's
@@ -2040,7 +2204,7 @@ pub fn fetch_filtered<'py>(
     let projected = if include_paths.is_some() {
         None
     } else {
-        projected_columns(&plan)?
+        projected_record_fields(&plan)?
     };
     // The record constructor travels with the call, paired to the plan kind:
     // a record plan requires it, a root plan must not carry one. A mismatch
@@ -2063,23 +2227,29 @@ pub fn fetch_filtered<'py>(
             ));
         }
     };
-    // The hop-class map travels the same way, paired to the instances plan
-    // (#286): population hydrates every hop through the full model protocol,
-    // so each included table's Python class must arrive with the call.
-    let hop_classes_py = match (&include_paths, hop_classes) {
-        (Some(_), Some(hop_classes)) => Some(hop_classes.unbind()),
-        (None, None) => None,
-        (Some(_), None) => {
+    // The hop-class map travels the same way, paired to the plans that decode
+    // or hydrate through another model's protocol: every instances plan
+    // (population, #286) and a record plan with traversed fields (each leaf's
+    // enum catalog resolves through its owning model's class, #293).
+    let needs_hop_classes = include_paths.is_some()
+        || projected
+            .as_ref()
+            .is_some_and(|fields| fields.iter().any(|field| !field.path.is_empty()));
+    let hop_classes_py = match (needs_hop_classes, hop_classes) {
+        (true, Some(hop_classes)) => Some(hop_classes.unbind()),
+        (false, None) => None,
+        (true, None) => {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "fetch_filtered(): an instances materialization plan requires \
-                 hop_classes; the Python builder always passes the included \
-                 hop model classes.",
+                "fetch_filtered(): this materialization plan requires \
+                 hop_classes (an instances plan, or a record plan with \
+                 traversed fields); the Python builder always passes the hop \
+                 model classes.",
             ));
         }
-        (None, Some(_)) => {
+        (false, Some(_)) => {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "fetch_filtered(): hop_classes was passed without an \
-                 instances materialization plan.",
+                "fetch_filtered(): hop_classes was passed for a plan that \
+                 traverses no relation.",
             ));
         }
     };
@@ -2115,7 +2285,7 @@ pub fn fetch_filtered<'py>(
             let pk = schema.meta.pk_col.clone();
 
             let mut select = Query::select();
-            apply_select_list(&mut select, &table_name, projected.as_deref());
+            apply_select_list(&mut select, &table_name, projected.as_deref(), &join_plan)?;
             apply_include_select_list(&mut select, &include_hops);
             select.from(Alias::new(&table_name));
 
@@ -2191,9 +2361,10 @@ pub fn fetch_filtered<'py>(
         // A record plan skips PK extraction entirely: projected records carry
         // no persistence identity and never enter the identity map (ADR-0007)
         // — the projection may not even include the PK column. Decode itself
-        // runs through the model's codec plan either way, so a projected
-        // datetime/uuid/enum/decimal column decodes identically to full
-        // hydration on both backends.
+        // runs through the owning model's codec plan either way (the root's,
+        // or a hop registration's for a traversed field, #293), so a
+        // projected datetime/uuid/enum/decimal column decodes identically to
+        // full hydration on both backends.
         let pk_for_decode = if projected.is_some() {
             None
         } else {
@@ -2335,7 +2506,11 @@ pub fn fetch_filtered<'py>(
             });
         }
 
-        let parsed_data = typed_rows_to_parsed_data(rows, &schema_for_decode, pk_for_decode);
+        let parsed_data = if let Some(fields) = &projected {
+            record_rows_to_parsed_data(rows, fields, &schema_for_decode, &plan, &join_plan)?
+        } else {
+            typed_rows_to_parsed_data(rows, &schema_for_decode, pk_for_decode)
+        };
 
         Python::attach(|py| {
             let results = pyo3::types::PyList::empty(py);
@@ -2350,15 +2525,26 @@ pub fn fetch_filtered<'py>(
                     );
                 }
             }
-            // The MODEL's enum catalog, for both paths: a projected native-
-            // enum column hydrates the same enum member as the model field
-            // (decode parity, FF-C C4).
-            let enum_classes = crate::hydration::enum_classes_for(py, cls);
 
             if let Some(record_cls) = record_cls_py {
                 // Record path (#279): direct-to-dict record construction,
                 // deliberately bypassing the identity map — no lookup, no
-                // insert, no refresh of live instances.
+                // insert, no refresh of live instances. The enum catalog is
+                // built per OUTPUT field name from each source column's
+                // OWNING model (#293) — the root's for plain fields, the hop
+                // class's for traversed ones — so a projected enum column
+                // hydrates the same enum member as full hydration would
+                // (decode parity, FF-C C4), aliases included.
+                let fields_spec = projected
+                    .as_ref()
+                    .expect("validated above: a record_cls pairs with a record plan");
+                let record_enum_classes = record_enum_classes_for(
+                    py,
+                    cls,
+                    fields_spec,
+                    hop_classes_py.as_ref(),
+                    &join_plan,
+                )?;
                 let record_cls = record_cls.bind(py);
                 for (_, fields) in parsed_data {
                     let record = crate::hydration::hydrate_record_instance(
@@ -2366,12 +2552,15 @@ pub fn fetch_filtered<'py>(
                         record_cls,
                         fields,
                         &py_col_names,
-                        &enum_classes,
+                        &record_enum_classes,
                     )?;
                     results.append(record)?;
                 }
                 return Ok(results.into_any().unbind());
             }
+
+            // The MODEL's enum catalog for full hydration (FF-C C4).
+            let enum_classes = crate::hydration::enum_classes_for(py, cls);
 
             for (row_pk_val, fields) in parsed_data {
                 let instance = materialize_model_row(
@@ -4576,28 +4765,37 @@ mod materialization_walker_gate_tests {
 
 #[cfg(test)]
 mod record_select_list_tests {
-    //! Pin the record plan's SELECT-list resolution and rendering (#279):
-    //! projected columns render as an explicit root-qualified column list in
-    //! selection order on both dialects, and the v5 field shapes this walker
-    //! does not render yet (paths and aliases → #293, expressions → #294) are
+    //! Pin the record plan's SELECT-list resolution and rendering (#279/#293):
+    //! every field renders `<qualifier>.<column> AS "<name>"` in selection
+    //! order — root-qualified for plain fields, join-alias-qualified for
+    //! traversed ones (sharing the path's join with `where()`, ADR-0006) —
+    //! and the expression shape this walker does not render yet (#294) is
     //! rejected loudly at the boundary.
 
-    use super::{apply_select_list, projected_columns, query_plan_from_ir_json};
+    use super::{
+        apply_relation_joins, apply_select_list, projected_record_fields, query_join_plan,
+        query_plan_from_ir_json,
+    };
+    use crate::query::JoinPlan;
     use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder};
 
-    fn plan_with_materialization(materialization: serde_json::Value) -> crate::query::QueryPlan {
+    fn plan_from_payload_parts(
+        joins: serde_json::Value,
+        where_nodes: serde_json::Value,
+        materialization: serde_json::Value,
+    ) -> crate::query::QueryPlan {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
                 "ir_version": 5,
                 "payload": {
                     "model_name": "Transaction",
-                    "where": [],
+                    "where": where_nodes,
                     "order_by": [],
                     "limit": null,
                     "offset": null,
                     "m2m": null,
-                    "joins": [],
+                    "joins": joins,
                     "materialization": materialization
                 }
             })
@@ -4606,29 +4804,50 @@ mod record_select_list_tests {
         .expect("envelope parses")
     }
 
+    fn plan_with_materialization(materialization: serde_json::Value) -> crate::query::QueryPlan {
+        plan_from_payload_parts(
+            serde_json::json!([]),
+            serde_json::json!([]),
+            materialization,
+        )
+    }
+
     fn record_fields(fields: serde_json::Value) -> serde_json::Value {
         serde_json::json!({"kind": "record", "fields": fields})
     }
 
+    fn account_joins() -> serde_json::Value {
+        serde_json::json!([{
+            "join_type": "inner",
+            "path": [
+                {"relation": "account", "from_column": "account_id",
+                 "to_table": "account", "to_column": "id"}
+            ]
+        }])
+    }
+
     #[test]
-    fn record_plan_renders_subset_select_in_selection_order_on_both_dialects() {
+    fn record_plan_renders_aliased_subset_select_in_selection_order_on_both_dialects() {
         let plan = plan_with_materialization(record_fields(serde_json::json!([
             {"name": "id", "column": "id", "path": []},
             {"name": "amount", "column": "amount", "path": []}
         ])));
-        let projected = projected_columns(&plan)
+        let projected = projected_record_fields(&plan)
             .expect("record plan resolves")
-            .expect("record plan projects columns");
-        assert_eq!(projected, vec!["id".to_string(), "amount".to_string()]);
+            .expect("record plan projects fields");
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", Some(&projected));
+        apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
+            .expect("root fields render");
         select.from(Alias::new("transaction"));
 
+        // Every field renders under its output name (#293) — `AS "id"` here,
+        // so the result column names are the record field names uniformly.
         let pg = select.to_string(PostgresQueryBuilder);
         assert_eq!(
             pg,
-            "SELECT \"transaction\".\"id\", \"transaction\".\"amount\" FROM \"transaction\""
+            "SELECT \"transaction\".\"id\" AS \"id\", \
+             \"transaction\".\"amount\" AS \"amount\" FROM \"transaction\""
         );
         let sqlite = select.to_string(SqliteQueryBuilder).to_lowercase();
         assert!(
@@ -4643,38 +4862,131 @@ mod record_select_list_tests {
     #[test]
     fn root_instances_plan_renders_root_asterisk() {
         let plan = plan_with_materialization(serde_json::json!({"kind": "root_instances"}));
-        let projected = projected_columns(&plan).expect("root plan resolves");
+        let projected = projected_record_fields(&plan).expect("root plan resolves");
         assert!(projected.is_none());
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", projected.as_deref());
+        apply_select_list(&mut select, "transaction", None, &JoinPlan::default())
+            .expect("asterisk renders");
         select.from(Alias::new("transaction"));
         let sql = select.to_string(PostgresQueryBuilder);
         assert_eq!(sql, "SELECT \"transaction\".* FROM \"transaction\"");
     }
 
     #[test]
-    fn record_field_with_relation_path_is_rejected() {
-        let plan = plan_with_materialization(record_fields(serde_json::json!([
-            {"name": "label", "column": "label", "path": ["account"]}
-        ])));
-        let err = projected_columns(&plan).expect_err("path field must be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("label"), "must name the field: {msg}");
-        assert!(msg.contains("account"), "must name the path: {msg}");
-        assert!(msg.contains("#293"), "must name the deferred slice: {msg}");
-    }
-
-    #[test]
-    fn record_field_with_alias_is_rejected() {
+    fn aliased_root_field_renders_under_its_output_name() {
+        // An output alias is pure rendering: same source column, new result
+        // column name (#293).
         let plan = plan_with_materialization(record_fields(serde_json::json!([
             {"name": "total", "column": "amount", "path": []}
         ])));
-        let err = projected_columns(&plan).expect_err("aliased field must be rejected");
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
+            .expect("aliased field renders");
+        select.from(Alias::new("transaction"));
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert_eq!(
+            sql,
+            "SELECT \"transaction\".\"amount\" AS \"total\" FROM \"transaction\""
+        );
+    }
+
+    #[test]
+    fn traversed_field_renders_join_alias_qualified_under_its_output_name() {
+        // A traversed field reads through its path's JOIN alias — the same
+        // join `where()` traversal of the path would render (ADR-0006: the
+        // path is the join identity).
+        let plan = plan_from_payload_parts(
+            account_joins(),
+            serde_json::json!([]),
+            record_fields(serde_json::json!([
+                {"name": "id", "column": "id", "path": []},
+                {"name": "account_name", "column": "name", "path": ["account"]}
+            ])),
+        );
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", Some(&projected), &join_plan)
+            .expect("traversed field renders");
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.from(Alias::new("transaction"));
+
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("\"j1_account\".\"name\" AS \"account_name\""),
+            "traversed field must render join-alias-qualified: {sql}"
+        );
+        assert!(
+            sql.contains("INNER JOIN \"account\" AS \"j1_account\""),
+            "the path's join must render: {sql}"
+        );
+    }
+
+    #[test]
+    fn projection_and_where_share_one_join_for_the_same_path() {
+        // Shared-path join identity visible in rendered SQL (#293): a
+        // projected field and a WHERE leaf traversing the same path render
+        // exactly one JOIN.
+        let plan = plan_from_payload_parts(
+            account_joins(),
+            serde_json::json!([{
+                "node_kind": "leaf",
+                "operator": "==",
+                "column": "label",
+                "value": {"kind": "string", "value": "a1"},
+                "path": ["account"]
+            }]),
+            record_fields(serde_json::json!([
+                {"name": "account_name", "column": "name", "path": ["account"]}
+            ])),
+        );
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", Some(&projected), &join_plan)
+            .expect("traversed field renders");
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.from(Alias::new("transaction"));
+
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert_eq!(
+            sql.matches("JOIN").count(),
+            1,
+            "one path, one join — shared by projection and predicate: {sql}"
+        );
+    }
+
+    #[test]
+    fn traversed_field_without_join_entry_errors_loudly() {
+        // Defense-in-depth: the Python builder always registers a projection
+        // path's join, so a missing entry is a loud error, never a silently
+        // unqualified column.
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "account_name", "column": "name", "path": ["account"]}
+        ])));
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+
+        let mut select = Query::select();
+        let err =
+            apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
+                .expect_err("a pathed field with no join entry must error");
         let msg = err.to_string();
         assert!(
-            msg.contains("total") && msg.contains("amount"),
-            "must name alias and column: {msg}"
+            msg.contains("account_name") && msg.contains("account"),
+            "must name the field and its path: {msg}"
         );
     }
 
@@ -4686,14 +4998,14 @@ mod record_select_list_tests {
             {"name": "n", "path": [],
              "expr": {"fn": "count", "column": "id", "path": []}}
         ])));
-        let err = projected_columns(&plan).expect_err("expr field must be rejected");
+        let err = projected_record_fields(&plan).expect_err("expr field must be rejected");
         assert!(err.to_string().contains("expression"), "got {err}");
     }
 
     #[test]
     fn record_plan_with_no_fields_is_rejected() {
         let plan = plan_with_materialization(record_fields(serde_json::json!([])));
-        let err = projected_columns(&plan).expect_err("empty projection must be rejected");
+        let err = projected_record_fields(&plan).expect_err("empty projection must be rejected");
         assert!(err.to_string().contains("at least one"), "got {err}");
     }
 
@@ -4706,7 +5018,7 @@ mod record_select_list_tests {
                  "to_table": "account", "to_column": "id"}
             ]]
         }));
-        let err = projected_columns(&plan).expect_err("instances must be rejected");
+        let err = projected_record_fields(&plan).expect_err("instances must be rejected");
         assert!(
             err.to_string().contains("joined-row hydration"),
             "got {err}"
@@ -4782,7 +5094,7 @@ mod instances_select_list_tests {
         assert!(hops[0].parent_path.is_empty());
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", None);
+        apply_select_list(&mut select, "transaction", None, &join_plan).expect("asterisk renders");
         apply_include_select_list(&mut select, &hops);
         select.from(Alias::new("transaction"));
         apply_relation_joins(&mut select, &join_plan).expect("joins render");

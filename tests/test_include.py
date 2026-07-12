@@ -799,11 +799,19 @@ async def test_m2m_include_selector_names_the_future_mechanism(db_url):
 
 
 def test_include_and_projection_raise_in_both_chain_orders():
-    with pytest.raises(ValueError, match=r"exactly one materialization plan.*#282"):
+    # Flattened-as-final (#293, ADR-0009): the error points at traversed
+    # projection as the record-shaped way across a relation, permanently.
+    with pytest.raises(
+        ValueError,
+        match=r"exactly one materialization plan.*traversed projection",
+    ):
         INTransaction.select().include(lambda t: t.account).select(
             lambda t: (t.id, t.amount)
         )
-    with pytest.raises(ValueError, match=r"exactly one materialization plan.*#282"):
+    with pytest.raises(
+        ValueError,
+        match=r"exactly one materialization plan.*traversed projection",
+    ):
         INTransaction.select(lambda t: (t.id, t.amount)).include(  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             lambda t: t.account
         )

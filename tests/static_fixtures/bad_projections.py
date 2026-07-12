@@ -43,3 +43,13 @@ async def _update_on_a_projection() -> None:
 
 async def _delete_on_a_projection() -> None:
     await BadPTxn.select(lambda t: (t.id,)).delete()
+
+
+# NOT statically checkable today (#293): selector-shape misuse — a dict
+# nested in a tuple, a tuple in a dict, a non-string dict key. ty does not
+# check a lambda argument's inferred return type against the expected
+# callable's return type (the same checker limitation bad_predicates.py
+# documents for RHS typing), so RowSelector's shape union cannot bite at
+# the call site yet. These rejections are pinned at runtime instead
+# (tests/test_traversed_projection.py::TestBuildTimeErrors); when ty grows
+# lambda-return checking, promote them to this file.

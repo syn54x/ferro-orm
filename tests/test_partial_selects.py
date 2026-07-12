@@ -203,10 +203,6 @@ class TestSelectorValidation:
         with pytest.raises(AttributeError, match="Did you mean 'amount'"):
             PSTransaction.select(lambda t: (t.id, t.amonut))
 
-    def test_traversed_column_raises_pointed_not_yet_error(self):
-        with pytest.raises(NotImplementedError, match="account.label.*#282"):
-            PSTransaction.select(lambda t: t.account.label)
-
     def test_bare_relation_raises(self):
         with pytest.raises(TypeError, match="bare relation 'account'"):
             PSTransaction.select(lambda t: t.account)
@@ -215,8 +211,10 @@ class TestSelectorValidation:
         with pytest.raises(TypeError, match="comparison, not a column"):
             PSTransaction.select(lambda t: t.id == 1)
 
-    def test_duplicate_column_raises(self):
-        with pytest.raises(ValueError, match="'id' more than once"):
+    def test_duplicate_column_raises_naming_the_dict_form(self):
+        # The output-name collision error (#293): a plain duplicate is the
+        # root-level case of the same rule, resolved with the dict form.
+        with pytest.raises(ValueError, match=r"two fields named 'id'.*dict"):
             PSTransaction.select(lambda t: (t.id, t.id))
 
     def test_empty_selection_raises(self):
