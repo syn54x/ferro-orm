@@ -10,8 +10,8 @@ type; ``avg`` → float for int/float, Decimal for Decimal), SQL's empty-input
 semantics passing through verbatim (``None``/``count=0``, no hidden
 COALESCE), and the build-time rejection catalog: disallowed source families,
 aggregates inside ``where()`` (→ having(), #291), iterating a field proxy
-(the builtin-``sum`` trap), unaliased aggregates, and mixed
-aggregate/plain projections (→ #295).
+(the builtin-``sum`` trap), and unaliased aggregates. Mixed aggregate/plain
+projections are GROUPED queries — tests/test_grouped_aggregates.py (#295).
 """
 
 from datetime import datetime, timezone
@@ -366,12 +366,6 @@ class TestAggregateMisuse:
     def test_unaliased_single_aggregate_names_the_dict_form(self):
         with pytest.raises(TypeError, match=r"user-named.*dict"):
             GATransaction.select(lambda t: t.amount.sum())  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-
-    def test_mixed_aggregate_and_plain_points_at_grouped_aggregates(self):
-        with pytest.raises(NotImplementedError, match=r"grouped query.*#295"):
-            GATransaction.select(
-                lambda t: {"acct": t.account_id, "total": t.amount.sum()}
-            )
 
     def test_aggregate_has_no_truth_value(self):
         with pytest.raises(TypeError, match="no truth value"):
