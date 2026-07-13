@@ -8,19 +8,26 @@
 
 `include(lambda t: t.account)` delivers each result with the relation **populated** (ADR-0008): access becomes a plain attribute holding the complete related instance — no await, no query — while unpopulated relations keep the awaitable contract. Include is the third orthogonal query axis (joins decide membership, projection decides shape, include decides attached data): it never changes which rows come back, `.all()` still returns `list[Model]`, and `count()`/`exists()` are unaffected. Paths populate whole (`include(lambda t: t.account.owner)` populates both hops); includes are cumulative, order-free, and idempotent; populated instances run the full session identity-map protocol, and a refresh keeps a population only while the row's FK still points at it.
 
-Loud limits, at build time: forward-FK lambda paths only (a `BackRef`/M2M selector, a string, or a column selector raises `TypeError`); combining include with a projection raises `ValueError` in either chain order (one materialization plan per query, #282); `update()`/`delete()` on an included query raise `ValueError`. See [Populating Relations with include()](../guide/queries.md#populating-relations-with-include) for worked examples.
+Loud limits, at build time: forward-FK lambda paths only (a `BackRef`/M2M selector, a string, or a column selector raises `TypeError`); combining include with a projection raises `ValueError` in either chain order (one materialization plan per query; record results are flat — reach across a relation with traversed projection instead); `update()`/`delete()` on an included query raise `ValueError`. See [Populating Relations with include()](../guide/queries.md#populating-relations-with-include) for worked examples.
 
 ## `select()` overloads
 
-`select()` has three forms, resolved at build time:
+`select()` has four forms, resolved at build time:
 
 | Call | Returns | Result of `.all()` |
 | :--- | :--- | :--- |
 | `Model.select()` | `Query[Model]` | `list[Model]` — the full query, unchanged. |
-| `Model.select(lambda t: (t.id, t.amount))` | `ProjectedQuery[Model]` | `Rows[Row]` — projected records (single-field form: `select(lambda t: t.amount)`). |
-| `Model.select("id", "amount")` | `ProjectedQuery[Model]` | `Rows[Row]` — `order_by()`'s string contract: root columns only, never mixed with a lambda. |
+| `Model.select(lambda t: (t.id, t.account.name))` | `ProjectedQuery[Model]` | `Rows[Row]` — projected records; fields may traverse forward-FK paths at any depth and take the bare leaf column name (single-field form: `select(lambda t: t.amount)`). |
+| `Model.select(lambda t: {"owner_email": t.account.owner.email})` | `ProjectedQuery[Model]` | `Rows[Row]` — dict keys name the output fields (output aliases); values are field references or aggregate expressions. |
+| `Model.select("id", "amount")` | `ProjectedQuery[Model]` | `Rows[Row]` — `order_by()`'s string contract: root columns only, never traversal, never mixed with a lambda. |
 
-A `ProjectedQuery` composes like any `Query` (`where()` with traversal, `order_by()` by unselected columns, `limit()`/`offset()`, `first()`, `count()`, `exists()`); `update()`/`delete()` and a second `select()` raise at build time. See [Selecting a Column Subset](../guide/queries.md#selecting-a-column-subset) for worked examples and the complete-instance invariant behind the `Row` result shape.
+A `ProjectedQuery` composes like any `Query` (`where()` with traversal, `order_by()` by unselected columns, `limit()`/`offset()`, `first()`, `count()`, `exists()`); `update()`/`delete()`, a second `select()`, output-name collisions, and nested selector shapes raise at build time. Projection traversal narrows per ADR-0006 (INNER, one join per path, shared with `where()`/`order_by()`); `left_join()` keeps relation-less rows with their traversed fields decoded to `None`. See [Selecting a Column Subset](../guide/queries.md#selecting-a-column-subset) for worked examples and the complete-instance invariant behind the `Row` result shape.
+
+## Aggregates and grouped queries
+
+Five methods on column references build aggregate fields for the dict selector: `t.amount.count()` / `.sum()` / `.avg()` / `.min()` / `.max()` (traversal included: `t.account.balance.avg()`). Source families validate at build time — `sum`/`avg` take numeric columns, `min`/`max` orderable ones (numeric, text, date/time), `count` any column; enum/uuid/json/bool are rejected. Result types are a pinned cross-backend contract derived from the source column (`count → int`, `min`/`max` → source type, `sum` → source numeric type, `avg` → `float` for int/float and `Decimal` for Decimal); empty input passes SQL through verbatim (`None`, `count → 0`).
+
+An aggregate-only projection collapses to one record (read with `first()`). Mixing plain fields in makes the query **grouped**: every plain field is a group key — `GROUP BY` is derived from the projection, never declared. On a projected query `order_by()` strings resolve output field names first, then root columns; the lambda form spells source expressions including aggregates (`order_by(lambda t: t.amount.sum(), "desc")`); on an aggregate projection every sort key must be a group key or an aggregate — anything else raises at build time, as do `count()`/`exists()` (ambiguous between rows and groups) and aggregate predicates in `where()` (post-aggregation filtering is `having()`, #291). See [Aggregations & Grouped Queries](../guide/aggregations.md) for worked examples.
 
 ::: ferro.query.builder.Query
 
@@ -35,3 +42,5 @@ A `ProjectedQuery` composes like any `Query` (`where()` with traversal, `order_b
 ::: ferro.query.Predicate
 
 ::: ferro.query.RowSelector
+
+::: ferro.query.AggregateExpr

@@ -12,9 +12,16 @@ from ferro import BackRef, Field, ForeignKey, Model, Relation, Rows, connect, en
 
 
 # --8<-- [start:schema]
+class Owner(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    email: str
+    accounts: Relation[list["Account"]] = BackRef()
+
+
 class Account(Model):
     id: int | None = Field(default=None, primary_key=True)
     label: str
+    owner: Annotated[Owner | None, ForeignKey(related_name="accounts")] = None
     transactions: Relation[list["Transaction"]] = BackRef()
 
 
@@ -22,7 +29,9 @@ class Transaction(Model):
     id: int | None = Field(default=None, primary_key=True)
     amount: int
     memo: str
-    account: Annotated[Account, ForeignKey(related_name="transactions")]
+    account: Annotated[
+        Account | None, ForeignKey(related_name="transactions")
+    ] = None
 # --8<-- [end:schema]
 
 
@@ -30,7 +39,8 @@ async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
     async with engines.session():
-        a1 = await Account.create(id=1, label="a1")
+        alice = await Owner.create(id=1, email="alice@example.com")
+        a1 = await Account.create(id=1, label="a1", owner=alice)
         b1 = await Account.create(id=2, label="b1")
         await Transaction.create(id=1, amount=10, memo="coffee", account=a1)
         await Transaction.create(id=2, amount=20, memo="lunch", account=a1)
@@ -75,6 +85,69 @@ async def main() -> None:
         rows = await Transaction.select("id", "amount").order_by("id").all()
         assert rows[0].model_dump() == {"id": 1, "amount": 10}
         # --8<-- [end:strings]
+
+        # --8<-- [start:traversed]
+        # A selected field may reach across a relation, at any depth.
+        # Unaliased, the field takes the bare leaf column name.
+        rows = await (
+            Transaction.select(lambda t: (t.memo, t.account.label))
+            .order_by("id")
+            .all()
+        )
+        assert rows[0].model_dump() == {"memo": "coffee", "label": "a1"}
+        # --8<-- [end:traversed]
+
+        # --8<-- [start:aliases]
+        # A dict-returning selector names the output fields — keys are the
+        # record's field names, values may traverse.
+        rows = await (
+            Transaction.select(
+                lambda t: {
+                    "memo": t.memo,
+                    "account_label": t.account.label,
+                    "owner_email": t.account.owner.email,
+                }
+            )
+            .order_by("id")
+            .all()
+        )
+        assert rows[0].model_dump() == {
+            "memo": "coffee",
+            "account_label": "a1",
+            "owner_email": "alice@example.com",
+        }
+        # --8<-- [end:aliases]
+
+        # --8<-- [start:traversal-narrows]
+        # Traversal narrows exactly like a where() predicate on the same
+        # path: rows without the relation drop out (b1 has no owner)...
+        rows = await Transaction.select(
+            lambda t: {"memo": t.memo, "owner_email": t.account.owner.email}
+        ).all()
+        assert {r.memo for r in rows} == {"coffee", "lunch"}
+
+        # ... and left_join() is the opt-out: rows are kept, and their
+        # traversed fields decode to None — even from a non-nullable column.
+        rows = await (
+            Transaction.select(
+                lambda t: {"memo": t.memo, "owner_email": t.account.owner.email}
+            )
+            .left_join(lambda t: t.account.owner)
+            .order_by("id")
+            .all()
+        )
+        assert rows.model_dump()[2] == {"memo": "dinner", "owner_email": None}
+        # --8<-- [end:traversal-narrows]
+
+        # --8<-- [start:collision]
+        # Two selected fields resolving to the same output name is a
+        # build-time error naming the fix: the dict form.
+        try:
+            Transaction.select(lambda t: (t.id, t.account.id))
+        except ValueError as exc:
+            assert "two fields named 'id'" in str(exc)
+            assert "dict selector form" in str(exc)
+        # --8<-- [end:collision]
 
         # --8<-- [start:compose]
         # Projection composes with everything a read query can do: traversal

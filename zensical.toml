@@ -22,6 +22,7 @@ nav = [
   { "Guide" = [
     { "Models & Fields" = "guide/models-and-fields.md" },
     { "Queries" = "guide/queries.md" },
+    { "Aggregations" = "guide/aggregations.md" },
     { "Mutations" = "guide/mutations.md" },
     { "Relationships" = "guide/relationships.md" },
     { "Transactions" = "guide/transactions.md" },

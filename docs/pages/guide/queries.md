@@ -146,7 +146,7 @@ Queries are lazy — nothing hits the database until you await a terminal:
 
 `Model.all()` is shorthand for `Model.select().all()`.
 
-On a **projected** query (`select(lambda t: (t.id, t.amount))`), `.all()` returns `Rows[Row]` and `.first()` returns `Row | None` — records, not model instances; `count()` and `exists()` are unchanged. See [Selecting a Column Subset](#selecting-a-column-subset).
+On a **projected** query (`select(lambda t: (t.id, t.amount))`), `.all()` returns `Rows[Row]` and `.first()` returns `Row | None` — records, not model instances; `count()` and `exists()` are unchanged on a plain projection (on an aggregate projection they raise with guidance). See [Selecting a Column Subset](#selecting-a-column-subset) and [Aggregations & Grouped Queries](aggregations.md).
 
 ## Querying Across Relationships
 
@@ -491,7 +491,7 @@ Misuse raises at build time, before any SQL:
 
 - **Forward foreign keys only.** Including a `BackRef` or `ManyToMany` relation raises `TypeError`: reverse and M2M population will be a separate mechanism (a batched second query stitched onto the results), not `include()`. Until it lands, fetch collections through the relation itself (`await author.posts.all()`).
 - **Lambda selectors only.** `include("account")` raises pointing at the lambda form — strings never traverse. Selecting a *column* (`include(lambda t: t.account.label)`) raises too: every populated hop is a complete row, so there is nothing to select per column.
-- **No include × projection.** A query carries exactly one materialization plan — populated instances or projected records, not both. Either order raises `ValueError` naming [#282](https://github.com/syn54x/ferro-orm/issues/282), which designs record+relation results.
+- **No include × projection.** A query carries exactly one materialization plan — populated instances or projected records, never both — and record results are flat, permanently. Either order raises `ValueError` pointing at [traversed projection](#reaching-across-a-relation), the record-shaped way across a relation.
 - **No mutations.** `update()`/`delete()` on an included query raise — a mutation returns no instances to populate.
 
 ```python
@@ -556,9 +556,41 @@ Quick scripts can pass column names as strings — the same string contract as `
 --8<-- "docs/examples/partial_selects.py:strings"
 ```
 
+### Reaching across a relation
+
+A selected field may traverse a forward-FK relation, at any depth — the same attribute chaining as a `where()` predicate. Unaliased, a traversed field takes the **bare leaf column name**:
+
+```python
+--8<-- "docs/examples/partial_selects.py:traversed"
+```
+
+Strings never traverse (`select("account.label")` is rejected permanently) — traversed projection is lambda-only.
+
+### Naming output fields
+
+Return a **dict** from the selector and the keys name the record's fields — an *output alias*. Aliases name output fields only, never joins or tables, and the dict's insertion order is the record's field order:
+
+```python
+--8<-- "docs/examples/partial_selects.py:aliases"
+```
+
+The dict form is also how you resolve a name collision: `t.id` and `t.account.id` both want to be called `id`, so selecting them unaliased is a build-time error naming this fix:
+
+```python
+--8<-- "docs/examples/partial_selects.py:collision"
+```
+
+### Traversal narrows; `left_join()` opts out
+
+Projection traversal is ordinary traversal (ADR-0006): it renders an INNER join per relation path — **shared** with any `where()`/`order_by()` traversal of the same path — so rows without the relation drop out. `left_join()` keeps them, and their traversed fields decode to `None`, *even when the source column is non-nullable* — a projected record describes the row you got, not the related model:
+
+```python
+--8<-- "docs/examples/partial_selects.py:traversal-narrows"
+```
+
 ### Projections compose like any other query
 
-`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, and `first()` all work unchanged; `count()` and `exists()` are unaffected by projection — they measure the same matching rows a full query would:
+`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, and `first()` all work unchanged; on a plain projection `count()` and `exists()` are unaffected — they measure the same matching rows a full query would. (On an *aggregate* projection they raise with guidance instead — see [Aggregations & Grouped Queries](aggregations.md#the-loud-limits).)
 
 ```python
 --8<-- "docs/examples/partial_selects.py:compose"
@@ -570,7 +602,7 @@ Quick scripts can pass column names as strings — the same string contract as `
 
 ### Build-time validation and the loud limits
 
-A misspelled column fails when you build the query, with a did-you-mean — exactly like `where()` and `order_by()`:
+A misspelled column fails when you build the query, with a did-you-mean — exactly like `where()` and `order_by()`, and a traversed field validates every hop against that hop's model:
 
 ```text
 >>> Transaction.select(lambda t: (t.id, t.amonut))
@@ -579,26 +611,30 @@ AttributeError: Transaction has no queryable column 'amonut'. Did you mean 'amou
 
 Misuse is loud, never silently ignored:
 
-- **No traversed projection yet.** `select(lambda t: t.account.label)` raises `NotImplementedError` — projecting related columns is designed together with output aliases and aggregations. Dotted strings (`select("account.label")`) are rejected permanently; traversal will be lambda-only when it lands.
+- **No output-name collisions.** Two selected fields resolving to the same name raise `ValueError` naming the dict form (see above).
+- **One selector, one shape.** A dict nested in a tuple, a tuple (or dict) as a dict value, and non-string dict keys all raise `TypeError` — a projected record is flat.
 - **No mutations through a projection.** `update()` / `delete()` on a projected query raise `ValueError` at the call, before any SQL — a projection is a read shape, and silently ignoring it would make `select(...)` a no-op on mutations. Mutate through an unprojected query instead.
-- **No double `select()`.** Replacing a projection mid-chain would change the result type; name every column in one call, or start a new query from the model.
+- **No double `select()`.** Replacing a projection mid-chain would change the result type; name every field in one call, or start a new query from the model.
 - **No mixing forms.** Strings and a lambda in one `select()` call raise `TypeError`.
+- **No `include()` with a projection**, in either chain order: a query carries exactly one materialization plan, and record results are flat — permanently. Reach across the relation with traversed projection, or populate instances on an unprojected query.
 
 Static typing follows the same shape promise as predicates: `select(...)` flips the query's type so `.all()` checks as `Rows[Row]` and `.first()` as `Row | None` — passing a `Row` where a model instance is expected fails the type checker. See [Typed Query Predicates](../concepts/query-typing.md#projected-queries).
+
+Aggregation builds directly on this machinery — `select(lambda t: {"total": t.amount.sum()})` — and mixing aggregate and plain fields turns the projection into a **grouped query**. That is its own chapter: [Aggregations & Grouped Queries](aggregations.md).
 
 ## Not Yet Supported
 
 !!! note "On the roadmap"
     The following query features are **not yet implemented** — see the [Roadmap](../roadmap.md):
 
-    - Aggregations beyond `count()` / `exists()` (`sum`, `avg`, `min`, `max`, `GROUP BY`)
-    - Traversed projection and output aliases (`select(lambda t: t.account.name)`) — designed together with aggregations
+    - `having()` — post-aggregation filtering; `where()` rejects aggregate predicates pointing at it ([#291](https://github.com/syn54x/ferro-orm/issues/291))
     - Reverse (`BackRef`) and many-to-many population — [`include()`](#populating-relations-with-include) covers forward FKs; collection population is a separate future mechanism
     - Case-insensitive `ilike()`
     - `not_in()` (negate with `!=` conditions combined with `&` in the meantime)
 
 ## See Also
 
+- [Aggregations & Grouped Queries](aggregations.md) — `count`/`sum`/`avg`/`min`/`max` and derived grouping
 - [Mutations](mutations.md) — creating, updating, and deleting records
 - [Relationships](relationships.md) — forward and reverse relations
 - [Typed Query Predicates](../concepts/query-typing.md) — why three predicate styles exist
