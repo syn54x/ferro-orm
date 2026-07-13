@@ -2296,7 +2296,12 @@ pub fn update_record<'py>(
     })
 }
 
-/// Persist multiple model instances in a single batch `INSERT`.
+/// Persist multiple model instances in as few batch `INSERT`s as the
+/// backend's bind-parameter limit allows (#298).
+///
+/// Atomicity: with an ambient transaction every statement runs inside it;
+/// without one, a multi-statement batch runs in its own transaction so the
+/// call stays all-or-nothing.
 ///
 /// Args:
 ///     name (str): Model class name.
@@ -2340,24 +2345,32 @@ pub fn save_bulk_records<'py>(
 
         let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
         let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
-        let (sql, bind_values) = {
+
+        // Columns come from the first row's order (skip a null auto-pk).
+        let mut column_names: Vec<String> = Vec::new();
+        for (key, input) in &record_inputs[0] {
+            let is_pk = pk_col.as_deref() == Some(key.as_str());
+            if is_pk && pk_is_auto && input.is_json_null() {
+                continue;
+            }
+            column_names.push(key.clone());
+        }
+
+        // One multi-row INSERT binds rows × columns parameters, and both
+        // backends cap binds per statement — split the batch so every
+        // statement stays within the active backend's budget (#298).
+        let rows_per_stmt =
+            bulk_insert_rows_per_statement(engine.max_bind_params(), column_names.len());
+
+        let mut statements: Vec<(String, sea_query::Values)> = Vec::new();
+        for chunk in record_inputs.chunks(rows_per_stmt) {
             let mut insert_stmt = InsertStatement::new()
                 .into_table(Alias::new(&table_name))
                 .to_owned();
-
-            // Columns come from the first row's order (skip a null auto-pk).
-            let mut column_names: Vec<String> = Vec::new();
-            for (key, input) in &record_inputs[0] {
-                let is_pk = pk_col.as_deref() == Some(key.as_str());
-                if is_pk && pk_is_auto && input.is_json_null() {
-                    continue;
-                }
-                column_names.push(key.clone());
-            }
             insert_stmt.columns(column_names.iter().map(|c| Alias::new(c)));
 
             let null_input = BindInput::Json(serde_json::Value::Null);
-            for row in &record_inputs {
+            for row in chunk {
                 let lookup: std::collections::HashMap<&str, &BindInput> =
                     row.iter().map(|(k, v)| (k.as_str(), v)).collect();
                 let mut row_values = Vec::with_capacity(column_names.len());
@@ -2377,18 +2390,92 @@ pub fn save_bulk_records<'py>(
             }
 
             let (s, values) = sea_query_build_for_backend!(insert_stmt, backend);
-            (s, values)
-        };
+            statements.push((s, values));
+        }
 
-        let rows_affected =
-            execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
+        // A bare multi-statement call opens its own transaction: the single
+        // statement it replaces was atomic, and chunking must not regress
+        // that. With an ambient transaction (or a single statement) the
+        // existing execution path already gives the right boundary.
+        let own_tx: Option<TransactionConnection> = if tx_conn.is_none() && statements.len() > 1 {
+            let conn = engine.begin_transaction_connection().await.map_err(|e| {
+                crate::errors::map_db_error(&format!("Bulk save failed for '{}'", name), e)
+            })?;
+            Some(Arc::new(tokio::sync::Mutex::new(conn)))
+        } else {
+            None
+        };
+        let exec_conn = tx_conn.as_ref().or(own_tx.as_ref());
+
+        let mut rows_affected: u64 = 0;
+        for (sql, bind_values) in &statements {
+            let executed =
+                execute_statement_with_optional_tx(&engine, exec_conn, sql, &bind_values.0).await;
+            match executed {
+                Ok(n) => rows_affected += n,
+                Err(e) => {
+                    if let Some(own_tx) = &own_tx {
+                        // Surface the insert failure even if ROLLBACK also
+                        // fails — a dead connection aborts the transaction
+                        // server-side, so the root cause is the honest error.
+                        let _ = execute_transaction_sql(own_tx, "ROLLBACK").await;
+                    }
+                    return Err(crate::errors::map_db_error(
+                        &format!("Bulk save failed for '{}'", name),
+                        e,
+                    ));
+                }
+            }
+        }
+
+        if let Some(own_tx) = &own_tx {
+            execute_transaction_sql(own_tx, "COMMIT")
                 .await
-                .map_err(|e| {
-                    crate::errors::map_db_error(&format!("Bulk save failed for '{}'", name), e)
-                })?;
+                .map_err(|e| crate::errors::map_db_error("Failed to COMMIT", e))?;
+        }
 
         Ok(rows_affected)
     })
+}
+
+/// Rows per INSERT statement so `rows × columns` never exceeds the backend's
+/// bind-parameter budget. Always at least one row: a single row wider than
+/// the budget cannot be split further, so it passes through to the backend
+/// (whose error is then the honest answer). A zero-column statement binds
+/// nothing, so the whole batch fits in one statement.
+fn bulk_insert_rows_per_statement(max_bind_params: usize, n_columns: usize) -> usize {
+    if n_columns == 0 {
+        return usize::MAX;
+    }
+    (max_bind_params / n_columns).max(1)
+}
+
+#[cfg(test)]
+mod bulk_chunking_tests {
+    use super::bulk_insert_rows_per_statement;
+
+    #[test]
+    fn floors_to_the_bind_budget() {
+        // sqlite budget, 5 columns: 6,553 rows bind 32,765 of 32,766.
+        assert_eq!(bulk_insert_rows_per_statement(32_766, 5), 6_553);
+        // Postgres budget, 12 columns: 5,461 rows bind 65,532 of 65,535.
+        assert_eq!(bulk_insert_rows_per_statement(65_535, 12), 5_461);
+    }
+
+    #[test]
+    fn exact_division_uses_the_full_budget() {
+        assert_eq!(bulk_insert_rows_per_statement(65_535, 5), 13_107);
+    }
+
+    #[test]
+    fn one_row_minimum_even_when_a_single_row_exceeds_the_budget() {
+        assert_eq!(bulk_insert_rows_per_statement(10, 20), 1);
+    }
+
+    #[test]
+    fn zero_columns_never_split() {
+        assert_eq!(bulk_insert_rows_per_statement(32_766, 0), usize::MAX);
+    }
 }
 
 /// Fetches records for a given model class based on a QueryIR-defined query.

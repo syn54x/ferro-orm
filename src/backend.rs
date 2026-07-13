@@ -415,6 +415,19 @@ impl EngineHandle {
         self.backend
     }
 
+    /// Maximum bind parameters one statement may carry on this backend.
+    ///
+    /// SQLite: `SQLITE_MAX_VARIABLE_NUMBER`, 32,766 by default since 3.32.
+    /// Postgres: the wire protocol's `Bind` message carries an `int16`
+    /// parameter count, so 65,535 is a hard protocol ceiling.
+    #[must_use]
+    pub fn max_bind_params(&self) -> usize {
+        match self.backend {
+            Dialect::Sqlite => 32_766,
+            Dialect::Postgres => 65_535,
+        }
+    }
+
     /// Record one catalog-introspection round-trip (called at the single
     /// choke point that executes catalog SQL).
     pub fn record_catalog_query(&self) {
@@ -611,7 +624,6 @@ impl EngineHandle {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn begin_transaction_connection(&self) -> Result<EngineConnection, sqlx::Error> {
         match &self.pool_snapshot() {
             BackendPool::Sqlite(pool) => {

@@ -6,7 +6,7 @@ Ferro moves SQL generation, parameter binding, and row hydration out of Python a
 
 The Rust core helps most where a traditional ORM spends significant CPU time in Python:
 
-**Bulk inserts.** `bulk_create` serializes and binds an entire batch in Rust and writes it as a single statement. The per-row Python overhead — building parameter lists, driver round-trips, object bookkeeping — largely disappears:
+**Bulk inserts.** `bulk_create` serializes and binds an entire batch in Rust and writes it in as few statements as the backend's bind-parameter limit allows. The per-row Python overhead — building parameter lists, driver round-trips, object bookkeeping — largely disappears:
 
 ```python
 users = [
@@ -43,7 +43,7 @@ for i in range(1000):
 await User.bulk_create([User(username=f"user_{i}") for i in range(1000)])
 ```
 
-Batches in the low thousands (roughly 1,000–5,000 rows) are a good unit of work — large enough to amortize overhead, small enough to keep statements and memory reasonable. Note that `bulk_create` skips the [identity map](identity-map.md) by design.
+Batch size is unbounded — Ferro splits large batches under the backend's bind-parameter limit automatically and keeps the whole call all-or-nothing — so size batches by what your application can hold in memory, not by statement limits. Note that `bulk_create` skips the [identity map](identity-map.md) by design.
 
 **Use batch update/delete instead of instance loops.** Push the work into one SQL statement:
 

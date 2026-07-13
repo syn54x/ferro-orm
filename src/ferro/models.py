@@ -639,6 +639,12 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     ) -> int:
         """Persist multiple instances in a single bulk operation
 
+        Batch size is unbounded: batches larger than the backend's
+        bind-parameter limit allows in one statement are split internally.
+        The call is atomic either way — inside an ambient ``transaction()``
+        that transaction is the atomicity boundary; a bare call is
+        all-or-nothing (a failure on any row inserts none).
+
         Args:
             instances: Model instances to persist.
 
