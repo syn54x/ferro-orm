@@ -28,6 +28,7 @@ from .._core import (
     update_filtered,
 )
 from .nodes import (
+    AggregateExpr,
     FieldProxy,
     Predicate,
     QueryNode,
@@ -91,6 +92,14 @@ def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNo
             f"where() predicate returned the bare relation {relation!r}; compare "
             f"a column (e.g. t.{relation}.<column> == ...) or use == None / "
             "== an instance to filter by the relation."
+        )
+    if isinstance(result, AggregateExpr):
+        # Comparing an aggregate already raises inside the lambda (#294); a
+        # BARE aggregate returned from where() gets the same having() story.
+        raise TypeError(
+            f"where() cannot filter on the aggregate {result._dotted()}: "
+            "WHERE filters rows before aggregation. Post-aggregation "
+            "filtering is having() (#291)."
         )
     if not isinstance(result, QueryNode):
         raise TypeError(
@@ -264,23 +273,28 @@ def _resolve_include_selector(
 
 
 class _ProjectedField(NamedTuple):
-    """One projected record field, resolved at build time (#279/#293).
+    """One projected record field, resolved at build time (#279/#293/#294).
 
     ``name`` is the output field name on the record — the dict key when the
     selector is dict-returning (an output alias, CONTEXT.md), the bare leaf
     column name otherwise. ``column`` is the source column and ``path`` the
     relation path to its table (``()`` = root model; non-empty is traversed
-    projection).
+    projection). ``agg`` is the aggregate function applied to the source
+    (``None`` = a plain column field); an aggregate field serializes as a v5
+    ``expr`` — its traversal rides ``expr.path`` as hop facts, never the
+    field-level ``path``.
     """
 
     name: str
     column: str
     path: tuple[str, ...]
+    agg: str | None = None
 
     @property
     def dotted(self) -> str:
         """The selector expression this field came from (error messages)."""
-        return "t." + ".".join((*self.path, self.column))
+        base = "t." + ".".join((*self.path, self.column))
+        return f"{base}.{self.agg}()" if self.agg else base
 
 
 def _resolve_projection_selector(
@@ -331,6 +345,20 @@ def _resolve_projection_selector(
                 f'"<other name>": {field.dotted}}})).'
             )
         seen[field.name] = field
+    # Mixing aggregate and plain fields makes the projection a GROUPED query
+    # — every plain field becomes a group key (ADR-0009). Derived grouping
+    # lands with #295; until then the mix is rejected loudly, never rendered
+    # as the SQL both backends would misanswer (Postgres errors at runtime,
+    # SQLite answers with an arbitrary row's value).
+    if any(field.agg for field in fields) and any(not field.agg for field in fields):
+        plain = next(field for field in fields if not field.agg)
+        raise NotImplementedError(
+            f"select() cannot mix aggregate and plain fields yet: "
+            f"{plain.dotted} next to an aggregate makes this a grouped query "
+            "(every plain field is a group key, ADR-0009), which lands with "
+            "#295. Project the aggregates alone, or wait for grouped "
+            "aggregates."
+        )
     return fields
 
 
@@ -384,6 +412,12 @@ def _projection_item_field(item: Any, *, context: str) -> _ProjectedField:
             "output fields, return one dict for the whole selection "
             '(e.g. `lambda t: {"id": t.id, "account_name": t.account.name}`).'
         )
+    if isinstance(item, AggregateExpr):
+        raise TypeError(
+            f"aggregate fields are user-named (#294): give {item._dotted()} "
+            "an output name with the dict selector form "
+            f'(e.g. select(lambda t: {{"total": {item._dotted()}}})).'
+        )
     if isinstance(item, RelationProxy):
         relation = item._path[-1]
         raise TypeError(
@@ -417,9 +451,10 @@ def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, .
     """Validate a dict selector into aliased fields (#293).
 
     Keys are output field names (CONTEXT.md: Output alias) and must be
-    strings; values are field references and may traverse. Nesting a tuple,
-    list, or dict as a value is rejected — flat records only (ADR-0009:
-    record results are flat).
+    strings; values are field references (which may traverse) or aggregate
+    expressions (``t.amount.sum()`` — #294, dict-only: aggregate fields are
+    user-named). Nesting a tuple, list, or dict as a value is rejected —
+    flat records only (ADR-0009: record results are flat).
     """
     fields: list[_ProjectedField] = []
     for key, value in result.items():
@@ -428,6 +463,13 @@ def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, .
                 f"select() dict selector keys are output field names and must "
                 f"be strings, got {key!r} ({type(key).__name__})."
             )
+        if isinstance(value, AggregateExpr):
+            fields.append(
+                _ProjectedField(
+                    name=key, column=value.column, path=value.path, agg=value.fn
+                )
+            )
+            continue
         if isinstance(value, (dict, tuple, list)):
             raise TypeError(
                 f"select() dict selector value for {key!r} is a "
@@ -1450,25 +1492,47 @@ class ProjectedQuery(Query[T]):
         """Serialize the ``record`` plan: one field per projected field.
 
         ``name`` is declared separately from ``column`` (output aliases) and
-        each field carries its relation ``path`` (traversed projection,
-        #293); an aggregate field will carry an ``expr`` instead (#294).
+        each plain field carries its relation ``path`` (traversed projection,
+        #293). An aggregate field carries an ``expr`` instead (#294): ``fn``
+        as data and the source's traversal as hop facts on ``expr.path`` —
+        self-contained on the wire — with the field-level ``path`` empty.
         """
-        return {
-            "kind": "record",
-            "fields": [
-                {"name": field.name, "column": field.column, "path": list(field.path)}
-                for field in self._projection
-            ],
-        }
+        fields: list[dict[str, Any]] = []
+        for field in self._projection:
+            if field.agg is not None:
+                fields.append(
+                    {
+                        "name": field.name,
+                        "path": [],
+                        "expr": {
+                            "fn": field.agg,
+                            "column": field.column,
+                            "path": _resolve_join_hops(self.model_cls, field.path),
+                        },
+                    }
+                )
+            else:
+                fields.append(
+                    {
+                        "name": field.name,
+                        "column": field.column,
+                        "path": list(field.path),
+                    }
+                )
+        return {"kind": "record", "fields": fields}
 
     def _traversed_hop_classes(self) -> dict[str, type] | None:
-        """Hop classes for traversed projection paths, or None if all-root.
+        """Hop classes for traversed PLAIN projection paths, or None.
 
         The record decode path resolves each traversed leaf's enum catalog
         through its owning model's class (#293) — the same per-table map the
-        instances plan travels with (#286).
+        instances plan travels with (#286). Aggregate fields never need one:
+        enum sources are rejected at build time and ``count`` decodes to a
+        plain int, so no aggregate output is enum-typed.
         """
-        paths = {field.path for field in self._projection if field.path}
+        paths = {
+            field.path for field in self._projection if field.path and not field.agg
+        }
         if not paths:
             return None
         return self._hop_classes_for_paths(paths)

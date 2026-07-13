@@ -68,3 +68,20 @@ async def _projection_composes_with_left_join() -> None:
         .all()
     )
     del rows
+
+
+async def _aggregate_dict_selector() -> None:
+    # Aggregate expressions (#294) are dict-selector values; they type
+    # opaquely (AggregateExpr) and the result stays Rows[Row] / Row | None —
+    # shape-not-names typing holds (record-field inference is #290's lane).
+    one: Row | None = await GoodPTxn.select(
+        lambda t: {
+            "n": t.id.count(),
+            "total": t.amount.sum(),
+            "mean": t.amount.avg(),
+            "lo": t.amount.min(),
+            "hi": t.amount.max(),
+            "avg_traversed": t.account.owner.id.avg(),
+        }
+    ).first()
+    del one

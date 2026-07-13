@@ -426,30 +426,47 @@ fn reject_unsupported_materialization(plan: &QueryPlan, operation: &str) -> PyRe
     )))
 }
 
-/// One projected record field resolved for rendering and decode (#279/#293):
-/// the output `name`, the source `column`, and the relation `path` to the
-/// source column's table (`[]` = root model).
+/// The source one projected record field reads from (#279/#293/#294).
+#[derive(Debug, Clone)]
+enum ProjectedSource {
+    /// A plain column: source `column` on the table `path` reaches
+    /// (`[]` = root model).
+    Column { column: String, path: Vec<String> },
+    /// An aggregate over a column (#294): `func` applied to `column` on the
+    /// table `path` reaches. `path` holds relation NAMES (derived from the
+    /// wire expression's hop facts) so it keys into the join plan exactly
+    /// like a plain field's path.
+    Aggregate {
+        func: ferro_schema_ir::AggregateFn,
+        column: String,
+        path: Vec<String>,
+    },
+}
+
+/// One projected record field resolved for rendering and decode: the output
+/// `name` plus its [`ProjectedSource`].
 #[derive(Debug, Clone)]
 struct ProjectedField {
     name: String,
-    column: String,
-    path: Vec<String>,
+    source: ProjectedSource,
 }
 
 /// Resolve the fetch walker's record plan from the query's materialization
-/// (#279/#293).
+/// (#279/#293/#294).
 ///
 /// `root_instances` → `None` (render the root-table asterisk, full
 /// hydration). `record` → the ordered projected fields: plain, aliased
-/// (`name != column`), and traversed (non-empty `path`) fields all render
-/// (#293); an `expr` field is boundary defense (I-6) until aggregations land
-/// (#294) — rejected loudly, never silently projected wrong.
+/// (`name != column`), traversed (non-empty `path`), and aggregate (`expr`)
+/// fields all render. Mixing aggregate and plain fields makes the plan a
+/// GROUPED query — derived GROUP BY lands with #295 — so the mix is boundary
+/// defense (I-6) until then: rejected loudly, never rendered as SQL SQLite
+/// would answer with an arbitrary row's value.
 ///
 /// # Errors
 /// `PyValueError` for `instances` (the joined-row hydration plan resolves no
 /// projected SELECT list — the instances fetch path widens the SELECT itself,
 /// #286, and dispatches before calling this), an empty `record` field list,
-/// or an `expr` field (#294).
+/// a duplicate output name, or a mixed aggregate/plain plan (#295).
 fn projected_record_fields(plan: &QueryPlan) -> PyResult<Option<Vec<ProjectedField>>> {
     let fields = match &plan.materialization {
         Materialization::RootInstances => return Ok(None),
@@ -481,86 +498,228 @@ fn projected_record_fields(plan: &QueryPlan) -> PyResult<Option<Vec<ProjectedFie
                 field.name
             )));
         }
-        if field.expr.is_some() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "record field {:?} carries an expression: expression fields \
-                 (aggregations) are not yet implemented (#294).",
-                field.name
-            )));
-        }
-        // Deserialization enforces exactly-one-of, so a field without an
-        // `expr` always carries a column; `None` here is a mixed-build shape
-        // that cannot reach this walker.
-        let Some(column) = field.column.as_deref() else {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "record field {:?} carries neither a column nor an expression.",
-                field.name
-            )));
+        let source = if let Some(expr) = &field.expr {
+            ProjectedSource::Aggregate {
+                func: expr.r#fn,
+                column: expr.column.clone(),
+                path: expr.path.iter().map(|hop| hop.relation.clone()).collect(),
+            }
+        } else {
+            // Deserialization enforces exactly-one-of, so a field without an
+            // `expr` always carries a column; `None` here is a mixed-build
+            // shape that cannot reach this walker.
+            let Some(column) = field.column.as_deref() else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "record field {:?} carries neither a column nor an expression.",
+                    field.name
+                )));
+            };
+            ProjectedSource::Column {
+                column: column.to_string(),
+                path: field.path.clone(),
+            }
         };
         resolved.push(ProjectedField {
             name: field.name.clone(),
-            column: column.to_string(),
-            path: field.path.clone(),
+            source,
         });
     }
+    let has_aggregate = resolved
+        .iter()
+        .any(|f| matches!(f.source, ProjectedSource::Aggregate { .. }));
+    let has_plain = resolved
+        .iter()
+        .any(|f| matches!(f.source, ProjectedSource::Column { .. }));
+    if has_aggregate && has_plain {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "record plan mixes aggregate and plain fields: a mixed projection \
+             is a grouped query (every plain field is a group key, ADR-0009), \
+             which is not yet implemented (#295).",
+        ));
+    }
     Ok(Some(resolved))
+}
+
+/// Resolve a record field's SELECT qualifier: the root table for an empty
+/// `path`, the path's JOIN alias otherwise (#293).
+///
+/// # Errors
+/// `Err` when the path has no join-plan entry — the Python builder always
+/// registers a projection path's join and [`QueryPlan::build_join_plan`]
+/// unions aggregate-source paths, so this is defense-in-depth, never a
+/// silently unqualified column.
+fn record_field_qualifier<'a>(
+    table_name: &'a str,
+    join_plan: &'a JoinPlan,
+    name: &str,
+    path: &[String],
+) -> PyResult<&'a str> {
+    if path.is_empty() {
+        return Ok(table_name);
+    }
+    join_plan
+        .prefix_alias
+        .get(path)
+        .map(String::as_str)
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "record field {name:?} traverses relation path {path:?} but \
+                 the query renders no join for that path; the Python builder \
+                 always registers projection joins.",
+            ))
+        })
 }
 
 /// Apply a fetch SELECT list: the projected fields of a `record` plan (in
 /// selection order) or the root-table asterisk for full hydration (#279).
 ///
-/// Every record field renders `<qualifier>.<column> AS "<name>"` (#293): the
-/// qualifier is the root table for an empty `path` and the path's JOIN alias
-/// otherwise, so a traversed field reads through the same join its path
-/// renders for `where()`/`order_by()` (shared join identity, ADR-0006) and
-/// the result column arrives under the output name, aliases included.
+/// Every record field renders under its output name (#293): a plain field as
+/// `<qualifier>.<column> AS "<name>"`, an aggregate as
+/// `<FN>(<qualifier>.<column>) AS "<name>"` (#294) — the qualifier is the
+/// root table for an empty path and the path's JOIN alias otherwise, so a
+/// traversed source reads through the same join its path renders for
+/// `where()`/`order_by()` (shared join identity, ADR-0006).
 ///
 /// # Errors
-/// `PyValueError` when a field's path has no join-plan entry — the Python
-/// builder always registers the join for a traversed projection, so this is
-/// defense-in-depth, never a silently unqualified column.
+/// `PyValueError` when a field's path has no join-plan entry
+/// ([`record_field_qualifier`]).
 fn apply_select_list(
     select: &mut SelectStatement,
     table_name: &str,
     projected: Option<&[ProjectedField]>,
     join_plan: &JoinPlan,
 ) -> PyResult<()> {
-    match projected {
-        Some(fields) => {
-            for field in fields {
-                let qualifier = if field.path.is_empty() {
-                    table_name
-                } else {
-                    join_plan.prefix_alias.get(&field.path).ok_or_else(|| {
-                        pyo3::exceptions::PyValueError::new_err(format!(
-                            "record field {:?} traverses relation path {:?} \
-                             but the query renders no join for that path; \
-                             the Python builder always registers projection \
-                             joins.",
-                            field.name, field.path
-                        ))
-                    })?
-                };
+    let Some(fields) = projected else {
+        select.column((Alias::new(table_name), sea_query::Asterisk));
+        return Ok(());
+    };
+    for field in fields {
+        match &field.source {
+            ProjectedSource::Column { column, path } => {
+                let qualifier =
+                    record_field_qualifier(table_name, join_plan, &field.name, path)?;
                 select.expr_as(
-                    Expr::col((Alias::new(qualifier), Alias::new(field.column.as_str()))),
+                    Expr::col((Alias::new(qualifier), Alias::new(column.as_str()))),
                     Alias::new(field.name.as_str()),
                 );
             }
-        }
-        None => {
-            select.column((Alias::new(table_name), sea_query::Asterisk));
+            ProjectedSource::Aggregate { func, column, path } => {
+                let qualifier =
+                    record_field_qualifier(table_name, join_plan, &field.name, path)?;
+                let source = Expr::col((Alias::new(qualifier), Alias::new(column.as_str())));
+                let call = match func {
+                    ferro_schema_ir::AggregateFn::Count => sea_query::Func::count(source),
+                    ferro_schema_ir::AggregateFn::Sum => sea_query::Func::sum(source),
+                    ferro_schema_ir::AggregateFn::Avg => sea_query::Func::avg(source),
+                    ferro_schema_ir::AggregateFn::Min => sea_query::Func::min(source),
+                    ferro_schema_ir::AggregateFn::Max => sea_query::Func::max(source),
+                };
+                select.expr_as(call, Alias::new(field.name.as_str()));
+            }
         }
     }
     Ok(())
 }
 
+/// How one record result column decodes (#293/#294): through its source
+/// column's owning codec plan, with an optional aggregate contract on top.
+struct RecordFieldDecode<'a> {
+    plan: &'a crate::codec_plan::ModelCodecPlan,
+    column: &'a str,
+    agg: Option<ferro_schema_ir::AggregateFn>,
+}
+
+/// Coerce an aggregate result to a plain Python int (`count`, and `sum` over
+/// int sources). Postgres widens `SUM(bigint)`/`COUNT` results to `numeric`/
+/// `int8`, so the wire may carry a decimal string for an integral value; a
+/// value that does not parse integrally passes through as a Decimal — the
+/// truthful value in a degraded type, never a wrong number.
+fn coerce_aggregate_int(value: EngineValue) -> crate::state::RustValue {
+    use crate::state::RustValue;
+    match value {
+        EngineValue::I64(v) => RustValue::BigInt(v),
+        EngineValue::F64(v) if v.fract() == 0.0 => RustValue::BigInt(v as i64),
+        EngineValue::Decimal(s) | EngineValue::String(s) => match s.parse::<i64>() {
+            Ok(v) => RustValue::BigInt(v),
+            Err(_) => RustValue::Decimal(s),
+        },
+        _ => RustValue::None,
+    }
+}
+
+/// Coerce an aggregate result to a plain Python float (`avg` over int/float
+/// sources, `sum` over float sources). Postgres `AVG(int)` arrives as a
+/// numeric string; SQLite arrives as a float already.
+fn coerce_aggregate_float(value: EngineValue) -> crate::state::RustValue {
+    use crate::state::RustValue;
+    match value {
+        EngineValue::F64(v) => RustValue::Double(v),
+        EngineValue::I64(v) => RustValue::Double(v as f64),
+        EngineValue::Decimal(s) | EngineValue::String(s) => match s.parse::<f64>() {
+            Ok(v) => RustValue::Double(v),
+            Err(_) => RustValue::None,
+        },
+        _ => RustValue::None,
+    }
+}
+
+/// Decode one aggregate result value per the pinned cross-backend contract
+/// (#294, ADR-0009), derived from the SOURCE column's codec:
+///
+/// - `count` → int (never NULL in SQL);
+/// - `min`/`max` → the source type, via the source column's own codec;
+/// - `sum` → the source numeric type (int → int, float → float,
+///   Decimal → Decimal);
+/// - `avg` → float for int/float sources, Decimal for Decimal sources.
+///
+/// SQL's empty-input NULL passes through as `None` verbatim — no hidden
+/// COALESCE (`count` returns 0 from SQL itself).
+fn decode_aggregate_value(
+    func: ferro_schema_ir::AggregateFn,
+    value: EngineValue,
+    plan: &crate::codec_plan::ModelCodecPlan,
+    source_column: &str,
+) -> crate::state::RustValue {
+    use crate::codec_plan::ColumnCodec;
+    use ferro_schema_ir::AggregateFn;
+    if matches!(value, EngineValue::Null) {
+        return crate::state::RustValue::None;
+    }
+    let source_is_decimal = matches!(plan.codec(source_column), Some(ColumnCodec::Decimal));
+    match func {
+        AggregateFn::Count => coerce_aggregate_int(value),
+        AggregateFn::Min | AggregateFn::Max => {
+            crate::codec::decode_engine_value(value, plan, source_column)
+        }
+        AggregateFn::Sum => {
+            if source_is_decimal {
+                crate::codec::decode_engine_value(value, plan, source_column)
+            } else if matches!(plan.codec(source_column), Some(ColumnCodec::Float)) {
+                coerce_aggregate_float(value)
+            } else {
+                coerce_aggregate_int(value)
+            }
+        }
+        AggregateFn::Avg => {
+            if source_is_decimal {
+                crate::codec::decode_engine_value(value, plan, source_column)
+            } else {
+                coerce_aggregate_float(value)
+            }
+        }
+    }
+}
+
 /// Decode record-plan rows: each result column arrives under its OUTPUT name
 /// (the rendered `AS` alias, #293) and decodes against its SOURCE column's
 /// owning model — the root's codec plan for an empty path, the hop table's
-/// registration plan otherwise (the root-vs-hop codec lesson, #270). NULL
-/// decodes to `None` unconditionally: a `left_join` keeps relation-less rows,
-/// and their traversed fields are `None` even when the source column is
-/// non-nullable (a projected record is not the related model).
+/// registration plan otherwise (the root-vs-hop codec lesson, #270) — with
+/// aggregate fields decoding per the pinned contract
+/// ([`decode_aggregate_value`], #294). NULL decodes to `None`
+/// unconditionally: a `left_join` keeps relation-less rows, and their
+/// traversed fields are `None` even when the source column is non-nullable
+/// (a projected record is not the related model); an empty-input aggregate
+/// passes its SQL NULL through the same way.
 ///
 /// # Errors
 /// `PyValueError` when a traversed field's hop table has no resolved
@@ -575,17 +734,21 @@ fn record_rows_to_parsed_data(
     plan: &QueryPlan,
     join_plan: &JoinPlan,
 ) -> PyResult<Vec<ParsedRow>> {
-    // Output name -> (codec plan of the owning model, source column).
-    let mut decode: HashMap<&str, (&crate::codec_plan::ModelCodecPlan, &str)> = HashMap::new();
+    // Output name -> how that result column decodes.
+    let mut decode: HashMap<&str, RecordFieldDecode<'_>> = HashMap::new();
     for field in fields {
-        let codec_plan = if field.path.is_empty() {
+        let (column, path, agg) = match &field.source {
+            ProjectedSource::Column { column, path } => (column, path, None),
+            ProjectedSource::Aggregate { func, column, path } => (column, path, Some(*func)),
+        };
+        let codec_plan = if path.is_empty() {
             &root.codec_plan
         } else {
-            let table = join_plan.prefix_table.get(&field.path).ok_or_else(|| {
+            let table = join_plan.prefix_table.get(path).ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(format!(
                     "record field {:?} traverses relation path {:?} with no \
                      join-plan table entry.",
-                    field.name, field.path
+                    field.name, path
                 ))
             })?;
             let registration = plan.hop_registrations.get(table).ok_or_else(|| {
@@ -597,19 +760,38 @@ fn record_rows_to_parsed_data(
             })?;
             &registration.codec_plan
         };
-        decode.insert(field.name.as_str(), (codec_plan, field.column.as_str()));
+        decode.insert(
+            field.name.as_str(),
+            RecordFieldDecode {
+                plan: codec_plan,
+                column: column.as_str(),
+                agg,
+            },
+        );
     }
     let mut parsed = Vec::with_capacity(rows.len());
     for row in rows {
         let mut decoded_fields = Vec::with_capacity(row.values.len());
         for (name, value) in row.values {
-            let Some((codec_plan, source_column)) = decode.get(name.as_str()) else {
+            let Some(field_decode) = decode.get(name.as_str()) else {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "record decode received result column {name:?} that \
                      matches no projected field.",
                 )));
             };
-            let value = crate::codec::decode_engine_value(value, codec_plan, source_column);
+            let value = match field_decode.agg {
+                Some(func) => decode_aggregate_value(
+                    func,
+                    value,
+                    field_decode.plan,
+                    field_decode.column,
+                ),
+                None => crate::codec::decode_engine_value(
+                    value,
+                    field_decode.plan,
+                    field_decode.column,
+                ),
+            };
             decoded_fields.push((name, value));
         }
         // Projected records carry no persistence identity: no PK extraction.
@@ -620,11 +802,13 @@ fn record_rows_to_parsed_data(
 
 /// Build a record plan's enum catalog, keyed by OUTPUT field name (#293).
 ///
-/// Each projected field's enum class (when its source column is enum-typed)
-/// resolves through the source's OWNING model — the root class for plain
+/// Each plain field's enum class (when its source column is enum-typed)
+/// resolves through the source's OWNING model — the root class for root
 /// fields, the hop table's class (from `hop_classes`) for traversed ones — so
 /// hydration converts exactly the values full hydration of that model would,
-/// under the record's output names.
+/// under the record's output names. Aggregate fields never carry one: enum
+/// sources are rejected at build time and `count` decodes to a plain int
+/// (#294), so no aggregate output is enum-typed.
 ///
 /// # Errors
 /// `PyValueError` when a traversed field's path has no join-plan table or its
@@ -641,14 +825,17 @@ fn record_enum_classes_for<'py>(
     let mut hop_enums: HashMap<String, HashMap<String, Bound<'py, PyAny>>> = HashMap::new();
     let mut out: HashMap<String, Bound<'py, PyAny>> = HashMap::new();
     for field in fields {
-        let source_enums = if field.path.is_empty() {
+        let ProjectedSource::Column { column, path } = &field.source else {
+            continue;
+        };
+        let source_enums = if path.is_empty() {
             &root_enums
         } else {
-            let table = join_plan.prefix_table.get(&field.path).ok_or_else(|| {
+            let table = join_plan.prefix_table.get(path).ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(format!(
                     "record field {:?} traverses relation path {:?} with no \
                      join-plan table entry.",
-                    field.name, field.path
+                    field.name, path
                 ))
             })?;
             if !hop_enums.contains_key(table) {
@@ -670,7 +857,7 @@ fn record_enum_classes_for<'py>(
             }
             &hop_enums[table]
         };
-        if let Some(enum_cls) = source_enums.get(&field.column) {
+        if let Some(enum_cls) = source_enums.get(column) {
             out.insert(field.name.clone(), enum_cls.clone());
         }
     }
@@ -2229,12 +2416,16 @@ pub fn fetch_filtered<'py>(
     };
     // The hop-class map travels the same way, paired to the plans that decode
     // or hydrate through another model's protocol: every instances plan
-    // (population, #286) and a record plan with traversed fields (each leaf's
-    // enum catalog resolves through its owning model's class, #293).
+    // (population, #286) and a record plan with traversed PLAIN fields (each
+    // leaf's enum catalog resolves through its owning model's class, #293).
+    // Aggregate fields never need one — enum sources are rejected at build
+    // time and count decodes to a plain int (#294).
     let needs_hop_classes = include_paths.is_some()
-        || projected
-            .as_ref()
-            .is_some_and(|fields| fields.iter().any(|field| !field.path.is_empty()));
+        || projected.as_ref().is_some_and(|fields| {
+            fields.iter().any(|field| {
+                matches!(&field.source, ProjectedSource::Column { path, .. } if !path.is_empty())
+            })
+        });
     let hop_classes_py = match (needs_hop_classes, hop_classes) {
         (true, Some(hop_classes)) => Some(hop_classes.unbind()),
         (false, None) => None,
@@ -4991,15 +5182,92 @@ mod record_select_list_tests {
     }
 
     #[test]
-    fn record_field_with_expr_is_rejected() {
-        // A well-formed v5 expression field parses (the wire shape is the
-        // contract, #292) but this walker does not render it until #294.
+    fn global_aggregates_render_under_their_output_names() {
+        // The five aggregate functions render `<FN>(<root>.<col>) AS "<name>"`
+        // (#294) — no GROUP BY on an aggregate-only plan (a global aggregate
+        // collapses to one row).
         let plan = plan_with_materialization(record_fields(serde_json::json!([
             {"name": "n", "path": [],
-             "expr": {"fn": "count", "column": "id", "path": []}}
+             "expr": {"fn": "count", "column": "id", "path": []}},
+            {"name": "total", "path": [],
+             "expr": {"fn": "sum", "column": "amount", "path": []}},
+            {"name": "mean", "path": [],
+             "expr": {"fn": "avg", "column": "amount", "path": []}},
+            {"name": "lo", "path": [],
+             "expr": {"fn": "min", "column": "amount", "path": []}},
+            {"name": "hi", "path": [],
+             "expr": {"fn": "max", "column": "amount", "path": []}}
         ])));
-        let err = projected_record_fields(&plan).expect_err("expr field must be rejected");
-        assert!(err.to_string().contains("expression"), "got {err}");
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
+            .expect("aggregates render");
+        select.from(Alias::new("transaction"));
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert_eq!(
+            sql,
+            "SELECT COUNT(\"transaction\".\"id\") AS \"n\", \
+             SUM(\"transaction\".\"amount\") AS \"total\", \
+             AVG(\"transaction\".\"amount\") AS \"mean\", \
+             MIN(\"transaction\".\"amount\") AS \"lo\", \
+             MAX(\"transaction\".\"amount\") AS \"hi\" FROM \"transaction\""
+        );
+        assert!(!sql.contains("GROUP BY"), "no grouping on a global aggregate: {sql}");
+    }
+
+    #[test]
+    fn traversed_aggregate_source_renders_through_its_paths_join() {
+        // An expr field's traversal is self-contained on the wire (hop facts,
+        // ADR-0009): with an EMPTY joins section, build_join_plan unions the
+        // source path in with traversal semantics (INNER), and the aggregate
+        // reads through that alias.
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "avg_balance", "path": [],
+             "expr": {"fn": "avg", "column": "balance", "path": [
+                 {"relation": "account", "from_column": "account_id",
+                  "to_table": "account", "to_column": "id"}
+             ]}}
+        ])));
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", Some(&projected), &join_plan)
+            .expect("traversed aggregate renders");
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.from(Alias::new("transaction"));
+
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("AVG(\"j1_account\".\"balance\") AS \"avg_balance\""),
+            "aggregate must read through the path's join alias: {sql}"
+        );
+        assert!(
+            sql.contains("INNER JOIN \"account\" AS \"j1_account\""),
+            "the source path must render INNER (traversal semantics): {sql}"
+        );
+    }
+
+    #[test]
+    fn mixed_aggregate_and_plain_plan_is_rejected() {
+        // A mixed projection is a grouped query (every plain field is a group
+        // key, ADR-0009) — boundary defense until #295 derives GROUP BY.
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "acct", "column": "account_id", "path": []},
+            {"name": "total", "path": [],
+             "expr": {"fn": "sum", "column": "amount", "path": []}}
+        ])));
+        let err = projected_record_fields(&plan).expect_err("mixed plan must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("grouped") && msg.contains("#295"),
+            "must point at grouped aggregates: {msg}"
+        );
     }
 
     #[test]
