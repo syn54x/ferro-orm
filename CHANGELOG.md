@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.16.1 (2026-07-13)
+
+### Bug Fixes
+
+- Chunk bulk_create under backend bind-parameter limits
+  ([`38da62d`](https://github.com/syn54x/ferro-orm/commit/38da62d9ab9fab6b36a9eae0722c1d741b976d15))
+
+
 ## v0.16.0 (2026-07-13)
 
 ### Chores
