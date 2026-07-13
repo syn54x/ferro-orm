@@ -62,6 +62,23 @@ row = await Transaction.select(lambda t: t.amount).first()  # Row | None
 full = await Transaction.select().all()  # list[Transaction] — bare form unchanged
 ```
 
+Every selector form keeps that shape: the tuple, the single field, traversal
+at any depth (`t.account.owner.email` chains as `FieldProxy[Any]`), and the
+dict form, whose values may also be **aggregate expressions**:
+
+```python
+row = await Transaction.select(
+    lambda t: {"acct": t.account_id, "total": t.amount.sum()}
+).first()  # Row | None
+```
+
+An aggregate expression types **opaquely**: `t.amount.sum()` is an
+`AggregateExpr` — deliberately not a value, not a `QueryNode`, not a column.
+That is what makes the misuse gates work: an aggregate compared inside
+`where()` raises at build time (post-aggregation filtering is `having()`),
+and an `AggregateExpr` is only ever valid as a dict-selector value or an
+`order_by()` lambda result.
+
 The gate divides the work exactly like predicates do:
 
 - **Shape is checked statically.** Passing a `Row` where a model instance is
@@ -73,6 +90,14 @@ The gate divides the work exactly like predicates do:
   to the checker; a misspelled column raises `AttributeError` with a
   did-you-mean when the query is built, before any round-trip — the same
   runtime validation as `where()` and `order_by()`.
+
+The promise is **shape, not names**: the checker knows a projected query
+yields `Rows[Row]`, but not that this particular `Row` has a `.total` of type
+`int | None` — record fields type as `Any` on access. Inferring per-field
+record types from the selector (so `row.total` checks as what the aggregate
+contract says it is) is the record-field inference lane, tracked in
+[#290](https://github.com/syn54x/ferro-orm/issues/290) — another place
+typing can sharpen later with zero runtime change.
 
 ## Included Queries
 
@@ -118,7 +143,8 @@ parameter type.
 - `ferro.query.QueryProxy` — validating attribute proxy passed to lambda predicates.
 - `ferro.query.Predicate` — `Callable[[QueryProxy[TModel]], QueryNode]`, the type of any lambda predicate.
 - `ferro.query.FieldProxy` — generic over the column's Python type (`FieldProxy[T]`); the mechanism a `QueryProxy` attribute access returns.
-- `ferro.query.RowSelector` — the type of a `select()` lambda selector: a callable returning one column or a tuple of columns.
+- `ferro.query.RowSelector` — the type of a `select()` lambda selector: a callable returning one field, a tuple of fields, or a dict of output names to fields/aggregates.
+- `ferro.query.AggregateExpr` — the opaque type of `t.amount.sum()` and friends; valid only as a dict-selector value or an `order_by()` lambda result.
 - `ferro.query.Row` / `ferro.query.Rows` — projected records and their list-like container, the result shape of a projected query.
 
 ## See Also

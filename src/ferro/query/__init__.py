@@ -2,6 +2,7 @@
 
 from .builder import ProjectedQuery, Query, Relation
 from .nodes import (
+    AggregateExpr,
     FieldProxy,
     Predicate,
     QueryNode,
@@ -12,6 +13,7 @@ from .nodes import (
 from .rows import Row, Rows
 
 __all__ = [
+    "AggregateExpr",
     "FieldProxy",
     "Predicate",
     "ProjectedQuery",

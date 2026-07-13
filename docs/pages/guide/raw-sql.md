@@ -4,7 +4,7 @@ Ferro exposes a raw SQL escape hatch — `execute`, `fetch_all`, `fetch_one` —
 
 ## When to Reach for Raw SQL
 
-Reach for raw SQL when the ORM can't express what you need: aggregations and reports, Postgres GUCs (`set_config`, `SET LOCAL`), advisory locks, `LISTEN/NOTIFY`, database-side functions, or one-off maintenance statements. For everyday CRUD, prefer the ORM — it returns typed, validated instances; raw SQL returns plain dicts of primitives.
+Reach for raw SQL when the ORM can't express what you need: complex reports (window functions, CTEs, `HAVING`), Postgres GUCs (`set_config`, `SET LOCAL`), advisory locks, `LISTEN/NOTIFY`, database-side functions, or one-off maintenance statements. For everyday CRUD — and for plain [aggregations and grouped queries](aggregations.md), which are ORM territory now — prefer the ORM: it returns typed, validated instances; raw SQL returns plain dicts of primitives.
 
 !!! warning "Raw SQL is an escape hatch"
     Bind values cross the FFI as wire-close primitives, and rows come back as `dict[str, str | int | float | bool | bytes | None]`. UUID, datetime, and JSON columns are returned as **strings**. If you want typed rows, use the ORM.
