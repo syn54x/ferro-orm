@@ -448,6 +448,20 @@ impl QueryPlan {
                 builder.walk_path(root_table, path, EdgeType::IncludeOnly);
             }
         }
+        // Aggregate-source edge union (#294): an `expr` field's traversal is
+        // self-contained on the wire (hop facts, ADR-0009), so the plan can
+        // render without a matching `joins` entry. The Python builder
+        // registers the path anyway (shared join identity with `where()`/
+        // `order_by()` — same prefix, same alias, deduped by walk_path);
+        // edges only an expression reaches render with traversal semantics:
+        // INNER unless a `joins` entry LEFT-marks them (ADR-0006).
+        if let Materialization::Record { fields } = &self.materialization {
+            for field in fields {
+                if let Some(expr) = &field.expr {
+                    builder.walk_path(root_table, &expr.path, EdgeType::Resolved(&left_edges));
+                }
+            }
+        }
         Ok(builder.finish())
     }
 

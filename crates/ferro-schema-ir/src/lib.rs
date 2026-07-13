@@ -705,6 +705,44 @@ mod tests {
     }
 
     #[test]
+    fn query_global_aggregate_fixture_roundtrip() {
+        // The global-aggregate golden vector (#294): an aggregate-only record
+        // plan — count, root sum, and a traversed avg carrying hop facts on
+        // the expression, plus a `joins` entry sharing the avg's path (join
+        // identity) — survives a deserialize/serialize round-trip without
+        // drift. No group keys: the whole result collapses to one record.
+        let fixture = include_str!(
+            "../../../tests/fixtures/ir_vectors/query_transaction_global_aggregate_v5.json"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("global aggregate fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> = serde_json::from_value(ir.clone())
+            .expect("global aggregate IR must deserialize");
+        let Materialization::Record { fields } = &envelope.payload.materialization else {
+            panic!(
+                "expected a record plan, got {:?}",
+                envelope.payload.materialization
+            );
+        };
+        assert_eq!(fields.len(), 3);
+        assert!(
+            fields.iter().all(|f| f.expr.is_some()),
+            "a global aggregate plan is aggregate-only"
+        );
+        assert_eq!(
+            fields[0].expr.as_ref().map(|e| e.r#fn),
+            Some(AggregateFn::Count)
+        );
+        let encoded =
+            serde_json::to_value(&envelope).expect("global aggregate IR must serialize");
+        assert_eq!(encoded, ir, "global aggregate round-trip must not drift");
+    }
+
+    #[test]
     fn query_traversed_record_fixture_roundtrip() {
         // The traversed-projection golden vector (#293): an aliased root
         // field, a 1-hop field under a LEFT-marked path, and a 2-hop field

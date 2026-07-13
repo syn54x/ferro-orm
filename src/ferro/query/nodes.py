@@ -4,10 +4,43 @@ import difflib
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Generic, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar
 
 TField = TypeVar("TField")
 TModel = TypeVar("TModel")
+
+# Aggregate source families (#294, ADR-0009): which column families each
+# aggregate accepts, validated at build time. `None` = any column. Families
+# with no portable cross-backend meaning — enum (definition order vs lexical
+# text order diverges), uuid (no Postgres min/max), json, bool — are outside
+# every non-count set; build time is the only honest place to fail them.
+_AGG_NUMERIC = frozenset({"integer", "number", "decimal"})
+_AGG_ORDERED = _AGG_NUMERIC | {"string", "datetime", "date", "time"}
+_AGGREGATE_FAMILIES: dict[str, frozenset[str] | None] = {
+    "count": None,
+    "sum": _AGG_NUMERIC,
+    "avg": _AGG_NUMERIC,
+    "min": _AGG_ORDERED,
+    "max": _AGG_ORDERED,
+}
+_AGGREGATE_FAMILY_HINT = {
+    "sum": "a numeric column (int, float, or Decimal)",
+    "avg": "a numeric column (int, float, or Decimal)",
+    "min": "an orderable column (numeric, text, or date/time)",
+    "max": "an orderable column (numeric, text, or date/time)",
+}
+
+
+def _aggregate_source_family(spec: Any) -> str:
+    """Classify a column spec into an aggregate source family (#294).
+
+    Enum-typed columns classify as ``enum`` regardless of their storage
+    family (a text enum's logical type is ``string``, an IntEnum's is
+    ``integer`` — both aggregate-hostile for the same portability reason).
+    """
+    if spec.enum_values is not None or spec.enum_class is not None:
+        return "enum"
+    return spec.logical_type
 
 
 class QueryNode:
@@ -195,7 +228,12 @@ class FieldProxy(Generic[TField]):
         True
     """
 
-    def __init__(self, column: str, path: tuple[str, ...] = ()):
+    def __init__(
+        self,
+        column: str,
+        path: tuple[str, ...] = (),
+        owner: type | None = None,
+    ):
         """Initialize a field proxy for a specific column
 
         Args:
@@ -204,9 +242,81 @@ class FieldProxy(Generic[TField]):
                 table; empty (default) means the root model. Plumbed through
                 so relation traversal (#270) can populate it — this slice
                 never produces a non-empty path.
+            owner: The model class this column belongs to (the root model, or
+                a traversal's target model), when known. Query proxies always
+                pass it; aggregate methods (#294) read the column spec off it
+                to validate source families at build time. A hand-built proxy
+                without an owner skips that validation.
         """
         self.column = column
         self.path = path
+        # Underscored so the attribute can never statically shadow traversal
+        # to a relation FIELD named "owner" (`t.account.owner.email`) through
+        # the TYPE_CHECKING `__getattr__` chain.
+        self._owner = owner
+
+    def _dotted(self) -> str:
+        """The selector expression this proxy came from (error messages)."""
+        return "t." + ".".join((*self.path, self.column))
+
+    def _aggregate(self, fn: str) -> "AggregateExpr":
+        """Build an aggregate expression over this column (#294, ADR-0009).
+
+        Validates the source family at build time when the owning model is
+        known: ``sum``/``avg`` need a numeric column, ``min``/``max`` an
+        orderable one (numeric, text, date/time), ``count`` takes any column.
+        Families with no portable cross-backend meaning (enum, uuid, json,
+        bool) are rejected pointedly — build time is the only honest place
+        to fail.
+        """
+        if self._owner is not None:
+            spec = getattr(self._owner, "__ferro_columns__", {}).get(self.column)
+            if spec is not None:
+                family = _aggregate_source_family(spec)
+                allowed = _AGGREGATE_FAMILIES[fn]
+                if allowed is not None and family not in allowed:
+                    model = self._owner.__name__
+                    raise TypeError(
+                        f"{self._dotted()}.{fn}() is not supported: "
+                        f"{model}.{self.column} is {family}-typed, and {fn}() "
+                        f"takes {_AGGREGATE_FAMILY_HINT[fn]}. No portable "
+                        "cross-backend meaning exists for this aggregate over "
+                        f"a {family} column."
+                    )
+        return AggregateExpr(fn, self.column, self.path)
+
+    def count(self) -> "AggregateExpr":
+        """``COUNT(column)`` — counts rows where this column is non-NULL."""
+        return self._aggregate("count")
+
+    def sum(self) -> "AggregateExpr":
+        """``SUM(column)`` — numeric columns only; ``None`` over no rows."""
+        return self._aggregate("sum")
+
+    def avg(self) -> "AggregateExpr":
+        """``AVG(column)`` — numeric columns only; ``None`` over no rows."""
+        return self._aggregate("avg")
+
+    def min(self) -> "AggregateExpr":
+        """``MIN(column)`` — numeric, text, or date/time columns."""
+        return self._aggregate("min")
+
+    def max(self) -> "AggregateExpr":
+        """``MAX(column)`` — numeric, text, or date/time columns."""
+        return self._aggregate("max")
+
+    def __iter__(self) -> "NoReturn":
+        """Reject iteration — the builtin-``sum`` trap (#294).
+
+        ``sum(t.amount)`` calls ``iter(t.amount)`` and would otherwise fail
+        with an opaque message (or hang on an infinite proxy). Aggregation is
+        a method on the proxy, not a Python builtin over it.
+        """
+        raise TypeError(
+            f"{self._dotted()} is a column reference and cannot be iterated; "
+            f"did you mean {self._dotted()}.sum()? Aggregates are methods on "
+            "the column (.count()/.sum()/.avg()/.min()/.max())."
+        )
 
     if TYPE_CHECKING:
 
@@ -319,6 +429,71 @@ class FieldProxy(Generic[TField]):
         return f"FieldProxy(column={self.column!r})"
 
 
+class AggregateExpr:
+    """A build-time aggregate expression over one column (#294, ADR-0009).
+
+    Built by the five aggregate methods on :class:`FieldProxy`
+    (``t.amount.sum()``, traversal included: ``t.account.balance.avg()``).
+    Carries the aggregate ``fn`` (the closed ``count/sum/avg/min/max`` set),
+    the source ``column``, and the source's relation ``path`` — the data the
+    ``select()`` resolver turns into a v5 ``expr`` record field.
+
+    Deliberately opaque: an aggregate expression is a projection source, not
+    a value — comparing one raises pointedly at build time (post-aggregation
+    filtering is ``having()``, #291), and it is not a predicate, a column, or
+    an iterable.
+    """
+
+    __slots__ = ("fn", "column", "path")
+
+    def __init__(self, fn: str, column: str, path: tuple[str, ...]) -> None:
+        self.fn = fn
+        self.column = column
+        self.path = path
+
+    def _dotted(self) -> str:
+        """The selector expression this aggregate came from (errors)."""
+        return "t." + ".".join((*self.path, self.column)) + f".{self.fn}()"
+
+    def _reject_comparison(self, symbol: str) -> NoReturn:
+        """Reject a comparison on an aggregate (#294 → having(), #291)."""
+        raise TypeError(
+            f"{self._dotted()} {symbol} ... is not a where() predicate: "
+            "WHERE filters rows before aggregation, so an aggregate cannot "
+            "appear in it. Post-aggregation filtering is having() (#291); "
+            "until it lands, filter rows with where() and compare the "
+            "aggregated result in Python."
+        )
+
+    def __eq__(self, other: object) -> NoReturn:  # type: ignore[override]
+        self._reject_comparison("==")
+
+    def __ne__(self, other: object) -> NoReturn:  # type: ignore[override]
+        self._reject_comparison("!=")
+
+    def __lt__(self, other: object) -> NoReturn:
+        self._reject_comparison("<")
+
+    def __le__(self, other: object) -> NoReturn:
+        self._reject_comparison("<=")
+
+    def __gt__(self, other: object) -> NoReturn:
+        self._reject_comparison(">")
+
+    def __ge__(self, other: object) -> NoReturn:
+        self._reject_comparison(">=")
+
+    def __bool__(self) -> NoReturn:
+        raise TypeError(
+            f"{self._dotted()} has no truth value; an aggregate expression "
+            "is a projection source (select(lambda t: {\"total\": "
+            f"{self._dotted()}}})), not a predicate."
+        )
+
+    def __repr__(self) -> str:
+        return f"AggregateExpr(fn={self.fn!r}, column={self.column!r}, path={self.path!r})"
+
+
 def validate_query_column(model_cls: type, name: str) -> str:
     """Validate a queryable column name at build time (FF-F F-2).
 
@@ -403,7 +578,7 @@ class QueryProxy(Generic[TModel]):
                 self._model_cls, (name,), spec.target
             )
         validate_query_column(self._model_cls, name)
-        return FieldProxy(name)
+        return FieldProxy(name, owner=self._model_cls)
 
 
 class RelationProxy:
@@ -455,7 +630,7 @@ class RelationProxy:
         if spec is not None:
             return RelationProxy(self._root_model, self._path + (name,), spec.target)
         validate_query_column(self._target, name)
-        return FieldProxy(name, path=self._path)
+        return FieldProxy(name, path=self._path, owner=self._target)
 
     def _relation_name(self) -> str:
         """The last-hop relation field name (the one being compared)."""
@@ -573,14 +748,16 @@ RowSelector: TypeAlias = Callable[
     FieldProxy[Any]
     | tuple[FieldProxy[Any], ...]
     | list[FieldProxy[Any]]
-    | dict[str, FieldProxy[Any]],
+    | dict[str, "FieldProxy[Any] | AggregateExpr"],
 ]
 """Type alias for lambda selectors accepted by ``select()`` projections.
 
 A selector names fields — one (``lambda t: t.amount``), several
 (``lambda t: (t.id, t.amount)``), or a dict whose string keys name the
 output fields (``lambda t: {"account_name": t.account.name}`` — output
-aliases, #293). Fields may traverse forward-FK relations at any depth.
+aliases, #293). Fields may traverse forward-FK relations at any depth, and
+dict values may be aggregate expressions (``{"total": t.amount.sum()}`` —
+#294; aggregates are user-named, so the dict form is their only home).
 Returning a comparison (a :class:`QueryNode`), nesting shapes, or using a
 non-string dict key fails the static gate: a projection selects fields,
 a predicate belongs in ``where()``.
