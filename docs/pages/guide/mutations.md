@@ -14,11 +14,13 @@ Ferro's write surface is three verbs with three distinct intents — none of the
 
 ### create
 
-`Model.create(**fields)` validates, inserts, and returns the persisted instance in one call. For inserting many rows, `Model.bulk_create(instances)` batches them into a single statement and returns the inserted count:
+`Model.create(**fields)` validates, inserts, and returns the persisted instance in one call. For inserting many rows, `Model.bulk_create(instances)` writes the whole batch in bulk and returns the inserted count:
 
 ```python
 --8<-- "docs/examples/quickstart.py:create"
 ```
+
+Batch size is unbounded. Both backends cap how many parameters one statement may bind (SQLite 32,766; PostgreSQL 65,535), so Ferro splits a large batch across as many INSERT statements as the active backend requires — an implementation detail you never see. Atomicity is preserved either way: inside a [`transaction()`](transactions.md) block that transaction is the boundary, and a bare `bulk_create` call is all-or-nothing — if any row fails (say, a unique violation late in the batch), no rows from the batch are inserted.
 
 `create()` is a plain INSERT — it never updates an existing row. A duplicate primary key or unique value raises [`UniqueViolationError`](../api/exceptions.md), and the existing row is left untouched:
 
