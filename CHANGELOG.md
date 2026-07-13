@@ -1,6 +1,37 @@
 # CHANGELOG
 
 
+## v0.16.0 (2026-07-13)
+
+### Chores
+
+- ADR-0009 aggregate projections + output-alias/traversed-projection/aggregate-projection glossary
+  ([`51b8c0c`](https://github.com/syn54x/ferro-orm/commit/51b8c0c5fef2d383561b0127028ad5e7eb5bbbc3))
+
+### Documentation
+
+- Aggregation guide, projection reference, typing page
+  ([#296](https://github.com/syn54x/ferro-orm/pull/296),
+  [`44230c5`](https://github.com/syn54x/ferro-orm/commit/44230c55b53544788210f0664dc2a32634409839))
+
+### Features
+
+- Global aggregates — count/sum/avg/min/max ([#294](https://github.com/syn54x/ferro-orm/pull/294),
+  [`1679e44`](https://github.com/syn54x/ferro-orm/commit/1679e44399b8ecc9f47a4f416dbf9aa821173b16))
+
+- Grouped aggregates, order_by rules, verb guardrails
+  ([#295](https://github.com/syn54x/ferro-orm/pull/295),
+  [`2408ad7`](https://github.com/syn54x/ferro-orm/commit/2408ad7ae91cf6e7024e7297764191967596e869))
+
+- Traversed projection + output aliases ([#293](https://github.com/syn54x/ferro-orm/pull/293),
+  [`1e73e2a`](https://github.com/syn54x/ferro-orm/commit/1e73e2a8f53a4d56d3caaa38a754166023e4c361))
+
+### Refactoring
+
+- QueryIR v5 — the expr record-field shape ([#292](https://github.com/syn54x/ferro-orm/pull/292),
+  [`dc779d0`](https://github.com/syn54x/ferro-orm/commit/dc779d0e1184e6c87e19872302a045c3f36b8e5f))
+
+
 ## v0.15.0 (2026-07-11)
 
 ### Chores
