@@ -452,21 +452,21 @@ struct ProjectedField {
 }
 
 /// Resolve the fetch walker's record plan from the query's materialization
-/// (#279/#293/#294).
+/// (#279/#293/#294/#295).
 ///
 /// `root_instances` → `None` (render the root-table asterisk, full
 /// hydration). `record` → the ordered projected fields: plain, aliased
 /// (`name != column`), traversed (non-empty `path`), and aggregate (`expr`)
-/// fields all render. Mixing aggregate and plain fields makes the plan a
-/// GROUPED query — derived GROUP BY lands with #295 — so the mix is boundary
-/// defense (I-6) until then: rejected loudly, never rendered as SQL SQLite
-/// would answer with an arbitrary row's value.
+/// fields all render. A plan mixing aggregate and plain fields is a GROUPED
+/// query (#295, ADR-0009): every plain field is a group key, and the
+/// renderer derives GROUP BY from this resolution — grouping never travels
+/// on the wire.
 ///
 /// # Errors
 /// `PyValueError` for `instances` (the joined-row hydration plan resolves no
 /// projected SELECT list — the instances fetch path widens the SELECT itself,
 /// #286, and dispatches before calling this), an empty `record` field list,
-/// a duplicate output name, or a mixed aggregate/plain plan (#295).
+/// or a duplicate output name.
 fn projected_record_fields(plan: &QueryPlan) -> PyResult<Option<Vec<ProjectedField>>> {
     let fields = match &plan.materialization {
         Materialization::RootInstances => return Ok(None),
@@ -524,20 +524,16 @@ fn projected_record_fields(plan: &QueryPlan) -> PyResult<Option<Vec<ProjectedFie
             source,
         });
     }
-    let has_aggregate = resolved
-        .iter()
-        .any(|f| matches!(f.source, ProjectedSource::Aggregate { .. }));
-    let has_plain = resolved
-        .iter()
-        .any(|f| matches!(f.source, ProjectedSource::Column { .. }));
-    if has_aggregate && has_plain {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "record plan mixes aggregate and plain fields: a mixed projection \
-             is a grouped query (every plain field is a group key, ADR-0009), \
-             which is not yet implemented (#295).",
-        ));
-    }
     Ok(Some(resolved))
+}
+
+/// True when a record plan contains at least one aggregate field — the plan
+/// is then an AGGREGATE PROJECTION (CONTEXT.md): every plain field is a
+/// group key and the renderer derives GROUP BY from the plan (#295).
+fn record_plan_has_aggregate(fields: &[ProjectedField]) -> bool {
+    fields
+        .iter()
+        .any(|f| matches!(f.source, ProjectedSource::Aggregate { .. }))
 }
 
 /// Resolve a record field's SELECT qualifier: the root table for an empty
@@ -580,6 +576,13 @@ fn record_field_qualifier<'a>(
 /// traversed source reads through the same join its path renders for
 /// `where()`/`order_by()` (shared join identity, ADR-0006).
 ///
+/// An AGGREGATE PROJECTION derives its GROUP BY here (#295, ADR-0009): when
+/// any field is an aggregate, every plain field's qualified source column
+/// becomes a group key, in selection order. Grouping never travels on the
+/// wire — the record plan determines it, exactly as joins render from paths.
+/// With no plain fields there is no GROUP BY: the whole result collapses to
+/// one record (the global aggregate, #294).
+///
 /// # Errors
 /// `PyValueError` when a field's path has no join-plan entry
 /// ([`record_field_qualifier`]).
@@ -593,15 +596,17 @@ fn apply_select_list(
         select.column((Alias::new(table_name), sea_query::Asterisk));
         return Ok(());
     };
+    let derive_group_by = record_plan_has_aggregate(fields);
     for field in fields {
         match &field.source {
             ProjectedSource::Column { column, path } => {
                 let qualifier =
                     record_field_qualifier(table_name, join_plan, &field.name, path)?;
-                select.expr_as(
-                    Expr::col((Alias::new(qualifier), Alias::new(column.as_str()))),
-                    Alias::new(field.name.as_str()),
-                );
+                let source = Expr::col((Alias::new(qualifier), Alias::new(column.as_str())));
+                if derive_group_by {
+                    select.add_group_by([source.clone().into()]);
+                }
+                select.expr_as(source, Alias::new(field.name.as_str()));
             }
             ProjectedSource::Aggregate { func, column, path } => {
                 let qualifier =
@@ -619,6 +624,44 @@ fn apply_select_list(
         }
     }
     Ok(())
+}
+
+/// Resolve one `ORDER BY` term against a record plan (#295): SQL's own
+/// ORDER BY scoping, made deterministic in the renderer.
+///
+/// An empty-path term whose column matches an OUTPUT field name renders as
+/// the bare result-column alias (output names resolve first — group keys and
+/// aggregates both sort this way); anything else falls back to a qualified
+/// source column. On an aggregate projection the fallback must be a group
+/// key's source `(column, path)` — an ungrouped bare column is rejected
+/// loudly (the SQLite arbitrary-row trap made unwritable; the Python builder
+/// rejects it at build time, so this is boundary defense, I-6).
+fn record_order_by_expr(
+    order: &ferro_schema_ir::QueryOrderBy,
+    fields: &[ProjectedField],
+    table_name: &str,
+    join_plan: &JoinPlan,
+) -> PyResult<Expr> {
+    if order.path.is_empty() && fields.iter().any(|f| f.name == order.column) {
+        return Ok(Expr::col(Alias::new(order.column.as_str())));
+    }
+    if record_plan_has_aggregate(fields) {
+        let is_group_key_source = fields.iter().any(|f| {
+            matches!(&f.source, ProjectedSource::Column { column, path }
+                if *column == order.column && *path == order.path)
+        });
+        if !is_group_key_source {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "ORDER BY {:?} on an aggregate projection must name a group \
+                 key or an aggregate: it is neither an output field nor a \
+                 group key's source column, so each group would answer with \
+                 an arbitrary row's value.",
+                order.column
+            )));
+        }
+    }
+    crate::query::qualify_column_with_joins(table_name, join_plan, &order.column, &order.path)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 /// How one record result column decodes (#293/#294): through its source
@@ -2518,15 +2561,22 @@ pub fn fetch_filtered<'py>(
             // path qualifies by the root table, a relation path by its JOIN alias
             // (#271). A path with no matching join entry is a loud error — the
             // Python builder always registers the join for an order_by path, so
-            // this is defense-in-depth, never reachable in normal use.
+            // this is defense-in-depth, never reachable in normal use. On a
+            // record plan the term resolves output field names FIRST (#295):
+            // a matching name renders as the bare result-column alias.
             for order in &plan.order_by {
-                let col = crate::query::qualify_column_with_joins(
-                    &table_name,
-                    &join_plan,
-                    &order.column,
-                    &order.path,
-                )
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                let col = match projected.as_deref() {
+                    Some(fields) => {
+                        record_order_by_expr(order, fields, &table_name, &join_plan)?
+                    }
+                    None => crate::query::qualify_column_with_joins(
+                        &table_name,
+                        &join_plan,
+                        &order.column,
+                        &order.path,
+                    )
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?,
+                };
                 let dir = if order.direction.to_lowercase() == "desc" {
                     Order::Desc
                 } else {
@@ -4956,16 +5006,17 @@ mod materialization_walker_gate_tests {
 
 #[cfg(test)]
 mod record_select_list_tests {
-    //! Pin the record plan's SELECT-list resolution and rendering (#279/#293):
-    //! every field renders `<qualifier>.<column> AS "<name>"` in selection
-    //! order — root-qualified for plain fields, join-alias-qualified for
-    //! traversed ones (sharing the path's join with `where()`, ADR-0006) —
-    //! and the expression shape this walker does not render yet (#294) is
-    //! rejected loudly at the boundary.
+    //! Pin the record plan's SELECT-list resolution and rendering
+    //! (#279/#293/#294/#295): every field renders under its output name in
+    //! selection order — root-qualified for plain fields,
+    //! join-alias-qualified for traversed ones (sharing the path's join with
+    //! `where()`, ADR-0006), aggregate functions over their sources — with
+    //! GROUP BY derived from the plain fields of an aggregate plan and the
+    //! #295 ORDER BY scoping rules.
 
     use super::{
-        apply_relation_joins, apply_select_list, projected_record_fields, query_join_plan,
-        query_plan_from_ir_json,
+        apply_relation_joins, apply_select_list, projected_record_fields,
+        query_join_plan, query_plan_from_ir_json, record_order_by_expr,
     };
     use crate::query::JoinPlan;
     use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder};
@@ -5254,19 +5305,153 @@ mod record_select_list_tests {
     }
 
     #[test]
-    fn mixed_aggregate_and_plain_plan_is_rejected() {
-        // A mixed projection is a grouped query (every plain field is a group
-        // key, ADR-0009) — boundary defense until #295 derives GROUP BY.
+    fn mixed_plan_derives_group_by_from_the_plain_fields() {
+        // The grouped query (#295, ADR-0009): GROUP BY never travels on the
+        // wire — the renderer derives it from the plan, one key per plain
+        // field in selection order, qualified like the SELECT list. Pins the
+        // rendered SQL for the wire shape golden-vectored in
+        // query_transaction_aggregate_v5.json.
+        let plan = plan_from_payload_parts(
+            account_joins(),
+            serde_json::json!([]),
+            record_fields(serde_json::json!([
+                {"name": "account_name", "column": "name", "path": ["account"]},
+                {"name": "acct", "column": "account_id", "path": []},
+                {"name": "total", "path": [],
+                 "expr": {"fn": "sum", "column": "amount", "path": []}}
+            ])),
+        );
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+        let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", Some(&projected), &join_plan)
+            .expect("grouped plan renders");
+        apply_relation_joins(&mut select, &join_plan).expect("joins render");
+        select.from(Alias::new("transaction"));
+
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains(
+                "GROUP BY \"j1_account\".\"name\", \"transaction\".\"account_id\""
+            ),
+            "every plain field is a group key, in selection order: {sql}"
+        );
+        assert!(
+            sql.contains("SUM(\"transaction\".\"amount\") AS \"total\""),
+            "the aggregate renders alongside the keys: {sql}"
+        );
+    }
+
+    #[test]
+    fn plain_plan_renders_no_group_by() {
+        // Grouping is derived only when an aggregate is present: a plain
+        // projection never grows a GROUP BY.
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "id", "column": "id", "path": []},
+            {"name": "amount", "column": "amount", "path": []}
+        ])));
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+
+        let mut select = Query::select();
+        apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
+            .expect("plain plan renders");
+        select.from(Alias::new("transaction"));
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert!(!sql.contains("GROUP BY"), "no aggregate, no grouping: {sql}");
+    }
+
+    #[test]
+    fn order_by_output_field_name_renders_the_bare_alias() {
+        // #295 rule 1 in the renderer: an empty-path ORDER BY term matching
+        // an output field name renders unqualified — SQL's own output-column
+        // scoping resolves it, aggregates included.
         let plan = plan_with_materialization(record_fields(serde_json::json!([
             {"name": "acct", "column": "account_id", "path": []},
             {"name": "total", "path": [],
              "expr": {"fn": "sum", "column": "amount", "path": []}}
         ])));
-        let err = projected_record_fields(&plan).expect_err("mixed plan must be rejected");
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+
+        let order = ferro_schema_ir::QueryOrderBy {
+            column: "total".to_string(),
+            direction: "desc".to_string(),
+            path: vec![],
+        };
+        let expr = record_order_by_expr(&order, &projected, "transaction", &JoinPlan::default())
+            .expect("output-name term resolves");
+        let mut select = Query::select();
+        select.expr(expr);
+        select.from(Alias::new("transaction"));
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert!(
+            sql.starts_with("SELECT \"total\" "),
+            "output-name term must render bare: {sql}"
+        );
+    }
+
+    #[test]
+    fn order_by_group_key_source_column_qualifies_as_usual() {
+        // A term that is no output name falls back to the qualified source —
+        // allowed on an aggregate plan when it is a group key's source.
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "acct", "column": "account_id", "path": []},
+            {"name": "total", "path": [],
+             "expr": {"fn": "sum", "column": "amount", "path": []}}
+        ])));
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+
+        let order = ferro_schema_ir::QueryOrderBy {
+            column: "account_id".to_string(),
+            direction: "asc".to_string(),
+            path: vec![],
+        };
+        let expr = record_order_by_expr(&order, &projected, "transaction", &JoinPlan::default())
+            .expect("group-key source term resolves");
+        let mut select = Query::select();
+        select.expr(expr);
+        select.from(Alias::new("transaction"));
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("\"transaction\".\"account_id\""),
+            "source term must stay qualified: {sql}"
+        );
+    }
+
+    #[test]
+    fn order_by_ungrouped_column_on_aggregate_plan_errors_loudly() {
+        // Boundary defense for #295 rule 3 (the Python builder rejects this
+        // at build time): an ORDER BY term that is neither an output field
+        // nor a group key's source would make SQLite answer with an
+        // arbitrary row's value.
+        let plan = plan_with_materialization(record_fields(serde_json::json!([
+            {"name": "acct", "column": "account_id", "path": []},
+            {"name": "total", "path": [],
+             "expr": {"fn": "sum", "column": "amount", "path": []}}
+        ])));
+        let projected = projected_record_fields(&plan)
+            .expect("record plan resolves")
+            .expect("record plan projects fields");
+
+        let order = ferro_schema_ir::QueryOrderBy {
+            column: "note".to_string(),
+            direction: "asc".to_string(),
+            path: vec![],
+        };
+        let err = record_order_by_expr(&order, &projected, "transaction", &JoinPlan::default())
+            .expect_err("an ungrouped bare term must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("grouped") && msg.contains("#295"),
-            "must point at grouped aggregates: {msg}"
+            msg.contains("note") && msg.contains("group key"),
+            "must name the term and the rule: {msg}"
         );
     }
 

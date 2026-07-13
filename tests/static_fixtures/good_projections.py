@@ -70,6 +70,28 @@ async def _projection_composes_with_left_join() -> None:
     del rows
 
 
+async def _grouped_top_n_chain() -> None:
+    # The grouped query (#295): keys + aggregates, output-name ordering,
+    # group limit — still Rows[Row].
+    rows: Rows[Row] = await (
+        GoodPTxn.select(lambda t: {"acct": t.account_id, "total": t.amount.sum()})
+        .order_by("total", "desc")
+        .limit(5)
+        .all()
+    )
+    del rows
+
+
+async def _order_by_aggregate_lambda() -> None:
+    # Rule 2 (#295): the lambda form spells the aggregate source expression.
+    rows: Rows[Row] = await (
+        GoodPTxn.select(lambda t: {"acct": t.account_id, "total": t.amount.sum()})
+        .order_by(lambda t: t.amount.sum(), "desc")
+        .all()
+    )
+    del rows
+
+
 async def _aggregate_dict_selector() -> None:
     # Aggregate expressions (#294) are dict-selector values; they type
     # opaquely (AggregateExpr) and the result stays Rows[Row] / Row | None —

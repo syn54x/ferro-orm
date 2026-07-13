@@ -345,20 +345,6 @@ def _resolve_projection_selector(
                 f'"<other name>": {field.dotted}}})).'
             )
         seen[field.name] = field
-    # Mixing aggregate and plain fields makes the projection a GROUPED query
-    # — every plain field becomes a group key (ADR-0009). Derived grouping
-    # lands with #295; until then the mix is rejected loudly, never rendered
-    # as the SQL both backends would misanswer (Postgres errors at runtime,
-    # SQLite answers with an arbitrary row's value).
-    if any(field.agg for field in fields) and any(not field.agg for field in fields):
-        plain = next(field for field in fields if not field.agg)
-        raise NotImplementedError(
-            f"select() cannot mix aggregate and plain fields yet: "
-            f"{plain.dotted} next to an aggregate makes this a grouped query "
-            "(every plain field is a group key, ADR-0009), which lands with "
-            "#295. Project the aggregates alone, or wait for grouped "
-            "aggregates."
-        )
     return fields
 
 
@@ -1487,6 +1473,26 @@ class ProjectedQuery(Query[T]):
         for field in fields:
             if field.path:
                 self._joins.setdefault(field.path, "inner")
+        # Rule 3 (#295) covers sort keys added BEFORE the projection too:
+        # an order_by() chained ahead of an aggregate select() must already
+        # name a group key (or coincide with an output field) — checked here
+        # so the error stays at build time, not at the render boundary.
+        if self._has_aggregate():
+            output_names = {field.name for field in fields}
+            for order in self.order_by_clause:
+                column, path = order["column"], tuple(order["path"])
+                if not path and column in output_names:
+                    continue
+                if self._is_group_key_source(column, path):
+                    continue
+                dotted = "t." + ".".join((*path, column))
+                raise ValueError(
+                    f"order_by() key {dotted} (added before this select()) "
+                    "is not a group key of the aggregate projection: each "
+                    "group would answer with an arbitrary row's value. "
+                    "Project it as a group key, or sort by an output field "
+                    "after the select()."
+                )
 
     def _materialization_ir(self) -> dict[str, Any]:
         """Serialize the ``record`` plan: one field per projected field.
@@ -1520,6 +1526,186 @@ class ProjectedQuery(Query[T]):
                     }
                 )
         return {"kind": "record", "fields": fields}
+
+    def _has_aggregate(self) -> bool:
+        """True when this is an AGGREGATE PROJECTION (CONTEXT.md): at least
+        one aggregate field, so every plain field is a group key (#295)."""
+        return any(field.agg for field in self._projection)
+
+    def _append_order_by(
+        self, column: str, direction: str, path: tuple[str, ...]
+    ) -> Self:
+        """Clone with one resolved ORDER BY entry appended (#295)."""
+        new = self._clone()
+        new.order_by_clause.append(
+            {"column": column, "direction": direction.lower(), "path": list(path)}
+        )
+        if path:
+            new._joins.setdefault(path, "inner")
+        return new
+
+    def order_by(
+        self,
+        field: "str | Callable[[QueryProxy[T]], Any]",
+        direction: str = "asc",
+    ) -> Self:
+        """Add an ordering clause to a projected query (#295's three rules).
+
+        Strings resolve OUTPUT field names first, then root columns — SQL's
+        own ORDER BY scoping (``order_by("total")`` sorts by the projected
+        aggregate, even if a root column shares the name). The lambda form
+        spells SOURCE expressions: a column (traversal included), or an
+        aggregate (``order_by(lambda t: t.amount.sum(), "desc")``) which must
+        match a projected aggregate field and sorts by its output name.
+
+        On an AGGREGATE projection every sort key must be a group key or an
+        aggregate — anything else raises at build time (each group would
+        answer with an arbitrary row's value; SQLite would even permit it).
+        On a plain projection unselected root columns stay sortable,
+        unchanged.
+
+        Args:
+            field: Output field name or root column-name string, or a lambda
+                naming a source column / aggregate expression.
+            direction: ``"asc"`` (default) or ``"desc"``.
+
+        Returns:
+            A new query with the ordering added; ``self`` is unchanged.
+
+        Raises:
+            ValueError: If ``direction`` is invalid, or the sort key is not a
+                group key or aggregate on an aggregate projection (including
+                an aggregate expression matching no projected field).
+            AttributeError: If a string names neither an output field nor a
+                queryable root column.
+            TypeError: If a lambda resolves to a bare relation or any other
+                non-sortable value.
+        """
+        if direction.lower() not in ("asc", "desc"):
+            raise ValueError("direction must be 'asc' or 'desc'")
+        has_aggregate = self._has_aggregate()
+        output_names = {f.name for f in self._projection}
+
+        if isinstance(field, str):
+            # Rule 1: output field names first (group keys and aggregates
+            # both sort by name), then root columns.
+            if field in output_names:
+                return self._append_order_by(field, direction, ())
+            try:
+                validate_query_column(self.model_cls, field)
+            except AttributeError as exc:
+                raise AttributeError(
+                    f"{exc.args[0]} On this projected query, output field "
+                    f"names also sort: {', '.join(sorted(output_names))}.",
+                    name=getattr(exc, "name", None),
+                    obj=getattr(exc, "obj", None),
+                ) from None
+            if has_aggregate and not self._is_group_key_source(field, ()):
+                raise ValueError(
+                    f"order_by({field!r}) on an aggregate projection must "
+                    "name a group key or an aggregate: it is neither an "
+                    "output field nor a group key's source column, so each "
+                    "group would answer with an arbitrary row's value. Sort "
+                    "by an output field name, or project the column as a "
+                    "group key."
+                )
+            return self._append_order_by(field, direction, ())
+
+        if not callable(field):
+            raise TypeError(
+                "order_by() expected a column-name string or a lambda "
+                f"selector, got {type(field).__name__}"
+            )
+        selected = field(QueryProxy(self.model_cls))
+        # Rule 2: the lambda form spells source expressions — aggregates
+        # resolve to the projected field carrying the same expression and
+        # sort by its output name.
+        if isinstance(selected, AggregateExpr):
+            for proj in self._projection:
+                if (
+                    proj.agg == selected.fn
+                    and proj.column == selected.column
+                    and proj.path == selected.path
+                ):
+                    return self._append_order_by(proj.name, direction, ())
+            raise ValueError(
+                f"order_by() aggregate {selected._dotted()} matches no "
+                "projected field; project it to sort by it (e.g. "
+                f'select(lambda t: {{..., "key": {selected._dotted()}}}) '
+                'with order_by("key")).'
+            )
+        if isinstance(selected, RelationProxy):
+            relation = selected._path[-1]
+            raise TypeError(
+                f"order_by() selector returned the bare relation {relation!r}, "
+                "not a column; order by a column on it instead "
+                f"(e.g. t.{relation}.<column>)."
+            )
+        if not isinstance(selected, FieldProxy):
+            raise TypeError(
+                "order_by() selector must return a FieldProxy "
+                f"(e.g. `lambda u: u.created_at`), got {type(selected).__name__}"
+            )
+        # Rule 3: on an aggregate projection a source column must be a group
+        # key; on a plain projection unselected columns stay sortable.
+        if has_aggregate and not self._is_group_key_source(
+            selected.column, selected.path
+        ):
+            dotted = "t." + ".".join((*selected.path, selected.column))
+            raise ValueError(
+                f"order_by() key {dotted} on an aggregate projection must be "
+                "a group key or an aggregate: it is not a group key's source "
+                "column, so each group would answer with an arbitrary row's "
+                "value. Project it as a group key, or sort by an aggregate."
+            )
+        return self._append_order_by(selected.column, direction, selected.path)
+
+    def _is_group_key_source(self, column: str, path: tuple[str, ...]) -> bool:
+        """True when ``(column, path)`` is some plain field's source (#295)."""
+        return any(
+            field.agg is None and field.column == column and field.path == path
+            for field in self._projection
+        )
+
+    def count(self):  # type: ignore[override]
+        """Count matching rows — or raise on an aggregate projection (#295).
+
+        On a plain projection ``count()`` stays projection-blind (#279's
+        verb contract). On an AGGREGATE projection "count" is ambiguous
+        between rows and groups, so it raises synchronously at the call,
+        before any coroutine or SQL exists, with both spellings.
+
+        Raises:
+            ValueError: On an aggregate projection — count rows with an
+                unprojected query, count groups with ``len(await q.all())``.
+        """
+        if self._has_aggregate():
+            raise ValueError(
+                "count() on an aggregate projection is ambiguous: count the "
+                "matching rows with an unprojected query "
+                "(Model.where(...).count()), or count the groups with "
+                "len(await q.all())."
+            )
+        return super().count()
+
+    def exists(self):  # type: ignore[override]
+        """Existence check — or raise on an aggregate projection (#295).
+
+        Raises:
+            ValueError: On an aggregate projection — a global aggregate
+                always yields one record, and "a group exists" is
+                ``len(await q.all()) > 0``; test the unprojected query
+                instead (``Model.where(...).exists()``).
+        """
+        if self._has_aggregate():
+            raise ValueError(
+                "exists() on an aggregate projection is ambiguous: an "
+                "aggregate-only projection always yields exactly one record. "
+                "Test row existence with an unprojected query "
+                "(Model.where(...).exists()), or group existence with "
+                "len(await q.all()) > 0."
+            )
+        return super().exists()
 
     def _traversed_hop_classes(self) -> dict[str, type] | None:
         """Hop classes for traversed PLAIN projection paths, or None.
