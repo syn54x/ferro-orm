@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v0.16.2 (2026-07-15)
+
+### Bug Fixes
+
+- Self-referential FKs no longer evict their component from CREATE TABLE order
+  ([#303](https://github.com/syn54x/ferro-orm/pull/303),
+  [`d1a55f6`](https://github.com/syn54x/ferro-orm/commit/d1a55f6ae241101d98ee659e6651fa33abaf4ec5))
+
+### Refactoring
+
+- Compile QueryIR payloads at a single wire choke point
+  ([`851b3f4`](https://github.com/syn54x/ferro-orm/commit/851b3f4e1f077d70481ebca643ff0ffff81645d8))
+
+
 ## v0.16.1 (2026-07-13)
 
 ### Bug Fixes
