@@ -32,7 +32,7 @@ from ferro.ir.compiler import (
     reset_schema_ir_compile_count_for_test,
     schema_ir_compile_count_for_test,
 )
-from ferro import state as ferro_state
+from ferro.registry import REGISTRY
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent / "src" / "ferro"
 
@@ -52,8 +52,8 @@ def _cold_pi_row_survives_registry_wipe():
     Runs before ``clean_registry`` (autouse precedes explicit fixtures), so
     ``clean_registry`` tests still start from a truly empty registry.
     """
-    if _ColdPiRow.__ferro_identity__ not in ferro_state._MODEL_REGISTRY_PY:
-        ferro_state.register_model(_ColdPiRow)
+    if _ColdPiRow.__ferro_identity__ not in REGISTRY.models():
+        REGISTRY.register(_ColdPiRow)
     yield
 
 
@@ -89,9 +89,9 @@ def test_rust_registry_empty_after_import_before_connect(clean_registry) -> None
         note: str
 
     identity = PiFresh.__ferro_identity__
-    assert ferro_state._MODEL_REGISTRY_PY[identity] is PiFresh
-    assert identity in ferro_state._SCHEMA_IR_BY_MODEL
-    assert ferro_state.registration_generation() == 1
+    assert REGISTRY.models()[identity] is PiFresh
+    assert REGISTRY.envelope(identity) is not None
+    assert REGISTRY.registration_generation() == 1
     assert _rust_model_registry_count_for_test() == 0
 
 
@@ -154,7 +154,7 @@ async def test_cold_rehydration_after_clear_registry(db_url) -> None:
     """Module-level models survive clear_registry + connect (#246 / #65 pattern)."""
     reset_engine()
     clear_registry()
-    assert _ColdPiRow.__ferro_identity__ in ferro_state._MODEL_REGISTRY_PY
+    assert _ColdPiRow.__ferro_identity__ in REGISTRY.models()
 
     await connect(db_url, auto_migrate=True)
     row_id = uuid4()
@@ -189,8 +189,8 @@ async def test_relationship_models_stay_python_only_until_connect(
 
     resolve_relationships()
     assert _rust_model_registry_count_for_test() == 0
-    assert ferro_state._MODEL_REGISTRY_PY[PiAuthor.__ferro_identity__] is PiAuthor
-    assert ferro_state._MODEL_REGISTRY_PY[PiPost.__ferro_identity__] is PiPost
+    assert REGISTRY.models()[PiAuthor.__ferro_identity__] is PiAuthor
+    assert REGISTRY.models()[PiPost.__ferro_identity__] is PiPost
 
     baseline = _bulk_install_count_for_test()
     await connect(db_url, auto_migrate=True)

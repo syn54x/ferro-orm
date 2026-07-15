@@ -37,17 +37,13 @@ from ferro.migrations import get_metadata
 
 @pytest.fixture(autouse=True)
 def cleanup():
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     reset_engine()
     clear_registry()
     yield
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
 
 def test_ffi_naming_helpers_match_i1_conventions():
@@ -240,7 +236,7 @@ def test_m2m_join_artifacts_follow_custom_table_names():
     """FF-E E2 exit gate: default join table/columns derive from table names."""
     from ferro import ManyToMany
     from ferro.relations import resolve_relationships
-    from ferro.state import _JOIN_TABLE_REGISTRY
+    from ferro.registry import REGISTRY
 
     class WikiPage(Model):
         __ferro_table__: ClassVar[str] = "wiki_pages"
@@ -254,8 +250,8 @@ def test_m2m_join_artifacts_follow_custom_table_names():
 
     resolve_relationships()
 
-    assert "wiki_pages_tags" in _JOIN_TABLE_REGISTRY
-    bundle = _JOIN_TABLE_REGISTRY["wiki_pages_tags"]
+    assert "wiki_pages_tags" in REGISTRY.join_tables()
+    bundle = REGISTRY.join_tables()["wiki_pages_tags"]
     columns_by_name = {spec.name: spec for spec in bundle["columns"]}
     assert set(columns_by_name) == {"wiki_pages_id", "wiki_tags_id"}
     assert columns_by_name["wiki_pages_id"].foreign_key.to_table == "wiki_pages"
@@ -265,7 +261,7 @@ def test_m2m_join_artifacts_follow_custom_table_names():
 def test_forward_declared_fk_to_custom_table_model_resolves_configured_table():
     """FF-E E2: a string/ForwardRef FK target's to_table follows the target's
     __ferro_table__ — both while the reference is still an unresolved string
-    (registry lookup via resolve_model_reference) and after
+    (registry lookup via REGISTRY.resolve_reference) and after
     resolve_relationships binds it (the schema DDL consumes)."""
     from ferro.relations import resolve_relationships
 
@@ -288,7 +284,7 @@ def test_forward_declared_fk_to_custom_table_model_resolves_configured_table():
 
     # Pre-resolution: metadata.to is still the string/ForwardRef, but the
     # target IS registered — _target_table_name's string branch must resolve
-    # it through resolve_model_reference, not lowercase the class name.
+    # it through REGISTRY.resolve_reference, not lowercase the class name.
     raw_to = FwdArticle.ferro_relations["author"].to
     assert isinstance(raw_to, (str, ForwardRef))
     fk = _article_fk()

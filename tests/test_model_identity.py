@@ -5,20 +5,14 @@ from typing import ClassVar
 import pytest
 
 from ferro import Model
-from ferro.state import resolve_model_reference
+from ferro.registry import REGISTRY
 
 
 @pytest.fixture(autouse=True)
 def _isolate_relation_state():
-    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
-
-    models_snapshot = dict(_MODEL_REGISTRY_PY)
-    relations_snapshot = list(_PENDING_RELATIONS)
+    snapshot = REGISTRY.snapshot()
     yield
-    _MODEL_REGISTRY_PY.clear()
-    _MODEL_REGISTRY_PY.update(models_snapshot)
-    _PENDING_RELATIONS.clear()
-    _PENDING_RELATIONS.extend(relations_snapshot)
+    REGISTRY.restore(snapshot)
 
 
 def test_models_are_stamped_with_identity_and_table():
@@ -68,14 +62,14 @@ def test_resolve_model_reference_short_and_qualified():
     class RefTarget(Model):
         id: int | None = None
 
-    assert resolve_model_reference("RefTarget") is RefTarget
-    assert resolve_model_reference(RefTarget.__ferro_identity__) is RefTarget
+    assert REGISTRY.resolve_reference("RefTarget") is RefTarget
+    assert REGISTRY.resolve_reference(RefTarget.__ferro_identity__) is RefTarget
 
 
 def test_resolve_model_reference_not_found():
     with pytest.raises(RuntimeError, match="NoSuchModelAnywhere"):
-        resolve_model_reference("NoSuchModelAnywhere")
-    assert resolve_model_reference("NoSuchModelAnywhere", default=None) is None
+        REGISTRY.resolve_reference("NoSuchModelAnywhere")
+    assert REGISTRY.resolve_reference("NoSuchModelAnywhere", default=None) is None
 
 
 def test_registry_keys_by_qualified_identity():
@@ -83,10 +77,8 @@ def test_registry_keys_by_qualified_identity():
         __ferro_table__: ClassVar[str] = "qualified_key_model_a"
         id: int | None = None
 
-    from ferro.state import _MODEL_REGISTRY_PY
-
-    assert _MODEL_REGISTRY_PY[QualifiedKeyModel.__ferro_identity__] is QualifiedKeyModel
-    assert "QualifiedKeyModel" not in _MODEL_REGISTRY_PY
+    assert REGISTRY.models()[QualifiedKeyModel.__ferro_identity__] is QualifiedKeyModel
+    assert "QualifiedKeyModel" not in REGISTRY.models()
 
 
 def test_same_named_models_in_distinct_scopes_coexist():
@@ -105,10 +97,8 @@ def test_same_named_models_in_distinct_scopes_coexist():
         return ScopedModel
 
     a, b = make_a(), make_b()
-    from ferro.state import _MODEL_REGISTRY_PY
-
-    assert _MODEL_REGISTRY_PY[a.__ferro_identity__] is a
-    assert _MODEL_REGISTRY_PY[b.__ferro_identity__] is b
+    assert REGISTRY.models()[a.__ferro_identity__] is a
+    assert REGISTRY.models()[b.__ferro_identity__] is b
 
 
 def test_resolve_model_reference_ambiguous_lists_candidates():
@@ -128,7 +118,7 @@ def test_resolve_model_reference_ambiguous_lists_candidates():
 
     a, b = make_a(), make_b()
     with pytest.raises(RuntimeError) as excinfo:
-        resolve_model_reference("AmbiguousRef")
+        REGISTRY.resolve_reference("AmbiguousRef")
     message = str(excinfo.value)
     assert a.__ferro_identity__ in message
     assert b.__ferro_identity__ in message
@@ -197,8 +187,6 @@ def test_two_distinct_models_sharing_a_table_error_names_both():
 
 
 def test_same_identity_redefinition_is_idempotent():
-    from ferro.state import _MODEL_REGISTRY_PY
-
     class Redefined(Model):  # noqa: F811
         id: int | None = None
         name: str
@@ -209,7 +197,7 @@ def test_same_identity_redefinition_is_idempotent():
         age: int
 
     assert "age" in Redefined.model_fields
-    assert _MODEL_REGISTRY_PY[Redefined.__ferro_identity__] is Redefined
+    assert REGISTRY.models()[Redefined.__ferro_identity__] is Redefined
 
 
 def test_m2m_join_table_colliding_with_model_table_errors():

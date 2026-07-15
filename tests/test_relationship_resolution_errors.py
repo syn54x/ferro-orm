@@ -15,15 +15,11 @@ from ferro.relations import resolve_relationships
 
 @pytest.fixture(autouse=True)
 def _isolate_relation_state():
-    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    models_snapshot = dict(_MODEL_REGISTRY_PY)
-    relations_snapshot = list(_PENDING_RELATIONS)
+    snapshot = REGISTRY.snapshot()
     yield
-    _MODEL_REGISTRY_PY.clear()
-    _MODEL_REGISTRY_PY.update(models_snapshot)
-    _PENDING_RELATIONS.clear()
-    _PENDING_RELATIONS.extend(relations_snapshot)
+    REGISTRY.restore(snapshot)
 
 
 def test_second_pass_rebuild_failure_aborts_with_model_named(monkeypatch):

@@ -10,7 +10,7 @@ import ferro
 from ferro import Model, OperationalError, connect, execute
 from ferro._core import _bulk_install_count_for_test
 from ferro.base import FerroField
-from ferro import state as ferro_state
+from ferro.registry import REGISTRY
 
 
 @pytest.mark.asyncio
@@ -228,12 +228,12 @@ async def test_failed_resolve_stays_dirty_and_retries(
     async with ferro.engines.session():
         with pytest.raises(RuntimeError, match="simulated resolve failure"):
             await OsRetryLate.create(payload="first")
-    assert ferro_state.is_modelset_dirty()
+    assert REGISTRY.is_dirty()
 
     async with ferro.engines.session():
         row = await OsRetryLate.create(payload="second")
         assert (await OsRetryLate.get(row.id)).payload == "second"
-    assert not ferro_state.is_modelset_dirty()
+    assert not REGISTRY.is_dirty()
 
 
 def test_alembic_metadata_uses_ensure_resolved_not_operation_seam(

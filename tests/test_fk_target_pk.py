@@ -18,9 +18,9 @@ def _isolate_relation_state():
     """Restore the global relation registries after each test.
 
     Each test below declares its models *inside the test function*, but
-    `ModelMetaclass` still appends their `ForeignKey` metadata to the
-    module-level `_PENDING_RELATIONS` list and registers the classes in
-    `_MODEL_REGISTRY_PY` (see `src/ferro/metaclass.py`) unconditionally at
+    `ModelMetaclass` still queues their `ForeignKey` metadata on the
+    Registry's pending-relations queue and registers the classes in
+    the model registry (see `src/ferro/metaclass.py`) unconditionally at
     class-creation time -- nothing about being defined inside a function
     scopes that registration. Nothing ever removes those entries once the
     test function returns, so without this fixture the test-local
@@ -30,19 +30,11 @@ def _isolate_relation_state():
     relation, including these stale ones, and blows up because their
     target models never declared the matching `BackRef()`.
     """
-    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS, deregister_model
+    from ferro.registry import REGISTRY
 
-    models_snapshot = dict(_MODEL_REGISTRY_PY)
-    relations_snapshot = list(_PENDING_RELATIONS)
+    snapshot = REGISTRY.snapshot()
     yield
-    # Evict test-local models through the entrypoint so their envelope caches go
-    # with them, then restore the baseline snapshot (bulk teardown restore).
-    for name in set(_MODEL_REGISTRY_PY) - set(models_snapshot):
-        deregister_model(name)
-    _MODEL_REGISTRY_PY.clear()
-    _MODEL_REGISTRY_PY.update(models_snapshot)
-    _PENDING_RELATIONS.clear()
-    _PENDING_RELATIONS.extend(relations_snapshot)
+    REGISTRY.restore(snapshot)
 
 
 def test_fk_extraction_uses_target_pk_name():

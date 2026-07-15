@@ -17,10 +17,10 @@ class ConnectionRouteMarker(ferro.Model):
 
 @pytest.fixture(autouse=True)
 def _ensure_models_registered():
-    from ferro.state import register_model
+    from ferro.registry import REGISTRY
 
     ConnectionRouteMarker._reregister_ferro()
-    register_model(ConnectionRouteMarker)
+    REGISTRY.register(ConnectionRouteMarker)
     yield
 
 

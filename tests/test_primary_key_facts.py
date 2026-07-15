@@ -26,17 +26,11 @@ def _isolate_relation_state():
     functions still register globally at class-creation time, so snapshot and
     restore the registry and pending-relations stores around each test.
     """
-    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS, deregister_model
+    from ferro.registry import REGISTRY
 
-    models_snapshot = dict(_MODEL_REGISTRY_PY)
-    relations_snapshot = list(_PENDING_RELATIONS)
+    snapshot = REGISTRY.snapshot()
     yield
-    for name in set(_MODEL_REGISTRY_PY) - set(models_snapshot):
-        deregister_model(name)
-    _MODEL_REGISTRY_PY.clear()
-    _MODEL_REGISTRY_PY.update(models_snapshot)
-    _PENDING_RELATIONS.clear()
-    _PENDING_RELATIONS.extend(relations_snapshot)
+    REGISTRY.restore(snapshot)
 
 
 def test_pk_field_name_cached_on_class():

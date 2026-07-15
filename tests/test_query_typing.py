@@ -27,10 +27,9 @@ pytestmark = pytest.mark.sqlite_only
 @pytest.fixture(autouse=True)
 def _clear_state():
     """Reset model registry and engine between typing tests."""
-    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
+    REGISTRY.reset_for_test()
     reset_engine()
     clear_registry()
     yield

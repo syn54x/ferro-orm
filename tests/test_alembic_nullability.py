@@ -23,11 +23,9 @@ from ferro.migrations import get_metadata
 
 @pytest.fixture(autouse=True)
 def cleanup():
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     reset_engine()
     clear_registry()
     yield

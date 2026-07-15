@@ -73,13 +73,13 @@ async def _ensure_rust_registration_synced_for_operation() -> None:
     contention the event loop blocks for one resolve+install per generation; do
     not offload this to a thread pool — that would reintroduce interleaving.
     """
-    from .state import is_modelset_dirty
+    from .registry import REGISTRY
 
-    if not is_modelset_dirty():
+    if not REGISTRY.is_dirty():
         return
 
     with _OPERATION_REGISTRATION_SYNC_LOCK:
-        if is_modelset_dirty():
+        if REGISTRY.is_dirty():
             _ensure_rust_registration_synced()
 
 
@@ -97,25 +97,26 @@ def ensure_resolved_modelset() -> dict[str, Any]:
     path.
     """
     from .ir.compiler import compile_registry_schema_ir
+    from .registry import REGISTRY
     from .relations import resolve_relationships
-    from .state import is_modelset_dirty
 
-    if not is_modelset_dirty():
+    if not REGISTRY.is_dirty():
         return compile_registry_schema_ir()
 
     with _RESOLVED_MODELSET_LOCK:
-        if is_modelset_dirty():
+        if REGISTRY.is_dirty():
             resolve_relationships()
         return compile_registry_schema_ir()
 
 
 def _ensure_rust_registration_synced() -> None:
     """Resolve the modelset if needed, then push it to the Rust runtime."""
-    from . import state as ferro_state
+    from .registry import REGISTRY
 
     envelope = ensure_resolved_modelset()
+    cached = REGISTRY.modelset()
     _push_registration_to_rust(
-        envelope, fingerprint=ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT
+        envelope, fingerprint=cached[1] if cached is not None else None
     )
 
 
@@ -131,24 +132,21 @@ def clear_registry() -> None:
     tolerated by SQLite but rejected by Postgres (``relation ... does not
     exist``). (#153)
 
-    The Python model registry (``_MODEL_REGISTRY_PY``) is intentionally **not**
-    cleared here: clearing the Rust registry while keeping the declared Python
-    models is what allows cold re-hydration after ``reset_engine`` (see
-    ``tests/test_enum_cold_hydration.py``). Callers that want a full Python-side
-    reset clear ``_MODEL_REGISTRY_PY`` / ``_PENDING_RELATIONS`` themselves.
+    The Python model registry is intentionally **not** cleared here: clearing
+    the Rust registry while keeping the declared Python models is what allows
+    cold re-hydration after ``reset_engine`` (see
+    ``tests/test_enum_cold_hydration.py``). Callers that want a full
+    Python-side reset use ``REGISTRY.reset_for_test()``.
 
-    Each purged join table's compiled SchemaIR envelope is also evicted from the
-    per-model envelope cache (via ``evict_model_envelope`` — envelope-only, so the
-    model registry stays intact per the promise above), keeping the two stores the
-    #153 guard depends on in agreement: a lingering join envelope would let a
-    future assemble step resurrect the stale join table.
+    Each purged join table's compiled SchemaIR envelope is evicted with it —
+    ``Registry.clear_join_tables`` owns that agreement (#153): a lingering
+    join envelope would let a future assemble step resurrect the stale join
+    table.
     """
     _core_clear_registry()
-    from .state import _JOIN_TABLE_REGISTRY, evict_model_envelope
+    from .registry import REGISTRY
 
-    for join_table in list(_JOIN_TABLE_REGISTRY):
-        evict_model_envelope(join_table)
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.clear_join_tables()
 
 
 def _push_registration_to_rust(
@@ -172,18 +170,15 @@ def _push_registration_to_rust(
     """
     import json as _json
 
-    from . import state as ferro_state
     from .ir.compiler import compile_registry_schema_ir, schema_ir_fingerprint
+    from .registry import REGISTRY
 
     if envelope is None:
         envelope = compile_registry_schema_ir()
     if fingerprint is None:
-        cached = ferro_state._SCHEMA_IR_MODELSET
-        if (
-            cached is envelope
-            and ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT is not None
-        ):
-            fingerprint = ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT
+        cached = REGISTRY.modelset()
+        if cached is not None and cached[0] is envelope:
+            fingerprint = cached[1]
         else:
             fingerprint = schema_ir_fingerprint(envelope)
     _install_registration(_json.dumps(envelope), fingerprint)

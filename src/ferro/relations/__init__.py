@@ -4,13 +4,7 @@ from .._shadow_fk_types import pk_python_type_for_model, reconcile_shadow_fk_typ
 from ..base import ForeignKey, ManyToManyRelation
 from ..columns import fk_shadow_spec
 from ..ir.compiler import compile_model_schema_ir, register_model_with_ir
-from ..state import (  # noqa: F401
-    _JOIN_TABLE_REGISTRY,
-    _MODEL_REGISTRY_PY,
-    _PENDING_RELATIONS,
-    mark_modelset_resolved,
-    resolve_model_reference,
-)
+from ..registry import REGISTRY
 from .descriptors import RelationshipDescriptor
 
 
@@ -22,12 +16,9 @@ def resolve_relationships():
     model's PK type where applicable, then ``model_rebuild``s affected classes before
     the schema re-registration pass.
     """
-    global _PENDING_RELATIONS
-
-    # Copy and clear so that we don't process the same relations multiple times
-    # if resolve_relationships is called again (e.g. in tests)
-    to_process = list(_PENDING_RELATIONS)
-    _PENDING_RELATIONS.clear()
+    # Drain (copy-and-clear) so that we don't process the same relations
+    # multiple times if resolve_relationships is called again (e.g. in tests)
+    to_process = REGISTRY.drain_pending_relations()
 
     recompile_targets: set[str] = set()
 
@@ -36,7 +27,7 @@ def resolve_relationships():
         # 1. Resolve 'to' model
         if isinstance(rel.to, (str, ForwardRef)):
             to_name = rel.to if isinstance(rel.to, str) else rel.to.__forward_arg__
-            target_model = resolve_model_reference(to_name, default=None)
+            target_model = REGISTRY.resolve_reference(to_name, default=None)
             if not target_model:
                 raise RuntimeError(
                     f"Relationship resolution failed: '{to_name}' not found"
@@ -65,7 +56,7 @@ def resolve_relationships():
                 ),
             )
         elif isinstance(rel, ManyToManyRelation):
-            source_model = _MODEL_REGISTRY_PY[model_name]
+            source_model = REGISTRY.models()[model_name]
             source_table = source_model.__ferro_table__
             target_table = target_model.__ferro_table__
 
@@ -76,7 +67,7 @@ def resolve_relationships():
             else:
                 join_table = rel.through
 
-            for key, other in _MODEL_REGISTRY_PY.items():
+            for key, other in REGISTRY.models().items():
                 if getattr(other, "__ferro_table__", None) == join_table:
                     raise RuntimeError(
                         f"M2M relation '{model_name}.{field_name}' derives join "
@@ -140,13 +131,16 @@ def resolve_relationships():
                 composite_uniques=composite_uniques,
                 composite_indexes=composite_indexes,
             )
-            _JOIN_TABLE_REGISTRY[join_table] = {
-                "columns": join_columns,
-                "composite_uniques": composite_uniques,
-                "composite_indexes": composite_indexes,
-            }
+            REGISTRY.add_join_table(
+                join_table,
+                {
+                    "columns": join_columns,
+                    "composite_uniques": composite_uniques,
+                    "composite_indexes": composite_indexes,
+                },
+            )
 
-    rebuilt = reconcile_shadow_fk_types(_MODEL_REGISTRY_PY)
+    rebuilt = reconcile_shadow_fk_types(REGISTRY.models())
     for model_cls in rebuilt:
         recompile_targets.add(model_cls.__ferro_identity__)
 
@@ -154,7 +148,7 @@ def resolve_relationships():
     # resolution (relationship sources/targets and shadow-FK reconciliation
     # targets). Replacement, never mutation (grilling Q3).
     for model_name in sorted(recompile_targets):
-        model_cls = _MODEL_REGISTRY_PY.get(model_name)
+        model_cls = REGISTRY.models().get(model_name)
         if model_cls is None:
             continue
         try:
@@ -165,5 +159,5 @@ def resolve_relationships():
                 f"while resolving relationships: {exc}"
             ) from exc
 
-    mark_modelset_resolved()
-    _PENDING_RELATIONS.clear()
+    REGISTRY.mark_resolved()
+    REGISTRY.drain_pending_relations()

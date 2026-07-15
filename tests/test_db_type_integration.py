@@ -15,7 +15,7 @@ import pytest
 
 import ferro
 from ferro import Field, Model, clear_registry, connect, reset_engine, varchar
-from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+from ferro.registry import REGISTRY
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -30,8 +30,8 @@ def cleanup():
     """Drop inline models from the Python registry after each test.
 
     ``clear_registry()`` only clears the Rust side; ``connect()`` calls
-    ``resolve_relationships()`` which re-registers every entry in
-    ``_MODEL_REGISTRY_PY``. Clearing the Python registries at setup keeps each
+    ``resolve_relationships()`` which re-registers every entry in the model
+    registry. Wiping the Registry at setup keeps each
     test's ``connect()`` scoped to its own inline model (module-level models
     from other files would otherwise leak their tables/enums into this test's
     schema); the global ``_ferro_registry_isolation`` fixture restores the
@@ -39,9 +39,7 @@ def cleanup():
     """
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     yield
     reset_engine()
     clear_registry()

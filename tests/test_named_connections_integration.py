@@ -50,10 +50,10 @@ if TYPE_CHECKING:
 
 @pytest.fixture(autouse=True)
 def _ensure_models_registered():
-    from ferro.state import register_model
+    from ferro.registry import REGISTRY
 
     NamedSmokeMarker._reregister_ferro()
-    register_model(NamedSmokeMarker)
+    REGISTRY.register(NamedSmokeMarker)
     yield
 
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from .. import state as ferro_state
 from .._core import (
     _ddl_check_constraint_name,
     _ddl_composite_index_name,
@@ -27,11 +26,7 @@ from ..columns import (
 )
 from ..composite_indexes import drop_overlap_with_uniques, normalized_composite_indexes
 from ..composite_uniques import normalized_composite_uniques
-from ..state import (
-    _JOIN_TABLE_REGISTRY,
-    _MODEL_REGISTRY_PY,
-    _SCHEMA_IR_BY_MODEL,
-)
+from ..registry import REGISTRY, ir_fingerprint
 
 _IR_VERSION = 1
 
@@ -219,11 +214,11 @@ def compile_schema_ir_payload(
 def _persist_schema_ir_envelope(model_name: str, envelope: dict[str, Any]) -> None:
     """Store one model's compiled SchemaIR envelope and fingerprint.
 
-    Routes through the single ``ferro.state`` envelope-write entrypoint so every
-    per-model store mutation lives at the store-owning layer (#243); the
-    fingerprint is derived from the envelope inside that entrypoint.
+    Routes through the Registry's envelope-write entrypoint so every per-model
+    store mutation lives at the store-owning layer (#243); the fingerprint is
+    derived from the envelope inside that entrypoint.
     """
-    ferro_state.persist_model_envelope(model_name, envelope)
+    REGISTRY.persist_envelope(model_name, envelope)
 
 
 def _compile_and_persist_model_envelope(
@@ -341,12 +336,12 @@ def compile_model_schema_ir(
 def _model_payload_from_envelope(name: str) -> dict[str, Any]:
     """Return one model's SchemaIR payload object from the envelope cache.
 
-    The returned dict is a live reference into ``_SCHEMA_IR_BY_MODEL`` — the
-    assembled modelset shares these payload objects. Treat them as read-only;
-    in-place mutation corrupts the per-model cache and survives clean-path
-    re-assembles indefinitely (#245).
+    The returned dict is a live reference into the Registry's envelope cache —
+    the assembled modelset shares these payload objects. Treat them as
+    read-only; in-place mutation corrupts the per-model cache and survives
+    clean-path re-assembles indefinitely (#245).
     """
-    envelope = _SCHEMA_IR_BY_MODEL.get(name)
+    envelope = REGISTRY.envelope(name)
     if envelope is None:
         raise RuntimeError(
             f"Missing SchemaIR envelope for '{name}'. "
@@ -359,11 +354,11 @@ def _model_payload_from_envelope(name: str) -> dict[str, Any]:
 def _assemble_modelset_envelope() -> dict[str, Any]:
     """Stitch per-model envelopes into one sorted modelset envelope."""
     models: list[dict[str, Any]] = []
-    for model_name, _model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
+    for model_name in sorted(REGISTRY.models()):
         models.append(_model_payload_from_envelope(model_name))
 
     for table_name, bundle in sorted(
-        _JOIN_TABLE_REGISTRY.items(), key=lambda item: item[0]
+        REGISTRY.join_tables().items(), key=lambda item: item[0]
     ):
         if not isinstance(bundle, dict):
             continue
@@ -378,20 +373,8 @@ def _assemble_modelset_envelope() -> dict[str, Any]:
         },
     }
 
-    ferro_state._SCHEMA_IR_MODELSET = envelope
-    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = ferro_state.ir_fingerprint(envelope)
+    REGISTRY.set_modelset(envelope)
     return envelope
-
-
-def _missing_registry_envelope_names() -> list[str]:
-    missing: list[str] = []
-    for name in _MODEL_REGISTRY_PY:
-        if name not in _SCHEMA_IR_BY_MODEL:
-            missing.append(name)
-    for table_name, bundle in _JOIN_TABLE_REGISTRY.items():
-        if isinstance(bundle, dict) and table_name not in _SCHEMA_IR_BY_MODEL:
-            missing.append(table_name)
-    return missing
 
 
 def _register_join_table_bundle(table_name: str, bundle: dict[str, Any]) -> None:
@@ -405,12 +388,12 @@ def _register_join_table_bundle(table_name: str, bundle: dict[str, Any]) -> None
 
 
 def _recompile_missing_registry_envelopes() -> None:
-    for model_name in _missing_registry_envelope_names():
-        model_cls = _MODEL_REGISTRY_PY.get(model_name)
+    for model_name in REGISTRY.missing_envelope_names():
+        model_cls = REGISTRY.models().get(model_name)
         if model_cls is not None:
             compile_model_schema_ir(model_name, model_cls)
             continue
-        bundle = _JOIN_TABLE_REGISTRY.get(model_name)
+        bundle = REGISTRY.join_tables().get(model_name)
         if isinstance(bundle, dict):
             _register_join_table_bundle(model_name, bundle)
 
@@ -423,10 +406,10 @@ def _recompile_all_registered_envelopes() -> None:
     Alembic-adjacent tooling) historically relied on compile-not-assemble here.
     The connect/reconnect clean path never hits this (#245).
     """
-    for model_name, model_cls in sorted(_MODEL_REGISTRY_PY.items(), key=lambda item: item[0]):
+    for model_name, model_cls in sorted(REGISTRY.models().items()):
         compile_model_schema_ir(model_name, model_cls)
     for table_name, bundle in sorted(
-        _JOIN_TABLE_REGISTRY.items(), key=lambda item: item[0]
+        REGISTRY.join_tables().items(), key=lambda item: item[0]
     ):
         if isinstance(bundle, dict):
             _register_join_table_bundle(table_name, bundle)
@@ -435,8 +418,8 @@ def _recompile_all_registered_envelopes() -> None:
 def compile_registry_schema_ir() -> dict[str, Any]:
     """Assemble and persist a deterministic SchemaIR envelope for all models.
 
-    Stitches already-compiled per-model envelopes from ``_SCHEMA_IR_BY_MODEL``
-    for every entry in ``_MODEL_REGISTRY_PY`` and ``_JOIN_TABLE_REGISTRY``.
+    Stitches already-compiled per-model envelopes from the Registry's envelope
+    cache for every registered model and join table.
     On a dirty registry, recompiles envelopes first so direct callers that
     bypass ``resolve_relationships()`` still observe current registry state.
     After ``ensure_resolved_modelset()`` on the clean path, this is
@@ -445,7 +428,7 @@ def compile_registry_schema_ir() -> dict[str, Any]:
     Returns:
         The assembled model-set SchemaIR envelope, sorted by model name.
     """
-    if ferro_state.is_modelset_dirty():
+    if REGISTRY.is_dirty():
         _recompile_all_registered_envelopes()
     else:
         _recompile_missing_registry_envelopes()
@@ -454,4 +437,4 @@ def compile_registry_schema_ir() -> dict[str, Any]:
 
 def schema_ir_fingerprint(ir_envelope: dict[str, Any]) -> str:
     """Return a deterministic SHA-256 fingerprint for a SchemaIR envelope."""
-    return ferro_state.ir_fingerprint(ir_envelope)
+    return ir_fingerprint(ir_envelope)

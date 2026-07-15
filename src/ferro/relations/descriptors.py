@@ -7,7 +7,7 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from ferro.models import Model
 
-from ..state import resolve_model_reference
+from ..registry import REGISTRY
 
 
 def _instance_origin_outside_transaction(instance: object) -> str | None:
@@ -36,7 +36,7 @@ class RelationshipDescriptor(BaseModel):
             return self
 
         if self._target_model is None:
-            self._target_model = resolve_model_reference(self.target_model_name)
+            self._target_model = REGISTRY.resolve_reference(self.target_model_name)
 
         # The related rows are keyed by this instance's PK (cached fact —
         # this runs on every reverse-relation attribute access).
@@ -83,7 +83,7 @@ class ForwardDescriptor(BaseModel):
             return self
 
         if self._target_model is None:
-            self._target_model = resolve_model_reference(self.target_model_name)
+            self._target_model = REGISTRY.resolve_reference(self.target_model_name)
 
         async def _fetch():
             id_val = getattr(instance, f"{self.field_name}_id")

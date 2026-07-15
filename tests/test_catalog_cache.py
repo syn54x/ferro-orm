@@ -23,13 +23,11 @@ from ferro.base import FerroField
 @pytest.fixture
 def clean_registry():
     from ferro import clear_registry, reset_engine
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     yield
 
 

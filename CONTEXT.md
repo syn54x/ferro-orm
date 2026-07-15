@@ -108,6 +108,10 @@ _Avoid_: Column alias, AS label, join alias
 The single cached answer to "which column is this model's primary key" — derived once at the compile choke point alongside column specs, stored as `__ferro_pk__` (`None` for a PK-less model). At most one `primary_key=True` column may be declared; a violation raises at class definition time. Operations that need a PK read the cached fact and raise clearly when it is `None` — never guess.
 _Avoid_: PK lookup, PK scan, first primary-key column
 
+**Registry**:
+The single owner of Python-side registration state (`ferro.registry.REGISTRY`): model classes, per-model SchemaIR envelopes + fingerprints, join-table bundles, pending relations, the modelset artifact, and the generation counters. Its stores are private; the agreement invariants (fingerprint pairs its envelope, join-table eviction clears envelopes, one-call test reset) live inside the interface, not in caller convention. Routing/session state is not the Registry — that is `ferro.state`.
+_Avoid_: state module, global dicts, model cache
+
 **Provisional registration**:
 The per-model state installed when a class body finishes executing — enough for runtime codec and PK metadata, but relationships may still be pending and the modelset is not yet authoritative for DDL.
 _Avoid_: Import-time registration, partial registry

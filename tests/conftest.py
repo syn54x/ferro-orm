@@ -220,19 +220,12 @@ def clean_registry():
     the reset now happens once here instead of in each copy.
     """
     from ferro import clear_registry, reset_engine
-    from ferro import state as ferro_state
+    from ferro.registry import REGISTRY
 
     def _wipe() -> None:
         reset_engine()
         clear_registry()
-        ferro_state._MODEL_REGISTRY_PY.clear()
-        ferro_state._PENDING_RELATIONS.clear()
-        ferro_state._JOIN_TABLE_REGISTRY.clear()
-        ferro_state._SCHEMA_IR_BY_MODEL.clear()
-        ferro_state._SCHEMA_IR_FINGERPRINT_BY_MODEL.clear()
-        ferro_state._SCHEMA_IR_MODELSET = None
-        ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = None
-        ferro_state.reset_registration_generations_for_test()
+        REGISTRY.reset_for_test()
         from ferro.ir.compiler import reset_schema_ir_compile_count_for_test
 
         reset_schema_ir_compile_count_for_test()
@@ -253,25 +246,11 @@ def _ferro_registry_isolation():
     captured in the baseline snapshot and survive; function-local models are
     dropped when the test ends.
     """
-    from ferro.state import (
-        _JOIN_TABLE_REGISTRY,
-        _MODEL_REGISTRY_PY,
-        _PENDING_RELATIONS,
-        deregister_model,
-    )
+    from ferro.registry import REGISTRY
 
-    models_snapshot = dict(_MODEL_REGISTRY_PY)
-    pending_snapshot = list(_PENDING_RELATIONS)
-    joins_snapshot = dict(_JOIN_TABLE_REGISTRY)
+    snapshot = REGISTRY.snapshot()
     yield
-    # Deregister function-local models through the entrypoint so their envelope
-    # + fingerprint are evicted too — a bare `.clear()`/restore of the registry
-    # would leave those caches disagreeing (the divergence #243 eliminates).
-    for name in set(_MODEL_REGISTRY_PY) - set(models_snapshot):
-        deregister_model(name)
-    _MODEL_REGISTRY_PY.clear()
-    _MODEL_REGISTRY_PY.update(models_snapshot)
-    _PENDING_RELATIONS.clear()
-    _PENDING_RELATIONS.extend(pending_snapshot)
-    _JOIN_TABLE_REGISTRY.clear()
-    _JOIN_TABLE_REGISTRY.update(joins_snapshot)
+    # Wholesale restore covers every store the old hand-rolled version had to
+    # keep in agreement by convention: function-local models drop with their
+    # envelope + fingerprint entries, module-scope state survives.
+    REGISTRY.restore(snapshot)

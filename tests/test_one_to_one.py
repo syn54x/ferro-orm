@@ -19,10 +19,9 @@ pytestmark = pytest.mark.backend_matrix
 def cleanup():
     reset_engine()
     clear_registry()
-    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
+    REGISTRY.reset_for_test()
     yield
 
 

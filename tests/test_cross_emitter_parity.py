@@ -49,17 +49,13 @@ pytestmark = pytest.mark.backend_matrix
 
 @pytest.fixture(autouse=True)
 def cleanup():
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     reset_engine()
     clear_registry()
     yield
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
 
 class OrgRole(StrEnum):
@@ -265,16 +261,14 @@ async def test_alembic_autogen_after_migrate_updates_is_idempotent(db_url):
     ``uq_`` index / a constraint-less column) plus a ``UserWarning`` — visible
     divergence by design, covered in ``test_auto_migrate.py``.
     """
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     _build_migration_v1_models()
     await connect(db_url, auto_migrate=True)
 
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     _build_migration_v2_models()
     await connect(db_url, migrate_updates=True)
