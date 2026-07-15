@@ -80,6 +80,14 @@ _Avoid_: Eager-loaded field, select_related, prefetched attribute, joined attrib
 A query's declaration of what its result columns become: complete root instances (every query today), a projected record of named fields, or — in the future — a populated instance graph. Every query carries exactly one plan; the plan travels with the query rather than being inferred from its column list.
 _Avoid_: Select list, projection spec, hydration mode flag
 
+**QueryIR payload**:
+The single typed wire artifact a query ships to the Rust runtime — model identity, predicates, ordering, paging, joins, and exactly one materialization plan, inside a versioned envelope. Compiled only by `compile_query`; no other code assembles query wire shape.
+_Avoid_: Query dict, query def, payload dict
+
+**Golden vector**:
+A hand-authored JSON fixture pinning one wire shape — the independent authority both the Python emitter and the Rust decoder assert against, never regenerated from either side's output. Updating one by hand is the contract-review moment for a wire change.
+_Avoid_: Snapshot, fixture dump, example payload
+
 **Aggregate projection**:
 A projection containing at least one aggregate field. Each group collapses to exactly one projected record: every non-aggregate field is a group key, so grouping is derived from the projection and never declared separately. With no non-aggregate fields, the whole result collapses to a single record. Grouping collapses rows — bucketing complete instances by a key ("partitioning") is a different, client-side operation and is not grouping.
 _Avoid_: Group-by query, summary query, rollup, partition

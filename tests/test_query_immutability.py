@@ -7,6 +7,7 @@ import pytest
 import ferro
 from ferro import FerroField, Model
 from ferro.query import Query, Relation
+from ferro.query.wire import OrderByEntry
 
 
 pytestmark = pytest.mark.sqlite_only
@@ -48,17 +49,20 @@ class TestImmutableChaining:
         assert (q1._limit, q1._offset, q1.order_by_clause) == (None, None, [])
         assert q2._limit == 5 and q2._offset is None
         assert q3._offset == 10
-        assert q4.order_by_clause == [{"column": "age", "direction": "desc", "path": []}]
+        assert q4.order_by_clause == [
+            OrderByEntry(column="age", direction="desc", path=())
+        ]
         assert q3.order_by_clause == []
 
-    def test_m2m_context_is_not_shared_between_clones(self):
+    def test_m2m_context_is_immutable_so_clones_share_it_safely(self):
         class ImmUser4(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
 
         q1 = Query(ImmUser4)._m2m("jt", "src", "tgt", 1)
         q2 = q1.limit(3)
-        assert q1._m2m_context is not q2._m2m_context
         assert q2._m2m_context == q1._m2m_context
+        with pytest.raises(AttributeError):
+            q2._m2m_context.join_table = "other"  # frozen: no aliasing hazard
 
     def test_relation_chaining_preserves_relation_type(self):
         class ImmUser5(Model):

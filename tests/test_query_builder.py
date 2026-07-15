@@ -9,8 +9,8 @@ import pytest
 import ferro
 from ferro import Model, connect
 from ferro.query import Query, QueryNode
-from ferro.query.builder import _query_ir_payload_to_json
 from ferro.query.nodes import FieldProxy, _serialize_query_value
+from ferro.query.wire import compile_query, to_wire_json
 from pydantic import Field
 
 pytestmark = pytest.mark.backend_matrix
@@ -49,30 +49,23 @@ def test_serialize_query_value_normalizes_non_json_native_values():
     json.dumps(serialized)
 
 
-def test_query_ir_payload_to_json_serializes_m2m_context_without_mutating_query_state():
+def test_to_wire_json_serializes_m2m_context_without_mutating_query_state():
+    class WireM2mPost(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+
     source_id = uuid.uuid4()
-    query = Query(Model)._m2m(
+    query = Query(WireM2mPost)._m2m(
         "post_tags",
         "post_id",
         "tag_id",
         source_id,
     )
-    query_def = {
-        "model_name": "Tag",
-        "where": [],
-        "order_by": [],
-        "limit": None,
-        "offset": None,
-        "m2m": query._m2m_context,
-        "joins": [],
-        "materialization": {"kind": "root_instances"},
-    }
 
-    query_json = _query_ir_payload_to_json(query_def)
+    query_json = to_wire_json(compile_query(query, "fetch"))
     payload = json.loads(query_json)
 
-    assert query._m2m_context["source_id"] == source_id
-    assert isinstance(query._m2m_context["source_id"], uuid.UUID)
+    assert query._m2m_context.source_id == source_id
+    assert isinstance(query._m2m_context.source_id, uuid.UUID)
     assert payload["ir_kind"] == "query"
     assert payload["ir_version"] == 5
     assert payload["payload"]["m2m"]["source_id"] == str(source_id)
@@ -81,7 +74,12 @@ def test_query_ir_payload_to_json_serializes_m2m_context_without_mutating_query_
 def test_query_carries_root_instances_materialization_by_default():
     """Every query without a projection materializes complete root instances
     (ADR-0007): the v3 plan is explicit data on the wire, never inferred."""
-    assert Query(Model)._materialization_ir() == {"kind": "root_instances"}
+
+    class WirePlainRow(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+
+    payload = compile_query(Query(WirePlainRow), "fetch").to_ir_dict()
+    assert payload["materialization"] == {"kind": "root_instances"}
 
 
 def test_query_node_to_dict_serializes_uuid_values_inside_in_filters():

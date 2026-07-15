@@ -6,6 +6,7 @@ import pytest
 
 from ferro import FerroField, ForeignKey, Model
 from ferro.query import Query, QueryProxy
+from ferro.query.wire import OrderByEntry
 
 
 pytestmark = pytest.mark.sqlite_only
@@ -87,7 +88,7 @@ class TestOrderByValidation:
 
         q = ObUser.select().order_by(lambda u: u.created_at, "desc")
         assert q.order_by_clause == [
-            {"column": "created_at", "direction": "desc", "path": []}
+            OrderByEntry(column="created_at", direction="desc", path=())
         ]
 
     def test_order_by_string_is_validated(self):
@@ -96,7 +97,9 @@ class TestOrderByValidation:
             age: int = 0
 
         q = ObUser2.select().order_by("age")
-        assert q.order_by_clause == [{"column": "age", "direction": "asc", "path": []}]
+        assert q.order_by_clause == [
+            OrderByEntry(column="age", direction="asc", path=())
+        ]
 
     def test_order_by_misspelled_string_raises(self):
         class ObUser3(Model):

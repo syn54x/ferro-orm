@@ -3,11 +3,19 @@ import subprocess
 from pathlib import Path
 
 
-def test_query_methods_use_query_ir_serializer_instead_of_raw_json_dumps():
-    source = Path("src/ferro/query/builder.py").read_text(encoding="utf-8")
+def test_wire_module_is_the_only_query_payload_serializer():
+    """The QueryIR payload has one compiler and one envelope serializer
+    (ferro.query.wire); the builder carries zero wire vocabulary."""
+    wire_source = Path("src/ferro/query/wire.py").read_text(encoding="utf-8")
+    assert wire_source.count("def compile_query(") == 1
+    assert wire_source.count("def to_wire_json(") == 1
 
-    assert source.count("def _query_ir_payload_to_json(") == 1
-    assert "json.dumps(query_def)" not in source
+    builder_source = Path("src/ferro/query/builder.py").read_text(encoding="utf-8")
+    assert "json.dumps" not in builder_source
+    assert '"ir_version"' not in builder_source
+    assert '"materialization"' not in builder_source
+    assert '"model_name"' not in builder_source
+    assert '"join_type"' not in builder_source
 
 
 def test_mutating_query_methods_cannot_carry_pagination():
@@ -28,16 +36,21 @@ def test_mutating_query_methods_cannot_carry_pagination():
         attributes = {
             node.attr for node in ast.walk(method) if isinstance(node, ast.Attribute)
         }
+        called = {
+            node.func.id
+            for node in ast.walk(method)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
         assert "_limit" not in attributes, (
             f"Query.{method_name}() must not read _limit; pagination is rejected "
-            "by _mutating_query_def (FF-A A1)"
+            "by compile_query's mutate guardrails (FF-A A1)"
         )
         assert "_offset" not in attributes, (
             f"Query.{method_name}() must not read _offset; pagination is rejected "
-            "by _mutating_query_def (FF-A A1)"
+            "by compile_query's mutate guardrails (FF-A A1)"
         )
-        assert "_mutating_query_def" in attributes, (
-            f"Query.{method_name}() must build its payload via _mutating_query_def"
+        assert "compile_query" in called, (
+            f"Query.{method_name}() must build its payload via compile_query"
         )
 
 

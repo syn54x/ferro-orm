@@ -1,4 +1,10 @@
-"""Build fluent query objects that serialize QueryIR payloads for the Rust core."""
+"""Build fluent query objects; ``ferro.query.wire`` compiles them to QueryIR.
+
+This module owns chainer-time state and validation (predicates, joins,
+projection, includes). Everything whose output is wire shape — the payload
+dataclasses, hop-fact resolution, join serialization, materialization plans,
+verb policy, and the versioned envelope — lives behind ``wire.compile_query``.
+"""
 
 import copy
 from typing import (
@@ -35,10 +41,17 @@ from .nodes import (
     QueryProxy,
     RelationProxy,
     RowSelector,
-    _serialize_query_value,
     validate_query_column,
 )
 from .rows import Row, Rows
+from .wire import (
+    M2mContext,
+    OrderByEntry,
+    compile_query,
+    model_identity,
+    path_edges,
+    to_wire_json,
+)
 
 if TYPE_CHECKING:
     from .._core import RouteHandle
@@ -50,32 +63,6 @@ E = TypeVar("E")
 # at import; `into=` record types would parameterize per call). Construction
 # always goes through Rows._wrap — never pydantic validation (ADR-0007).
 _ROWS_OF_ROW: type[Rows[Row]] = Rows[Row]
-
-
-def _query_ir_payload_to_json(query_payload: dict[str, Any]) -> str:
-    """Serialize a QueryIR payload into a versioned IR envelope JSON string.
-
-    Always emits ``ir_version: 5`` (#292 — unconditional bump, exactly like v4
-    at #285, v3 at #278, and v2 at #269; there is no earlier envelope left
-    anywhere). v5 gives ``record`` fields expression sources (ADR-0009): a
-    field carries either a ``column`` + ``path`` or an aggregate ``expr``.
-    Python and Rust ship in one wheel, so a single supported version is the
-    whole contract (#267 Implementation Decisions).
-    """
-    import json
-
-    return json.dumps(
-        {
-            "ir_kind": "query",
-            "ir_version": 5,
-            "payload": _serialize_query_value(query_payload),
-        }
-    )
-
-
-def _model_identity(model_cls: type) -> str:
-    """Qualified registry identity of a Ferro model class (FF-E)."""
-    return model_cls.__ferro_identity__  # ty: ignore[unresolved-attribute]
 
 
 def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNode:
@@ -130,20 +117,6 @@ def _register_join_paths(node: QueryNode, joins: dict[tuple[str, ...], str]) -> 
         joins.setdefault(tuple(node.path), "inner")
 
 
-def _where_node_traverses(node: QueryNode) -> bool:
-    """True if any leaf under ``node`` carries a non-empty relation path (#273).
-
-    Used by :meth:`Query._mutating_query_def` to reject relation traversal on
-    ``update()``/``delete()``. A join-free shadow-FK leaf (``t.account ==
-    instance`` desugars to ``path=()``) is NOT traversal and stays allowed.
-    """
-    if node.is_compound:
-        return (node.left is not None and _where_node_traverses(node.left)) or (
-            node.right is not None and _where_node_traverses(node.right)
-        )
-    return bool(node.path)
-
-
 def _resolve_join_selector(
     selector: "Callable[[QueryProxy[Any]], Any]", model_cls: type
 ) -> tuple[str, ...]:
@@ -182,11 +155,6 @@ def _resolve_join_selector(
             f"(e.g. `lambda t: t.account`), got {type(result).__name__}"
         )
     return result._path
-
-
-def _path_edges(path: tuple[str, ...]) -> list[tuple[str, ...]]:
-    """Every edge (prefix of length ≥ 1) of a relation ``path`` (#272)."""
-    return [path[:i] for i in range(1, len(path) + 1)]
 
 
 def _reject_reverse_relation_include(exc: AttributeError) -> None:
@@ -485,63 +453,6 @@ def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, .
     return tuple(fields)
 
 
-def _target_pk_column(model_cls: type) -> str:
-    """Return the single primary-key column name of a relation target (#270).
-
-    Raises:
-        ValueError: If ``model_cls`` has zero or multiple primary-key columns —
-            relation traversal joins against exactly one PK column, so an
-            ambiguous target is a loud error naming the model, never a guess.
-    """
-    pks = [
-        name
-        for name, spec in getattr(model_cls, "__ferro_columns__", {}).items()
-        if spec.primary_key
-    ]
-    if len(pks) != 1:
-        raise ValueError(
-            f"Relation traversal into {model_cls.__name__!r} requires exactly one "
-            f"primary-key column, found {len(pks)}: {sorted(pks)}."
-        )
-    return pks[0]
-
-
-def _resolve_join_hops(
-    model_cls: type, path: tuple[str, ...]
-) -> list[dict[str, str]]:
-    """Resolve a relation path into ordered hop facts for the QueryIR ``joins``.
-
-    Each hop's ``relation``/``from_column``/``to_table``/``to_column`` is read
-    from the relation-spec chain starting at ``model_cls`` — ``from_column`` is
-    the shadow FK column on the source side, ``to_column`` the target's PK.
-
-    Raises:
-        ValueError: If a path element is not a declared relation of the current
-            model (should not happen — proxies validate at build time), or the
-            target has no single primary key (:func:`_target_pk_column`).
-    """
-    hops: list[dict[str, str]] = []
-    current = model_cls
-    for relation in path:
-        specs = getattr(current, "__ferro_relation_specs__", None) or {}
-        spec = specs.get(relation)
-        if spec is None:
-            raise ValueError(
-                f"{current.__name__!r} has no relation {relation!r} for traversal."
-            )
-        target = spec.target
-        hops.append(
-            {
-                "relation": relation,
-                "from_column": spec.shadow_column,
-                "to_table": target.__ferro_table__,
-                "to_column": _target_pk_column(target),
-            }
-        )
-        current = target
-    return hops
-
-
 class Query(Generic[T]):
     """Build and execute fluent ORM queries.
 
@@ -568,10 +479,10 @@ class Query(Generic[T]):
         self._using = using
         self._session = session
         self.where_clause: list["QueryNode"] = []
-        self.order_by_clause: list[dict[str, Any]] = []
+        self.order_by_clause: list[OrderByEntry] = []
         self._limit: int | None = None
         self._offset: int | None = None
-        self._m2m_context: dict[str, Any] | None = None
+        self._m2m_context: M2mContext | None = None
         # Relation paths that must render a join, insertion-ordered (full path
         # tuple -> registered join_type). Populated by where()/order_by()
         # traversal ("inner") and by the explicit join()/left_join() chainers
@@ -587,7 +498,7 @@ class Query(Generic[T]):
         self._explicit_edges: dict[tuple[str, ...], str] = {}
         # Relation paths to populate (#286, ADR-0008), insertion-ordered and
         # deduped by path identity (dict-as-ordered-set). CRITICAL: include
-        # paths never enter ``_joins``/``_serialize_joins`` — they ride the
+        # paths never enter ``_joins``/the wire ``joins`` section — they ride the
         # ``instances`` materialization plan, so the ``joins`` wire section
         # keeps its stage-1 semantics untouched and include contributes no
         # join-type opinion on any edge another clause references.
@@ -610,9 +521,8 @@ class Query(Generic[T]):
         new = copy.copy(self)
         new.where_clause = list(self.where_clause)
         new.order_by_clause = list(self.order_by_clause)
-        new._m2m_context = (
-            dict(self._m2m_context) if self._m2m_context is not None else None
-        )
+        # M2mContext is frozen, so clones can share it safely.
+        new._m2m_context = self._m2m_context
         new._joins = dict(self._joins)
         new._explicit_edges = dict(self._explicit_edges)
         new._includes = dict(self._includes)
@@ -626,12 +536,12 @@ class Query(Generic[T]):
         A new ``Query`` with the m2m context set; ``self`` is unchanged.
         """
         new = self._clone()
-        new._m2m_context = {
-            "join_table": join_table,
-            "source_col": source_col,
-            "target_col": target_col,
-            "source_id": source_id,
-        }
+        new._m2m_context = M2mContext(
+            join_table=join_table,
+            source_col=source_col,
+            target_col=target_col,
+            source_id=source_id,
+        )
         return new
 
     def where(self, predicate: "Predicate[T]") -> Self:
@@ -862,11 +772,7 @@ class Query(Generic[T]):
 
         new = self._clone()
         new.order_by_clause.append(
-            {
-                "column": col_name,
-                "direction": direction.lower(),
-                "path": list(path),
-            }
+            OrderByEntry(column=col_name, direction=direction.lower(), path=path)
         )
         if path:
             new._joins.setdefault(path, "inner")
@@ -994,7 +900,7 @@ class Query(Generic[T]):
         direction is idempotent.
         """
         path = _resolve_join_selector(selector, self.model_cls)
-        edges = _path_edges(path)
+        edges = path_edges(path)
         new = self._clone()
         for edge in edges:
             existing = new._explicit_edges.get(edge)
@@ -1047,27 +953,6 @@ class Query(Generic[T]):
         new._offset = value
         return new
 
-    def _materialization_ir(self) -> dict[str, Any]:
-        """Serialize this query's materialization plan (ADR-0007, v4).
-
-        Every fetching query carries exactly one plan on the wire. A query
-        without a projection or includes materializes complete root
-        instances; an included query carries the ``instances`` plan — one
-        ordered hop-fact list per include path (#286), the same hop shape as
-        the ``joins`` section but deliberately separate from it (ADR-0008):
-        the fetch walker unions include-only edges in as LEFT, so include
-        can never change membership or a shared edge's join type.
-        """
-        if self._includes:
-            return {
-                "kind": "instances",
-                "paths": [
-                    _resolve_join_hops(self.model_cls, path)
-                    for path in self._includes
-                ],
-            }
-        return {"kind": "root_instances"}
-
     def _include_hop_classes(self) -> dict[str, type]:
         """Map each included hop's physical table to its model class (#286)."""
         return self._hop_classes_for_paths(self._includes)
@@ -1100,109 +985,6 @@ class Query(Generic[T]):
                 current = target
         return hop_classes
 
-    def _serialize_joins(self) -> list[dict[str, Any]]:
-        """Serialize collected relation paths into QueryIR ``joins`` entries.
-
-        Emits one entry per registered full path, in insertion order, each
-        carrying its ordered hop facts (:func:`_resolve_join_hops`). The Rust
-        SELECT walkers assign deterministic ``j{i}_{relation}`` aliases and
-        dedup shared prefixes at render time (#270).
-
-        The wire ``join_type`` is resolved from ``_explicit_edges`` at the EDGE
-        level so it is already unambiguous (#272): an entry is ``"left"`` iff
-        ALL of its edges are explicitly LEFT-marked, else ``"inner"``. Because
-        ``.left_join`` is whole-path and the only source of LEFT, a proper
-        prefix of a longer path can be LEFT while the deeper hop is INNER — that
-        prefix is itself a registered ``_joins`` entry (``left_join`` registers
-        its full path) and is emitted as its own ``"left"`` entry; the longer
-        entry is emitted ``"inner"``. The Rust edge resolver then renders the
-        prefix edges LEFT and the deeper edges INNER (a pure double-check of
-        this wire). This also makes "explicit LEFT beats implicit INNER on a
-        shared edge" visible in the IR itself.
-        """
-        entries: list[dict[str, Any]] = []
-        for path in self._joins:
-            is_left = all(
-                self._explicit_edges.get(edge) == "left" for edge in _path_edges(path)
-            )
-            entries.append(
-                {
-                    "join_type": "left" if is_left else "inner",
-                    "path": _resolve_join_hops(self.model_cls, path),
-                }
-            )
-        return entries
-
-    def _mutating_query_def(self, operation: str) -> dict[str, Any]:
-        """Build the QueryIR payload for a mutating operation (update/delete).
-
-        Mutating payloads never carry ``limit``/``offset`` keys: portable SQL
-        has no ``UPDATE/DELETE ... LIMIT``, so pagination on a mutation is
-        rejected loudly instead of being silently ignored.
-
-        Raises:
-            ValueError: If ``limit()``/``offset()`` was set, or if the query
-                traverses a relation (a joined/explicit-edge path, or a
-                where-clause leaf carrying a non-empty path). Portable SQL has
-                no ``UPDATE/DELETE ... JOIN``; a join-free shadow-FK filter
-                (``t.account == instance``) stays allowed. Rejected here, before
-                any DB round-trip (the Rust guard from #270 stays as boundary
-                defense).
-        """
-        if self._limit is not None or self._offset is not None:
-            raise ValueError(
-                f"{operation}() does not support limit/offset: portable SQL has "
-                f"no {operation.upper()} ... LIMIT. Remove the .limit()/.offset() "
-                f"call, or fetch primary keys first and {operation} by "
-                "primary-key set."
-            )
-        if (
-            self._joins
-            or self._explicit_edges
-            or any(_where_node_traverses(node) for node in self.where_clause)
-        ):
-            raise ValueError(
-                f"{operation}() does not support relation traversal: portable SQL "
-                f"has no {operation.upper()} ... JOIN. Fetch primary keys via the "
-                f"joined query first, then {operation} by primary-key set. "
-                "(A join-free relation filter like `t.account == instance` is "
-                "allowed.)"
-            )
-        if self._includes:
-            raise ValueError(
-                f"{operation}() does not support include(): a mutation is a "
-                "single-table write shape and returns no instances to "
-                "populate. Drop the .include(...) call, or fetch the "
-                "populated rows first and mutate by primary-key set."
-            )
-        return {
-            "model_name": _model_identity(self.model_cls),
-            "where": [node.to_ir_dict() for node in self.where_clause],
-            "order_by": [],
-            "m2m": None,
-            "joins": [],
-            # A mutation never materializes a projected result; projection on
-            # a mutating query is rejected before this payload is built.
-            "materialization": {"kind": "root_instances"},
-        }
-
-    def _fetch_query_def(self) -> dict[str, Any]:
-        """Build the QueryIR payload for a fetching operation (``all()``).
-
-        Carries the query's own materialization plan — ``root_instances``
-        here, a ``record`` plan on a :class:`ProjectedQuery` (ADR-0007).
-        """
-        return {
-            "model_name": _model_identity(self.model_cls),
-            "where": [node.to_ir_dict() for node in self.where_clause],
-            "order_by": self.order_by_clause,
-            "limit": self._limit,
-            "offset": self._offset,
-            "m2m": self._m2m_context,
-            "joins": self._serialize_joins(),
-            "materialization": self._materialization_ir(),
-        }
-
     async def all(self) -> list[T]:
         """Return all model instances that match the current query
 
@@ -1214,18 +996,18 @@ class Query(Generic[T]):
             >>> isinstance(users, list)
             True
         """
-        query_def = self._fetch_query_def()
+        payload = compile_query(self, "fetch")
         route = await self._transaction_or_using()
         if self._includes:
             return await fetch_filtered(
                 self.model_cls,
-                _query_ir_payload_to_json(query_def),
+                to_wire_json(payload),
                 route,
                 hop_classes=self._include_hop_classes(),
             )
         return await fetch_filtered(
             self.model_cls,
-            _query_ir_payload_to_json(query_def),
+            to_wire_json(payload),
             route,
         )
 
@@ -1240,23 +1022,11 @@ class Query(Generic[T]):
             >>> isinstance(total, int)
             True
         """
-        query_def = {
-            "model_name": _model_identity(self.model_cls),
-            "where": [node.to_ir_dict() for node in self.where_clause],
-            "order_by": [],
-            "limit": None,
-            "offset": None,
-            "m2m": self._m2m_context,
-            "joins": self._serialize_joins(),
-            # count() is unaffected by projection (PRD #277 verb table): it
-            # materializes a scalar, so the plan is root_instances even on a
-            # projected query.
-            "materialization": {"kind": "root_instances"},
-        }
+        payload = compile_query(self, "count")
         route = await self._transaction_or_using()
         return await count_filtered(
-            _model_identity(self.model_cls),
-            _query_ir_payload_to_json(query_def),
+            model_identity(self.model_cls),
+            to_wire_json(payload),
             route,
         )
 
@@ -1282,11 +1052,11 @@ class Query(Generic[T]):
             >>> isinstance(updated, int)
             True
         """
-        query_def = self._mutating_query_def("update")
+        payload = compile_query(self, "update")
         route = await self._transaction_or_using()
         return await update_filtered(
-            _model_identity(self.model_cls),
-            _query_ir_payload_to_json(query_def),
+            model_identity(self.model_cls),
+            to_wire_json(payload),
             update_bind_payload(fields),
             route,
         )
@@ -1324,11 +1094,11 @@ class Query(Generic[T]):
             >>> isinstance(deleted, int)
             True
         """
-        query_def = self._mutating_query_def("delete")
+        payload = compile_query(self, "delete")
         route = await self._transaction_or_using()
         return await delete_filtered(
-            _model_identity(self.model_cls),
-            _query_ir_payload_to_json(query_def),
+            model_identity(self.model_cls),
+            to_wire_json(payload),
             route,
         )
 
@@ -1372,10 +1142,10 @@ class Query(Generic[T]):
 
         route = await self._transaction_or_using()
         await add_m2m_links(
-            self._m2m_context["join_table"],
-            self._m2m_context["source_col"],
-            self._m2m_context["target_col"],
-            self._m2m_context["source_id"],
+            self._m2m_context.join_table,
+            self._m2m_context.source_col,
+            self._m2m_context.target_col,
+            self._m2m_context.source_id,
             ids,
             route,
         )
@@ -1405,10 +1175,10 @@ class Query(Generic[T]):
 
         route = await self._transaction_or_using()
         await remove_m2m_links(
-            self._m2m_context["join_table"],
-            self._m2m_context["source_col"],
-            self._m2m_context["target_col"],
-            self._m2m_context["source_id"],
+            self._m2m_context.join_table,
+            self._m2m_context.source_col,
+            self._m2m_context.target_col,
+            self._m2m_context.source_id,
             ids,
             route,
         )
@@ -1430,9 +1200,9 @@ class Query(Generic[T]):
 
         route = await self._transaction_or_using()
         await clear_m2m_links(
-            self._m2m_context["join_table"],
-            self._m2m_context["source_col"],
-            self._m2m_context["source_id"],
+            self._m2m_context.join_table,
+            self._m2m_context.source_col,
+            self._m2m_context.source_id,
             route,
         )
 
@@ -1480,7 +1250,7 @@ class ProjectedQuery(Query[T]):
         if self._has_aggregate():
             output_names = {field.name for field in fields}
             for order in self.order_by_clause:
-                column, path = order["column"], tuple(order["path"])
+                column, path = order.column, order.path
                 if not path and column in output_names:
                     continue
                 if self._is_group_key_source(column, path):
@@ -1494,39 +1264,6 @@ class ProjectedQuery(Query[T]):
                     "after the select()."
                 )
 
-    def _materialization_ir(self) -> dict[str, Any]:
-        """Serialize the ``record`` plan: one field per projected field.
-
-        ``name`` is declared separately from ``column`` (output aliases) and
-        each plain field carries its relation ``path`` (traversed projection,
-        #293). An aggregate field carries an ``expr`` instead (#294): ``fn``
-        as data and the source's traversal as hop facts on ``expr.path`` —
-        self-contained on the wire — with the field-level ``path`` empty.
-        """
-        fields: list[dict[str, Any]] = []
-        for field in self._projection:
-            if field.agg is not None:
-                fields.append(
-                    {
-                        "name": field.name,
-                        "path": [],
-                        "expr": {
-                            "fn": field.agg,
-                            "column": field.column,
-                            "path": _resolve_join_hops(self.model_cls, field.path),
-                        },
-                    }
-                )
-            else:
-                fields.append(
-                    {
-                        "name": field.name,
-                        "column": field.column,
-                        "path": list(field.path),
-                    }
-                )
-        return {"kind": "record", "fields": fields}
-
     def _has_aggregate(self) -> bool:
         """True when this is an AGGREGATE PROJECTION (CONTEXT.md): at least
         one aggregate field, so every plain field is a group key (#295)."""
@@ -1538,7 +1275,7 @@ class ProjectedQuery(Query[T]):
         """Clone with one resolved ORDER BY entry appended (#295)."""
         new = self._clone()
         new.order_by_clause.append(
-            {"column": column, "direction": direction.lower(), "path": list(path)}
+            OrderByEntry(column=column, direction=direction.lower(), path=path)
         )
         if path:
             new._joins.setdefault(path, "inner")
@@ -1735,13 +1472,13 @@ class ProjectedQuery(Query[T]):
             >>> [r.amount for r in rows]  # doctest: +SKIP
             [Decimal('12.50'), Decimal('7.00')]
         """
-        query_def = self._fetch_query_def()
+        payload = compile_query(self, "fetch")
         route = await self._transaction_or_using()
         hop_classes = self._traversed_hop_classes()
         if hop_classes is not None:
             records = await fetch_filtered(
                 self.model_cls,
-                _query_ir_payload_to_json(query_def),
+                to_wire_json(payload),
                 route,
                 record_cls=Row,
                 hop_classes=hop_classes,
@@ -1749,7 +1486,7 @@ class ProjectedQuery(Query[T]):
         else:
             records = await fetch_filtered(
                 self.model_cls,
-                _query_ir_payload_to_json(query_def),
+                to_wire_json(payload),
                 route,
                 record_cls=Row,
             )

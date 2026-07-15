@@ -22,6 +22,7 @@ import ferro
 from ferro import BackRef, FerroField, ForeignKey, ManyToMany, Model, Relation
 from ferro.query import Query, QueryNode
 from ferro.query.nodes import FieldProxy, QueryProxy
+from ferro.query.wire import compile_query
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -680,22 +681,22 @@ def test_query_node_boolean_coercion_raises():
 
 class TestMutatingTraversalRejection:
     """update()/delete() reject relation traversal at the shared choke point
-    (:meth:`Query._mutating_query_def`), before any serialization or DB."""
+    (:func:`ferro.query.wire.compile_query`), before any serialization or DB."""
 
     def test_traversed_predicate_rejected_for_update_and_delete(self):
         q = Query(QJTransaction).where(lambda t: t.account.label == "a1")
         for operation in ("update", "delete"):
             with pytest.raises(ValueError, match="does not support relation traversal"):
-                q._mutating_query_def(operation)
+                compile_query(q, operation)
 
     def test_explicit_join_rejected(self):
         q = Query(QJTransaction).join(lambda t: t.account)
         with pytest.raises(ValueError, match="relation traversal"):
-            q._mutating_query_def("update")
+            compile_query(q, "update")
 
     def test_join_free_relation_filter_is_allowed(self):
         q = Query(QJTransaction).where(lambda t: t.account == _persisted_account(1))
-        payload = q._mutating_query_def("update")  # must NOT raise
+        payload = compile_query(q, "update").to_ir_dict()  # must NOT raise
         assert payload["where"][0]["column"] == "account_id"
         assert payload["where"][0]["path"] == []
 
@@ -719,9 +720,10 @@ async def test_update_and_delete_reject_traversal_before_db():
 
 def _serialized_join_types(query) -> list[tuple[tuple[str, ...], str]]:
     """(path, join_type) for each serialized ``joins`` entry, in wire order."""
+    payload = compile_query(query, "fetch").to_ir_dict()
     return [
         (tuple(hop["relation"] for hop in entry["path"]), entry["join_type"])
-        for entry in query._serialize_joins()
+        for entry in payload["joins"]
     ]
 
 
