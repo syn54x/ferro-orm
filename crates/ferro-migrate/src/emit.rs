@@ -255,47 +255,23 @@ fn post_create_artifacts(
 
 /// Order `AddTable` models so each table's FK targets are created before it.
 ///
-/// A FK dependency on a table that is *not* part of this add set (already
-/// exists in the live DB) does not constrain ordering. Cycles fall through in
-/// arbitrary order — the inline FKs are anonymous, so a cyclic create still
-/// runs (SQLite is lenient; Postgres `CREATE TABLE` with a forward inline FK
-/// reference is the pre-existing behavior preserved here).
+/// Delegates to [`crate::order_by_dependencies`] for the dependency
+/// semantics: a self-referential FK and a FK to a table outside this add set
+/// do not constrain ordering, and genuine cross-table cycles fall through in
+/// input order (SQLite tolerates the forward references; Postgres rejects
+/// them — #302 follow-up).
 pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a SchemaModel> {
-    let mut remaining: Vec<&SchemaModel> = models.to_vec();
-    let mut ordered = Vec::new();
-    let mut created = std::collections::HashSet::new();
-
-    while !remaining.is_empty() {
-        let available: std::collections::HashSet<String> = remaining
-            .iter()
-            .map(|m| m.table_name.clone())
-            .collect();
-        let mut progress = false;
-        let mut index = 0;
-        while index < remaining.len() {
-            let deps: Vec<String> = remaining[index]
+    crate::order_by_dependencies(
+        models.to_vec(),
+        |model| model.table_name.clone(),
+        |model| {
+            model
                 .foreign_keys
                 .iter()
                 .map(|fk| fk.to_table.clone())
-                .collect();
-            if deps
-                .iter()
-                .all(|dep| created.contains(dep) || !available.contains(dep))
-            {
-                let model = remaining.remove(index);
-                created.insert(model.table_name.clone());
-                ordered.push(model);
-                progress = true;
-            } else {
-                index += 1;
-            }
-        }
-        if !progress {
-            ordered.append(&mut remaining);
-            break;
-        }
-    }
-    ordered
+                .collect()
+        },
+    )
 }
 
 fn emit_add_table_passes(

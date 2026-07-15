@@ -7,7 +7,7 @@ use crate::backend::EngineHandle;
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 fn model_ir_dependencies(
@@ -32,52 +32,26 @@ fn model_ir_dependencies(
     deps
 }
 
-/// Topologically sort registered models for the migrate ALTER reconcile loop.
+/// Dependency-sort registered models for the migrate ALTER reconcile loop.
 ///
 /// FK edges come from [`SchemaModel::foreign_keys`] in the pushed modelset.
-/// External targets (not among registered table names) do not block ordering.
-/// Cycles append the remaining entries when no progress is possible.
+/// Entries are sorted by model name first, then delegated to
+/// [`ferro_migrate::order_by_dependencies`] — the shared primitive that also
+/// orders CREATE TABLE emission — so self-referential FKs, external targets,
+/// and cycle fallback behave identically on both paths (#302).
 pub(crate) fn order_models_for_migration(
     registry: HashMap<String, Arc<crate::state::RegisteredModel>>,
     modelset: &IrEnvelope<SchemaIrPayload>,
 ) -> Vec<(String, Arc<crate::state::RegisteredModel>)> {
-    let mut remaining: Vec<(String, Arc<crate::state::RegisteredModel>)> =
+    let mut entries: Vec<(String, Arc<crate::state::RegisteredModel>)> =
         registry.into_iter().collect();
-    remaining.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut ordered = Vec::with_capacity(remaining.len());
-    let mut created = HashSet::new();
-
-    while !remaining.is_empty() {
-        let available_names: HashSet<String> = remaining
-            .iter()
-            .map(|(_, model)| model.table_name.clone())
-            .collect();
-        let mut progress = false;
-        let mut index = 0;
-
-        while index < remaining.len() {
-            let deps = model_ir_dependencies(&remaining[index].1.table_name, modelset);
-            if deps
-                .iter()
-                .all(|dep| created.contains(dep) || !available_names.contains(dep))
-            {
-                let item = remaining.remove(index);
-                let table = item.1.table_name.clone();
-                created.insert(table);
-                ordered.push(item);
-                progress = true;
-            } else {
-                index += 1;
-            }
-        }
-
-        if !progress {
-            ordered.append(&mut remaining);
-        }
-    }
-
-    ordered
+    ferro_migrate::order_by_dependencies(
+        entries,
+        |(_, model)| model.table_name.clone(),
+        |(_, model)| model_ir_dependencies(&model.table_name, modelset),
+    )
 }
 
 /// Internal utility to create all registered tables in the database.
@@ -527,6 +501,27 @@ mod tests {
             .collect();
         assert!(tables.contains(&"alpha"));
         assert!(tables.contains(&"beta"));
+    }
+
+    #[test]
+    fn order_models_for_migration_self_fk_is_not_an_ordering_constraint() {
+        // #302: `znode` carries a self-referential FK and `areferrer`
+        // (alphabetically first) requires it. The self-loop must not evict
+        // the component from the dependency order.
+        let modelset = test_modelset(vec![
+            test_schema_model("znode", &["znode"]),
+            test_schema_model("areferrer", &["znode"]),
+        ]);
+        let mut registry = HashMap::new();
+        registry.insert("ZNode".to_string(), test_registered("znode"));
+        registry.insert("AReferrer".to_string(), test_registered("areferrer"));
+
+        let ordered = order_models_for_migration(registry, &modelset);
+        let tables: Vec<&str> = ordered
+            .iter()
+            .map(|(_, model)| model.table_name.as_str())
+            .collect();
+        assert_eq!(tables, vec!["znode", "areferrer"]);
     }
 
     #[test]
