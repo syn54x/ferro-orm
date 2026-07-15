@@ -100,6 +100,10 @@ _Avoid_: Nested select, join column, related-field pull
 A user-chosen name for one field of a projected record, given as the key in a dict-returning selector (`select(lambda t: {"account_name": t.account.name})`). Aliases name output fields only — never joins or tables; the relation path remains the sole join identity.
 _Avoid_: Column alias, AS label, join alias
 
+**Primary key fact**:
+The single cached answer to "which column is this model's primary key" — derived once at the compile choke point alongside column specs, stored as `__ferro_pk__` (`None` for a PK-less model). At most one `primary_key=True` column may be declared; a violation raises at class definition time. Operations that need a PK read the cached fact and raise clearly when it is `None` — never guess.
+_Avoid_: PK lookup, PK scan, first primary-key column
+
 **Provisional registration**:
 The per-model state installed when a class body finishes executing — enough for runtime codec and PK metadata, but relationships may still be pending and the modelset is not yet authoritative for DDL.
 _Avoid_: Import-time registration, partial registry

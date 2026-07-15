@@ -38,12 +38,15 @@ class RelationshipDescriptor(BaseModel):
         if self._target_model is None:
             self._target_model = resolve_model_reference(self.target_model_name)
 
-        # Find the primary key value of the current instance
-        pk_field = "id"
-        for f_name, spec in getattr(instance.__class__, "__ferro_columns__", {}).items():
-            if spec.primary_key:
-                pk_field = f_name
-                break
+        # The related rows are keyed by this instance's PK (cached fact —
+        # this runs on every reverse-relation attribute access).
+        pk_field = instance.__class__.__ferro_pk__
+        if pk_field is None:
+            raise ValueError(
+                f"Cannot access relation {self.field_name!r}: "
+                f"{instance.__class__.__name__} declares no primary-key "
+                "column, so its related rows cannot be keyed."
+            )
         pk_val = getattr(instance, pk_field)
 
         if self.is_m2m:
