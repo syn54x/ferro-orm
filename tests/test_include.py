@@ -505,11 +505,14 @@ def test_include_is_immutable_and_idempotent():
 
 
 def test_include_paths_never_enter_the_joins_wire_section():
+    from ferro.query.wire import compile_query
+
     q = INTransaction.select().include(lambda t: t.account)
+    payload = compile_query(q, "fetch").to_ir_dict()
 
     assert q._joins == {}
-    assert q._serialize_joins() == []
-    assert q._materialization_ir() == {
+    assert payload["joins"] == []
+    assert payload["materialization"] == {
         "kind": "instances",
         "paths": [
             [

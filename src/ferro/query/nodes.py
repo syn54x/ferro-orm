@@ -673,8 +673,8 @@ class RelationProxy:
             )
         if isinstance(other, self._target):
             # Reuse the Task 3 PK resolver (loud on zero/multiple PKs); local
-            # import avoids a builder <-> nodes import cycle at module load.
-            from .builder import _target_pk_column
+            # import avoids a wire <-> nodes import cycle at module load.
+            from .wire import _target_pk_column
 
             pk_column = _target_pk_column(self._target)
             pk_value = getattr(other, pk_column, None)
