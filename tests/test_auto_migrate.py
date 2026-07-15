@@ -1376,3 +1376,45 @@ async def test_pg_json_to_jsonb_declaration_edit_alters_in_place(
     async with ferro.engines.session():
         migrated = await JsonbMigrated.get(1)
     assert migrated.payload == {"kept": True}
+
+
+# ---------------------------------------------------------------------------
+# CREATE TABLE dependency order with a self-referential FK (issue #302)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_self_fk_does_not_evict_component_from_create_order(
+    db_url, clean_registry
+):
+    """A self-referential FK is not a cycle — the table depends only on itself —
+    so it must not knock its dependency component out of the CREATE TABLE
+    topological order. Before the #302 fix, `zorderednode`'s self-loop made the
+    whole component fall back to name order, and `aorderedref` (which sorts
+    first but carries a required FK to it) failed on a fresh Postgres schema
+    with `relation "zorderednode" does not exist`."""
+    from typing import Optional
+
+    from ferro import ForeignKey
+
+    class ZOrderedNode(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        parent: Annotated[
+            Optional["ZOrderedNode"], ForeignKey(related_name="children")
+        ] = None
+        children: Relation[list["ZOrderedNode"]] = BackRef()
+        refs: Relation[list["AOrderedRef"]] = BackRef()
+
+    class AOrderedRef(Model):
+        id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
+        node: Annotated[ZOrderedNode, ForeignKey(related_name="refs")]
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        root = await ZOrderedNode.create()
+        child = await ZOrderedNode.create(parent=root)
+        ref = await AOrderedRef.create(node=child)
+
+        fetched = await AOrderedRef.get(ref.id)
+        assert fetched.node_id == child.id

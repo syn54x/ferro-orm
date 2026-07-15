@@ -4,12 +4,14 @@
 //! [`emit_sql_with_ir`] lowers structural ops to executable backend-specific DDL.
 
 mod emit;
+mod order;
 
 use ferro_ddl_lowering::schema_columns_storage_drift;
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use emit::{emit_sql_with_ir, order_models_for_create, render_create_table, CreateTableEmission};
+pub use order::order_by_dependencies;
 pub use ferro_ddl_lowering::Dialect;
 
 /// Executable SQL plus non-fatal warnings from [`emit_sql_with_ir`].

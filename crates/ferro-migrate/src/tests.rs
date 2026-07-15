@@ -1459,3 +1459,36 @@ fn emit_sql_with_ir_add_column_db_check_postgres_quoted_and_sqlite_warns() {
         lite.warnings
     );
 }
+
+#[test]
+fn order_models_for_create_self_fk_is_not_an_ordering_constraint() {
+    // #302: `znode` carries a self-referential FK; `areferrer` arrives first
+    // (mirroring the alphabetical incoming order) and requires `znode`. The
+    // self-loop is satisfied by the table's own CREATE, so it must not evict
+    // the component from the dependency order.
+    let znode = SchemaModel {
+        foreign_keys: vec![SchemaForeignKey {
+            column: "parent_id".to_string(),
+            to_table: "znode".to_string(),
+            to_column: "id".to_string(),
+            on_delete: None,
+            name: None,
+        }],
+        ..schema_model("znode", vec![col("id", "uuid", false)])
+    };
+    let areferrer = SchemaModel {
+        foreign_keys: vec![SchemaForeignKey {
+            column: "node_id".to_string(),
+            to_table: "znode".to_string(),
+            to_column: "id".to_string(),
+            on_delete: None,
+            name: None,
+        }],
+        ..schema_model("areferrer", vec![col("id", "uuid", false)])
+    };
+
+    let models = vec![&areferrer, &znode];
+    let ordered = order_models_for_create(&models);
+    let tables: Vec<&str> = ordered.iter().map(|m| m.table_name.as_str()).collect();
+    assert_eq!(tables, vec!["znode", "areferrer"]);
+}
