@@ -508,7 +508,7 @@ def test_include_paths_never_enter_the_joins_wire_section():
     from ferro.query.wire import compile_query
 
     q = INTransaction.select().include(lambda t: t.account)
-    payload = compile_query(q, "fetch").to_ir_dict()
+    payload = compile_query(q, "fetch").payload.to_ir_dict()
 
     assert q._joins == {}
     assert payload["joins"] == []

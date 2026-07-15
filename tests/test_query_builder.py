@@ -10,7 +10,7 @@ import ferro
 from ferro import Model, connect
 from ferro.query import Query, QueryNode
 from ferro.query.nodes import FieldProxy, _serialize_query_value
-from ferro.query.wire import compile_query, to_wire_json
+from ferro.query.wire import compile_query
 from pydantic import Field
 
 pytestmark = pytest.mark.backend_matrix
@@ -61,7 +61,7 @@ def test_to_wire_json_serializes_m2m_context_without_mutating_query_state():
         source_id,
     )
 
-    query_json = to_wire_json(compile_query(query, "fetch"))
+    query_json = compile_query(query, "fetch").wire_json
     payload = json.loads(query_json)
 
     assert query._m2m_context.source_id == source_id
@@ -78,7 +78,7 @@ def test_query_carries_root_instances_materialization_by_default():
     class WirePlainRow(Model):
         id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
 
-    payload = compile_query(Query(WirePlainRow), "fetch").to_ir_dict()
+    payload = compile_query(Query(WirePlainRow), "fetch").payload.to_ir_dict()
     assert payload["materialization"] == {"kind": "root_instances"}
 
 

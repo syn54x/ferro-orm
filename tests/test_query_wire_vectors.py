@@ -1,7 +1,7 @@
 """Builder→wire golden-vector equality: the Python half of the QueryIR contract.
 
 Each test builds one real query through the public chainers and asserts the
-compiled wire envelope (``compile_query`` → ``to_wire_json``) equals the
+compiled wire envelope (``compile_query(...).wire_json``) equals the
 hand-authored golden vector in ``tests/fixtures/ir_vectors/`` byte-for-byte.
 The Rust half round-trips the same fixture files in ``crates/ferro-schema-ir``
 — one artifact, both sides assert, so neither side can drift silently.
@@ -27,7 +27,7 @@ from typing import Annotated, Any, Callable
 import pytest
 
 from ferro import BackRef, FerroField, ForeignKey, Model, Relation
-from ferro.query.wire import compile_query, to_wire_json
+from ferro.query.wire import compile_query
 from ferro.relations import resolve_relationships
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
@@ -221,7 +221,7 @@ def test_builder_emission_matches_vector(
     expected = vector["ir"]
     assert expected["payload"]["model_name"] == root
 
-    emitted = json.loads(to_wire_json(compile_query(build(models), "fetch")))
+    emitted = json.loads(compile_query(build(models), "fetch").wire_json)
 
     expected["payload"]["model_name"] = models[root].__ferro_identity__
     assert emitted == expected
@@ -233,7 +233,7 @@ def test_builder_emission_matches_vector(
 
 
 def _payload(query: Any, verb: str) -> dict[str, Any]:
-    return json.loads(to_wire_json(compile_query(query, verb)))["payload"]
+    return json.loads(compile_query(query, verb).wire_json)["payload"]
 
 
 def test_count_zeroes_ordering_and_paging_but_keeps_joins(
@@ -283,6 +283,6 @@ def test_mutate_payload_omits_pagination_keys(models: dict[str, type]) -> None:
 
 
 def test_envelope_is_versioned(models: dict[str, type]) -> None:
-    envelope = json.loads(to_wire_json(compile_query(models["User"].select(), "fetch")))
+    envelope = json.loads(compile_query(models["User"].select(), "fetch").wire_json)
     assert envelope["ir_kind"] == "query"
     assert envelope["ir_version"] == 5

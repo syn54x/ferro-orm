@@ -50,7 +50,7 @@ def test_mutating_payload_omits_pagination_keys():
 
     query = PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
     for operation in ("update", "delete"):
-        payload = compile_query(query, operation).to_ir_dict()
+        payload = compile_query(query, operation).payload.to_ir_dict()
         assert "limit" not in payload
         assert "offset" not in payload
         assert payload["model_name"] == PaginationGuardItem.__ferro_identity__

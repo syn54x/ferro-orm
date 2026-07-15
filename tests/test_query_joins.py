@@ -696,7 +696,7 @@ class TestMutatingTraversalRejection:
 
     def test_join_free_relation_filter_is_allowed(self):
         q = Query(QJTransaction).where(lambda t: t.account == _persisted_account(1))
-        payload = compile_query(q, "update").to_ir_dict()  # must NOT raise
+        payload = compile_query(q, "update").payload.to_ir_dict()  # must NOT raise
         assert payload["where"][0]["column"] == "account_id"
         assert payload["where"][0]["path"] == []
 
@@ -720,7 +720,7 @@ async def test_update_and_delete_reject_traversal_before_db():
 
 def _serialized_join_types(query) -> list[tuple[tuple[str, ...], str]]:
     """(path, join_type) for each serialized ``joins`` entry, in wire order."""
-    payload = compile_query(query, "fetch").to_ir_dict()
+    payload = compile_query(query, "fetch").payload.to_ir_dict()
     return [
         (tuple(hop["relation"] for hop in entry["path"]), entry["join_type"])
         for entry in payload["joins"]
