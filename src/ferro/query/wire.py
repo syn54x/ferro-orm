@@ -262,22 +262,21 @@ class QueryIrPayload:
 def _target_pk_column(model_cls: type) -> str:
     """Return the single primary-key column name of a relation target (#270).
 
+    Reads the cached ``__ferro_pk__`` fact (multi-PK models cannot exist past
+    class definition), so only the PK-less case remains to guard.
+
     Raises:
-        ValueError: If ``model_cls`` has zero or multiple primary-key columns —
-            relation traversal joins against exactly one PK column, so an
-            ambiguous target is a loud error naming the model, never a guess.
+        ValueError: If ``model_cls`` has no primary-key column — relation
+            traversal joins against the target's PK, so a PK-less target is a
+            loud error naming the model, never a guess.
     """
-    pks = [
-        name
-        for name, spec in getattr(model_cls, "__ferro_columns__", {}).items()
-        if spec.primary_key
-    ]
-    if len(pks) != 1:
+    pk = getattr(model_cls, "__ferro_pk__", None)
+    if pk is None:
         raise ValueError(
-            f"Relation traversal into {model_cls.__name__!r} requires exactly one "
-            f"primary-key column, found {len(pks)}: {sorted(pks)}."
+            f"Relation traversal into {model_cls.__name__!r} requires a "
+            "primary-key column, and it declares none."
         )
-    return pks[0]
+    return pk
 
 
 def resolve_join_hops(

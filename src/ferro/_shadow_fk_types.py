@@ -27,13 +27,12 @@ def _scalar_part_of_annotation(ann: Any) -> Any:
 
 def pk_python_type_for_model(target: type[Any]) -> Any | None:
     """Return the PK column's scalar python type from the target's specs."""
-    specs = getattr(target, "__ferro_columns__", None)
-    if not specs:
+    pk_field = getattr(target, "__ferro_pk__", None)
+    if pk_field is None:
         return None
-    for spec in specs.values():
-        if spec.primary_key:
-            return spec.python_type
-    return None
+    specs = getattr(target, "__ferro_columns__", None) or {}
+    spec = specs.get(pk_field)
+    return spec.python_type if spec is not None else None
 
 
 def shadow_annotation_for_pk(pk_ann: Any) -> Any:

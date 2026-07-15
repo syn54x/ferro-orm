@@ -31,7 +31,35 @@ __all__ = [
     "build_relation_specs",
     "fk_shadow_spec",
     "pk_spec",
+    "primary_key_field_name",
 ]
+
+
+def primary_key_field_name(model_name: str, specs: dict[str, ColumnSpec]) -> str | None:
+    """Derive the model's single PK field name from its column specs.
+
+    The one derivation site for "which column is the primary key" — cached on
+    the class as ``__ferro_pk__`` at the compile choke point, so every
+    consumer (save, descriptors, shadow-FK typing, traversal) reads the cached
+    fact instead of re-looping specs. At most one ``primary_key=True`` column
+    is legal; zero is a valid declaration (``None``) and the operations that
+    need a PK raise their own errors.
+
+    Raises:
+        TypeError: If more than one column declares ``primary_key=True`` —
+            at class definition time, naming the model and offending fields,
+            rather than resolving the ambiguity silently by declaration order
+            (the follow-up ADR-0002 asked for). ``TypeError`` is the
+            declaration-error contract the metaclass surfaces unwrapped
+            (ADR-0003's db_type validation sets the precedent).
+    """
+    pks = [name for name, spec in specs.items() if spec.primary_key]
+    if len(pks) > 1:
+        raise TypeError(
+            f"Model {model_name!r} declares multiple primary-key columns: "
+            f"{sorted(pks)!r}. At most one primary_key=True column is supported."
+        )
+    return pks[0] if pks else None
 
 
 @dataclass(frozen=True, slots=True)

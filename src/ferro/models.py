@@ -211,6 +211,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = ()
     __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = ()
     __ferro_columns__: ClassVar[dict[str, "ColumnSpec"]] = {}
+    #: The single PK field name, derived once at the compile choke point
+    #: alongside ``__ferro_columns__``; ``None`` for a PK-less model.
+    __ferro_pk__: ClassVar[str | None] = None
     __ferro_relation_specs__: ClassVar[dict[str, "RelationSpec"]] = {}
     _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
 
@@ -247,9 +250,17 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 if isinstance(val, Model):
                     # Read the *target* model's PK (FF-D D5) — the source
                     # model's PK name is irrelevant to the related instance.
-                    pk_field = val.__class__._primary_key_field_name() or "id"
-                    id_val = getattr(val, pk_field, None)
-                    data[f"{field_name}_id"] = id_val
+                    pk_field = val.__class__.__ferro_pk__
+                    if pk_field is None:
+                        raise ValueError(
+                            f"Cannot assign a {val.__class__.__name__} instance "
+                            f"to relationship field {field_name!r}: "
+                            f"{val.__class__.__name__} declares no primary-key "
+                            "column, so there is no value to store in "
+                            f"{field_name!r}_id. Pass the scalar value directly "
+                            "or declare a primary_key=True column."
+                        )
+                    data[f"{field_name}_id"] = getattr(val, pk_field, None)
                 else:
                     # It's already an ID or something else
                     data[f"{field_name}_id"] = val
@@ -323,7 +334,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 mode="upsert",
             )
         elif _is_persisted(self):
-            pk_field_name = self.__class__._primary_key_field_name()
+            pk_field_name = self.__class__.__ferro_pk__
             pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
             if pk_val is None:
                 raise ValueError(
@@ -346,16 +357,17 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             )
 
         pk_val = None
-        pk_field_name = None
+        pk_field_name = self.__class__.__ferro_pk__
 
-        for field_name, spec in self.__class__.__ferro_columns__.items():
-            if not spec.primary_key:
-                continue
-            pk_field_name = field_name
-            if spec.autoincrement and getattr(self, field_name) is None and new_id is not None:
-                setattr(self, field_name, new_id)
-            pk_val = getattr(self, field_name)
-            break
+        if pk_field_name is not None:
+            spec = self.__class__.__ferro_columns__[pk_field_name]
+            if (
+                spec.autoincrement
+                and getattr(self, pk_field_name) is None
+                and new_id is not None
+            ):
+                setattr(self, pk_field_name, new_id)
+            pk_val = getattr(self, pk_field_name)
 
         if pk_val is not None:
             register_instance(
@@ -380,7 +392,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> if user:
             ...     await user.delete()
         """
-        pk_field_name = self.__class__._primary_key_field_name()
+        pk_field_name = self.__class__.__ferro_pk__
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
         route, _identity_using = await _instance_transaction_route(self, using, session)
 
@@ -393,13 +405,6 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             _core_evict_instance(name, str(pk_val), route)
             # The instance is transient again: a later save() re-INSERTs.
             _set_persisted(self, False)
-
-    @classmethod
-    def _primary_key_field_name(cls) -> str | None:
-        for field_name, spec in cls.__ferro_columns__.items():
-            if spec.primary_key:
-                return field_name
-        return None
 
     @classmethod
     async def all(
@@ -454,7 +459,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         Returns:
             The matching model instance, or None when no record exists.
         """
-        pk_field_name = cls._primary_key_field_name()
+        pk_field_name = cls.__ferro_pk__
         if pk_field_name is None:
             raise RuntimeError(f"Model {cls.__name__} does not define a primary key")
 
@@ -475,7 +480,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> user = await User.get(1)
             >>> await user.refresh()
         """
-        pk_field_name = self.__class__._primary_key_field_name()
+        pk_field_name = self.__class__.__ferro_pk__
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
 
         if pk_val is None:
@@ -772,7 +777,7 @@ class ModelConnection[M: Model]:
         return instance
 
     async def get_or_none(self, pk: Any) -> M | None:
-        pk_field_name = self.model_cls._primary_key_field_name()
+        pk_field_name = self.model_cls.__ferro_pk__
         if pk_field_name is None:
             raise RuntimeError(
                 f"Model {self.model_cls.__name__} does not define a primary key"

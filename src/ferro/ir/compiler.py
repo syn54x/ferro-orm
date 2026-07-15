@@ -19,7 +19,12 @@ from .._core import (
     _ddl_single_index_name,
     _ddl_single_unique_name,
 )
-from ..columns import ColumnSpec, build_column_specs, build_relation_specs
+from ..columns import (
+    ColumnSpec,
+    build_column_specs,
+    build_relation_specs,
+    primary_key_field_name,
+)
 from ..composite_indexes import drop_overlap_with_uniques, normalized_composite_indexes
 from ..composite_uniques import normalized_composite_uniques
 from ..state import (
@@ -300,6 +305,10 @@ def compile_model_schema_ir(
     """
     if specs is None:
         specs = build_column_specs(model_cls)
+    # Derive the PK fact (and run the at-most-one guard) before compile +
+    # persist: a multi-PK model raises here, at class definition time, and
+    # never persists an envelope or publishes specs.
+    pk_field = primary_key_field_name(model_name, specs)
     column_names = frozenset(specs)
     uniques = normalized_composite_uniques(model_cls, column_names)
     indexes = drop_overlap_with_uniques(
@@ -318,6 +327,9 @@ def compile_model_schema_ir(
     # "``__ferro_columns__`` can never go stale relative to the envelope"
     # invariant, made atomic.
     model_cls.__ferro_columns__ = specs
+    # Same choke point caches the PK fact: every ``__ferro_columns__`` refresh
+    # re-derives ``__ferro_pk__``, so it can never go stale relative to specs.
+    model_cls.__ferro_pk__ = pk_field
     # Same choke point compiles relation-traversal facts (#268): every
     # ``__ferro_columns__`` refresh (provisional class-body registration and
     # the resolved second pass) refreshes ``__ferro_relation_specs__`` too, so
