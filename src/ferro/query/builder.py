@@ -12,7 +12,6 @@ from typing import (
     Any,
     Callable,
     Generic,
-    Iterable,
     NamedTuple,
     Never,
     NoReturn,
@@ -50,7 +49,6 @@ from .wire import (
     compile_query,
     model_identity,
     path_edges,
-    to_wire_json,
 )
 
 if TYPE_CHECKING:
@@ -953,38 +951,6 @@ class Query(Generic[T]):
         new._offset = value
         return new
 
-    def _include_hop_classes(self) -> dict[str, type]:
-        """Map each included hop's physical table to its model class (#286)."""
-        return self._hop_classes_for_paths(self._includes)
-
-    def _hop_classes_for_paths(
-        self, paths: "Iterable[tuple[str, ...]]"
-    ) -> dict[str, type]:
-        """Map each hop table along ``paths`` to its model class (#286/#293).
-
-        The Rust fetch walker needs a hop's Python class whenever it decodes
-        or hydrates through that model's protocol — every included hop (codec
-        plan, enum classes, identity map, #286) and every traversed
-        projection leaf (enum decode, #293). Resolved here, where the
-        relation-spec chain lives, and passed across the FFI keyed by
-        ``to_table`` (one model per table, enforced at registration).
-        """
-        hop_classes: dict[str, type] = {}
-        for path in paths:
-            current = self.model_cls
-            for relation in path:
-                specs = getattr(current, "__ferro_relation_specs__", None) or {}
-                spec = specs.get(relation)
-                if spec is None:
-                    raise ValueError(
-                        f"{current.__name__!r} has no relation {relation!r} "
-                        "for population."
-                    )
-                target = spec.target
-                hop_classes[target.__ferro_table__] = target
-                current = target
-        return hop_classes
-
     async def all(self) -> list[T]:
         """Return all model instances that match the current query
 
@@ -996,19 +962,13 @@ class Query(Generic[T]):
             >>> isinstance(users, list)
             True
         """
-        payload = compile_query(self, "fetch")
+        compiled = compile_query(self, "fetch")
         route = await self._transaction_or_using()
-        if self._includes:
-            return await fetch_filtered(
-                self.model_cls,
-                to_wire_json(payload),
-                route,
-                hop_classes=self._include_hop_classes(),
-            )
         return await fetch_filtered(
             self.model_cls,
-            to_wire_json(payload),
+            compiled.wire_json,
             route,
+            hop_classes=compiled.hop_classes,
         )
 
     async def count(self) -> int:
@@ -1022,11 +982,11 @@ class Query(Generic[T]):
             >>> isinstance(total, int)
             True
         """
-        payload = compile_query(self, "count")
+        compiled = compile_query(self, "count")
         route = await self._transaction_or_using()
         return await count_filtered(
             model_identity(self.model_cls),
-            to_wire_json(payload),
+            compiled.wire_json,
             route,
         )
 
@@ -1052,11 +1012,11 @@ class Query(Generic[T]):
             >>> isinstance(updated, int)
             True
         """
-        payload = compile_query(self, "update")
+        compiled = compile_query(self, "update")
         route = await self._transaction_or_using()
         return await update_filtered(
             model_identity(self.model_cls),
-            to_wire_json(payload),
+            compiled.wire_json,
             update_bind_payload(fields),
             route,
         )
@@ -1094,11 +1054,11 @@ class Query(Generic[T]):
             >>> isinstance(deleted, int)
             True
         """
-        payload = compile_query(self, "delete")
+        compiled = compile_query(self, "delete")
         route = await self._transaction_or_using()
         return await delete_filtered(
             model_identity(self.model_cls),
-            to_wire_json(payload),
+            compiled.wire_json,
             route,
         )
 
@@ -1444,22 +1404,6 @@ class ProjectedQuery(Query[T]):
             )
         return super().exists()
 
-    def _traversed_hop_classes(self) -> dict[str, type] | None:
-        """Hop classes for traversed PLAIN projection paths, or None.
-
-        The record decode path resolves each traversed leaf's enum catalog
-        through its owning model's class (#293) — the same per-table map the
-        instances plan travels with (#286). Aggregate fields never need one:
-        enum sources are rejected at build time and ``count`` decodes to a
-        plain int, so no aggregate output is enum-typed.
-        """
-        paths = {
-            field.path for field in self._projection if field.path and not field.agg
-        }
-        if not paths:
-            return None
-        return self._hop_classes_for_paths(paths)
-
     async def all(self) -> Rows[Row]:  # type: ignore[override]  # ty: ignore[invalid-method-override]
         """Return the projected records for every matching row.
 
@@ -1472,24 +1416,15 @@ class ProjectedQuery(Query[T]):
             >>> [r.amount for r in rows]  # doctest: +SKIP
             [Decimal('12.50'), Decimal('7.00')]
         """
-        payload = compile_query(self, "fetch")
+        compiled = compile_query(self, "fetch")
         route = await self._transaction_or_using()
-        hop_classes = self._traversed_hop_classes()
-        if hop_classes is not None:
-            records = await fetch_filtered(
-                self.model_cls,
-                to_wire_json(payload),
-                route,
-                record_cls=Row,
-                hop_classes=hop_classes,
-            )
-        else:
-            records = await fetch_filtered(
-                self.model_cls,
-                to_wire_json(payload),
-                route,
-                record_cls=Row,
-            )
+        records = await fetch_filtered(
+            self.model_cls,
+            compiled.wire_json,
+            route,
+            record_cls=Row,
+            hop_classes=compiled.hop_classes,
+        )
         return _ROWS_OF_ROW._wrap(records)
 
     async def first(self) -> Row | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]

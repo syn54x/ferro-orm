@@ -84,6 +84,10 @@ _Avoid_: Select list, projection spec, hydration mode flag
 The single typed wire artifact a query ships to the Rust runtime — model identity, predicates, ordering, paging, joins, and exactly one materialization plan, inside a versioned envelope. Compiled only by `compile_query`; no other code assembles query wire shape.
 _Avoid_: Query dict, query def, payload dict
 
+**Compiled query**:
+The single artifact `compile_query` returns: the QueryIR payload, its wire JSON, and the plan-scoped hop-class map, all views of one compile. The map is collected from the hop facts the payload itself carries, so wire and hop classes can never disagree; it is `None` unless the materialization plan decodes or hydrates through a hop model's class (mirroring the Rust `needs_hop_classes` guard — a both-sides double-check). No other code assembles hop classes for the FFI.
+_Avoid_: payload + kwargs, hop-class side-channel, wire tuple
+
 **Golden vector**:
 A hand-authored JSON fixture pinning one wire shape — the independent authority both the Python emitter and the Rust decoder assert against, never regenerated from either side's output. Updating one by hand is the contract-review moment for a wire change.
 _Avoid_: Snapshot, fixture dump, example payload

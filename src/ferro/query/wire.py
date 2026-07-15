@@ -20,7 +20,7 @@ validation and state; this module owns everything whose output is wire shape.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from .nodes import QueryNode, _serialize_query_value
@@ -69,12 +69,19 @@ def path_edges(path: tuple[str, ...]) -> list[tuple[str, ...]]:
 @dataclass(frozen=True)
 class QueryJoinHop:
     """One hop fact of a relation path — the shared shape of the ``joins``
-    section, ``instances`` plan paths, and aggregate ``expr`` traversals."""
+    section, ``instances`` plan paths, and aggregate ``expr`` traversals.
+
+    ``target`` is the hop's model class — a compile-side fact riding the hop
+    (the hop-class map is collected from it), never serialized: the wire
+    carries ``to_table`` and Rust resolves registration facts from its own
+    registry.
+    """
 
     relation: str
     from_column: str
     to_table: str
     to_column: str
+    target: type = field(compare=False, repr=False, kw_only=True)
 
     def to_ir_dict(self) -> dict[str, str]:
         return {
@@ -309,6 +316,7 @@ def resolve_join_hops(
                 from_column=spec.shadow_column,
                 to_table=target.__ferro_table__,
                 to_column=_target_pk_column(target),
+                target=target,
             )
         )
         current = target
@@ -451,8 +459,52 @@ def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
         )
 
 
-def compile_query(query: "Query[Any]", verb: QueryVerb) -> QueryIrPayload:
-    """Compile a built query into its wire payload — the single choke point.
+@dataclass(frozen=True)
+class CompiledQuery:
+    """One compiled artifact per query — CONTEXT.md "Compiled query".
+
+    ``wire_json`` and ``hop_classes`` are two views of the same compile:
+    the map is collected from the hop facts the payload itself carries, so
+    the wire and the classes the runtime hydrates through can never
+    disagree (the builder previously re-walked relation-spec chains to
+    assemble ``hop_classes`` beside the wire, agreeing by hand).
+
+    ``hop_classes`` is plan-scoped, mirroring the Rust ``needs_hop_classes``
+    guard exactly (a both-sides double-check, like #272 join edges): ``None``
+    unless the materialization plan decodes or hydrates through a hop model's
+    class — an ``instances`` plan (#286) or a ``record`` plan with traversed
+    plain fields (#293). When it is a map, it covers every hop the payload
+    carries, keyed by physical table (one model per table, enforced at
+    registration).
+    """
+
+    payload: QueryIrPayload
+    wire_json: str
+    hop_classes: dict[str, type] | None
+
+
+def _payload_hop_classes(payload: QueryIrPayload) -> dict[str, type] | None:
+    """Collect the plan-scoped hop-class map from the payload's own hops."""
+    materialization = payload.materialization
+    needs = isinstance(materialization, Instances) or (
+        isinstance(materialization, Record)
+        and any(field.expr is None and field.path for field in materialization.fields)
+    )
+    if not needs:
+        return None
+    hop_classes: dict[str, type] = {}
+    for join in payload.joins:
+        for hop in join.path:
+            hop_classes[hop.to_table] = hop.target
+    if isinstance(materialization, Instances):
+        for path in materialization.paths:
+            for hop in path:
+                hop_classes[hop.to_table] = hop.target
+    return hop_classes
+
+
+def compile_query(query: "Query[Any]", verb: QueryVerb) -> CompiledQuery:
+    """Compile a built query into its wire artifact — the single choke point.
 
     What each verb carries is policy, stated here once:
 
@@ -473,7 +525,7 @@ def compile_query(query: "Query[Any]", verb: QueryVerb) -> QueryIrPayload:
     where = tuple(node.to_ir_dict() for node in query.where_clause)
     if verb in ("update", "delete"):
         _reject_mutation_misuse(query, verb)
-        return QueryIrPayload(
+        payload = QueryIrPayload(
             model_name=identity,
             where=where,
             order_by=(),
@@ -483,8 +535,8 @@ def compile_query(query: "Query[Any]", verb: QueryVerb) -> QueryIrPayload:
             joins=(),
             materialization=RootInstances(),
         )
-    if verb == "count":
-        return QueryIrPayload(
+    elif verb == "count":
+        payload = QueryIrPayload(
             model_name=identity,
             where=where,
             order_by=(),
@@ -494,15 +546,21 @@ def compile_query(query: "Query[Any]", verb: QueryVerb) -> QueryIrPayload:
             joins=_serialize_joins(query),
             materialization=RootInstances(),
         )
-    return QueryIrPayload(
-        model_name=identity,
-        where=where,
-        order_by=tuple(query.order_by_clause),
-        limit=query._limit,
-        offset=query._offset,
-        m2m=query._m2m_context,
-        joins=_serialize_joins(query),
-        materialization=_materialization(query),
+    else:
+        payload = QueryIrPayload(
+            model_name=identity,
+            where=where,
+            order_by=tuple(query.order_by_clause),
+            limit=query._limit,
+            offset=query._offset,
+            m2m=query._m2m_context,
+            joins=_serialize_joins(query),
+            materialization=_materialization(query),
+        )
+    return CompiledQuery(
+        payload=payload,
+        wire_json=to_wire_json(payload),
+        hop_classes=_payload_hop_classes(payload),
     )
 
 
