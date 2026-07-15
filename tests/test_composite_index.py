@@ -29,19 +29,15 @@ pytestmark = pytest.mark.backend_matrix
 
 @pytest.fixture(autouse=True)
 def cleanup_registry():
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     yield
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
 
 def _indexes(table: sa.Table) -> list[sa.Index]:

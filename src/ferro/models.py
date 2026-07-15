@@ -126,9 +126,9 @@ def evict_instance(
     directly with their already-resolved route instead of going through this
     wrapper, so a route is never resolved twice for one operation.
     """
-    from .state import resolve_model_reference
+    from .registry import REGISTRY
 
-    model_cls = resolve_model_reference(model) if isinstance(model, str) else model
+    model_cls = REGISTRY.resolve_reference(model) if isinstance(model, str) else model
     route = resolve_operation_scope(using=using, session=session)
     _core_evict_instance(model_cls.__ferro_identity__, pk, route)
 

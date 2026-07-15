@@ -13,24 +13,24 @@ from ferro.ir.compiler import (
     reset_schema_ir_compile_count_for_test,
     schema_ir_compile_count_for_test,
 )
-from ferro import state as ferro_state
+from ferro.registry import REGISTRY
 
 
 def test_register_and_deregister_bump_generation_counter(clean_registry) -> None:
-    assert ferro_state.registration_generation() == 0
-    assert ferro_state.resolved_generation() == 0
-    assert not ferro_state.is_modelset_dirty()
+    assert REGISTRY.registration_generation() == 0
+    assert REGISTRY.resolved_generation() == 0
+    assert not REGISTRY.is_dirty()
 
     class GcWidget(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
 
-    assert ferro_state.registration_generation() == 1
-    assert ferro_state.is_modelset_dirty()
+    assert REGISTRY.registration_generation() == 1
+    assert REGISTRY.is_dirty()
 
-    ferro_state.deregister_model(GcWidget.__ferro_identity__)
-    assert ferro_state.registration_generation() == 2
-    assert ferro_state.is_modelset_dirty()
+    REGISTRY.deregister(GcWidget.__ferro_identity__)
+    assert REGISTRY.registration_generation() == 2
+    assert REGISTRY.is_dirty()
 
 
 def test_resolve_clears_dirty_generation(clean_registry) -> None:
@@ -46,10 +46,10 @@ def test_resolve_clears_dirty_generation(clean_registry) -> None:
         title: str
         author: Annotated["GcAuthor", ForeignKey(related_name="posts")]
 
-    assert ferro_state.is_modelset_dirty()
+    assert REGISTRY.is_dirty()
     resolve_relationships()
-    assert not ferro_state.is_modelset_dirty()
-    assert ferro_state.resolved_generation() == ferro_state.registration_generation()
+    assert not REGISTRY.is_dirty()
+    assert REGISTRY.resolved_generation() == REGISTRY.registration_generation()
 
 
 def test_assemble_fails_loudly_on_missing_envelope(clean_registry) -> None:
@@ -61,7 +61,7 @@ def test_assemble_fails_loudly_on_missing_envelope(clean_registry) -> None:
     from ferro.ir.compiler import _assemble_modelset_envelope
 
     resolve_relationships()
-    ferro_state.evict_model_envelope(GcOrphan.__ferro_identity__)
+    REGISTRY.evict_envelope(GcOrphan.__ferro_identity__)
 
     with pytest.raises(RuntimeError, match="Missing SchemaIR envelope"):
         _assemble_modelset_envelope()
@@ -147,4 +147,6 @@ async def test_ensure_rust_registration_synced_routes_connect(db_url, clean_regi
     reset_schema_ir_compile_count_for_test()
     modelset = ensure_resolved_modelset()
     assert schema_ir_compile_count_for_test() == 0
-    assert modelset is ferro_state._SCHEMA_IR_MODELSET
+    cached = REGISTRY.modelset()
+    assert cached is not None
+    assert modelset is cached[0]

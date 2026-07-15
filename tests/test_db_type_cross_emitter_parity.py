@@ -47,21 +47,13 @@ def _render_create_table_via_ir(
 
 @pytest.fixture(autouse=True)
 def cleanup():
-    from ferro.state import (
-        _JOIN_TABLE_REGISTRY,
-        _MODEL_REGISTRY_PY,
-        _PENDING_RELATIONS,
-    )
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     reset_engine()
     clear_registry()
     yield
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     reset_engine()
     clear_registry()
 

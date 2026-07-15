@@ -21,11 +21,9 @@ from ferro.migrations import get_metadata
 
 @pytest.fixture(autouse=True)
 def cleanup():
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     reset_engine()
     clear_registry()
     yield
@@ -63,11 +61,9 @@ def test_schema_diff_simulation():
 
     # 2. Simulate code change (adding a field)
     # We clear the registry and redefine to simulate a fresh run after a code edit
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     clear_registry()
 
     class Product(Model):  # noqa
@@ -90,11 +86,9 @@ def test_index_and_unique_diff():
     meta_v1 = get_metadata()
     assert meta_v1.tables["settings"].indexes == set()
 
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     clear_registry()
 
     class Settings(Model):  # noqa

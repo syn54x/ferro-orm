@@ -154,13 +154,13 @@ def _property_is_integer(prop: dict[str, Any]) -> bool:
 
 
 def _target_table_name(target: Any) -> str:
-    from .state import resolve_model_reference
+    from .registry import REGISTRY
 
     if isinstance(target, ForwardRef):
         target = target.__forward_arg__
     if isinstance(target, str):
         try:
-            model = resolve_model_reference(target, default=None)
+            model = REGISTRY.resolve_reference(target, default=None)
         except RuntimeError:
             # Ambiguous short ref during first-pass schema build: defer the
             # loud, candidate-listing error to resolve_relationships (the

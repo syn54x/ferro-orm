@@ -23,8 +23,8 @@ from .base import FerroField, ForeignKey, ManyToManyRelation
 from .fields import FERRO_FIELD_EXTRA_KEY
 from .ir import compile_model_schema_ir
 from .query import Relation
+from .registry import REGISTRY
 from .relations.descriptors import ForwardDescriptor
-from .state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS, register_model
 
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -79,7 +79,7 @@ class ModelMetaclass(type(BaseModel)):
         cls.__ferro_identity__ = f"{cls.__module__}.{cls.__qualname__}"
         cls.__ferro_table__ = mcs._resolve_table_name(name, namespace)
         for field_name, metadata in pending_relations:
-            _PENDING_RELATIONS.append((cls.__ferro_identity__, field_name, metadata))
+            REGISTRY.defer_relation(cls.__ferro_identity__, field_name, metadata)
 
         mcs._register_model(cls, cls.__ferro_identity__, local_relations)
         ferro_fields = mcs._parse_ferro_field_metadata(cls)
@@ -278,8 +278,9 @@ class ModelMetaclass(type(BaseModel)):
         Returns:
             (local_relations, fields_to_remove, pending_relations): Relationship
             metadata, fields to hide from Pydantic, and ``(field_name, metadata)``
-            entries deferred to ``_PENDING_RELATIONS`` (flushed under the model's
-            resolved ``__ferro_identity__`` after the class object exists).
+            entries deferred to the Registry's pending-relation queue (flushed
+            under the model's resolved ``__ferro_identity__`` after the class
+            object exists).
         """
         local_relations = {}
         fields_to_remove = []
@@ -405,7 +406,7 @@ class ModelMetaclass(type(BaseModel)):
                 qualified identity is idempotent.
         """
         table_name = cls.__ferro_table__
-        for key, other in _MODEL_REGISTRY_PY.items():
+        for key, other in REGISTRY.models().items():
             if key == identity:
                 continue
             if getattr(other, "__ferro_table__", None) == table_name:
@@ -415,7 +416,7 @@ class ModelMetaclass(type(BaseModel)):
                     "models cannot share a table. Set __ferro_table__ on one of "
                     "them to give it a distinct table name."
                 )
-        register_model(cls)
+        REGISTRY.register(cls)
         cls.ferro_relations = local_relations
 
     @staticmethod

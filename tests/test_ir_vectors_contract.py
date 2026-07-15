@@ -376,21 +376,23 @@ def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> 
 def test_compile_registry_schema_ir_persists_modelset_cache(
     clean_model_registry: None,
 ) -> None:
-    from ferro import state as ferro_state
     from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
+    from ferro.registry import REGISTRY
     from ferro.relations import resolve_relationships
     from tests.test_cross_emitter_parity import _build_fixture_models
 
     _build_fixture_models()
     resolve_relationships()
 
-    ferro_state._SCHEMA_IR_MODELSET = None
-    ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT = None
+    REGISTRY.clear_modelset()
 
     compiled = compile_registry_schema_ir()
 
-    assert ferro_state._SCHEMA_IR_MODELSET == compiled
-    assert ferro_state._SCHEMA_IR_MODELSET_FINGERPRINT == schema_ir_fingerprint(compiled)
+    cached = REGISTRY.modelset()
+    assert cached is not None
+    envelope, fingerprint = cached
+    assert envelope == compiled
+    assert fingerprint == schema_ir_fingerprint(compiled)
 
 
 def test_schema_ir_compiler_emits_db_check_expression_for_closed_domain(
@@ -534,8 +536,8 @@ def test_clear_registry_clears_join_table_registry(clean_model_registry: None) -
     be re-created with foreign keys to tables that no longer exist — tolerated by
     SQLite, rejected by Postgres (``relation ... does not exist``). (#153)
     """
-    from ferro import state as ferro_state
     from ferro.ir import compile_registry_schema_ir
+    from ferro.registry import REGISTRY
     from ferro.relations import resolve_relationships
 
     class Tag(Model):
@@ -549,15 +551,16 @@ def test_clear_registry_clears_join_table_registry(clean_model_registry: None) -
         tags: Relation[list["Tag"]] = BackRef()
 
     resolve_relationships()
-    assert ferro_state._JOIN_TABLE_REGISTRY, "precondition: a join table is registered"
+    assert REGISTRY.join_tables(), "precondition: a join table is registered"
 
-    # Simulate a lean test cleanup that clears the declared models but (as the
+    # Simulate a lean test cleanup that drops the declared models but (as the
     # failing fixtures did) NOT the join-table registry directly. clear_registry
     # must reset the join registry so a later full-registry compile can't
     # resurrect a stale join table whose FK targets no longer exist.
     clear_registry()
-    ferro_state._MODEL_REGISTRY_PY.clear()
+    for name in list(REGISTRY.models()):
+        REGISTRY.deregister(name)
 
-    assert ferro_state._JOIN_TABLE_REGISTRY == {}, "clear_registry must clear join tables"
+    assert REGISTRY.join_tables() == {}, "clear_registry must clear join tables"
     table_names = {m["table_name"] for m in compile_registry_schema_ir()["payload"]["models"]}
     assert "tag_posts" not in table_names, f"stale join table resurrected: {table_names}"

@@ -55,17 +55,15 @@ def test_shadow_annotation_for_foreign_key_unresolved_string():
 
 @pytest.fixture
 def _cleanup_registry():
-    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
+    REGISTRY.reset_for_test()
     yield
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
+    REGISTRY.reset_for_test()
 
 
 def test_reconcile_upgrades_forward_ref_shadow(_cleanup_registry):
-    """Models self-register on class creation; do not hand-fill _MODEL_REGISTRY_PY."""
+    """Models self-register on class creation; do not hand-fill the registry."""
     from ferro.relations import resolve_relationships
 
     class ReconcileChild(Model):

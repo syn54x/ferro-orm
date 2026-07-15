@@ -52,13 +52,11 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
     We clear registries, migrate a fresh in-memory DB, then use the M2M API; if the
     join table were not created, .add() would fail. No second connection needed."""
     from ferro import clear_registry, connect, reset_engine
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     class Actor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -101,13 +99,11 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
 async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_url):
     """Runtime join-table DDL should derive FK column metadata from source PKs."""
     from ferro import clear_registry, connect, reset_engine
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     class UuidActor(Model):
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
@@ -154,13 +150,11 @@ async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
     from ferro import Field as FerroFieldFn
     from ferro import clear_registry, connect, reset_engine
     from ferro.models import transaction
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     class UuidTag(Model):
         id: UUID = FerroFieldFn(default_factory=uuid4, primary_key=True)
@@ -217,13 +211,11 @@ from ferro.raw import execute, fetch_all  # noqa: E402
 @pytest.fixture
 def clean_registry():
     from ferro import clear_registry, reset_engine
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
     yield
 
 
@@ -826,12 +818,10 @@ async def test_index_reconcile_adds_composite_index_to_existing_table(
 
     # Re-register a NEW model class with the composite index annotation.
     from ferro import clear_registry
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     class IdxCompModel(Model):  # noqa: F811 — intentional redefinition
         __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
@@ -879,12 +869,10 @@ async def test_index_reconcile_adds_single_column_index_to_existing_column(
 
     # Re-register with index=True on the existing column.
     from ferro import clear_registry
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     class IdxSingleModel(Model):  # noqa: F811
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -960,12 +948,10 @@ async def test_index_reconcile_destructive_drops_removed_composite_index(
 
     # Re-register model WITHOUT the composite index.
     from ferro import clear_registry
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     class IdxDropModel(Model):  # noqa: F811
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -1062,12 +1048,10 @@ async def test_uuid_pk_derived_second_pass_is_noop(db_url, db_backend, clean_reg
 
     # Second connect: same model, same schema — must be a complete no-op.
     from ferro import clear_registry
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     class UuidPkItem(Model):  # noqa: F811 — intentional re-declaration for second connect
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
@@ -1115,12 +1099,10 @@ async def test_uuid_pk_derived_drift_is_stable(db_url, db_backend, clean_registr
 
     # First migrate_updates pass — should apply nothing (fresh table).
     from ferro import clear_registry
-    from ferro.state import _JOIN_TABLE_REGISTRY, _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     class UuidDriftModel(Model):  # noqa: F811
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
@@ -1134,9 +1116,7 @@ async def test_uuid_pk_derived_drift_is_stable(db_url, db_backend, clean_registr
 
     # Second migrate_updates pass — must be identical to the first (idempotent).
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    _PENDING_RELATIONS.clear()
-    _JOIN_TABLE_REGISTRY.clear()
+    REGISTRY.reset_for_test()
 
     class UuidDriftModel(Model):  # noqa: F811
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
@@ -1243,17 +1223,16 @@ async def test_db_check_reconnect_is_idempotent(db_url):
     from ferro import Field as FerroField
     from ferro import clear_registry, connect, reset_engine
     from ferro.raw import fetch_all
-    from ferro.state import _MODEL_REGISTRY_PY, _PENDING_RELATIONS
+    from ferro.registry import REGISTRY
 
     reset_engine()
     clear_registry()
-    _MODEL_REGISTRY_PY.clear()
-    # Match this file's other reconnect tests: clearing the model registry
-    # without also draining the pending-relations queue leaves import-time
+    # Match this file's other reconnect tests: wiping the model registry
+    # without also draining the pending-relations queue would leave import-time
     # relations from module-level models in other test files dangling, so the
-    # connect() below crashes in resolve_relationships when their now-unregistered
-    # source model is looked up. (Pre-existing isolation gap surfaced by ordering.)
-    _PENDING_RELATIONS.clear()
+    # connect() below would crash in resolve_relationships when their
+    # now-unregistered source model is looked up. reset_for_test() clears both.
+    REGISTRY.reset_for_test()
 
     class DocStatus(StrEnum):
         PENDING = "pending"

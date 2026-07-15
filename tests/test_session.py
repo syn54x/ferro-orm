@@ -19,10 +19,10 @@ class SessionMarker(ferro.Model):
 
 @pytest.fixture(autouse=True)
 def _ensure_models_registered():
-    from ferro.state import register_model
+    from ferro.registry import REGISTRY
 
     SessionMarker._reregister_ferro()
-    register_model(SessionMarker)
+    REGISTRY.register(SessionMarker)
     yield
 
 
