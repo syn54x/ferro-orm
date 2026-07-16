@@ -1,6 +1,22 @@
 # CHANGELOG
 
 
+## v0.16.3 (2026-07-16)
+
+### Bug Fixes
+
+- Derive the primary-key fact once and reject multi-PK models at class definition
+  ([`ef91fa0`](https://github.com/syn54x/ferro-orm/commit/ef91fa09e09d5e7444e8d659b831921d40bcb365))
+
+### Refactoring
+
+- Compile_query returns one CompiledQuery artifact carrying the hop-class map
+  ([`fc7084c`](https://github.com/syn54x/ferro-orm/commit/fc7084c4ad89b135815f74852263989f23868143))
+
+- Single Registry owner for Python-side registration state
+  ([`1179fcc`](https://github.com/syn54x/ferro-orm/commit/1179fcc07cc9e4305b7e7a8c141b8b29264dcd26))
+
+
 ## v0.16.2 (2026-07-15)
 
 ### Bug Fixes
