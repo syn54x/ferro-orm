@@ -17,7 +17,16 @@ transactions both point at (the line-aware category filter).
 import pytest
 from typing import Annotated
 
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation, connect, engines
+from ferro import (
+    BackRef,
+    FerroField,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    connect,
+    engines,
+)
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -508,3 +517,140 @@ async def test_inner_lambda_must_return_a_predicate(db_url):
     await connect(db_url, auto_migrate=True)
     with pytest.raises(TypeError, match="predicate"):
         ExTxn.where(lambda t: t.lines.exists(lambda line: line.amount))
+
+
+# ---------------------------------------------------------------------------
+# Many-to-many (#316): the same verb, the same node, a two-hop correlation
+# path — join table first (correlated to the enclosing scope), then the
+# target. M2M is test surface, not a second mechanism.
+# ---------------------------------------------------------------------------
+
+
+class ExTag(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str = ""
+    users: Relation[list["ExUser"]] = ManyToMany(related_name="tags")
+
+
+class ExUser(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    username: str = ""
+    tags: Relation[list["ExTag"]] = BackRef()
+
+
+async def _seed_tags() -> dict[str, object]:
+    admin = await ExTag.create(name="admin")
+    beta = await ExTag.create(name="beta")
+    alice = await ExUser.create(username="alice")
+    bob = await ExUser.create(username="bob")
+    await ExUser.create(username="carol")  # tag-less
+    await admin.users.add(alice)
+    await beta.users.add(alice)
+    await beta.users.add(bob)
+    return {"admin": admin, "beta": beta, "alice": alice, "bob": bob}
+
+
+async def _usernames(query) -> list[str]:
+    return sorted(r.username for r in await query.all())
+
+
+@pytest.mark.asyncio
+async def test_m2m_bare_exists(db_url):
+    """Bare ``.exists()`` on an M2M relation: any linked row, each root
+    exactly once no matter how many join-table rows match."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await _seed_tags()
+
+        rows = await _usernames(ExUser.where(lambda u: u.tags.exists()))
+        assert rows == ["alice", "bob"]
+
+
+@pytest.mark.asyncio
+async def test_m2m_scoped_exists(db_url):
+    """The #316 demo: ``u.tags.exists(lambda tag: tag.name == "admin")``."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await _seed_tags()
+
+        rows = await _usernames(
+            ExUser.where(lambda u: u.tags.exists(lambda tag: tag.name == "admin"))
+        )
+        assert rows == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_m2m_negated_exists(db_url):
+    """``~u.tags.exists(...)`` renders NOT EXISTS over the two-hop path."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await _seed_tags()
+
+        assert await _usernames(ExUser.where(lambda u: ~u.tags.exists())) == ["carol"]
+        assert await _usernames(
+            ExUser.where(lambda u: ~u.tags.exists(lambda tag: tag.name == "admin"))
+        ) == ["bob", "carol"]
+
+
+@pytest.mark.asyncio
+async def test_m2m_exists_from_the_declaring_side(db_url):
+    """The declaring side spells identically: tags with at least one user."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await _seed_tags()
+        await ExTag.create(name="unused")
+
+        results = await ExTag.where(lambda t: t.users.exists()).all()
+        assert sorted(r.name for r in results) == ["admin", "beta"]
+
+
+@pytest.mark.asyncio
+async def test_m2m_inner_lambda_full_predicate_power(db_url):
+    """Operators, combinators, and ``~`` inside the M2M inner lambda, exactly
+    like the reverse-FK slice."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await _seed_tags()
+
+        rows = await _usernames(
+            ExUser.where(
+                lambda u: u.tags.exists(
+                    lambda tag: (
+                        tag.name.in_(["admin", "beta"]) & ~tag.name.like("%adm%")
+                    )
+                )
+            )
+        )
+        assert rows == ["alice", "bob"]
+
+
+@pytest.mark.asyncio
+async def test_m2m_exists_composes_with_root_predicates(db_url):
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await _seed_tags()
+
+        rows = await _usernames(
+            ExUser.where(
+                lambda u: (
+                    u.tags.exists(lambda tag: tag.name == "beta")
+                    & (u.username != "bob")
+                )
+            )
+        )
+        assert rows == ["alice"]
+
+        n = await ExUser.where(lambda u: u.tags.exists()).count()
+        assert n == 2
+
+
+@pytest.mark.asyncio
+async def test_m2m_proxy_rejects_everything_but_exists(db_url):
+    """The M2M reverse proxy has the same single verb as the reverse-FK one."""
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(AttributeError, match=r"\.exists\(\)"):
+        ExUser.where(lambda u: u.tags.name == "admin")
+    with pytest.raises(TypeError, match=r"\.exists\(\)"):
+        ExUser.where(lambda u: u.tags != None)  # noqa: E711
+    with pytest.raises(TypeError, match=r"\.exists\(\)"):
+        ExUser.where(lambda u: u.tags.in_([1]))

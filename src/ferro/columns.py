@@ -89,25 +89,38 @@ class RelationSpec:
 
 @dataclass(frozen=True, slots=True)
 class ReverseSpec:
-    """One reverse (BackRef) relation's existence-test facts (#314, ADR-0007).
+    """One reverse (BackRef/M2M) relation's existence-test facts (ADR-0007).
 
     Built beside :class:`RelationSpec` at the same compile choke point and
-    exposed as ``cls.__ferro_reverse_specs__``. A reverse relation supports
-    exactly one predicate form — the existence test ``t.rel.exists()`` — so
-    the spec carries only what a correlated EXISTS needs: the child model and
-    the child-side FK column the subquery correlates on. Reverse relations are
-    *tested*, never *traversed*; traversal facts stay on :class:`RelationSpec`.
+    exposed as ``cls.__ferro_reverse_specs__``. A reverse or M2M relation
+    supports exactly one predicate form — the existence test
+    ``t.rel.exists()`` — so the spec carries only what a correlated EXISTS
+    needs: the related model plus the correlation columns (the child-side FK
+    for a reverse FK; the join-table triple for M2M, #316). Reverse relations
+    are *tested*, never *traversed*; traversal facts stay on
+    :class:`RelationSpec`.
     """
 
     field_name: str
-    #: The child model — the side declaring the ``ForeignKey``.
+    #: The related model — the FK-declaring child (reverse FK) or the M2M
+    #: target: the model the inner lambda's parameter resolves against.
     target: type
-    #: Shadow FK column on the child table the EXISTS correlates against.
-    child_fk_column: str
+    #: Shadow FK column on the child table the EXISTS correlates against
+    #: (reverse FK only; ``None`` for M2M).
+    child_fk_column: str | None
     #: True when the child FK is ``unique=True`` (one-to-one BackRef). The
     #: rendering is identical at every cardinality (always correlated EXISTS);
     #: carried as a compile-side fact, not a render switch.
-    is_one_to_one: bool
+    is_one_to_one: bool = False
+    #: True for an M2M edge — the existence test correlates through the join
+    #: table (two hops) instead of a child FK (one hop).
+    is_m2m: bool = False
+    #: M2M join-table triple (``None`` for reverse FK): the association
+    #: table, its column referencing THIS side, and its column referencing
+    #: the target side — exactly as the descriptor orients them per side.
+    join_table: str | None = None
+    source_col: str | None = None
+    target_col: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,15 +508,17 @@ def build_reverse_specs(model_cls: type[Any]) -> dict[str, ReverseSpec]:
 
     Reads the :class:`~ferro.relations.descriptors.RelationshipDescriptor`
     instances ``resolve_relationships`` installs on the class — the facts a
-    correlated EXISTS needs (child model, child FK column, one-to-one flag)
-    already live there, so this derives, never re-computes. At provisional
-    class-body time no descriptors exist yet and the map is empty; the
-    resolved second pass recompiles with descriptors installed, so the lookup
-    is complete once resolution finishes (same lifecycle as
-    :func:`build_relation_specs`).
+    correlated EXISTS needs (related model, child FK column or join-table
+    triple, one-to-one flag) already live there, so this derives, never
+    re-computes. At provisional class-body time no descriptors exist yet and
+    the map is empty; the resolved second pass recompiles with descriptors
+    installed, so the lookup is complete once resolution finishes (same
+    lifecycle as :func:`build_relation_specs`).
 
-    M2M descriptors are skipped for now: the existence test's M2M form (a
-    two-hop correlation through the join table) lands in #316.
+    M2M descriptors (#316) map to a join-table spec; each side's descriptor
+    already orients ``source_col``/``target_col`` for that side, so the spec
+    is a straight copy of resolution's facts on both the declaring and the
+    ``related_name`` side.
 
     Callers store the result on ``cls.__ferro_reverse_specs__`` and must
     replace, never mutate — same convention as ``__ferro_columns__``.
@@ -518,10 +533,19 @@ def build_reverse_specs(model_cls: type[Any]) -> dict[str, ReverseSpec]:
         for name, attr in vars(klass).items():
             if not isinstance(attr, RelationshipDescriptor) or name in specs:
                 continue
-            if attr.is_m2m:
-                continue
             target = REGISTRY.resolve_reference(attr.target_model_name, default=None)
             if target is None:
+                continue
+            if attr.is_m2m:
+                specs[name] = ReverseSpec(
+                    field_name=name,
+                    target=target,
+                    child_fk_column=None,
+                    is_m2m=True,
+                    join_table=attr.join_table,
+                    source_col=attr.source_col,
+                    target_col=attr.target_col,
+                )
                 continue
             specs[name] = ReverseSpec(
                 field_name=name,
