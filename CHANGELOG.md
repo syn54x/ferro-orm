@@ -1,6 +1,35 @@
 # CHANGELOG
 
 
+## v0.17.0 (2026-07-18)
+
+### Documentation
+
+- Design existence tests (.exists()) and uniform ~ negation
+  ([`c68a477`](https://github.com/syn54x/ferro-orm/commit/c68a47780cd5fe6d8ecfcb4f7e0f9c8ec2b798fe))
+
+- **query**: Document universal ~ negation and three-valued logic
+  ([`6061d66`](https://github.com/syn54x/ferro-orm/commit/6061d66e96c99f089339f7a4a83b9424101da8be))
+
+### Features
+
+- **query**: Bare .exists() on reverse FK — existence-test tracer bullet
+  ([#319](https://github.com/syn54x/ferro-orm/pull/319),
+  [`2538e06`](https://github.com/syn54x/ferro-orm/commit/2538e06b217e449d10dd564687f5ca3581d5d08d))
+
+- **query**: Existence-test error surfaces and docs — the feature's edges
+  ([`be88aed`](https://github.com/syn54x/ferro-orm/commit/be88aed35f0975f9333bf0dabacaffc8a82f8f34))
+
+- **query**: M2M existence tests — the two-hop correlation path
+  ([`336b529`](https://github.com/syn54x/ferro-orm/commit/336b5298d0e7beca8231452655544fcc7a15ad6a))
+
+- **query**: Scoped existence tests — inner predicates, nesting, cross-scope guard
+  ([`df11625`](https://github.com/syn54x/ferro-orm/commit/df11625b90e01d293f4863bec8afafb9110a1ac3))
+
+- **query**: Uniform predicate negation — prefix ~ as a NOT wire node
+  ([`bfa3126`](https://github.com/syn54x/ferro-orm/commit/bfa3126914b5a1b5d93a65ee3fe2f066bb314b1f))
+
+
 ## v0.16.3 (2026-07-16)
 
 ### Bug Fixes
