@@ -137,14 +137,15 @@ pub struct SchemaCheck {
 /// Query IR: filter, sort, pagination, joins, materialization plan, and
 /// optional M2M join context.
 ///
-/// `ir_version: 6` (unconditional, no earlier version emitted anywhere —
-/// #269, #278, #285, #292, #310). `joins` is required and always present
-/// (`[]` when the query traverses no relation); every leaf and `order_by`
-/// entry carries a `path` (required, `[]` = root model); `materialization` is
-/// required — the plan travels with the query as data (ADR-0007), never
-/// inferred from a column list. v5 gave `record` fields expression sources
-/// (#292, ADR-0009); v6 gives predicate trees the recursive `not` node kind
-/// (uniform negation, #310, ADR-0008).
+/// `ir_version: 7` (unconditional, no earlier version emitted anywhere —
+/// #269, #278, #285, #292, #310, #314). `joins` is required and always
+/// present (`[]` when the query traverses no relation); every leaf and
+/// `order_by` entry carries a `path` (required, `[]` = root model);
+/// `materialization` is required — the plan travels with the query as data
+/// (ADR-0007), never inferred from a column list. v5 gave `record` fields
+/// expression sources (#292, ADR-0009); v6 gave predicate trees the
+/// recursive `not` node kind (uniform negation, #310, ADR-0008); v7 adds the
+/// recursive `exists` node kind (existence tests, #314, ADR-0007).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryIrPayload {
     /// Model class name the query targets.
@@ -334,8 +335,9 @@ pub struct QueryOrderBy {
     pub path: Vec<String>,
 }
 
-/// Predicate tree node in query IR: leaf comparison, compound AND/OR, or a
-/// recursive NOT wrapping any child (uniform negation, v6, ADR-0008).
+/// Predicate tree node in query IR: leaf comparison, compound AND/OR, a
+/// recursive NOT wrapping any child (uniform negation, v6, ADR-0008), or a
+/// recursive existence test over a reverse/M2M relation (v7, ADR-0007).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "node_kind")]
 pub enum QueryNode {
@@ -369,6 +371,23 @@ pub enum QueryNode {
     Not {
         /// The negated subtree.
         child: Box<QueryNode>,
+    },
+    /// Existence test on a reverse or M2M relation (ADR-0007): a correlated
+    /// `EXISTS (SELECT 1 ...)` at every cardinality. Carries no negation
+    /// flag — NOT EXISTS is the `not` node over this one.
+    #[serde(rename = "exists")]
+    Exists {
+        /// Correlation hop path in the `joins`-section hop-fact shape: one
+        /// hop for a reverse FK (`FROM child WHERE child.fk = root.pk`), two
+        /// for M2M (join table, then target). The first hop's table is the
+        /// subquery FROM, correlated to the enclosing scope's alias;
+        /// remaining hops render as inner joins inside the subquery.
+        hops: Vec<QueryJoinHop>,
+        /// Ordinary inner condition tree over the relation's target model
+        /// (`[]` = bare test). May itself contain `exists`/`not` nodes —
+        /// nesting is recursion, not a second mechanism.
+        #[serde(rename = "where")]
+        where_clause: Vec<QueryNode>,
     },
 }
 
@@ -448,7 +467,7 @@ mod tests {
     #[test]
     fn query_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v6.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v7.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query fixture must parse");
         let ir = parsed
@@ -473,7 +492,7 @@ mod tests {
         // leaf `IN` comparison (the NOT IN spelling) — and must survive a
         // deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_leaf_v6.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_leaf_v7.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query not-leaf fixture must parse");
         let ir = parsed
@@ -500,7 +519,7 @@ mod tests {
         // OR compound whole — no De Morgan expansion on the wire — and must
         // survive a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_compound_v6.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_compound_v7.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query not-compound fixture must parse");
         let ir = parsed
@@ -522,11 +541,68 @@ mod tests {
     }
 
     #[test]
+    fn query_exists_fixture_roundtrip() {
+        // The bare 1-hop existence-test golden vector (#314, ADR-0007): an
+        // `exists` node carries its correlation hop path plus an empty inner
+        // condition tree, and must survive a deserialize/serialize
+        // round-trip without drift.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_account_exists_v7.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query exists fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query exists IR must deserialize");
+        match &envelope.payload.where_clause[0] {
+            QueryNode::Exists { hops, where_clause } => {
+                assert_eq!(hops.len(), 1);
+                assert_eq!(hops[0].relation, "transactions");
+                assert_eq!(hops[0].from_column, "id");
+                assert_eq!(hops[0].to_table, "transaction");
+                assert_eq!(hops[0].to_column, "account_id");
+                assert!(where_clause.is_empty(), "bare test carries no inner tree");
+            }
+            other => panic!("where[0] must be an exists node, got {other:?}"),
+        }
+        let encoded = serde_json::to_value(&envelope).expect("query exists IR must serialize");
+        assert_eq!(encoded, ir, "query exists round-trip must not drift");
+    }
+
+    #[test]
+    fn query_not_exists_fixture_roundtrip() {
+        // NOT EXISTS on the wire is the ordinary `not` node over an `exists`
+        // node — the exists node carries no negation flag (ADR-0008
+        // composition; #314).
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_owner_not_exists_v7.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query not-exists fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query not-exists IR must deserialize");
+        match &envelope.payload.where_clause[0] {
+            QueryNode::Not { child } => match child.as_ref() {
+                QueryNode::Exists { hops, .. } => assert_eq!(hops[0].relation, "accounts"),
+                other => panic!("not child must be the exists node, got {other:?}"),
+            },
+            other => panic!("where[0] must be a not node, got {other:?}"),
+        }
+        let encoded = serde_json::to_value(&envelope).expect("query not-exists IR must serialize");
+        assert_eq!(encoded, ir, "query not-exists round-trip must not drift");
+    }
+
+    #[test]
     fn query_traversal_fixture_roundtrip() {
         // Multi-hop `joins` section + path-carrying leaves must survive a
         // deserialize/serialize round-trip without drift (#270 wire stability).
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v6.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v7.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversal fixture must parse");
@@ -552,7 +628,7 @@ mod tests {
         // deserialize/serialize round-trip without drift, and the join_type
         // tokens must reach Rust exactly as written on the wire.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v6.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v7.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query left_join fixture must parse");
         let ir = parsed
@@ -578,7 +654,7 @@ mod tests {
         // payload — predicate, order, limit, and a two-field record plan —
         // survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v6.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v7.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query record fixture must parse");
         let ir = parsed
@@ -777,7 +853,7 @@ mod tests {
         // identity) — survives a deserialize/serialize round-trip without
         // drift. No group keys: the whole result collapses to one record.
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_global_aggregate_v6.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_global_aggregate_v7.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("global aggregate fixture must parse");
@@ -815,7 +891,7 @@ mod tests {
         // joins section included — survives a deserialize/serialize
         // round-trip without drift.
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_traversed_record_v6.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversed_record_v7.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversed record fixture must parse");
@@ -853,7 +929,7 @@ mod tests {
         // a deserialize/serialize round-trip without drift. GROUP BY does not
         // travel: the renderer derives it from the non-expr fields (ADR-0009).
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_aggregate_v6.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_aggregate_v7.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query aggregate fixture must parse");
@@ -921,7 +997,7 @@ mod tests {
         // payload — root predicate, empty `joins`, and a one-path instances
         // plan — survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v6.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v7.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query include fixture must parse");
         let ir = parsed

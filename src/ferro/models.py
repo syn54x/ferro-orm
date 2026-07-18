@@ -12,7 +12,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from .columns import ColumnSpec, RelationSpec
+    from .columns import ColumnSpec, RelationSpec, ReverseSpec
     from .query import Predicate, ProjectedQuery, RowSelector
     from .session import Session
 
@@ -215,6 +215,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: alongside ``__ferro_columns__``; ``None`` for a PK-less model.
     __ferro_pk__: ClassVar[str | None] = None
     __ferro_relation_specs__: ClassVar[dict[str, "RelationSpec"]] = {}
+    #: Reverse (BackRef) relation facts for existence tests (#314, ADR-0007),
+    #: refreshed at the same compile choke point as ``__ferro_relation_specs__``.
+    __ferro_reverse_specs__: ClassVar[dict[str, "ReverseSpec"]] = {}
     _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
 
     @classmethod
