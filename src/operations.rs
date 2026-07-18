@@ -372,8 +372,20 @@ async fn populate_hop_bind_context(
     exec: Executor<'_>,
     backend: Dialect,
 ) -> PyResult<()> {
-    for edge in &join_plan.renders {
-        let table = &edge.to_table;
+    // Every table an existence test reaches (#314/#315) — correlation hops
+    // plus inner-traversal join hops, at any nesting depth — binds inner
+    // leaves against its own model, so it needs the same registration + enum
+    // catalog resolution as a rendered join edge. Collected up front (the
+    // walk borrows the plan immutably; the inserts below mutate it).
+    let mut tables: Vec<String> = join_plan
+        .renders
+        .iter()
+        .map(|edge| edge.to_table.clone())
+        .collect();
+    for node in &plan.where_clause {
+        collect_exists_tables(node, &mut tables);
+    }
+    for table in &tables {
         if !plan.hop_registrations.contains_key(table) {
             let registration = crate::state::registration_for_table(table)?;
             plan.hop_registrations.insert(table.clone(), registration);
@@ -385,6 +397,39 @@ async fn populate_hop_bind_context(
         }
     }
     Ok(())
+}
+
+/// Collect every table an existence test in `node`'s subtree touches:
+/// correlation `hops`, inner-traversal `joins` hops, and nested tests
+/// recursively (#315). Leaves contribute nothing — their tables are the
+/// scope tables these very entries establish.
+fn collect_exists_tables(node: &ferro_schema_ir::QueryNode, tables: &mut Vec<String>) {
+    use ferro_schema_ir::QueryNode;
+    match node {
+        QueryNode::Leaf { .. } => {}
+        QueryNode::Compound { left, right, .. } => {
+            collect_exists_tables(left, tables);
+            collect_exists_tables(right, tables);
+        }
+        QueryNode::Not { child } => collect_exists_tables(child, tables),
+        QueryNode::Exists {
+            hops,
+            where_clause,
+            joins,
+        } => {
+            for hop in hops {
+                tables.push(hop.to_table.clone());
+            }
+            for join in joins {
+                for hop in &join.path {
+                    tables.push(hop.to_table.clone());
+                }
+            }
+            for inner in where_clause {
+                collect_exists_tables(inner, tables);
+            }
+        }
+    }
 }
 
 /// Reject relation traversal on a mutating operation (#270 renders joins in SELECT

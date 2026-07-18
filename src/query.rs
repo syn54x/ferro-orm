@@ -63,11 +63,17 @@ enum ColumnQualifier<'a> {
         root_table: &'a str,
         join_plan: &'a JoinPlan,
     },
-    /// Inside an EXISTS subquery (#314, ADR-0007): an empty-path leaf
+    /// Inside an EXISTS subquery (#314/#315, ADR-0007): an empty-path leaf
     /// qualifies by the subquery scope's `alias` and binds against `table`'s
-    /// model. The variant owns its strings — subquery aliases are minted
-    /// during the render walk, not borrowed from the plan.
-    ExistsScope { alias: String, table: String },
+    /// model; a path-carrying leaf resolves through the subquery's own
+    /// `join_plan` (the exists node's `joins` section, rendered inside the
+    /// subquery). The variant owns its data — subquery aliases are minted
+    /// during the render walk, not borrowed from the statement plan.
+    ExistsScope {
+        alias: String,
+        table: String,
+        join_plan: JoinPlan,
+    },
 }
 
 /// Qualify a column reference (a WHERE leaf or an `ORDER BY` term) by its
@@ -286,15 +292,22 @@ fn qualify_leaf_column(
             })?;
             Ok(Expr::col((Alias::new(alias.as_str()), Alias::new(column))))
         }
-        ColumnQualifier::ExistsScope { alias, .. } => {
-            if !path.is_empty() {
-                return Err(format!(
-                    "WHERE column {column:?} carries relation path {path:?} \
-                     inside an existence test; forward traversal inside the \
-                     subquery is not rendered yet (#315)"
-                ));
+        ColumnQualifier::ExistsScope {
+            alias, join_plan, ..
+        } => {
+            if path.is_empty() {
+                return Ok(Expr::col((Alias::new(alias.as_str()), Alias::new(column))));
             }
-            Ok(Expr::col((Alias::new(alias.as_str()), Alias::new(column))))
+            let hop_alias = join_plan.prefix_alias.get(path).ok_or_else(|| {
+                format!(
+                    "column {column:?} carries relation path {path:?} with no \
+                     matching join entry inside the existence test"
+                )
+            })?;
+            Ok(Expr::col((
+                Alias::new(hop_alias.as_str()),
+                Alias::new(column),
+            )))
         }
     }
 }
@@ -599,9 +612,13 @@ impl QueryPlan {
                     .node_to_condition_for_backend(child, backend, qualifier, exists_counter)?
                     .not())
             }
-            QueryNode::Exists { hops, where_clause } => {
-                // Existence test (#314, ADR-0007): one render loop for every
-                // hop count. The first hop's table is the subquery FROM,
+            QueryNode::Exists {
+                hops,
+                where_clause,
+                joins,
+            } => {
+                // Existence test (#314/#315, ADR-0007): one render loop for
+                // every hop count. The first hop's table is the subquery FROM,
                 // correlated to the enclosing scope's alias; remaining hops
                 // (M2M target) render as inner joins inside the subquery; the
                 // inner tree recurses through this same builder scoped to the
@@ -644,9 +661,51 @@ impl QueryPlan {
                     last_alias = hop_alias;
                     last_table = hop.to_table.clone();
                 }
+                // Inner forward-traversal joins (#315): rendered INSIDE the
+                // subquery, rooted at the inner scope, always INNER
+                // (ADR-0006 traversal semantics; there is no inner-lambda
+                // left_join spelling). Shared prefixes across entries dedup
+                // to one edge; aliases come from the same statement-wide
+                // counter, so they can never collide with any other scope.
+                let mut inner_plan = JoinPlan::default();
+                for join in joins {
+                    if join.join_type != "inner" {
+                        return Err(format!(
+                            "unsupported join_type {:?} inside an existence test; \
+                             traversal inside the subquery is always \"inner\"",
+                            join.join_type
+                        ));
+                    }
+                    let mut prefix: Vec<String> = Vec::new();
+                    let mut prev_alias = last_alias.clone();
+                    for hop in &join.path {
+                        prefix.push(hop.relation.clone());
+                        if let Some(existing) = inner_plan.prefix_alias.get(&prefix) {
+                            prev_alias = existing.clone();
+                            continue;
+                        }
+                        *exists_counter += 1;
+                        let hop_alias = format!("x{}_{}", exists_counter, hop.relation);
+                        subquery.join_as(
+                            JoinType::InnerJoin,
+                            Alias::new(&hop.to_table),
+                            Alias::new(&hop_alias),
+                            Expr::col((Alias::new(&prev_alias), Alias::new(&hop.from_column)))
+                                .equals((Alias::new(&hop_alias), Alias::new(&hop.to_column))),
+                        );
+                        inner_plan
+                            .prefix_alias
+                            .insert(prefix.clone(), hop_alias.clone());
+                        inner_plan
+                            .prefix_table
+                            .insert(prefix.clone(), hop.to_table.clone());
+                        prev_alias = hop_alias;
+                    }
+                }
                 let inner_scope = ColumnQualifier::ExistsScope {
                     alias: last_alias,
                     table: last_table,
+                    join_plan: inner_plan,
                 };
                 for node in where_clause {
                     inner = inner.add(self.node_to_condition_for_backend(
@@ -791,23 +850,35 @@ impl QueryPlan {
         qualifier: &ColumnQualifier<'_>,
         path: &[String],
     ) -> Result<(Option<&crate::codec_plan::ModelCodecPlan>, &HashMap<String, String>), String> {
-        // Inside an EXISTS subquery (#314) an empty-path leaf belongs to the
-        // subquery scope's table, NEVER the root model — resolve before the
-        // root early-return below. Registration is optional here (mirroring
-        // the root's own `Option`): an inner leaf on an unregistered/
-        // unprobed table degrades to generic binds, exactly like an
-        // unregistered root model. The walkers populate both maps for scoped
-        // tests (#315).
-        if let ColumnQualifier::ExistsScope { table, .. } = qualifier {
-            if !path.is_empty() {
-                return Err(format!(
-                    "relation path {path:?} inside an existence test is not \
-                     rendered yet (#315); cannot resolve typed binds"
-                ));
-            }
+        // Inside an EXISTS subquery (#314/#315) a leaf belongs to the
+        // subquery scope — the scope table for an empty path, the inner
+        // join plan's hop table for a traversed one — NEVER the root model;
+        // resolve before the root early-return below. Registration is
+        // optional here (mirroring the root's own `Option`): an inner leaf
+        // on an unregistered/unprobed table degrades to generic binds,
+        // exactly like an unregistered root model. The walkers populate
+        // both maps for every table an existence test reaches.
+        if let ColumnQualifier::ExistsScope {
+            table, join_plan, ..
+        } = qualifier
+        {
+            let leaf_table = if path.is_empty() {
+                table
+            } else {
+                join_plan.prefix_table.get(path).ok_or_else(|| {
+                    format!(
+                        "relation path {path:?} has no matching join entry \
+                         inside the existence test for typed binds"
+                    )
+                })?
+            };
             return Ok((
-                self.hop_registrations.get(table).map(|m| &m.codec_plan),
-                self.hop_enum_udt.get(table).unwrap_or(empty_enum_udt()),
+                self.hop_registrations
+                    .get(leaf_table)
+                    .map(|m| &m.codec_plan),
+                self.hop_enum_udt
+                    .get(leaf_table)
+                    .unwrap_or(empty_enum_udt()),
             ));
         }
         if path.is_empty() {
@@ -1102,6 +1173,99 @@ mod tests {
         assert!(sql.contains("\"x1_transfer_out\""), "first alias: {sql}");
         assert!(sql.contains("\"x2_transfer_in\""), "second alias: {sql}");
         assert!(sql.contains(" or "), "OR composition preserved: {sql}");
+    }
+
+    #[test]
+    fn scoped_exists_renders_inner_conditions_and_traversal_joins() {
+        // Scoped existence test (#315): the inner tree's empty-path leaf
+        // qualifies by the subquery scope's alias, and a traversed inner
+        // leaf resolves through the exists node's own `joins` section —
+        // rendered as an INNER join inside the subquery (ADR-0006).
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Acct",
+            "where": [
+                {"node_kind": "exists",
+                 "hops": [{"relation": "transactions", "from_column": "id",
+                           "to_table": "transaction", "to_column": "account_id"}],
+                 "where": [
+                    {"node_kind": "compound", "operator": "AND",
+                     "left": {"node_kind": "leaf", "column": "amount", "operator": ">=",
+                              "value": {"kind": "int", "value": 100}, "path": []},
+                     "right": {"node_kind": "leaf", "column": "name", "operator": "==",
+                               "value": {"kind": "string", "value": "checking"},
+                               "path": ["account"]}}
+                 ],
+                 "joins": [
+                    {"join_type": "inner",
+                     "path": [{"relation": "account", "from_column": "account_id",
+                               "to_table": "account", "to_column": "id"}]}
+                 ]}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let mut select = Query::select();
+        select.from(Alias::new("acct")).cond_where(
+            plan.to_condition_for_backend(Dialect::Sqlite, Some("acct"))
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(
+            sql.contains(
+                "inner join \"account\" as \"x2_account\" on \
+                 \"x1_transactions\".\"account_id\" = \"x2_account\".\"id\""
+            ),
+            "inner traversal join must render INSIDE the subquery: {sql}"
+        );
+        assert!(
+            sql.contains("\"x1_transactions\".\"amount\" >= 100"),
+            "empty-path inner leaf qualifies by the subquery scope alias: {sql}"
+        );
+        assert!(
+            sql.contains("\"x2_account\".\"name\" = 'checking'"),
+            "traversed inner leaf qualifies by its inner join alias: {sql}"
+        );
+    }
+
+    #[test]
+    fn nested_exists_correlates_to_the_inner_scope() {
+        // Depth-2 nesting (#315): the inner exists node's correlation hop
+        // resolves against the ENCLOSING SUBQUERY's alias, not the root —
+        // recursion through the ExistsScope qualifier, no second mechanism.
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Owner",
+            "where": [
+                {"node_kind": "exists",
+                 "hops": [{"relation": "accounts", "from_column": "id",
+                           "to_table": "account", "to_column": "owner_id"}],
+                 "where": [
+                    {"node_kind": "exists",
+                     "hops": [{"relation": "transactions", "from_column": "id",
+                               "to_table": "transaction", "to_column": "account_id"}],
+                     "where": []}
+                 ]}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let mut select = Query::select();
+        select.from(Alias::new("owner")).cond_where(
+            plan.to_condition_for_backend(Dialect::Postgres, Some("owner"))
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(PostgresQueryBuilder).to_lowercase();
+        assert!(
+            sql.contains("\"x1_accounts\".\"owner_id\" = \"owner\".\"id\""),
+            "outer test correlates to the root alias: {sql}"
+        );
+        assert!(
+            sql.contains("\"x2_transactions\".\"account_id\" = \"x1_accounts\".\"id\""),
+            "nested test correlates to the enclosing SUBQUERY alias: {sql}"
+        );
     }
 
     #[test]

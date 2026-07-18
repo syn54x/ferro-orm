@@ -1,14 +1,17 @@
-"""End-to-end behavior of existence tests on reverse relations (#314, ADR-0007).
+"""End-to-end behavior of existence tests on reverse relations (ADR-0007).
 
 A reverse (BackRef) relation appears in a predicate in exactly one form — the
-existence test ``t.rel.exists()`` — rendered as a correlated EXISTS at every
-cardinality (one-to-one BackRefs included), negated with ``~``. These tests
-assert result sets only, on both database backends via the backend matrix;
-the wire shape is pinned separately by the ``exists`` golden vectors.
+existence test ``t.rel.exists(...)`` — rendered as a correlated EXISTS at
+every cardinality (one-to-one BackRefs included), negated with ``~``, and
+optionally scoped by a full ferro predicate over the related model (#315).
+These tests assert result sets only, on both database backends via the
+backend matrix; the wire shape is pinned separately by the ``exists`` golden
+vectors.
 
-The model graph mirrors the #307 workload: a transaction with two one-to-one
-BackRefs into a transfer link row (membership via either FK column) plus a
-to-many BackRef onto split lines.
+The model graph mirrors the #307/#308 workloads: a transaction with two
+one-to-one BackRefs into a transfer link row (membership via either FK
+column), a to-many BackRef onto split lines, and a category the lines and
+transactions both point at (the line-aware category filter).
 """
 
 import pytest
@@ -19,9 +22,19 @@ from ferro import BackRef, FerroField, ForeignKey, Model, Relation, connect, eng
 pytestmark = pytest.mark.backend_matrix
 
 
+class ExCat(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str = ""
+    txns: Relation[list["ExTxn"]] = BackRef()
+    lines: Relation[list["ExLine"]] = BackRef()
+
+
 class ExTxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
+    category: Annotated[
+        ExCat | None, ForeignKey(related_name="txns", on_delete="SET NULL")
+    ] = None
     transfer_out: "ExTransfer" = BackRef()
     transfer_in: "ExTransfer" = BackRef()
     lines: Relation[list["ExLine"]] = BackRef()
@@ -40,7 +53,11 @@ class ExTransfer(Model):
 class ExLine(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     txn: Annotated[ExTxn, ForeignKey(related_name="lines", on_delete="CASCADE")]
-    category: str = ""
+    category: Annotated[
+        ExCat | None, ForeignKey(related_name="lines", on_delete="SET NULL")
+    ] = None
+    amount: int = 0
+    memo: str = ""
 
 
 async def _seed_transfers() -> dict[str, ExTxn]:
@@ -108,7 +125,7 @@ async def test_to_many_exists_returns_each_root_once(db_url):
     async with engines.session():
         split = await ExTxn.create(amount=-70)
         for _ in range(3):
-            await ExLine.create(txn=split, category="groceries")
+            await ExLine.create(txn=split)
         await ExTxn.create(amount=-10)
 
         results = await ExTxn.where(lambda t: t.lines.exists()).all()
@@ -123,7 +140,7 @@ async def test_exists_composes_with_root_predicates_order_and_limit(db_url):
     async with engines.session():
         for amount in (-40, -50, -60):
             txn = await ExTxn.create(amount=amount)
-            await ExLine.create(txn=txn, category="travel")
+            await ExLine.create(txn=txn)
         await ExTxn.create(amount=-80)  # child-less
 
         results = (
@@ -216,3 +233,278 @@ async def test_exists_rejected_on_mutating_verbs(db_url):
             await ExTxn.where(lambda t: t.lines.exists()).update(amount=0)
         with pytest.raises(ValueError, match="delete"):
             await ExTxn.where(lambda t: t.lines.exists()).delete()
+
+
+# ---------------------------------------------------------------------------
+# Scoped inner predicates (#315): the optional inner lambda is a full ferro
+# predicate over the child model — every operator, forward traversal (joins
+# INSIDE the subquery, ADR-0006 unchanged), nesting — with cross-scope
+# references rejected at build time (deferred to #309).
+# ---------------------------------------------------------------------------
+
+
+async def _seed_categories() -> dict[str, object]:
+    """The #308 fixture: a split transaction whose three lines carry the
+    category (its own category vacated), a plain transaction categorized at
+    the root, and a transaction matching neither."""
+    groceries = await ExCat.create(name="Groceries")
+    travel = await ExCat.create(name="Travel")
+    split = await ExTxn.create(amount=-7000)  # category vacated while split
+    for amount in (-3000, -2000, -2000):
+        await ExLine.create(txn=split, category=groceries, amount=amount)
+    plain = await ExTxn.create(amount=-1000, category=groceries)
+    other = await ExTxn.create(amount=-500, category=travel)
+    return {
+        "groceries": groceries,
+        "travel": travel,
+        "split": split,
+        "plain": plain,
+        "other": other,
+    }
+
+
+@pytest.mark.asyncio
+async def test_scoped_exists_filters_by_child_predicate(db_url):
+    """``t.lines.exists(lambda line: ...)`` keeps exactly the roots with a
+    matching child row."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        seeded = await _seed_categories()
+
+        rows = await _amounts(
+            ExTxn.where(
+                lambda t: t.lines.exists(
+                    lambda line, cat=seeded["groceries"]: line.category_id == cat.id
+                )
+            )
+        )
+        assert rows == [-7000]
+
+
+@pytest.mark.asyncio
+async def test_308_line_aware_category_filter(db_url):
+    """The full #308 demo: root-or-line category membership. A three-line
+    split matches exactly once, the child-less root survives through the OR's
+    root branch, and keyset ``order_by`` + ``limit`` compose unchanged."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        seeded = await _seed_categories()
+        ids = [seeded["groceries"].id]
+
+        query = ExTxn.where(
+            lambda t: (
+                t.category_id.in_(ids)
+                | t.lines.exists(lambda line: line.category_id.in_(ids))
+            )
+        )
+        rows = await _amounts(query)
+        assert rows == [-7000, -1000]
+
+        paged = (
+            await ExTxn.where(
+                lambda t: (
+                    t.category_id.in_(ids)
+                    | t.lines.exists(lambda line: line.category_id.in_(ids))
+                )
+            )
+            .order_by("amount", "desc")
+            .limit(1)
+            .all()
+        )
+        assert [r.amount for r in paged] == [-1000]
+
+
+@pytest.mark.asyncio
+async def test_inner_lambda_supports_full_operator_set(db_url):
+    """Every operator and ``&``/``|``/``~`` composition works over the child
+    model — the inner predicate is ordinary ferro, not a sub-language."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        txn = await ExTxn.create(amount=-70)
+        await ExLine.create(txn=txn, amount=-30, memo="grocery run")
+        await ExLine.create(txn=txn, amount=-40, memo="fuel")
+        bare = await ExTxn.create(amount=-10)
+        await ExLine.create(txn=bare, amount=5, memo="refund")
+
+        assert await _amounts(
+            ExTxn.where(lambda t: t.lines.exists(lambda line: line.memo.like("%fuel%")))
+        ) == [-70]
+        assert await _amounts(
+            ExTxn.where(
+                lambda t: t.lines.exists(
+                    lambda line: (line.amount <= -30) & ~line.memo.like("%grocery%")
+                )
+            )
+        ) == [-70]
+        assert await _amounts(
+            ExTxn.where(
+                lambda t: t.lines.exists(
+                    lambda line: (line.amount > 0) | (line.amount < -35)
+                )
+            )
+        ) == [-70, -10]
+
+
+@pytest.mark.asyncio
+async def test_forward_traversal_inside_subquery(db_url):
+    """A forward-FK traversal inside the inner lambda renders its join INSIDE
+    the EXISTS subquery under unchanged ADR-0006 semantics (INNER,
+    narrowing)."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await _seed_categories()
+
+        rows = await _amounts(
+            ExTxn.where(
+                lambda t: t.lines.exists(lambda line: line.category.name == "Groceries")
+            )
+        )
+        assert rows == [-7000]
+
+        # INNER semantics: a line with no category can never match a
+        # traversed inner predicate.
+        uncategorized = await ExTxn.create(amount=-42)
+        await ExLine.create(txn=uncategorized, amount=-42)
+        rows = await _amounts(
+            ExTxn.where(
+                lambda t: t.lines.exists(lambda line: line.category.name != "nope")
+            )
+        )
+        assert rows == [-7000]
+
+
+@pytest.mark.asyncio
+async def test_nested_exists_depth_two(db_url):
+    """Existence tests nest: categories with a transaction that has a
+    negative line — the exists node's inner tree is an ordinary condition
+    tree, so recursion is free."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        cat = await ExCat.create(name="Active")
+        idle = await ExCat.create(name="Idle")
+        txn = await ExTxn.create(amount=-100, category=cat)
+        await ExLine.create(txn=txn, amount=-60)
+        pos = await ExTxn.create(amount=200, category=idle)
+        await ExLine.create(txn=pos, amount=200)
+
+        results = await ExCat.where(
+            lambda c: c.txns.exists(
+                lambda t: t.lines.exists(lambda line: line.amount < 0)
+            )
+        ).all()
+        assert [r.name for r in results] == ["Active"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_grouping_contrast(db_url):
+    """``exists(lambda line: A & B)`` (one child row matches both) and
+    ``exists(A-test) & exists(B-test)`` (some child row matches each) are
+    different, correct row sets — the ambiguity ADR-0007 rejects is
+    unspellable by construction."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        both_in_one = await ExTxn.create(amount=-10)
+        await ExLine.create(txn=both_in_one, amount=-50, memo="fuel")
+        spread = await ExTxn.create(amount=-20)
+        await ExLine.create(txn=spread, amount=-50, memo="snacks")
+        await ExLine.create(txn=spread, amount=-5, memo="fuel")
+
+        one_row_matches_both = await _amounts(
+            ExTxn.where(
+                lambda t: t.lines.exists(
+                    lambda line: (line.amount <= -50) & line.memo.like("%fuel%")
+                )
+            )
+        )
+        assert one_row_matches_both == [-10]
+
+        some_row_matches_each = await _amounts(
+            ExTxn.where(
+                lambda t: (
+                    t.lines.exists(lambda line: line.amount <= -50)
+                    & t.lines.exists(lambda line: line.memo.like("%fuel%"))
+                )
+            )
+        )
+        assert some_row_matches_each == [-20, -10]
+
+
+@pytest.mark.asyncio
+async def test_negated_scoped_exists(db_url):
+    """``~t.lines.exists(lambda line: ...)`` renders NOT EXISTS over the scoped
+    subquery."""
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        seeded = await _seed_categories()
+        ids = [seeded["groceries"].id]
+
+        rows = await _amounts(
+            ExTxn.where(
+                lambda t: ~t.lines.exists(lambda line: line.category_id.in_(ids))
+            )
+        )
+        assert rows == [-1000, -500]
+
+
+@pytest.mark.asyncio
+async def test_scoped_exists_count(db_url):
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        seeded = await _seed_categories()
+        ids = [seeded["groceries"].id]
+
+        n = await ExTxn.where(
+            lambda t: (
+                t.category_id.in_(ids)
+                | t.lines.exists(lambda line: line.category_id.in_(ids))
+            )
+        ).count()
+        assert n == 2
+
+
+# ---------------------------------------------------------------------------
+# Cross-scope guard (#315): the inner lambda may reference only its own
+# parameter's scope; everything else fails at build time pointing at the
+# deferred capability (#309). Silent misrendering is the failure mode this
+# guard exists to prevent.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cross_scope_outer_column_rejected(db_url):
+    """An inner-tree leaf built from the OUTER lambda's parameter is a
+    build-time error, not a silently re-scoped column."""
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(TypeError, match="#309"):
+        ExTxn.where(lambda t: t.lines.exists(lambda line: t.amount > 5))
+
+
+@pytest.mark.asyncio
+async def test_cross_scope_field_proxy_rhs_rejected(db_url):
+    """A FieldProxy as a comparison right-hand side (column-to-column) is a
+    build-time error pointing at #309 — whichever scope it came from."""
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(TypeError, match="#309"):
+        ExTxn.where(
+            lambda t: t.lines.exists(lambda line: line.category_id == t.category_id)
+        )
+    with pytest.raises(TypeError, match="#309"):
+        ExTxn.where(lambda t: t.lines.exists(lambda line: line.amount == line.amount))
+
+
+@pytest.mark.asyncio
+async def test_cross_scope_nested_exists_rejected(db_url):
+    """A nested existence test built from the OUTER proxy inside the inner
+    lambda is cross-scope too."""
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(TypeError, match="#309"):
+        ExTxn.where(lambda t: t.lines.exists(lambda line: t.transfer_out.exists()))
+
+
+@pytest.mark.asyncio
+async def test_inner_lambda_must_return_a_predicate(db_url):
+    """A non-predicate inner lambda fails with the same pointed shape as
+    where() itself."""
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(TypeError, match="predicate"):
+        ExTxn.where(lambda t: t.lines.exists(lambda line: line.amount))
