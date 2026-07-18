@@ -11,11 +11,10 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 5 (#292 — unconditional bump; `record` fields
-# carry exactly one source — `column` + `path`, or an aggregate `expr` with
-# hop-fact `path`, ADR-0009 on the ADR-0007 plan substrate); `schema`/`codec`
-# remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 5, "codec": 1}
+# `query` is on ir_version 6 (#310 — unconditional bump; predicate trees
+# gain the recursive `not` node kind beside `leaf`/`compound`, ADR-0008);
+# `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 6, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -39,10 +38,22 @@ def _require_keys(obj: dict[str, Any], required: set[str], label: str) -> None:
 
 
 def _validate_query_node(node: dict[str, Any], label: str) -> None:
-    _require_keys(node, {"node_kind", "operator"}, label)
+    _require_keys(node, {"node_kind"}, label)
     node_kind = node["node_kind"]
+    assert node_kind in {"leaf", "compound", "not"}, (
+        f"{label}.node_kind invalid: {node_kind!r}"
+    )
+
+    if node_kind == "not":
+        # v6 (ADR-0008): uniform negation is one recursive node wrapping any
+        # child — no operator token, no per-operator negative forms.
+        _require_keys(node, {"child"}, label)
+        assert isinstance(node["child"], dict), f"{label}.child must be object"
+        _validate_query_node(node["child"], f"{label}.child")
+        return
+
+    _require_keys(node, {"operator"}, label)
     operator = node["operator"]
-    assert node_kind in {"leaf", "compound"}, f"{label}.node_kind invalid: {node_kind!r}"
     assert operator in QUERY_OPERATORS, f"{label}.operator invalid: {operator!r}"
 
     if node_kind == "leaf":

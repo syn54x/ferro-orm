@@ -33,6 +33,7 @@ fn reject_non_empty_leaf_path(node: &QueryNode) -> Result<(), String> {
             reject_non_empty_leaf_path(left)?;
             reject_non_empty_leaf_path(right)
         }
+        QueryNode::Not { child } => reject_non_empty_leaf_path(child),
     }
 }
 
@@ -548,6 +549,13 @@ impl QueryPlan {
                     op => return Err(format!("unsupported compound QueryNode operator: {op}")),
                 })
             }
+            QueryNode::Not { child } => {
+                // Uniform negation (ADR-0008): a faithful SQL `NOT (...)` over
+                // the rebuilt child — no operator rewriting, no De Morgan.
+                Ok(self
+                    .node_to_condition_for_backend(child, backend, qualifier)?
+                    .not())
+            }
             QueryNode::Leaf {
                 operator,
                 column,
@@ -810,6 +818,102 @@ mod tests {
         assert!(
             sql.contains("is not null"),
             "expected IS NOT NULL, got {sql}"
+        );
+    }
+
+    #[test]
+    fn not_node_renders_sql_not_over_leaf_child() {
+        // Uniform negation (#312, ADR-0008): a `not` node lowers to a faithful
+        // SQL `NOT (...)` over the rebuilt child — here NOT (role IN (...)),
+        // with no operator rewriting.
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [
+                {"node_kind": "not", "child":
+                    {"node_kind": "leaf", "column": "role", "operator": "IN",
+                     "value": {"kind": "list", "value": ["admin", "owner"]}, "path": []}}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let mut select = Query::select();
+        select.from(Alias::new("pending")).cond_where(
+            plan.to_condition_for_backend(Dialect::Sqlite, None)
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        // SQL NOT binds looser than IN, so this parses as NOT (role IN (...)).
+        assert!(
+            sql.contains("not \"role\" in ('admin', 'owner')"),
+            "expected NOT over the un-rewritten IN child, got {sql}"
+        );
+    }
+
+    #[test]
+    fn not_node_renders_sql_not_over_compound_child() {
+        // `~` over a compound negates the whole group (#313): NOT (a OR b),
+        // never a De Morgan expansion of the children.
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [
+                {"node_kind": "not", "child":
+                    {"node_kind": "compound", "operator": "OR",
+                     "left": {"node_kind": "leaf", "column": "age", "operator": ">=",
+                              "value": {"kind": "int", "value": 18}, "path": []},
+                     "right": {"node_kind": "leaf", "column": "name", "operator": "LIKE",
+                               "value": {"kind": "string", "value": "%x%"}, "path": []}}}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let mut select = Query::select();
+        select.from(Alias::new("pending")).cond_where(
+            plan.to_condition_for_backend(Dialect::Sqlite, None)
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(sql.contains("not"), "expected SQL NOT, got {sql}");
+        assert!(sql.contains("or"), "compound OR preserved under NOT: {sql}");
+        assert!(
+            sql.contains("like"),
+            "child LIKE must render un-rewritten: {sql}"
+        );
+    }
+
+    #[test]
+    fn double_not_renders_as_the_plain_child() {
+        // `~~p` reaches Rust as two nested `not` wire nodes; SeaQuery's
+        // `Condition::not` toggles a negation flag, so the even nesting
+        // renders as the plain child. That collapse is semantically exact
+        // under SQL three-valued logic (NOT NOT x ≡ x for TRUE, FALSE, and
+        // UNKNOWN alike) — the wire stays faithful, only the rendering
+        // simplifies.
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Pending",
+            "where": [
+                {"node_kind": "not", "child":
+                    {"node_kind": "not", "child":
+                        {"node_kind": "leaf", "column": "age", "operator": ">=",
+                         "value": {"kind": "int", "value": 18}, "path": []}}}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let mut select = Query::select();
+        select.from(Alias::new("pending")).cond_where(
+            plan.to_condition_for_backend(Dialect::Sqlite, None)
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(
+            !sql.contains("not") && sql.contains("\"age\" >= 18"),
+            "expected the double negation to render as the plain child, got {sql}"
         );
     }
 

@@ -53,6 +53,7 @@ class QueryNode:
         left: Left child node for compound expressions.
         right: Right child node for compound expressions.
         is_compound: Flag indicating whether the node combines two child nodes.
+        child: Negated child node for NOT nodes (``~``, ADR-0008).
 
     Examples:
         >>> active_filter = FieldProxy("active") == True
@@ -71,6 +72,7 @@ class QueryNode:
         right: "QueryNode | None" = None,
         is_compound: bool = False,
         path: tuple[str, ...] = (),
+        child: "QueryNode | None" = None,
     ):
         """Initialize a query expression node
 
@@ -85,6 +87,8 @@ class QueryNode:
                 table; empty (default) means the root model. Plumbed through
                 so relation traversal (#270) can populate it — this slice
                 never produces a non-empty path.
+            child: The negated child for a NOT node (built by ``~``,
+                ADR-0008); ``None`` for leaf and compound nodes.
         """
         self.column = column
         self.operator = operator
@@ -93,6 +97,7 @@ class QueryNode:
         self.right = right
         self.is_compound = is_compound
         self.path = path
+        self.child = child
 
     def __or__(self, other: "QueryNode") -> "QueryNode":
         """Combine two nodes with logical OR
@@ -133,8 +138,29 @@ class QueryNode:
             return NotImplemented
         return QueryNode(left=self, operator="AND", right=other, is_compound=True)
 
+    def __invert__(self) -> "QueryNode":
+        """Negate this predicate with prefix ``~`` (ADR-0008)
+
+        One universal rule: ``~`` negates ANY predicate node — leaf
+        comparison, AND/OR compound, or a negation itself (``~~p`` nests) —
+        by wrapping it in a NOT node rendered as SQL ``NOT (...)``. There are
+        no per-operator negative forms: ``~t.col.in_(ids)`` is NOT IN,
+        ``~t.col.like(p)`` is NOT LIKE.
+
+        Returns:
+            A NOT node wrapping ``self``.
+
+        Examples:
+            >>> node = ~FieldProxy("role").in_(["admin", "owner"])
+            >>> node.child.operator
+            'IN'
+        """
+        return QueryNode(child=self)
+
     def to_ir_dict(self) -> dict[str, Any]:
         """Serialize the query node tree into a QueryIR payload shape."""
+        if self.child is not None:
+            return {"node_kind": "not", "child": self.child.to_ir_dict()}
         if not self.is_compound:
             serialized = _serialize_query_value(self.value)
             return {
@@ -157,23 +183,26 @@ class QueryNode:
     def __bool__(self) -> bool:
         """Reject boolean coercion of a query node (#273).
 
-        Python evaluates ``and``/``or`` by calling ``bool()`` on the operands,
-        so ``(u.age >= 18) and (u.active == True)`` would silently collapse to
-        one branch instead of building a compound predicate. Raising here turns
-        that mistake into a pointed error at build time; combine predicates with
-        the bitwise ``&`` / ``|`` operators instead.
+        Python evaluates ``and``/``or`` by calling ``bool()`` on the operands
+        (and ``not`` coerces its operand the same way), so ``(u.age >= 18) and
+        (u.active == True)`` would silently collapse to one branch instead of
+        building a compound predicate. Raising here turns that mistake into a
+        pointed error at build time; combine predicates with the bitwise
+        ``&`` / ``|`` operators and negate with ``~``.
 
         Raises:
             TypeError: Always — a ``QueryNode`` has no truth value.
         """
         raise TypeError(
             "QueryNode cannot be used in a boolean context; use & / | to "
-            "combine predicates, not and/or "
-            "(e.g. (u.age >= 18) & (u.active == True))."
+            "combine predicates and ~ to negate them, not and/or/not "
+            "(e.g. (u.age >= 18) & ~(u.active == True))."
         )
 
     def __repr__(self):
         """Return a developer-friendly representation of the node"""
+        if self.child is not None:
+            return f"QueryNode(NOT {self.child!r})"
         if not self.is_compound:
             return f"QueryNode(column={self.column!r}, operator={self.operator!r}, value={self.value!r})"
         return (

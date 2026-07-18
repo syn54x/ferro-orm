@@ -671,12 +671,15 @@ class TestRelationProxySugar:
 
 
 def test_query_node_boolean_coercion_raises():
-    """`and`/`or` misuse coerces a QueryNode to bool; that raises pointedly."""
+    """`and`/`or`/`not` misuse coerces a QueryNode to bool; that raises
+    pointedly, naming `~` as the supported negation spelling (#313)."""
     node = FieldProxy("age") >= 18
     with pytest.raises(TypeError, match="boolean context.*use & / |"):
         bool(node)
     with pytest.raises(TypeError, match="use & / |"):
         _ = (FieldProxy("age") >= 18) and (FieldProxy("age") <= 30)
+    with pytest.raises(TypeError, match=r"~ to negate"):
+        _ = not (FieldProxy("age") >= 18)
 
 
 class TestMutatingTraversalRejection:
@@ -685,6 +688,15 @@ class TestMutatingTraversalRejection:
 
     def test_traversed_predicate_rejected_for_update_and_delete(self):
         q = Query(QJTransaction).where(lambda t: t.account.label == "a1")
+        for operation in ("update", "delete"):
+            with pytest.raises(ValueError, match="does not support relation traversal"):
+                compile_query(q, operation)
+
+    def test_negated_traversed_predicate_rejected_for_update_and_delete(self):
+        # A traversing leaf stays traversal under `~` (#312): the guard sees
+        # through the NOT wrapper, so negation can't smuggle a join into a
+        # single-table mutation.
+        q = Query(QJTransaction).where(lambda t: ~(t.account.label == "a1"))
         for operation in ("update", "delete"):
             with pytest.raises(ValueError, match="does not support relation traversal"):
                 compile_query(q, operation)

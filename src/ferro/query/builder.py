@@ -105,6 +105,9 @@ def _register_join_paths(node: QueryNode, joins: dict[tuple[str, ...], str]) -> 
     ``&``/``|`` trees and across multiple ``where()`` calls falls out of the
     dict.
     """
+    if node.child is not None:
+        _register_join_paths(node.child, joins)
+        return
     if node.is_compound:
         if node.left is not None:
             _register_join_paths(node.left, joins)

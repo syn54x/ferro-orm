@@ -32,13 +32,13 @@ if TYPE_CHECKING:
 # mutate arm; they stay distinct values so guardrail errors name the caller.
 QueryVerb = Literal["fetch", "count", "update", "delete"]
 
-# Always 5 (#292 — unconditional bump, exactly like v4 at #285, v3 at #278,
-# and v2 at #269; there is no earlier envelope left anywhere). v5 gives
-# ``record`` fields expression sources (ADR-0009): a field carries either a
-# ``column`` + ``path`` or an aggregate ``expr``. Python and Rust ship in one
+# Always 6 (#310 — unconditional bump, exactly like v5 at #292, v4 at #285,
+# v3 at #278, and v2 at #269; there is no earlier envelope left anywhere). v6
+# gives predicate trees the recursive ``not`` node kind beside ``leaf`` and
+# ``compound`` (uniform negation, ADR-0008). Python and Rust ship in one
 # wheel, so a single supported version is the whole contract (#267
 # Implementation Decisions).
-_IR_VERSION = 5
+_IR_VERSION = 6
 
 
 class _AbsentType:
@@ -329,7 +329,10 @@ def _where_node_traverses(node: QueryNode) -> bool:
     Used by the mutate guardrails to reject relation traversal on
     ``update()``/``delete()``. A join-free shadow-FK leaf (``t.account ==
     instance`` desugars to ``path=()``) is NOT traversal and stays allowed.
+    A negation traverses iff its child does (``~`` never adds a path).
     """
+    if node.child is not None:
+        return _where_node_traverses(node.child)
     if node.is_compound:
         return (node.left is not None and _where_node_traverses(node.left)) or (
             node.right is not None and _where_node_traverses(node.right)
