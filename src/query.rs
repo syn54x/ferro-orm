@@ -1269,6 +1269,59 @@ mod tests {
     }
 
     #[test]
+    fn two_hop_exists_renders_join_table_then_target() {
+        // M2M existence test (#316): the SAME render loop — first hop's
+        // table is the subquery FROM correlated to the enclosing scope,
+        // the second hop renders as an inner join inside the subquery, and
+        // the inner tree qualifies by the LAST hop's alias (the target).
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "User",
+            "where": [
+                {"node_kind": "exists",
+                 "hops": [
+                    {"relation": "tags", "from_column": "id",
+                     "to_table": "tag_users", "to_column": "user_id"},
+                    {"relation": "tags", "from_column": "tag_id",
+                     "to_table": "tag", "to_column": "id"}
+                 ],
+                 "where": [
+                    {"node_kind": "leaf", "column": "name", "operator": "==",
+                     "value": {"kind": "string", "value": "admin"}, "path": []}
+                 ]}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let mut select = Query::select();
+        select.from(Alias::new("user")).cond_where(
+            plan.to_condition_for_backend(Dialect::Postgres, Some("user"))
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(PostgresQueryBuilder).to_lowercase();
+        assert!(
+            sql.contains("exists(select 1 from \"tag_users\" as \"x1_tags\""),
+            "join table is the subquery FROM: {sql}"
+        );
+        assert!(
+            sql.contains(
+                "inner join \"tag\" as \"x2_tags\" on \
+                 \"x1_tags\".\"tag_id\" = \"x2_tags\".\"id\""
+            ),
+            "target joins on inside the subquery: {sql}"
+        );
+        assert!(
+            sql.contains("\"x1_tags\".\"user_id\" = \"user\".\"id\""),
+            "join table correlates to the enclosing alias: {sql}"
+        );
+        assert!(
+            sql.contains("\"x2_tags\".\"name\" = 'admin'"),
+            "inner tree qualifies by the LAST hop's alias: {sql}"
+        );
+    }
+
+    #[test]
     fn exists_requires_a_qualified_enclosing_scope() {
         // Correlation needs an alias to correlate against; the unqualified
         // unit-test path fails loudly rather than emitting an uncorrelated
