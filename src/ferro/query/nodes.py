@@ -1010,15 +1010,15 @@ def _collect_inner_traversal_paths(
 
 
 class ReverseRelationProxy:
-    """Predicate proxy for a reverse (BackRef) relation (#314, ADR-0007).
+    """Predicate proxy for a reverse (BackRef) or M2M relation (ADR-0007).
 
     Returned by attribute access on a :class:`QueryProxy` when the accessed
-    name is a resolved reverse relation. It exposes exactly one verb — the
-    existence test :meth:`exists` — because reverse relations are *tested*,
-    never *traversed*: column access, comparisons (including ``!= None`` /
-    ``== None``), and ``in_`` raise at build time with the supported spelling
-    in the message. Negation is uniform ``~`` over the returned node
-    (ADR-0008), so NOT EXISTS is ``~t.rel.exists()``.
+    name is a resolved reverse or many-to-many relation. It exposes exactly
+    one verb — the existence test :meth:`exists` — because reverse relations
+    are *tested*, never *traversed*: column access, comparisons (including
+    ``!= None`` / ``== None``), and ``in_`` raise at build time with the
+    supported spelling in the message. Negation is uniform ``~`` over the
+    returned node (ADR-0008), so NOT EXISTS is ``~t.rel.exists()``.
     """
 
     __slots__ = ("_root_model", "_name", "_spec")
@@ -1069,13 +1069,46 @@ class ReverseRelationProxy:
                 "column: the existence test correlates the child's FK "
                 "against the root primary key."
             )
-        hop = QueryJoinHop(
-            relation=self._name,
-            from_column=root_pk,
-            to_table=self._spec.target.__ferro_table__,
-            to_column=self._spec.child_fk_column,
-            target=self._spec.target,
-        )
+        if self._spec.is_m2m:
+            # Two hops through the join table (#316), same node and render
+            # loop as the one-hop form: the join table correlates to the
+            # enclosing scope, the target joins on inside the subquery. Both
+            # hops carry this relation's name — one relation, one alias
+            # family.
+            target_pk = getattr(self._spec.target, "__ferro_pk__", None)
+            if target_pk is None:
+                raise ValueError(
+                    f"t.{self._name}.exists() requires "
+                    f"{self._spec.target.__name__} to declare a primary-key "
+                    "column: the M2M existence test joins the join table to "
+                    "the target primary key."
+                )
+            hops = (
+                QueryJoinHop(
+                    relation=self._name,
+                    from_column=root_pk,
+                    to_table=self._spec.join_table,
+                    to_column=self._spec.source_col,
+                    target=self._spec.target,
+                ),
+                QueryJoinHop(
+                    relation=self._name,
+                    from_column=self._spec.target_col,
+                    to_table=self._spec.target.__ferro_table__,
+                    to_column=target_pk,
+                    target=self._spec.target,
+                ),
+            )
+        else:
+            hops = (
+                QueryJoinHop(
+                    relation=self._name,
+                    from_column=root_pk,
+                    to_table=self._spec.target.__ferro_table__,
+                    to_column=self._spec.child_fk_column,
+                    target=self._spec.target,
+                ),
+            )
         where: tuple[QueryNode, ...] = ()
         joins: tuple[Any, ...] = ()
         if inner is not None:
@@ -1093,7 +1126,7 @@ class ReverseRelationProxy:
             where = (node,)
         return QueryNode(
             exists=ExistsTest(
-                hops=(hop,), where=where, joins=joins, owner=self._root_model
+                hops=hops, where=where, joins=joins, owner=self._root_model
             )
         )
 

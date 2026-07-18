@@ -26,7 +26,7 @@ from typing import Annotated, Any, Callable
 
 import pytest
 
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import BackRef, FerroField, ForeignKey, ManyToMany, Model, Relation
 from ferro.query.wire import compile_query
 from ferro.relations import resolve_relationships
 
@@ -69,6 +69,12 @@ def _build_models() -> dict[str, type]:
         active: bool = True
         email: str = ""
         role: str = ""
+        tags: Relation[list["Tag"]] = BackRef()
+
+    class Tag(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str = ""
+        users: Relation[list["User"]] = ManyToMany(related_name="tags")
 
     resolve_relationships()
     return {
@@ -76,6 +82,7 @@ def _build_models() -> dict[str, type]:
         "Account": Account,
         "Transaction": Transaction,
         "User": User,
+        "Tag": Tag,
     }
 
 
@@ -246,6 +253,14 @@ def _q_nested_exists(m: dict[str, type]) -> Any:
     )
 
 
+def _q_m2m_exists(m: dict[str, type]) -> Any:
+    # M2M existence test (#316): the same exists node carries a TWO-hop
+    # correlation path — join table first (correlated to the enclosing
+    # scope), then the target — both hops named for the one relation they
+    # belong to. The scoped inner tree resolves over the target model.
+    return m["User"].where(lambda u: u.tags.exists(lambda tag: tag.name == "admin"))
+
+
 CASES: list[tuple[str, Callable[[dict[str, type]], Any], str]] = [
     ("query_user_compound_v7", _q_user_compound, "User"),
     ("query_user_not_leaf_v7", _q_not_leaf, "User"),
@@ -254,6 +269,7 @@ CASES: list[tuple[str, Callable[[dict[str, type]], Any], str]] = [
     ("query_owner_not_exists_v7", _q_not_exists, "Owner"),
     ("query_account_scoped_exists_v7", _q_scoped_exists, "Account"),
     ("query_owner_nested_exists_v7", _q_nested_exists, "Owner"),
+    ("query_user_m2m_exists_v7", _q_m2m_exists, "User"),
     ("query_transaction_traversal_v7", _q_traversal, "Transaction"),
     ("query_transaction_left_join_v7", _q_left_join, "Transaction"),
     ("query_transaction_include_v7", _q_include, "Transaction"),

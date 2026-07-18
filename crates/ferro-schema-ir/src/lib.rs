@@ -671,6 +671,39 @@ mod tests {
     }
 
     #[test]
+    fn query_m2m_exists_fixture_roundtrip() {
+        // The two-hop M2M existence-test golden vector (#316): the SAME
+        // exists node, a two-hop correlation path — join table first, then
+        // the target — with the scoped inner tree over the target model.
+        // Must survive a deserialize/serialize round-trip without drift.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_m2m_exists_v7.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query m2m-exists fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query m2m-exists IR must deserialize");
+        match &envelope.payload.where_clause[0] {
+            QueryNode::Exists {
+                hops, where_clause, ..
+            } => {
+                assert_eq!(hops.len(), 2, "M2M correlates through two hops");
+                assert_eq!(hops[0].to_table, "tag_users");
+                assert_eq!(hops[0].to_column, "user_id");
+                assert_eq!(hops[1].from_column, "tag_id");
+                assert_eq!(hops[1].to_table, "tag");
+                assert_eq!(where_clause.len(), 1);
+            }
+            other => panic!("where[0] must be an exists node, got {other:?}"),
+        }
+        let encoded = serde_json::to_value(&envelope).expect("query m2m-exists IR must serialize");
+        assert_eq!(encoded, ir, "query m2m-exists round-trip must not drift");
+    }
+
+    #[test]
     fn query_traversal_fixture_roundtrip() {
         // Multi-hop `joins` section + path-carrying leaves must survive a
         // deserialize/serialize round-trip without drift (#270 wire stability).
