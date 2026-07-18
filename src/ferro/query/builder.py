@@ -158,6 +158,18 @@ def _resolve_join_selector(
             "(e.g. `lambda t: t.account.name`); a join selector names a relation "
             "path (e.g. `lambda t: t.account`)."
         )
+    if isinstance(result, ReverseRelationProxy):
+        # Joining a reverse/M2M edge would multiply root rows — the pinned
+        # "a join never multiplies root rows" property is preserved by
+        # rejection (ADR-0007); membership is the existence test's job.
+        relation = result._name
+        raise TypeError(
+            f"join()/left_join() cannot join the reverse relation "
+            f"{relation!r}: a join on a reverse or many-to-many edge would "
+            "multiply root rows. Test membership with a predicate instead — "
+            f"where(lambda t: t.{relation}.exists(...)), negated with ~ — "
+            "reverse relations are tested, not traversed (ADR-0007)."
+        )
     if not isinstance(result, RelationProxy):
         raise TypeError(
             "join()/left_join() selector must return a relation path "
