@@ -56,6 +56,10 @@ _Avoid_: Join inference, nested filter, path lookup, string path
 The ordered sequence of forward-FK hops a traversal walks (`account`, or `account → owner`). A path is the identity of a join: the same path referenced anywhere in a query is one join, and distinct paths to the same model are distinct joins. Left-join requests apply to a whole path.
 _Avoid_: Join alias, lookup chain, dotted path string
 
+**Existence test**:
+The only predicate form on a reverse or many-to-many relation — `t.lines.exists(...)` — asking whether at least one related row exists, optionally scoped by a full inner predicate over the related model. Renders as a correlated EXISTS; the result stays root-shaped (shape-preserving query), so it composes with any other predicate, ordering, and paging. Reverse relations are *tested*, never *traversed*: traversal remains a forward-FK concept.
+_Avoid_: membership filter, semi-join filter, reverse traversal, subquery filter, `.any()`
+
 **Shape-preserving query**:
 The invariant that filtering and ordering never change what a query returns — a query over Transaction yields Transaction instances regardless of which relations its predicates traverse. Only an explicit projection operation may change the result shape.
 _Avoid_: Implicit projection, row narrowing
