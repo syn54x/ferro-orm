@@ -28,11 +28,10 @@ Rules:
 
 - `domain` and `ir.ir_kind` must match.
 - `ir.ir_version` must equal `1` for `schema` and `codec` vectors. `query`
-  vectors are on `ir_version: 5` (#292 — unconditional bump; the payload
-  carries a required `materialization` section (ADR-0007), the `instances`
-  kind carries `paths` of hop facts (ADR-0008), and `record` fields carry
-  exactly one source — `column` + `path`, or an aggregate `expr` with its
-  own hop-fact `path` (ADR-0009)); there is no earlier `query` vector left.
+  vectors are on `ir_version: 6` (#310 — unconditional bump, exactly like v5
+  at #292; predicate trees gain the recursive `not` node kind beside `leaf`
+  and `compound` (ADR-0008): `{"node_kind": "not", "child": {...}}`, any
+  child, any depth); there is no earlier `query` vector left.
 - `expect_valid` currently supports only `true` fixtures (negative vectors can be added later).
 - Fixture file names use `<domain>_<scenario>_v<version>.json` (matching that
   domain's current `ir_version`).

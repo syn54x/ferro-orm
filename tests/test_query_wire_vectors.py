@@ -196,15 +196,33 @@ def _q_global_aggregate(m: dict[str, type]) -> Any:
     )
 
 
+def _q_not_leaf(m: dict[str, type]) -> Any:
+    return (
+        m["User"]
+        .where(lambda u: ~u.role.in_(["admin", "owner"]))
+        .order_by("id")
+        .limit(100)
+        .offset(0)
+    )
+
+
+def _q_not_compound(m: dict[str, type]) -> Any:
+    return m["User"].where(
+        lambda u: ~((u.active == True) | (u.email.like("%@ferro.dev")))  # noqa: E712
+    )
+
+
 CASES: list[tuple[str, Callable[[dict[str, type]], Any], str]] = [
-    ("query_user_compound_v5", _q_user_compound, "User"),
-    ("query_transaction_traversal_v5", _q_traversal, "Transaction"),
-    ("query_transaction_left_join_v5", _q_left_join, "Transaction"),
-    ("query_transaction_include_v5", _q_include, "Transaction"),
-    ("query_transaction_record_v5", _q_record, "Transaction"),
-    ("query_transaction_traversed_record_v5", _q_traversed_record, "Transaction"),
-    ("query_transaction_aggregate_v5", _q_aggregate, "Transaction"),
-    ("query_transaction_global_aggregate_v5", _q_global_aggregate, "Transaction"),
+    ("query_user_compound_v6", _q_user_compound, "User"),
+    ("query_user_not_leaf_v6", _q_not_leaf, "User"),
+    ("query_user_not_compound_v6", _q_not_compound, "User"),
+    ("query_transaction_traversal_v6", _q_traversal, "Transaction"),
+    ("query_transaction_left_join_v6", _q_left_join, "Transaction"),
+    ("query_transaction_include_v6", _q_include, "Transaction"),
+    ("query_transaction_record_v6", _q_record, "Transaction"),
+    ("query_transaction_traversed_record_v6", _q_traversed_record, "Transaction"),
+    ("query_transaction_aggregate_v6", _q_aggregate, "Transaction"),
+    ("query_transaction_global_aggregate_v6", _q_global_aggregate, "Transaction"),
 ]
 
 
@@ -285,4 +303,4 @@ def test_mutate_payload_omits_pagination_keys(models: dict[str, type]) -> None:
 def test_envelope_is_versioned(models: dict[str, type]) -> None:
     envelope = json.loads(compile_query(models["User"].select(), "fetch").wire_json)
     assert envelope["ir_kind"] == "query"
-    assert envelope["ir_version"] == 5
+    assert envelope["ir_version"] == 6

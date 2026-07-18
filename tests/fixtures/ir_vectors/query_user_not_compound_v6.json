@@ -1,0 +1,49 @@
+{
+  "vector_name": "query_user_not_compound_v6",
+  "domain": "query",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "query",
+    "ir_version": 6,
+    "payload": {
+      "model_name": "User",
+      "where": [
+        {
+          "node_kind": "not",
+          "child": {
+            "node_kind": "compound",
+            "operator": "OR",
+            "left": {
+              "node_kind": "leaf",
+              "column": "active",
+              "operator": "==",
+              "value": {
+                "kind": "bool",
+                "value": true
+              },
+              "path": []
+            },
+            "right": {
+              "node_kind": "leaf",
+              "column": "email",
+              "operator": "LIKE",
+              "value": {
+                "kind": "string",
+                "value": "%@ferro.dev"
+              },
+              "path": []
+            }
+          }
+        }
+      ],
+      "order_by": [],
+      "limit": null,
+      "offset": null,
+      "m2m": null,
+      "joins": [],
+      "materialization": {
+        "kind": "root_instances"
+      }
+    }
+  }
+}

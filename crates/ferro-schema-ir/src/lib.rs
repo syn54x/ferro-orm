@@ -137,13 +137,14 @@ pub struct SchemaCheck {
 /// Query IR: filter, sort, pagination, joins, materialization plan, and
 /// optional M2M join context.
 ///
-/// `ir_version: 5` (unconditional, no earlier version emitted anywhere —
-/// #269, #278, #285, #292). `joins` is required and always present (`[]` when
-/// the query traverses no relation); every leaf and `order_by` entry carries a
-/// `path` (required, `[]` = root model); `materialization` is required — the
-/// plan travels with the query as data (ADR-0007), never inferred from a
-/// column list. v5 gives `record` fields expression sources: a field carries
-/// either a `column` + `path` or an `expr` (#292, ADR-0009).
+/// `ir_version: 6` (unconditional, no earlier version emitted anywhere —
+/// #269, #278, #285, #292, #310). `joins` is required and always present
+/// (`[]` when the query traverses no relation); every leaf and `order_by`
+/// entry carries a `path` (required, `[]` = root model); `materialization` is
+/// required — the plan travels with the query as data (ADR-0007), never
+/// inferred from a column list. v5 gave `record` fields expression sources
+/// (#292, ADR-0009); v6 gives predicate trees the recursive `not` node kind
+/// (uniform negation, #310, ADR-0008).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryIrPayload {
     /// Model class name the query targets.
@@ -333,7 +334,8 @@ pub struct QueryOrderBy {
     pub path: Vec<String>,
 }
 
-/// Predicate tree node in query IR (leaf comparison or compound AND/OR).
+/// Predicate tree node in query IR: leaf comparison, compound AND/OR, or a
+/// recursive NOT wrapping any child (uniform negation, v6, ADR-0008).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "node_kind")]
 pub enum QueryNode {
@@ -359,6 +361,14 @@ pub enum QueryNode {
         left: Box<QueryNode>,
         /// Right subtree.
         right: Box<QueryNode>,
+    },
+    /// Uniform negation (`~`, ADR-0008): SQL `NOT (...)` over the child.
+    /// Fully general — the child may be any node kind, at any depth; there
+    /// are no per-operator negative forms on the wire.
+    #[serde(rename = "not")]
+    Not {
+        /// The negated subtree.
+        child: Box<QueryNode>,
     },
 }
 
@@ -438,7 +448,7 @@ mod tests {
     #[test]
     fn query_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v5.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v6.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query fixture must parse");
         let ir = parsed
@@ -457,11 +467,66 @@ mod tests {
     }
 
     #[test]
+    fn query_not_leaf_fixture_roundtrip() {
+        // The not-over-leaf golden vector (#312, ADR-0008): uniform negation
+        // travels as one recursive `not` node wrapping its child — here a
+        // leaf `IN` comparison (the NOT IN spelling) — and must survive a
+        // deserialize/serialize round-trip without drift.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_leaf_v6.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query not-leaf fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query not-leaf IR must deserialize");
+        // The wire carries a `not` node whose child is the IN leaf.
+        match &envelope.payload.where_clause[0] {
+            QueryNode::Not { child } => match child.as_ref() {
+                QueryNode::Leaf { operator, .. } => assert_eq!(operator, "IN"),
+                other => panic!("not child must be the IN leaf, got {other:?}"),
+            },
+            other => panic!("where[0] must be a not node, got {other:?}"),
+        }
+        let encoded = serde_json::to_value(&envelope).expect("query not-leaf IR must serialize");
+        assert_eq!(encoded, ir, "query not-leaf round-trip must not drift");
+    }
+
+    #[test]
+    fn query_not_compound_fixture_roundtrip() {
+        // The not-over-compound golden vector (#313, ADR-0008): `~` wraps an
+        // OR compound whole — no De Morgan expansion on the wire — and must
+        // survive a deserialize/serialize round-trip without drift.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_compound_v6.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query not-compound fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query not-compound IR must deserialize");
+        match &envelope.payload.where_clause[0] {
+            QueryNode::Not { child } => match child.as_ref() {
+                QueryNode::Compound { operator, .. } => assert_eq!(operator, "OR"),
+                other => panic!("not child must be the OR compound, got {other:?}"),
+            },
+            other => panic!("where[0] must be a not node, got {other:?}"),
+        }
+        let encoded =
+            serde_json::to_value(&envelope).expect("query not-compound IR must serialize");
+        assert_eq!(encoded, ir, "query not-compound round-trip must not drift");
+    }
+
+    #[test]
     fn query_traversal_fixture_roundtrip() {
         // Multi-hop `joins` section + path-carrying leaves must survive a
         // deserialize/serialize round-trip without drift (#270 wire stability).
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v5.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversal_v6.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversal fixture must parse");
@@ -487,7 +552,7 @@ mod tests {
         // deserialize/serialize round-trip without drift, and the join_type
         // tokens must reach Rust exactly as written on the wire.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v5.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v6.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query left_join fixture must parse");
         let ir = parsed
@@ -513,7 +578,7 @@ mod tests {
         // payload — predicate, order, limit, and a two-field record plan —
         // survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v5.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v6.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query record fixture must parse");
         let ir = parsed
@@ -712,7 +777,7 @@ mod tests {
         // identity) — survives a deserialize/serialize round-trip without
         // drift. No group keys: the whole result collapses to one record.
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_global_aggregate_v5.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_global_aggregate_v6.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("global aggregate fixture must parse");
@@ -750,7 +815,7 @@ mod tests {
         // joins section included — survives a deserialize/serialize
         // round-trip without drift.
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_traversed_record_v5.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversed_record_v6.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversed record fixture must parse");
@@ -788,7 +853,7 @@ mod tests {
         // a deserialize/serialize round-trip without drift. GROUP BY does not
         // travel: the renderer derives it from the non-expr fields (ADR-0009).
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_aggregate_v5.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_aggregate_v6.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query aggregate fixture must parse");
@@ -856,7 +921,7 @@ mod tests {
         // payload — root predicate, empty `joins`, and a one-path instances
         // plan — survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v5.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v6.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query include fixture must parse");
         let ir = parsed
