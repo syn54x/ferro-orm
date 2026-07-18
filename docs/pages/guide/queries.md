@@ -100,6 +100,7 @@ Lambda predicates keep the call site fully type-checked: the proxy's attributes 
 | `.in_(values)` | `IN` | `lambda user: user.role.in_(["admin", "moderator"])` |
 | `== None` | `IS NULL` | `lambda user: user.deleted_at == None` |
 | `!= None` | `IS NOT NULL` | `lambda user: user.deleted_at != None` |
+| `~` | `NOT` | `lambda user: ~user.role.in_(["admin", "moderator"])` |
 
 ```python
 --8<-- "docs/examples/predicates.py:operators"
@@ -115,6 +116,52 @@ Combine predicates with `&` (AND) and `|` (OR), or chain multiple `.where()` cal
 
 !!! warning "Always parenthesize `&` and `|` operands"
     Python's `&` and `|` bind tighter than comparison operators, so `user.age < 18 | user.archived == True` parses as `user.age < (18 | user.archived) == True` — not what you meant. Wrap each condition in parentheses: `(user.age < 18) | (user.archived == True)`.
+
+## Negating Conditions
+
+Prefix `~` negates **any** predicate — a comparison, `.in_()`, `.like()`, or a whole `&`/`|` group. It is the one negation rule in Ferro: there are no per-operator negative forms (no `not_in()`, no `not_like()`), because `~` already covers every predicate the same way:
+
+```python
+--8<-- "docs/examples/predicates.py:negation"
+```
+
+Each `~` renders as a faithful SQL `NOT (...)` over the condition it wraps. The last example above ships to the database as:
+
+```sql
+SELECT ... FROM user WHERE NOT (user.age < 18 OR user.archived = TRUE)
+```
+
+Negated conditions compose exactly like un-negated ones — mix them into `&`/`|` trees at any depth, chain `.order_by()`/`.limit()` after them, and double negation (`~~p`) means what it says. Adding a `~` never restructures your query.
+
+### Negation and NULL values
+
+SQL comparisons follow **three-valued logic**: a comparison against `NULL` is neither true nor false but *unknown*, and a `WHERE` clause only keeps rows whose condition is **true**. `NOT` maps unknown to unknown — so a negated comparison still excludes rows where the column is `NULL`. `~` is SQL's `NOT`, not Python's set complement.
+
+Concretely, with a nullable column:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/predicates.py:nullable-model"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/predicates_annotated.py:nullable-model"
+    ```
+
+`~(invoice.amount > 100)` renders as:
+
+```sql
+SELECT ... FROM invoice WHERE NOT (invoice.amount > 100)
+```
+
+For a row where `amount` is `NULL`, `amount > 100` is unknown, `NOT unknown` is still unknown, and the row is excluded — from the negated query *and* from the original one. This matches the `!=` operator you already use (`invoice.amount != 100` excludes `NULL` rows too); `~` just makes the rule visible on every predicate. When you want the `NULL` rows kept, say so explicitly with an `IS NULL` branch:
+
+```python
+--8<-- "docs/examples/predicates.py:three-valued"
+```
 
 ## Ordering, Limit & Offset
 
@@ -387,7 +434,7 @@ Do the two-step: fetch the primary keys with the joined query, then mutate by th
 ### Guardrails
 
 - A predicate lambda that returns a **bare relation** (`lambda transaction: transaction.account`) is meaningless as a filter and raises `TypeError` pointing you at `== None`, `== an instance`, or a column comparison. The same bare relation in `order_by()` is likewise rejected.
-- Combining predicates with Python's `and`/`or` (instead of `&`/`|`) coerces a node to `bool` and raises `TypeError: QueryNode cannot be used in a boolean context; use & / |`. Always parenthesize and use the bitwise operators.
+- Combining predicates with Python's `and`/`or`/`not` (instead of `&`/`|`/`~`) coerces a node to `bool` and raises `TypeError: QueryNode cannot be used in a boolean context; use & / | to combine predicates and ~ to negate them`. Always parenthesize and use the bitwise operators.
 
 See [Relationships](relationships.md) for the schema-declaration side of foreign keys and reverse relations.
 
@@ -630,7 +677,6 @@ Aggregation builds directly on this machinery — `select(lambda t: {"total": t.
     - `having()` — post-aggregation filtering; `where()` rejects aggregate predicates pointing at it ([#291](https://github.com/syn54x/ferro-orm/issues/291))
     - Reverse (`BackRef`) and many-to-many population — [`include()`](#populating-relations-with-include) covers forward FKs; collection population is a separate future mechanism
     - Case-insensitive `ilike()`
-    - `not_in()` (negate with `!=` conditions combined with `&` in the meantime)
 
 ## See Also
 
