@@ -39,6 +39,7 @@ from .nodes import (
     QueryNode,
     QueryProxy,
     RelationProxy,
+    ReverseRelationProxy,
     RowSelector,
     validate_query_column,
 )
@@ -77,6 +78,13 @@ def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNo
             f"where() predicate returned the bare relation {relation!r}; compare "
             f"a column (e.g. t.{relation}.<column> == ...) or use == None / "
             "== an instance to filter by the relation."
+        )
+    if isinstance(result, ReverseRelationProxy):
+        relation = result._name
+        raise TypeError(
+            f"where() predicate returned the bare reverse relation "
+            f"{relation!r}; test membership with t.{relation}.exists() "
+            f"(negate with ~t.{relation}.exists(), ADR-0007)."
         )
     if isinstance(result, AggregateExpr):
         # Comparing an aggregate already raises inside the lambda (#294); a
@@ -176,15 +184,27 @@ def _reject_reverse_relation_include(exc: AttributeError) -> None:
     if not name or model is None:
         return
     if isinstance(getattr(model, name, None), RelationshipDescriptor):
-        raise TypeError(
-            f"include() cannot populate {name!r}: it is a reverse (BackRef) "
-            "or many-to-many relation, and include() populates forward "
-            "foreign-key paths only (e.g. lambda t: t.account). Reverse and "
-            "M2M population will be a separate mechanism — a batched second "
-            "query stitched onto the results — not include(). Until it "
-            f"lands, fetch the collection through the relation itself "
-            f"(await instance.{name}.all())."
-        ) from None
+        raise _reverse_population_error(name) from None
+
+
+def _reverse_population_error(name: str) -> TypeError:
+    """The pinned include()-cannot-populate-a-reverse-relation error (#287).
+
+    One construction site for the two paths that reach it: a reverse relation
+    the predicate proxies resolve (a :class:`ReverseRelationProxy` selector
+    result, #314) and one they don't yet (an M2M name, surfaced as an
+    ``AttributeError`` and re-raised by
+    :func:`_reject_reverse_relation_include`).
+    """
+    return TypeError(
+        f"include() cannot populate {name!r}: it is a reverse (BackRef) "
+        "or many-to-many relation, and include() populates forward "
+        "foreign-key paths only (e.g. lambda t: t.account). Reverse and "
+        "M2M population will be a separate mechanism — a batched second "
+        "query stitched onto the results — not include(). Until it "
+        f"lands, fetch the collection through the relation itself "
+        f"(await instance.{name}.all())."
+    )
 
 
 def _resolve_include_selector(
@@ -233,6 +253,10 @@ def _resolve_include_selector(
             "(e.g. `lambda t: t.account`) — every populated hop is a complete "
             "row, so there is nothing to select per column."
         )
+    if isinstance(result, ReverseRelationProxy):
+        # The predicate proxies resolve reverse relations now (#314), so the
+        # population rejection fires here rather than via AttributeError.
+        raise _reverse_population_error(result._name)
     if not isinstance(result, RelationProxy):
         raise TypeError(
             "include() selector must return a relation path "

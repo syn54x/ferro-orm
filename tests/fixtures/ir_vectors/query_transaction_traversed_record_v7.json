@@ -1,61 +1,37 @@
 {
-  "vector_name": "query_transaction_traversal_v6",
+  "vector_name": "query_transaction_traversed_record_v7",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 6,
+    "ir_version": 7,
     "payload": {
       "model_name": "Transaction",
       "where": [
         {
-          "node_kind": "compound",
-          "operator": "AND",
-          "left": {
-            "node_kind": "leaf",
-            "column": "email",
-            "operator": "==",
-            "value": {
-              "kind": "string",
-              "value": "owner@ferro.dev"
-            },
-            "path": [
-              "account",
-              "owner"
-            ]
+          "node_kind": "leaf",
+          "column": "amount",
+          "operator": ">=",
+          "value": {
+            "kind": "int",
+            "value": 100
           },
-          "right": {
-            "node_kind": "leaf",
-            "column": "amount",
-            "operator": ">=",
-            "value": {
-              "kind": "int",
-              "value": 100
-            },
-            "path": []
-          }
+          "path": []
         }
       ],
       "order_by": [
-        {
-          "column": "name",
-          "direction": "asc",
-          "path": [
-            "account"
-          ]
-        },
         {
           "column": "id",
           "direction": "asc",
           "path": []
         }
       ],
-      "limit": 50,
-      "offset": 0,
+      "limit": null,
+      "offset": null,
       "m2m": null,
       "joins": [
         {
-          "join_type": "inner",
+          "join_type": "left",
           "path": [
             {
               "relation": "account",
@@ -84,7 +60,24 @@
         }
       ],
       "materialization": {
-        "kind": "root_instances"
+        "kind": "record",
+        "fields": [
+          {
+            "name": "txn_id",
+            "column": "id",
+            "path": []
+          },
+          {
+            "name": "account_name",
+            "column": "name",
+            "path": ["account"]
+          },
+          {
+            "name": "owner_email",
+            "column": "email",
+            "path": ["account", "owner"]
+          }
+        ]
       }
     }
   }

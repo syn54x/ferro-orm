@@ -11,10 +11,10 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 6 (#310 — unconditional bump; predicate trees
-# gain the recursive `not` node kind beside `leaf`/`compound`, ADR-0008);
-# `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 6, "codec": 1}
+# `query` is on ir_version 7 (#314 — unconditional bump; predicate trees
+# gain the recursive `exists` node kind beside `leaf`/`compound`/`not`
+# (existence tests, ADR-0007)); `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 7, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -40,7 +40,7 @@ def _require_keys(obj: dict[str, Any], required: set[str], label: str) -> None:
 def _validate_query_node(node: dict[str, Any], label: str) -> None:
     _require_keys(node, {"node_kind"}, label)
     node_kind = node["node_kind"]
-    assert node_kind in {"leaf", "compound", "not"}, (
+    assert node_kind in {"leaf", "compound", "not", "exists"}, (
         f"{label}.node_kind invalid: {node_kind!r}"
     )
 
@@ -50,6 +50,25 @@ def _validate_query_node(node: dict[str, Any], label: str) -> None:
         _require_keys(node, {"child"}, label)
         assert isinstance(node["child"], dict), f"{label}.child must be object"
         _validate_query_node(node["child"], f"{label}.child")
+        return
+
+    if node_kind == "exists":
+        # v7 (ADR-0007): an existence test carries a correlation hop path (1
+        # hop for a reverse FK, 2 for M2M — the `joins`-section hop shape) and
+        # an ordinary inner condition tree (empty = bare test). No negation
+        # flag: NOT EXISTS is the `not` node over this one.
+        _require_keys(node, {"hops", "where"}, label)
+        hops = node["hops"]
+        assert isinstance(hops, list) and hops, (
+            f"{label}.hops must be a non-empty list"
+        )
+        for h, hop in enumerate(hops):
+            _validate_hop(hop, f"{label}.hops[{h}]")
+        inner = node["where"]
+        assert isinstance(inner, list), f"{label}.where must be a list"
+        for i, child in enumerate(inner):
+            assert isinstance(child, dict), f"{label}.where[{i}] must be object"
+            _validate_query_node(child, f"{label}.where[{i}]")
         return
 
     _require_keys(node, {"operator"}, label)

@@ -6,7 +6,7 @@
 
 use crate::state::Dialect;
 use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoin, QueryNode, QueryOrderBy};
-use sea_query::{Alias, Condition, Expr, SimpleExpr};
+use sea_query::{Alias, Condition, Expr, JoinType, SimpleExpr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -34,6 +34,13 @@ fn reject_non_empty_leaf_path(node: &QueryNode) -> Result<(), String> {
             reject_non_empty_leaf_path(right)
         }
         QueryNode::Not { child } => reject_non_empty_leaf_path(child),
+        // An existence test correlates a subquery to another table — mutations
+        // stay single-table write shapes, and the Python guard already rejects
+        // this at build time (#314); failing loud here is boundary defense.
+        QueryNode::Exists { hops, .. } => Err(format!(
+            "WHERE carries an existence test over relation {:?}",
+            hops.first().map(|h| h.relation.as_str()).unwrap_or("?")
+        )),
     }
 }
 
@@ -56,6 +63,11 @@ enum ColumnQualifier<'a> {
         root_table: &'a str,
         join_plan: &'a JoinPlan,
     },
+    /// Inside an EXISTS subquery (#314, ADR-0007): an empty-path leaf
+    /// qualifies by the subquery scope's `alias` and binds against `table`'s
+    /// model. The variant owns its strings — subquery aliases are minted
+    /// during the render walk, not borrowed from the plan.
+    ExistsScope { alias: String, table: String },
 }
 
 /// Qualify a column reference (a WHERE leaf or an `ORDER BY` term) by its
@@ -209,6 +221,14 @@ impl JoinPlanBuilder {
     }
 }
 
+/// Empty native-enum catalog for EXISTS-scope leaves whose table has no
+/// probed catalog yet (#314) — the `&HashMap` return shape needs a `'static`
+/// fallback.
+fn empty_enum_udt() -> &'static HashMap<String, String> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// Validate a join_type token from the IR (`"inner"`/`"left"`), erroring loudly
 /// on anything else so an unknown type can never silently mis-render.
 fn validate_join_type(join_type: &str) -> Result<&'static str, String> {
@@ -264,6 +284,16 @@ fn qualify_leaf_column(
                      matching join entry"
                 )
             })?;
+            Ok(Expr::col((Alias::new(alias.as_str()), Alias::new(column))))
+        }
+        ColumnQualifier::ExistsScope { alias, .. } => {
+            if !path.is_empty() {
+                return Err(format!(
+                    "WHERE column {column:?} carries relation path {path:?} \
+                     inside an existence test; forward traversal inside the \
+                     subquery is not rendered yet (#315)"
+                ));
+            }
             Ok(Expr::col((Alias::new(alias.as_str()), Alias::new(column))))
         }
     }
@@ -523,8 +553,18 @@ impl QueryPlan {
         qualifier: &ColumnQualifier<'_>,
     ) -> Result<Condition, String> {
         let mut condition = Condition::all();
+        // Statement-wide EXISTS subquery alias counter (#314): every exists
+        // node rendered anywhere in this WHERE tree mints globally unique
+        // `x{n}_{relation}` aliases, so nested tests and repeated tests over
+        // the same table can never collide with each other or the outer scope.
+        let mut exists_counter = 0usize;
         for node in &self.where_clause {
-            condition = condition.add(self.node_to_condition_for_backend(node, backend, qualifier)?);
+            condition = condition.add(self.node_to_condition_for_backend(
+                node,
+                backend,
+                qualifier,
+                &mut exists_counter,
+            )?);
         }
         Ok(condition)
     }
@@ -534,6 +574,7 @@ impl QueryPlan {
         node: &QueryNode,
         backend: Dialect,
         qualifier: &ColumnQualifier<'_>,
+        exists_counter: &mut usize,
     ) -> Result<Condition, String> {
         match node {
             QueryNode::Compound {
@@ -541,8 +582,10 @@ impl QueryPlan {
                 left,
                 right,
             } => {
-                let left_cond = self.node_to_condition_for_backend(left, backend, qualifier)?;
-                let right_cond = self.node_to_condition_for_backend(right, backend, qualifier)?;
+                let left_cond =
+                    self.node_to_condition_for_backend(left, backend, qualifier, exists_counter)?;
+                let right_cond =
+                    self.node_to_condition_for_backend(right, backend, qualifier, exists_counter)?;
                 Ok(match operator.as_str() {
                     "OR" => Condition::any().add(left_cond).add(right_cond),
                     "AND" => Condition::all().add(left_cond).add(right_cond),
@@ -553,8 +596,68 @@ impl QueryPlan {
                 // Uniform negation (ADR-0008): a faithful SQL `NOT (...)` over
                 // the rebuilt child — no operator rewriting, no De Morgan.
                 Ok(self
-                    .node_to_condition_for_backend(child, backend, qualifier)?
+                    .node_to_condition_for_backend(child, backend, qualifier, exists_counter)?
                     .not())
+            }
+            QueryNode::Exists { hops, where_clause } => {
+                // Existence test (#314, ADR-0007): one render loop for every
+                // hop count. The first hop's table is the subquery FROM,
+                // correlated to the enclosing scope's alias; remaining hops
+                // (M2M target) render as inner joins inside the subquery; the
+                // inner tree recurses through this same builder scoped to the
+                // last hop. NOT EXISTS arrives as the `not` node above.
+                let enclosing: &str = match qualifier {
+                    ColumnQualifier::RootTable(table) => table,
+                    ColumnQualifier::Joined { root_table, .. } => root_table,
+                    ColumnQualifier::ExistsScope { alias, .. } => alias.as_str(),
+                    ColumnQualifier::Unqualified => {
+                        return Err("an existence test requires a table-qualified enclosing \
+                             scope to correlate against"
+                            .to_string());
+                    }
+                };
+                let first = hops
+                    .first()
+                    .ok_or_else(|| "existence test carries no correlation hops".to_string())?;
+                *exists_counter += 1;
+                let sub_alias = format!("x{}_{}", exists_counter, first.relation);
+                let mut subquery = sea_query::Query::select();
+                subquery
+                    .expr(Expr::val(1))
+                    .from_as(Alias::new(&first.to_table), Alias::new(&sub_alias));
+                let mut inner = Condition::all().add(
+                    Expr::col((Alias::new(&sub_alias), Alias::new(&first.to_column)))
+                        .equals((Alias::new(enclosing), Alias::new(&first.from_column))),
+                );
+                let mut last_alias = sub_alias;
+                let mut last_table = first.to_table.clone();
+                for hop in &hops[1..] {
+                    *exists_counter += 1;
+                    let hop_alias = format!("x{}_{}", exists_counter, hop.relation);
+                    subquery.join_as(
+                        JoinType::InnerJoin,
+                        Alias::new(&hop.to_table),
+                        Alias::new(&hop_alias),
+                        Expr::col((Alias::new(&last_alias), Alias::new(&hop.from_column)))
+                            .equals((Alias::new(&hop_alias), Alias::new(&hop.to_column))),
+                    );
+                    last_alias = hop_alias;
+                    last_table = hop.to_table.clone();
+                }
+                let inner_scope = ColumnQualifier::ExistsScope {
+                    alias: last_alias,
+                    table: last_table,
+                };
+                for node in where_clause {
+                    inner = inner.add(self.node_to_condition_for_backend(
+                        node,
+                        backend,
+                        &inner_scope,
+                        exists_counter,
+                    )?);
+                }
+                subquery.cond_where(inner);
+                Ok(Condition::all().add(Expr::exists(subquery)))
             }
             QueryNode::Leaf {
                 operator,
@@ -688,6 +791,25 @@ impl QueryPlan {
         qualifier: &ColumnQualifier<'_>,
         path: &[String],
     ) -> Result<(Option<&crate::codec_plan::ModelCodecPlan>, &HashMap<String, String>), String> {
+        // Inside an EXISTS subquery (#314) an empty-path leaf belongs to the
+        // subquery scope's table, NEVER the root model — resolve before the
+        // root early-return below. Registration is optional here (mirroring
+        // the root's own `Option`): an inner leaf on an unregistered/
+        // unprobed table degrades to generic binds, exactly like an
+        // unregistered root model. The walkers populate both maps for scoped
+        // tests (#315).
+        if let ColumnQualifier::ExistsScope { table, .. } = qualifier {
+            if !path.is_empty() {
+                return Err(format!(
+                    "relation path {path:?} inside an existence test is not \
+                     rendered yet (#315); cannot resolve typed binds"
+                ));
+            }
+            return Ok((
+                self.hop_registrations.get(table).map(|m| &m.codec_plan),
+                self.hop_enum_udt.get(table).unwrap_or(empty_enum_udt()),
+            ));
+        }
         if path.is_empty() {
             return Ok((
                 self.registration.as_ref().map(|m| &m.codec_plan),
@@ -881,6 +1003,131 @@ mod tests {
         assert!(
             sql.contains("like"),
             "child LIKE must render un-rewritten: {sql}"
+        );
+    }
+
+    #[test]
+    fn exists_node_renders_correlated_exists_subquery() {
+        // Existence test (#314, ADR-0007): a 1-hop `exists` node lowers to a
+        // correlated `EXISTS (SELECT 1 FROM child AS x1_rel WHERE
+        // x1_rel.fk = root.pk)` against the enclosing scope's alias.
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Txn",
+            "where": [
+                {"node_kind": "exists",
+                 "hops": [{"relation": "transfer_out", "from_column": "id",
+                           "to_table": "transfer", "to_column": "outflow_transaction_id"}],
+                 "where": []}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let mut select = Query::select();
+        select.from(Alias::new("txn")).cond_where(
+            plan.to_condition_for_backend(Dialect::Sqlite, Some("txn"))
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(
+            sql.contains("exists(select 1 from \"transfer\" as \"x1_transfer_out\""),
+            "expected an EXISTS(SELECT 1 ...) subquery, got {sql}"
+        );
+        assert!(
+            sql.contains("\"x1_transfer_out\".\"outflow_transaction_id\" = \"txn\".\"id\""),
+            "subquery must correlate the child FK to the enclosing alias: {sql}"
+        );
+    }
+
+    #[test]
+    fn not_over_exists_renders_not_exists() {
+        // NOT EXISTS is the ordinary `not` node over an `exists` node — the
+        // exists node carries no negation flag (ADR-0008 composition).
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Txn",
+            "where": [
+                {"node_kind": "not", "child":
+                    {"node_kind": "exists",
+                     "hops": [{"relation": "lines", "from_column": "id",
+                               "to_table": "split_line", "to_column": "transaction_id"}],
+                     "where": []}}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let mut select = Query::select();
+        select.from(Alias::new("txn")).cond_where(
+            plan.to_condition_for_backend(Dialect::Sqlite, Some("txn"))
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(SqliteQueryBuilder).to_lowercase();
+        assert!(
+            sql.contains("not exists(select 1 from \"split_line\""),
+            "expected NOT EXISTS over the subquery, got {sql}"
+        );
+    }
+
+    #[test]
+    fn sibling_exists_nodes_mint_distinct_subquery_aliases() {
+        // The #307 OR shape — membership via either FK column — renders two
+        // independent subqueries whose aliases cannot collide even though
+        // both correlate to the same root.
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Txn",
+            "where": [
+                {"node_kind": "compound", "operator": "OR",
+                 "left": {"node_kind": "exists",
+                          "hops": [{"relation": "transfer_out", "from_column": "id",
+                                    "to_table": "transfer", "to_column": "outflow_transaction_id"}],
+                          "where": []},
+                 "right": {"node_kind": "exists",
+                           "hops": [{"relation": "transfer_in", "from_column": "id",
+                                     "to_table": "transfer", "to_column": "inflow_transaction_id"}],
+                           "where": []}}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let mut select = Query::select();
+        select.from(Alias::new("txn")).cond_where(
+            plan.to_condition_for_backend(Dialect::Postgres, Some("txn"))
+                .expect("valid test query"),
+        );
+        let sql = select.to_string(PostgresQueryBuilder).to_lowercase();
+        assert!(sql.contains("\"x1_transfer_out\""), "first alias: {sql}");
+        assert!(sql.contains("\"x2_transfer_in\""), "second alias: {sql}");
+        assert!(sql.contains(" or "), "OR composition preserved: {sql}");
+    }
+
+    #[test]
+    fn exists_requires_a_qualified_enclosing_scope() {
+        // Correlation needs an alias to correlate against; the unqualified
+        // unit-test path fails loudly rather than emitting an uncorrelated
+        // (always-true) subquery.
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "model_name": "Txn",
+            "where": [
+                {"node_kind": "exists",
+                 "hops": [{"relation": "lines", "from_column": "id",
+                           "to_table": "split_line", "to_column": "transaction_id"}],
+                 "where": []}
+            ],
+            "order_by": [],
+            "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let err = plan
+            .to_condition_for_backend(Dialect::Sqlite, None)
+            .expect_err("unqualified scope must be rejected");
+        assert!(
+            err.contains("existence test"),
+            "error names the existence test: {err}"
         );
     }
 

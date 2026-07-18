@@ -22,6 +22,7 @@ from ..columns import (
     ColumnSpec,
     build_column_specs,
     build_relation_specs,
+    build_reverse_specs,
     primary_key_field_name,
 )
 from ..composite_indexes import drop_overlap_with_uniques, normalized_composite_indexes
@@ -330,6 +331,10 @@ def compile_model_schema_ir(
     # the resolved second pass) refreshes ``__ferro_relation_specs__`` too, so
     # the latter is never stale relative to the former.
     model_cls.__ferro_relation_specs__ = build_relation_specs(model_cls, specs)
+    # And the reverse-relation facts (#314, ADR-0007): the same refresh keeps
+    # ``__ferro_reverse_specs__`` in step, so existence tests resolve against
+    # descriptors the moment relationship resolution recompiles this model.
+    model_cls.__ferro_reverse_specs__ = build_reverse_specs(model_cls)
     return envelope
 
 

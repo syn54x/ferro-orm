@@ -27,8 +27,10 @@ __all__ = [
     "ColumnSpec",
     "ForeignKeyRef",
     "RelationSpec",
+    "ReverseSpec",
     "build_column_specs",
     "build_relation_specs",
+    "build_reverse_specs",
     "fk_shadow_spec",
     "pk_spec",
     "primary_key_field_name",
@@ -83,6 +85,29 @@ class RelationSpec:
     target: type
     shadow_column: str
     nullable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReverseSpec:
+    """One reverse (BackRef) relation's existence-test facts (#314, ADR-0007).
+
+    Built beside :class:`RelationSpec` at the same compile choke point and
+    exposed as ``cls.__ferro_reverse_specs__``. A reverse relation supports
+    exactly one predicate form — the existence test ``t.rel.exists()`` — so
+    the spec carries only what a correlated EXISTS needs: the child model and
+    the child-side FK column the subquery correlates on. Reverse relations are
+    *tested*, never *traversed*; traversal facts stay on :class:`RelationSpec`.
+    """
+
+    field_name: str
+    #: The child model — the side declaring the ``ForeignKey``.
+    target: type
+    #: Shadow FK column on the child table the EXISTS correlates against.
+    child_fk_column: str
+    #: True when the child FK is ``unique=True`` (one-to-one BackRef). The
+    #: rendering is identical at every cardinality (always correlated EXISTS);
+    #: carried as a compile-side fact, not a render switch.
+    is_one_to_one: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,6 +487,51 @@ def build_relation_specs(
             shadow_column=shadow_column,
             nullable=shadow_spec.nullable,
         )
+    return specs
+
+
+def build_reverse_specs(model_cls: type[Any]) -> dict[str, ReverseSpec]:
+    """Build one ReverseSpec per resolved reverse (BackRef) relation (#314).
+
+    Reads the :class:`~ferro.relations.descriptors.RelationshipDescriptor`
+    instances ``resolve_relationships`` installs on the class — the facts a
+    correlated EXISTS needs (child model, child FK column, one-to-one flag)
+    already live there, so this derives, never re-computes. At provisional
+    class-body time no descriptors exist yet and the map is empty; the
+    resolved second pass recompiles with descriptors installed, so the lookup
+    is complete once resolution finishes (same lifecycle as
+    :func:`build_relation_specs`).
+
+    M2M descriptors are skipped for now: the existence test's M2M form (a
+    two-hop correlation through the join table) lands in #316.
+
+    Callers store the result on ``cls.__ferro_reverse_specs__`` and must
+    replace, never mutate — same convention as ``__ferro_columns__``.
+    """
+    # Late imports: columns.py is a low-level leaf module; the relations
+    # package (and the registry it pulls in) imports back into it.
+    from .registry import REGISTRY
+    from .relations.descriptors import RelationshipDescriptor
+
+    specs: dict[str, ReverseSpec] = {}
+    for klass in model_cls.__mro__:
+        for name, attr in vars(klass).items():
+            if not isinstance(attr, RelationshipDescriptor) or name in specs:
+                continue
+            if attr.is_m2m:
+                continue
+            target = REGISTRY.resolve_reference(attr.target_model_name, default=None)
+            if target is None:
+                continue
+            specs[name] = ReverseSpec(
+                field_name=name,
+                target=target,
+                # The child FK field is the descriptor's `field_name`; its
+                # shadow column follows the single `{field}_id` convention
+                # (same derivation as build_relation_specs).
+                child_fk_column=f"{attr.field_name}_id",
+                is_one_to_one=attr.is_one_to_one,
+            )
     return specs
 
 

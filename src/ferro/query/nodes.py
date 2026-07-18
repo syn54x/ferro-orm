@@ -3,6 +3,7 @@
 import difflib
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar
 
@@ -54,6 +55,7 @@ class QueryNode:
         right: Right child node for compound expressions.
         is_compound: Flag indicating whether the node combines two child nodes.
         child: Negated child node for NOT nodes (``~``, ADR-0008).
+        exists: The existence test's facts for exists nodes (ADR-0007).
 
     Examples:
         >>> active_filter = FieldProxy("active") == True
@@ -73,6 +75,7 @@ class QueryNode:
         is_compound: bool = False,
         path: tuple[str, ...] = (),
         child: "QueryNode | None" = None,
+        exists: "ExistsTest | None" = None,
     ):
         """Initialize a query expression node
 
@@ -89,6 +92,9 @@ class QueryNode:
                 never produces a non-empty path.
             child: The negated child for a NOT node (built by ``~``,
                 ADR-0008); ``None`` for leaf and compound nodes.
+            exists: The correlation hops and inner condition tree of an
+                existence test (built by ``t.rel.exists()``, ADR-0007);
+                ``None`` for every other node kind.
         """
         self.column = column
         self.operator = operator
@@ -98,6 +104,7 @@ class QueryNode:
         self.is_compound = is_compound
         self.path = path
         self.child = child
+        self.exists = exists
 
     def __or__(self, other: "QueryNode") -> "QueryNode":
         """Combine two nodes with logical OR
@@ -161,6 +168,12 @@ class QueryNode:
         """Serialize the query node tree into a QueryIR payload shape."""
         if self.child is not None:
             return {"node_kind": "not", "child": self.child.to_ir_dict()}
+        if self.exists is not None:
+            return {
+                "node_kind": "exists",
+                "hops": [hop.to_ir_dict() for hop in self.exists.hops],
+                "where": [node.to_ir_dict() for node in self.exists.where],
+            }
         if not self.is_compound:
             serialized = _serialize_query_value(self.value)
             return {
@@ -203,6 +216,9 @@ class QueryNode:
         """Return a developer-friendly representation of the node"""
         if self.child is not None:
             return f"QueryNode(NOT {self.child!r})"
+        if self.exists is not None:
+            relation = self.exists.hops[0].relation if self.exists.hops else "?"
+            return f"QueryNode(EXISTS {relation!r}, where={self.exists.where!r})"
         if not self.is_compound:
             return f"QueryNode(column={self.column!r}, operator={self.operator!r}, value={self.value!r})"
         return (
@@ -221,6 +237,23 @@ def _serialize_query_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _serialize_query_value(item) for key, item in value.items()}
     return value
+
+
+@dataclass(frozen=True)
+class ExistsTest:
+    """The facts of one existence test (CONTEXT.md, ADR-0007).
+
+    ``hops`` is the correlation hop path in the ``joins``-section hop-fact
+    shape (``QueryJoinHop`` — typed loosely here because the wire module
+    imports this one): one hop for a reverse FK, two for M2M. ``where`` is
+    the ordinary inner condition tree over the related model — empty for a
+    bare test; nesting and negation come free from :class:`QueryNode`
+    recursion. There is no negation flag: NOT EXISTS is ``~`` (a ``not``
+    node) over the exists node, like every other predicate (ADR-0008).
+    """
+
+    hops: tuple[Any, ...]
+    where: tuple["QueryNode", ...]
 
 
 def _query_value_kind(value: Any) -> str:
@@ -593,7 +626,9 @@ class QueryProxy(Generic[TModel]):
 
         Relation specs are consulted FIRST (#270): a declared forward-FK field
         name yields a :class:`RelationProxy` for traversal (``t.account`` →
-        proxy → ``.ledger_id``); every other name falls through to column
+        proxy → ``.ledger_id``). A reverse (BackRef) relation name yields a
+        :class:`ReverseRelationProxy` exposing the existence test and nothing
+        else (#314, ADR-0007). Every other name falls through to column
         validation and returns a :class:`FieldProxy`.
         """
         relations = getattr(self._model_cls, "__ferro_relation_specs__", None) or {}
@@ -605,6 +640,12 @@ class QueryProxy(Generic[TModel]):
             # rejects `lambda t: t.account` (design pin, PRD #267).
             return RelationProxy(  # ty: ignore[invalid-return-type]
                 self._model_cls, (name,), spec.target
+            )
+        reverse = getattr(self._model_cls, "__ferro_reverse_specs__", None) or {}
+        rspec = reverse.get(name)
+        if rspec is not None:
+            return ReverseRelationProxy(  # ty: ignore[invalid-return-type]
+                self._model_cls, name, rspec
             )
         validate_query_column(self._model_cls, name)
         return FieldProxy(name, owner=self._model_cls)
@@ -658,6 +699,22 @@ class RelationProxy:
         spec = relations.get(name)
         if spec is not None:
             return RelationProxy(self._root_model, self._path + (name,), spec.target)
+        reverse = getattr(self._target, "__ferro_reverse_specs__", None) or {}
+        if name in reverse:
+            # A reverse relation reached through forward traversal
+            # (`t.account.transactions`) is recognized but has no supported
+            # predicate form yet: an existence test correlates to the ROOT
+            # scope only (#314). Fail pointedly rather than fall through to
+            # the column error's misleading "no queryable column" message.
+            dotted = ".".join(("t", *self._path, name))
+            raise AttributeError(
+                f"{dotted} names the reverse relation {name!r} on a traversed "
+                "scope; existence tests are supported on the query root only "
+                f"(t.{name}.exists() on a {self._target.__name__} query). "
+                "Reverse relations are tested, not traversed (ADR-0007).",
+                name=name,
+                obj=self._target,
+            )
         validate_query_column(self._target, name)
         return FieldProxy(name, path=self._path, owner=self._target)
 
@@ -767,6 +824,115 @@ class RelationProxy:
     def __repr__(self) -> str:
         joined = ".".join(self._path)
         return f"RelationProxy(path={joined!r}, target={self._target.__name__!r})"
+
+
+class ReverseRelationProxy:
+    """Predicate proxy for a reverse (BackRef) relation (#314, ADR-0007).
+
+    Returned by attribute access on a :class:`QueryProxy` when the accessed
+    name is a resolved reverse relation. It exposes exactly one verb — the
+    existence test :meth:`exists` — because reverse relations are *tested*,
+    never *traversed*: column access, comparisons (including ``!= None`` /
+    ``== None``), and ``in_`` raise at build time with the supported spelling
+    in the message. Negation is uniform ``~`` over the returned node
+    (ADR-0008), so NOT EXISTS is ``~t.rel.exists()``.
+    """
+
+    __slots__ = ("_root_model", "_name", "_spec")
+
+    def __init__(self, root_model: type, name: str, spec: Any) -> None:
+        self._root_model = root_model
+        self._name = name
+        self._spec = spec
+
+    def exists(self) -> QueryNode:
+        """Build the existence test: a correlated EXISTS over the child rows.
+
+        Always a correlated EXISTS at every cardinality (a one-to-one BackRef
+        renders identically to a to-many one); the result stays root-shaped,
+        so the node composes with any other predicate, ordering, and paging.
+
+        Returns:
+            An exists :class:`QueryNode` carrying the one-hop correlation
+            path (child table, child FK column against the root PK).
+
+        Raises:
+            ValueError: If the root model declares no primary-key column —
+                the EXISTS correlates child FK to root PK, so a PK-less root
+                is a loud error, never a guess.
+        """
+        # Late import: wire.py imports this module (nodes owns the predicate
+        # shape, wire owns the hop-fact shape).
+        from .wire import QueryJoinHop
+
+        root_pk = getattr(self._root_model, "__ferro_pk__", None)
+        if root_pk is None:
+            raise ValueError(
+                f"t.{self._name}.exists() requires "
+                f"{self._root_model.__name__} to declare a primary-key "
+                "column: the existence test correlates the child's FK "
+                "against the root primary key."
+            )
+        hop = QueryJoinHop(
+            relation=self._name,
+            from_column=root_pk,
+            to_table=self._spec.target.__ferro_table__,
+            to_column=self._spec.child_fk_column,
+            target=self._spec.target,
+        )
+        return QueryNode(exists=ExistsTest(hops=(hop,), where=()))
+
+    def _reject_operator(self, symbol: str) -> NoReturn:
+        raise TypeError(
+            f"reverse relation {self._name!r} does not support {symbol}: a "
+            "reverse relation appears in a predicate only as an existence "
+            f"test — t.{self._name}.exists(), negated with "
+            f"~t.{self._name}.exists(). Reverse relations are tested, not "
+            "traversed (ADR-0007)."
+        )
+
+    def __getattr__(self, name: str) -> NoReturn:
+        raise AttributeError(
+            f"reverse relation {self._name!r} has no queryable column "
+            f"{name!r}: reverse relations are tested, not traversed "
+            f"(ADR-0007). Test membership with t.{self._name}.exists(), "
+            f"negated with ~t.{self._name}.exists().",
+            name=name,
+            obj=self._root_model,
+        )
+
+    def __eq__(self, other: object) -> QueryNode:  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        return self._reject_operator("== None" if other is None else "==")
+
+    def __ne__(self, other: object) -> QueryNode:  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        return self._reject_operator("!= None" if other is None else "!=")
+
+    def __lt__(self, other: object) -> QueryNode:
+        return self._reject_operator("<")
+
+    def __le__(self, other: object) -> QueryNode:
+        return self._reject_operator("<=")
+
+    def __gt__(self, other: object) -> QueryNode:
+        return self._reject_operator(">")
+
+    def __ge__(self, other: object) -> QueryNode:
+        return self._reject_operator(">=")
+
+    def in_(self, other: object) -> QueryNode:
+        return self._reject_operator("in_")
+
+    def like(self, other: object) -> QueryNode:
+        return self._reject_operator("like")
+
+    def __lshift__(self, other: object) -> QueryNode:
+        return self._reject_operator("<<")
+
+    def __repr__(self) -> str:
+        return (
+            f"ReverseRelationProxy(relation={self._name!r}, "
+            f"child={self._spec.target.__name__!r})"
+        )
 
 
 Predicate: TypeAlias = Callable[[QueryProxy[TModel]], QueryNode]
