@@ -56,7 +56,10 @@ def _validate_query_node(node: dict[str, Any], label: str) -> None:
         # v7 (ADR-0007): an existence test carries a correlation hop path (1
         # hop for a reverse FK, 2 for M2M — the `joins`-section hop shape) and
         # an ordinary inner condition tree (empty = bare test). No negation
-        # flag: NOT EXISTS is the `not` node over this one.
+        # flag: NOT EXISTS is the `not` node over this one. When the inner
+        # tree traverses forward FKs (#315), the hop facts ride the node's
+        # own `joins` section — present only when non-empty (absent on a
+        # traversal-free test, pinned wire bytes).
         _require_keys(node, {"hops", "where"}, label)
         hops = node["hops"]
         assert isinstance(hops, list) and hops, (
@@ -69,6 +72,24 @@ def _validate_query_node(node: dict[str, Any], label: str) -> None:
         for i, child in enumerate(inner):
             assert isinstance(child, dict), f"{label}.where[{i}] must be object"
             _validate_query_node(child, f"{label}.where[{i}]")
+        if "joins" in node:
+            joins = node["joins"]
+            assert isinstance(joins, list) and joins, (
+                f"{label}.joins must be a non-empty list when present"
+            )
+            for j, join in enumerate(joins):
+                join_label = f"{label}.joins[{j}]"
+                assert isinstance(join, dict), f"{join_label} must be object"
+                _require_keys(join, {"join_type", "path"}, join_label)
+                assert join["join_type"] == "inner", (
+                    f"{join_label}.join_type must be \"inner\" (ADR-0006: "
+                    "traversal inside a subquery narrows)"
+                )
+                assert isinstance(join["path"], list) and join["path"], (
+                    f"{join_label}.path must be a non-empty list"
+                )
+                for h, hop in enumerate(join["path"]):
+                    _validate_hop(hop, f"{join_label}.path[{h}]")
         return
 
     _require_keys(node, {"operator"}, label)

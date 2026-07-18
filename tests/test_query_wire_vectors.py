@@ -225,12 +225,35 @@ def _q_not_exists(m: dict[str, type]) -> Any:
     return m["Owner"].where(lambda o: ~o.accounts.exists())
 
 
+def _q_scoped_exists(m: dict[str, type]) -> Any:
+    # Scoped existence test (#315): the inner lambda is a full ferro
+    # predicate over the child model. The traversed inner leaf
+    # (`t.account.name`) puts its hop facts on the exists node's own `joins`
+    # section — rendered INSIDE the subquery, never on the root query.
+    return m["Account"].where(
+        lambda a: a.transactions.exists(
+            lambda t: (t.amount >= 100) & (t.account.name == "checking")
+        )
+    )
+
+
+def _q_nested_exists(m: dict[str, type]) -> Any:
+    # Nested exists-in-exists (#315): the inner tree is an ordinary condition
+    # tree, so depth comes from recursion, not a second mechanism. The bare
+    # inner node carries no `joins` key at all (absent, not empty).
+    return m["Owner"].where(
+        lambda o: o.accounts.exists(lambda a: a.transactions.exists())
+    )
+
+
 CASES: list[tuple[str, Callable[[dict[str, type]], Any], str]] = [
     ("query_user_compound_v7", _q_user_compound, "User"),
     ("query_user_not_leaf_v7", _q_not_leaf, "User"),
     ("query_user_not_compound_v7", _q_not_compound, "User"),
     ("query_account_exists_v7", _q_exists_bare, "Account"),
     ("query_owner_not_exists_v7", _q_not_exists, "Owner"),
+    ("query_account_scoped_exists_v7", _q_scoped_exists, "Account"),
+    ("query_owner_nested_exists_v7", _q_nested_exists, "Owner"),
     ("query_transaction_traversal_v7", _q_traversal, "Transaction"),
     ("query_transaction_left_join_v7", _q_left_join, "Transaction"),
     ("query_transaction_include_v7", _q_include, "Transaction"),

@@ -388,6 +388,12 @@ pub enum QueryNode {
         /// nesting is recursion, not a second mechanism.
         #[serde(rename = "where")]
         where_clause: Vec<QueryNode>,
+        /// Forward-traversal joins the inner tree references (#315),
+        /// rendered INSIDE the subquery as inner joins (ADR-0006 traversal
+        /// semantics are unchanged there; `left_join` has no inner-lambda
+        /// spelling). Absent on the wire when empty — pinned bytes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        joins: Vec<QueryJoin>,
     },
 }
 
@@ -557,7 +563,9 @@ mod tests {
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query exists IR must deserialize");
         match &envelope.payload.where_clause[0] {
-            QueryNode::Exists { hops, where_clause } => {
+            QueryNode::Exists {
+                hops, where_clause, ..
+            } => {
                 assert_eq!(hops.len(), 1);
                 assert_eq!(hops[0].relation, "transactions");
                 assert_eq!(hops[0].from_column, "id");
@@ -595,6 +603,71 @@ mod tests {
         }
         let encoded = serde_json::to_value(&envelope).expect("query not-exists IR must serialize");
         assert_eq!(encoded, ir, "query not-exists round-trip must not drift");
+    }
+
+    #[test]
+    fn query_scoped_exists_fixture_roundtrip() {
+        // The scoped existence-test golden vector (#315): the inner tree is
+        // an ordinary condition tree, and a traversed inner leaf's hop facts
+        // ride the exists node's own `joins` section (rendered INSIDE the
+        // subquery). Must survive a deserialize/serialize round-trip.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_account_scoped_exists_v7.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query scoped-exists fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query scoped-exists IR must deserialize");
+        match &envelope.payload.where_clause[0] {
+            QueryNode::Exists {
+                hops,
+                where_clause,
+                joins,
+            } => {
+                assert_eq!(hops.len(), 1);
+                assert_eq!(where_clause.len(), 1);
+                assert_eq!(joins.len(), 1);
+                assert_eq!(joins[0].join_type, "inner");
+                assert_eq!(joins[0].path[0].relation, "account");
+            }
+            other => panic!("where[0] must be an exists node, got {other:?}"),
+        }
+        let encoded =
+            serde_json::to_value(&envelope).expect("query scoped-exists IR must serialize");
+        assert_eq!(encoded, ir, "query scoped-exists round-trip must not drift");
+    }
+
+    #[test]
+    fn query_nested_exists_fixture_roundtrip() {
+        // Nested exists-in-exists (#315): depth is recursion, not a second
+        // mechanism, and the bare inner node omits `joins` entirely (absent,
+        // not empty — pinned wire bytes via skip_serializing_if).
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_owner_nested_exists_v7.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query nested-exists fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query nested-exists IR must deserialize");
+        match &envelope.payload.where_clause[0] {
+            QueryNode::Exists { where_clause, .. } => match &where_clause[0] {
+                QueryNode::Exists { hops, joins, .. } => {
+                    assert_eq!(hops[0].relation, "transactions");
+                    assert!(joins.is_empty(), "bare nested test carries no joins");
+                }
+                other => panic!("inner where[0] must be an exists node, got {other:?}"),
+            },
+            other => panic!("where[0] must be an exists node, got {other:?}"),
+        }
+        let encoded =
+            serde_json::to_value(&envelope).expect("query nested-exists IR must serialize");
+        assert_eq!(encoded, ir, "query nested-exists round-trip must not drift");
     }
 
     #[test]

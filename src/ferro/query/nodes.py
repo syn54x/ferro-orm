@@ -76,6 +76,7 @@ class QueryNode:
         path: tuple[str, ...] = (),
         child: "QueryNode | None" = None,
         exists: "ExistsTest | None" = None,
+        owner: type | None = None,
     ):
         """Initialize a query expression node
 
@@ -95,6 +96,11 @@ class QueryNode:
             exists: The correlation hops and inner condition tree of an
                 existence test (built by ``t.rel.exists()``, ADR-0007);
                 ``None`` for every other node kind.
+            owner: The model class whose scope built this leaf (the proxy's
+                owner), when known. A compile-side fact, never serialized —
+                the cross-scope guard on scoped existence tests (#315) reads
+                it to catch a leaf smuggled in from another lambda's
+                parameter.
         """
         self.column = column
         self.operator = operator
@@ -105,6 +111,7 @@ class QueryNode:
         self.path = path
         self.child = child
         self.exists = exists
+        self.owner = owner
 
     def __or__(self, other: "QueryNode") -> "QueryNode":
         """Combine two nodes with logical OR
@@ -169,11 +176,19 @@ class QueryNode:
         if self.child is not None:
             return {"node_kind": "not", "child": self.child.to_ir_dict()}
         if self.exists is not None:
-            return {
+            serialized_exists: dict[str, Any] = {
                 "node_kind": "exists",
                 "hops": [hop.to_ir_dict() for hop in self.exists.hops],
                 "where": [node.to_ir_dict() for node in self.exists.where],
             }
+            # The inner-traversal joins key is absent, not empty, on a
+            # traversal-free test (#315) — pinned wire bytes, mirroring the
+            # Rust skip_serializing_if.
+            if self.exists.joins:
+                serialized_exists["joins"] = [
+                    join.to_ir_dict() for join in self.exists.joins
+                ]
+            return serialized_exists
         if not self.is_compound:
             serialized = _serialize_query_value(self.value)
             return {
@@ -250,10 +265,18 @@ class ExistsTest:
     bare test; nesting and negation come free from :class:`QueryNode`
     recursion. There is no negation flag: NOT EXISTS is ``~`` (a ``not``
     node) over the exists node, like every other predicate (ADR-0008).
+
+    ``joins`` carries the inner tree's forward-traversal hop facts (#315,
+    ``QueryJoin`` entries, always ``"inner"`` — ADR-0006 semantics inside the
+    subquery), serialized only when non-empty. ``owner`` is the model whose
+    proxy built this test — a compile-side scope tag for the cross-scope
+    guard, never serialized.
     """
 
     hops: tuple[Any, ...]
     where: tuple["QueryNode", ...]
+    joins: tuple[Any, ...] = ()
+    owner: type | None = None
 
 
 def _query_value_kind(value: Any) -> str:
@@ -399,29 +422,29 @@ class FieldProxy(Generic[TField]):
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an equality comparison node"""
-        return QueryNode(self.column, "==", other, path=self.path)
+        return QueryNode(self.column, "==", other, path=self.path, owner=self._owner)
 
     def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
         """Build an inequality comparison node"""
-        return QueryNode(self.column, "!=", other, path=self.path)
+        return QueryNode(self.column, "!=", other, path=self.path, owner=self._owner)
 
     def __lt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than comparison node"""
-        return QueryNode(self.column, "<", other, path=self.path)
+        return QueryNode(self.column, "<", other, path=self.path, owner=self._owner)
 
     def __le__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a less-than-or-equal comparison node"""
-        return QueryNode(self.column, "<=", other, path=self.path)
+        return QueryNode(self.column, "<=", other, path=self.path, owner=self._owner)
 
     def __gt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than comparison node"""
-        return QueryNode(self.column, ">", other, path=self.path)
+        return QueryNode(self.column, ">", other, path=self.path, owner=self._owner)
 
     def __ge__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
         """Build a greater-than-or-equal comparison node"""
-        return QueryNode(self.column, ">=", other, path=self.path)
+        return QueryNode(self.column, ">=", other, path=self.path, owner=self._owner)
 
     def in_(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
@@ -446,7 +469,9 @@ class FieldProxy(Generic[TField]):
             raise TypeError(
                 f"The 'in_' operator expects a list, tuple, or set, got {type(other).__name__}"
             )
-        return QueryNode(self.column, "IN", list(other), path=self.path)
+        return QueryNode(
+            self.column, "IN", list(other), path=self.path, owner=self._owner
+        )
 
     def like(self: "FieldProxy[str]", pattern: str) -> QueryNode:
         """Build a ``LIKE`` comparison node
@@ -466,7 +491,9 @@ class FieldProxy(Generic[TField]):
             >>> email_filter.operator
             'LIKE'
         """
-        return QueryNode(self.column, "LIKE", pattern, path=self.path)
+        return QueryNode(
+            self.column, "LIKE", pattern, path=self.path, owner=self._owner
+        )
 
     def __lshift__(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
@@ -722,20 +749,24 @@ class RelationProxy:
         """The last-hop relation field name (the one being compared)."""
         return self._path[-1]
 
-    def _last_hop_shadow_column(self) -> str:
-        """Shadow FK column of the LAST hop, resolved along the spec chain.
+    def _last_hop_shadow_column(self) -> tuple[str, type]:
+        """Shadow FK column of the LAST hop and the model declaring it.
 
-        For ``t.account`` this is ``account_id`` on the root table; for
-        ``t.account.owner`` it is ``owner_id`` on the hop-1 (account) table.
+        For ``t.account`` this is ``account_id`` on the root table (owner =
+        root model); for ``t.account.owner`` it is ``owner_id`` on the hop-1
+        (account) table. The owner rides the comparison node as a
+        compile-side scope fact (#315 cross-scope guard).
         """
         current = self._root_model
+        declaring = current
         spec = None
         for name in self._path:
             specs = getattr(current, "__ferro_relation_specs__", None) or {}
             spec = specs[name]
+            declaring = current
             current = spec.target
         assert spec is not None  # a RelationProxy always has ≥ 1 hop
-        return spec.shadow_column
+        return spec.shadow_column, declaring
 
     def _instance_comparison(self, other: object, operator: str) -> QueryNode:
         """Desugar ``== instance`` / ``== None`` to a shadow-FK leaf (#273).
@@ -751,11 +782,15 @@ class RelationProxy:
                 the relation-vs-scalar guardrail, suggesting a column compare.
         """
         relation = self._relation_name()
-        shadow = self._last_hop_shadow_column()
+        shadow, shadow_owner = self._last_hop_shadow_column()
         prefix_path = self._path[:-1]
         if other is None:
             return QueryNode(
-                column=shadow, operator=operator, value=None, path=prefix_path
+                column=shadow,
+                operator=operator,
+                value=None,
+                path=prefix_path,
+                owner=shadow_owner,
             )
         if isinstance(other, self._target):
             # Reuse the Task 3 PK resolver (loud on zero/multiple PKs); local
@@ -771,7 +806,11 @@ class RelationProxy:
                     "save it first"
                 )
             return QueryNode(
-                column=shadow, operator=operator, value=pk_value, path=prefix_path
+                column=shadow,
+                operator=operator,
+                value=pk_value,
+                path=prefix_path,
+                owner=shadow_owner,
             )
         raise TypeError(
             f"cannot compare relation {relation!r} to {other!r}: expected a "
@@ -826,6 +865,150 @@ class RelationProxy:
         return f"RelationProxy(path={joined!r}, target={self._target.__name__!r})"
 
 
+def _resolve_scoped_predicate(
+    inner: "Predicate[Any]", model_cls: type, relation: str
+) -> QueryNode:
+    """Evaluate an existence test's inner lambda over the related model (#315).
+
+    The inner predicate is ordinary ferro — the same validating
+    :class:`QueryProxy` a root ``where()`` receives, constructed for the
+    related model — so every operator, combinator, traversal, and nested
+    existence test works unchanged. The rejection shapes mirror
+    ``where()``'s own.
+
+    Raises:
+        TypeError: If ``inner`` is not callable, returns a bare relation or
+            reverse relation, an aggregate, or any other non-predicate value.
+    """
+    if not callable(inner):
+        raise TypeError(
+            f"t.{relation}.exists(...) expected a predicate callable over "
+            f"{model_cls.__name__} (e.g. `lambda l: l.amount < 0`), got "
+            f"{type(inner).__name__}"
+        )
+    result = inner(QueryProxy(model_cls))
+    if isinstance(result, RelationProxy):
+        bare = result._path[-1]
+        raise TypeError(
+            f"t.{relation}.exists(...) inner predicate returned the bare "
+            f"relation {bare!r}; compare a column (e.g. l.{bare}.<column> == "
+            "...) or use == None / == an instance."
+        )
+    if isinstance(result, ReverseRelationProxy):
+        bare = result._name
+        raise TypeError(
+            f"t.{relation}.exists(...) inner predicate returned the bare "
+            f"reverse relation {bare!r}; test membership with "
+            f"l.{bare}.exists()."
+        )
+    if isinstance(result, AggregateExpr):
+        raise TypeError(
+            f"t.{relation}.exists(...) cannot filter on the aggregate "
+            f"{result._dotted()}: an existence test answers membership, not "
+            "aggregation."
+        )
+    if not isinstance(result, QueryNode):
+        raise TypeError(
+            f"t.{relation}.exists(...) inner callable must return a "
+            f"predicate (QueryNode), got {type(result).__name__}"
+        )
+    return result
+
+
+def _validate_inner_scope(node: QueryNode, model_cls: type, relation: str) -> None:
+    """Reject cross-scope references in an inner condition tree (#315).
+
+    The inner lambda may reference only its own parameter's scope. A leaf
+    built from any other proxy (the outer lambda's parameter), a
+    ``FieldProxy`` as a comparison right-hand side (column-to-column), and a
+    nested existence test built from another scope's proxy are all
+    build-time errors pointing at the deferred capability (#309) — silent
+    misrendering is the failure mode this guard exists to prevent.
+
+    Detection reads compile-side facts the proxies stamp on their nodes: a
+    leaf's ``owner`` (the model whose proxy built it) checked against the
+    model its ``path`` resolves to FROM THE INNER SCOPE, and an exists
+    node's ``owner`` (the scope whose proxy built the test).
+    """
+    if node.child is not None:
+        _validate_inner_scope(node.child, model_cls, relation)
+        return
+    if node.exists is not None:
+        if node.exists.owner is not None and node.exists.owner is not model_cls:
+            raise TypeError(
+                f"t.{relation}.exists(...) inner predicate contains an "
+                "existence test built from another scope's parameter "
+                f"(over {node.exists.owner.__name__}, not "
+                f"{model_cls.__name__}). Cross-scope references inside an "
+                "existence test are not supported yet (#309) — the inner "
+                "lambda may reference only its own parameter."
+            )
+        # Its own inner tree was validated against its own scope when built.
+        return
+    if node.is_compound:
+        if node.left is not None:
+            _validate_inner_scope(node.left, model_cls, relation)
+        if node.right is not None:
+            _validate_inner_scope(node.right, model_cls, relation)
+        return
+    if isinstance(
+        node.value,
+        (FieldProxy, AggregateExpr, QueryProxy, RelationProxy, ReverseRelationProxy),
+    ):
+        raise TypeError(
+            f"t.{relation}.exists(...) inner predicate compares "
+            f"{node.column!r} against another column reference; "
+            "column-to-column comparison is cross-scope correlation, not "
+            "supported yet (#309) — compare against a value."
+        )
+    expected = model_cls
+    for hop_name in node.path:
+        specs = getattr(expected, "__ferro_relation_specs__", None) or {}
+        spec = specs.get(hop_name)
+        if spec is None:
+            raise TypeError(
+                f"t.{relation}.exists(...) inner predicate leaf "
+                f"{node.column!r} traverses {hop_name!r}, which is not a "
+                f"relation of {expected.__name__} — the leaf was built from "
+                "another scope's parameter. Cross-scope references are not "
+                "supported yet (#309)."
+            )
+        expected = spec.target
+    if node.owner is not None and node.owner is not expected:
+        raise TypeError(
+            f"t.{relation}.exists(...) inner predicate leaf {node.column!r} "
+            f"belongs to {node.owner.__name__}, not the inner scope "
+            f"({expected.__name__}) — it was built from another lambda's "
+            "parameter. Cross-scope correlation is not supported yet "
+            "(#309); the inner lambda may reference only its own parameter."
+        )
+
+
+def _collect_inner_traversal_paths(
+    node: QueryNode, paths: dict[tuple[str, ...], None]
+) -> None:
+    """Collect an inner tree's forward-traversal paths in first-use order.
+
+    The same walk as the builder's ``_register_join_paths`` but scoped to
+    one existence test: full paths only (the Rust render dedups shared
+    prefixes), and nested exists nodes are skipped — their traversal facts
+    ride their own ``joins`` section.
+    """
+    if node.child is not None:
+        _collect_inner_traversal_paths(node.child, paths)
+        return
+    if node.exists is not None:
+        return
+    if node.is_compound:
+        if node.left is not None:
+            _collect_inner_traversal_paths(node.left, paths)
+        if node.right is not None:
+            _collect_inner_traversal_paths(node.right, paths)
+        return
+    if node.path:
+        paths.setdefault(tuple(node.path))
+
+
 class ReverseRelationProxy:
     """Predicate proxy for a reverse (BackRef) relation (#314, ADR-0007).
 
@@ -845,25 +1028,38 @@ class ReverseRelationProxy:
         self._name = name
         self._spec = spec
 
-    def exists(self) -> QueryNode:
+    def exists(self, inner: "Predicate[Any] | None" = None) -> QueryNode:
         """Build the existence test: a correlated EXISTS over the child rows.
 
         Always a correlated EXISTS at every cardinality (a one-to-one BackRef
         renders identically to a to-many one); the result stays root-shaped,
         so the node composes with any other predicate, ordering, and paging.
 
+        Args:
+            inner: Optional scoping predicate — a full ferro predicate over
+                the related model (#315): every operator, ``&``/``|``/``~``,
+                forward traversal (joins rendered INSIDE the subquery,
+                ADR-0006 unchanged), and nested existence tests. It may
+                reference only its own parameter's scope; cross-scope
+                references raise at build time (#309).
+
         Returns:
             An exists :class:`QueryNode` carrying the one-hop correlation
-            path (child table, child FK column against the root PK).
+            path (child table, child FK column against the root PK) and,
+            when scoped, the inner condition tree plus its forward-traversal
+            join facts.
 
         Raises:
             ValueError: If the root model declares no primary-key column —
                 the EXISTS correlates child FK to root PK, so a PK-less root
                 is a loud error, never a guess.
+            TypeError: If ``inner`` is not a predicate callable, does not
+                return a predicate, or references a scope other than its own
+                parameter (cross-scope, #309).
         """
         # Late import: wire.py imports this module (nodes owns the predicate
         # shape, wire owns the hop-fact shape).
-        from .wire import QueryJoinHop
+        from .wire import QueryJoin, QueryJoinHop, resolve_join_hops
 
         root_pk = getattr(self._root_model, "__ferro_pk__", None)
         if root_pk is None:
@@ -880,7 +1076,26 @@ class ReverseRelationProxy:
             to_column=self._spec.child_fk_column,
             target=self._spec.target,
         )
-        return QueryNode(exists=ExistsTest(hops=(hop,), where=()))
+        where: tuple[QueryNode, ...] = ()
+        joins: tuple[Any, ...] = ()
+        if inner is not None:
+            node = _resolve_scoped_predicate(inner, self._spec.target, self._name)
+            _validate_inner_scope(node, self._spec.target, self._name)
+            paths: dict[tuple[str, ...], None] = {}
+            _collect_inner_traversal_paths(node, paths)
+            joins = tuple(
+                QueryJoin(
+                    join_type="inner",
+                    path=resolve_join_hops(self._spec.target, path),
+                )
+                for path in paths
+            )
+            where = (node,)
+        return QueryNode(
+            exists=ExistsTest(
+                hops=(hop,), where=where, joins=joins, owner=self._root_model
+            )
+        )
 
     def _reject_operator(self, symbol: str) -> NoReturn:
         raise TypeError(
