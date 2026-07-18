@@ -15,6 +15,14 @@ class User(Model):
 # --8<-- [end:setup]
 
 
+# --8<-- [start:nullable-model]
+class Invoice(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    reference: str
+    amount: float | None = None  # None until the invoice is issued
+# --8<-- [end:nullable-model]
+
+
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
@@ -56,6 +64,40 @@ async def main() -> None:
         # --8<-- [end:combining]
         assert len(flagged) == 2
         assert len(young_members) == 2
+
+        # --8<-- [start:negation]
+        # ~ negates ANY predicate: a comparison, .in_(), .like(), or a whole
+        # &/| group. There are no per-operator negative forms to memorize.
+        not_staff = await User.where(lambda user: ~user.role.in_(["admin", "moderator"])).all()
+        not_a_names = await User.where(lambda user: ~user.name.like("a%")).all()
+        active_adults = await User.where(lambda user: ~((user.age < 18) | (user.archived == True))).all()  # noqa: E712
+        # --8<-- [end:negation]
+        assert len(not_staff) == 3
+        assert len(not_a_names) == 3
+        assert len(active_adults) == 2
+
+        await Invoice.bulk_create(
+            [
+                Invoice(reference="inv-1", amount=250.0),
+                Invoice(reference="inv-2", amount=40.0),
+                Invoice(reference="inv-3", amount=None),
+            ]
+        )
+
+        # --8<-- [start:three-valued]
+        big = await Invoice.where(lambda invoice: invoice.amount > 100).all()
+        not_big = await Invoice.where(lambda invoice: ~(invoice.amount > 100)).all()
+
+        # inv-3 (amount is NULL) appears in NEITHER list
+        assert {invoice.reference for invoice in big} == {"inv-1"}
+        assert {invoice.reference for invoice in not_big} == {"inv-2"}
+
+        # keeping the NULL rows is an explicit extra condition
+        not_big_or_unissued = await Invoice.where(
+            lambda invoice: ~(invoice.amount > 100) | (invoice.amount == None)  # noqa: E711
+        ).all()
+        assert {invoice.reference for invoice in not_big_or_unissued} == {"inv-2", "inv-3"}
+        # --8<-- [end:three-valued]
 
         # --8<-- [start:ordering-slicing]
         oldest_first = await User.select().order_by(lambda user: user.age, "desc").all()

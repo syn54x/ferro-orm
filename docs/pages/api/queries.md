@@ -2,6 +2,8 @@
 
 `Model.where(...)` and `Model.select()` return a `Query` — an immutable, chainable builder that executes when awaited via `all()`, `first()`, `count()`, `exists()`, `update()`, or `delete()`. Predicates are lambda-only (`User.where(lambda user: user.age >= 18)`) — a fresh `QueryProxy` validates column names against the model at build time.
 
+Prefix `~` negates **any** predicate — leaf comparison or `&`/`|` compound — rendering as SQL `NOT (...)` over the condition it wraps (ADR-0008). It is the universal negation rule: there are no per-operator negative forms (`~t.role.in_([...])` is NOT IN, `~t.email.like(p)` is NOT LIKE), and double negation nests. Like SQL `NOT` and the `!=` operator, a negated comparison excludes rows where the compared column is `NULL` — see [Negation and NULL values](../guide/queries.md#negation-and-null-values).
+
 `where()` and `order_by()` lambdas may **traverse** a forward-FK relation (`lambda t: t.account.ledger_id == 1`): each hop renders one INNER join, deduplicated by relation path (ADR-0006). `join()` forces a join on a relation path (a bare `join()` is an existence filter on a nullable relation), and `left_join()` marks the whole path LEFT to keep relation-less rows. See the [Querying Across Relationships](../guide/queries.md#querying-across-relationships) guide for worked examples.
 
 ## `include()` and populated relations
