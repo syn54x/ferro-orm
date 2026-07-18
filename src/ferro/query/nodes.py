@@ -466,6 +466,23 @@ class FieldProxy(Generic[TField]):
             'IN'
         """
         if not isinstance(other, (list, tuple, set)):
+            # Late import: builder imports this module at load time.
+            # ProjectedQuery and Relation subclass Query, so one check
+            # covers every query shape.
+            from .builder import Query
+
+            if isinstance(other, Query):
+                # in_(subquery) is declined, not deferred (ADR-0007): the
+                # workloads it serves are existence-test workloads, and
+                # hand-correlating on id columns leaks the join column into
+                # every call site.
+                raise TypeError(
+                    f"The 'in_' operator expects a list, tuple, or set, got "
+                    f"{type(other).__name__}. To filter on membership in "
+                    "related rows, use the existence test on the relation — "
+                    "where(lambda t: t.<relation>.exists(lambda r: ...)) — "
+                    "instead of an in_(subquery) (ADR-0007)."
+                )
             raise TypeError(
                 f"The 'in_' operator expects a list, tuple, or set, got {type(other).__name__}"
             )

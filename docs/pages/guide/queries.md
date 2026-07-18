@@ -101,6 +101,7 @@ Lambda predicates keep the call site fully type-checked: the proxy's attributes 
 | `== None` | `IS NULL` | `lambda user: user.deleted_at == None` |
 | `!= None` | `IS NOT NULL` | `lambda user: user.deleted_at != None` |
 | `~` | `NOT` | `lambda user: ~user.role.in_(["admin", "moderator"])` |
+| `.exists(...)` | `EXISTS (SELECT 1 …)` | `lambda user: user.posts.exists(lambda post: post.published == True)` — reverse/M2M relations only; see [Existence Tests](#existence-tests-on-reverse-many-to-many-relations) |
 
 ```python
 --8<-- "docs/examples/predicates.py:operators"
@@ -329,6 +330,8 @@ For the opposite question — "has *no* related row" — compare the relation to
 --8<-- "docs/examples/traversal.py:is-null"
 ```
 
+Both spellings here are the **forward** direction — the FK column lives on the queried table. Asking the same question in the *reverse* direction ("has at least one / no related child row") is an [existence test](#existence-tests-on-reverse-many-to-many-relations): `t.lines.exists()` / `~t.lines.exists()`.
+
 ### Keeping rows that have no relation
 
 When you want the relation-less rows *kept* rather than filtered out, opt into a `left_join`. It marks **every edge of its path** LEFT (the whole-path rule), so a left-marked two-hop path retains rows missing the relation at either hop:
@@ -412,6 +415,8 @@ latest = await author.posts.order_by(lambda post: post.created_at, "desc").limit
 n = await author.posts.count()
 ```
 
+That is a query *from* an instance. To filter the **root query** on membership in a reverse relation — "authors who have at least one published post" — use an [existence test](#existence-tests-on-reverse-many-to-many-relations): `Author.where(lambda a: a.posts.exists(lambda post: post.published == True))`.
+
 ### Results are plain root instances
 
 A traversed query is **shape-preserving**: filtering `Transaction` through `transaction.account.ledger_id` still returns `Transaction` instances, no matter how deep the predicate reaches. Traversal does *not* pre-load the related rows onto the results — `await transaction.account` still issues its own query, exactly as it does without any traversal. Attaching related data is a separate, explicit request: [`include()`](#populating-relations-with-include).
@@ -437,6 +442,122 @@ Do the two-step: fetch the primary keys with the joined query, then mutate by th
 - Combining predicates with Python's `and`/`or`/`not` (instead of `&`/`|`/`~`) coerces a node to `bool` and raises `TypeError: QueryNode cannot be used in a boolean context; use & / | to combine predicates and ~ to negate them`. Always parenthesize and use the bitwise operators.
 
 See [Relationships](relationships.md) for the schema-declaration side of foreign keys and reverse relations.
+
+## Existence Tests on Reverse & Many-to-Many Relations
+
+Traversal reaches *forward* along a foreign key. The reverse question — "which transactions have at least one split line?", "which transactions appear in any transfer?" — is a different shape: the related rows live on the **other** table, keyed back at you. In a predicate, a reverse (`BackRef`) or many-to-many relation supports exactly one verb for that question, the **existence test**:
+
+```python
+matches = await Transaction.where(lambda t: t.lines.exists()).all()
+```
+
+`.exists()` renders as a correlated `EXISTS` subquery — never a join — so the result stays **root-shaped**: each matching row comes back exactly once (a transaction with three lines is one result, no `DISTINCT` bookkeeping), rows are never multiplied, and the test composes with every other predicate, ordering, and paging. One verb covers every cardinality: a one-to-one `BackRef`, a to-many `BackRef`, and an M2M edge all spell the same, so a schema cardinality change never breaks a call site.
+
+The examples below use this schema — a transfer links two transactions through unique FKs (one-to-one BackRefs), split lines hang off a transaction (to-many), and a category is referenced by both layers:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/existence_tests.py:schema"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/existence_tests_annotated.py:schema"
+    ```
+
+### Bare tests and negation
+
+A bare `.exists()` asks "is any related row there?". Negation is the uniform `~` — NOT EXISTS is not a separate spelling:
+
+```python
+--8<-- "docs/examples/existence_tests.py:bare"
+```
+
+The first query ships to the database as:
+
+```sql
+SELECT ... FROM transaction t
+WHERE EXISTS (SELECT 1 FROM transfer WHERE transfer.outflow_transaction_id = t.id)
+   OR EXISTS (SELECT 1 FROM transfer WHERE transfer.inflow_transaction_id = t.id)
+```
+
+### Scoping with an inner predicate
+
+Pass a lambda to filter *which* related rows count. The inner lambda is a **full ferro predicate over the related model** — every operator, `&`/`|`/`~`, forward traversal, even nested existence tests — not a sub-language:
+
+```python
+--8<-- "docs/examples/existence_tests.py:scoped"
+```
+
+Rendered SQL — the root branch keeps line-less transactions, the `EXISTS` branch finds categories on any line:
+
+```sql
+SELECT ... FROM transaction t
+WHERE t.category_id IN (...)
+   OR EXISTS (SELECT 1 FROM split_line l
+              WHERE l.txn_id = t.id AND l.category_id IN (...))
+```
+
+Because the result is root-shaped, keyset ordering and paging compose unchanged:
+
+```python
+--8<-- "docs/examples/existence_tests.py:composes"
+```
+
+### Grouping is explicit
+
+With conditions on the *same* relation, there are two different questions: does **one** related row match all conditions, or does **some** related row match each? The lambda scope makes the choice visible — one test with a compound inner predicate, or two tests combined outside:
+
+```python
+--8<-- "docs/examples/existence_tests.py:grouping"
+```
+
+This is why reverse relations have an explicit combinator rather than implicit path traversal (`t.lines.category_id == x` raises): with implicit traversal, nothing on the page says which of those two questions `(t.lines.a == 1) & (t.lines.b == 2)` asks (ADR-0007).
+
+### Traversal inside the test, and nesting
+
+Forward-FK traversal works inside the inner lambda — its joins render *inside* the `EXISTS` subquery with the same [INNER semantics](#every-traversed-hop-is-an-inner-join) as everywhere else — and existence tests nest to any depth:
+
+```python
+--8<-- "docs/examples/existence_tests.py:traversal-inside"
+```
+
+### Many-to-many
+
+An M2M relation spells identically, from either side — the test correlates through the association table and the inner lambda scopes over the target model:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/existence_tests.py:m2m-schema"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/existence_tests_annotated.py:m2m-schema"
+    ```
+
+```python
+--8<-- "docs/examples/existence_tests.py:m2m"
+```
+
+### One verb, loud dead ends
+
+Reverse relations are **tested, never traversed** (ADR-0007). Every other way of naming a reverse or M2M relation in a query fails at build time with the supported spelling in the message:
+
+- **Column access** (`t.lines.category_id`) raises `AttributeError` — scope the columns with the inner lambda instead: `t.lines.exists(lambda line: line.category_id == ...)`.
+- **Comparisons**, including the tempting `t.transfer_out != None`, raise `TypeError` — a reverse relation has no root-side column to be `NULL`; the spelling is `t.transfer_out.exists()` (and `~t.transfer_out.exists()` for absence).
+- **`in_()` with a query** (`t.id.in_(subquery)`) raises `TypeError` — the workloads an `IN (subquery)` serves are existence-test workloads, without hand-correlating on id columns.
+- **`join()` / `left_join()` on a reverse edge** raise `TypeError` — a join there would multiply root rows; membership is the existence test's job.
+- **The inner lambda sees only its own parameter.** Referencing the outer lambda's parameter (or comparing column-to-column) is a build-time error — cross-scope correlation is a tracked future capability ([#309](https://github.com/syn54x/ferro-orm/issues/309)), never a silent misrender.
+
+Existence tests answer **membership** only. *Populating* a reverse collection onto results (the data axis) is a separate future mechanism — see [Not Yet Supported](#not-yet-supported); until it lands, fetch collections through the relation itself (`await txn.lines.all()`).
+
+!!! note "Two `exists`, two levels"
+    `t.lines.exists(...)` inside a predicate is the existence *test* on a relation. `await query.exists()` is the query *terminal* asking whether the whole query matches any row. Same word, deliberately — both ask "is there at least one?" — at different levels.
 
 ## Populating Relations with include()
 
@@ -536,7 +657,7 @@ Every fetch refreshes instances the session already holds. A refresh keeps each 
 
 Misuse raises at build time, before any SQL:
 
-- **Forward foreign keys only.** Including a `BackRef` or `ManyToMany` relation raises `TypeError`: reverse and M2M population will be a separate mechanism (a batched second query stitched onto the results), not `include()`. Until it lands, fetch collections through the relation itself (`await author.posts.all()`).
+- **Forward foreign keys only.** Including a `BackRef` or `ManyToMany` relation raises `TypeError`: reverse and M2M population will be a separate mechanism (a batched second query stitched onto the results), not `include()`. Until it lands, fetch collections through the relation itself (`await author.posts.all()`). *Filtering* on reverse membership is a different axis and already works — the [existence test](#existence-tests-on-reverse-many-to-many-relations).
 - **Lambda selectors only.** `include("account")` raises pointing at the lambda form — strings never traverse. Selecting a *column* (`include(lambda t: t.account.label)`) raises too: every populated hop is a complete row, so there is nothing to select per column.
 - **No include × projection.** A query carries exactly one materialization plan — populated instances or projected records, never both — and record results are flat, permanently. Either order raises `ValueError` pointing at [traversed projection](#reaching-across-a-relation), the record-shaped way across a relation.
 - **No mutations.** `update()`/`delete()` on an included query raise — a mutation returns no instances to populate.
@@ -675,7 +796,8 @@ Aggregation builds directly on this machinery — `select(lambda t: {"total": t.
     The following query features are **not yet implemented** — see the [Roadmap](../roadmap.md):
 
     - `having()` — post-aggregation filtering; `where()` rejects aggregate predicates pointing at it ([#291](https://github.com/syn54x/ferro-orm/issues/291))
-    - Reverse (`BackRef`) and many-to-many population — [`include()`](#populating-relations-with-include) covers forward FKs; collection population is a separate future mechanism
+    - Reverse (`BackRef`) and many-to-many **population** — [`include()`](#populating-relations-with-include) covers forward FKs; collection population is a separate future mechanism. (*Filtering* on reverse/M2M membership is supported — that's the [existence test](#existence-tests-on-reverse-many-to-many-relations).)
+    - Cross-scope correlation inside an existence test — comparing an inner-lambda column to an outer column ([#309](https://github.com/syn54x/ferro-orm/issues/309)); rejected loudly at build time today
     - Case-insensitive `ilike()`
 
 ## See Also

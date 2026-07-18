@@ -644,6 +644,57 @@ async def test_m2m_exists_composes_with_root_predicates(db_url):
         assert n == 2
 
 
+# ---------------------------------------------------------------------------
+# Remaining error surfaces (#317): every place a reverse or M2M relation can
+# be named now answers with the supported spelling.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_left_join_on_reverse_edge_names_exists(db_url):
+    """``left_join()`` on a reverse edge stays rejected — the pinned "a join
+    never multiplies root rows" property is preserved by rejection — and the
+    error now names ``.exists()``."""
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(TypeError, match=r"\.exists\("):
+        ExTxn.select().left_join(lambda t: t.transfer_out)
+    with pytest.raises(TypeError, match=r"\.exists\("):
+        ExTxn.select().join(lambda t: t.lines)
+
+
+@pytest.mark.asyncio
+async def test_left_join_on_m2m_edge_names_exists(db_url):
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(TypeError, match=r"\.exists\("):
+        ExUser.select().left_join(lambda u: u.tags)
+
+
+@pytest.mark.asyncio
+async def test_in_with_query_rhs_names_exists(db_url):
+    """``in_()`` with a query RHS stays a TypeError, and the message names the
+    existence test when the RHS is a query (the #307 repro's second guess)."""
+    await connect(db_url, auto_migrate=True)
+    sub = ExLine.select(lambda line: line.txn_id)
+    with pytest.raises(TypeError, match=r"\.exists\("):
+        ExTxn.where(lambda t: t.id.in_(sub))
+    with pytest.raises(TypeError, match=r"\.exists\("):
+        ExTxn.where(lambda t: t.id.in_(ExLine.select()))
+    # A non-query, non-collection RHS keeps the plain message — no exists
+    # hint where none applies.
+    with pytest.raises(TypeError, match="expects a list, tuple, or set") as exc_info:
+        ExTxn.where(lambda t: t.id.in_(42))
+    assert ".exists(" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_include_on_m2m_edge_unchanged(db_url):
+    """``include()`` population rejection is unchanged for M2M too — reverse
+    population stays a separate future mechanism."""
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(TypeError, match="reverse .BackRef. or many-to-many"):
+        ExUser.select().include(lambda u: u.tags)
+
+
 @pytest.mark.asyncio
 async def test_m2m_proxy_rejects_everything_but_exists(db_url):
     """The M2M reverse proxy has the same single verb as the reverse-FK one."""
