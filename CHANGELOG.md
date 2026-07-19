@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.17.1 (2026-07-19)
+
+### Bug Fixes
+
+- **migrate**: Auto-migrate pass ownership — column-before-index sequencing and FK on_delete
+  reconciliation ([#326](https://github.com/syn54x/ferro-orm/pull/326),
+  [`3451b1d`](https://github.com/syn54x/ferro-orm/commit/3451b1dad37d8ac39709d986aa20b1de4c12542a))
+
+
 ## v0.17.0 (2026-07-18)
 
 ### Documentation
