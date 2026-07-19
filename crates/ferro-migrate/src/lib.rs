@@ -6,7 +6,9 @@
 mod emit;
 mod order;
 
-use ferro_ddl_lowering::schema_columns_storage_drift;
+use ferro_ddl_lowering::{
+    fk_action_from_str, fk_action_sql, fk_name, is_ferro_fk_name, schema_columns_storage_drift,
+};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -97,6 +99,25 @@ pub enum MigrationOp {
         /// Index name.
         name: String,
     },
+    /// A declared FK whose column exists live but has no FK constraint at all.
+    /// (FKs on newly added columns ride the `AddColumn` emission instead.)
+    AddForeignKey {
+        /// Owning table.
+        table: String,
+        /// Local FK column.
+        column: String,
+    },
+    /// A live ferro-owned FK whose definition (`on_delete`, target) drifted
+    /// from the declared FK on the same column — rebuilt as
+    /// `DROP CONSTRAINT` + `ADD CONSTRAINT` where the backend allows it.
+    RebuildForeignKey {
+        /// Owning table.
+        table: String,
+        /// Local FK column.
+        column: String,
+        /// Name of the live constraint to drop.
+        old_name: String,
+    },
 }
 
 /// Ordered migration operations plus non-fatal warnings collected during planning.
@@ -167,6 +188,13 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: Dialect) -> Vec<String> {
             MigrationOp::DropIndex { name, .. } => {
                 sql.push(format!("-- index '{}' handled by emit_sql_with_ir", name));
             }
+            MigrationOp::AddForeignKey { table, column }
+            | MigrationOp::RebuildForeignKey { table, column, .. } => {
+                sql.push(format!(
+                    "-- foreign key for '{}.{}' handled by emit_sql_with_ir",
+                    table, column
+                ));
+            }
         }
     }
     sql
@@ -205,6 +233,7 @@ pub fn plan_from_ir(
         };
         diff_model_columns(*table, old_model, new_model, dialect, &mut plan);
         diff_model_indexes(*table, old_model, new_model, &mut plan);
+        diff_model_foreign_keys(*table, old_model, new_model, &mut plan);
     }
 
     plan
@@ -316,6 +345,79 @@ fn diff_model_indexes(
                 table: table.to_string(),
                 name: name.clone(),
             });
+        }
+    }
+}
+
+fn diff_model_foreign_keys(
+    table: &str,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    plan: &mut MigrationPlan,
+) {
+    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
+
+    for fk in &new_model.foreign_keys {
+        // An FK on a newly added column rides the AddColumn emission; the
+        // reconcile step only governs FKs whose column already exists live.
+        if !old_col_names.contains(fk.column.as_str()) {
+            continue;
+        }
+
+        let Some(live) = old_model
+            .foreign_keys
+            .iter()
+            .find(|live| live.column == fk.column)
+        else {
+            plan.operations.push(MigrationOp::AddForeignKey {
+                table: table.to_string(),
+                column: fk.column.clone(),
+            });
+            continue;
+        };
+
+        // Live `to_column` can be empty when the backend reports an
+        // implicit-PK reference (SQLite); only a stated target can drift.
+        let target_drift = live.to_table != fk.to_table
+            || (!live.to_column.is_empty() && live.to_column != fk.to_column);
+        // Compare via the canonical SQL rendering — sea-query's
+        // `ForeignKeyAction` has no equality of its own.
+        let action_drift = fk_action_sql(fk_action_from_str(live.on_delete.as_deref()))
+            != fk_action_sql(fk_action_from_str(fk.on_delete.as_deref()));
+        if !target_drift && !action_drift {
+            continue;
+        }
+
+        match live.name.as_deref() {
+            // A drifting constraint ferro does not own is never altered —
+            // but it is never silent either.
+            Some(name) if !is_ferro_fk_name(name) => {
+                plan.warnings.push(format!(
+                    "Foreign key on '{}.{}' drifts from the model (live: REFERENCES {} \
+                     ON DELETE {}; declared: REFERENCES {} ON DELETE {}), but the live \
+                     constraint '{}' is not ferro-owned, so it is left untouched. \
+                     Migrate it manually or with Alembic.",
+                    table,
+                    fk.column,
+                    live.to_table,
+                    fk_action_sql(fk_action_from_str(live.on_delete.as_deref())),
+                    fk.to_table,
+                    fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+                    name,
+                ));
+            }
+            _ => {
+                plan.operations.push(MigrationOp::RebuildForeignKey {
+                    table: table.to_string(),
+                    column: fk.column.clone(),
+                    // SQLite exposes no live constraint names; fall back to
+                    // the canonical name (unused there — emission warns).
+                    old_name: live
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| fk_name(table, &fk.column, &live.to_table)),
+                });
+            }
         }
     }
 }

@@ -57,6 +57,43 @@ pub(crate) fn is_ferro_index_name(name: &str) -> bool {
     name.starts_with("idx_") || name.starts_with("uq_")
 }
 
+/// One live single-column foreign-key constraint, normalized across backends.
+/// (Ferro only ever emits single-column FKs; multi-column live constraints are
+/// user-owned by construction and never surfaced to reconciliation.)
+///
+/// `Deserialize` exists for `_render_migration_sql_for_test`.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct LiveForeignKey {
+    /// Constraint name. `None` on SQLite — `PRAGMA foreign_key_list` does not
+    /// expose constraint names (one more way SQLite FK constraints cannot be
+    /// reconciled in place, only warned about).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Local column.
+    pub column: String,
+    /// Referenced table.
+    pub to_table: String,
+    /// Referenced column.
+    #[serde(default)]
+    pub to_column: String,
+    /// `ON DELETE` action in the declared-IR vocabulary: `CASCADE`,
+    /// `SET NULL`, `SET DEFAULT`, `RESTRICT`, `NO ACTION`.
+    pub on_delete: String,
+}
+
+/// Map `pg_constraint.confdeltype` to the declared-IR action vocabulary.
+/// Returns `None` for codes Postgres does not produce.
+pub(crate) fn fk_action_from_confdeltype(confdeltype: &str) -> Option<&'static str> {
+    match confdeltype {
+        "a" => Some("NO ACTION"),
+        "r" => Some("RESTRICT"),
+        "c" => Some("CASCADE"),
+        "n" => Some("SET NULL"),
+        "d" => Some("SET DEFAULT"),
+        _ => None,
+    }
+}
+
 /// One live SQLite index covering some column, with enough context to decide
 /// whether it can be dropped ahead of `ALTER TABLE ... DROP COLUMN`.
 #[derive(Clone, Debug)]
@@ -126,6 +163,128 @@ pub async fn live_table_columns(
     } else {
         Some(columns)
     })
+}
+
+/// The set of live table names in the connected schema — one query, taken by
+/// the create pass so it can leave every existing table to the reconciliation
+/// pass (ADR-0010) instead of leaning on `IF NOT EXISTS` per statement.
+pub async fn live_table_names(
+    engine: &EngineHandle,
+) -> PyResult<std::collections::HashSet<String>> {
+    let (sql, context) = match engine.backend() {
+        Dialect::Sqlite => (
+            "SELECT name FROM sqlite_master WHERE type = 'table'",
+            "sqlite_master",
+        ),
+        Dialect::Postgres => (
+            "SELECT table_name::text AS name FROM information_schema.tables \
+             WHERE table_schema = current_schema()",
+            "information_schema.tables",
+        ),
+    };
+    let rows = engine
+        .fetch_all_sql_unprepared(sql)
+        .await
+        .map_err(|e| introspection_error(context, "*", e))?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row_string(row, "name"))
+        .collect())
+}
+
+/// Read the live single-column foreign-key constraints on `table`.
+pub async fn live_table_foreign_keys(
+    engine: &EngineHandle,
+    table: &str,
+) -> PyResult<Vec<LiveForeignKey>> {
+    match engine.backend() {
+        Dialect::Sqlite => sqlite_table_foreign_keys(engine, table).await,
+        Dialect::Postgres => postgres_table_foreign_keys(engine, table).await,
+    }
+}
+
+async fn sqlite_table_foreign_keys(
+    engine: &EngineHandle,
+    table: &str,
+) -> PyResult<Vec<LiveForeignKey>> {
+    let sql = format!("PRAGMA foreign_key_list({})", quote_ident(table));
+    let rows = engine
+        .fetch_all_sql_unprepared(&sql)
+        .await
+        .map_err(|e| introspection_error("PRAGMA foreign_key_list", table, e))?;
+
+    // Rows are (id, seq, table, from, to, on_update, on_delete, match); a
+    // multi-column FK repeats its `id` with seq > 0 — those are user-owned by
+    // construction and skipped whole.
+    let multi_column: std::collections::HashSet<i64> = rows
+        .iter()
+        .filter(|row| row_opt_i64(row, "seq").unwrap_or(0) > 0)
+        .filter_map(|row| row_opt_i64(row, "id"))
+        .collect();
+
+    Ok(rows
+        .iter()
+        .filter(|row| row_opt_i64(row, "seq").unwrap_or(0) == 0)
+        .filter(|row| row_opt_i64(row, "id").map_or(true, |id| !multi_column.contains(&id)))
+        .filter_map(|row| {
+            Some(LiveForeignKey {
+                name: None,
+                column: row_string(row, "from")?,
+                to_table: row_string(row, "table")?,
+                // `to` is NULL when the FK references the target's implicit PK.
+                to_column: row_string(row, "to").unwrap_or_default(),
+                on_delete: row_string(row, "on_delete")
+                    .unwrap_or_else(|| "NO ACTION".to_string())
+                    .to_uppercase(),
+            })
+        })
+        .collect())
+}
+
+async fn postgres_table_foreign_keys(
+    engine: &EngineHandle,
+    table: &str,
+) -> PyResult<Vec<LiveForeignKey>> {
+    let sql = r#"
+        SELECT
+            con.conname::text AS name,
+            src.attname::text AS column_name,
+            rel_f.relname::text AS to_table,
+            dst.attname::text AS to_column,
+            con.confdeltype::text AS on_delete,
+            array_length(con.conkey, 1)::bigint AS n_cols
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+        JOIN pg_class rel_f ON rel_f.oid = con.confrelid
+        LEFT JOIN pg_attribute src
+            ON src.attrelid = con.conrelid AND src.attnum = con.conkey[1]
+        LEFT JOIN pg_attribute dst
+            ON dst.attrelid = con.confrelid AND dst.attnum = con.confkey[1]
+        WHERE con.contype = 'f'
+          AND nsp.nspname = current_schema()
+          AND rel.relname = $1
+        ORDER BY con.conname
+        "#;
+
+    let rows = engine
+        .fetch_all_sql_unprepared_with_binds(sql, &[EngineBindValue::String(table.to_string())])
+        .await
+        .map_err(|e| introspection_error("pg_constraint", table, e))?;
+
+    Ok(rows
+        .iter()
+        .filter(|row| row_opt_i64(row, "n_cols") == Some(1))
+        .filter_map(|row| {
+            Some(LiveForeignKey {
+                name: row_string(row, "name"),
+                column: row_string(row, "column_name")?,
+                to_table: row_string(row, "to_table")?,
+                to_column: row_string(row, "to_column").unwrap_or_default(),
+                on_delete: fk_action_from_confdeltype(&row_string(row, "on_delete")?)?.to_string(),
+            })
+        })
+        .collect())
 }
 
 async fn sqlite_table_columns(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveColumn>> {
@@ -346,6 +505,78 @@ mod tests {
         assert!(!is_ferro_index_name("sqlite_autoindex_user_1"));
         assert!(!is_ferro_index_name("user_email_key"));
         assert!(!is_ferro_index_name("my_custom_index"));
+    }
+
+    #[test]
+    fn ferro_fk_names_are_recognized() {
+        use ferro_ddl_lowering::is_ferro_fk_name;
+        assert!(is_ferro_fk_name("fk_account_connection_id_connection"));
+        assert!(!is_ferro_fk_name("account_connection_id_fkey"));
+        assert!(!is_ferro_fk_name("my_custom_fk"));
+    }
+
+    #[test]
+    fn confdeltype_maps_to_declared_action_vocabulary() {
+        assert_eq!(fk_action_from_confdeltype("a"), Some("NO ACTION"));
+        assert_eq!(fk_action_from_confdeltype("r"), Some("RESTRICT"));
+        assert_eq!(fk_action_from_confdeltype("c"), Some("CASCADE"));
+        assert_eq!(fk_action_from_confdeltype("n"), Some("SET NULL"));
+        assert_eq!(fk_action_from_confdeltype("d"), Some("SET DEFAULT"));
+        assert_eq!(fk_action_from_confdeltype("x"), None);
+    }
+
+    #[tokio::test]
+    async fn live_table_names_lists_sqlite_tables() {
+        let engine = memory_engine().await;
+        engine
+            .execute_sql("CREATE TABLE alpha (id integer)")
+            .await
+            .unwrap();
+        engine
+            .execute_sql("CREATE TABLE beta (id integer)")
+            .await
+            .unwrap();
+
+        let names = live_table_names(&engine).await.unwrap();
+        assert!(names.contains("alpha"));
+        assert!(names.contains("beta"));
+        assert!(!names.contains("gamma"));
+    }
+
+    #[tokio::test]
+    async fn live_table_foreign_keys_reads_single_column_fks_and_skips_composite() {
+        let engine = memory_engine().await;
+        engine
+            .execute_sql("CREATE TABLE connection (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        engine
+            .execute_sql("CREATE TABLE pair (a integer, b integer, PRIMARY KEY (a, b))")
+            .await
+            .unwrap();
+        engine
+            .execute_sql(
+                "CREATE TABLE account (\
+                 id INTEGER PRIMARY KEY, \
+                 connection_id integer, \
+                 pa integer, pb integer, \
+                 CONSTRAINT fk_account_connection_id_connection \
+                   FOREIGN KEY (connection_id) REFERENCES connection (id) \
+                   ON DELETE SET NULL, \
+                 FOREIGN KEY (pa, pb) REFERENCES pair (a, b))",
+            )
+            .await
+            .unwrap();
+
+        let fks = live_table_foreign_keys(&engine, "account").await.unwrap();
+        assert_eq!(fks.len(), 1, "composite FK must be skipped: {fks:?}");
+        let fk = &fks[0];
+        // PRAGMA foreign_key_list exposes no constraint names.
+        assert_eq!(fk.name, None);
+        assert_eq!(fk.column, "connection_id");
+        assert_eq!(fk.to_table, "connection");
+        assert_eq!(fk.to_column, "id");
+        assert_eq!(fk.on_delete, "SET NULL");
     }
 
     #[tokio::test]

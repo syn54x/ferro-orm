@@ -408,16 +408,7 @@ fn emit_add_column(
 
     if let Some(fk) = model.foreign_keys.iter().find(|fk| fk.column == column) {
         if dialect == Dialect::Postgres {
-            let on_delete = fk_action_from_str(fk.on_delete.as_deref());
-            result.statements.push(format!(
-                "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
-                quote_ident(table),
-                quote_ident(&fk_constraint_name(table, fk)),
-                quote_ident(column),
-                quote_ident(&fk.to_table),
-                quote_ident(&fk.to_column),
-                fk_action_sql(on_delete),
-            ));
+            result.statements.push(render_add_fk_sql(table, fk));
         } else {
             result.warnings.push(format!(
                 "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint \
@@ -430,6 +421,39 @@ fn emit_add_column(
     }
 
     Ok(result)
+}
+
+/// `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... ON DELETE ...` for one
+/// IR foreign key. Postgres-only — SQLite cannot add table constraints to an
+/// existing table; its callers warn instead.
+fn render_add_fk_sql(table: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> String {
+    format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
+        quote_ident(table),
+        quote_ident(&fk_constraint_name(table, fk)),
+        quote_ident(&fk.column),
+        quote_ident(&fk.to_table),
+        quote_ident(&fk.to_column),
+        fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+    )
+}
+
+/// Find the declared FK for `column` on `table` in the new-IR model.
+fn find_foreign_key<'a>(
+    model: &'a SchemaModel,
+    table: &str,
+    column: &str,
+) -> Result<&'a ferro_schema_ir::SchemaForeignKey, EmissionError> {
+    model
+        .foreign_keys
+        .iter()
+        .find(|fk| fk.column == column)
+        .ok_or_else(|| EmissionError {
+            message: format!(
+                "Foreign-key operation for '{}.{}' has no matching FK in the declared IR",
+                table, column
+            ),
+        })
 }
 
 fn emit_alter_column_type(
@@ -672,6 +696,61 @@ pub fn emit_sql_with_ir(
             // table-qualified) on both SQLite and Postgres, so only the index name is needed.
             MigrationOp::DropIndex { table: _, name } => {
                 result.statements.push(format!("DROP INDEX IF EXISTS \"{}\"", name));
+            }
+            MigrationOp::AddForeignKey { table, column } => {
+                let model = find_model(&new_models, table)?;
+                let fk = find_foreign_key(model, table, column)?;
+                match dialect {
+                    Dialect::Postgres => result.statements.push(render_add_fk_sql(table, fk)),
+                    Dialect::Sqlite => result.warnings.push(format!(
+                        "Declared FOREIGN KEY on '{}.{}' (on_delete {}) has no live \
+                         constraint, and SQLite cannot add table constraints to an \
+                         existing table. Referential integrity for this column is not \
+                         database-enforced; use Alembic if you need the constraint.",
+                        table,
+                        column,
+                        fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+                    )),
+                }
+            }
+            MigrationOp::RebuildForeignKey {
+                table,
+                column,
+                old_name,
+            } => {
+                let model = find_model(&new_models, table)?;
+                let fk = find_foreign_key(model, table, column)?;
+                match dialect {
+                    Dialect::Postgres => {
+                        result.statements.push(format!(
+                            "ALTER TABLE {} DROP CONSTRAINT {}",
+                            quote_ident(table),
+                            quote_ident(old_name),
+                        ));
+                        result.statements.push(render_add_fk_sql(table, fk));
+                    }
+                    Dialect::Sqlite => {
+                        let live_action = find_model(&old_models, table)
+                            .ok()
+                            .and_then(|old| {
+                                old.foreign_keys.iter().find(|live| live.column == *column)
+                            })
+                            .map(|live| {
+                                fk_action_sql(fk_action_from_str(live.on_delete.as_deref()))
+                            })
+                            .unwrap_or("<unknown>");
+                        result.warnings.push(format!(
+                            "Foreign key on '{}.{}' declares on_delete {} but the live \
+                             constraint enforces {}; SQLite cannot alter constraints in \
+                             place, so the live behavior remains. Migrate with Alembic to \
+                             apply the declared action.",
+                            table,
+                            column,
+                            fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+                            live_action,
+                        ));
+                    }
+                }
             }
         }
     }

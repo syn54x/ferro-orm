@@ -123,3 +123,19 @@ _Avoid_: Import-time registration, partial registry
 **Resolved registration**:
 The registry epoch after relationship resolution completes — join tables exist, shadow FK columns are wired, and the SchemaIR modelset is authoritative for DDL and auto-migrate.
 _Avoid_: Final registration, committed registry
+
+**Create pass**:
+The auto-migrate step that brings missing tables into existence — the table, its columns, its indexes and constraints, together. A table that already exists is left completely untouched by this pass, whatever its shape.
+_Avoid_: Bootstrap, ensure-tables, table sync
+
+**Reconciliation pass**:
+The `migrate_updates` step that alters existing tables to match the registered models — the only authority for DDL against a table that already exists. Within one table, column changes land before the indexes and constraints that reference them.
+_Avoid_: Update pass, schema sync, drift repair
+
+**Ferro-owned artifact**:
+An index or constraint whose name follows ferro's canonical naming (`idx_`, `uq_`, `fk_`, `ck_`), marking it as reconcilable: auto-migrate may create, rebuild, or drop it to match the declared model. Artifacts named any other way belong to the user and are never altered or dropped.
+_Avoid_: Managed index, system constraint, internal index
+
+**Constraint rebuild**:
+Drop-and-recreate of a ferro-owned constraint whose live definition no longer matches the declared model — a foreign key's `on_delete`, its target, its columns. Metadata-only: rows are never touched. On a backend that cannot alter constraints, ferro warns loudly and skips; it never diverges silently.
+_Avoid_: Constraint alter, FK patch, in-place constraint update

@@ -38,7 +38,7 @@ SQLite and PostgreSQL (including hosted providers such as Supabase). MySQL and o
 
 Two tiers:
 
-- **Auto-migration at connect time** — `connect(url, auto_migrate=True)` creates missing tables. As of 0.11.0, `migrate_updates=True` also adds missing columns (and reconciles type/nullability drift on PostgreSQL), and `migrate_destructive=True` drops model-removed columns. Great for development and simple deployments.
+- **Auto-migration at connect time** — `connect(url, auto_migrate=True)` creates missing tables. As of 0.11.0, `migrate_updates=True` also adds missing columns (and reconciles type, nullability, and foreign-key `on_delete` drift on PostgreSQL), and `migrate_destructive=True` drops model-removed columns. Great for development and simple deployments.
 - **Alembic bridge** — for versioned, reviewable production migrations and anything auto-migrate can't express (renames, primary-key changes, complex transforms). Install with `pip install "ferro-orm[alembic]"`.
 
 See [Migrations](guide/migrations.md).
