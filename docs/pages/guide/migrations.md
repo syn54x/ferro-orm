@@ -43,6 +43,8 @@ What it covers is capability-relative per backend:
 | Add composite index (`__ferro_composite_indexes__`) to existing columns | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
 | Add unique column (`unique=True`) | ✅ via explicit unique index + warning | ✅ inline `UNIQUE` |
 | Add foreign-key column | ✅ column only, no FK constraint + warning | ✅ column + FK constraint |
+| Add missing FK constraint to an existing column | ⚠️ `UserWarning`, no DDL | ✅ `ADD CONSTRAINT` |
+| Change a foreign key's `on_delete` (or target) | ⚠️ `UserWarning`, no DDL | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
 | Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic) | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
 | Change nullability | ⚠️ `UserWarning`, no DDL | ✅ `SET NOT NULL` / `DROP NOT NULL` |
 | Drop orphaned Ferro-named index (`idx_*` / `uq_*`) | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
@@ -53,6 +55,7 @@ Rules worth knowing:
 
 - **NOT NULL additions need a literal default.** Existing rows must be backfilled, so a new required field without a literal default fails the connect with a clear error. Make it nullable, give it a default, or use Alembic.
 - **Added columns reuse the exact `CREATE TABLE` DDL**, so a database brought forward by `migrate_updates` matches one created fresh, and `alembic revision --autogenerate` stays clean afterwards.
+- **Only ferro-owned constraints are rebuilt.** FK reconciliation matches the `fk_<table>_<col>_<to_table>` names ferro emits (just as index reconciliation only touches `idx_*`/`uq_*`). A drifting constraint with any other name is left untouched and reported with a `UserWarning` — user-created schema survives auto-migrate. Rebuilding is metadata-only: rows are never touched, and the new `ADD CONSTRAINT` validates existing rows, failing loudly (and rolling back the table's plan on Postgres) if they violate it.
 - **Postgres type changes take an exclusive lock** and fail the connect if existing data does not cast cleanly — fine for a development flag, but worth knowing.
 - **The pool refreshes after any schema change**, so no cached statement or stale identity-mapped instance can observe the pre-migration schema.
 

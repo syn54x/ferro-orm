@@ -216,8 +216,8 @@ async def connect(
     Args:
         url: The database connection string (e.g., "sqlite:example.db?mode=rwc").
         auto_migrate: If True, automatically create tables for all registered models.
-            Existing tables are left untouched unless ``migrate_updates`` /
-            ``migrate_destructive`` are also set.
+            Existing tables are left completely untouched — whatever their shape —
+            unless ``migrate_updates`` / ``migrate_destructive`` are also set.
         name: Optional connection name. Omitted connections register as "default".
         default: If True, make this named connection the default for unqualified operations.
         pool: Optional per-connection pool configuration.
@@ -239,9 +239,18 @@ async def connect(
             - **Postgres only**: column type changes
               (``ALTER COLUMN ... TYPE ... USING`` cast) and nullability changes
               (``SET/DROP NOT NULL``) when the live column disagrees with the model.
+              Also foreign-key reconciliation: a ferro-owned (``fk_``-named)
+              constraint whose definition drifts from the declared FK
+              (``on_delete``, target) is rebuilt (``DROP CONSTRAINT`` +
+              ``ADD CONSTRAINT``), and a declared FK missing entirely from an
+              existing column is added. A drifting constraint ferro does not
+              own is warned about, never altered.
             - **SQLite**: type/nullability drift cannot be changed in place; ferro
               emits a ``UserWarning`` naming the column and pointing at Alembic.
               (SQLite's type affinity makes declared-type drift mostly cosmetic.)
+              FK constraints likewise cannot be added or altered on an existing
+              table; any foreign-key drift warns loudly instead of diverging
+              silently.
             - **Transactionality**: on Postgres each table's migration plan
               runs inside a single transaction — a mid-plan failure rolls the
               table back to exactly its pre-migration state. On SQLite,
@@ -284,7 +293,9 @@ async def connect(
 
 async def create_tables(using=None):
     """
-    Manually create tables for all registered models on a connected engine.
+    Manually create the *missing* tables for registered models on a connected
+    engine. A table that already exists is left completely untouched; altering
+    existing tables belongs to ``migrate(updates=True)``.
 
     Compiles and pushes the current registry SchemaIR to the Rust runtime
     before delegating to the Rust create entrypoint, so a model defined after
@@ -308,7 +319,8 @@ async def migrate(using=None, updates=True, destructive=False):
 
     Args:
         using: Named connection to migrate, or None for the default.
-        updates: If True (default), add missing columns and reconcile type/nullability drift.
+        updates: If True (default), add missing columns and reconcile
+            type, nullability, and foreign-key definition drift (see ``connect``).
         destructive: If True, also drop live columns absent from the model. Implies ``updates``.
     """
     _ensure_rust_registration_synced()
