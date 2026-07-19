@@ -19,7 +19,8 @@ use ferro_schema_ir::{
     SchemaModel, SchemaUnique,
 };
 use crate::introspect::{
-    LiveColumn, LiveIndex, live_table_columns, live_table_indexes, quote_ident,
+    LiveColumn, LiveForeignKey, LiveIndex, live_table_columns, live_table_foreign_keys,
+    live_table_indexes, quote_ident,
     sqlite_indexes_covering_column,
 };
 use crate::schema::{internal_create_tables, order_models_for_migration};
@@ -141,6 +142,7 @@ fn live_columns_to_schema_ir(
     table_lower: &str,
     live: &[LiveColumn],
     live_indexes: &[LiveIndex],
+    live_foreign_keys: &[LiveForeignKey],
     backend: Dialect,
 ) -> IrEnvelope<SchemaIrPayload> {
     let dialect = backend;
@@ -177,7 +179,20 @@ fn live_columns_to_schema_ir(
                 model_name: table_lower.to_string(),
                 table_name: table_lower.to_string(),
                 columns,
-                foreign_keys: Vec::<SchemaForeignKey>::new(),
+                foreign_keys: {
+                    let mut fks: Vec<SchemaForeignKey> = live_foreign_keys
+                        .iter()
+                        .map(|fk| SchemaForeignKey {
+                            column: fk.column.clone(),
+                            to_table: fk.to_table.clone(),
+                            to_column: fk.to_column.clone(),
+                            on_delete: Some(fk.on_delete.clone()),
+                            name: fk.name.clone(),
+                        })
+                        .collect();
+                    fks.sort_by(|a, b| a.column.cmp(&b.column));
+                    fks
+                },
                 indexes: live_indexes.iter().map(|i| SchemaIndex {
                     name: i.name.clone(), columns: i.columns.clone(), unique: i.unique,
                 }).collect(),
@@ -246,6 +261,7 @@ pub fn plan_table_migration(
     declared: &IrEnvelope<SchemaIrPayload>,
     live: &[LiveColumn],
     live_indexes: &[LiveIndex],
+    live_foreign_keys: &[LiveForeignKey],
     backend: Dialect,
     opts: MigrateOptions,
 ) -> PyResult<MigrationPlan> {
@@ -253,7 +269,8 @@ pub fn plan_table_migration(
         return Ok(MigrationPlan::new());
     }
 
-    let old_ir = live_columns_to_schema_ir(table_lower, live, live_indexes, backend);
+    let old_ir =
+        live_columns_to_schema_ir(table_lower, live, live_indexes, live_foreign_keys, backend);
     let new_ir = declared;
     let mut typed_plan = plan_from_ir(&old_ir, new_ir, backend);
 
@@ -416,9 +433,18 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
             continue;
         };
         let live_indexes = live_table_indexes(&engine, &table_lower).await?;
+        let live_foreign_keys = live_table_foreign_keys(&engine, &table_lower).await?;
 
         let Some(declared) = declared_envelope_for(&modelset, &table_lower) else { continue };
-        let mut plan = plan_table_migration(&table_lower, &declared, &live, &live_indexes, backend, opts)?;
+        let mut plan = plan_table_migration(
+            &table_lower,
+            &declared,
+            &live,
+            &live_indexes,
+            &live_foreign_keys,
+            backend,
+            opts,
+        )?;
         if plan.is_empty() {
             warnings.append(&mut plan.warnings);
             continue;
@@ -568,7 +594,7 @@ pub fn migrate(
 /// unrecognized, or the diff contains an unsafe change.
 #[pyfunction]
 #[pyo3(name = "_render_migration_sql_for_test")]
-#[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new()))]
+#[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new(), live_foreign_keys_json=String::new()))]
 pub fn _render_migration_sql_for_test(
     name: String,
     schema_ir_json: String,
@@ -577,6 +603,7 @@ pub fn _render_migration_sql_for_test(
     updates: bool,
     destructive: bool,
     live_indexes_json: String,
+    live_foreign_keys_json: String,
 ) -> PyResult<(Vec<String>, Vec<String>)> {
     let backend = match dialect.as_str() {
         "postgres" => Dialect::Postgres,
@@ -601,10 +628,28 @@ pub fn _render_migration_sql_for_test(
             pyo3::exceptions::PyValueError::new_err(format!("Invalid live-indexes JSON: {}", e))
         })?
     };
+    let live_foreign_keys: Vec<LiveForeignKey> = if live_foreign_keys_json.is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&live_foreign_keys_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid live-foreign-keys JSON: {}",
+                e
+            ))
+        })?
+    };
 
     let table_lower = name;
     let opts = MigrateOptions::laddered(updates, destructive);
-    let plan = plan_table_migration(&table_lower, &declared, &live, &live_indexes, backend, opts)?;
+    let plan = plan_table_migration(
+        &table_lower,
+        &declared,
+        &live,
+        &live_indexes,
+        &live_foreign_keys,
+        backend,
+        opts,
+    )?;
 
     let mut statements = plan.statements;
     for col_name in &plan.drop_columns {
