@@ -128,6 +128,33 @@ pub async fn live_table_columns(
     })
 }
 
+/// The set of live table names in the connected schema — one query, taken by
+/// the create pass so it can leave every existing table to the reconciliation
+/// pass (ADR-0010) instead of leaning on `IF NOT EXISTS` per statement.
+pub async fn live_table_names(
+    engine: &EngineHandle,
+) -> PyResult<std::collections::HashSet<String>> {
+    let (sql, context) = match engine.backend() {
+        Dialect::Sqlite => (
+            "SELECT name FROM sqlite_master WHERE type = 'table'",
+            "sqlite_master",
+        ),
+        Dialect::Postgres => (
+            "SELECT table_name::text AS name FROM information_schema.tables \
+             WHERE table_schema = current_schema()",
+            "information_schema.tables",
+        ),
+    };
+    let rows = engine
+        .fetch_all_sql_unprepared(sql)
+        .await
+        .map_err(|e| introspection_error(context, "*", e))?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row_string(row, "name"))
+        .collect())
+}
+
 async fn sqlite_table_columns(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveColumn>> {
     let sql = format!("PRAGMA table_info({})", quote_ident(table));
     let rows = engine

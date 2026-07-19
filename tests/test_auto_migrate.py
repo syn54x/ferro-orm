@@ -889,6 +889,70 @@ async def test_index_reconcile_adds_single_column_index_to_existing_column(
 
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
+async def test_migrate_updates_adds_columns_before_composite_unique_referencing_them(
+    db_url, db_backend, clean_registry
+):
+    """Issue #324: one migrate_updates pass over an existing populated table
+    must add new columns before creating a composite unique that references
+    them. The create pass must leave the existing table entirely alone —
+    firing the unique's DDL there fails with "column does not exist" before
+    the reconciliation pass can add the columns."""
+    from typing import ClassVar
+
+    class ProvTxn(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        account_id: int
+
+    # Phase 1: the pre-upgrade release creates and populates the table.
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await ProvTxn.create(account_id=1)
+    ferro.reset_engine()
+
+    from ferro import clear_registry
+    from ferro.registry import REGISTRY
+
+    clear_registry()
+    REGISTRY.reset_for_test()
+
+    # Phase 2: the upgrade declares two new columns and a composite unique
+    # spanning one existing and one new column — the single-deploy shape.
+    class ProvTxn(Model):  # noqa: F811 — intentional redefinition
+        __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("account_id", "provider_transaction_id"),
+        )
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        account_id: int
+        provider_transaction_id: str | None = None
+        pending: bool = False
+
+    await ferro.connect(db_url, auto_migrate=True, migrate_updates=True)
+    async with ferro.engines.session():
+        rows = await ProvTxn.all()
+        assert len(rows) == 1
+        assert rows[0].provider_transaction_id is None
+        assert rows[0].pending is False
+
+        names = _live_index_names(db_url, db_backend, "provtxn")
+        assert "uq_provtxn_account_id_provider_transaction_id" in names, (
+            f"expected uq_provtxn_account_id_provider_transaction_id, got: {names}"
+        )
+
+        # The unique must span BOTH columns. (SQLite's double-quoted-string
+        # fallback can silently create an index over a string *constant* when
+        # the column doesn't exist yet — same account with two distinct
+        # provider ids must be allowed.)
+        await ProvTxn.create(account_id=2, provider_transaction_id="p1")
+        await ProvTxn.create(account_id=2, provider_transaction_id="p2")
+
+        from ferro.exceptions import UniqueViolationError
+
+        with pytest.raises(UniqueViolationError):
+            await ProvTxn.create(account_id=2, provider_transaction_id="p1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
 async def test_index_reconcile_noop_when_index_already_present(
     db_url, db_backend, clean_registry
 ):

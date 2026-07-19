@@ -79,9 +79,22 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
 
     let dialect = engine.backend();
 
+    // ADR-0010: the create pass owns only missing tables. An existing table —
+    // whatever its shape — belongs to the reconciliation pass; firing even
+    // `IF NOT EXISTS` index DDL at it can reference columns only the
+    // reconcile pass will add (#324).
+    let existing_tables = crate::introspect::live_table_names(&engine).await?;
+
     let model_refs: Vec<&ferro_schema_ir::SchemaModel> =
         modelset.payload.models.iter().collect();
     for model in ferro_migrate::order_models_for_create(&model_refs) {
+        if existing_tables.contains(&model.table_name) {
+            crate::log_debug(format!(
+                "Ferro Engine: Table '{}' already exists — left to the reconciliation pass",
+                model.table_name
+            ));
+            continue;
+        }
         let emission = ferro_migrate::render_create_table(model, dialect).map_err(|err| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "CREATE TABLE emission failed for '{}': {}",
