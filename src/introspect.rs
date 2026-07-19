@@ -81,13 +81,6 @@ pub struct LiveForeignKey {
     pub on_delete: String,
 }
 
-/// Ferro emits FK constraints as `fk_<table>_<col>_<to_table>`
-/// (`ferro_ddl_lowering::fk_name`). Reconciliation only ever touches names it
-/// owns.
-pub(crate) fn is_ferro_fk_name(name: &str) -> bool {
-    name.starts_with("fk_")
-}
-
 /// Map `pg_constraint.confdeltype` to the declared-IR action vocabulary.
 /// Returns `None` for codes Postgres does not produce.
 pub(crate) fn fk_action_from_confdeltype(confdeltype: &str) -> Option<&'static str> {
@@ -516,6 +509,7 @@ mod tests {
 
     #[test]
     fn ferro_fk_names_are_recognized() {
+        use ferro_ddl_lowering::is_ferro_fk_name;
         assert!(is_ferro_fk_name("fk_account_connection_id_connection"));
         assert!(!is_ferro_fk_name("account_connection_id_fkey"));
         assert!(!is_ferro_fk_name("my_custom_fk"));

@@ -1492,3 +1492,346 @@ fn order_models_for_create_self_fk_is_not_an_ordering_constraint() {
     let tables: Vec<&str> = ordered.iter().map(|m| m.table_name.as_str()).collect();
     assert_eq!(tables, vec!["znode", "areferrer"]);
 }
+
+// ---------------------------------------------------------------------------
+// Foreign-key reconciliation (#325)
+// ---------------------------------------------------------------------------
+
+fn fk(
+    column: &str,
+    to_table: &str,
+    on_delete: Option<&str>,
+    name: Option<&str>,
+) -> SchemaForeignKey {
+    SchemaForeignKey {
+        column: column.to_string(),
+        to_table: to_table.to_string(),
+        to_column: "id".to_string(),
+        on_delete: on_delete.map(str::to_string),
+        name: name.map(str::to_string),
+    }
+}
+
+fn schema_model_with_fks(
+    table: &str,
+    cols: Vec<SchemaColumn>,
+    fks: Vec<SchemaForeignKey>,
+) -> SchemaModel {
+    let mut model = schema_model(table, cols);
+    model.foreign_keys = fks;
+    model
+}
+
+#[test]
+fn plan_from_ir_rebuilds_fk_on_delete_drift() {
+    let old_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("CASCADE"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+    let new_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("SET NULL"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+
+    let plan = plan_from_ir(&old_ir, &new_ir, Dialect::Postgres);
+    assert_eq!(
+        plan.operations,
+        vec![MigrationOp::RebuildForeignKey {
+            table: "account".to_string(),
+            column: "connection_id".to_string(),
+            old_name: "fk_account_connection_id_connection".to_string(),
+        }]
+    );
+    assert!(plan.warnings.is_empty());
+}
+
+#[test]
+fn plan_from_ir_fk_noop_when_definition_matches() {
+    // Declared None means CASCADE — a live CASCADE constraint is not drift.
+    let old_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("CASCADE"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+    let new_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            None,
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+
+    let plan = plan_from_ir(&old_ir, &new_ir, Dialect::Postgres);
+    assert!(
+        plan.operations.is_empty(),
+        "unexpected ops: {:?}",
+        plan.operations
+    );
+    assert!(plan.warnings.is_empty());
+}
+
+#[test]
+fn plan_from_ir_adds_fk_missing_on_existing_column() {
+    let old_ir = envelope(vec![schema_model(
+        "account",
+        vec![col("connection_id", "integer", true)],
+    )]);
+    let new_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("SET NULL"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+
+    let plan = plan_from_ir(&old_ir, &new_ir, Dialect::Postgres);
+    assert_eq!(
+        plan.operations,
+        vec![MigrationOp::AddForeignKey {
+            table: "account".to_string(),
+            column: "connection_id".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn plan_from_ir_fk_on_new_column_rides_add_column() {
+    // The FK's column does not exist live: AddColumn emission owns the
+    // constraint, so no standalone FK op may be planned.
+    let old_ir = envelope(vec![schema_model(
+        "account",
+        vec![col("id", "integer", false)],
+    )]);
+    let new_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![
+            col("id", "integer", false),
+            col("connection_id", "integer", true),
+        ],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("SET NULL"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+
+    let plan = plan_from_ir(&old_ir, &new_ir, Dialect::Postgres);
+    assert_eq!(
+        plan.operations,
+        vec![MigrationOp::AddColumn {
+            table: "account".to_string(),
+            column: "connection_id".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn plan_from_ir_warns_on_user_owned_fk_drift() {
+    let old_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("CASCADE"),
+            Some("account_connection_id_fkey"),
+        )],
+    )]);
+    let new_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("SET NULL"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+
+    let plan = plan_from_ir(&old_ir, &new_ir, Dialect::Postgres);
+    assert!(
+        plan.operations.is_empty(),
+        "unexpected ops: {:?}",
+        plan.operations
+    );
+    assert_eq!(plan.warnings.len(), 1);
+    assert!(
+        plan.warnings[0].contains("not ferro-owned"),
+        "{}",
+        plan.warnings[0]
+    );
+    assert!(plan.warnings[0].contains("account_connection_id_fkey"));
+}
+
+#[test]
+fn plan_from_ir_unnamed_live_fk_drift_rebuilds_with_canonical_name() {
+    // SQLite live FKs carry no constraint name; the op falls back to the
+    // canonical name (emission warns on SQLite anyway).
+    let old_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk("connection_id", "connection", Some("CASCADE"), None)],
+    )]);
+    let new_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("SET NULL"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+
+    let plan = plan_from_ir(&old_ir, &new_ir, Dialect::Sqlite);
+    assert_eq!(
+        plan.operations,
+        vec![MigrationOp::RebuildForeignKey {
+            table: "account".to_string(),
+            column: "connection_id".to_string(),
+            old_name: "fk_account_connection_id_connection".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn emit_sql_with_ir_rebuild_fk_postgres_drops_then_adds() {
+    let new_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("SET NULL"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::RebuildForeignKey {
+            table: "account".to_string(),
+            column: "connection_id".to_string(),
+            old_name: "fk_account_connection_id_connection".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let result = emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"account\" DROP CONSTRAINT \"fk_account_connection_id_connection\""
+                .to_string(),
+            "ALTER TABLE \"account\" ADD CONSTRAINT \"fk_account_connection_id_connection\" \
+             FOREIGN KEY (\"connection_id\") REFERENCES \"connection\" (\"id\") \
+             ON DELETE SET NULL"
+                .to_string(),
+        ]
+    );
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn emit_sql_with_ir_rebuild_fk_sqlite_warns_and_skips() {
+    let old_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk("connection_id", "connection", Some("CASCADE"), None)],
+    )]);
+    let new_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("SET NULL"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::RebuildForeignKey {
+            table: "account".to_string(),
+            column: "connection_id".to_string(),
+            old_name: "fk_account_connection_id_connection".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let result = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
+    assert!(
+        result.statements.is_empty(),
+        "unexpected DDL: {:?}",
+        result.statements
+    );
+    assert_eq!(result.warnings.len(), 1);
+    assert!(
+        result.warnings[0].contains("on_delete SET NULL"),
+        "{}",
+        result.warnings[0]
+    );
+    assert!(
+        result.warnings[0].contains("CASCADE"),
+        "{}",
+        result.warnings[0]
+    );
+}
+
+#[test]
+fn emit_sql_with_ir_add_fk_postgres_and_sqlite() {
+    let new_ir = envelope(vec![schema_model_with_fks(
+        "account",
+        vec![col("connection_id", "integer", true)],
+        vec![fk(
+            "connection_id",
+            "connection",
+            Some("SET NULL"),
+            Some("fk_account_connection_id_connection"),
+        )],
+    )]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddForeignKey {
+            table: "account".to_string(),
+            column: "connection_id".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let pg = emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(
+        pg.statements,
+        vec![
+            "ALTER TABLE \"account\" ADD CONSTRAINT \"fk_account_connection_id_connection\" \
+             FOREIGN KEY (\"connection_id\") REFERENCES \"connection\" (\"id\") \
+             ON DELETE SET NULL"
+                .to_string(),
+        ]
+    );
+
+    let sqlite = emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, Dialect::Sqlite).unwrap();
+    assert!(sqlite.statements.is_empty());
+    assert_eq!(sqlite.warnings.len(), 1);
+    assert!(sqlite.warnings[0].contains("SQLite cannot add table constraints"));
+}

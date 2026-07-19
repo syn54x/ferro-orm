@@ -542,6 +542,13 @@ pub fn fk_name(table_lower: &str, col_name: &str, to_table: &str) -> String {
     raw
 }
 
+/// Whether a live constraint name follows the ferro FK convention above — the
+/// ownership test: reconciliation only ever rebuilds names ferro emits;
+/// constraints named any other way belong to the user and are never altered.
+pub fn is_ferro_fk_name(name: &str) -> bool {
+    name.starts_with("fk_")
+}
+
 /// Single-column unique name with 63-char guard.
 pub fn single_unique_index_name(table_lower: &str, col_name: &str) -> String {
     let raw = format!("uq_{table_lower}_{col_name}");

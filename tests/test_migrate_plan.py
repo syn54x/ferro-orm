@@ -496,3 +496,87 @@ class TestJsonStorageDiff:
         stmts, warns = render(schema, live, "sqlite")
         assert stmts == []
         assert warns == []
+
+
+class TestForeignKeyReconcile:
+    """Plan-level rendering for FK definition drift on existing columns (#325)."""
+
+    LIVE_WITH_FK_COLUMN = PK_ONLY_LIVE + [
+        {"name": "connection_id", "declared_type": "integer", "is_nullable": True}
+    ]
+    LIVE_FK_CASCADE = [
+        {
+            "name": "fk_invoice_connection_id_connection",
+            "column": "connection_id",
+            "to_table": "connection",
+            "to_column": "id",
+            "on_delete": "CASCADE",
+        }
+    ]
+
+    def _schema(self, on_delete):
+        return schema_with(
+            {
+                "connection_id": {
+                    "type": "integer",
+                    "ferro_nullable": True,
+                    "foreign_key": {"to_table": "connection", "on_delete": on_delete},
+                }
+            }
+        )
+
+    def _render(self, dialect, *, live_fks, on_delete="SET NULL"):
+        schema = self._schema(on_delete)
+        return _render_migration_sql_for_test(
+            "invoice",
+            _compile_schema_ir_json(schema, "invoice"),
+            json.dumps(self.LIVE_WITH_FK_COLUMN),
+            dialect,
+            True,
+            False,
+            "",
+            json.dumps(live_fks),
+        )
+
+    def test_pg_on_delete_drift_rebuilds_constraint(self):
+        stmts, warns = self._render("postgres", live_fks=self.LIVE_FK_CASCADE)
+        assert stmts == [
+            'ALTER TABLE "invoice" DROP CONSTRAINT "fk_invoice_connection_id_connection"',
+            'ALTER TABLE "invoice" ADD CONSTRAINT "fk_invoice_connection_id_connection"'
+            ' FOREIGN KEY ("connection_id") REFERENCES "connection" ("id")'
+            " ON DELETE SET NULL",
+        ]
+        assert warns == []
+
+    def test_pg_matching_on_delete_is_noop(self):
+        stmts, warns = self._render(
+            "postgres", live_fks=self.LIVE_FK_CASCADE, on_delete="CASCADE"
+        )
+        assert stmts == []
+        assert warns == []
+
+    def test_pg_missing_fk_on_existing_column_is_added(self):
+        stmts, warns = self._render("postgres", live_fks=[])
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD CONSTRAINT "fk_invoice_connection_id_connection"'
+            ' FOREIGN KEY ("connection_id") REFERENCES "connection" ("id")'
+            " ON DELETE SET NULL",
+        ]
+        assert warns == []
+
+    def test_pg_user_owned_fk_drift_warns_and_leaves_constraint(self):
+        user_fk = [dict(self.LIVE_FK_CASCADE[0], name="invoice_connection_id_fkey")]
+        stmts, warns = self._render("postgres", live_fks=user_fk)
+        assert stmts == []
+        assert len(warns) == 1
+        assert "not ferro-owned" in warns[0]
+        assert "invoice_connection_id_fkey" in warns[0]
+
+    def test_sqlite_on_delete_drift_warns_and_emits_no_ddl(self):
+        unnamed_fk = [dict(self.LIVE_FK_CASCADE[0], name=None)]
+        stmts, warns = self._render("sqlite", live_fks=unnamed_fk)
+        assert stmts == []
+        assert len(warns) == 1
+        assert "on_delete SET NULL" in warns[0]
+        assert "CASCADE" in warns[0]
+        assert "Alembic" in warns[0]

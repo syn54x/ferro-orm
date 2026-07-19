@@ -952,6 +952,111 @@ async def test_migrate_updates_adds_columns_before_composite_unique_referencing_
 
 
 @pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_migrate_updates_rebuilds_fk_on_delete_drift(db_url, clean_registry):
+    """Issue #325: changing a ForeignKey's on_delete on an existing model must
+    rebuild the live constraint, not silently keep the old action. The Pinch
+    shape: CASCADE (the default) shipped, then the upgrade declares SET NULL —
+    deleting the parent must sever the reference, never destroy the child."""
+    from ferro import ForeignKey
+
+    class FkDriftConn(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        accounts: Relation[list["FkDriftAccount"]] = BackRef()
+
+    class FkDriftAccount(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        connection: Annotated[
+            FkDriftConn | None, ForeignKey(related_name="accounts")
+        ] = None
+
+    # Phase A: the pre-upgrade release creates the schema (default CASCADE)
+    # and populates it.
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        parent = await FkDriftConn.create(name="c1")
+        await FkDriftAccount.create(connection=parent)
+    ferro.reset_engine()
+
+    from ferro import clear_registry
+    from ferro.registry import REGISTRY
+
+    clear_registry()
+    REGISTRY.reset_for_test()
+
+    # Phase B: identical models except the FK now declares SET NULL.
+    class FkDriftConn(Model):  # noqa: F811 — intentional redefinition
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        accounts: Relation[list["FkDriftAccount"]] = BackRef()
+
+    class FkDriftAccount(Model):  # noqa: F811 — intentional redefinition
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        connection: Annotated[
+            FkDriftConn | None,
+            ForeignKey(related_name="accounts", on_delete="SET NULL"),
+        ] = None
+
+    await ferro.connect(db_url, migrate_updates=True)
+    async with ferro.engines.session():
+        parents = await FkDriftConn.all()
+        await parents[0].delete()
+
+        # Sever, never destroy: the child survives with a nulled reference.
+        children = await FkDriftAccount.all()
+        assert len(children) == 1
+        assert children[0].connection_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_sqlite_fk_on_delete_drift_warns_loudly(db_url, clean_registry):
+    """Issue #325 on SQLite: FK constraints cannot be altered in place, so an
+    on_delete change on an existing table must warn loudly (naming the
+    constraint) instead of diverging silently."""
+    from ferro import ForeignKey
+
+    class FkWarnConn(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        accounts: Relation[list["FkWarnAccount"]] = BackRef()
+
+    class FkWarnAccount(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        connection: Annotated[
+            FkWarnConn | None, ForeignKey(related_name="accounts")
+        ] = None
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        parent = await FkWarnConn.create(name="c1")
+        await FkWarnAccount.create(connection=parent)
+    ferro.reset_engine()
+
+    from ferro import clear_registry
+    from ferro.registry import REGISTRY
+
+    clear_registry()
+    REGISTRY.reset_for_test()
+
+    class FkWarnConn(Model):  # noqa: F811 — intentional redefinition
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        accounts: Relation[list["FkWarnAccount"]] = BackRef()
+
+    class FkWarnAccount(Model):  # noqa: F811 — intentional redefinition
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        connection: Annotated[
+            FkWarnConn | None,
+            ForeignKey(related_name="accounts", on_delete="SET NULL"),
+        ] = None
+
+    with pytest.warns(UserWarning, match=r"on_delete|fk_fkwarnaccount"):
+        await ferro.connect(db_url, migrate_updates=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_index_reconcile_noop_when_index_already_present(
     db_url, db_backend, clean_registry
