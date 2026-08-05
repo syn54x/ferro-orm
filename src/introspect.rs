@@ -192,6 +192,35 @@ pub async fn live_table_names(
         .collect())
 }
 
+/// Read every native enum type in the connected schema with its labels in
+/// enum sort order: `type name → labels`. Postgres-only — SQLite has no native
+/// enum types — and taken once per reconciliation run (label addition is
+/// per-type, not per-table). Callers must guard on dialect.
+pub async fn live_enum_type_labels(
+    engine: &EngineHandle,
+) -> PyResult<std::collections::BTreeMap<String, Vec<String>>> {
+    let sql = "SELECT t.typname::text AS type_name, e.enumlabel::text AS label \
+               FROM pg_type t \
+               JOIN pg_namespace n ON n.oid = t.typnamespace \
+               JOIN pg_enum e ON e.enumtypid = t.oid \
+               WHERE n.nspname = current_schema() \
+               ORDER BY t.typname, e.enumsortorder";
+    let rows = engine
+        .fetch_all_sql_unprepared(sql)
+        .await
+        .map_err(|e| introspection_error("pg_enum", "*", e))?;
+    let mut labels_by_type: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        if let (Some(type_name), Some(label)) =
+            (row_string(row, "type_name"), row_string(row, "label"))
+        {
+            labels_by_type.entry(type_name).or_default().push(label);
+        }
+    }
+    Ok(labels_by_type)
+}
+
 /// Read the live single-column foreign-key constraints on `table`.
 pub async fn live_table_foreign_keys(
     engine: &EngineHandle,

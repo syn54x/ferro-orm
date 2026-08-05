@@ -50,6 +50,16 @@ For a single model, every emitter must agree on:
    and `db_check_constraint_name` (Rust).
 9. **Default values** — server-side defaults must serialize identically.
 10. **Nullability** — must agree.
+11. **Enum label additions** — the label-addition decision (which model-declared
+    labels a live enum type is missing, and which live labels are extra) and
+    the rendered `ALTER TYPE ... ADD VALUE IF NOT EXISTS` statement are decided
+    by ONE pair of functions: `ferro_ddl_lowering::missing_enum_labels` /
+    `extra_enum_labels` + `render_pg_enum_add_value`. The auto-migrate
+    reconciliation pass consumes them directly; the Alembic autogenerate
+    comparator consumes them over FFI (`_core._plan_enum_label_addition`) and
+    executes the byte-identical statements. Pinned by
+    `tests/test_cross_emitter_parity.py` and the ferro-ddl-lowering unit pins.
+    See ADR-0011 (append-only; update-gated; warn-never-act for extras).
 
 ### Why this invariant exists
 
