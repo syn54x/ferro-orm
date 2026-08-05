@@ -294,3 +294,23 @@ async def test_alembic_autogen_after_migrate_updates_is_idempotent(db_url):
         "what Alembic expects of the current models.\n\n"
         f"Diff:\n{significant}"
     )
+
+
+def test_label_addition_statement_parity_pin():
+    """Cross-language golden pin for label addition (AGENTS.md § I-1 item 11).
+
+    The FFI returns the Rust-rendered ``ADD VALUE IF NOT EXISTS`` statement
+    byte-for-byte — the same literal is pinned in ferro-ddl-lowering's unit
+    tests, and the Alembic comparator executes it verbatim. If either side
+    drifts, the two migration doors would run different SQL for the same
+    model; this pin fails first.
+    """
+    import json
+
+    from ferro._core import _plan_enum_label_addition
+
+    plan = json.loads(
+        _plan_enum_label_addition("provider", ["plaid", "mx"], ["plaid", "legacy"])
+    )
+    assert plan["statements"] == ["ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"]
+    assert plan["extra_labels"] == ["legacy"]

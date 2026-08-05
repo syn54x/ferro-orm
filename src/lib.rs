@@ -156,6 +156,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_fk_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_resolve_storage_type, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_render_check_body, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_plan_enum_label_addition, m)?)?;
     m.add_function(wrap_pyfunction!(
         hydration::_verify_hydration_abi_for_test,
         m
