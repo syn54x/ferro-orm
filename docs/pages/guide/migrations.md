@@ -48,6 +48,8 @@ What it covers is capability-relative per backend:
 | Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic) | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
 | Change nullability | ⚠️ `UserWarning`, no DDL | ✅ `SET NOT NULL` / `DROP NOT NULL` |
 | Drop orphaned Ferro-named index (`idx_*` / `uq_*`) | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
+| Add a missing enum label (a `StrEnum` grew a member) | ✅ nothing to do — enums store as text | ✅ `ALTER TYPE ... ADD VALUE` *0.18.0+* |
+| Remove or rename an enum label | ✅ nothing to do | ⚠️ `UserWarning`, no DDL — Alembic territory |
 | Inline single-column `UNIQUE` on existing column, index option changes | ❌ never — Alembic territory | ❌ never |
 | Rename column/table, change primary key, drop table | ❌ never — Alembic territory | ❌ never |
 
@@ -58,6 +60,74 @@ Rules worth knowing:
 - **Only ferro-owned constraints are rebuilt.** FK reconciliation matches the `fk_<table>_<col>_<to_table>` names ferro emits (just as index reconciliation only touches `idx_*`/`uq_*`). A drifting constraint with any other name is left untouched and reported with a `UserWarning` — user-created schema survives auto-migrate. Rebuilding is metadata-only: rows are never touched, and the new `ADD CONSTRAINT` validates existing rows, failing loudly (and rolling back the table's plan on Postgres) if they violate it.
 - **Postgres type changes take an exclusive lock** and fail the connect if existing data does not cast cleanly — fine for a development flag, but worth knowing.
 - **The pool refreshes after any schema change**, so no cached statement or stale identity-mapped instance can observe the pre-migration schema.
+
+### Evolving enums: label addition
+
+*Added in 0.18.0.* On PostgreSQL, `StrEnum` fields create a **native enum type**, and a type that already exists in the database does not learn new members on its own. When a `StrEnum` grows, `migrate_updates=True` performs **label addition**: it compares the model's members against the live type and appends what's missing with `ALTER TYPE ... ADD VALUE IF NOT EXISTS`.
+
+!!! danger "This gap is invisible to your tests"
+    Under plain `auto_migrate=True` (without `migrate_updates`), an existing enum type is **never** updated — like every existing object, it belongs to the update pass. The failure mode is nasty: every test suite that creates its schema fresh gets the complete enum and stays green, while every *existing* database rejects the new member at runtime with `invalid input value for enum`. No app-side test against a throwaway schema can catch this. If your models' enums evolve, run with `migrate_updates=True` (or generate the migration with Alembic — the [autogenerate bridge](#alembic-for-production) sees the same drift).
+
+=== "Assignment"
+
+    ```python
+    from enum import StrEnum
+
+    import ferro
+    from ferro import Model
+
+
+    class Provider(StrEnum):
+        PLAID = "plaid"
+        MX = "mx"  # new member — the live type only has 'plaid'
+
+
+    class Feed(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        provider: Provider
+
+
+    await ferro.connect("postgres://...", migrate_updates=True)
+    # → ALTER TYPE "provider" ADD VALUE IF NOT EXISTS 'mx'
+
+    feed = await Feed.create(provider=Provider.MX)
+    recent = await Feed.where(lambda feed: feed.provider == Provider.MX).all()
+    ```
+
+=== "Annotated"
+
+    ```python
+    from enum import StrEnum
+    from typing import Annotated
+
+    import ferro
+    from ferro import FerroField, Model
+
+
+    class Provider(StrEnum):
+        PLAID = "plaid"
+        MX = "mx"  # new member — the live type only has 'plaid'
+
+
+    class Feed(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        provider: Provider
+
+
+    await ferro.connect("postgres://...", migrate_updates=True)
+    # → ALTER TYPE "provider" ADD VALUE IF NOT EXISTS 'mx'
+
+    feed = await Feed.create(provider=Provider.MX)
+    recent = await Feed.where(lambda feed: feed.provider == Provider.MX).all()
+    ```
+
+The contract, precisely:
+
+- **Append-only, metadata-only.** Label addition adds labels and does nothing else; rows are never touched. A shared `StrEnum` used by several models is one type and reconciles once.
+- **Removals and renames are never automatic.** A live label the model no longer declares raises a `UserWarning` naming the type and labels — rows may still hold that label, and older code may still be running against the schema mid-deploy — and the label stays. Remove or rename labels in a reviewed Alembic migration.
+- **Labels commit before table changes.** Additions run as their own autocommit statements ahead of the per-table plans, so a new column whose literal default is a brand-new member works in a single deploy, on every supported PostgreSQL version.
+- **Appended labels sort last.** `ADD VALUE` appends: a member inserted mid-enum in Python lands at the end of the database ordering, and `ORDER BY` on an enum column follows *database* order, not declaration order.
+- **SQLite is unaffected.** Enums store as text there; a new member needs no DDL.
 
 ### Destructive drops with `migrate_destructive`
 
@@ -134,6 +204,7 @@ target_metadata = get_metadata()
 - **Composite constraints** (`__ferro_composite_uniques__`, `__ferro_composite_indexes__`) emit matching `UniqueConstraint` / `Index` objects, including the automatic constraints on many-to-many join tables.
 - **One-to-one** relations (`ForeignKey(unique=True)`) emit the same `UNIQUE` on the shadow column that `auto_migrate` creates at runtime.
 - **Enums** map to named `sqlalchemy.Enum` types (class name lowercased, e.g. `UserRole` → `userrole`) so revisions compile on PostgreSQL, which rejects anonymous enum types.
+- **Enum label drift is diffed.** *0.18.0+.* Alembic core is blind to enum value changes; ferro's bridge registers an autogenerate comparator that diffs each named enum type against the live PostgreSQL catalog — the same decision (and the same rendered SQL) the auto-migrate pass uses. A grown `StrEnum` generates `ALTER TYPE ... ADD VALUE IF NOT EXISTS` inside an `autocommit_block()` (placed before table operations, runnable on every supported PostgreSQL version); a live label the model no longer declares generates a comment in the revision telling you removal needs a hand-written step. Models in sync generate nothing.
 
 ### Autogenerate
 
