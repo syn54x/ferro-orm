@@ -1,6 +1,38 @@
 # CHANGELOG
 
 
+## v0.18.0 (2026-08-05)
+
+### Documentation
+
+- **adr**: ADR-0011 label addition + glossary terms (enum label, label addition)
+  ([`449616f`](https://github.com/syn54x/ferro-orm/commit/449616f07aefe473fe098f45f6873eb2003cf8e5))
+
+- **migrate**: Label addition — the auto_migrate trap, the migrate_updates contract, the ordering
+  caveat ([#334](https://github.com/syn54x/ferro-orm/pull/334),
+  [`482911b`](https://github.com/syn54x/ferro-orm/commit/482911b441eeeed21b13d3927c9492797bb1eba5))
+
+### Features
+
+- **alembic**: Autogenerate comparator emits label additions from the shared diff
+  ([#333](https://github.com/syn54x/ferro-orm/pull/333),
+  [`1579fc3`](https://github.com/syn54x/ferro-orm/commit/1579fc38a7f0d2b94c4ea51aa7daac652df30abc))
+
+- **migrate**: Label addition tracer — migrate_updates appends missing enum labels
+  ([#330](https://github.com/syn54x/ferro-orm/pull/330),
+  [`e929a6a`](https://github.com/syn54x/ferro-orm/commit/e929a6ae854fd435c6aac3277e476c15b106f73a))
+
+- **migrate**: Warn-never-act for extra enum labels; create pass stays silent
+  ([#331](https://github.com/syn54x/ferro-orm/pull/331),
+  [`a73d142`](https://github.com/syn54x/ferro-orm/commit/a73d142e2ff22ef8e47c2a8b8c34ca92372d0487))
+
+### Testing
+
+- **migrate**: Label addition edges — shared types, default-in-same-run, ordering, idempotence
+  ([#332](https://github.com/syn54x/ferro-orm/pull/332),
+  [`1215f0c`](https://github.com/syn54x/ferro-orm/commit/1215f0c0e52367eafd91411b7b7891220edf318e))
+
+
 ## v0.17.1 (2026-07-19)
 
 ### Bug Fixes
