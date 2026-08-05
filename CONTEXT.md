@@ -129,12 +129,20 @@ The auto-migrate step that brings missing tables into existence — the table, i
 _Avoid_: Bootstrap, ensure-tables, table sync
 
 **Reconciliation pass**:
-The `migrate_updates` step that alters existing tables to match the registered models — the only authority for DDL against a table that already exists. Within one table, column changes land before the indexes and constraints that reference them.
+The `migrate_updates` step that alters existing schema objects — tables and ferro-owned enum types — to match the registered models; the only authority for DDL against an object that already exists. Within one table, column changes land before the indexes and constraints that reference them; label additions land before any table's changes.
 _Avoid_: Update pass, schema sync, drift repair
 
 **Ferro-owned artifact**:
-An index or constraint whose name follows ferro's canonical naming (`idx_`, `uq_`, `fk_`, `ck_`), marking it as reconcilable: auto-migrate may create, rebuild, or drop it to match the declared model. Artifacts named any other way belong to the user and are never altered or dropped.
+A schema object ferro may reconcile to match the declared model. Indexes and constraints are ferro-owned by naming (`idx_`, `uq_`, `fk_`, `ck_`); native enum types are ferro-owned by derivation — the type's name matches the name ferro derives from the model. Artifacts owned neither way belong to the user and are never altered or dropped.
 _Avoid_: Managed index, system constraint, internal index
+
+**Enum label**:
+One storable value of a native Postgres enum type, mirrored from a Python `StrEnum` member's value. Members are the Python-side declaration; labels are what the database accepts and stores.
+_Avoid_: Enum value, variant, choice
+
+**Label addition**:
+The reconciliation-pass operation appending model-declared labels missing from a live ferro-owned enum type. Append-only and metadata-only: rows are never touched, and labels the database has but the model lacks are warned about loudly and never removed — removal and rename are reviewed-migration territory.
+_Avoid_: Enum sync, label reconciliation, enum evolution
 
 **Constraint rebuild**:
 Drop-and-recreate of a ferro-owned constraint whose live definition no longer matches the declared model — a foreign key's `on_delete`, its target, its columns. Metadata-only: rows are never touched. On a backend that cannot alter constraints, ferro warns loudly and skips; it never diverges silently.
