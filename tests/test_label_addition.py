@@ -123,3 +123,160 @@ async def test_plain_auto_migrate_stays_silent_and_inert_with_drift(
     assert not [w for w in recwarn if "provider" in str(w.message)]
     async with engines.session():
         assert await _live_labels("provider") == ["plaid", "legacy"]
+
+
+@pytest.mark.asyncio
+async def test_shared_type_reconciles_exactly_once(db_url, clean_registry):
+    """A StrEnum shared by two models is one type and reconciles once: one
+    warning for its drift, and both tables accept the appended label."""
+    await connect(db_url)
+    async with engines.session():
+        await execute("CREATE TYPE \"provider\" AS ENUM ('plaid', 'legacy')")
+        await execute(
+            'CREATE TABLE "feed" ("id" serial PRIMARY KEY, "provider" "provider" NOT NULL)'
+        )
+        await execute(
+            'CREATE TABLE "payout" ("id" serial PRIMARY KEY, "provider" "provider" NOT NULL)'
+        )
+    reset_engine()
+
+    class Provider(StrEnum):
+        PLAID = "plaid"
+        MX = "mx"
+
+    class Feed(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        provider: Provider
+
+    class Payout(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        provider: Provider
+
+    with pytest.warns(UserWarning) as record:
+        await connect(db_url, migrate_updates=True)
+    per_type = [w for w in record if "'legacy'" in str(w.message)]
+    assert len(per_type) == 1, "one warning per drifted type, not per table"
+
+    async with engines.session():
+        assert (await Feed.create(provider=Provider.MX)).provider is Provider.MX
+        assert (await Payout.create(provider=Provider.MX)).provider is Provider.MX
+
+
+@pytest.mark.asyncio
+async def test_new_label_as_default_of_new_column_in_same_run(db_url, clean_registry):
+    """The single-deploy shape: add a member AND a new column defaulting to it.
+    The label commits (autocommit pre-pass) before the table plan references
+    it — the trap Prisma #8424 documents."""
+    await connect(db_url)
+    async with engines.session():
+        await execute("CREATE TYPE \"state\" AS ENUM ('open')")
+        await execute('CREATE TABLE "ticket" ("id" serial PRIMARY KEY)')
+        await execute('INSERT INTO "ticket" DEFAULT VALUES')
+    reset_engine()
+
+    class State(StrEnum):
+        OPEN = "open"
+        CLOSED = "closed"
+
+    class Ticket(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        state: State = ferro.Field(default=State.CLOSED)
+
+    await connect(db_url, migrate_updates=True)
+    async with engines.session():
+        rows = await fetch_all('SELECT "state" FROM "ticket"')
+        assert [r["state"] for r in rows] == ["closed"], (
+            "existing row backfilled with the appended label"
+        )
+        assert (await Ticket.create()).state is State.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_new_table_defaulting_to_new_label_of_existing_stale_type(
+    db_url, clean_registry
+):
+    """A brand new table whose enum column defaults to a new member of an
+    existing stale type creates cleanly in one migrate_updates run: fresh
+    CREATE TABLE never renders server-side defaults (they are client-side),
+    so no create-pass statement can reference a label before label addition
+    lands it."""
+    await connect(db_url)
+    async with engines.session():
+        # The type exists (older model used it); the new table does not.
+        await execute("CREATE TYPE \"state\" AS ENUM ('open')")
+    reset_engine()
+
+    class State(StrEnum):
+        OPEN = "open"
+        CLOSED = "closed"
+
+    class Audit(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        state: State = ferro.Field(default=State.CLOSED)
+
+    await connect(db_url, migrate_updates=True)
+    async with engines.session():
+        assert (await Audit.create()).state is State.CLOSED
+        assert await _live_labels("state") == ["open", "closed"]
+
+
+@pytest.mark.asyncio
+async def test_appended_labels_sort_last_regardless_of_declaration_order(
+    db_url, clean_registry
+):
+    """Documented caveat: ADD VALUE appends, so enum ORDER BY follows database
+    order, not Python declaration order."""
+    await connect(db_url)
+    async with engines.session():
+        await execute("CREATE TYPE \"provider\" AS ENUM ('plaid')")
+        await execute(
+            'CREATE TABLE "feed" ("id" serial PRIMARY KEY, "provider" "provider" NOT NULL)'
+        )
+    reset_engine()
+
+    class Provider(StrEnum):
+        MX = "mx"  # declared first in Python...
+        PLAID = "plaid"
+
+    class Feed(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        provider: Provider
+
+    await connect(db_url, migrate_updates=True)
+    async with engines.session():
+        # ...but appended last in the database ordering.
+        assert await _live_labels("provider") == ["plaid", "mx"]
+        await Feed.create(provider=Provider.MX)
+        await Feed.create(provider=Provider.PLAID)
+        rows = await fetch_all('SELECT "provider" FROM "feed" ORDER BY "provider"')
+        assert [r["provider"] for r in rows] == ["plaid", "mx"]
+
+
+@pytest.mark.asyncio
+async def test_second_boot_is_a_noop(db_url, clean_registry, recwarn):
+    """Label addition is idempotent: a reconciled schema replans to nothing —
+    no statements, no warnings, labels and order untouched."""
+    await connect(db_url)
+    async with engines.session():
+        await execute("CREATE TYPE \"provider\" AS ENUM ('plaid')")
+        await execute(
+            'CREATE TABLE "feed" ("id" serial PRIMARY KEY, "provider" "provider" NOT NULL)'
+        )
+    reset_engine()
+
+    class Provider(StrEnum):
+        PLAID = "plaid"
+        MX = "mx"
+
+    class Feed(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        provider: Provider
+
+    await connect(db_url, migrate_updates=True)
+    reset_engine()
+    recwarn.clear()
+
+    await connect(db_url, migrate_updates=True)
+    assert not [w for w in recwarn if "provider" in str(w.message)]
+    async with engines.session():
+        assert await _live_labels("provider") == ["plaid", "mx"]
