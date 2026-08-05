@@ -498,6 +498,33 @@ pub fn render_pg_enum_create_type(type_name: &str, labels: &[String]) -> String 
     )
 }
 
+/// The label-addition decision (ADR-0011): which model-declared labels a live
+/// ferro-owned enum type is missing, in declared order. This is the single
+/// decision table for enum label drift — the auto-migrate planner and the
+/// Alembic autogenerate comparator both consume it mechanically (AGENTS.md
+/// § I-1); neither side re-derives it. Append-only by construction: labels the
+/// live type has but the model lacks are not this function's concern.
+pub fn missing_enum_labels(declared: &[String], live: &[String]) -> Vec<String> {
+    declared
+        .iter()
+        .filter(|label| !live.contains(label))
+        .cloned()
+        .collect()
+}
+
+/// One `ALTER TYPE ... ADD VALUE IF NOT EXISTS` for a label addition.
+/// `IF NOT EXISTS` makes concurrent boots and shared-type replans harmless;
+/// executed outside transactions (autocommit) so the statement is legal on
+/// every supported Postgres version and the label is committed before any
+/// table plan that references it.
+pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
+    format!(
+        "ALTER TYPE {} ADD VALUE IF NOT EXISTS '{}'",
+        quote_ident(type_name),
+        label.replace('\'', "''"),
+    )
+}
+
 /// Detect a refused conversion from a live column to a resolved storage
 /// target. Extends [`refused_scalar_conversion`] with the native-enum case:
 /// a live non-enum (varchar/text) column targeted at a native Postgres enum
@@ -1461,6 +1488,32 @@ mod tests {
              WHERE t.typname = 'status' AND n.nspname = current_schema()) THEN \
              CREATE TYPE \"status\" AS ENUM ('draft', 'active'); \
              END IF; END $$"
+        );
+    }
+
+    #[test]
+    fn missing_enum_labels_returns_additions_in_declared_order() {
+        let declared = vec!["plaid".to_string(), "mx".to_string(), "teller".to_string()];
+        let live = vec!["plaid".to_string()];
+        assert_eq!(missing_enum_labels(&declared, &live), vec!["mx", "teller"]);
+    }
+
+    #[test]
+    fn missing_enum_labels_empty_when_live_covers_declared() {
+        let declared = vec!["plaid".to_string()];
+        let live = vec!["plaid".to_string(), "legacy".to_string()];
+        assert!(missing_enum_labels(&declared, &live).is_empty());
+    }
+
+    #[test]
+    fn render_pg_enum_add_value_is_pinned_and_escapes() {
+        assert_eq!(
+            render_pg_enum_add_value("provider", "mx"),
+            "ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"
+        );
+        assert_eq!(
+            render_pg_enum_add_value("od'd", "it's"),
+            "ALTER TYPE \"od'd\" ADD VALUE IF NOT EXISTS 'it''s'"
         );
     }
 

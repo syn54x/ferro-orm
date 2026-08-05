@@ -12,15 +12,18 @@
 //! matches a freshly created one (AGENTS.md § I-1).
 
 use crate::backend::EngineHandle;
-use ferro_ddl_lowering::{Dialect, information_schema_to_db_type_token};
+use ferro_ddl_lowering::{
+    Dialect, ResolvedStorage, information_schema_to_db_type_token, missing_enum_labels,
+    render_pg_enum_add_value, resolve_column_storage,
+};
 use ferro_migrate::{MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
     IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
     SchemaModel, SchemaUnique,
 };
 use crate::introspect::{
-    LiveColumn, LiveForeignKey, LiveIndex, live_table_columns, live_table_foreign_keys,
-    live_table_indexes, quote_ident,
+    LiveColumn, LiveForeignKey, LiveIndex, live_enum_type_labels, live_table_columns,
+    live_table_foreign_keys, live_table_indexes, quote_ident,
     sqlite_indexes_covering_column,
 };
 use crate::schema::{internal_create_tables, order_models_for_migration};
@@ -426,6 +429,17 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
     let mut warnings = Vec::new();
     let mut ddl_ran = false;
 
+    // Label addition (ADR-0011): reconcile ferro-owned enum types before any
+    // table's plan. Per-type, not per-table (a shared StrEnum reconciles
+    // once), and outside the per-table transactions below — `ALTER TYPE ...
+    // ADD VALUE` is non-transactional before PG12 and its label is unusable
+    // until commit on PG12+; autocommit execution here means every label is
+    // committed before a table plan (e.g. a new column defaulting to it)
+    // can reference it.
+    if backend == Dialect::Postgres {
+        ddl_ran |= add_missing_enum_labels(&engine, &modelset).await?;
+    }
+
     for (_name, model) in order_models_for_migration(schemas, &modelset) {
         let table_lower = model.table_name.clone();
         let Some(live) = live_table_columns(&engine, &table_lower).await? else {
@@ -554,6 +568,53 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
     }
 
     Ok(())
+}
+
+/// The reconciliation pass's label addition (ADR-0011; CONTEXT.md *label
+/// addition*): append model-declared labels missing from live ferro-owned
+/// enum types. A type is ferro-owned by *derivation* — its name is the one
+/// model resolution produces — so the declared side of the diff is itself the
+/// ownership test; live types with no model-derived counterpart are user-owned
+/// and never touched. Live types absent entirely are the create pass's / ADD
+/// COLUMN guard's concern, not label addition's. Returns whether DDL executed.
+async fn add_missing_enum_labels(
+    engine: &EngineHandle,
+    modelset: &IrEnvelope<SchemaIrPayload>,
+) -> PyResult<bool> {
+    // Declared native enum types, deduped across models and columns in
+    // deterministic order (a shared StrEnum reconciles exactly once).
+    let mut declared: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for model in &modelset.payload.models {
+        for col in &model.columns {
+            if let Ok(ResolvedStorage::PgEnum { type_name, labels }) =
+                resolve_column_storage(col, Dialect::Postgres)
+            {
+                declared.entry(type_name).or_insert(labels);
+            }
+        }
+    }
+    if declared.is_empty() {
+        return Ok(false);
+    }
+
+    let live = live_enum_type_labels(engine).await?;
+    let mut ran = false;
+    for (type_name, labels) in &declared {
+        let Some(live_labels) = live.get(type_name) else { continue };
+        for label in missing_enum_labels(labels, live_labels) {
+            let sql = render_pg_enum_add_value(type_name, &label);
+            engine.execute_sql_unprepared(&sql).await.map_err(|e| {
+                crate::errors::map_db_error(
+                    &format!(
+                        "Auto-migrate failed to add enum label '{label}' to type '{type_name}'"
+                    ),
+                    e,
+                )
+            })?;
+            ran = true;
+        }
+    }
+    Ok(ran)
 }
 
 /// Manually run the auto-migrate pass against a connected engine.
