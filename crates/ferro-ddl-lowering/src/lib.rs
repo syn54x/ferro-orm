@@ -512,6 +512,36 @@ pub fn missing_enum_labels(declared: &[String], live: &[String]) -> Vec<String> 
         .collect()
 }
 
+/// The warn-never-act half of the label-addition decision (ADR-0011): labels
+/// the live type carries that the model no longer declares, in live (enum
+/// sort) order. Rows may still hold these labels and older code may still be
+/// running against the schema, so callers warn loudly and never remove —
+/// removal and rename are reviewed-migration territory.
+pub fn extra_enum_labels(declared: &[String], live: &[String]) -> Vec<String> {
+    live.iter()
+        .filter(|label| !declared.contains(label))
+        .cloned()
+        .collect()
+}
+
+/// The warn-never-act message for one drifted enum type, or `None` when
+/// nothing is extra. Single-sourced like [`refused_conversion_warning`]:
+/// callers emit it verbatim, never re-derive the wording.
+pub fn extra_enum_labels_warning(type_name: &str, extra: &[String]) -> Option<String> {
+    if extra.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = extra.iter().map(|l| format!("'{l}'")).collect();
+    Some(format!(
+        "Enum type '{}' has label(s) {} that the model no longer declares. \
+         Label addition is append-only: ferro never removes enum labels \
+         (existing rows may still hold them). Remove or rename labels with \
+         a reviewed Alembic migration.",
+        type_name,
+        listed.join(", ")
+    ))
+}
+
 /// One `ALTER TYPE ... ADD VALUE IF NOT EXISTS` for a label addition.
 /// `IF NOT EXISTS` makes concurrent boots and shared-type replans harmless;
 /// executed outside transactions (autocommit) so the statement is legal on
@@ -1503,6 +1533,29 @@ mod tests {
         let declared = vec!["plaid".to_string()];
         let live = vec!["plaid".to_string(), "legacy".to_string()];
         assert!(missing_enum_labels(&declared, &live).is_empty());
+    }
+
+    #[test]
+    fn extra_enum_labels_returns_undeclared_live_labels_in_live_order() {
+        let declared = vec!["plaid".to_string()];
+        let live = vec!["legacy".to_string(), "plaid".to_string(), "old".to_string()];
+        assert_eq!(extra_enum_labels(&declared, &live), vec!["legacy", "old"]);
+        assert!(extra_enum_labels(&live, &live).is_empty());
+    }
+
+    #[test]
+    fn extra_enum_labels_warning_is_pinned_and_names_the_exit() {
+        assert_eq!(
+            extra_enum_labels_warning("provider", &["legacy".to_string()]),
+            Some(
+                "Enum type 'provider' has label(s) 'legacy' that the model no longer \
+                 declares. Label addition is append-only: ferro never removes enum \
+                 labels (existing rows may still hold them). Remove or rename labels \
+                 with a reviewed Alembic migration."
+                    .to_string()
+            )
+        );
+        assert_eq!(extra_enum_labels_warning("provider", &[]), None);
     }
 
     #[test]
