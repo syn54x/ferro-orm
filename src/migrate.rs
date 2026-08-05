@@ -13,8 +13,9 @@
 
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
-    Dialect, ResolvedStorage, information_schema_to_db_type_token, missing_enum_labels,
-    render_pg_enum_add_value, resolve_column_storage,
+    Dialect, ResolvedStorage, extra_enum_labels, extra_enum_labels_warning,
+    information_schema_to_db_type_token, missing_enum_labels, render_pg_enum_add_value,
+    resolve_column_storage,
 };
 use ferro_migrate::{MigrationOp, emit_sql_with_ir, plan_from_ir};
 use ferro_schema_ir::{
@@ -437,7 +438,7 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
     // committed before a table plan (e.g. a new column defaulting to it)
     // can reference it.
     if backend == Dialect::Postgres {
-        ddl_ran |= add_missing_enum_labels(&engine, &modelset).await?;
+        ddl_ran |= add_missing_enum_labels(&engine, &modelset, &mut warnings).await?;
     }
 
     for (_name, model) in order_models_for_migration(schemas, &modelset) {
@@ -580,6 +581,7 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
 async fn add_missing_enum_labels(
     engine: &EngineHandle,
     modelset: &IrEnvelope<SchemaIrPayload>,
+    warnings: &mut Vec<String>,
 ) -> PyResult<bool> {
     // Declared native enum types, deduped across models and columns in
     // deterministic order (a shared StrEnum reconciles exactly once).
@@ -601,6 +603,13 @@ async fn add_missing_enum_labels(
     let mut ran = false;
     for (type_name, labels) in &declared {
         let Some(live_labels) = live.get(type_name) else { continue };
+        // Warn-never-act (ADR-0011): live labels the model no longer declares
+        // are named loudly — rows may still hold them — but never removed.
+        // Once per drifted type, not per table referencing it.
+        let extra = extra_enum_labels(labels, live_labels);
+        if let Some(warning) = extra_enum_labels_warning(type_name, &extra) {
+            warnings.push(warning);
+        }
         for label in missing_enum_labels(labels, live_labels) {
             let sql = render_pg_enum_add_value(type_name, &label);
             engine.execute_sql_unprepared(&sql).await.map_err(|e| {
