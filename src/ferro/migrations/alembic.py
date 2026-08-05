@@ -7,7 +7,12 @@ except ImportError:
     sa = None
 
 from .._annotation_utils import _VARCHAR_RE
-from .._core import _ddl_fk_name, _render_check_body, _resolve_storage_type
+from .._core import (
+    _ddl_fk_name,
+    _plan_enum_label_addition,
+    _render_check_body,
+    _resolve_storage_type,
+)
 
 #: SQLAlchemy ``naming_convention`` mirroring the Rust emitter's names. IR-backed
 #: metadata names every artifact explicitly; this convention covers any
@@ -271,3 +276,135 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
         except ValueError:
             return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Label addition comparator (ADR-0011; CONTEXT.md *label addition*).
+#
+# Alembic core is blind to enum label drift: autogenerate against a database
+# whose native enum type is missing a model-declared label produces an empty
+# revision, and the first use of the new member fails at runtime (#328). This
+# comparator is the second mechanical consumer of the label-addition decision
+# table (AGENTS.md § I-1): the diff AND the rendered statements come from the
+# Rust core over FFI (`_plan_enum_label_addition`), byte-identical to what the
+# auto-migrate reconciliation pass executes.
+#
+# There is no `migrate_updates` gate here — running autogenerate is itself the
+# request for a diff; parity is in the decision, not the gate. The generated
+# ops render inside `op.get_context().autocommit_block()` so the revision is
+# legal on every supported Postgres version and the label is committed before
+# any table op that references it; label additions are inserted ahead of the
+# revision's table ops for the same reason. Extra live labels render as a
+# comment (warn-never-act): removal is reviewed-migration territory.
+# ---------------------------------------------------------------------------
+
+try:
+    from alembic.autogenerate import comparators as _alembic_comparators
+    from alembic.autogenerate import renderers as _alembic_renderers
+    from alembic.operations.ops import MigrateOperation as _MigrateOperation
+except ImportError:  # pragma: no cover - alembic optional at import time
+    _alembic_comparators = None
+
+
+if _alembic_comparators is not None:
+
+    class AddEnumLabelsOp(_MigrateOperation):
+        """Autogenerate carrier for one ferro-owned enum type's label drift.
+
+        Renders to plain ``op.execute`` calls — a generated revision does not
+        import ferro to run.
+        """
+
+        def __init__(
+            self,
+            type_name: str,
+            statements: list[str],
+            extra_labels: list[str],
+        ) -> None:
+            self.type_name = type_name
+            self.statements = statements
+            self.extra_labels = extra_labels
+
+        def to_diff_tuple(self):
+            return (
+                "ferro_add_enum_labels",
+                self.type_name,
+                tuple(self.statements),
+                tuple(self.extra_labels),
+            )
+
+        def reverse(self):
+            # Labels cannot be removed in place; the downgrade is a no-op by
+            # the same warn-never-act contract that governs upgrades.
+            return AddEnumLabelsOp(self.type_name, [], [])
+
+    @_alembic_comparators.dispatch_for("schema")
+    def _compare_enum_labels(autogen_context, upgrade_ops, schemas) -> None:
+        if autogen_context.dialect.name != "postgresql":
+            return
+        metadata = autogen_context.metadata
+        if metadata is None:
+            return
+
+        # Declared native enum types: the named sa.Enum types the bridge maps
+        # from the shared storage decision (`_sa_type_from_ir_column`).
+        declared: dict[str, list[str]] = {}
+        for table in metadata.tables.values():
+            for column in table.columns:
+                if isinstance(column.type, sa.Enum) and column.type.name:
+                    declared.setdefault(str(column.type.name), list(column.type.enums))
+        if not declared:
+            return
+
+        # Live labels per type in enum sort order — the same catalog read the
+        # reconciliation pass takes, scoped to the connection's schema.
+        rows = autogen_context.connection.execute(
+            sa.text(
+                "SELECT t.typname AS type_name, e.enumlabel AS label "
+                "FROM pg_type t "
+                "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "JOIN pg_enum e ON e.enumtypid = t.oid "
+                "WHERE n.nspname = current_schema() "
+                "ORDER BY t.typname, e.enumsortorder"
+            )
+        ).fetchall()
+        live: dict[str, list[str]] = {}
+        for row in rows:
+            live.setdefault(row.type_name, []).append(row.label)
+
+        # A live type with no model-derived counterpart is user-owned; a
+        # declared type absent live belongs to table-creation ops. Insert
+        # drifted types ahead of the table ops, in deterministic order.
+        drifted = []
+        for type_name in sorted(declared):
+            if type_name not in live:
+                continue
+            plan = json.loads(
+                _plan_enum_label_addition(
+                    type_name, declared[type_name], live[type_name]
+                )
+            )
+            if plan["statements"] or plan["extra_labels"]:
+                drifted.append(
+                    AddEnumLabelsOp(type_name, plan["statements"], plan["extra_labels"])
+                )
+        upgrade_ops.ops[:0] = drifted
+
+    @_alembic_renderers.dispatch_for(AddEnumLabelsOp)
+    def _render_add_enum_labels(autogen_context, op: AddEnumLabelsOp) -> list[str]:
+        lines: list[str] = []
+        if op.extra_labels:
+            listed = ", ".join(f"'{label}'" for label in op.extra_labels)
+            lines.append(
+                f"# ferro: enum type '{op.type_name}' has live label(s) {listed} "
+                "that the model no longer declares. Label addition is append-only "
+                "and never removes labels (rows may still hold them); remove or "
+                "rename them in a reviewed migration."
+            )
+        if op.statements:
+            # Outside the migration transaction: ALTER TYPE ... ADD VALUE is
+            # non-transactional before PG12, and the label must be committed
+            # before any table op below can reference it.
+            lines.append("with op.get_context().autocommit_block():")
+            lines.extend(f"    op.execute({stmt!r})" for stmt in op.statements)
+        return lines

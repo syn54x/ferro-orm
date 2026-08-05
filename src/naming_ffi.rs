@@ -79,6 +79,29 @@ pub fn _resolve_storage_type(column_ir_json: String, dialect: String) -> PyResul
     Ok(payload.to_string())
 }
 
+/// The label-addition decision over FFI (ADR-0011): given one enum type's
+/// declared and live labels, return the Rust-rendered `ADD VALUE` statements
+/// (in declared order) and the extra warn-never-act labels (in live order).
+/// The Alembic autogenerate comparator consumes this instead of re-deriving
+/// the diff or re-rendering the SQL (AGENTS.md § I-1) — the auto-migrate
+/// planner and the generated revision execute byte-identical statements.
+#[pyfunction]
+pub fn _plan_enum_label_addition(
+    type_name: String,
+    declared: Vec<String>,
+    live: Vec<String>,
+) -> String {
+    let statements: Vec<String> = ferro_ddl_lowering::missing_enum_labels(&declared, &live)
+        .iter()
+        .map(|label| ferro_ddl_lowering::render_pg_enum_add_value(&type_name, label))
+        .collect();
+    serde_json::json!({
+        "statements": statements,
+        "extra_labels": ferro_ddl_lowering::extra_enum_labels(&declared, &live),
+    })
+    .to_string()
+}
+
 /// Render the shared `db_check` CHECK body (`"col" IN (v1, v2, ...)`) —
 /// byte-identical to the Rust emitters. `values` arrive pre-rendered (quoted)
 /// from the IR compiler.

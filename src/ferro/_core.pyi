@@ -221,3 +221,15 @@ def _resolve_storage_type(column_ir_json: str, dialect: str) -> str:
 def _render_check_body(column: str, values: list[str]) -> str:
     """The shared db_check CHECK body, byte-identical to the Rust emitters."""
     ...
+
+def _plan_enum_label_addition(
+    type_name: str, declared: list[str], live: list[str]
+) -> str:
+    """The label-addition decision (ADR-0011) for one enum type.
+
+    Returns JSON: ``{"statements": [...], "extra_labels": [...]}`` — the
+    Rust-rendered ``ADD VALUE IF NOT EXISTS`` statements for model-declared
+    labels the live type is missing, and the live labels the model no longer
+    declares (warn-never-act).
+    """
+    ...

@@ -27,7 +27,7 @@ async def test_migrate_updates_appends_missing_label_and_member_round_trips(
             'CREATE TABLE "feed" ('
             '"id" serial PRIMARY KEY, "provider" "provider" NOT NULL)'
         )
-        await execute("INSERT INTO \"feed\" (\"provider\") VALUES ('plaid')")
+        await execute('INSERT INTO "feed" ("provider") VALUES (\'plaid\')')
     reset_engine()
 
     class Provider(StrEnum):
@@ -85,9 +85,7 @@ async def test_extra_live_labels_warn_and_are_never_removed(db_url, clean_regist
 
     with pytest.warns(UserWarning, match=r"legacy") as record:
         await connect(db_url, migrate_updates=True)
-    enum_warnings = [
-        str(w.message) for w in record if "provider" in str(w.message)
-    ]
+    enum_warnings = [str(w.message) for w in record if "provider" in str(w.message)]
     assert len(enum_warnings) == 1, "warning fires per drifted type, exactly once"
     assert "'legacy'" in enum_warnings[0]
     assert "Alembic" in enum_warnings[0], "warning names the reviewed-migration exit"
@@ -280,3 +278,103 @@ async def test_second_boot_is_a_noop(db_url, clean_registry, recwarn):
     assert not [w for w in recwarn if "provider" in str(w.message)]
     async with engines.session():
         assert await _live_labels("provider") == ["plaid", "mx"]
+
+
+# ---------------------------------------------------------------------------
+# Alembic comparator (#333): the second consumer of the label-addition
+# decision (AGENTS.md § I-1) — autogenerate sees the same drift.
+# ---------------------------------------------------------------------------
+
+
+def _autogen_upgrade_code(postgres_base_url, db_schema_name):
+    """Run real autogenerate against the live per-test schema and render the
+    upgrade code, mirroring test_cross_emitter_parity.py's connection dance."""
+    import sqlalchemy as sa
+    from alembic.autogenerate import produce_migrations, render_python_code
+    from alembic.migration import MigrationContext
+
+    from ferro.migrations import get_metadata
+
+    metadata = get_metadata()
+    for scheme in ("postgresql://", "postgres://"):
+        if postgres_base_url.startswith(scheme):
+            sync_url = "postgresql+psycopg://" + postgres_base_url[len(scheme) :]
+            break
+    else:
+        sync_url = postgres_base_url
+    engine = sa.create_engine(sync_url)
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
+            ctx = MigrationContext.configure(
+                conn, opts={"compare_type": True, "compare_server_default": True}
+            )
+            script = produce_migrations(ctx, metadata)
+        return render_python_code(script.upgrade_ops)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_autogenerate_emits_label_additions_in_autocommit_block(
+    db_url, postgres_base_url, db_schema_name, clean_registry
+):
+    """The reviewed-migration door sees the drift: the generated revision
+    carries the addition inside an autocommit block (runnable on every
+    supported PG version) and a comment for the warn-never-act direction."""
+    await connect(db_url)
+    async with engines.session():
+        await execute("CREATE TYPE \"provider\" AS ENUM ('plaid', 'legacy')")
+        await execute(
+            'CREATE TABLE "feed" ("id" serial PRIMARY KEY, "provider" "provider" NOT NULL)'
+        )
+    reset_engine()
+
+    class Provider(StrEnum):
+        PLAID = "plaid"
+        MX = "mx"
+
+    class Feed(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        provider: Provider
+
+    code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
+    assert "autocommit_block" in code
+    # The op.execute payload is the Rust-rendered statement (repr-quoted by
+    # the renderer); assert on its stable substrings.
+    assert "ADD VALUE IF NOT EXISTS" in code
+    assert '"provider"' in code
+    assert "mx" in code
+    assert "legacy" in code, "extra live label surfaces as a revision comment"
+    assert "reviewed" in code, "comment names the reviewed-migration exit"
+
+
+@pytest.mark.asyncio
+async def test_autogenerate_emits_nothing_for_enums_in_sync(
+    db_url, postgres_base_url, db_schema_name, clean_registry
+):
+    """No phantom diffs (AGENTS.md § I-1): model and database agree → the
+    comparator stays silent."""
+    await connect(db_url)
+    async with engines.session():
+        await execute("CREATE TYPE \"provider\" AS ENUM ('plaid', 'mx')")
+        await execute(
+            'CREATE TABLE "feed" ("id" serial PRIMARY KEY, "provider" "provider" NOT NULL)'
+        )
+    reset_engine()
+
+    class Provider(StrEnum):
+        PLAID = "plaid"
+        MX = "mx"
+
+    class Feed(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        provider: Provider
+
+    code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
+    assert "ADD VALUE" not in code
+    assert "autocommit_block" not in code
+
+
+# The cross-language statement parity pin lives in the canonical parity seam:
+# tests/test_cross_emitter_parity.py::test_label_addition_statement_parity_pin.
