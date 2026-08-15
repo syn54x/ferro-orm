@@ -17,11 +17,11 @@ FerroError
 ```
 
 `ForeignKeyViolationError` covers every foreign-key rejection: a dangling
-insert, and a parent delete or key update blocked by `on_delete="RESTRICT"`
-(or `ON UPDATE RESTRICT`). Catch the type, not a SQLSTATE. On PostgreSQL 17
-RESTRICT reports `23503`; PostgreSQL 18 reports `23001`
-(`restrict_violation`). Both are this class. `exc.sqlstate` is the raw
-driver code — it is not rewritten.
+insert, and deleting a row still referenced by `ForeignKey(on_delete="RESTRICT")`.
+Catch the type, not a SQLSTATE. On PostgreSQL 17 that RESTRICT delete
+reports `23503`; PostgreSQL 18 reports `23001` (`restrict_violation`).
+Both are this class. `exc.sqlstate` is the raw driver code — it is not
+rewritten.
 
 Catch a duplicate insert without matching driver text:
 
