@@ -132,6 +132,71 @@ async def test_foreign_key_violation_is_typed(db_url, db_backend):
             assert exc.sqlstate == "23503"
 
 
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_restrict_parent_instance_delete_is_typed(db_url, db_backend):
+    class RestrictDelParent(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        kids: Relation[list["RestrictDelChild"]] = BackRef()
+
+    class RestrictDelChild(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        parent: Annotated[
+            RestrictDelParent, ForeignKey(related_name="kids", on_delete="RESTRICT")
+        ]
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        parent = RestrictDelParent(name="p")
+        await parent.save()
+        await RestrictDelChild(title="c", parent_id=parent.id).save()
+
+        with pytest.raises(ForeignKeyViolationError) as excinfo:
+            await parent.delete()
+
+        exc = excinfo.value
+        assert isinstance(exc, IntegrityError)
+        if db_backend == "postgres":
+            assert exc.sqlstate is not None
+            assert exc.sqlstate in {"23503", "23001"}
+            assert exc.constraint is not None
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_restrict_parent_query_delete_is_typed(db_url, db_backend):
+    class RestrictQDelParent(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        kids: Relation[list["RestrictQDelChild"]] = BackRef()
+
+    class RestrictQDelChild(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        parent: Annotated[
+            RestrictQDelParent, ForeignKey(related_name="kids", on_delete="RESTRICT")
+        ]
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        parent = RestrictQDelParent(name="p")
+        await parent.save()
+        pk = parent.id
+        await RestrictQDelChild(title="c", parent_id=pk).save()
+
+        with pytest.raises(ForeignKeyViolationError) as excinfo:
+            await RestrictQDelParent.where(lambda parent: parent.id == pk).delete()
+
+        exc = excinfo.value
+        assert isinstance(exc, IntegrityError)
+        if db_backend == "postgres":
+            assert exc.sqlstate is not None
+            assert exc.sqlstate in {"23503", "23001"}
+            assert exc.constraint is not None
+
+
 @pytest.mark.asyncio
 async def test_unopenable_database_is_operational_error(tmp_path):
     # No mode=rwc: SQLite refuses to open a missing file, which surfaces as a

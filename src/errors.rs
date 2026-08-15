@@ -8,9 +8,9 @@
 //!
 //! Classification policy (DBAPI-shaped):
 //! - Constraint violations map to the `IntegrityError` subclasses.
-//!   Ferro's integrity-code table is the authority (`23001`/`23503` FK,
-//!   `23505` unique, `23502` not-null, `23514` check); sqlx `kind()` is
-//!   the fallback for SQLite and unknown codes.
+//!   Ferro's integrity-code table is the authority (`23001`/`23503`/`1811`
+//!   FK, `23505` unique, `23502` not-null, `23514` check); sqlx `kind()`
+//!   is the fallback for other SQLite codes and unknown SQLSTATEs.
 //! - Environment/runtime failures (I/O, TLS, pool exhaustion) map to
 //!   `OperationalError`.
 //! - Client-side misuse of the interface (configuration, protocol,
@@ -26,10 +26,11 @@ static EXCEPTIONS_MODULE: GILOnceCell<Py<PyAny>> = GILOnceCell::new();
 /// Python exception class name for a database error, from Ferro's
 /// integrity-code table then sqlx `kind()` as fallback.
 ///
-/// Known codes win so Postgres 18 `23001` (`restrict_violation`) is
-/// `ForeignKeyViolationError` even though sqlx still reports `Other`.
-/// Unknown codes (including `23000` / `23P01`) and SQLite (no SQLSTATE)
-/// fall through to `kind()`.
+/// Known codes win so Postgres 18 `23001` (`restrict_violation`) and
+/// SQLite `1811` (`SQLITE_CONSTRAINT_TRIGGER`, how RESTRICT is
+/// implemented) are `ForeignKeyViolationError` even though sqlx reports
+/// `Other`. Unknown codes (including `23000` / `23P01`) fall through to
+/// `kind()`.
 pub(crate) fn exception_name_for_database(
     kind: sqlx::error::ErrorKind,
     code: Option<&str>,
@@ -37,7 +38,7 @@ pub(crate) fn exception_name_for_database(
     use sqlx::error::ErrorKind;
 
     match code {
-        Some("23001") | Some("23503") => "ForeignKeyViolationError",
+        Some("23001") | Some("23503") | Some("1811") => "ForeignKeyViolationError",
         Some("23505") => "UniqueViolationError",
         Some("23502") => "NotNullViolationError",
         Some("23514") => "CheckViolationError",
@@ -147,10 +148,19 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_restrict_trigger_1811_is_foreign_key() {
+        assert_eq!(
+            exception_name_for_database(ErrorKind::Other, Some("1811")),
+            "ForeignKeyViolationError"
+        );
+    }
+
+    #[test]
     fn integrity_codes_win_over_kind() {
         let cases = [
             ("23001", "ForeignKeyViolationError"),
             ("23503", "ForeignKeyViolationError"),
+            ("1811", "ForeignKeyViolationError"),
             ("23505", "UniqueViolationError"),
             ("23502", "NotNullViolationError"),
             ("23514", "CheckViolationError"),
