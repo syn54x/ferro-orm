@@ -17,7 +17,9 @@ from .._core import (
     _ddl_fk_name,
     _ddl_single_index_name,
     _ddl_single_unique_name,
+    _ddl_table_check_constraint_name,
 )
+from ..checks import TableCheckSpec, compile_table_checks
 from ..columns import (
     ColumnSpec,
     build_column_specs,
@@ -100,6 +102,38 @@ def _composite_unique_name(table_name: str, columns: list[str]) -> str:
     return _ddl_composite_unique_name(table_name, columns)
 
 
+def _table_check_name(table_name: str, suffix: str) -> str:
+    """Canonical table-check constraint name (shared Rust builder)."""
+    return _ddl_table_check_constraint_name(table_name, suffix)
+
+
+def _table_check_entries(
+    model_name: str,
+    table_name: str,
+    table_checks: Sequence[TableCheckSpec],
+    column_check_names: set[str],
+) -> list[dict[str, Any]]:
+    """Name each compiled table check and reject collisions.
+
+    A ``db_check`` column already owns ``ck_<table>_<col>``; a table check that
+    resolved to the same live name would silently shadow (or be shadowed by) it
+    on one emitter, so it fails at class definition instead. Declaration order
+    is preserved — the CREATE TABLE emitter renders the checks in IR order.
+    """
+    entries: list[dict[str, Any]] = []
+    for spec in table_checks:
+        name = _table_check_name(table_name, spec.suffix)
+        if name in column_check_names:
+            raise TypeError(
+                f"{model_name}.__ferro_checks__ check {spec.suffix!r} resolves to the "
+                f"constraint name {name!r}, which a Field(db_check=True) column "
+                f"check on '{table_name}' already owns. Rename the table check's "
+                "suffix."
+            )
+        entries.append({"name": name, "predicate": spec.predicate})
+    return entries
+
+
 def compile_schema_ir_payload(
     model_name: str,
     columns: Sequence[ColumnSpec],
@@ -107,6 +141,7 @@ def compile_schema_ir_payload(
     table_name: str | None = None,
     composite_uniques: Sequence[Sequence[str]] = (),
     composite_indexes: Sequence[Sequence[str]] = (),
+    table_checks: Sequence[TableCheckSpec] = (),
 ) -> dict[str, Any]:
     """Compile column specs into a SchemaIR payload object (locked shape).
 
@@ -116,6 +151,8 @@ def compile_schema_ir_payload(
         table_name: Physical table name (defaults to ``model_name.lower()``).
         composite_uniques: Validated composite-unique column groups.
         composite_indexes: Validated composite-index column groups.
+        table_checks: Compiled ``__ferro_checks__`` table checks, in declaration
+            order (see :func:`ferro.checks.compile_table_checks`).
 
     Returns:
         A SchemaIR payload object ready to be wrapped in an IR envelope.
@@ -209,6 +246,17 @@ def compile_schema_ir_payload(
         "uniques": sorted(uniques, key=lambda item: item["name"]),
         "checks": sorted(checks, key=lambda item: item["name"]),
     }
+    # Absent, not empty, when no table checks are declared: the Rust IR skips
+    # the field when empty, and every existing model's envelope (and therefore
+    # its fingerprint) stays byte-identical.
+    table_check_entries = _table_check_entries(
+        model_name,
+        resolved_table_name,
+        table_checks,
+        {item["name"] for item in checks},
+    )
+    if table_check_entries:
+        model_payload["table_checks"] = table_check_entries
     return {"dialect_agnostic": True, "models": [model_payload]}
 
 
@@ -229,6 +277,7 @@ def _compile_and_persist_model_envelope(
     table_name: str | None = None,
     composite_uniques: Sequence[Sequence[str]] = (),
     composite_indexes: Sequence[Sequence[str]] = (),
+    table_checks: Sequence[TableCheckSpec] = (),
 ) -> dict[str, Any]:
     """Compile one model or join table to SchemaIR and persist its envelope.
 
@@ -243,6 +292,7 @@ def _compile_and_persist_model_envelope(
         table_name=table_name,
         composite_uniques=composite_uniques,
         composite_indexes=composite_indexes,
+        table_checks=table_checks,
     )
     envelope = wrap_schema_ir(payload)
     _persist_schema_ir_envelope(model_name, envelope)
@@ -310,12 +360,17 @@ def compile_model_schema_ir(
     indexes = drop_overlap_with_uniques(
         normalized_composite_indexes(model_cls, column_names), uniques, model_name
     )
+    # Table checks compile against THIS pass's specs (never the class's
+    # published ones), so a predicate can reference a shadow FK column at class
+    # definition and the resolved second pass re-lowers against fresh specs.
+    table_checks = compile_table_checks(model_cls, model_name, specs)
     envelope = _compile_and_persist_model_envelope(
         model_name,
         tuple(specs.values()),
         table_name=getattr(model_cls, "__ferro_table__", None),
         composite_uniques=uniques,
         composite_indexes=indexes,
+        table_checks=table_checks,
     )
     # Publish specs onto the class only after compile + persist succeed, so a
     # composite-validation or persist failure leaves the prior specs in place

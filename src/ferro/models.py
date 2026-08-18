@@ -12,6 +12,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from .checks import Check
     from .columns import ColumnSpec, RelationSpec, ReverseSpec
     from .query import Predicate, ProjectedQuery, RowSelector
     from .session import Session
@@ -202,6 +203,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     join tables get a non-unique reverse-direction composite index
     automatically; opt out with ``ManyToMany(reverse_index=False)``.
 
+    **Table checks:** declare a ``typing.ClassVar`` named ``__ferro_checks__``
+    as a tuple of :class:`~ferro.checks.Check` objects — each a name suffix
+    plus a ferro predicate lambda over this model's own columns, e.g.
+    ``(Check("at_most_one_outflow", lambda transfer: (transfer.outflow_transaction
+    == None) | (transfer.outflow_activity == None)),)``. The live constraint is
+    ``ck_<table>_<suffix>``, emitted inline in ``CREATE TABLE`` on both backends
+    (ADR-0012, ADR-0014). For a single-column closed-domain CHECK use
+    ``Field(db_check=True)`` instead.
+
     Examples:
         >>> class User(Model):
         ...     id: int | None = None
@@ -210,6 +220,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = ()
     __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = ()
+    #: Table-level CHECK constraints (ADR-0012); an empty tuple is a no-op.
+    __ferro_checks__: ClassVar[tuple["Check", ...]] = ()
     __ferro_columns__: ClassVar[dict[str, "ColumnSpec"]] = {}
     #: The single PK field name, derived once at the compile choke point
     #: alongside ``__ferro_columns__``; ``None`` for a PK-less model.

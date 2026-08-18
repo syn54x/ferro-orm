@@ -11,6 +11,7 @@ from .._core import (
     _ddl_fk_name,
     _plan_enum_label_addition,
     _render_check_body,
+    _render_table_check_body,
     _resolve_storage_type,
 )
 
@@ -107,6 +108,21 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
         if not isinstance(values, list) or not values:
             continue
         sqltext = _render_check_body(column, values)
+        table_args.append(sa.CheckConstraint(sqltext, name=name))
+
+    # Table checks (ADR-0012): the same named CHECKs the Rust emitter folds
+    # into CREATE TABLE, with the body rendered by the shared Rust renderer
+    # over the IR predicate — never a second body language (I-1).
+    for table_check in model_ir.get("table_checks") or []:
+        if not isinstance(table_check, dict):
+            continue
+        name = table_check.get("name")
+        predicate = table_check.get("predicate")
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(predicate, dict) or not predicate:
+            continue
+        sqltext = _render_table_check_body(json.dumps(predicate))
         table_args.append(sa.CheckConstraint(sqltext, name=name))
 
     # Every `uniques[]` entry — single-column included — is a standalone named
