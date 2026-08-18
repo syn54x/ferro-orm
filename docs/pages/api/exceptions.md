@@ -36,6 +36,17 @@ except UniqueViolationError as exc:
     print(exc.driver_message)  # original driver text, for logs
 ```
 
+The same pattern applies to table checks declared in `__ferro_checks__` — a row that violates the predicate raises `CheckViolationError`:
+
+```python
+from ferro import CheckViolationError
+
+try:
+    await Pair.create(left="both", right="set")
+except CheckViolationError as exc:
+    print(exc.constraint)  # e.g. "ck_pair_at_most_one_side" on Postgres
+```
+
 `ModelDoesNotExist` is raised by primary-key lookups like `Model.get(pk)` when
 no row matches — use `Model.get_or_none(pk)` if you prefer `None` over an
 exception — and by `save()` on a persisted instance whose row no longer exists
