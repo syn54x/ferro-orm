@@ -202,6 +202,7 @@ fn live_columns_to_schema_ir(
                 }).collect(),
                 uniques: Vec::<SchemaUnique>::new(),
                 checks: Vec::<SchemaCheck>::new(),
+                table_checks: Vec::new(),
             }],
         },
     }

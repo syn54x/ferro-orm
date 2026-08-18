@@ -42,6 +42,7 @@ fn schema_model(table: &str, cols: Vec<SchemaColumn>) -> SchemaModel {
         indexes: Vec::<SchemaIndex>::new(),
         uniques: Vec::<SchemaUnique>::new(),
         checks: Vec::<SchemaCheck>::new(),
+        table_checks: Vec::new(),
     }
 }
 

@@ -637,11 +637,73 @@ pub fn composite_unique_index_name(table_lower: &str, col_names: &[&str]) -> Str
 
 /// Check constraint name (`ck_<table>_<col>`).
 pub fn db_check_constraint_name(table_lower: &str, col_name: &str) -> String {
-    let raw = format!("ck_{table_lower}_{col_name}");
+    table_check_constraint_name(table_lower, col_name)
+}
+
+/// Table-check constraint name (`ck_<table>_<suffix>`) with 63-char guard.
+pub fn table_check_constraint_name(table_lower: &str, suffix: &str) -> String {
+    let raw = format!("ck_{table_lower}_{suffix}");
     if raw.chars().count() > 63 {
         return format!("{}_ck", raw.chars().take(60).collect::<String>());
     }
     raw
+}
+
+/// Render a structured check predicate to its CHECK body SQL fragment.
+pub fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
+    match expr {
+        ferro_schema_ir::CheckExpr::And { left, right } => format!(
+            "({}) AND ({})",
+            render_check_expr(left),
+            render_check_expr(right)
+        ),
+        ferro_schema_ir::CheckExpr::Or { left, right } => format!(
+            "({}) OR ({})",
+            render_check_expr(left),
+            render_check_expr(right)
+        ),
+        ferro_schema_ir::CheckExpr::Not { child } => format!("NOT ({})", render_check_expr(child)),
+        ferro_schema_ir::CheckExpr::IsNull { column } => {
+            format!("{} IS NULL", quote_ident(column))
+        }
+        ferro_schema_ir::CheckExpr::IsNotNull { column } => {
+            format!("{} IS NOT NULL", quote_ident(column))
+        }
+        ferro_schema_ir::CheckExpr::Cmp { column, op, other } => {
+            let rhs = match other {
+                ferro_schema_ir::CheckOperand::Column { name } => quote_ident(name),
+                ferro_schema_ir::CheckOperand::Literal { token } => token.clone(),
+            };
+            format!(
+                "{} {} {}",
+                quote_ident(column),
+                check_cmp_op_sql(*op),
+                rhs
+            )
+        }
+        ferro_schema_ir::CheckExpr::In { column, values } => {
+            format!("{} IN ({})", quote_ident(column), values.join(", "))
+        }
+        ferro_schema_ir::CheckExpr::Like { column, pattern } => {
+            format!("{} LIKE {}", quote_ident(column), pattern)
+        }
+    }
+}
+
+fn check_cmp_op_sql(op: ferro_schema_ir::CheckCmpOp) -> &'static str {
+    match op {
+        ferro_schema_ir::CheckCmpOp::Eq => "=",
+        ferro_schema_ir::CheckCmpOp::Ne => "<>",
+        ferro_schema_ir::CheckCmpOp::Lt => "<",
+        ferro_schema_ir::CheckCmpOp::Le => "<=",
+        ferro_schema_ir::CheckCmpOp::Gt => ">",
+        ferro_schema_ir::CheckCmpOp::Ge => ">=",
+    }
+}
+
+/// The CHECK body for a table check — byte-identical across emitters (I-1).
+pub fn render_table_check_body(check: &ferro_schema_ir::SchemaTableCheck) -> String {
+    render_check_expr(&check.predicate)
 }
 
 /// The CHECK body for a `db_check` enum constraint — byte-identical across the
@@ -957,6 +1019,83 @@ mod tests {
         assert_eq!(single_index_name("user", "email"), "idx_user_email");
         assert_eq!(single_unique_index_name("user", "email"), "uq_user_email");
         assert_eq!(db_check_constraint_name("user", "role"), "ck_user_role");
+        assert_eq!(
+            table_check_constraint_name("transfer", "at_most_one_outflow"),
+            "ck_transfer_at_most_one_outflow"
+        );
+    }
+
+    #[test]
+    fn table_check_constraint_name_truncates_above_63() {
+        let long_suffix = "a".repeat(70);
+        let result = table_check_constraint_name("verylongtable", &long_suffix);
+        assert_eq!(result.chars().count(), 63);
+        assert!(result.ends_with("_ck"));
+        assert_eq!(
+            result,
+            db_check_constraint_name("verylongtable", &long_suffix),
+            "table and column checks share the truncation rule"
+        );
+    }
+
+    fn transfer_at_most_one_outflow_check() -> ferro_schema_ir::SchemaTableCheck {
+        use ferro_schema_ir::CheckExpr;
+        ferro_schema_ir::SchemaTableCheck {
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+            predicate: CheckExpr::Or {
+                left: Box::new(CheckExpr::IsNull {
+                    column: "outflow_transaction_id".to_string(),
+                }),
+                right: Box::new(CheckExpr::IsNull {
+                    column: "outflow_activity_id".to_string(),
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn render_table_check_body_pins_transfer_is_null_or() {
+        assert_eq!(
+            render_table_check_body(&transfer_at_most_one_outflow_check()),
+            "(\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL)"
+        );
+    }
+
+    #[test]
+    fn render_check_expr_covers_cmp_in_and_like() {
+        use ferro_schema_ir::{CheckCmpOp, CheckExpr, CheckOperand};
+        assert_eq!(
+            render_check_expr(&CheckExpr::Cmp {
+                column: "amount".to_string(),
+                op: CheckCmpOp::Ge,
+                other: CheckOperand::Literal {
+                    token: "0".to_string(),
+                },
+            }),
+            "\"amount\" >= 0"
+        );
+        assert_eq!(
+            render_check_expr(&CheckExpr::In {
+                column: "status".to_string(),
+                values: vec!["'draft'".to_string(), "'active'".to_string()],
+            }),
+            "\"status\" IN ('draft', 'active')"
+        );
+        assert_eq!(
+            render_check_expr(&CheckExpr::Like {
+                column: "code".to_string(),
+                pattern: "'A%'".to_string(),
+            }),
+            "\"code\" LIKE 'A%'"
+        );
+        assert_eq!(
+            render_check_expr(&CheckExpr::Not {
+                child: Box::new(CheckExpr::IsNotNull {
+                    column: "deleted_at".to_string(),
+                }),
+            }),
+            "NOT (\"deleted_at\" IS NOT NULL)"
+        );
     }
 
     #[test]
