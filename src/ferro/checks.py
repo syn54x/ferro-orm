@@ -11,18 +11,23 @@ This module owns the declaration surface and the lowering from the evaluated
 derived by the SchemaIR compiler from the shared Rust builder
 (``_ddl_table_check_constraint_name``), never here.
 
-Supported predicate dialect in this release (ADR-0016): ``== None`` /
-``!= None`` — on a column, on a forward-FK relation, or on its shadow ``*_id``
-column — combined with ``&``, ``|``, and ``~``. Comparisons against literals,
-``.in_()``, ``.like()``, relation traversal, existence tests, and aggregates
-are rejected at class definition until the check-predicate dialect grows
-(#346); the lowering below is the single place new arms attach.
+Supported predicate dialect (ADR-0016): the root-column ``where()`` dialect —
+comparisons (including column-to-column), ``== None`` / ``!= None`` on a
+column or forward-FK relation (or its shadow ``*_id`` column), ``.in_()``,
+``.like()``, enum members as inlined labels, combined with ``&``, ``|``, and
+``~``. Closed-over variables, function calls (other than ``.in_()`` /
+``.like()``), relation traversal, existence tests, and aggregates fail at
+class definition. The lowering below is the single place new arms attach.
 """
 
 from __future__ import annotations
 
+import ast
+import enum
+import inspect
 import re
-from collections.abc import Mapping
+import textwrap
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,11 +40,31 @@ _SUFFIX_RE = re.compile(r"^[a-z][a-z0-9_]*\Z")
 _SUFFIX_SHAPE = "[a-z][a-z0-9_]*"
 
 #: Leaf operators that lower to a NULL test, and the ``CheckExpr`` kind each
-#: produces. Every other operator belongs to #346.
+#: produces.
 _NULL_TEST_KINDS = {"==": "is_null", "!=": "is_not_null"}
 
-#: How to spell a rejected leaf operator back to the user.
-_OPERATOR_SPELLING = {"IN": "in_()", "LIKE": "like()"}
+#: Comparison operators that lower to ``CheckExpr::Cmp``.
+_CMP_OPS = {
+    "==": "eq",
+    "!=": "ne",
+    "<": "lt",
+    "<=": "le",
+    ">": "gt",
+    ">=": "ge",
+}
+
+#: Method calls permitted inside a check predicate body.
+_ALLOWED_PREDICATE_CALLS = frozenset({"in_", "like"})
+
+#: Query methods rejected with a specific dialect message (not generic "call").
+_DISALLOWED_QUERY_METHOD_CALLS = {
+    "exists": "an existence test",
+    "sum": "an aggregate",
+    "avg": "an aggregate",
+    "min": "an aggregate",
+    "max": "an aggregate",
+    "count": "an aggregate",
+}
 
 
 @dataclass(frozen=True)
@@ -204,8 +229,8 @@ class _RelationNullProxy:
             f"check predicate traverses the relation {self._relation!r} to reach "
             f"{name!r}: relation traversal reads another table, which a CHECK "
             f"cannot do. Test the relation itself (t.{self._relation} == None) or "
-            f"its shadow column (t.{self._shadow}) — richer check predicates land "
-            "with #346."
+            f"its shadow column (t.{self._shadow}) — richer traversal stays "
+            "rejected (ADR-0016)."
         )
 
     def _reject_operator(self, symbol: str) -> Any:
@@ -293,15 +318,88 @@ def _reverse_relation_names(model_cls: type[Any]) -> frozenset[str]:
     )
 
 
-def _unsupported(model_name: str, suffix: str, what: str) -> "TypeError":
-    """The one rejection message for predicate forms #346 will add."""
+def _unsupported(model_name: str, suffix: str, what: str) -> TypeError:
+    """Rejection message for predicate forms outside the check dialect."""
     return TypeError(
         f"{model_name}.{FERRO_CHECKS} check {suffix!r} uses {what}, which check "
-        "predicates do not support yet. This release compiles NULL tests "
-        "(== None / != None, on a column, a forward-FK relation, or its shadow "
-        "*_id column) combined with & / | / ~ (ADR-0016). Richer predicates "
-        "land with #346."
+        "predicates do not support. A check predicate is the root-column "
+        "where() dialect: comparisons, IS NULL, AND/OR/NOT, .in_(), .like(), "
+        "and column-to-column tests with inlined literals — not relation "
+        "traversal, existence tests, aggregates, closed-over variables, or "
+        "function calls (ADR-0016)."
     )
+
+
+def _check_literal_token(value: Any) -> str:
+    """Render one Python value as a pre-quoted SQL literal token.
+
+    Mirrors the ``db_check`` enum-label quoting in
+    :func:`ferro.ir.compiler.compile_schema_ir_payload` — bools as
+    ``true``/``false``, numbers as ``str``, everything else single-quoted
+    with ``'`` escaped.
+    """
+    if isinstance(value, enum.Enum):
+        value = value.value
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (int, float)):
+        return str(value)
+    escaped = str(value).replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _lower_operand(value: Any, model_name: str, suffix: str) -> dict[str, Any]:
+    """Lower one comparison or ``IN`` RHS into a ``CheckOperand`` wire shape."""
+    if isinstance(value, FieldProxy):
+        if value.path:
+            raise _unsupported(
+                model_name,
+                suffix,
+                f"relation traversal (t.{'.'.join((*value.path, value.column))})",
+            )
+        return {"kind": "column", "name": value.column}
+    return {"kind": "literal", "token": _check_literal_token(value)}
+
+
+def _validate_predicate_source(
+    predicate: Callable[..., Any], model_name: str, suffix: str
+) -> None:
+    """Reject closed-over names and disallowed function calls in the lambda body."""
+    code = predicate.__code__
+    if code.co_freevars:
+        for name, cell in zip(code.co_freevars, predicate.__closure__ or (), strict=True):
+            value = cell.cell_contents
+            if isinstance(value, type) and issubclass(value, enum.Enum):
+                continue
+            raise TypeError(
+                f"{model_name}.{FERRO_CHECKS} check {suffix!r} closes over "
+                f"{name!r}: check predicates must use literals inlined into the "
+                "CHECK body, not variables from the enclosing scope (ADR-0016)."
+            )
+    try:
+        source = inspect.getsource(predicate)
+    except OSError:
+        return
+    tree = ast.parse(textwrap.dedent(source))
+    lambda_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Lambda)]
+    if not lambda_nodes:
+        return
+    for node in ast.walk(lambda_nodes[-1]):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            attr = node.func.attr
+            if attr in _ALLOWED_PREDICATE_CALLS:
+                continue
+            if attr in _DISALLOWED_QUERY_METHOD_CALLS:
+                raise _unsupported(
+                    model_name, suffix, _DISALLOWED_QUERY_METHOD_CALLS[attr]
+                )
+        raise TypeError(
+            f"{model_name}.{FERRO_CHECKS} check {suffix!r} contains a function "
+            "call: check predicates inline literals and column references only — "
+            "not SQL functions or arbitrary Python calls (ADR-0016)."
+        )
 
 
 def _lower_node(node: QueryNode, model_name: str, suffix: str) -> dict[str, Any]:
@@ -325,19 +423,33 @@ def _lower_node(node: QueryNode, model_name: str, suffix: str) -> dict[str, Any]
             suffix,
             f"relation traversal (t.{'.'.join((*node.path, str(node.column)))})",
         )
-    kind = _NULL_TEST_KINDS.get(str(node.operator))
-    if kind is None or node.value is not None:
-        operator = _OPERATOR_SPELLING.get(str(node.operator), str(node.operator))
-        if kind is not None:
-            raise _unsupported(
-                model_name,
-                suffix,
-                f"the literal comparison {node.column!r} {operator} {node.value!r}",
-            )
-        raise _unsupported(
-            model_name, suffix, f"the comparison operator {operator!r}"
-        )
-    return {"kind": kind, "column": node.column}
+    operator = str(node.operator)
+    if operator == "IN":
+        if not isinstance(node.value, list):
+            raise _unsupported(model_name, suffix, "a non-literal IN list")
+        return {
+            "kind": "in",
+            "column": node.column,
+            "values": [_check_literal_token(item) for item in node.value],
+        }
+    if operator == "LIKE":
+        return {
+            "kind": "like",
+            "column": node.column,
+            "pattern": _check_literal_token(node.value),
+        }
+    null_kind = _NULL_TEST_KINDS.get(operator)
+    if null_kind is not None and node.value is None:
+        return {"kind": null_kind, "column": node.column}
+    cmp_op = _CMP_OPS.get(operator)
+    if cmp_op is None:
+        raise _unsupported(model_name, suffix, f"the operator {operator!r}")
+    return {
+        "kind": "cmp",
+        "column": node.column,
+        "op": cmp_op,
+        "other": _lower_operand(node.value, model_name, suffix),
+    }
 
 
 def _resolve_check_node(
@@ -361,6 +473,7 @@ def _resolve_check_node(
         _reverse_relation_names(model_cls),
     )
     prefix = f"{model_name}.{FERRO_CHECKS} check {check.suffix!r}: "
+    _validate_predicate_source(check.predicate, model_name, check.suffix)
     try:
         result = check.predicate(proxy)
     except (AttributeError, TypeError, ValueError) as exc:
