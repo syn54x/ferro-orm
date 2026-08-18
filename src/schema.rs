@@ -59,9 +59,16 @@ pub(crate) fn order_models_for_migration(
 /// This is used by both the `connect(auto_migrate=True)` flow and the
 /// manual `create_tables()` function.
 ///
+/// Returns the tables that already existed when the pass started — the set the
+/// reconciliation pass owns (ADR-0010). A table this pass created is already
+/// exactly the model, so re-diffing it would only replay the create pass's own
+/// backend-limitation warnings.
+///
 /// # Errors
 /// Returns a `PyErr` if the SQL execution fails.
-pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
+pub async fn internal_create_tables(
+    engine: Arc<EngineHandle>,
+) -> PyResult<std::collections::HashSet<String>> {
     // The runtime CREATE TABLE path is emitted from the Python-compiled SchemaIR
     // via the shared `ferro_migrate` emitter (issue #153). The modelset must have
     // been pushed by the `connect`/`create_tables` Python wrappers first — a
@@ -134,7 +141,7 @@ pub async fn internal_create_tables(engine: Arc<EngineHandle>) -> PyResult<()> {
         crate::log_debug(format!("✅ Ferro Engine: Table '{}' created", model.table_name));
     }
 
-    Ok(())
+    Ok(existing_tables)
 }
 
 /// Legacy per-model Rust registration from a SchemaIR column slice.
@@ -185,7 +192,7 @@ pub fn register_model_schema(
 pub fn create_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
-        internal_create_tables(engine).await
+        internal_create_tables(engine).await.map(|_existing| ())
     })
 }
 
