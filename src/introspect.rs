@@ -57,6 +57,28 @@ pub(crate) fn is_ferro_index_name(name: &str) -> bool {
     name.starts_with("idx_") || name.starts_with("uq_")
 }
 
+/// One live CHECK constraint on a table, normalized across backends.
+///
+/// `definition` is the catalog rendering: Postgres `pg_get_constraintdef`
+/// (`CHECK (...)`), SQLite the inline `CHECK (...)` fragment from
+/// `sqlite_master.sql`. Returned as-is — body-drift normalization is #344.
+///
+/// `ferro_owned` is true when the constraint name follows the `ck_*`
+/// convention; user-owned CHECKs are included so reconciliation can skip them.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct LiveCheck {
+    pub name: String,
+    pub definition: String,
+    #[serde(default)]
+    pub ferro_owned: bool,
+}
+
+/// Ferro emits table and column CHECKs as `ck_<table>_<suffix>`. Reconciliation
+/// only ever touches names it owns.
+pub(crate) fn is_ferro_check_name(name: &str) -> bool {
+    name.starts_with("ck_")
+}
+
 /// One live single-column foreign-key constraint, normalized across backends.
 /// (Ferro only ever emits single-column FKs; multi-column live constraints are
 /// user-owned by construction and never surfaced to reconciliation.)
@@ -509,6 +531,234 @@ async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<
     Ok(out)
 }
 
+/// Read every named CHECK constraint on `table`, ferro-owned or user-owned.
+pub async fn live_table_checks(
+    engine: &EngineHandle,
+    table: &str,
+) -> PyResult<Vec<LiveCheck>> {
+    match engine.backend() {
+        Dialect::Sqlite => sqlite_table_checks(engine, table).await,
+        Dialect::Postgres => postgres_table_checks(engine, table).await,
+    }
+}
+
+async fn sqlite_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveCheck>> {
+    let sql = format!(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = {}",
+        quote_ident(table)
+    );
+    let rows = engine
+        .fetch_all_sql_unprepared(&sql)
+        .await
+        .map_err(|e| introspection_error("sqlite_master", table, e))?;
+    let Some(create_sql) = rows.first().and_then(|row| row_string(row, "sql")) else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_sqlite_inline_named_checks(&create_sql)
+        .into_iter()
+        .map(|(name, definition)| LiveCheck {
+            ferro_owned: is_ferro_check_name(&name),
+            name,
+            definition,
+        })
+        .collect())
+}
+
+async fn postgres_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveCheck>> {
+    let sql = r#"
+        SELECT con.conname::text AS name,
+               pg_get_constraintdef(con.oid)::text AS definition
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+        WHERE con.contype = 'c'
+          AND nsp.nspname = current_schema()
+          AND rel.relname = $1
+        ORDER BY con.conname
+        "#;
+    let rows = engine
+        .fetch_all_sql_unprepared_with_binds(sql, &[EngineBindValue::String(table.to_string())])
+        .await
+        .map_err(|e| introspection_error("pg_constraint", table, e))?;
+
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = row_string(row, "name")?;
+            let definition = row_string(row, "definition")?;
+            Some(LiveCheck {
+                ferro_owned: is_ferro_check_name(&name),
+                name,
+                definition,
+            })
+        })
+        .collect())
+}
+
+/// Parse `CONSTRAINT <name> CHECK (...)` clauses from a SQLite `CREATE TABLE`
+/// statement stored in `sqlite_master.sql`.
+pub(crate) fn parse_sqlite_inline_named_checks(create_sql: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = create_sql.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let Some(rel) = find_ascii_case_insensitive(bytes, i, b"CONSTRAINT") else {
+            break;
+        };
+        i = rel + b"CONSTRAINT".len();
+        i = skip_ascii_whitespace(bytes, i);
+        let Some(name) = parse_sql_identifier(bytes, &mut i) else {
+            continue;
+        };
+        i = skip_ascii_whitespace(bytes, i);
+        if !starts_ascii_case_insensitive(bytes, i, b"CHECK") {
+            continue;
+        }
+        let check_start = i;
+        i += b"CHECK".len();
+        i = skip_ascii_whitespace(bytes, i);
+        if i >= bytes.len() || bytes[i] != b'(' {
+            continue;
+        }
+        let Some(end) = matching_close_paren(bytes, i) else {
+            continue;
+        };
+        let definition = create_sql[check_start..=end].to_string();
+        out.push((name, definition));
+        i = end + 1;
+    }
+    out
+}
+
+fn find_ascii_case_insensitive(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || start >= haystack.len() {
+        return None;
+    }
+    haystack[start..]
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+        .map(|pos| start + pos)
+}
+
+fn starts_ascii_case_insensitive(haystack: &[u8], start: usize, needle: &[u8]) -> bool {
+    haystack
+        .get(start..start + needle.len())
+        .is_some_and(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn skip_ascii_whitespace(haystack: &[u8], mut i: usize) -> usize {
+    while i < haystack.len() && haystack[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+fn parse_sql_identifier(haystack: &[u8], i: &mut usize) -> Option<String> {
+    if *i >= haystack.len() {
+        return None;
+    }
+    if haystack[*i] == b'"' {
+        let start = *i + 1;
+        let mut end = start;
+        while end < haystack.len() {
+            if haystack[end] == b'"' {
+                if haystack.get(end + 1) == Some(&b'"') {
+                    end += 2;
+                    continue;
+                }
+                let name = String::from_utf8_lossy(&haystack[start..end]).replace("\"\"", "\"");
+                *i = end + 1;
+                return Some(name);
+            }
+            end += 1;
+        }
+        return None;
+    }
+    if !haystack[*i].is_ascii_alphabetic() && haystack[*i] != b'_' {
+        return None;
+    }
+    let start = *i;
+    *i += 1;
+    while *i < haystack.len() && (haystack[*i].is_ascii_alphanumeric() || haystack[*i] == b'_') {
+        *i += 1;
+    }
+    Some(String::from_utf8_lossy(&haystack[start..*i]).to_string())
+}
+
+fn matching_close_paren(haystack: &[u8], open: usize) -> Option<usize> {
+    if haystack.get(open) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+    for (offset, &ch) in haystack[open..].iter().enumerate() {
+        if in_single {
+            if escape {
+                escape = false;
+            } else if ch == b'\'' {
+                if haystack.get(open + offset + 1) == Some(&b'\'') {
+                    escape = true;
+                } else {
+                    in_single = false;
+                }
+            }
+            continue;
+        }
+        if in_double {
+            if ch == b'"' {
+                if haystack.get(open + offset + 1) == Some(&b'"') {
+                    continue;
+                }
+                in_double = false;
+            }
+            continue;
+        }
+        match ch {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Test-only: read live CHECK constraints on `table` from the connected engine.
+///
+/// Returns a list of dicts with keys `name`, `definition`, and `ferro_owned`.
+#[pyfunction]
+#[pyo3(name = "_live_table_checks_for_test")]
+#[pyo3(signature = (table, using=None))]
+pub fn _live_table_checks_for_test(
+    py: Python<'_>,
+    table: String,
+    using: Option<String>,
+) -> PyResult<Bound<'_, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = crate::state::engine_for_connection(using)?;
+        let checks = live_table_checks(&engine, &table).await?;
+        Python::attach(|py| {
+            let out = pyo3::types::PyList::empty(py);
+            for check in checks {
+                let row = pyo3::types::PyDict::new(py);
+                row.set_item("name", check.name)?;
+                row.set_item("definition", check.definition)?;
+                row.set_item("ferro_owned", check.ferro_owned)?;
+                out.append(row)?;
+            }
+            Ok(out.into_any().unbind())
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +775,94 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn ferro_check_names_are_recognized() {
+        assert!(is_ferro_check_name("ck_transfer_at_most_one_outflow"));
+        assert!(is_ferro_check_name("ck_doc_format"));
+        assert!(!is_ferro_check_name("user_positive"));
+        assert!(!is_ferro_check_name("my_custom_check"));
+    }
+
+    #[test]
+    fn parse_sqlite_inline_named_checks_finds_ferro_and_user_owned() {
+        let create_sql = "CREATE TABLE transfer (\
+            id INTEGER PRIMARY KEY, \
+            outflow_transaction_id INTEGER, \
+            outflow_activity_id INTEGER, \
+            amount REAL NOT NULL, \
+            CONSTRAINT \"ck_transfer_at_most_one_outflow\" \
+              CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL)), \
+            CONSTRAINT \"user_positive\" CHECK (amount > 0)\
+        )";
+        let checks = parse_sqlite_inline_named_checks(create_sql);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].0, "ck_transfer_at_most_one_outflow");
+        assert_eq!(
+            checks[0].1,
+            "CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL))"
+        );
+        assert_eq!(checks[1].0, "user_positive");
+        assert_eq!(checks[1].1, "CHECK (amount > 0)");
+    }
+
+    #[tokio::test]
+    async fn live_table_checks_reads_sqlite_inline_named_checks() {
+        let engine = memory_engine().await;
+        engine
+            .execute_sql(
+                "CREATE TABLE transfer (\
+                 id INTEGER PRIMARY KEY, \
+                 outflow_transaction_id INTEGER, \
+                 outflow_activity_id INTEGER, \
+                 amount REAL NOT NULL, \
+                 CONSTRAINT \"ck_transfer_at_most_one_outflow\" \
+                   CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL)), \
+                 CONSTRAINT \"user_positive\" CHECK (amount > 0))",
+            )
+            .await
+            .unwrap();
+
+        let checks = live_table_checks(&engine, "transfer").await.unwrap();
+        assert_eq!(checks.len(), 2);
+
+        let ferro = checks
+            .iter()
+            .find(|c| c.name == "ck_transfer_at_most_one_outflow")
+            .expect("ferro-owned check");
+        assert!(ferro.ferro_owned);
+        assert_eq!(
+            ferro.definition,
+            "CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL))"
+        );
+
+        let user = checks
+            .iter()
+            .find(|c| c.name == "user_positive")
+            .expect("user-owned check");
+        assert!(!user.ferro_owned);
+        assert_eq!(user.definition, "CHECK (amount > 0)");
+    }
+
+    #[tokio::test]
+    async fn live_table_checks_skips_unnamed_sqlite_inline_checks() {
+        // SQLite allows column/table CHECK (...) without CONSTRAINT name, but
+        // Ferro table checks are always named (ADR-0014). Unnamed fragments
+        // have no stable identity for reconciliation — we do not surface them.
+        let engine = memory_engine().await;
+        engine
+            .execute_sql(
+                "CREATE TABLE item (id INTEGER PRIMARY KEY, amount REAL CHECK (amount > 0))",
+            )
+            .await
+            .unwrap();
+
+        let checks = live_table_checks(&engine, "item").await.unwrap();
+        assert!(
+            checks.is_empty(),
+            "unnamed inline CHECK must not be surfaced: {checks:?}"
+        );
     }
 
     #[test]
