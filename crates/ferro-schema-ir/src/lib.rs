@@ -47,6 +47,9 @@ pub struct SchemaModel {
     pub uniques: Vec<SchemaUnique>,
     /// Check constraints (`db_check=True` and similar).
     pub checks: Vec<SchemaCheck>,
+    /// Table-level CHECK constraints (`Check(suffix, predicate)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_checks: Vec<SchemaTableCheck>,
 }
 
 /// One column in schema IR.
@@ -132,6 +135,82 @@ pub struct SchemaCheck {
     pub column: String,
     /// Pre-rendered SQL literal tokens for the allowed values, e.g. `["'admin'", "'user'"]`.
     pub values: Vec<String>,
+}
+
+/// Table-level CHECK constraint: canonical name plus a structured predicate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SchemaTableCheck {
+    /// Canonical check name (`ck_<table>_<suffix>`).
+    pub name: String,
+    /// Structured predicate rendered by the shared lowering layer (I-1).
+    pub predicate: CheckExpr,
+}
+
+/// Structured check predicate — the full vocabulary table checks compile into.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind")]
+pub enum CheckExpr {
+    /// Boolean AND of two sub-predicates.
+    #[serde(rename = "and")]
+    And {
+        left: Box<CheckExpr>,
+        right: Box<CheckExpr>,
+    },
+    /// Boolean OR of two sub-predicates.
+    #[serde(rename = "or")]
+    Or {
+        left: Box<CheckExpr>,
+        right: Box<CheckExpr>,
+    },
+    /// Boolean NOT of a sub-predicate.
+    #[serde(rename = "not")]
+    Not { child: Box<CheckExpr> },
+    /// Column IS NULL.
+    #[serde(rename = "is_null")]
+    IsNull { column: String },
+    /// Column IS NOT NULL.
+    #[serde(rename = "is_not_null")]
+    IsNotNull { column: String },
+    /// Column comparison against another column or a pre-rendered literal.
+    #[serde(rename = "cmp")]
+    Cmp {
+        column: String,
+        op: CheckCmpOp,
+        other: CheckOperand,
+    },
+    /// Column membership in a pre-rendered literal list.
+    #[serde(rename = "in")]
+    In {
+        column: String,
+        values: Vec<String>,
+    },
+    /// Column LIKE a pre-rendered pattern literal.
+    #[serde(rename = "like")]
+    Like { column: String, pattern: String },
+}
+
+/// Comparison operator for [`CheckExpr::Cmp`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckCmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// RHS of [`CheckExpr::Cmp`]: another column or a pre-rendered SQL literal token.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind")]
+pub enum CheckOperand {
+    /// Another column reference.
+    #[serde(rename = "column")]
+    Column { name: String },
+    /// Pre-rendered SQL literal token (quoted string, number, …).
+    #[serde(rename = "literal")]
+    Literal { token: String },
 }
 
 /// Query IR: filter, sort, pagination, joins, materialization plan, and
@@ -468,6 +547,70 @@ mod tests {
             serde_json::from_value(ir.clone()).expect("schema IR must deserialize");
         let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
         assert_eq!(encoded, ir, "schema round-trip must not drift");
+    }
+
+    #[test]
+    fn schema_table_check_roundtrip() {
+        let wire = serde_json::json!({
+            "ir_kind": "schema",
+            "ir_version": 1,
+            "payload": {
+                "dialect_agnostic": true,
+                "models": [{
+                    "model_name": "Transfer",
+                    "table_name": "transfer",
+                    "columns": [],
+                    "foreign_keys": [],
+                    "indexes": [],
+                    "uniques": [],
+                    "checks": [],
+                    "table_checks": [{
+                        "name": "ck_transfer_at_most_one_outflow",
+                        "predicate": {
+                            "kind": "or",
+                            "left": {
+                                "kind": "is_null",
+                                "column": "outflow_transaction_id"
+                            },
+                            "right": {
+                                "kind": "is_null",
+                                "column": "outflow_activity_id"
+                            }
+                        }
+                    }]
+                }]
+            }
+        });
+        let envelope: IrEnvelope<SchemaIrPayload> =
+            serde_json::from_value(wire.clone()).expect("table check schema IR must deserialize");
+        assert_eq!(envelope.payload.models.len(), 1);
+        assert_eq!(envelope.payload.models[0].table_checks.len(), 1);
+        let encoded =
+            serde_json::to_value(&envelope).expect("table check schema IR must serialize");
+        assert_eq!(encoded, wire, "table check round-trip must not drift");
+    }
+
+    #[test]
+    fn schema_without_table_checks_deserializes() {
+        let wire = serde_json::json!({
+            "ir_kind": "schema",
+            "ir_version": 1,
+            "payload": {
+                "dialect_agnostic": true,
+                "models": [{
+                    "model_name": "User",
+                    "table_name": "user",
+                    "columns": [],
+                    "foreign_keys": [],
+                    "indexes": [],
+                    "uniques": [],
+                    "checks": []
+                }]
+            }
+        });
+        let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_value(wire)
+            .expect("legacy schema payload without table_checks must deserialize");
+        assert!(envelope.payload.models[0].table_checks.is_empty());
     }
 
     #[test]

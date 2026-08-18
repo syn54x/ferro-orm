@@ -801,6 +801,7 @@ mod install_registration_tests {
             indexes: vec![],
             uniques: vec![],
             checks: vec![],
+            table_checks: vec![],
         }
     }
 

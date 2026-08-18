@@ -37,6 +37,11 @@ pub fn _ddl_check_constraint_name(table: String, column: String) -> String {
 }
 
 #[pyfunction]
+pub fn _ddl_table_check_constraint_name(table: String, suffix: String) -> String {
+    ferro_ddl_lowering::table_check_constraint_name(&table, &suffix)
+}
+
+#[pyfunction]
 pub fn _ddl_fk_name(table: String, column: String, to_table: String) -> String {
     ferro_ddl_lowering::fk_name(&table, &column, &to_table)
 }
@@ -112,4 +117,16 @@ pub fn _render_check_body(column: String, values: Vec<String>) -> String {
         column,
         values,
     })
+}
+
+/// Render a table-check CHECK body from a structured predicate JSON object
+/// (the `predicate` field of `SchemaTableCheck`). Byte-identical to the Rust
+/// emitters (I-1).
+#[pyfunction]
+pub fn _render_table_check_body(predicate_json: String) -> PyResult<String> {
+    let predicate: ferro_schema_ir::CheckExpr =
+        serde_json::from_str(&predicate_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid check predicate: {e}"))
+        })?;
+    Ok(ferro_ddl_lowering::render_check_expr(&predicate))
 }
