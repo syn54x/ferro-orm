@@ -400,6 +400,38 @@ Validation mirrors composite uniques: at least two columns per tuple, columns mu
 
 Both ClassVars flow through to [Alembic autogenerate](migrations.md) as matching `UniqueConstraint` / `Index` objects.
 
+### Table checks
+
+When a rule spans several columns on the same row — "at most one of these two sides may be set" — a per-column option is not enough. Declare a **table check**: a named predicate over this model's own columns in the `ClassVar` `__ferro_checks__`.
+
+Each entry is `Check(suffix, predicate)`. You supply a short suffix (for example `at_most_one_side`); ferro derives the live constraint name `ck_<table>_<suffix>` (here, `ck_pair_at_most_one_side`). The predicate is a ferro lambda with a **lowercase-singular** parameter named after the model (`pair` for `Pair`), using the same style as [`where()`](queries.md) filters — not a SQL string.
+
+This release compiles null tests (`== None` / `!= None`, including on a forward foreign key or its shadow `*_id` column) combined with `&`, `|`, and `~`. Richer comparisons land in a follow-up release; invalid forms fail at class definition with a clear error.
+
+For a single-column closed domain (for example a `StrEnum` stored as text with `IN ('admin', 'user')`), use `Field(db_check=True)` instead — that emits `ck_<table>_<col>` and is a different artifact from table checks.
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/table_checks.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/table_checks_annotated.py:models"
+    ```
+
+- Each `Check` suffix must be a lowercase identifier (`[a-z][a-z0-9_]*`), unique per model, and must not collide with a column-check name (`ck_<table>_<col>`).
+- Unknown columns, duplicate suffixes, and unsupported predicate forms raise at model registration time.
+- Table checks are emitted **inline in `CREATE TABLE`** on both PostgreSQL and SQLite. See [migrations](migrations.md) for how they reconcile on existing tables.
+
+A violating insert raises `CheckViolationError` (PostgreSQL also sets `exc.constraint` to the live `ck_*` name):
+
+```python
+--8<-- "docs/examples/table_checks.py:violation"
+```
+
 ## Custom table names
 
 By default a model's table is its class name lowercased: `class User` →

@@ -41,6 +41,12 @@ What it covers is capability-relative per backend:
 | Add missing column | ✅ `ADD COLUMN` | ✅ `ADD COLUMN` |
 | Add the column's index (`index=True`) | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
 | Add composite index (`__ferro_composite_indexes__`) to existing columns | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
+| Add table check (`__ferro_checks__`) on CREATE TABLE | ✅ inline CHECK | ✅ inline CHECK |
+| Add table check to existing table | ⚠️ `UserWarning`, no DDL | ✅ `ADD CONSTRAINT` |
+| Rebuild table check on body drift | ⚠️ `UserWarning`, no DDL | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
+| Add column `db_check=True` on existing column | ⚠️ `UserWarning`, no DDL | ✅ `ADD CONSTRAINT` |
+| Leftover ferro check (`ck_*` live, removed from model) under `migrate_updates` | ⚠️ `UserWarning`, constraint stays | ⚠️ `UserWarning`, constraint stays |
+| Drop orphaned ferro check (`ck_*`) | ⚠️ `UserWarning`, no DDL | ✅ with `migrate_destructive=True` |
 | Add unique column (`unique=True`) | ✅ via explicit unique index + warning | ✅ inline `UNIQUE` |
 | Add foreign-key column | ✅ column only, no FK constraint + warning | ✅ column + FK constraint |
 | Add missing FK constraint to an existing column | ⚠️ `UserWarning`, no DDL | ✅ `ADD CONSTRAINT` |
@@ -58,6 +64,7 @@ Rules worth knowing:
 - **NOT NULL additions need a literal default.** Existing rows must be backfilled, so a new required field without a literal default fails the connect with a clear error. Make it nullable, give it a default, or use Alembic.
 - **Added columns reuse the exact `CREATE TABLE` DDL**, so a database brought forward by `migrate_updates` matches one created fresh, and `alembic revision --autogenerate` stays clean afterwards.
 - **Only ferro-owned constraints are rebuilt.** FK reconciliation matches the `fk_<table>_<col>_<to_table>` names ferro emits (just as index reconciliation only touches `idx_*`/`uq_*`). A drifting constraint with any other name is left untouched and reported with a `UserWarning` — user-created schema survives auto-migrate. Rebuilding is metadata-only: rows are never touched, and the new `ADD CONSTRAINT` validates existing rows, failing loudly (and rolling back the table's plan on Postgres) if they violate it.
+- **Table checks and column `db_check` share the `ck_*` prefix.** Every ferro-owned `ck_*` — table checks from `__ferro_checks__` and column checks from `Field(db_check=True)` — participates in the same reconciliation pass on PostgreSQL: missing checks are added on `migrate_updates`, same-name body drift triggers a rebuild, and orphaned ferro-owned checks drop only on `migrate_destructive`. A leftover `ck_*` that the model no longer declares stays live under `migrate_updates` and emits a `UserWarning` (silence would leave the database rejecting rows the model now allows). On SQLite, table checks are inline at CREATE time but cannot be added, rebuilt, or dropped on an existing table without a full rebuild — the reconcile pass warns with the constraint name and skips. Column `db_check` on SQLite follows the same ALTER-shaped limitation.
 - **Postgres type changes take an exclusive lock** and fail the connect if existing data does not cast cleanly — fine for a development flag, but worth knowing.
 - **The pool refreshes after any schema change**, so no cached statement or stale identity-mapped instance can observe the pre-migration schema.
 
