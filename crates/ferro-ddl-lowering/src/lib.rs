@@ -1696,6 +1696,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn column_check_label_change_is_drift() {
         let check = account_role_column_check();
         let model = transfer_model_with_checks(vec![], vec![check]);
