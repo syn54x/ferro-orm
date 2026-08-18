@@ -10,4 +10,3 @@ Rejected alternatives:
 - **Never drop, like enum labels**: label removal can leave rows holding the value; a CHECK drop does not rewrite rows. Alembic-only drop would leave the model lying until someone writes a revision.
 - **Silent leftover** (match orphaned indexes): an orphaned CHECK is user-visible — inserts the model accepts, the database rejects.
 - **Table checks only**: would leave two populations of the same `ck_*` prefix, one reconciled and one not. Toggling `db_check=True` on an existing column would keep doing nothing.
-

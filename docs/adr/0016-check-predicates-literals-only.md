@@ -9,4 +9,3 @@ Rejected alternatives:
 - **Transfer-only `IS NULL` / `OR`**: covers Pinch's four CHECKs and nothing else; the next `amount >= 0` would need a follow-up dialect.
 - **Snapshot closed-over variables**: `lambda t: t.amount > min_amount` would bake import-time state into schema, looking like config and drifting across processes.
 - **`_id` only or relation-null only**: one spelling fights I-8, the other fights the PRD and anyone who thinks in columns.
-
