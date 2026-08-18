@@ -13,11 +13,14 @@
 
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
-    Dialect, ResolvedStorage, extra_enum_labels, extra_enum_labels_warning,
-    information_schema_to_db_type_token, missing_enum_labels, render_pg_enum_add_value,
-    resolve_column_storage,
+    Dialect, ResolvedStorage, extra_check_names, extra_check_names_warning, extra_enum_labels,
+    extra_enum_labels_warning, information_schema_to_db_type_token, missing_enum_labels,
+    render_pg_enum_add_value, resolve_column_storage,
 };
-use ferro_migrate::{MigrationOp, emit_sql_with_ir, plan_check_rebuilds, plan_from_ir, plan_missing_checks};
+use ferro_migrate::{
+    MigrationOp, emit_sql_with_ir, plan_check_drops, plan_check_rebuilds, plan_from_ir,
+    plan_missing_checks,
+};
 use ferro_schema_ir::{
     IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
     SchemaModel, SchemaUnique,
@@ -305,6 +308,40 @@ pub fn plan_table_migration(
         new_ir,
         &live_for_rebuild,
     ));
+    // Leftovers (#345; ADR-0013): live ferro-owned names the model does not
+    // declare. Always warn (silence is wrong — leftover CHECKs keep rejecting
+    // rows the model now allows). DropCheck ops only when destructive — do
+    // not piggy-back on the DropIndex retain-filter, which would also
+    // swallow this warning on a warning-only plan.
+    let live_ferro_owned_names: Vec<String> = live_for_rebuild
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let declared_check_names: Vec<String> = new_ir
+        .payload
+        .models
+        .iter()
+        .find(|model| model.table_name == table_lower)
+        .map(|model| {
+            model
+                .table_checks
+                .iter()
+                .map(|check| check.name.clone())
+                .chain(model.checks.iter().map(|check| check.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let extras = extra_check_names(&declared_check_names, &live_ferro_owned_names);
+    if let Some(warning) = extra_check_names_warning(table_lower, &extras) {
+        typed_plan.warnings.push(warning);
+    }
+    if opts.destructive {
+        typed_plan.operations.extend(plan_check_drops(
+            table_lower,
+            new_ir,
+            &live_ferro_owned_names,
+        ));
+    }
 
     if !opts.destructive {
         typed_plan

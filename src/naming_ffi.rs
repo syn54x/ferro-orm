@@ -179,6 +179,43 @@ pub fn _plan_check_rebuild(
     Ok(serde_json::json!({ "statements": statements, "names": names }).to_string())
 }
 
+/// The leftover-CHECK drop decision over FFI (ADR-0013): given one model's
+/// compiled SchemaIR and the live ferro-owned CHECK names, return the
+/// Rust-rendered Postgres `DROP CONSTRAINT` statements (in live order) and
+/// the names they drop.
+///
+/// The Alembic autogenerate comparator consumes this instead of re-deriving
+/// the diff or re-rendering the SQL (AGENTS.md § I-1). Postgres-only
+/// (ADR-0014). There is no `migrate_destructive` gate — running autogenerate
+/// is itself the request for a diff; the destructive flag is connect-time
+/// safety only.
+#[pyfunction]
+pub fn _plan_check_drop(
+    table: String,
+    model_ir_json: String,
+    live_ferro_owned_names: Vec<String>,
+) -> PyResult<String> {
+    let model: ferro_schema_ir::SchemaModel =
+        serde_json::from_str(&model_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
+        })?;
+    let declared: Vec<String> = model
+        .table_checks
+        .iter()
+        .map(|check| check.name.clone())
+        .chain(model.checks.iter().map(|check| check.name.clone()))
+        .collect();
+    let names = ferro_ddl_lowering::extra_check_names(&declared, &live_ferro_owned_names);
+    let mut statements = Vec::with_capacity(names.len());
+    for name in &names {
+        let emission = ferro_ddl_lowering::render_check_drop(&table, name, Dialect::Postgres);
+        if let Some(statement) = emission.statement {
+            statements.push(statement);
+        }
+    }
+    Ok(serde_json::json!({ "statements": statements, "names": names }).to_string())
+}
+
 /// Render the shared `db_check` CHECK body (`"col" IN (v1, v2, ...)`) —
 /// byte-identical to the Rust emitters. `values` arrive pre-rendered (quoted)
 /// from the IR compiler.

@@ -5,7 +5,8 @@ use ferro_ddl_lowering::{
     self, ResolvedStorage, apply_canonical_type_for, canonical_from_schema_column,
     canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
     fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
-    refused_conversion_warning, render_check_addition, render_check_rebuild, render_db_check,
+    refused_conversion_warning, render_check_addition, render_check_drop, render_check_rebuild,
+    render_db_check,
     render_pg_enum_create_type, render_table_check_body, resolve_column_storage, single_index_name,
     single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
 };
@@ -784,6 +785,26 @@ pub fn emit_sql_with_ir(
                         ),
                     })?;
                 result.statements.extend(emission.statements);
+                if let Some(warning) = emission.warning {
+                    result.warnings.push(warning);
+                }
+            }
+            MigrationOp::DropCheck { table, name } => {
+                let model = find_model(&new_models, table)?;
+                let still_declared = model.table_checks.iter().any(|check| check.name == *name)
+                    || model.checks.iter().any(|check| check.name == *name);
+                if still_declared {
+                    return Err(EmissionError {
+                        message: format!(
+                            "Check-drop operation for '{name}' on table '{table}' is still \
+                             declared in the model IR"
+                        ),
+                    });
+                }
+                let emission = render_check_drop(table, name, dialect);
+                if let Some(statement) = emission.statement {
+                    result.statements.push(statement);
+                }
                 if let Some(warning) = emission.warning {
                     result.warnings.push(warning);
                 }

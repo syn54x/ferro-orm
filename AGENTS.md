@@ -85,6 +85,19 @@ For a single model, every emitter must agree on:
     executes the byte-identical statements. Pinned by
     `tests/test_table_check_rebuild.py`. See ADR-0015 (canonical render vs
     catalog, both through one normalizer) and ADR-0014 (SQLite warn-skip).
+14. **Check leftovers / drops** — the leftover-name decision (which live
+    ferro-owned `ck_*` names a table carries that the model no longer
+    declares) and the rendered DROP are decided by ONE trio of functions:
+    `ferro_ddl_lowering::extra_check_names` /
+    `extra_check_names_warning` / `render_check_drop`. The auto-migrate
+    reconciliation pass consumes them through
+    `ferro_migrate::plan_check_drops` (ops only under
+    `migrate_destructive`; the warning always fires on `migrate_updates`).
+    The Alembic autogenerate comparator consumes them over FFI
+    (`_core._plan_check_drop`) with **no** destructive gate and executes
+    the byte-identical statements. Pinned by
+    `tests/test_table_check_orphans.py`. See ADR-0013 (leftover warning +
+    destructive ladder) and ADR-0014 (SQLite warn-skip).
 
 ### Why this invariant exists
 

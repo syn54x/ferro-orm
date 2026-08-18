@@ -7,8 +7,8 @@ mod emit;
 mod order;
 
 use ferro_ddl_lowering::{
-    drifted_check_names, fk_action_from_str, fk_action_sql, fk_name, is_ferro_fk_name,
-    missing_check_names, schema_columns_storage_drift,
+    drifted_check_names, extra_check_names, fk_action_from_str, fk_action_sql, fk_name,
+    is_ferro_fk_name, missing_check_names, schema_columns_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,6 +128,16 @@ pub enum MigrationOp {
         /// Canonical constraint name (`ck_<table>_<suffix>`).
         name: String,
     },
+    /// A live ferro-owned CHECK the model no longer declares (#345;
+    /// ADR-0013). Planned only under `migrate_destructive`; Alembic
+    /// autogenerate always proposes the drop. The name must *not* still
+    /// be declared — emitting a drop for a declared name is a loud error.
+    DropCheck {
+        /// Owning table.
+        table: String,
+        /// Live constraint name (`ck_<table>_<suffix>`).
+        name: String,
+    },
     /// A live ferro-owned FK whose definition (`on_delete`, target) drifted
     /// from the declared FK on the same column — rebuilt as
     /// `DROP CONSTRAINT` + `ADD CONSTRAINT` where the backend allows it.
@@ -216,7 +226,9 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: Dialect) -> Vec<String> {
                     table, column
                 ));
             }
-            MigrationOp::AddCheck { name, .. } | MigrationOp::RebuildCheck { name, .. } => {
+            MigrationOp::AddCheck { name, .. }
+            | MigrationOp::RebuildCheck { name, .. }
+            | MigrationOp::DropCheck { name, .. } => {
                 sql.push(format!("-- check '{}' handled by emit_sql_with_ir", name));
             }
         }
@@ -329,6 +341,39 @@ pub fn plan_check_rebuilds(
     drifted_check_names(new_model, live)
         .into_iter()
         .map(|name| MigrationOp::RebuildCheck {
+            table: table.to_string(),
+            name,
+        })
+        .collect()
+}
+
+/// Plan the [`MigrationOp::DropCheck`] operations for one table (#345;
+/// ADR-0013): every live ferro-owned CHECK name the model no longer
+/// declares, in live order.
+///
+/// Callers append the result **after** [`plan_check_rebuilds`]. The
+/// `live_ferro_owned_names` slice is already filtered (`ferro_owned`);
+/// [`extra_check_names`] is a set-difference only. Connect-time callers
+/// gate the ops on `migrate_destructive`; the warning for leftovers is
+/// planned separately so a non-destructive retain-filter cannot swallow it.
+pub fn plan_check_drops(
+    table: &str,
+    new_ir: &IrEnvelope<SchemaIrPayload>,
+    live_ferro_owned_names: &[String],
+) -> Vec<MigrationOp> {
+    let new_models = index_models(&new_ir.payload.models);
+    let Some(new_model) = new_models.get(table) else {
+        return Vec::new();
+    };
+    let declared: Vec<String> = new_model
+        .table_checks
+        .iter()
+        .map(|check| check.name.clone())
+        .chain(new_model.checks.iter().map(|check| check.name.clone()))
+        .collect();
+    extra_check_names(&declared, live_ferro_owned_names)
+        .into_iter()
+        .map(|name| MigrationOp::DropCheck {
             table: table.to_string(),
             name,
         })
