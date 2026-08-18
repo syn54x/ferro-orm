@@ -949,6 +949,71 @@ fn declared_check_body(model: &ferro_schema_ir::SchemaModel, name: &str) -> Opti
         .map(render_check_body)
 }
 
+/// Live ferro-owned CHECK names the model no longer declares, in live order
+/// (ADR-0013, #345).
+///
+/// Set-difference only: callers pass *already-filtered* ferro-owned names
+/// (`LiveCheck.ferro_owned`, Alembic `ck_*`). This function does not inspect
+/// the prefix — a user-owned name that leaked into `live_ferro_owned_names`
+/// would be reported as extra. Missing names are an add
+/// (`missing_check_names`, #343); same-name body drift is a rebuild
+/// (`drifted_check_names`, #344).
+pub fn extra_check_names(
+    declared_names: &[String],
+    live_ferro_owned_names: &[String],
+) -> Vec<String> {
+    live_ferro_owned_names
+        .iter()
+        .filter(|name| !declared_names.contains(name))
+        .cloned()
+        .collect()
+}
+
+/// The leftover-CHECK warning for one table, or `None` when nothing is extra.
+/// Single-sourced like [`extra_enum_labels_warning`]: callers emit it verbatim,
+/// never re-derive the wording. Names every leftover and points at
+/// `migrate_destructive` / Alembic.
+pub fn extra_check_names_warning(table: &str, extra: &[String]) -> Option<String> {
+    if extra.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = extra.iter().map(|name| format!("'{name}'")).collect();
+    Some(format!(
+        "Table '{table}' has CHECK constraint(s) {} that the model no longer \
+         declares. Leftover CHECKs keep rejecting rows the model now allows. \
+         They stay in place unless you pass migrate_destructive=True (Postgres) \
+         or drop them with a reviewed Alembic migration.",
+        listed.join(", "),
+    ))
+}
+
+/// Render the DROP for one leftover CHECK constraint (ADR-0013, ADR-0014).
+///
+/// Postgres: one `ALTER TABLE … DROP CONSTRAINT`. SQLite: no statement, a
+/// warning that names the constraint and points at Alembic batch mode — SQLite
+/// cannot drop a table constraint without a full table rebuild.
+pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmission {
+    match dialect {
+        Dialect::Postgres => CheckEmission {
+            statement: Some(format!(
+                "ALTER TABLE {} DROP CONSTRAINT {}",
+                quote_ident(table),
+                quote_ident(name),
+            )),
+            warning: None,
+        },
+        Dialect::Sqlite => CheckEmission {
+            statement: None,
+            warning: Some(format!(
+                "CHECK constraint '{name}' on table '{table}' is no longer declared, \
+                 and SQLite cannot drop a table constraint in place (it requires a \
+                 full table rebuild). The live constraint remains; use Alembic's \
+                 batch mode to drop it."
+            )),
+        },
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CheckToken {
     Word(String),
@@ -1782,6 +1847,85 @@ mod tests {
             render_check_rebuild("transfer", &model, "ck_transfer_nope", Dialect::Postgres)
                 .is_none()
         );
+    }
+
+    // Leftover ferro-owned CHECKs (#345; ADR-0013): live name not in the
+    // declared set. extra_check_names is a set-difference only — the
+    // ferro_owned / ck_* filter is the caller's (migrate.rs / Alembic).
+
+    #[test]
+    fn extra_check_names_returns_undeclared_live_names_in_live_order() {
+        let declared = vec![
+            "ck_transfer_at_most_one_outflow".to_string(),
+            "ck_transfer_kind".to_string(),
+        ];
+        let live = vec![
+            "ck_transfer_orphan".to_string(),
+            "ck_transfer_kind".to_string(),
+            "ck_transfer_old".to_string(),
+        ];
+        assert_eq!(
+            extra_check_names(&declared, &live),
+            vec!["ck_transfer_orphan", "ck_transfer_old"]
+        );
+        assert!(extra_check_names(&declared, &declared).is_empty());
+    }
+
+    #[test]
+    fn extra_check_names_is_a_set_difference_only() {
+        let declared = vec!["ck_transfer_kind".to_string()];
+        let live = vec![
+            "ck_transfer_kind".to_string(),
+            "transfer_positive_amount".to_string(),
+        ];
+        assert_eq!(
+            extra_check_names(&declared, &live),
+            vec!["transfer_positive_amount"],
+            "prefix filtering is the caller's; this function does not drop non-ck_* names"
+        );
+        assert!(extra_check_names(&declared, &[]).is_empty());
+    }
+
+    #[test]
+    fn extra_check_names_warning_is_pinned_and_names_every_leftover() {
+        assert_eq!(
+            extra_check_names_warning(
+                "transfer",
+                &[
+                    "ck_transfer_orphan".to_string(),
+                    "ck_transfer_kind".to_string(),
+                ],
+            ),
+            Some(
+                "Table 'transfer' has CHECK constraint(s) 'ck_transfer_orphan', \
+                 'ck_transfer_kind' that the model no longer declares. Leftover \
+                 CHECKs keep rejecting rows the model now allows. They stay in \
+                 place unless you pass migrate_destructive=True (Postgres) or \
+                 drop them with a reviewed Alembic migration."
+                    .to_string()
+            )
+        );
+        assert_eq!(extra_check_names_warning("transfer", &[]), None);
+    }
+
+    #[test]
+    fn render_check_drop_is_one_alter_on_postgres() {
+        let emission = render_check_drop("transfer", "ck_transfer_orphan", Dialect::Postgres);
+        assert_eq!(
+            emission.statement.as_deref(),
+            Some(r#"ALTER TABLE "transfer" DROP CONSTRAINT "ck_transfer_orphan""#)
+        );
+        assert!(emission.warning.is_none());
+    }
+
+    #[test]
+    fn render_check_drop_warns_and_skips_on_sqlite() {
+        let emission = render_check_drop("transfer", "ck_transfer_orphan", Dialect::Sqlite);
+        assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
+        let warning = emission.warning.expect("SQLite must never skip silently");
+        assert!(warning.contains("ck_transfer_orphan"), "{warning}");
+        assert!(warning.contains("Alembic"), "{warning}");
+        assert!(warning.contains("batch"), "{warning}");
     }
 
     #[test]

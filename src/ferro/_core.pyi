@@ -278,3 +278,17 @@ def _plan_check_rebuild(
     reconciliation pass executes (I-1).
     """
     ...
+
+def _plan_check_drop(
+    table: str, model_ir_json: str, live_ferro_owned_names: list[str]
+) -> str:
+    """The leftover-CHECK drop decision (ADR-0013) for one table.
+
+    Returns JSON: ``{"statements": [...], "names": [...]}`` — the Rust-rendered
+    Postgres ``DROP CONSTRAINT`` statements for live ferro-owned CHECK names
+    the model no longer declares, plus those names. Byte-identical to what
+    the reconciliation pass executes under ``migrate_destructive`` (I-1).
+    There is no destructive gate here: running autogenerate is itself the
+    request for a diff.
+    """
+    ...
