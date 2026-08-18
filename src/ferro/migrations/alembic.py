@@ -10,6 +10,7 @@ from .._annotation_utils import _VARCHAR_RE
 from .._core import (
     _ddl_fk_name,
     _plan_check_addition,
+    _plan_check_rebuild,
     _plan_enum_label_addition,
     _render_check_body,
     _render_table_check_body,
@@ -408,23 +409,24 @@ if _alembic_comparators is not None:
         upgrade_ops.ops[:0] = drifted
 
     # -----------------------------------------------------------------------
-    # Check-addition comparator (ADR-0013; CONTEXT.md *table check*, *column
-    # check*).
+    # Check-addition / check-rebuild comparator (ADR-0013, ADR-0015;
+    # CONTEXT.md *table check*, *column check*, *constraint rebuild*).
     #
     # Alembic core does not compare CHECK constraints, so autogenerate against
-    # a database whose table is missing a declared ``ck_*`` produces an empty
-    # revision and the invariant silently goes unenforced. This comparator is
-    # the second mechanical consumer of the check-addition decision table
-    # (AGENTS.md § I-1): the diff AND the rendered statements come from the Rust
-    # core over FFI (``_plan_check_addition``), byte-identical to what the
-    # auto-migrate reconciliation pass executes.
+    # a database whose table is missing a declared ``ck_*`` — or whose live
+    # body drifted — produces an empty revision and the invariant silently
+    # goes unenforced. This comparator is the mechanical consumer of both
+    # decision tables (AGENTS.md § I-1): the diff AND the rendered statements
+    # come from the Rust core over FFI (``_plan_check_addition``,
+    # ``_plan_check_rebuild``), byte-identical to what the auto-migrate
+    # reconciliation pass executes. There is no Python normalizer.
     #
     # There is no ``migrate_updates`` gate here — running autogenerate is itself
-    # the request for a diff. Additions are appended after the revision's table
-    # ops so a CHECK over a newly added column lands after its ADD COLUMN.
-    # Postgres-only, like the reconciliation pass: on SQLite, adding a table
-    # constraint needs a full table rebuild, which is Alembic's batch-mode door
-    # (ADR-0014).
+    # the request for a diff. Additions then rebuilds are appended after the
+    # revision's table ops so a CHECK over a newly added column lands after
+    # its ADD COLUMN. Postgres-only, like the reconciliation pass: on SQLite,
+    # adding or rebuilding a table constraint needs a full table rebuild,
+    # which is Alembic's batch-mode door (ADR-0014).
     # -----------------------------------------------------------------------
 
     class FerroCheckConstraintsOp(_MigrateOperation):
@@ -461,16 +463,18 @@ if _alembic_comparators is not None:
                 "drop" if self.direction == "add" else "add",
             )
 
-    def _live_check_names_by_table(connection) -> dict[str, list[str]]:
-        """Live CHECK constraint names per ordinary table in the current schema.
+    def _live_check_names_by_table(connection) -> dict[str, list[tuple[str, str]]]:
+        """Live CHECK names + catalog definitions per ordinary table.
 
         A table with no CHECKs maps to an empty list — the distinction that
         keeps a table absent from the database (whose CHECKs ride ``create_table``)
-        out of the comparator.
+        out of the comparator. Definitions are ``pg_get_constraintdef`` text;
+        the Rust normalizer (ADR-0015) decides whether a same-name body drifted.
         """
         rows = connection.execute(
             sa.text(
-                "SELECT rel.relname AS table_name, con.conname AS name "
+                "SELECT rel.relname AS table_name, con.conname AS name, "
+                "       pg_get_constraintdef(con.oid)::text AS definition "
                 "FROM pg_class rel "
                 "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
                 "LEFT JOIN pg_constraint con "
@@ -479,11 +483,11 @@ if _alembic_comparators is not None:
                 "ORDER BY rel.relname, con.conname"
             )
         ).fetchall()
-        live: dict[str, list[str]] = {}
+        live: dict[str, list[tuple[str, str]]] = {}
         for row in rows:
-            names = live.setdefault(row.table_name, [])
+            checks = live.setdefault(row.table_name, [])
             if row.name is not None:
-                names.append(row.name)
+                checks.append((row.name, row.definition or ""))
         return live
 
     @_alembic_comparators.dispatch_for("schema")
@@ -507,6 +511,7 @@ if _alembic_comparators is not None:
         # carry. Tables absent live belong to the revision's create_table ops
         # (which already render their CHECKs inline).
         additions = []
+        rebuilds = []
         for model_ir in models:
             if not isinstance(model_ir, dict):
                 continue
@@ -515,16 +520,59 @@ if _alembic_comparators is not None:
                 continue
             if table_name not in metadata.tables:
                 continue
-            plan = json.loads(
-                _plan_check_addition(table_name, json.dumps(model_ir), live[table_name])
+            live_checks = live[table_name]
+            live_names = [name for name, _ in live_checks]
+            add_plan = json.loads(
+                _plan_check_addition(table_name, json.dumps(model_ir), live_names)
             )
-            if plan["statements"]:
+            if add_plan["statements"]:
                 additions.append(
                     FerroCheckConstraintsOp(
-                        table_name, plan["statements"], plan["names"]
+                        table_name, add_plan["statements"], add_plan["names"]
+                    )
+                )
+            rebuild_plan = json.loads(
+                _plan_check_rebuild(table_name, json.dumps(model_ir), live_checks)
+            )
+            if rebuild_plan["statements"]:
+                rebuilds.append(
+                    FerroCheckRebuildOp(
+                        table_name, rebuild_plan["statements"], rebuild_plan["names"]
                     )
                 )
         upgrade_ops.ops.extend(additions)
+        upgrade_ops.ops.extend(rebuilds)
+
+    class FerroCheckRebuildOp(_MigrateOperation):
+        """Autogenerate carrier for one table's drifted CHECK bodies.
+
+        Renders to plain ``op.execute`` of the Rust-rendered DROP + bare ADD
+        (I-1) — a generated revision does not import ferro to run. There is no
+        ``migrate_updates`` gate: running autogenerate is itself the request
+        for a diff.
+        """
+
+        def __init__(
+            self,
+            table_name: str,
+            statements: list[str],
+            names: list[str],
+        ) -> None:
+            self.table_name = table_name
+            self.statements = statements
+            self.names = names
+
+        def to_diff_tuple(self):
+            return (
+                "ferro_rebuild_check_constraints",
+                self.table_name,
+                tuple(self.names),
+            )
+
+        def reverse(self) -> "FerroCheckRebuildOp":
+            # The previous body is not in the generated revision; restoring it
+            # is a reviewed edit, not an autogenerated downgrade.
+            return FerroCheckRebuildOp(self.table_name, [], self.names)
 
     @_alembic_renderers.dispatch_for(FerroCheckConstraintsOp)
     def _render_check_constraints(
@@ -535,6 +583,10 @@ if _alembic_comparators is not None:
                 f"op.drop_constraint({name!r}, {op.table_name!r}, type_='check')"
                 for name in reversed(op.names)
             ]
+        return [f"op.execute({stmt!r})" for stmt in op.statements]
+
+    @_alembic_renderers.dispatch_for(FerroCheckRebuildOp)
+    def _render_check_rebuilds(autogen_context, op: FerroCheckRebuildOp) -> list[str]:
         return [f"op.execute({stmt!r})" for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(AddEnumLabelsOp)

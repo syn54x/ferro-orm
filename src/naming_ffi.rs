@@ -144,6 +144,41 @@ pub fn _plan_check_addition(
     Ok(serde_json::json!({ "statements": statements, "names": names }).to_string())
 }
 
+/// The check-rebuild decision over FFI (ADR-0015): given one model's compiled
+/// SchemaIR and the live CHECK names + catalog definitions, return the
+/// Rust-rendered Postgres `DROP` + bare `ADD` statements (in declared order)
+/// and the constraint names they rebuild.
+///
+/// The Alembic autogenerate comparator consumes this instead of re-deriving
+/// the diff or re-rendering the SQL (AGENTS.md § I-1). Postgres-only
+/// (ADR-0014). There is no `migrate_updates` gate — running autogenerate is
+/// itself the request for a diff.
+#[pyfunction]
+pub fn _plan_check_rebuild(
+    table: String,
+    model_ir_json: String,
+    live: Vec<(String, String)>,
+) -> PyResult<String> {
+    let model: ferro_schema_ir::SchemaModel =
+        serde_json::from_str(&model_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
+        })?;
+    let names = ferro_ddl_lowering::drifted_check_names(&model, &live);
+    let mut statements = Vec::with_capacity(names.len().saturating_mul(2));
+    for name in &names {
+        let emission =
+            ferro_ddl_lowering::render_check_rebuild(&table, &model, name, Dialect::Postgres)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "CHECK constraint '{name}' drifted on table '{table}' but has no \
+                         declared artifact in the model IR"
+                    ))
+                })?;
+        statements.extend(emission.statements);
+    }
+    Ok(serde_json::json!({ "statements": statements, "names": names }).to_string())
+}
+
 /// Render the shared `db_check` CHECK body (`"col" IN (v1, v2, ...)`) —
 /// byte-identical to the Rust emitters. `values` arrive pre-rendered (quoted)
 /// from the IR compiler.
