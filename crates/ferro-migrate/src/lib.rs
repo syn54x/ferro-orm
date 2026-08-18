@@ -7,7 +7,8 @@ mod emit;
 mod order;
 
 use ferro_ddl_lowering::{
-    fk_action_from_str, fk_action_sql, fk_name, is_ferro_fk_name, schema_columns_storage_drift,
+    fk_action_from_str, fk_action_sql, fk_name, is_ferro_fk_name, missing_check_names,
+    schema_columns_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
@@ -107,6 +108,15 @@ pub enum MigrationOp {
         /// Local FK column.
         column: String,
     },
+    /// A declared CHECK constraint — table check or column check — with no live
+    /// constraint of that name (#343). Looked up by `name` in the declared
+    /// model's `table_checks`, then its `checks`.
+    AddCheck {
+        /// Owning table.
+        table: String,
+        /// Canonical constraint name (`ck_<table>_<suffix>`).
+        name: String,
+    },
     /// A live ferro-owned FK whose definition (`on_delete`, target) drifted
     /// from the declared FK on the same column — rebuilt as
     /// `DROP CONSTRAINT` + `ADD CONSTRAINT` where the backend allows it.
@@ -195,6 +205,9 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: Dialect) -> Vec<String> {
                     table, column
                 ));
             }
+            MigrationOp::AddCheck { name, .. } => {
+                sql.push(format!("-- check '{}' handled by emit_sql_with_ir", name));
+            }
         }
     }
     sql
@@ -237,6 +250,53 @@ pub fn plan_from_ir(
     }
 
     plan
+}
+
+/// Plan the [`MigrationOp::AddCheck`] operations for one table (#343; ADR-0013):
+/// every declared CHECK constraint — table check or column check — that
+/// `live_check_names` does not already cover.
+///
+/// Separate from [`plan_from_ir`] because a live CHECK is not IR. Introspection
+/// reports a name plus the *backend's* rendering of the body; putting that
+/// rendering in a `SchemaCheck`/`SchemaTableCheck` would introduce a second
+/// body language beside the IR predicate, which is exactly what AGENTS.md § I-1
+/// forbids. The decision itself is name-based and single-sourced in
+/// `ferro_ddl_lowering::missing_check_names`.
+///
+/// Callers append the result to the plan **after** [`plan_from_ir`]'s
+/// operations, so a check over a newly added column lands after its
+/// `ALTER TABLE … ADD COLUMN` (CONTEXT.md *reconciliation pass*).
+pub fn plan_missing_checks(
+    table: &str,
+    old_ir: &IrEnvelope<SchemaIrPayload>,
+    new_ir: &IrEnvelope<SchemaIrPayload>,
+    live_check_names: &[String],
+) -> Vec<MigrationOp> {
+    let old_models = index_models(&old_ir.payload.models);
+    let new_models = index_models(&new_ir.payload.models);
+    let (Some(old_model), Some(new_model)) = (old_models.get(table), new_models.get(table)) else {
+        return Vec::new();
+    };
+    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
+
+    missing_check_names(new_model, live_check_names)
+        .into_iter()
+        .filter(|name| {
+            // A column check whose column is newly added rides the AddColumn
+            // emission (`emit_add_column` emits its DO-block), the same dedup
+            // `diff_model_indexes` applies to single-column indexes. Table
+            // checks are never emitted by AddColumn, so they always stand alone.
+            new_model
+                .checks
+                .iter()
+                .find(|check| &check.name == name)
+                .is_none_or(|check| old_col_names.contains(check.column.as_str()))
+        })
+        .map(|name| MigrationOp::AddCheck {
+            table: table.to_string(),
+            name,
+        })
+        .collect()
 }
 
 fn index_models<'a>(models: &'a [SchemaModel]) -> BTreeMap<String, &'a SchemaModel> {

@@ -5,9 +5,9 @@ use ferro_ddl_lowering::{
     self, ResolvedStorage, apply_canonical_type_for, canonical_from_schema_column,
     canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
     fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
-    refused_conversion_warning, render_db_check, render_pg_enum_create_type,
-    render_table_check_body, resolve_column_storage, single_index_name, single_unique_index_name,
-    sqlite_declared_type, sqlite_type_storage_drift,
+    refused_conversion_warning, render_check_addition, render_db_check,
+    render_pg_enum_create_type, render_table_check_body, resolve_column_storage, single_index_name,
+    single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
@@ -755,6 +755,23 @@ pub fn emit_sql_with_ir(
                         column,
                         fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
                     )),
+                }
+            }
+            MigrationOp::AddCheck { table, name } => {
+                let model = find_model(&new_models, table)?;
+                let emission = render_check_addition(table, model, name, dialect)
+                    .ok_or_else(|| EmissionError {
+                        message: format!(
+                            "Check-addition operation for '{}' on table '{}' has no matching \
+                             CHECK constraint in the declared IR",
+                            name, table
+                        ),
+                    })?;
+                if let Some(statement) = emission.statement {
+                    result.statements.push(statement);
+                }
+                if let Some(warning) = emission.warning {
+                    result.warnings.push(warning);
                 }
             }
             MigrationOp::RebuildForeignKey {

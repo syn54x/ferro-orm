@@ -75,6 +75,8 @@ def _render_migration_sql_for_test(
     updates: bool = True,
     destructive: bool = False,
     live_indexes_json: str = "",
+    live_foreign_keys_json: str = "",
+    live_checks_json: str = "",
 ) -> tuple[list[str], list[str]]:
     """Test-only: render the auto-migrate diff for one table without a database.
 
@@ -82,7 +84,10 @@ def _render_migration_sql_for_test(
     serialized as JSON). ``live_columns_json`` is a JSON array of objects with the
     LiveColumn shape (``name``, ``declared_type``, ``is_nullable``, ``is_primary_key``,
     ``char_max_len``, ``is_enum_udt``). ``live_indexes_json`` is a JSON array of objects
-    with the LiveIndex shape (``name``, ``columns``, ``unique``).
+    with the LiveIndex shape (``name``, ``columns``, ``unique``);
+    ``live_foreign_keys_json`` the LiveForeignKey shape (``name``, ``column``,
+    ``to_table``, ``to_column``, ``on_delete``); ``live_checks_json`` the LiveCheck
+    shape (``name``, ``definition``, ``ferro_owned``).
     Returns ``(statements, warnings)``.
     """
     ...
@@ -246,5 +251,17 @@ def _plan_enum_label_addition(
     Rust-rendered ``ADD VALUE IF NOT EXISTS`` statements for model-declared
     labels the live type is missing, and the live labels the model no longer
     declares (warn-never-act).
+    """
+    ...
+
+def _plan_check_addition(
+    table: str, model_ir_json: str, live_names: list[str]
+) -> str:
+    """The check-addition decision (ADR-0013) for one table.
+
+    Returns JSON: ``{"statements": [...], "names": [...]}`` — the Rust-rendered
+    Postgres ``ADD`` statements for declared CHECK constraints (table checks,
+    then column checks) that no live constraint of that name covers, plus those
+    names. Byte-identical to what the reconciliation pass executes (I-1).
     """
     ...

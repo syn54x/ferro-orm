@@ -107,6 +107,43 @@ pub fn _plan_enum_label_addition(
     .to_string()
 }
 
+/// The check-addition decision over FFI (ADR-0013): given one model's compiled
+/// SchemaIR and the CHECK constraint names its live table already carries,
+/// return the Rust-rendered Postgres `ADD` statements (in declared order —
+/// table checks, then column checks) and the constraint names they add.
+///
+/// The Alembic autogenerate comparator consumes this instead of re-deriving the
+/// diff or re-rendering the SQL (AGENTS.md § I-1): the generated revision and
+/// the auto-migrate reconciliation pass execute byte-identical statements.
+/// Postgres-only, like the reconciliation pass itself (ADR-0014).
+#[pyfunction]
+pub fn _plan_check_addition(
+    table: String,
+    model_ir_json: String,
+    live_names: Vec<String>,
+) -> PyResult<String> {
+    let model: ferro_schema_ir::SchemaModel =
+        serde_json::from_str(&model_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
+        })?;
+    let names = ferro_ddl_lowering::missing_check_names(&model, &live_names);
+    let mut statements = Vec::with_capacity(names.len());
+    for name in &names {
+        let emission =
+            ferro_ddl_lowering::render_check_addition(&table, &model, name, Dialect::Postgres)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "CHECK constraint '{name}' is missing from table '{table}' but has no \
+                         declared artifact in the model IR"
+                    ))
+                })?;
+        if let Some(statement) = emission.statement {
+            statements.push(statement);
+        }
+    }
+    Ok(serde_json::json!({ "statements": statements, "names": names }).to_string())
+}
+
 /// Render the shared `db_check` CHECK body (`"col" IN (v1, v2, ...)`) —
 /// byte-identical to the Rust emitters. `values` arrive pre-rendered (quoted)
 /// from the IR compiler.

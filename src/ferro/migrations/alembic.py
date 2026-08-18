@@ -9,6 +9,7 @@ except ImportError:
 from .._annotation_utils import _VARCHAR_RE
 from .._core import (
     _ddl_fk_name,
+    _plan_check_addition,
     _plan_enum_label_addition,
     _render_check_body,
     _render_table_check_body,
@@ -405,6 +406,136 @@ if _alembic_comparators is not None:
                     AddEnumLabelsOp(type_name, plan["statements"], plan["extra_labels"])
                 )
         upgrade_ops.ops[:0] = drifted
+
+    # -----------------------------------------------------------------------
+    # Check-addition comparator (ADR-0013; CONTEXT.md *table check*, *column
+    # check*).
+    #
+    # Alembic core does not compare CHECK constraints, so autogenerate against
+    # a database whose table is missing a declared ``ck_*`` produces an empty
+    # revision and the invariant silently goes unenforced. This comparator is
+    # the second mechanical consumer of the check-addition decision table
+    # (AGENTS.md § I-1): the diff AND the rendered statements come from the Rust
+    # core over FFI (``_plan_check_addition``), byte-identical to what the
+    # auto-migrate reconciliation pass executes.
+    #
+    # There is no ``migrate_updates`` gate here — running autogenerate is itself
+    # the request for a diff. Additions are appended after the revision's table
+    # ops so a CHECK over a newly added column lands after its ADD COLUMN.
+    # Postgres-only, like the reconciliation pass: on SQLite, adding a table
+    # constraint needs a full table rebuild, which is Alembic's batch-mode door
+    # (ADR-0014).
+    # -----------------------------------------------------------------------
+
+    class FerroCheckConstraintsOp(_MigrateOperation):
+        """Autogenerate carrier for one table's missing CHECK constraints.
+
+        Renders to plain ``op.execute`` / ``op.drop_constraint`` calls — a
+        generated revision does not import ferro to run.
+        """
+
+        def __init__(
+            self,
+            table_name: str,
+            statements: list[str],
+            names: list[str],
+            direction: str = "add",
+        ) -> None:
+            self.table_name = table_name
+            self.statements = statements
+            self.names = names
+            self.direction = direction
+
+        def to_diff_tuple(self):
+            return (
+                f"ferro_{self.direction}_check_constraints",
+                self.table_name,
+                tuple(self.names),
+            )
+
+        def reverse(self) -> "FerroCheckConstraintsOp":
+            return FerroCheckConstraintsOp(
+                self.table_name,
+                self.statements,
+                self.names,
+                "drop" if self.direction == "add" else "add",
+            )
+
+    def _live_check_names_by_table(connection) -> dict[str, list[str]]:
+        """Live CHECK constraint names per ordinary table in the current schema.
+
+        A table with no CHECKs maps to an empty list — the distinction that
+        keeps a table absent from the database (whose CHECKs ride ``create_table``)
+        out of the comparator.
+        """
+        rows = connection.execute(
+            sa.text(
+                "SELECT rel.relname AS table_name, con.conname AS name "
+                "FROM pg_class rel "
+                "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
+                "LEFT JOIN pg_constraint con "
+                "  ON con.conrelid = rel.oid AND con.contype = 'c' "
+                "WHERE nsp.nspname = current_schema() AND rel.relkind = 'r' "
+                "ORDER BY rel.relname, con.conname"
+            )
+        ).fetchall()
+        live: dict[str, list[str]] = {}
+        for row in rows:
+            names = live.setdefault(row.table_name, [])
+            if row.name is not None:
+                names.append(row.name)
+        return live
+
+    @_alembic_comparators.dispatch_for("schema")
+    def _compare_check_constraints(autogen_context, upgrade_ops, schemas) -> None:
+        if autogen_context.dialect.name != "postgresql":
+            return
+        metadata = autogen_context.metadata
+        if metadata is None:
+            return
+
+        from .. import ensure_resolved_modelset
+
+        models = ensure_resolved_modelset().get("payload", {}).get("models", [])
+        if not models:
+            return
+
+        live = _live_check_names_by_table(autogen_context.connection)
+
+        # The declared side is the compiled SchemaIR — the structured predicate
+        # the shared renderer needs, which the reflected SA metadata does not
+        # carry. Tables absent live belong to the revision's create_table ops
+        # (which already render their CHECKs inline).
+        additions = []
+        for model_ir in models:
+            if not isinstance(model_ir, dict):
+                continue
+            table_name = model_ir.get("table_name")
+            if not isinstance(table_name, str) or table_name not in live:
+                continue
+            if table_name not in metadata.tables:
+                continue
+            plan = json.loads(
+                _plan_check_addition(table_name, json.dumps(model_ir), live[table_name])
+            )
+            if plan["statements"]:
+                additions.append(
+                    FerroCheckConstraintsOp(
+                        table_name, plan["statements"], plan["names"]
+                    )
+                )
+        upgrade_ops.ops.extend(additions)
+
+    @_alembic_renderers.dispatch_for(FerroCheckConstraintsOp)
+    def _render_check_constraints(
+        autogen_context, op: FerroCheckConstraintsOp
+    ) -> list[str]:
+        if op.direction == "drop":
+            return [
+                f"op.drop_constraint({name!r}, {op.table_name!r}, type_='check')"
+                for name in reversed(op.names)
+            ]
+        return [f"op.execute({stmt!r})" for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(AddEnumLabelsOp)
     def _render_add_enum_labels(autogen_context, op: AddEnumLabelsOp) -> list[str]:

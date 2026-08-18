@@ -760,6 +760,92 @@ pub fn render_db_check(table: &str, check: &ferro_schema_ir::SchemaCheck, dialec
     }
 }
 
+/// The check-addition decision (ADR-0013): which declared CHECK constraints —
+/// table checks and column checks alike — have no live constraint of that name,
+/// in declared order (table checks, then column checks).
+///
+/// This is the single decision table for missing CHECKs: the auto-migrate
+/// reconciliation pass consumes it through `ferro-migrate`, and the Alembic
+/// autogenerate comparator consumes it over FFI (AGENTS.md § I-1). Neither side
+/// re-derives it.
+///
+/// The comparison is by NAME only. A live constraint whose *body* drifted from
+/// the declared predicate is a constraint rebuild, not an addition (ADR-0015,
+/// #344), and a live name ferro does not own cannot collide with a declared
+/// `ck_*` name — so a user-owned CHECK is never added over.
+pub fn missing_check_names(
+    model: &ferro_schema_ir::SchemaModel,
+    live_names: &[String],
+) -> Vec<String> {
+    declared_check_names(model)
+        .into_iter()
+        .filter(|name| !live_names.iter().any(|live| live == name))
+        .collect()
+}
+
+/// Every CHECK constraint name the model declares, table checks first.
+fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String> {
+    model
+        .table_checks
+        .iter()
+        .map(|check| check.name.clone())
+        .chain(model.checks.iter().map(|check| check.name.clone()))
+        .collect()
+}
+
+/// Render the ADD for one declared CHECK constraint, or `None` when `name` is
+/// not declared on `model`.
+///
+/// The single source both migration doors consume for a missing CHECK
+/// (AGENTS.md § I-1). A **table check** is one plain
+/// `ALTER TABLE … ADD CONSTRAINT … CHECK (…)`: the caller only asks for it when
+/// the name is absent live, so no existence guard is needed. A **column check**
+/// reuses [`render_db_check`], the same idempotent DO-block the create path
+/// emits. On SQLite both are skipped with a warning that names the constraint
+/// (ADR-0014): adding a table constraint to an existing table needs a full
+/// table rebuild, which is Alembic's batch-mode door.
+pub fn render_check_addition(
+    table: &str,
+    model: &ferro_schema_ir::SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> Option<CheckEmission> {
+    if let Some(check) = model.table_checks.iter().find(|check| check.name == name) {
+        return Some(render_add_table_check(table, check, dialect));
+    }
+    let check = model.checks.iter().find(|check| check.name == name)?;
+    Some(render_db_check(table, check, dialect))
+}
+
+/// The table-check half of [`render_check_addition`].
+fn render_add_table_check(
+    table: &str,
+    check: &ferro_schema_ir::SchemaTableCheck,
+    dialect: Dialect,
+) -> CheckEmission {
+    match dialect {
+        Dialect::Postgres => CheckEmission {
+            statement: Some(format!(
+                "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({})",
+                quote_ident(table),
+                quote_ident(&check.name),
+                render_table_check_body(check),
+            )),
+            warning: None,
+        },
+        Dialect::Sqlite => CheckEmission {
+            statement: None,
+            warning: Some(format!(
+                "Table check '{}' is declared on '{}' but missing from the live table, and \
+                 SQLite cannot add a table constraint to an existing table (it requires a \
+                 full table rebuild). The invariant is not database-enforced; use Alembic's \
+                 batch mode to apply it.",
+                check.name, table
+            )),
+        },
+    }
+}
+
 /// Postgres `ALTER COLUMN ... TYPE` target spelling.
 pub fn pg_alter_type_target(canonical: CanonicalType) -> String {
     match canonical {
@@ -1058,6 +1144,127 @@ mod tests {
         assert_eq!(
             render_table_check_body(&transfer_at_most_one_outflow_check()),
             "(\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL)"
+        );
+    }
+
+    fn transfer_model_with_checks(
+        table_checks: Vec<ferro_schema_ir::SchemaTableCheck>,
+        checks: Vec<ferro_schema_ir::SchemaCheck>,
+    ) -> ferro_schema_ir::SchemaModel {
+        ferro_schema_ir::SchemaModel {
+            model_name: "transfer".to_string(),
+            table_name: "transfer".to_string(),
+            columns: Vec::new(),
+            foreign_keys: Vec::new(),
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            checks,
+            table_checks,
+        }
+    }
+
+    fn account_role_column_check() -> ferro_schema_ir::SchemaCheck {
+        ferro_schema_ir::SchemaCheck {
+            name: "ck_transfer_kind".to_string(),
+            column: "kind".to_string(),
+            values: vec!["'in'".to_string(), "'out'".to_string()],
+        }
+    }
+
+    #[test]
+    fn missing_check_names_reports_declared_names_absent_live() {
+        let model = transfer_model_with_checks(
+            vec![transfer_at_most_one_outflow_check()],
+            vec![account_role_column_check()],
+        );
+        assert_eq!(
+            missing_check_names(&model, &["ck_transfer_kind".to_string()]),
+            vec!["ck_transfer_at_most_one_outflow".to_string()],
+            "table checks come first, and a live name is never re-added"
+        );
+        assert!(
+            missing_check_names(
+                &model,
+                &[
+                    "ck_transfer_at_most_one_outflow".to_string(),
+                    "ck_transfer_kind".to_string(),
+                ],
+            )
+            .is_empty(),
+            "a reconciled table replans to nothing"
+        );
+    }
+
+    #[test]
+    fn missing_check_names_ignores_user_owned_live_constraints() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        assert_eq!(
+            missing_check_names(&model, &["transfer_positive_amount".to_string()]),
+            vec!["ck_transfer_at_most_one_outflow".to_string()],
+            "a user-owned live CHECK is not a counterpart for a declared ck_* name"
+        );
+    }
+
+    #[test]
+    fn render_check_addition_table_check_is_one_plain_alter_on_postgres() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let emission = render_check_addition(
+            "transfer",
+            &model,
+            "ck_transfer_at_most_one_outflow",
+            Dialect::Postgres,
+        )
+        .expect("declared table check must resolve");
+        assert_eq!(
+            emission.statement.as_deref(),
+            Some(
+                "ALTER TABLE \"transfer\" ADD CONSTRAINT \"ck_transfer_at_most_one_outflow\" \
+                 CHECK ((\"outflow_transaction_id\" IS NULL) OR \
+                 (\"outflow_activity_id\" IS NULL))"
+            )
+        );
+        assert!(emission.warning.is_none());
+    }
+
+    #[test]
+    fn render_check_addition_table_check_warns_and_skips_on_sqlite() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let emission = render_check_addition(
+            "transfer",
+            &model,
+            "ck_transfer_at_most_one_outflow",
+            Dialect::Sqlite,
+        )
+        .expect("declared table check must resolve");
+        assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
+        let warning = emission.warning.expect("SQLite must never skip silently");
+        assert!(
+            warning.contains("ck_transfer_at_most_one_outflow"),
+            "{warning}"
+        );
+        assert!(warning.contains("Alembic"), "{warning}");
+    }
+
+    #[test]
+    fn render_check_addition_column_check_reuses_the_idempotent_do_block() {
+        let check = account_role_column_check();
+        let model = transfer_model_with_checks(vec![], vec![check.clone()]);
+        let emission =
+            render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Postgres)
+                .expect("declared column check must resolve");
+        assert_eq!(
+            emission.statement,
+            render_db_check("transfer", &check, Dialect::Postgres).statement,
+            "the column-check ADD is single-sourced with the create path"
+        );
+    }
+
+    #[test]
+    fn render_check_addition_returns_none_for_an_undeclared_name() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        assert!(
+            render_check_addition("transfer", &model, "ck_transfer_nope", Dialect::Postgres)
+                .is_none()
         );
     }
 
