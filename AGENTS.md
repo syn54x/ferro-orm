@@ -47,8 +47,8 @@ For a single model, every emitter must agree on:
 7. **Primary key constraint names** — when explicitly named.
 8. **Check constraint names** — `ck_<table>_<col>` for the single-column
    `db_check=True` constraint; `ck_<table>_<suffix>` for table checks declared
-   in `__ferro_checks__`. Column checks use `_ck_constraint_name` (Python) and
-   `db_check_constraint_name` (Rust); table checks use
+   in `__ferro_checks__`. Column checks use `_ddl_check_constraint_name`
+   (Python) and `db_check_constraint_name` (Rust); table checks use
    `_ddl_table_check_constraint_name` (Python) and
    `table_check_constraint_name` (Rust).
 9. **Default values** — server-side defaults must serialize identically.

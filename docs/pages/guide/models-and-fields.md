@@ -406,7 +406,7 @@ When a rule spans several columns on the same row — "at most one of these two 
 
 Each entry is `Check(suffix, predicate)`. You supply a short suffix (for example `at_most_one_side`); ferro derives the live constraint name `ck_<table>_<suffix>` (here, `ck_pair_at_most_one_side`). The predicate is a ferro lambda with a **lowercase-singular** parameter named after the model (`pair` for `Pair`), using the same style as [`where()`](queries.md) filters — not a SQL string.
 
-This release compiles null tests (`== None` / `!= None`, including on a forward foreign key or its shadow `*_id` column) combined with `&`, `|`, and `~`. Richer comparisons land in a follow-up release; invalid forms fail at class definition with a clear error.
+The predicate is the root-column `where()` dialect: comparisons, `== None` / `!= None` (including on a forward foreign key or its shadow `*_id` column), `&` / `|` / `~`, `.in_()`, `.like()`, and column-to-column (`pair.left != pair.right`). Values are literals inlined into the CHECK — not bind parameters. Relation traversal, `.exists()`, aggregates, and closed-over variables fail at class definition.
 
 For a single-column closed domain (for example a `StrEnum` stored as text with `IN ('admin', 'user')`), use `Field(db_check=True)` instead — that emits `ck_<table>_<col>` and is a different artifact from table checks.
 
