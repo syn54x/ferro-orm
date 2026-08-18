@@ -13,18 +13,21 @@
 
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
-    Dialect, ResolvedStorage, extra_enum_labels, extra_enum_labels_warning,
-    information_schema_to_db_type_token, missing_enum_labels, render_pg_enum_add_value,
-    resolve_column_storage,
+    Dialect, ResolvedStorage, extra_check_names, extra_check_names_warning, extra_enum_labels,
+    extra_enum_labels_warning, information_schema_to_db_type_token, missing_enum_labels,
+    render_pg_enum_add_value, resolve_column_storage,
 };
-use ferro_migrate::{MigrationOp, emit_sql_with_ir, plan_from_ir};
+use ferro_migrate::{
+    MigrationOp, emit_sql_with_ir, plan_check_drops, plan_check_rebuilds, plan_from_ir,
+    plan_missing_checks,
+};
 use ferro_schema_ir::{
     IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
     SchemaModel, SchemaUnique,
 };
 use crate::introspect::{
-    LiveColumn, LiveForeignKey, LiveIndex, live_enum_type_labels, live_table_columns,
-    live_table_foreign_keys, live_table_indexes, quote_ident,
+    LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, live_enum_type_labels, live_table_checks,
+    live_table_columns, live_table_foreign_keys, live_table_indexes, quote_ident,
     sqlite_indexes_covering_column,
 };
 use crate::schema::{internal_create_tables, order_models_for_migration};
@@ -202,6 +205,7 @@ fn live_columns_to_schema_ir(
                 }).collect(),
                 uniques: Vec::<SchemaUnique>::new(),
                 checks: Vec::<SchemaCheck>::new(),
+                table_checks: Vec::new(),
             }],
         },
     }
@@ -266,6 +270,7 @@ pub fn plan_table_migration(
     live: &[LiveColumn],
     live_indexes: &[LiveIndex],
     live_foreign_keys: &[LiveForeignKey],
+    live_checks: &[LiveCheck],
     backend: Dialect,
     opts: MigrateOptions,
 ) -> PyResult<MigrationPlan> {
@@ -277,6 +282,66 @@ pub fn plan_table_migration(
         live_columns_to_schema_ir(table_lower, live, live_indexes, live_foreign_keys, backend);
     let new_ir = declared;
     let mut typed_plan = plan_from_ir(&old_ir, new_ir, backend);
+    // Check addition (#343; ADR-0013) is planned after the column diff so a
+    // CHECK over a newly added column lands after its ADD COLUMN. Live CHECKs
+    // travel beside the IR rather than inside it: their bodies are the
+    // backend's own rendering, and the IR carries exactly one body language
+    // (AGENTS.md § I-1).
+    let live_check_names: Vec<String> =
+        live_checks.iter().map(|check| check.name.clone()).collect();
+    typed_plan.operations.extend(plan_missing_checks(
+        table_lower,
+        &old_ir,
+        new_ir,
+        &live_check_names,
+    ));
+    // Body drift (#344; ADR-0015) is planned after missing-name adds. Live
+    // catalog text stays beside the IR; only ferro-owned names are eligible
+    // for rebuild (a user-owned CHECK is never dropped).
+    let live_for_rebuild: Vec<(String, String)> = live_checks
+        .iter()
+        .filter(|check| check.ferro_owned)
+        .map(|check| (check.name.clone(), check.definition.clone()))
+        .collect();
+    typed_plan.operations.extend(plan_check_rebuilds(
+        table_lower,
+        new_ir,
+        &live_for_rebuild,
+    ));
+    // Leftovers (#345; ADR-0013): live ferro-owned names the model does not
+    // declare. Always warn (silence is wrong — leftover CHECKs keep rejecting
+    // rows the model now allows). DropCheck ops only when destructive — do
+    // not piggy-back on the DropIndex retain-filter, which would also
+    // swallow this warning on a warning-only plan.
+    let live_ferro_owned_names: Vec<String> = live_for_rebuild
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let declared_check_names: Vec<String> = new_ir
+        .payload
+        .models
+        .iter()
+        .find(|model| model.table_name == table_lower)
+        .map(|model| {
+            model
+                .table_checks
+                .iter()
+                .map(|check| check.name.clone())
+                .chain(model.checks.iter().map(|check| check.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let extras = extra_check_names(&declared_check_names, &live_ferro_owned_names);
+    if let Some(warning) = extra_check_names_warning(table_lower, &extras) {
+        typed_plan.warnings.push(warning);
+    }
+    if opts.destructive {
+        typed_plan.operations.extend(plan_check_drops(
+            table_lower,
+            new_ir,
+            &live_ferro_owned_names,
+        ));
+    }
 
     if !opts.destructive {
         typed_plan
@@ -406,7 +471,7 @@ async fn execute_drop_column(
 /// Returns a `PyErr` if introspection, DDL execution, or the pool refresh
 /// fails, or if the diff contains a change that cannot be applied safely.
 pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult<()> {
-    internal_create_tables(engine.clone()).await?;
+    let tables_before_create = internal_create_tables(engine.clone()).await?;
     if !opts.updates {
         return Ok(());
     }
@@ -443,12 +508,20 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
 
     for (_name, model) in order_models_for_migration(schemas, &modelset) {
         let table_lower = model.table_name.clone();
+        // ADR-0010: the reconciliation pass owns tables that already existed.
+        // A table the create pass built in this same run is already exactly the
+        // model — re-diffing it can only replay that pass's own
+        // backend-limitation warnings (e.g. the SQLite `db_check` elision).
+        if !tables_before_create.contains(&table_lower) {
+            continue;
+        }
         let Some(live) = live_table_columns(&engine, &table_lower).await? else {
-            // Freshly created (or otherwise absent) tables have nothing to diff.
+            // A table that vanished between the create pass and here.
             continue;
         };
         let live_indexes = live_table_indexes(&engine, &table_lower).await?;
         let live_foreign_keys = live_table_foreign_keys(&engine, &table_lower).await?;
+        let live_checks = live_table_checks(&engine, &table_lower).await?;
 
         let Some(declared) = declared_envelope_for(&modelset, &table_lower) else { continue };
         let mut plan = plan_table_migration(
@@ -457,6 +530,7 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
             &live,
             &live_indexes,
             &live_foreign_keys,
+            &live_checks,
             backend,
             opts,
         )?;
@@ -664,7 +738,7 @@ pub fn migrate(
 /// unrecognized, or the diff contains an unsafe change.
 #[pyfunction]
 #[pyo3(name = "_render_migration_sql_for_test")]
-#[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new(), live_foreign_keys_json=String::new()))]
+#[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new(), live_foreign_keys_json=String::new(), live_checks_json=String::new()))]
 pub fn _render_migration_sql_for_test(
     name: String,
     schema_ir_json: String,
@@ -674,6 +748,7 @@ pub fn _render_migration_sql_for_test(
     destructive: bool,
     live_indexes_json: String,
     live_foreign_keys_json: String,
+    live_checks_json: String,
 ) -> PyResult<(Vec<String>, Vec<String>)> {
     let backend = match dialect.as_str() {
         "postgres" => Dialect::Postgres,
@@ -709,6 +784,14 @@ pub fn _render_migration_sql_for_test(
         })?
     };
 
+    let live_checks: Vec<LiveCheck> = if live_checks_json.is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&live_checks_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid live-checks JSON: {}", e))
+        })?
+    };
+
     let table_lower = name;
     let opts = MigrateOptions::laddered(updates, destructive);
     let plan = plan_table_migration(
@@ -717,6 +800,7 @@ pub fn _render_migration_sql_for_test(
         &live,
         &live_indexes,
         &live_foreign_keys,
+        &live_checks,
         backend,
         opts,
     )?;

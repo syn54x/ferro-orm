@@ -637,11 +637,73 @@ pub fn composite_unique_index_name(table_lower: &str, col_names: &[&str]) -> Str
 
 /// Check constraint name (`ck_<table>_<col>`).
 pub fn db_check_constraint_name(table_lower: &str, col_name: &str) -> String {
-    let raw = format!("ck_{table_lower}_{col_name}");
+    table_check_constraint_name(table_lower, col_name)
+}
+
+/// Table-check constraint name (`ck_<table>_<suffix>`) with 63-char guard.
+pub fn table_check_constraint_name(table_lower: &str, suffix: &str) -> String {
+    let raw = format!("ck_{table_lower}_{suffix}");
     if raw.chars().count() > 63 {
         return format!("{}_ck", raw.chars().take(60).collect::<String>());
     }
     raw
+}
+
+/// Render a structured check predicate to its CHECK body SQL fragment.
+pub fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
+    match expr {
+        ferro_schema_ir::CheckExpr::And { left, right } => format!(
+            "({}) AND ({})",
+            render_check_expr(left),
+            render_check_expr(right)
+        ),
+        ferro_schema_ir::CheckExpr::Or { left, right } => format!(
+            "({}) OR ({})",
+            render_check_expr(left),
+            render_check_expr(right)
+        ),
+        ferro_schema_ir::CheckExpr::Not { child } => format!("NOT ({})", render_check_expr(child)),
+        ferro_schema_ir::CheckExpr::IsNull { column } => {
+            format!("{} IS NULL", quote_ident(column))
+        }
+        ferro_schema_ir::CheckExpr::IsNotNull { column } => {
+            format!("{} IS NOT NULL", quote_ident(column))
+        }
+        ferro_schema_ir::CheckExpr::Cmp { column, op, other } => {
+            let rhs = match other {
+                ferro_schema_ir::CheckOperand::Column { name } => quote_ident(name),
+                ferro_schema_ir::CheckOperand::Literal { token } => token.clone(),
+            };
+            format!(
+                "{} {} {}",
+                quote_ident(column),
+                check_cmp_op_sql(*op),
+                rhs
+            )
+        }
+        ferro_schema_ir::CheckExpr::In { column, values } => {
+            format!("{} IN ({})", quote_ident(column), values.join(", "))
+        }
+        ferro_schema_ir::CheckExpr::Like { column, pattern } => {
+            format!("{} LIKE {}", quote_ident(column), pattern)
+        }
+    }
+}
+
+fn check_cmp_op_sql(op: ferro_schema_ir::CheckCmpOp) -> &'static str {
+    match op {
+        ferro_schema_ir::CheckCmpOp::Eq => "=",
+        ferro_schema_ir::CheckCmpOp::Ne => "<>",
+        ferro_schema_ir::CheckCmpOp::Lt => "<",
+        ferro_schema_ir::CheckCmpOp::Le => "<=",
+        ferro_schema_ir::CheckCmpOp::Gt => ">",
+        ferro_schema_ir::CheckCmpOp::Ge => ">=",
+    }
+}
+
+/// The CHECK body for a table check — byte-identical across emitters (I-1).
+pub fn render_table_check_body(check: &ferro_schema_ir::SchemaTableCheck) -> String {
+    render_check_expr(&check.predicate)
 }
 
 /// The CHECK body for a `db_check` enum constraint — byte-identical across the
@@ -695,6 +757,509 @@ pub fn render_db_check(table: &str, check: &ferro_schema_ir::SchemaCheck, dialec
                 check.name, table
             )),
         },
+    }
+}
+
+/// The check-addition decision (ADR-0013): which declared CHECK constraints —
+/// table checks and column checks alike — have no live constraint of that name,
+/// in declared order (table checks, then column checks).
+///
+/// This is the single decision table for missing CHECKs: the auto-migrate
+/// reconciliation pass consumes it through `ferro-migrate`, and the Alembic
+/// autogenerate comparator consumes it over FFI (AGENTS.md § I-1). Neither side
+/// re-derives it.
+///
+/// The comparison is by NAME only. A live constraint whose *body* drifted from
+/// the declared predicate is a constraint rebuild, not an addition (ADR-0015,
+/// #344), and a live name ferro does not own cannot collide with a declared
+/// `ck_*` name — so a user-owned CHECK is never added over.
+pub fn missing_check_names(
+    model: &ferro_schema_ir::SchemaModel,
+    live_names: &[String],
+) -> Vec<String> {
+    declared_check_names(model)
+        .into_iter()
+        .filter(|name| !live_names.iter().any(|live| live == name))
+        .collect()
+}
+
+/// Every CHECK constraint name the model declares, table checks first.
+fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String> {
+    model
+        .table_checks
+        .iter()
+        .map(|check| check.name.clone())
+        .chain(model.checks.iter().map(|check| check.name.clone()))
+        .collect()
+}
+
+/// Render the ADD for one declared CHECK constraint, or `None` when `name` is
+/// not declared on `model`.
+///
+/// The single source both migration doors consume for a missing CHECK
+/// (AGENTS.md § I-1). A **table check** is one plain
+/// `ALTER TABLE … ADD CONSTRAINT … CHECK (…)`: the caller only asks for it when
+/// the name is absent live, so no existence guard is needed. A **column check**
+/// reuses [`render_db_check`], the same idempotent DO-block the create path
+/// emits. On SQLite both are skipped with a warning that names the constraint
+/// (ADR-0014): adding a table constraint to an existing table needs a full
+/// table rebuild, which is Alembic's batch-mode door.
+pub fn render_check_addition(
+    table: &str,
+    model: &ferro_schema_ir::SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> Option<CheckEmission> {
+    if let Some(check) = model.table_checks.iter().find(|check| check.name == name) {
+        return Some(render_add_table_check(table, check, dialect));
+    }
+    let check = model.checks.iter().find(|check| check.name == name)?;
+    Some(render_db_check(table, check, dialect))
+}
+
+/// The table-check half of [`render_check_addition`].
+fn render_add_table_check(
+    table: &str,
+    check: &ferro_schema_ir::SchemaTableCheck,
+    dialect: Dialect,
+) -> CheckEmission {
+    match dialect {
+        Dialect::Postgres => CheckEmission {
+            statement: Some(format!(
+                "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({})",
+                quote_ident(table),
+                quote_ident(&check.name),
+                render_table_check_body(check),
+            )),
+            warning: None,
+        },
+        Dialect::Sqlite => CheckEmission {
+            statement: None,
+            warning: Some(format!(
+                "Table check '{}' is declared on '{}' but missing from the live table, and \
+                 SQLite cannot add a table constraint to an existing table (it requires a \
+                 full table rebuild). The invariant is not database-enforced; use Alembic's \
+                 batch mode to apply it.",
+                check.name, table
+            )),
+        },
+    }
+}
+
+/// Outcome of rendering a CHECK constraint rebuild (ADR-0015).
+///
+/// Postgres emits two statements — drop the live constraint, then a **bare**
+/// `ALTER TABLE … ADD CONSTRAINT … CHECK (…)` so the new body actually
+/// replaces the old one. The idempotent `render_db_check` DO-block is the
+/// create/add path; using it here would no-op against the still-present name.
+/// SQLite cannot alter constraints in place (ADR-0014).
+#[derive(Debug)]
+pub struct CheckRebuildEmission {
+    /// DROP + ADD on Postgres; empty on SQLite.
+    pub statements: Vec<String>,
+    /// The SQLite skip warning (SQLite only).
+    pub warning: Option<String>,
+}
+
+/// Canonicalize a CHECK definition so catalog wrapping, identifier quotes,
+/// and whitespace are not drift (ADR-0015).
+///
+/// Both ferro's rendered CHECK body and a live catalog definition
+/// (`pg_get_constraintdef`, SQLite's `CHECK (…)` fragment) pass through this
+/// one function. A leading `CHECK` keyword is stripped; wrapping parentheses
+/// that enclose the whole expression are unwrapped; simple identifiers are
+/// compared unquoted. Postgres also paints `::type` casts onto literals and
+/// may rewrite `IN (…)` as `= ANY (ARRAY[…])` — those are the same predicate.
+pub fn normalize_check_definition(definition: &str) -> String {
+    let tokens = unwrap_outer_parens(strip_pg_in_any(strip_type_casts(strip_leading_check(
+        tokenize_check_sql(definition),
+    ))));
+    render_check_tokens(&tokens)
+}
+
+/// Declared CHECK names whose live counterpart exists and whose normalized
+/// body differs from the model's canonical rendering.
+///
+/// Absent-live names are an add (`missing_check_names`, #343), not a rebuild.
+/// Live names the model does not declare are leftover handling (#345).
+pub fn drifted_check_names(
+    model: &ferro_schema_ir::SchemaModel,
+    live: &[(String, String)],
+) -> Vec<String> {
+    declared_check_names(model)
+        .into_iter()
+        .filter(|name| {
+            let Some((_, live_def)) = live.iter().find(|(live_name, _)| live_name == name) else {
+                return false;
+            };
+            let Some(canonical) = declared_check_body(model, name) else {
+                return false;
+            };
+            normalize_check_definition(&canonical) != normalize_check_definition(live_def)
+        })
+        .collect()
+}
+
+/// Render the DROP+ADD (Postgres) or warn-skip (SQLite) for one declared
+/// CHECK whose live body drifted. `None` when `name` is not on `model`.
+pub fn render_check_rebuild(
+    table: &str,
+    model: &ferro_schema_ir::SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> Option<CheckRebuildEmission> {
+    let body = declared_check_body(model, name)?;
+    Some(match dialect {
+        Dialect::Postgres => CheckRebuildEmission {
+            statements: vec![
+                format!(
+                    "ALTER TABLE {} DROP CONSTRAINT {}",
+                    quote_ident(table),
+                    quote_ident(name),
+                ),
+                format!(
+                    "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({})",
+                    quote_ident(table),
+                    quote_ident(name),
+                    body,
+                ),
+            ],
+            warning: None,
+        },
+        Dialect::Sqlite => CheckRebuildEmission {
+            statements: Vec::new(),
+            warning: Some(format!(
+                "CHECK constraint '{name}' on table '{table}' has a declared body that \
+                 differs from the live constraint, and SQLite cannot alter constraints in \
+                 place (it requires a full table rebuild). The live body remains; use \
+                 Alembic's batch mode to apply the declared predicate."
+            )),
+        },
+    })
+}
+
+fn declared_check_body(model: &ferro_schema_ir::SchemaModel, name: &str) -> Option<String> {
+    if let Some(check) = model.table_checks.iter().find(|check| check.name == name) {
+        return Some(render_table_check_body(check));
+    }
+    model
+        .checks
+        .iter()
+        .find(|check| check.name == name)
+        .map(render_check_body)
+}
+
+/// Live ferro-owned CHECK names the model no longer declares, in live order
+/// (ADR-0013, #345).
+///
+/// Set-difference only: callers pass *already-filtered* ferro-owned names
+/// (`LiveCheck.ferro_owned`, Alembic `ck_*`). This function does not inspect
+/// the prefix — a user-owned name that leaked into `live_ferro_owned_names`
+/// would be reported as extra. Missing names are an add
+/// (`missing_check_names`, #343); same-name body drift is a rebuild
+/// (`drifted_check_names`, #344).
+pub fn extra_check_names(
+    declared_names: &[String],
+    live_ferro_owned_names: &[String],
+) -> Vec<String> {
+    live_ferro_owned_names
+        .iter()
+        .filter(|name| !declared_names.contains(name))
+        .cloned()
+        .collect()
+}
+
+/// The leftover-CHECK warning for one table, or `None` when nothing is extra.
+/// Single-sourced like [`extra_enum_labels_warning`]: callers emit it verbatim,
+/// never re-derive the wording. Names every leftover and points at
+/// `migrate_destructive` / Alembic.
+pub fn extra_check_names_warning(table: &str, extra: &[String]) -> Option<String> {
+    if extra.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = extra.iter().map(|name| format!("'{name}'")).collect();
+    Some(format!(
+        "Table '{table}' has CHECK constraint(s) {} that the model no longer \
+         declares. Leftover CHECKs keep rejecting rows the model now allows. \
+         They stay in place unless you pass migrate_destructive=True (Postgres) \
+         or drop them with a reviewed Alembic migration.",
+        listed.join(", "),
+    ))
+}
+
+/// Render the DROP for one leftover CHECK constraint (ADR-0013, ADR-0014).
+///
+/// Postgres: one `ALTER TABLE … DROP CONSTRAINT`. SQLite: no statement, a
+/// warning that names the constraint and points at Alembic batch mode — SQLite
+/// cannot drop a table constraint without a full table rebuild.
+pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmission {
+    match dialect {
+        Dialect::Postgres => CheckEmission {
+            statement: Some(format!(
+                "ALTER TABLE {} DROP CONSTRAINT {}",
+                quote_ident(table),
+                quote_ident(name),
+            )),
+            warning: None,
+        },
+        Dialect::Sqlite => CheckEmission {
+            statement: None,
+            warning: Some(format!(
+                "CHECK constraint '{name}' on table '{table}' is no longer declared, \
+                 and SQLite cannot drop a table constraint in place (it requires a \
+                 full table rebuild). The live constraint remains; use Alembic's \
+                 batch mode to drop it."
+            )),
+        },
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CheckToken {
+    Word(String),
+    String(String),
+    Punct(char),
+}
+
+fn tokenize_check_sql(input: &str) -> Vec<CheckToken> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if ch == '\'' {
+            let (lit, next) = take_quoted(&chars, i, '\'');
+            tokens.push(CheckToken::String(lit));
+            i = next;
+            continue;
+        }
+        if ch == '"' {
+            let (ident, next) = take_quoted(&chars, i, '"');
+            let inner = ident[1..ident.len() - 1].replace("\"\"", "\"");
+            if is_simple_ident(&inner) {
+                tokens.push(CheckToken::Word(inner));
+            } else {
+                tokens.push(CheckToken::Word(ident));
+            }
+            i = next;
+            continue;
+        }
+        if ch == ':' && i + 1 < chars.len() && chars[i + 1] == ':' {
+            tokens.push(CheckToken::Punct(':'));
+            tokens.push(CheckToken::Punct(':'));
+            i += 2;
+            continue;
+        }
+        if is_ident_start(ch) {
+            let start = i;
+            i += 1;
+            while i < chars.len() && is_ident_continue(chars[i]) {
+                i += 1;
+            }
+            tokens.push(CheckToken::Word(chars[start..i].iter().collect()));
+            continue;
+        }
+        tokens.push(CheckToken::Punct(ch));
+        i += 1;
+    }
+    tokens
+}
+
+fn take_quoted(chars: &[char], start: usize, quote: char) -> (String, usize) {
+    let mut out = String::from(quote);
+    let mut i = start + 1;
+    while i < chars.len() {
+        let ch = chars[i];
+        out.push(ch);
+        if ch == quote {
+            if i + 1 < chars.len() && chars[i + 1] == quote {
+                out.push(quote);
+                i += 2;
+                continue;
+            }
+            return (out, i + 1);
+        }
+        i += 1;
+    }
+    (out, i)
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn is_simple_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(ch) if is_ident_start(ch)) && chars.all(is_ident_continue)
+}
+
+fn strip_leading_check(mut tokens: Vec<CheckToken>) -> Vec<CheckToken> {
+    if matches!(tokens.first(), Some(CheckToken::Word(w)) if w.eq_ignore_ascii_case("check")) {
+        tokens.remove(0);
+    }
+    tokens
+}
+
+fn unwrap_outer_parens(mut tokens: Vec<CheckToken>) -> Vec<CheckToken> {
+    loop {
+        if tokens.len() < 2 {
+            return tokens;
+        }
+        if tokens.first() != Some(&CheckToken::Punct('('))
+            || tokens.last() != Some(&CheckToken::Punct(')'))
+        {
+            return tokens;
+        }
+        let mut depth = 0i32;
+        let mut wraps_all = true;
+        for (idx, token) in tokens.iter().enumerate() {
+            match token {
+                CheckToken::Punct('(') => depth += 1,
+                CheckToken::Punct(')') => {
+                    depth -= 1;
+                    if depth == 0 && idx != tokens.len() - 1 {
+                        wraps_all = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !wraps_all || depth != 0 {
+            return tokens;
+        }
+        tokens = tokens[1..tokens.len() - 1].to_vec();
+    }
+}
+
+fn strip_type_casts(tokens: Vec<CheckToken>) -> Vec<CheckToken> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == CheckToken::Punct(':')
+            && i + 1 < tokens.len()
+            && tokens[i + 1] == CheckToken::Punct(':')
+        {
+            i += 2;
+            if i < tokens.len() && matches!(tokens[i], CheckToken::Word(_)) {
+                i += 1;
+            }
+            // varchar(n) / char(n)
+            if i < tokens.len() && tokens[i] == CheckToken::Punct('(') {
+                i += 1;
+                while i < tokens.len() && tokens[i] != CheckToken::Punct(')') {
+                    i += 1;
+                }
+                if i < tokens.len() {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        out.push(tokens[i].clone());
+        i += 1;
+    }
+    out
+}
+
+fn strip_pg_in_any(tokens: Vec<CheckToken>) -> Vec<CheckToken> {
+    // `col = ANY (ARRAY[a, b])` is how Postgres stores `col IN (a, b)`.
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        let is_eq_any = tokens[i] == CheckToken::Punct('=')
+            && i + 1 < tokens.len()
+            && matches!(&tokens[i + 1], CheckToken::Word(w) if w.eq_ignore_ascii_case("any"));
+        if is_eq_any {
+            let mut j = i + 2;
+            if j < tokens.len() && tokens[j] == CheckToken::Punct('(') {
+                j += 1;
+            }
+            if j < tokens.len()
+                && matches!(&tokens[j], CheckToken::Word(w) if w.eq_ignore_ascii_case("array"))
+            {
+                j += 1;
+            }
+            if j < tokens.len() && tokens[j] == CheckToken::Punct('[') {
+                j += 1;
+                let values_start = j;
+                let mut depth = 1i32;
+                while j < tokens.len() && depth > 0 {
+                    match &tokens[j] {
+                        CheckToken::Punct('[') => depth += 1,
+                        CheckToken::Punct(']') => depth -= 1,
+                        _ => {}
+                    }
+                    if depth > 0 {
+                        j += 1;
+                    }
+                }
+                let values_end = j;
+                if j < tokens.len() && tokens[j] == CheckToken::Punct(']') {
+                    j += 1;
+                }
+                if j < tokens.len() && tokens[j] == CheckToken::Punct(')') {
+                    j += 1;
+                }
+                out.push(CheckToken::Word("IN".to_string()));
+                out.push(CheckToken::Punct('('));
+                out.extend(tokens[values_start..values_end].iter().cloned());
+                out.push(CheckToken::Punct(')'));
+                i = j;
+                continue;
+            }
+        }
+        out.push(tokens[i].clone());
+        i += 1;
+    }
+    out
+}
+
+fn render_check_tokens(tokens: &[CheckToken]) -> String {
+    let mut out = String::new();
+    for (idx, token) in tokens.iter().enumerate() {
+        let rendered = match token {
+            CheckToken::Word(word) => canonicalize_sql_word(word),
+            CheckToken::String(s) => s.clone(),
+            CheckToken::Punct(ch) => ch.to_string(),
+        };
+        if idx > 0 && needs_space(&tokens[idx - 1], token) {
+            out.push(' ');
+        }
+        out.push_str(&rendered);
+    }
+    out
+}
+
+fn canonicalize_sql_word(word: &str) -> String {
+    const KEYWORDS: &[&str] = &[
+        "AND", "OR", "NOT", "IS", "NULL", "IN", "LIKE", "ANY", "ARRAY", "CHECK", "TRUE", "FALSE",
+    ];
+    for keyword in KEYWORDS {
+        if word.eq_ignore_ascii_case(keyword) {
+            return (*keyword).to_string();
+        }
+    }
+    word.to_string()
+}
+
+fn needs_space(prev: &CheckToken, next: &CheckToken) -> bool {
+    match (prev, next) {
+        (CheckToken::Punct('('), _) | (_, CheckToken::Punct(')')) => false,
+        (_, CheckToken::Punct(',')) => false,
+        (CheckToken::Punct(','), _) => true,
+        (CheckToken::Punct(')'), CheckToken::Word(_)) => true,
+        (CheckToken::Word(_), CheckToken::Punct('(')) => false,
+        (CheckToken::Punct(_), CheckToken::Punct(_)) => false,
+        _ => true,
     }
 }
 
@@ -957,6 +1522,447 @@ mod tests {
         assert_eq!(single_index_name("user", "email"), "idx_user_email");
         assert_eq!(single_unique_index_name("user", "email"), "uq_user_email");
         assert_eq!(db_check_constraint_name("user", "role"), "ck_user_role");
+        assert_eq!(
+            table_check_constraint_name("transfer", "at_most_one_outflow"),
+            "ck_transfer_at_most_one_outflow"
+        );
+    }
+
+    #[test]
+    fn table_check_constraint_name_truncates_above_63() {
+        let long_suffix = "a".repeat(70);
+        let result = table_check_constraint_name("verylongtable", &long_suffix);
+        assert_eq!(result.chars().count(), 63);
+        assert!(result.ends_with("_ck"));
+        assert_eq!(
+            result,
+            db_check_constraint_name("verylongtable", &long_suffix),
+            "table and column checks share the truncation rule"
+        );
+    }
+
+    fn transfer_at_most_one_outflow_check() -> ferro_schema_ir::SchemaTableCheck {
+        use ferro_schema_ir::CheckExpr;
+        ferro_schema_ir::SchemaTableCheck {
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+            predicate: CheckExpr::Or {
+                left: Box::new(CheckExpr::IsNull {
+                    column: "outflow_transaction_id".to_string(),
+                }),
+                right: Box::new(CheckExpr::IsNull {
+                    column: "outflow_activity_id".to_string(),
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn render_table_check_body_pins_transfer_is_null_or() {
+        assert_eq!(
+            render_table_check_body(&transfer_at_most_one_outflow_check()),
+            "(\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL)"
+        );
+    }
+
+    fn transfer_model_with_checks(
+        table_checks: Vec<ferro_schema_ir::SchemaTableCheck>,
+        checks: Vec<ferro_schema_ir::SchemaCheck>,
+    ) -> ferro_schema_ir::SchemaModel {
+        ferro_schema_ir::SchemaModel {
+            model_name: "transfer".to_string(),
+            table_name: "transfer".to_string(),
+            columns: Vec::new(),
+            foreign_keys: Vec::new(),
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            checks,
+            table_checks,
+        }
+    }
+
+    fn account_role_column_check() -> ferro_schema_ir::SchemaCheck {
+        ferro_schema_ir::SchemaCheck {
+            name: "ck_transfer_kind".to_string(),
+            column: "kind".to_string(),
+            values: vec!["'in'".to_string(), "'out'".to_string()],
+        }
+    }
+
+    #[test]
+    fn missing_check_names_reports_declared_names_absent_live() {
+        let model = transfer_model_with_checks(
+            vec![transfer_at_most_one_outflow_check()],
+            vec![account_role_column_check()],
+        );
+        assert_eq!(
+            missing_check_names(&model, &["ck_transfer_kind".to_string()]),
+            vec!["ck_transfer_at_most_one_outflow".to_string()],
+            "table checks come first, and a live name is never re-added"
+        );
+        assert!(
+            missing_check_names(
+                &model,
+                &[
+                    "ck_transfer_at_most_one_outflow".to_string(),
+                    "ck_transfer_kind".to_string(),
+                ],
+            )
+            .is_empty(),
+            "a reconciled table replans to nothing"
+        );
+    }
+
+    #[test]
+    fn missing_check_names_ignores_user_owned_live_constraints() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        assert_eq!(
+            missing_check_names(&model, &["transfer_positive_amount".to_string()]),
+            vec!["ck_transfer_at_most_one_outflow".to_string()],
+            "a user-owned live CHECK is not a counterpart for a declared ck_* name"
+        );
+    }
+
+    #[test]
+    fn render_check_addition_table_check_is_one_plain_alter_on_postgres() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let emission = render_check_addition(
+            "transfer",
+            &model,
+            "ck_transfer_at_most_one_outflow",
+            Dialect::Postgres,
+        )
+        .expect("declared table check must resolve");
+        assert_eq!(
+            emission.statement.as_deref(),
+            Some(
+                "ALTER TABLE \"transfer\" ADD CONSTRAINT \"ck_transfer_at_most_one_outflow\" \
+                 CHECK ((\"outflow_transaction_id\" IS NULL) OR \
+                 (\"outflow_activity_id\" IS NULL))"
+            )
+        );
+        assert!(emission.warning.is_none());
+    }
+
+    #[test]
+    fn render_check_addition_table_check_warns_and_skips_on_sqlite() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let emission = render_check_addition(
+            "transfer",
+            &model,
+            "ck_transfer_at_most_one_outflow",
+            Dialect::Sqlite,
+        )
+        .expect("declared table check must resolve");
+        assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
+        let warning = emission.warning.expect("SQLite must never skip silently");
+        assert!(
+            warning.contains("ck_transfer_at_most_one_outflow"),
+            "{warning}"
+        );
+        assert!(warning.contains("Alembic"), "{warning}");
+    }
+
+    #[test]
+    fn render_check_addition_column_check_reuses_the_idempotent_do_block() {
+        let check = account_role_column_check();
+        let model = transfer_model_with_checks(vec![], vec![check.clone()]);
+        let emission =
+            render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Postgres)
+                .expect("declared column check must resolve");
+        assert_eq!(
+            emission.statement,
+            render_db_check("transfer", &check, Dialect::Postgres).statement,
+            "the column-check ADD is single-sourced with the create path"
+        );
+    }
+
+    #[test]
+    fn render_check_addition_returns_none_for_an_undeclared_name() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        assert!(
+            render_check_addition("transfer", &model, "ck_transfer_nope", Dialect::Postgres)
+                .is_none()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Check-body drift (#344; ADR-0015): same live name, different body is a
+    // rebuild. Catalog wrapping / quoting / whitespace is not drift.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn catalog_shaped_transfer_check_normalizes_equal_to_rendered_body() {
+        let canonical = render_table_check_body(&transfer_at_most_one_outflow_check());
+        // pg_get_constraintdef for the Transfer at-most-one-outflow shape:
+        // CHECK prefix, extra wrapping parens, unquoted idents.
+        let catalog = "CHECK (((outflow_transaction_id IS NULL) OR (outflow_activity_id IS NULL)))";
+        assert_eq!(
+            normalize_check_definition(catalog),
+            normalize_check_definition(&canonical),
+            "catalog noise must not look like a predicate change"
+        );
+        assert_ne!(
+            catalog, canonical,
+            "the pin is only meaningful if the raw strings actually differ"
+        );
+    }
+
+    #[test]
+    fn whitespace_and_quoting_only_is_not_drift() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let live = [(
+            "ck_transfer_at_most_one_outflow".to_string(),
+            "CHECK ( ( \"outflow_transaction_id\" IS NULL ) OR ( \"outflow_activity_id\" IS NULL ) )"
+                .to_string(),
+        )];
+        assert!(
+            drifted_check_names(&model, &live).is_empty(),
+            "quoting and whitespace are catalog noise, not a rebuild"
+        );
+    }
+
+    #[test]
+    fn a_real_predicate_change_is_drift() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let live = [(
+            "ck_transfer_at_most_one_outflow".to_string(),
+            "CHECK ((\"outflow_transaction_id\" IS NULL) AND (\"outflow_activity_id\" IS NULL))"
+                .to_string(),
+        )];
+        assert_eq!(
+            drifted_check_names(&model, &live),
+            vec!["ck_transfer_at_most_one_outflow".to_string()]
+        );
+    }
+
+    #[test]
+    fn drifted_check_names_skips_absent_live_and_undeclared_live() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        assert!(
+            drifted_check_names(&model, &[]).is_empty(),
+            "a missing name is an add (#343), not a rebuild"
+        );
+        let leftover = [("ck_transfer_orphan".to_string(), "CHECK (true)".to_string())];
+        assert!(
+            drifted_check_names(&model, &leftover).is_empty(),
+            "an undeclared live name is leftover handling (#345), not a rebuild"
+        );
+    }
+
+    #[test]
+    #[test]
+    fn postgres_in_any_array_and_text_casts_are_not_drift() {
+        let check = account_role_column_check();
+        let canonical = render_check_body(&check);
+        let catalog = "CHECK ((kind = ANY (ARRAY['in'::text, 'out'::text])))";
+        assert_eq!(
+            normalize_check_definition(catalog),
+            normalize_check_definition(&canonical),
+        );
+    }
+
+    #[test]
+    fn column_check_label_change_is_drift() {
+        let check = account_role_column_check();
+        let model = transfer_model_with_checks(vec![], vec![check]);
+        let live = [(
+            "ck_transfer_kind".to_string(),
+            "CHECK (\"kind\" IN ('in'))".to_string(),
+        )];
+        assert_eq!(
+            drifted_check_names(&model, &live),
+            vec!["ck_transfer_kind".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_check_rebuild_is_drop_then_bare_add_on_postgres() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let emission = render_check_rebuild(
+            "transfer",
+            &model,
+            "ck_transfer_at_most_one_outflow",
+            Dialect::Postgres,
+        )
+        .expect("declared table check must resolve");
+        assert_eq!(
+            emission.statements,
+            vec![
+                "ALTER TABLE \"transfer\" DROP CONSTRAINT \"ck_transfer_at_most_one_outflow\""
+                    .to_string(),
+                "ALTER TABLE \"transfer\" ADD CONSTRAINT \"ck_transfer_at_most_one_outflow\" \
+                 CHECK ((\"outflow_transaction_id\" IS NULL) OR \
+                 (\"outflow_activity_id\" IS NULL))"
+                    .to_string(),
+            ]
+        );
+        assert!(emission.warning.is_none());
+        assert!(
+            !emission.statements.iter().any(|sql| sql.contains("DO $$")),
+            "a rebuild must replace the body; the idempotent DO-block would no-op"
+        );
+    }
+
+    #[test]
+    fn render_check_rebuild_column_check_is_also_a_bare_add() {
+        let check = account_role_column_check();
+        let model = transfer_model_with_checks(vec![], vec![check]);
+        let emission =
+            render_check_rebuild("transfer", &model, "ck_transfer_kind", Dialect::Postgres)
+                .expect("declared column check must resolve");
+        assert_eq!(
+            emission.statements,
+            vec![
+                "ALTER TABLE \"transfer\" DROP CONSTRAINT \"ck_transfer_kind\"".to_string(),
+                "ALTER TABLE \"transfer\" ADD CONSTRAINT \"ck_transfer_kind\" \
+                 CHECK (\"kind\" IN ('in', 'out'))"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn render_check_rebuild_warns_and_skips_on_sqlite() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let emission = render_check_rebuild(
+            "transfer",
+            &model,
+            "ck_transfer_at_most_one_outflow",
+            Dialect::Sqlite,
+        )
+        .expect("declared table check must resolve");
+        assert!(emission.statements.is_empty(), "ADR-0014: no SQLite ALTER");
+        let warning = emission.warning.expect("SQLite must never skip silently");
+        assert!(
+            warning.contains("ck_transfer_at_most_one_outflow"),
+            "{warning}"
+        );
+        assert!(warning.contains("Alembic"), "{warning}");
+    }
+
+    #[test]
+    fn render_check_rebuild_returns_none_for_an_undeclared_name() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        assert!(
+            render_check_rebuild("transfer", &model, "ck_transfer_nope", Dialect::Postgres)
+                .is_none()
+        );
+    }
+
+    // Leftover ferro-owned CHECKs (#345; ADR-0013): live name not in the
+    // declared set. extra_check_names is a set-difference only — the
+    // ferro_owned / ck_* filter is the caller's (migrate.rs / Alembic).
+
+    #[test]
+    fn extra_check_names_returns_undeclared_live_names_in_live_order() {
+        let declared = vec![
+            "ck_transfer_at_most_one_outflow".to_string(),
+            "ck_transfer_kind".to_string(),
+        ];
+        let live = vec![
+            "ck_transfer_orphan".to_string(),
+            "ck_transfer_kind".to_string(),
+            "ck_transfer_old".to_string(),
+        ];
+        assert_eq!(
+            extra_check_names(&declared, &live),
+            vec!["ck_transfer_orphan", "ck_transfer_old"]
+        );
+        assert!(extra_check_names(&declared, &declared).is_empty());
+    }
+
+    #[test]
+    fn extra_check_names_is_a_set_difference_only() {
+        let declared = vec!["ck_transfer_kind".to_string()];
+        let live = vec![
+            "ck_transfer_kind".to_string(),
+            "transfer_positive_amount".to_string(),
+        ];
+        assert_eq!(
+            extra_check_names(&declared, &live),
+            vec!["transfer_positive_amount"],
+            "prefix filtering is the caller's; this function does not drop non-ck_* names"
+        );
+        assert!(extra_check_names(&declared, &[]).is_empty());
+    }
+
+    #[test]
+    fn extra_check_names_warning_is_pinned_and_names_every_leftover() {
+        assert_eq!(
+            extra_check_names_warning(
+                "transfer",
+                &[
+                    "ck_transfer_orphan".to_string(),
+                    "ck_transfer_kind".to_string(),
+                ],
+            ),
+            Some(
+                "Table 'transfer' has CHECK constraint(s) 'ck_transfer_orphan', \
+                 'ck_transfer_kind' that the model no longer declares. Leftover \
+                 CHECKs keep rejecting rows the model now allows. They stay in \
+                 place unless you pass migrate_destructive=True (Postgres) or \
+                 drop them with a reviewed Alembic migration."
+                    .to_string()
+            )
+        );
+        assert_eq!(extra_check_names_warning("transfer", &[]), None);
+    }
+
+    #[test]
+    fn render_check_drop_is_one_alter_on_postgres() {
+        let emission = render_check_drop("transfer", "ck_transfer_orphan", Dialect::Postgres);
+        assert_eq!(
+            emission.statement.as_deref(),
+            Some(r#"ALTER TABLE "transfer" DROP CONSTRAINT "ck_transfer_orphan""#)
+        );
+        assert!(emission.warning.is_none());
+    }
+
+    #[test]
+    fn render_check_drop_warns_and_skips_on_sqlite() {
+        let emission = render_check_drop("transfer", "ck_transfer_orphan", Dialect::Sqlite);
+        assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
+        let warning = emission.warning.expect("SQLite must never skip silently");
+        assert!(warning.contains("ck_transfer_orphan"), "{warning}");
+        assert!(warning.contains("Alembic"), "{warning}");
+        assert!(warning.contains("batch"), "{warning}");
+    }
+
+    #[test]
+    fn render_check_expr_covers_cmp_in_and_like() {
+        use ferro_schema_ir::{CheckCmpOp, CheckExpr, CheckOperand};
+        assert_eq!(
+            render_check_expr(&CheckExpr::Cmp {
+                column: "amount".to_string(),
+                op: CheckCmpOp::Ge,
+                other: CheckOperand::Literal {
+                    token: "0".to_string(),
+                },
+            }),
+            "\"amount\" >= 0"
+        );
+        assert_eq!(
+            render_check_expr(&CheckExpr::In {
+                column: "status".to_string(),
+                values: vec!["'draft'".to_string(), "'active'".to_string()],
+            }),
+            "\"status\" IN ('draft', 'active')"
+        );
+        assert_eq!(
+            render_check_expr(&CheckExpr::Like {
+                column: "code".to_string(),
+                pattern: "'A%'".to_string(),
+            }),
+            "\"code\" LIKE 'A%'"
+        );
+        assert_eq!(
+            render_check_expr(&CheckExpr::Not {
+                child: Box::new(CheckExpr::IsNotNull {
+                    column: "deleted_at".to_string(),
+                }),
+            }),
+            "NOT (\"deleted_at\" IS NOT NULL)"
+        );
     }
 
     #[test]

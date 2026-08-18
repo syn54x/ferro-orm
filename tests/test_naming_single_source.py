@@ -9,6 +9,7 @@ Alembic bridge renders named FK constraints and standalone named unique
 indexes — the artifact shapes both emitters share.
 """
 
+import json
 from typing import Annotated, ClassVar, ForwardRef
 
 import pytest
@@ -30,6 +31,8 @@ from ferro._core import (
     _ddl_fk_name,
     _ddl_single_index_name,
     _ddl_single_unique_name,
+    _ddl_table_check_constraint_name,
+    _render_table_check_body,
 )
 from ferro.ir import compile_registry_schema_ir
 from ferro.migrations import get_metadata
@@ -51,6 +54,10 @@ def test_ffi_naming_helpers_match_i1_conventions():
     assert _ddl_single_unique_name("user", "email") == "uq_user_email"
     assert _ddl_check_constraint_name("user", "role") == "ck_user_role"
     assert (
+        _ddl_table_check_constraint_name("transfer", "at_most_one_outflow")
+        == "ck_transfer_at_most_one_outflow"
+    )
+    assert (
         _ddl_fk_name("account", "org_id", "organization")
         == "fk_account_org_id_organization"
     )
@@ -63,11 +70,23 @@ def test_ffi_naming_helpers_guard_63_chars():
         _ddl_single_index_name("t" * 40, "c" * 40),
         _ddl_single_unique_name("t" * 40, "c" * 40),
         _ddl_check_constraint_name("t" * 40, "c" * 40),
+        _ddl_table_check_constraint_name("t" * 40, "c" * 40),
         _ddl_fk_name("t" * 30, "c" * 30, "o" * 30),
         _ddl_composite_index_name("t" * 40, ["c" * 40]),
         _ddl_composite_unique_name("t" * 40, ["c" * 40]),
     ]:
         assert len(name) == 63, name
+
+
+def test_ffi_table_check_renderer_matches_rust():
+    predicate = {
+        "kind": "or",
+        "left": {"kind": "is_null", "column": "outflow_transaction_id"},
+        "right": {"kind": "is_null", "column": "outflow_activity_id"},
+    }
+    assert _render_table_check_body(json.dumps(predicate)) == (
+        '("outflow_transaction_id" IS NULL) OR ("outflow_activity_id" IS NULL)'
+    )
 
 
 # 61 chars: long enough that idx_/uq_ + "member_" pushes past 63.

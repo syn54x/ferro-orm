@@ -6,7 +6,8 @@ use crate::emit::{
     test_single_index_name,
 };
 use ferro_schema_ir::{
-    SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaUnique,
+    CheckExpr, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaTableCheck,
+    SchemaUnique,
 };
 
 /// The single expected Postgres db_check emission for `account.role IN ('admin','user')`.
@@ -42,6 +43,7 @@ fn schema_model(table: &str, cols: Vec<SchemaColumn>) -> SchemaModel {
         indexes: Vec::<SchemaIndex>::new(),
         uniques: Vec::<SchemaUnique>::new(),
         checks: Vec::<SchemaCheck>::new(),
+        table_checks: Vec::new(),
     }
 }
 
@@ -1378,6 +1380,480 @@ fn render_create_table_unknown_logical_type_errors() {
             err.message
         );
     }
+}
+
+/// The Transfer-shaped table check: `outflow_transaction_id IS NULL OR
+/// outflow_activity_id IS NULL`, under the canonical `ck_<table>_<suffix>` name.
+fn transfer_outflow_table_check() -> SchemaTableCheck {
+    SchemaTableCheck {
+        name: ferro_ddl_lowering::table_check_constraint_name("transfer", "at_most_one_outflow"),
+        predicate: CheckExpr::Or {
+            left: Box::new(CheckExpr::IsNull {
+                column: "outflow_transaction_id".to_string(),
+            }),
+            right: Box::new(CheckExpr::IsNull {
+                column: "outflow_activity_id".to_string(),
+            }),
+        },
+    }
+}
+
+fn transfer_inflow_table_check() -> SchemaTableCheck {
+    SchemaTableCheck {
+        name: ferro_ddl_lowering::table_check_constraint_name("transfer", "at_most_one_inflow"),
+        predicate: CheckExpr::Or {
+            left: Box::new(CheckExpr::IsNull {
+                column: "inflow_transaction_id".to_string(),
+            }),
+            right: Box::new(CheckExpr::IsNull {
+                column: "inflow_activity_id".to_string(),
+            }),
+        },
+    }
+}
+
+fn transfer_model_with_table_checks(checks: Vec<SchemaTableCheck>) -> SchemaModel {
+    SchemaModel {
+        table_checks: checks,
+        ..schema_model(
+            "transfer",
+            vec![
+                pk_col("id", "int"),
+                col("inflow_activity_id", "int", true),
+                col("inflow_transaction_id", "int", true),
+                col("outflow_activity_id", "int", true),
+                col("outflow_transaction_id", "int", true),
+            ],
+        )
+    }
+}
+
+// A table check is INLINE in CREATE TABLE on BOTH dialects (ADR-0014): SQLite
+// can represent it at create time, and the ALTER-shaped `post_create_artifacts`
+// path (which elides column `db_check` on SQLite) is never involved.
+#[test]
+fn render_create_table_inlines_named_table_checks_on_both_dialects() {
+    let model = transfer_model_with_table_checks(vec![transfer_outflow_table_check()]);
+    let expected = "CONSTRAINT \"ck_transfer_at_most_one_outflow\" CHECK \
+                    ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL))";
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let emission = render_create_table(&model, dialect).unwrap();
+        assert!(
+            emission.create_sql.contains(expected),
+            "table check must be inline and named in CREATE TABLE ({dialect:?}): {}",
+            emission.create_sql
+        );
+        assert!(
+            emission.create_sql.ends_with(" )"),
+            "the spliced constraint list must still close the CREATE TABLE ({dialect:?}): {}",
+            emission.create_sql
+        );
+        assert!(
+            !emission.post_create_sqls.iter().any(|s| s.contains("CHECK")),
+            "table checks must not travel the ALTER-shaped post-create path ({dialect:?}): {:?}",
+            emission.post_create_sqls
+        );
+        assert!(emission.warnings.is_empty(), "{:?}", emission.warnings);
+    }
+}
+
+// Several checks keep IR order and are comma-separated like every other
+// inline constraint.
+#[test]
+fn render_create_table_inlines_every_table_check_in_ir_order() {
+    let model = transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+        transfer_inflow_table_check(),
+    ]);
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let sql = render_create_table(&model, dialect).unwrap().create_sql;
+        let outflow = sql
+            .find("ck_transfer_at_most_one_outflow")
+            .unwrap_or_else(|| panic!("missing outflow check ({dialect:?}): {sql}"));
+        let inflow = sql
+            .find("ck_transfer_at_most_one_inflow")
+            .unwrap_or_else(|| panic!("missing inflow check ({dialect:?}): {sql}"));
+        assert!(outflow < inflow, "IR order must be preserved ({dialect:?}): {sql}");
+        assert!(
+            sql.contains(
+                "IS NULL)), CONSTRAINT \"ck_transfer_at_most_one_inflow\""
+            ),
+            "checks must be comma-separated inline clauses ({dialect:?}): {sql}"
+        );
+    }
+}
+
+// A model with no table checks renders byte-identically to before (the splice
+// is a no-op, not an empty trailing comma).
+#[test]
+fn render_create_table_without_table_checks_is_unchanged() {
+    let with_checks = transfer_model_with_table_checks(vec![]);
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let sql = render_create_table(&with_checks, dialect).unwrap().create_sql;
+        assert!(!sql.contains("CHECK"), "{sql}");
+        assert!(!sql.contains(", )"), "{sql}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Check addition (#343; ADR-0013): the reconciliation pass adds a declared
+// CHECK — table check or column check — that no live constraint of that name
+// covers. Body drift is a rebuild (#344) and orphan drops are #345.
+// ---------------------------------------------------------------------------
+
+/// The live IR shape the reconciliation pass builds for `transfer` before the
+/// check was declared: the same columns, no checks (live CHECK names travel
+/// beside the IR, not inside it — a live `definition` is the backend's own SQL
+/// rendering, never a ferro body).
+fn live_transfer_ir() -> IrEnvelope<SchemaIrPayload> {
+    envelope(vec![transfer_model_with_table_checks(vec![])])
+}
+
+#[test]
+fn plan_missing_checks_adds_a_declared_table_check_absent_live() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    assert_eq!(
+        plan_missing_checks("transfer", &live_transfer_ir(), &new_ir, &[]),
+        vec![MigrationOp::AddCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn plan_missing_checks_is_a_noop_when_the_live_table_already_has_the_name() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    assert!(
+        plan_missing_checks(
+            "transfer",
+            &live_transfer_ir(),
+            &new_ir,
+            &["ck_transfer_at_most_one_outflow".to_string()],
+        )
+        .is_empty(),
+        "a reconciled table replans to nothing — no phantom add"
+    );
+}
+
+#[test]
+fn plan_missing_checks_skips_a_column_check_riding_its_new_column() {
+    // `emit_add_column` already emits the db_check DO-block for a column it
+    // adds; a standalone AddCheck would duplicate it (the same dedup
+    // `diff_model_indexes` applies to single-column indexes).
+    let mut model = schema_model("account", vec![ir_col("role", "string", None, true, false, false)]);
+    model.checks = vec![SchemaCheck {
+        name: test_db_check_constraint_name("account", "role"),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string()],
+    }];
+    let new_ir = envelope(vec![model.clone()]);
+
+    let without_column = envelope(vec![schema_model("account", vec![])]);
+    assert!(
+        plan_missing_checks("account", &without_column, &new_ir, &[]).is_empty(),
+        "the check rides the ADD COLUMN emission"
+    );
+
+    let with_column = envelope(vec![schema_model(
+        "account",
+        vec![ir_col("role", "string", None, true, false, false)],
+    )]);
+    assert_eq!(
+        plan_missing_checks("account", &with_column, &new_ir, &[]),
+        vec![MigrationOp::AddCheck {
+            table: "account".to_string(),
+            name: "ck_account_role".to_string(),
+        }],
+        "toggling db_check on an EXISTING column is a standalone add"
+    );
+}
+
+#[test]
+fn emit_sql_with_ir_add_check_table_check_alters_on_postgres_and_warns_on_sqlite() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let pg = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(
+        pg.statements,
+        vec![
+            "ALTER TABLE \"transfer\" ADD CONSTRAINT \"ck_transfer_at_most_one_outflow\" \
+             CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL))"
+        ]
+    );
+    assert!(pg.warnings.is_empty(), "{:?}", pg.warnings);
+
+    let lite = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Sqlite).unwrap();
+    assert!(lite.statements.is_empty(), "{:?}", lite.statements);
+    assert_eq!(lite.warnings.len(), 1);
+    assert!(
+        lite.warnings[0].contains("ck_transfer_at_most_one_outflow"),
+        "the SQLite skip names the constraint: {}",
+        lite.warnings[0]
+    );
+}
+
+#[test]
+fn emit_sql_with_ir_add_check_column_check_reuses_the_db_check_do_block() {
+    let mut model = schema_model("account", vec![ir_col("role", "string", None, true, false, false)]);
+    model.checks = vec![SchemaCheck {
+        name: test_db_check_constraint_name("account", "role"),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string(), "'user'".to_string()],
+    }];
+    let old_ir = envelope(vec![schema_model(
+        "account",
+        vec![ir_col("role", "string", None, true, false, false)],
+    )]);
+    let new_ir = envelope(vec![model]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddCheck {
+            table: "account".to_string(),
+            name: "ck_account_role".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let pg = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(pg.statements, vec![PG_DB_CHECK_ACCOUNT_ROLE]);
+}
+
+#[test]
+fn emit_sql_with_ir_orders_add_column_before_the_check_that_references_it() {
+    // The single-deploy shape: a new column plus a table check over it.
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let old_ir = envelope(vec![schema_model(
+        "transfer",
+        vec![
+            pk_col("id", "int"),
+            col("inflow_activity_id", "int", true),
+            col("inflow_transaction_id", "int", true),
+            col("outflow_activity_id", "int", true),
+        ],
+    )]);
+    let plan = MigrationPlan {
+        operations: vec![
+            MigrationOp::AddColumn {
+                table: "transfer".to_string(),
+                column: "outflow_transaction_id".to_string(),
+            },
+            MigrationOp::AddCheck {
+                table: "transfer".to_string(),
+                name: "ck_transfer_at_most_one_outflow".to_string(),
+            },
+        ],
+        warnings: Vec::new(),
+    };
+
+    let pg = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(pg.statements.len(), 2, "{:?}", pg.statements);
+    assert!(pg.statements[0].contains("ADD COLUMN \"outflow_transaction_id\""));
+    assert!(pg.statements[1].contains("ADD CONSTRAINT \"ck_transfer_at_most_one_outflow\""));
+}
+
+#[test]
+fn emit_sql_with_ir_add_check_fails_loudly_for_an_undeclared_name() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_nope".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let err = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap_err();
+    assert!(err.message.contains("ck_transfer_nope"), "{}", err.message);
+}
+
+// ---------------------------------------------------------------------------
+// Check-body rebuild (#344; ADR-0015): same live name, different body.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plan_check_rebuilds_plans_a_declared_name_whose_body_drifted() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let live = [(
+        "ck_transfer_at_most_one_outflow".to_string(),
+        "CHECK ((\"outflow_transaction_id\" IS NULL) AND (\"outflow_activity_id\" IS NULL))"
+            .to_string(),
+    )];
+    assert_eq!(
+        plan_check_rebuilds("transfer", &new_ir, &live),
+        vec![MigrationOp::RebuildCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn plan_check_rebuilds_is_a_noop_when_catalog_wrapping_is_the_only_difference() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let live = [(
+        "ck_transfer_at_most_one_outflow".to_string(),
+        "CHECK (((outflow_transaction_id IS NULL) OR (outflow_activity_id IS NULL)))".to_string(),
+    )];
+    assert!(
+        plan_check_rebuilds("transfer", &new_ir, &live).is_empty(),
+        "catalog parens are not drift"
+    );
+}
+
+#[test]
+fn emit_sql_with_ir_rebuild_check_drops_then_bare_adds_on_postgres() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::RebuildCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let pg = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(
+        pg.statements,
+        vec![
+            "ALTER TABLE \"transfer\" DROP CONSTRAINT \"ck_transfer_at_most_one_outflow\""
+                .to_string(),
+            "ALTER TABLE \"transfer\" ADD CONSTRAINT \"ck_transfer_at_most_one_outflow\" \
+             CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL))"
+                .to_string(),
+        ]
+    );
+    assert!(pg.warnings.is_empty(), "{:?}", pg.warnings);
+
+    let lite = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Sqlite).unwrap();
+    assert!(lite.statements.is_empty(), "{:?}", lite.statements);
+    assert_eq!(lite.warnings.len(), 1);
+    assert!(
+        lite.warnings[0].contains("ck_transfer_at_most_one_outflow"),
+        "{}",
+        lite.warnings[0]
+    );
+}
+
+#[test]
+fn emit_sql_with_ir_rebuild_check_fails_loudly_for_an_undeclared_name() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::RebuildCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_nope".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let err = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap_err();
+    assert!(err.message.contains("ck_transfer_nope"), "{}", err.message);
+}
+
+// ---------------------------------------------------------------------------
+// Leftover ferro-owned CHECKs (#345; ADR-0013): live name gone from the model.
+// Planned after rebuilds. User-owned names never enter live_ferro_owned_names.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plan_check_drops_plans_live_ferro_owned_names_the_model_does_not_declare() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let live = vec![
+        "ck_transfer_orphan".to_string(),
+        "ck_transfer_at_most_one_outflow".to_string(),
+        "ck_transfer_old".to_string(),
+    ];
+    assert_eq!(
+        plan_check_drops("transfer", &new_ir, &live),
+        vec![
+            MigrationOp::DropCheck {
+                table: "transfer".to_string(),
+                name: "ck_transfer_orphan".to_string(),
+            },
+            MigrationOp::DropCheck {
+                table: "transfer".to_string(),
+                name: "ck_transfer_old".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn plan_check_drops_is_a_noop_when_every_live_name_is_declared() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let live = vec!["ck_transfer_at_most_one_outflow".to_string()];
+    assert!(plan_check_drops("transfer", &new_ir, &live).is_empty());
+}
+
+#[test]
+fn emit_sql_with_ir_drop_check_drops_on_postgres_and_warns_on_sqlite() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::DropCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_orphan".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let pg = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(
+        pg.statements,
+        vec![r#"ALTER TABLE "transfer" DROP CONSTRAINT "ck_transfer_orphan""#.to_string()]
+    );
+    assert!(pg.warnings.is_empty(), "{:?}", pg.warnings);
+
+    let lite = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Sqlite).unwrap();
+    assert!(lite.statements.is_empty(), "{:?}", lite.statements);
+    assert_eq!(lite.warnings.len(), 1);
+    assert!(
+        lite.warnings[0].contains("ck_transfer_orphan"),
+        "{}",
+        lite.warnings[0]
+    );
+    assert!(lite.warnings[0].contains("Alembic"), "{}", lite.warnings[0]);
+}
+
+#[test]
+fn emit_sql_with_ir_drop_check_fails_loudly_for_a_still_declared_name() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::DropCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let err = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap_err();
+    assert!(
+        err.message.contains("ck_transfer_at_most_one_outflow"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]

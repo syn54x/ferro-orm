@@ -27,6 +27,7 @@ from ._core import (
     connect as _core_connect,
 )
 from .base import DbType, DbTypeToken, FerroField, FerroNullable, ForeignKey, varchar
+from .checks import Check
 from .exceptions import (
     CheckViolationError,
     DataError,
@@ -347,6 +348,7 @@ __all__ = [
     "FerroNullable",
     "varchar",
     "Field",
+    "Check",
     "ForeignKey",
     "BackRef",
     "ManyToMany",

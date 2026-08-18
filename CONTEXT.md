@@ -145,5 +145,17 @@ The reconciliation-pass operation appending model-declared labels missing from a
 _Avoid_: Enum sync, label reconciliation, enum evolution
 
 **Constraint rebuild**:
-Drop-and-recreate of a ferro-owned constraint whose live definition no longer matches the declared model — a foreign key's `on_delete`, its target, its columns. Metadata-only: rows are never touched. On a backend that cannot alter constraints, ferro warns loudly and skips; it never diverges silently.
+Drop-and-recreate of a ferro-owned constraint whose live definition no longer matches the declared model — a foreign key's `on_delete`, its target, its columns, or a table check's predicate. Metadata-only: rows are never touched. On a backend that cannot alter constraints, ferro warns loudly and skips; it never diverges silently.
 _Avoid_: Constraint alter, FK patch, in-place constraint update
+
+**Column check**:
+A single-column CHECK that restricts a closed-domain field to its declared labels (`Field(db_check=True)` → `col IN (...)`). Named `ck_<table>_<col>`; not a table check.
+_Avoid_: enum check, db_check constraint, value check
+
+**Table check**:
+A named boolean invariant over one row of one table, declared on the model as a lambda and enforced by the database as a CHECK constraint. The live name is `ck_<table>_<suffix>`; the suffix is what the model declares.
+_Avoid_: table-level check, multi-column check, composite check, row check
+
+**Check predicate**:
+The lambda body of a table check — a ferro predicate over that model's own columns (or a forward-FK null test on the relation or its shadow `*_id`), with literal values only. Relation traversal, existence tests, and aggregates are not check predicates.
+_Avoid_: check SQL, constraint expression, check body

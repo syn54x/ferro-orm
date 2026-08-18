@@ -75,6 +75,8 @@ def _render_migration_sql_for_test(
     updates: bool = True,
     destructive: bool = False,
     live_indexes_json: str = "",
+    live_foreign_keys_json: str = "",
+    live_checks_json: str = "",
 ) -> tuple[list[str], list[str]]:
     """Test-only: render the auto-migrate diff for one table without a database.
 
@@ -82,8 +84,20 @@ def _render_migration_sql_for_test(
     serialized as JSON). ``live_columns_json`` is a JSON array of objects with the
     LiveColumn shape (``name``, ``declared_type``, ``is_nullable``, ``is_primary_key``,
     ``char_max_len``, ``is_enum_udt``). ``live_indexes_json`` is a JSON array of objects
-    with the LiveIndex shape (``name``, ``columns``, ``unique``).
+    with the LiveIndex shape (``name``, ``columns``, ``unique``);
+    ``live_foreign_keys_json`` the LiveForeignKey shape (``name``, ``column``,
+    ``to_table``, ``to_column``, ``on_delete``); ``live_checks_json`` the LiveCheck
+    shape (``name``, ``definition``, ``ferro_owned``).
     Returns ``(statements, warnings)``.
+    """
+    ...
+
+async def _live_table_checks_for_test(
+    table: str, using: str | None = None
+) -> list[dict[str, object]]:
+    """Test-only: read live CHECK constraints on ``table`` from the connected engine.
+
+    Each dict has keys ``name``, ``definition``, and ``ferro_owned``.
     """
     ...
 
@@ -207,6 +221,8 @@ def _ddl_single_unique_name(table: str, column: str) -> str: ...
 def _ddl_composite_index_name(table: str, columns: list[str]) -> str: ...
 def _ddl_composite_unique_name(table: str, columns: list[str]) -> str: ...
 def _ddl_check_constraint_name(table: str, column: str) -> str: ...
+
+def _ddl_table_check_constraint_name(table: str, suffix: str) -> str: ...
 def _ddl_fk_name(table: str, column: str, to_table: str) -> str: ...
 
 def _resolve_storage_type(column_ir_json: str, dialect: str) -> str:
@@ -222,6 +238,10 @@ def _render_check_body(column: str, values: list[str]) -> str:
     """The shared db_check CHECK body, byte-identical to the Rust emitters."""
     ...
 
+def _render_table_check_body(predicate_json: str) -> str:
+    """The shared table-check CHECK body, byte-identical to the Rust emitters."""
+    ...
+
 def _plan_enum_label_addition(
     type_name: str, declared: list[str], live: list[str]
 ) -> str:
@@ -231,5 +251,44 @@ def _plan_enum_label_addition(
     Rust-rendered ``ADD VALUE IF NOT EXISTS`` statements for model-declared
     labels the live type is missing, and the live labels the model no longer
     declares (warn-never-act).
+    """
+    ...
+
+def _plan_check_addition(
+    table: str, model_ir_json: str, live_names: list[str]
+) -> str:
+    """The check-addition decision (ADR-0013) for one table.
+
+    Returns JSON: ``{"statements": [...], "names": [...]}`` — the Rust-rendered
+    Postgres ``ADD`` statements for declared CHECK constraints (table checks,
+    then column checks) that no live constraint of that name covers, plus those
+    names. Byte-identical to what the reconciliation pass executes (I-1).
+    """
+    ...
+
+def _plan_check_rebuild(
+    table: str, model_ir_json: str, live: list[tuple[str, str]]
+) -> str:
+    """The check-rebuild decision (ADR-0015) for one table.
+
+    Returns JSON: ``{"statements": [...], "names": [...]}`` — the Rust-rendered
+    Postgres ``DROP CONSTRAINT`` + bare ``ADD CONSTRAINT … CHECK`` statements
+    for declared CHECK constraints whose live catalog body normalizes unequal
+    to the canonical rendering, plus those names. Byte-identical to what the
+    reconciliation pass executes (I-1).
+    """
+    ...
+
+def _plan_check_drop(
+    table: str, model_ir_json: str, live_ferro_owned_names: list[str]
+) -> str:
+    """The leftover-CHECK drop decision (ADR-0013) for one table.
+
+    Returns JSON: ``{"statements": [...], "names": [...]}`` — the Rust-rendered
+    Postgres ``DROP CONSTRAINT`` statements for live ferro-owned CHECK names
+    the model no longer declares, plus those names. Byte-identical to what
+    the reconciliation pass executes under ``migrate_destructive`` (I-1).
+    There is no destructive gate here: running autogenerate is itself the
+    request for a diff.
     """
     ...
