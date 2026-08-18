@@ -23,10 +23,13 @@ class definition. The lowering below is the single place new arms attach.
 from __future__ import annotations
 
 import ast
+import difflib
+import dis
 import enum
 import inspect
 import re
 import textwrap
+import types
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -169,9 +172,12 @@ class _CheckProxy(QueryProxy[Any]):
             )
         if name in self._columns:
             return FieldProxy(name, owner=self._model_cls)
+        suggestions = sorted(set(self._columns) | set(self._relations))
+        close = difflib.get_close_matches(name, suggestions, n=1)
+        hint = f" Did you mean {close[0]!r}?" if close else ""
         raise AttributeError(
-            f"check predicate references unknown column {name!r}. Valid columns: "
-            f"{', '.join(sorted(self._columns))}."
+            f"check predicate references unknown column {name!r}.{hint} "
+            f"Valid columns: {', '.join(sorted(self._columns))}."
             + (
                 f" Valid relations: {', '.join(sorted(self._relations))}."
                 if self._relations
@@ -361,29 +367,95 @@ def _lower_operand(value: Any, model_name: str, suffix: str) -> dict[str, Any]:
     return {"kind": "literal", "token": _check_literal_token(value)}
 
 
+_GLOBAL_LOAD_OPS = frozenset({"LOAD_GLOBAL", "LOAD_NAME"})
+
+
+def _is_allowed_captured_value(value: Any) -> bool:
+    """Enum classes (and members) may appear in a check predicate; nothing else."""
+    if isinstance(value, enum.Enum):
+        return True
+    return isinstance(value, type) and issubclass(value, enum.Enum)
+
+
+def _iter_code_objects(code: types.CodeType):
+    yield code
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            yield from _iter_code_objects(const)
+
+
+def _closure_error(model_name: str, suffix: str, name: str) -> TypeError:
+    return TypeError(
+        f"{model_name}.{FERRO_CHECKS} check {suffix!r} closes over "
+        f"{name!r}: check predicates must use literals inlined into the "
+        "CHECK body, not variables from the enclosing scope (ADR-0016)."
+    )
+
+
+def _bound_default_values(predicate: Callable[..., Any]) -> tuple[Any, ...]:
+    values = list(predicate.__defaults__ or ())
+    if predicate.__kwdefaults__:
+        values.extend(predicate.__kwdefaults__.values())
+    return tuple(values)
+
+
 def _validate_predicate_source(
     predicate: Callable[..., Any], model_name: str, suffix: str
 ) -> None:
-    """Reject closed-over names and disallowed function calls in the lambda body."""
+    """Reject closed-over names and disallowed function calls in the lambda body.
+
+    Freevars catch an enclosing-function local. Module globals are not
+    freevars — they are ``LOAD_GLOBAL`` / ``LOAD_NAME`` — and default
+    arguments live on the callable. Both bake import-time state into the
+    CHECK body (ADR-0016) and must fail at class definition.
+    """
     code = predicate.__code__
     if code.co_freevars:
-        for name, cell in zip(code.co_freevars, predicate.__closure__ or (), strict=True):
-            value = cell.cell_contents
-            if isinstance(value, type) and issubclass(value, enum.Enum):
+        for name, cell in zip(
+            code.co_freevars, predicate.__closure__ or (), strict=True
+        ):
+            if _is_allowed_captured_value(cell.cell_contents):
                 continue
-            raise TypeError(
-                f"{model_name}.{FERRO_CHECKS} check {suffix!r} closes over "
-                f"{name!r}: check predicates must use literals inlined into the "
-                "CHECK body, not variables from the enclosing scope (ADR-0016)."
-            )
+            raise _closure_error(model_name, suffix, name)
+    for value in _bound_default_values(predicate):
+        if _is_allowed_captured_value(value):
+            continue
+        raise TypeError(
+            f"{model_name}.{FERRO_CHECKS} check {suffix!r} binds a default "
+            "argument: check predicates must use literals inlined into the "
+            "CHECK body, not values captured on the callable (ADR-0016)."
+        )
+    for code_obj in _iter_code_objects(code):
+        for inst in dis.get_instructions(code_obj):
+            if inst.opname not in _GLOBAL_LOAD_OPS:
+                continue
+            name = inst.argval
+            if not isinstance(name, str):
+                continue
+            if name not in predicate.__globals__:
+                # Builtins (``abs``, ``len``) stay for the AST call-walk so
+                # the error names the call, not a phantom closure.
+                continue
+            value = predicate.__globals__[name]
+            if _is_allowed_captured_value(value):
+                continue
+            raise _closure_error(model_name, suffix, name)
     try:
         source = inspect.getsource(predicate)
-    except OSError:
-        return
+    except OSError as exc:
+        raise TypeError(
+            f"{model_name}.{FERRO_CHECKS} check {suffix!r} source is "
+            "unavailable: check predicates must be lambdas whose body can be "
+            "validated (ADR-0016)."
+        ) from exc
     tree = ast.parse(textwrap.dedent(source))
     lambda_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Lambda)]
     if not lambda_nodes:
-        return
+        raise TypeError(
+            f"{model_name}.{FERRO_CHECKS} check {suffix!r} is not a lambda: "
+            "check predicates must be lambdas whose body can be validated "
+            "(ADR-0016)."
+        )
     for node in ast.walk(lambda_nodes[-1]):
         if not isinstance(node, ast.Call):
             continue

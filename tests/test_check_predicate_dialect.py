@@ -26,6 +26,12 @@ from ferro import (
 from ferro._core import _render_create_table_sql_for_test, _render_table_check_body
 from ferro.ir.compiler import compile_registry_schema_ir
 
+# Module global for ADR-0016: LOAD_GLOBAL of a non-enum name must fail, even
+# though it is not a freevar. `limit` also pins that a column of the same
+# name is LOAD_ATTR and must still compile.
+_MIN_AMOUNT = 5
+limit = 99
+
 
 @pytest.fixture(autouse=True)
 def cleanup_registry():
@@ -180,6 +186,61 @@ def test_function_call_in_predicate_fails_at_class_definition():
             amount: int = 0
 
 
+def test_module_global_fails_at_class_definition():
+    with pytest.raises(TypeError, match="closes over '_MIN_AMOUNT'"):
+
+        class BadGlobal(Model):
+            __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+                Check("min_amount", lambda bad: bad.amount >= _MIN_AMOUNT),
+            )
+
+            id: int | None = Field(default=None, primary_key=True)
+            amount: int = 0
+
+
+def test_default_argument_fails_at_class_definition():
+    with pytest.raises(TypeError, match="default argument"):
+
+        class BadDefault(Model):
+            __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+                Check("capped", lambda bad, _m=10: bad.amount <= _m),
+            )
+
+            id: int | None = Field(default=None, primary_key=True)
+            amount: int = 0
+
+
+def test_predicate_without_source_fails_at_class_definition():
+    ns: dict[str, object] = {}
+    exec("pred = lambda bad: bad.amount > 'x'.upper()", ns)
+    pred = ns["pred"]
+    assert callable(pred)
+
+    with pytest.raises(TypeError, match="source"):
+
+        class BadOpaque(Model):
+            __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+                Check("uppercased", pred),  # ty: ignore[invalid-argument-type]
+            )
+
+            id: int | None = Field(default=None, primary_key=True)
+            amount: int = 0
+
+
+def test_column_named_like_module_global_still_compiles():
+    assert limit == 99
+
+    class Ledger(Model):
+        __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+            Check("non_negative", lambda ledger: ledger.limit >= 0),
+        )
+
+        id: int | None = Field(default=None, primary_key=True)
+        limit: int = 0
+
+    assert _check_body("ledger", "non_negative") == '"limit" >= 0'
+
+
 @pytest.mark.parametrize(
     "predicate, expected",
     [
@@ -267,3 +328,21 @@ async def test_in_check_enforced_live(db_url):
         await Code.create(value="A")
         with pytest.raises(CheckViolationError):
             await Code.create(value="Z")
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_table_check_rejects_violating_bulk_update(db_url):
+    class Balance(Model):
+        __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+            Check("non_negative", lambda balance: balance.amount >= 0),
+        )
+
+        id: int | None = Field(default=None, primary_key=True)
+        amount: int = 0
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        row = await Balance.create(amount=10)
+        with pytest.raises(CheckViolationError):
+            await Balance.where(lambda b: b.id == row.id).update(amount=-1)

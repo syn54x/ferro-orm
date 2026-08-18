@@ -112,6 +112,18 @@ def test_unknown_column_fails_at_class_definition():
             left: str | None = None
 
 
+def test_unknown_column_suggests_a_close_match():
+    with pytest.raises(TypeError, match="Did you mean 'amount'"):
+
+        class TypoCheck(Model):
+            __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+                Check("positive", lambda typo: typo.amont >= 0),
+            )
+
+            id: int | None = Field(default=None, primary_key=True)
+            amount: int = 0
+
+
 def test_non_check_entries_fail_at_class_definition():
     with pytest.raises(TypeError, match="must be a Check object"):
 
