@@ -63,6 +63,16 @@ For a single model, every emitter must agree on:
     executes the byte-identical statements. Pinned by
     `tests/test_cross_emitter_parity.py` and the ferro-ddl-lowering unit pins.
     See ADR-0011 (append-only; update-gated; warn-never-act for extras).
+12. **Check additions** — the missing-check decision (which declared `ck_*`
+    names — table checks, then column checks — a live table does not carry)
+    and the rendered ADD are decided by ONE pair of functions:
+    `ferro_ddl_lowering::missing_check_names` / `render_check_addition`.
+    The auto-migrate reconciliation pass consumes them through
+    `ferro_migrate::plan_missing_checks`; the Alembic autogenerate
+    comparator consumes them over FFI (`_core._plan_check_addition`) and
+    executes the byte-identical statements. Pinned by
+    `tests/test_table_check_reconcile.py`. See ADR-0013 (add on
+    `migrate_updates`; name-only comparison) and ADR-0014 (SQLite warn-skip).
 
 ### Why this invariant exists
 
