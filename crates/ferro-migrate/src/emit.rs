@@ -6,8 +6,8 @@ use ferro_ddl_lowering::{
     canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
     fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
     refused_conversion_warning, render_db_check, render_pg_enum_create_type,
-    resolve_column_storage, single_index_name, single_unique_index_name, sqlite_declared_type,
-    sqlite_type_storage_drift,
+    render_table_check_body, resolve_column_storage, single_index_name, single_unique_index_name,
+    sqlite_declared_type, sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
@@ -80,6 +80,49 @@ fn name_sqlite_inline_fks(create_sql: String, model: &SchemaModel) -> String {
         sql = sql.replacen(&anchor, &named, 1);
     }
     sql
+}
+
+/// Splice the model's NAMED table CHECK clauses into the CREATE TABLE
+/// constraint list (ADR-0014: inline on both dialects, never a follow-up
+/// ALTER).
+///
+/// sea-query has no named-CHECK form — `TableCreateStatement::check` renders a
+/// bare `CHECK (...)` — so ferro renders the whole clause itself and appends it
+/// where sea-query closes the list, the same "we control both the anchor bytes
+/// and the emission order" reasoning as [`name_sqlite_inline_fks`]. Splicing
+/// before any CHECK text exists keeps the operation independent of the
+/// predicate body's contents.
+fn append_named_table_checks(
+    create_sql: String,
+    model: &SchemaModel,
+) -> Result<String, EmissionError> {
+    if model.table_checks.is_empty() {
+        return Ok(create_sql);
+    }
+    let clauses = model
+        .table_checks
+        .iter()
+        .map(|check| {
+            format!(
+                "CONSTRAINT {} CHECK ({})",
+                quote_ident(&check.name),
+                render_table_check_body(check)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Both builders close the column/constraint list with a literal " )" and
+    // emit nothing after it for the table options ferro sets. A sea-query
+    // upgrade that changes that is a loud emission failure, never a silently
+    // dropped constraint.
+    let head = create_sql.strip_suffix(" )").ok_or_else(|| EmissionError {
+        message: format!(
+            "Cannot inline table CHECK constraints for '{}': the rendered CREATE TABLE does \
+             not end in the expected constraint-list close. SQL: {}",
+            model.table_name, create_sql
+        ),
+    })?;
+    Ok(format!("{head}, {clauses} )"))
 }
 
 fn index_models<'a>(models: &'a [SchemaModel]) -> BTreeMap<String, &'a SchemaModel> {
@@ -178,6 +221,7 @@ pub fn render_create_table(
         Dialect::Sqlite => name_sqlite_inline_fks(table_stmt.build(SqliteQueryBuilder), model),
         Dialect::Postgres => table_stmt.build(PostgresQueryBuilder),
     };
+    let create_sql = append_named_table_checks(create_sql, model)?;
 
     let (post_create_sqls, warnings) = post_create_artifacts(model, dialect)?;
     Ok(CreateTableEmission {

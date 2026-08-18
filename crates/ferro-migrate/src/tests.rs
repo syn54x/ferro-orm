@@ -6,7 +6,8 @@ use crate::emit::{
     test_single_index_name,
 };
 use ferro_schema_ir::{
-    SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaUnique,
+    CheckExpr, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaTableCheck,
+    SchemaUnique,
 };
 
 /// The single expected Postgres db_check emission for `account.role IN ('admin','user')`.
@@ -1378,6 +1379,119 @@ fn render_create_table_unknown_logical_type_errors() {
             "EmissionError message must identify the offending logical_type token; got: {:?}",
             err.message
         );
+    }
+}
+
+/// The Transfer-shaped table check: `outflow_transaction_id IS NULL OR
+/// outflow_activity_id IS NULL`, under the canonical `ck_<table>_<suffix>` name.
+fn transfer_outflow_table_check() -> SchemaTableCheck {
+    SchemaTableCheck {
+        name: ferro_ddl_lowering::table_check_constraint_name("transfer", "at_most_one_outflow"),
+        predicate: CheckExpr::Or {
+            left: Box::new(CheckExpr::IsNull {
+                column: "outflow_transaction_id".to_string(),
+            }),
+            right: Box::new(CheckExpr::IsNull {
+                column: "outflow_activity_id".to_string(),
+            }),
+        },
+    }
+}
+
+fn transfer_inflow_table_check() -> SchemaTableCheck {
+    SchemaTableCheck {
+        name: ferro_ddl_lowering::table_check_constraint_name("transfer", "at_most_one_inflow"),
+        predicate: CheckExpr::Or {
+            left: Box::new(CheckExpr::IsNull {
+                column: "inflow_transaction_id".to_string(),
+            }),
+            right: Box::new(CheckExpr::IsNull {
+                column: "inflow_activity_id".to_string(),
+            }),
+        },
+    }
+}
+
+fn transfer_model_with_table_checks(checks: Vec<SchemaTableCheck>) -> SchemaModel {
+    SchemaModel {
+        table_checks: checks,
+        ..schema_model(
+            "transfer",
+            vec![
+                pk_col("id", "int"),
+                col("inflow_activity_id", "int", true),
+                col("inflow_transaction_id", "int", true),
+                col("outflow_activity_id", "int", true),
+                col("outflow_transaction_id", "int", true),
+            ],
+        )
+    }
+}
+
+// A table check is INLINE in CREATE TABLE on BOTH dialects (ADR-0014): SQLite
+// can represent it at create time, and the ALTER-shaped `post_create_artifacts`
+// path (which elides column `db_check` on SQLite) is never involved.
+#[test]
+fn render_create_table_inlines_named_table_checks_on_both_dialects() {
+    let model = transfer_model_with_table_checks(vec![transfer_outflow_table_check()]);
+    let expected = "CONSTRAINT \"ck_transfer_at_most_one_outflow\" CHECK \
+                    ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL))";
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let emission = render_create_table(&model, dialect).unwrap();
+        assert!(
+            emission.create_sql.contains(expected),
+            "table check must be inline and named in CREATE TABLE ({dialect:?}): {}",
+            emission.create_sql
+        );
+        assert!(
+            emission.create_sql.ends_with(" )"),
+            "the spliced constraint list must still close the CREATE TABLE ({dialect:?}): {}",
+            emission.create_sql
+        );
+        assert!(
+            !emission.post_create_sqls.iter().any(|s| s.contains("CHECK")),
+            "table checks must not travel the ALTER-shaped post-create path ({dialect:?}): {:?}",
+            emission.post_create_sqls
+        );
+        assert!(emission.warnings.is_empty(), "{:?}", emission.warnings);
+    }
+}
+
+// Several checks keep IR order and are comma-separated like every other
+// inline constraint.
+#[test]
+fn render_create_table_inlines_every_table_check_in_ir_order() {
+    let model = transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+        transfer_inflow_table_check(),
+    ]);
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let sql = render_create_table(&model, dialect).unwrap().create_sql;
+        let outflow = sql
+            .find("ck_transfer_at_most_one_outflow")
+            .unwrap_or_else(|| panic!("missing outflow check ({dialect:?}): {sql}"));
+        let inflow = sql
+            .find("ck_transfer_at_most_one_inflow")
+            .unwrap_or_else(|| panic!("missing inflow check ({dialect:?}): {sql}"));
+        assert!(outflow < inflow, "IR order must be preserved ({dialect:?}): {sql}");
+        assert!(
+            sql.contains(
+                "IS NULL)), CONSTRAINT \"ck_transfer_at_most_one_inflow\""
+            ),
+            "checks must be comma-separated inline clauses ({dialect:?}): {sql}"
+        );
+    }
+}
+
+// A model with no table checks renders byte-identically to before (the splice
+// is a no-op, not an empty trailing comma).
+#[test]
+fn render_create_table_without_table_checks_is_unchanged() {
+    let with_checks = transfer_model_with_table_checks(vec![]);
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let sql = render_create_table(&with_checks, dialect).unwrap().create_sql;
+        assert!(!sql.contains("CHECK"), "{sql}");
+        assert!(!sql.contains(", )"), "{sql}");
     }
 }
 
