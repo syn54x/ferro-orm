@@ -87,6 +87,15 @@ def _render_migration_sql_for_test(
     """
     ...
 
+async def _live_table_checks_for_test(
+    table: str, using: str | None = None
+) -> list[dict[str, object]]:
+    """Test-only: read live CHECK constraints on ``table`` from the connected engine.
+
+    Each dict has keys ``name``, ``definition``, and ``ferro_owned``.
+    """
+    ...
+
 async def fetch_all(
     cls: object,
     route: RouteHandle,
