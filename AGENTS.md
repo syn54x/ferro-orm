@@ -73,6 +73,18 @@ For a single model, every emitter must agree on:
     executes the byte-identical statements. Pinned by
     `tests/test_table_check_reconcile.py`. See ADR-0013 (add on
     `migrate_updates`; name-only comparison) and ADR-0014 (SQLite warn-skip).
+13. **Check rebuilds** — the same-name body-drift decision (which declared
+    `ck_*` names exist live **and** whose catalog definition normalizes
+    unequal to the canonical rendering) and the rendered DROP + bare ADD
+    are decided by ONE pair of functions:
+    `ferro_ddl_lowering::drifted_check_names` / `render_check_rebuild`
+    (one normalizer: `normalize_check_definition`). The auto-migrate
+    reconciliation pass consumes them through
+    `ferro_migrate::plan_check_rebuilds`; the Alembic autogenerate
+    comparator consumes them over FFI (`_core._plan_check_rebuild`) and
+    executes the byte-identical statements. Pinned by
+    `tests/test_table_check_rebuild.py`. See ADR-0015 (canonical render vs
+    catalog, both through one normalizer) and ADR-0014 (SQLite warn-skip).
 
 ### Why this invariant exists
 

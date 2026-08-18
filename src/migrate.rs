@@ -17,7 +17,7 @@ use ferro_ddl_lowering::{
     information_schema_to_db_type_token, missing_enum_labels, render_pg_enum_add_value,
     resolve_column_storage,
 };
-use ferro_migrate::{MigrationOp, emit_sql_with_ir, plan_from_ir, plan_missing_checks};
+use ferro_migrate::{MigrationOp, emit_sql_with_ir, plan_check_rebuilds, plan_from_ir, plan_missing_checks};
 use ferro_schema_ir::{
     IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
     SchemaModel, SchemaUnique,
@@ -291,6 +291,19 @@ pub fn plan_table_migration(
         &old_ir,
         new_ir,
         &live_check_names,
+    ));
+    // Body drift (#344; ADR-0015) is planned after missing-name adds. Live
+    // catalog text stays beside the IR; only ferro-owned names are eligible
+    // for rebuild (a user-owned CHECK is never dropped).
+    let live_for_rebuild: Vec<(String, String)> = live_checks
+        .iter()
+        .filter(|check| check.ferro_owned)
+        .map(|check| (check.name.clone(), check.definition.clone()))
+        .collect();
+    typed_plan.operations.extend(plan_check_rebuilds(
+        table_lower,
+        new_ir,
+        &live_for_rebuild,
     ));
 
     if !opts.destructive {

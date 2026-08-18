@@ -1680,6 +1680,94 @@ fn emit_sql_with_ir_add_check_fails_loudly_for_an_undeclared_name() {
     assert!(err.message.contains("ck_transfer_nope"), "{}", err.message);
 }
 
+// ---------------------------------------------------------------------------
+// Check-body rebuild (#344; ADR-0015): same live name, different body.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plan_check_rebuilds_plans_a_declared_name_whose_body_drifted() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let live = [(
+        "ck_transfer_at_most_one_outflow".to_string(),
+        "CHECK ((\"outflow_transaction_id\" IS NULL) AND (\"outflow_activity_id\" IS NULL))"
+            .to_string(),
+    )];
+    assert_eq!(
+        plan_check_rebuilds("transfer", &new_ir, &live),
+        vec![MigrationOp::RebuildCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn plan_check_rebuilds_is_a_noop_when_catalog_wrapping_is_the_only_difference() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let live = [(
+        "ck_transfer_at_most_one_outflow".to_string(),
+        "CHECK (((outflow_transaction_id IS NULL) OR (outflow_activity_id IS NULL)))".to_string(),
+    )];
+    assert!(
+        plan_check_rebuilds("transfer", &new_ir, &live).is_empty(),
+        "catalog parens are not drift"
+    );
+}
+
+#[test]
+fn emit_sql_with_ir_rebuild_check_drops_then_bare_adds_on_postgres() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
+        transfer_outflow_table_check(),
+    ])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::RebuildCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let pg = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(
+        pg.statements,
+        vec![
+            "ALTER TABLE \"transfer\" DROP CONSTRAINT \"ck_transfer_at_most_one_outflow\""
+                .to_string(),
+            "ALTER TABLE \"transfer\" ADD CONSTRAINT \"ck_transfer_at_most_one_outflow\" \
+             CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL))"
+                .to_string(),
+        ]
+    );
+    assert!(pg.warnings.is_empty(), "{:?}", pg.warnings);
+
+    let lite = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Sqlite).unwrap();
+    assert!(lite.statements.is_empty(), "{:?}", lite.statements);
+    assert_eq!(lite.warnings.len(), 1);
+    assert!(
+        lite.warnings[0].contains("ck_transfer_at_most_one_outflow"),
+        "{}",
+        lite.warnings[0]
+    );
+}
+
+#[test]
+fn emit_sql_with_ir_rebuild_check_fails_loudly_for_an_undeclared_name() {
+    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![])]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::RebuildCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_nope".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let err = emit_sql_with_ir(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap_err();
+    assert!(err.message.contains("ck_transfer_nope"), "{}", err.message);
+}
+
 #[test]
 fn render_check_body_quotes_column_and_joins_values() {
     let check = SchemaCheck {

@@ -160,6 +160,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_render_table_check_body, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_enum_label_addition, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_addition, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_rebuild, m)?)?;
     m.add_function(wrap_pyfunction!(
         introspect::_live_table_checks_for_test,
         m
