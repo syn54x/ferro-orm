@@ -168,17 +168,13 @@ def test_empty_ferro_checks_is_a_no_op():
 @pytest.mark.parametrize(
     "predicate, expected",
     [
-        (lambda t: t.memo.in_(["a", "b"]), "in_"),
-        (lambda t: t.memo.like("a%"), "like"),
-        (lambda t: t.amount > 0, "comparison"),
-        (lambda t: t.memo == "fixed", "comparison"),
         (lambda t: t.owner.label == None, "traversal"),  # noqa: E711
         (lambda t: t.notes.exists(), "existence test"),
         (lambda t: t.amount.sum(), "aggregate"),
     ],
 )
-def test_richer_predicates_are_rejected_until_346(predicate, expected):
-    """#346 grows the dialect; until then every richer form fails loudly."""
+def test_unsupported_check_predicates_fail_at_class_definition(predicate, expected):
+    """Traversal, existence tests, and aggregates stay outside the dialect."""
 
     class RejectOwner(Model):
         id: int | None = Field(default=None, primary_key=True)
