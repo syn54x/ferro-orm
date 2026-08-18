@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v0.19.0 (2026-08-18)
+
+### Bug Fixes
+
+- Classify PG18 RESTRICT (23001) as ForeignKeyViolationError
+  ([#338](https://github.com/syn54x/ferro-orm/pull/338),
+  [`4fa1153`](https://github.com/syn54x/ferro-orm/commit/4fa1153477802de8207c7987748db962b35c2f0f))
+
+### Features
+
+- Named table-level CHECK constraints ([#356](https://github.com/syn54x/ferro-orm/pull/356),
+  [`ba179e7`](https://github.com/syn54x/ferro-orm/commit/ba179e71e9bce4ab77a6fdbc1831661485de6799))
+
+
 ## v0.18.0 (2026-08-05)
 
 ### Documentation
