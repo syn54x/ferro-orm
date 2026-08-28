@@ -16,7 +16,7 @@ use dashmap::DashMap;
 use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoinHop};
 use pyo3::prelude::*;
 use sea_query::{
-    Alias, Condition, Expr, Iden, InsertStatement, JoinType, OnConflict, Order,
+    Alias, Condition, Expr, Iden, InsertStatement, JoinType, NullOrdering, OnConflict, Order,
     PostgresQueryBuilder, Query, SelectStatement, SimpleExpr, SqliteQueryBuilder, UpdateStatement,
     Value as SeaValue,
 };
@@ -669,6 +669,40 @@ fn apply_select_list(
         }
     }
     Ok(())
+}
+
+/// Apply one `ORDER BY` term's direction and optional NULLS placement (#361).
+///
+/// `nulls` is case-insensitive `"first"` / `"last"` (same lowering as
+/// `direction`). When unset, emit plain ASC/DESC — backend default, identical
+/// SQL to pre-#361. Junk tokens fail loudly as `PyValueError` (I-6).
+fn apply_order_by_term(
+    select: &mut SelectStatement,
+    col: SimpleExpr,
+    order: &ferro_schema_ir::QueryOrderBy,
+) -> PyResult<()> {
+    let dir = if order.direction.to_lowercase() == "desc" {
+        Order::Desc
+    } else {
+        Order::Asc
+    };
+    match order.nulls.as_deref().map(str::to_lowercase).as_deref() {
+        None => {
+            select.order_by_expr(col, dir);
+            Ok(())
+        }
+        Some("first") => {
+            select.order_by_expr_with_nulls(col, dir, NullOrdering::First);
+            Ok(())
+        }
+        Some("last") => {
+            select.order_by_expr_with_nulls(col, dir, NullOrdering::Last);
+            Ok(())
+        }
+        Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid order_by nulls {other:?}: expected \"first\" or \"last\""
+        ))),
+    }
 }
 
 /// Resolve one `ORDER BY` term against a record plan (#295): SQL's own
@@ -2709,12 +2743,7 @@ pub fn fetch_filtered<'py>(
                     )
                     .map_err(pyo3::exceptions::PyValueError::new_err)?,
                 };
-                let dir = if order.direction.to_lowercase() == "desc" {
-                    Order::Desc
-                } else {
-                    Order::Asc
-                };
-                select.order_by_expr(col.into(), dir);
+                apply_order_by_term(&mut select, col.into(), order)?;
             }
             if let Some(limit) = plan.limit {
                 select.limit(limit);
@@ -5588,6 +5617,7 @@ mod record_select_list_tests {
             column: "total".to_string(),
             direction: "desc".to_string(),
             path: vec![],
+            nulls: None,
         };
         let expr = record_order_by_expr(&order, &projected, "transaction", &JoinPlan::default())
             .expect("output-name term resolves");
@@ -5618,6 +5648,7 @@ mod record_select_list_tests {
             column: "account_id".to_string(),
             direction: "asc".to_string(),
             path: vec![],
+            nulls: None,
         };
         let expr = record_order_by_expr(&order, &projected, "transaction", &JoinPlan::default())
             .expect("group-key source term resolves");
@@ -5650,6 +5681,7 @@ mod record_select_list_tests {
             column: "note".to_string(),
             direction: "asc".to_string(),
             path: vec![],
+            nulls: None,
         };
         let err = record_order_by_expr(&order, &projected, "transaction", &JoinPlan::default())
             .expect_err("an ungrouped bare term must be rejected");
@@ -6220,6 +6252,122 @@ mod select_join_render_tests {
                 "owner edge INNER: {sql}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod order_by_nulls_render_tests {
+    //! #361: optional `order_by[].nulls` renders native NULLS FIRST/LAST on
+    //! both Postgres and SQLite via sea-query. Absent key keeps plain ASC/DESC.
+
+    use super::apply_order_by_term;
+    use sea_query::{
+        Alias, Expr, PostgresQueryBuilder, Query, SqliteQueryBuilder,
+    };
+
+    fn order_term(
+        column: &str,
+        direction: &str,
+        nulls: Option<&str>,
+    ) -> ferro_schema_ir::QueryOrderBy {
+        ferro_schema_ir::QueryOrderBy {
+            column: column.to_string(),
+            direction: direction.to_string(),
+            path: vec![],
+            nulls: nulls.map(str::to_string),
+        }
+    }
+
+    fn render_order_sql(
+        order: &ferro_schema_ir::QueryOrderBy,
+        postgres: bool,
+    ) -> Result<String, String> {
+        let mut select = Query::select();
+        select
+            .column(Alias::new("pinned_at"))
+            .from(Alias::new("item"));
+        let col = Expr::col((Alias::new("item"), Alias::new(order.column.as_str())));
+        apply_order_by_term(&mut select, col.into(), order).map_err(|e| e.to_string())?;
+        Ok(if postgres {
+            select.to_string(PostgresQueryBuilder)
+        } else {
+            select.to_string(SqliteQueryBuilder)
+        })
+    }
+
+    #[test]
+    fn nulls_last_with_desc_emits_native_clause_on_both_dialects() {
+        let order = order_term("pinned_at", "desc", Some("last"));
+        for (postgres, label) in [(true, "postgres"), (false, "sqlite")] {
+            let sql = render_order_sql(&order, postgres).expect(label);
+            assert!(
+                sql.contains("ORDER BY") && sql.contains("DESC") && sql.contains("NULLS LAST"),
+                "{label} must emit native NULLS LAST: {sql}"
+            );
+            assert!(
+                !sql.contains("IS NULL"),
+                "{label} must not emulate with IS NULL: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn nulls_first_emits_native_clause_on_both_dialects() {
+        let order = order_term("pinned_at", "asc", Some("first"));
+        for (postgres, label) in [(true, "postgres"), (false, "sqlite")] {
+            let sql = render_order_sql(&order, postgres).expect(label);
+            assert!(
+                sql.contains("ASC") && sql.contains("NULLS FIRST"),
+                "{label} must emit native NULLS FIRST: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_nulls_keeps_plain_direction_without_nulls_clause() {
+        let order = order_term("pinned_at", "desc", None);
+        for (postgres, label) in [(true, "postgres"), (false, "sqlite")] {
+            let sql = render_order_sql(&order, postgres).expect(label);
+            assert!(
+                sql.contains("DESC"),
+                "{label} must still emit DESC: {sql}"
+            );
+            assert!(
+                !sql.contains("NULLS"),
+                "{label} must omit NULLS when unset: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn nulls_token_is_case_insensitive() {
+        for token in ["LAST", "Last", "FIRST", "First"] {
+            let order = order_term("pinned_at", "desc", Some(token));
+            let sql = render_order_sql(&order, true).unwrap_or_else(|e| panic!("{token}: {e}"));
+            let expected = if token.eq_ignore_ascii_case("last") {
+                "NULLS LAST"
+            } else {
+                "NULLS FIRST"
+            };
+            assert!(
+                sql.contains(expected),
+                "case-insensitive {token:?} must emit {expected}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn junk_nulls_errors_loudly_not_silently() {
+        let order = order_term("pinned_at", "desc", Some("sideways"));
+        let err = render_order_sql(&order, true).expect_err("junk nulls must fail");
+        assert!(
+            err.contains("sideways"),
+            "error must name the bad value: {err}"
+        );
+        assert!(
+            err.contains("first") && err.contains("last"),
+            "error must name the accepted tokens: {err}"
+        );
     }
 }
 

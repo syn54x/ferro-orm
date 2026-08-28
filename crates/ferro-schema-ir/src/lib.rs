@@ -412,6 +412,11 @@ pub struct QueryOrderBy {
     /// Relation field names from the root model to the ordered column's table;
     /// `[]` = root model (#269 requires this empty until #270 renders joins).
     pub path: Vec<String>,
+    /// Optional NULLS placement (`"first"` / `"last"`, case-insensitive in the
+    /// planner). Omitted on the wire when unset so existing fixtures keep
+    /// byte-identical round-trips (#361).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nulls: Option<String>,
 }
 
 /// Predicate tree node in query IR: leaf comparison, compound AND/OR, a
@@ -1310,6 +1315,35 @@ mod tests {
         assert!(
             msg.contains("root_instances") && msg.contains("record") && msg.contains("instances"),
             "must name the supported kinds: {msg}"
+        );
+    }
+
+    #[test]
+    fn query_order_by_nulls_optional_wire() {
+        // #361: optional `nulls` on an order_by term — present key round-trips;
+        // absent key deserializes as None and is omitted on serialize.
+        let with: QueryOrderBy = serde_json::from_value(serde_json::json!({
+            "column": "pinned_at",
+            "direction": "desc",
+            "path": [],
+            "nulls": "last"
+        }))
+        .expect("order_by with nulls must deserialize");
+        assert_eq!(with.nulls.as_deref(), Some("last"));
+        let encoded = serde_json::to_value(&with).expect("serialize with nulls");
+        assert_eq!(encoded["nulls"], "last");
+
+        let without: QueryOrderBy = serde_json::from_value(serde_json::json!({
+            "column": "pinned_at",
+            "direction": "desc",
+            "path": []
+        }))
+        .expect("order_by without nulls must deserialize");
+        assert_eq!(without.nulls, None);
+        let encoded = serde_json::to_value(&without).expect("serialize without nulls");
+        assert!(
+            encoded.get("nulls").is_none(),
+            "unset nulls must be omitted from the wire: {encoded}"
         );
     }
 
