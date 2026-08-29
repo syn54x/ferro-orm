@@ -1076,12 +1076,15 @@ class Query(Generic[T]):
             route,
         )
 
+    @overload
     async def update(
-        self,
-        recipe: Callable[[QueryProxy[T]], dict[str, Any]] | None = None,
-        /,
-        **fields: Any,
-    ) -> int:
+        self, recipe: Callable[[QueryProxy[T]], dict[str, Any]], /
+    ) -> int: ...
+
+    @overload
+    async def update(self, /, **fields: Any) -> int: ...
+
+    async def update(self, *args: Any, **fields: Any) -> int:
         """Update all records matching the current query.
 
         Two doors, one SET wire: keyword literals (``update(name="x")``) or a
@@ -1094,9 +1097,10 @@ class Query(Generic[T]):
         cannot be mixed.
 
         Args:
-            recipe: Optional positional callable receiving a
+            *args: Optional positional recipe callable receiving a
                 :class:`QueryProxy` and returning a non-empty ``dict`` of
-                root-column assignments.
+                root-column assignments. Nameless so a keyword ``recipe=``
+                still SETs a column of that name.
             **fields: Field names and literal values to update.
 
         Returns:
@@ -1122,6 +1126,9 @@ class Query(Generic[T]):
             ...     }
             ... )
         """
+        if len(args) > 1:
+            raise TypeError("update() takes at most one positional recipe")
+        recipe = args[0] if args else None
         if recipe is not None and fields:
             raise TypeError(
                 "update() accepts either a recipe callable or keyword "

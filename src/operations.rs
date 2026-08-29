@@ -3864,7 +3864,7 @@ fn set_value_to_expr(
                 )));
             }
             let quoted = column.replace('"', "");
-            let left = Expr::cust(format!("COALESCE(\"{quoted}\", '{{}}')"));
+            let left = Expr::cust(format!("COALESCE(\"{quoted}\"::jsonb, '{{}}'::jsonb)"));
             let right =
                 Expr::value(SeaValue::String(Some(Box::new(patch.to_string())))).cast_as("jsonb");
             Ok(left.concatenate(right))
@@ -4680,8 +4680,11 @@ mod m2m_value_tests {
         let (sql, values) = update.build(PostgresQueryBuilder);
         let upper = sql.to_uppercase();
         assert!(
-            upper.contains("COALESCE") && sql.contains("||") && sql.contains("jsonb"),
-            "merge SET must render COALESCE + || + jsonb, not a pre-merged bind: {sql}"
+            upper.contains("COALESCE")
+                && sql.contains("||")
+                && sql.contains("::jsonb")
+                && sql.contains("turns"),
+            "merge SET must render COALESCE(col::jsonb, '{{}}'::jsonb) || $n::jsonb: {sql}"
         );
         assert!(
             sql.contains("turns"),

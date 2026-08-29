@@ -116,6 +116,25 @@ def resolve_operation_scope(
     return RouteHandle(connection_name=effective_using, session_id=session_id)
 
 
+def resolve_compile_connection_name(
+    *,
+    using: str | None,
+    session: SessionLike | None,
+) -> str | None:
+    """Connection name execute would use, or ``None`` when there is no route.
+
+    Compile-time dialect gates (``.merge()``) must inspect the same
+    connection as ``resolve_operation_scope``, not only ``Query._using``.
+    IR goldens compile without an engine; that case stays ``None``.
+    """
+    try:
+        return resolve_operation_scope(using=using, session=session).connection_name
+    except RuntimeError as exc:
+        if exc.args and exc.args[0] == _NO_ROUTE_MESSAGE:
+            return None
+        raise
+
+
 def resolve_transaction_scope(
     *,
     using: str | None,

@@ -198,7 +198,7 @@ Keyword `update(name="x")` stays literals-only. A recipe callable assigns expres
 
 `+` and `-` are honest SQL: `NULL + 1` is NULL. They do not fill empties. `.merge()` does — a NULL object column is treated as `{}` (`COALESCE`). `now` is a singleton import (`from ferro import now`), not `now()`, and only assigns to a `datetime` column.
 
-`.merge()` is Postgres-only shallow object merge (right-hand patch wins on key overlap). It is not deep merge, not `jsonb_set`, and not key-remove. SQLite, a list-typed column, or a list patch fail at build time (list concat is `.concat()`, not shipped yet).
+`.merge()` is Postgres-only shallow object merge (right-hand patch wins on key overlap). It is not deep merge, not `jsonb_set`, and not key-remove. After `connect`, SQLite, a list-typed column, or a list patch fail at build time (list concat is `.concat()`, not shipped yet). The dialect check uses the same connection the UPDATE will run on (ambient or explicit session, not only the default engine).
 
 === "Assignment"
 
