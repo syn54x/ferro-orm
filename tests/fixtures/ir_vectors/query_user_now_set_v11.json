@@ -1,0 +1,38 @@
+{
+  "vector_name": "query_user_now_set_v11",
+  "domain": "query",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "query",
+    "ir_version": 11,
+    "payload": {
+      "model_name": "User",
+      "where": [
+        {
+          "node_kind": "leaf",
+          "column": "active",
+          "operator": "==",
+          "value": {
+            "kind": "bool",
+            "value": true
+          },
+          "path": []
+        }
+      ],
+      "set": [
+        {
+          "column": "updated_at",
+          "value": {
+            "kind": "now"
+          }
+        }
+      ],
+      "order_by": [],
+      "m2m": null,
+      "joins": [],
+      "materialization": {
+        "kind": "root_instances"
+      }
+    }
+  }
+}

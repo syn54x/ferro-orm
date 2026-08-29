@@ -22,7 +22,6 @@ from typing import (
     overload,
 )
 
-from .._bind_payload import update_bind_payload
 from .._core import (
     add_m2m_links,
     clear_m2m_links,
@@ -41,6 +40,7 @@ from .nodes import (
     RelationProxy,
     ReverseRelationProxy,
     RowSelector,
+    ValueExpr,
     validate_query_column,
 )
 from .rows import Row, Rows
@@ -104,11 +104,33 @@ def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNo
             "WHERE filters rows before aggregation. Post-aggregation "
             "filtering is having() (#291)."
         )
+    if isinstance(result, ValueExpr):
+        result._reject_clause("where")
     if not isinstance(result, QueryNode):
         raise TypeError(
             "where() predicate callable must return QueryNode, "
             f"got {type(result).__name__}"
         )
+    return result
+
+
+def _resolve_update_recipe(
+    recipe: Callable[[QueryProxy[Any]], Any], model_cls: type
+) -> dict[str, Any]:
+    """Evaluate an ``update()`` recipe against a validating ``QueryProxy``."""
+    if not callable(recipe):
+        raise TypeError(
+            "update() expected a recipe callable "
+            '(e.g. `lambda user: {"email": "x", "bonus": user.score}`), '
+            f"got {type(recipe).__name__}"
+        )
+    result = recipe(QueryProxy(model_cls))
+    if not isinstance(result, dict):
+        raise TypeError(
+            f"update() recipe must return a dict, got {type(result).__name__}"
+        )
+    if not result:
+        raise ValueError("update() recipe must assign at least one column")
     return result
 
 
@@ -419,6 +441,8 @@ def _projection_item_field(item: Any, *, context: str) -> _ProjectedField:
             "an output name with the dict selector form "
             f'(e.g. select(lambda t: {{"total": {item._dotted()}}})).'
         )
+    if isinstance(item, ValueExpr):
+        item._reject_clause("select")
     if isinstance(item, RelationProxy):
         relation = item._path[-1]
         raise TypeError(
@@ -471,6 +495,8 @@ def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, .
                 )
             )
             continue
+        if isinstance(value, ValueExpr):
+            value._reject_clause("select")
         if isinstance(value, (dict, tuple, list)):
             raise TypeError(
                 f"select() dict selector value for {key!r} is a "
@@ -641,9 +667,7 @@ class Query(Generic[T]):
     @overload
     def select(self, *columns: str) -> "ProjectedQuery[T]": ...
 
-    def select(
-        self, *selectors: "RowSelector[T] | str"
-    ) -> "Self | ProjectedQuery[T]":
+    def select(self, *selectors: "RowSelector[T] | str") -> "Self | ProjectedQuery[T]":
         """Project the query to a column subset, or pass through unchanged.
 
         Bare ``select()`` keeps meaning "full query": it returns an equivalent
@@ -810,6 +834,8 @@ class Query(Generic[T]):
                     "not a column; order by a column on it instead "
                     f"(e.g. t.{relation}.<column>)."
                 )
+            if isinstance(selected, ValueExpr):
+                selected._reject_clause("order_by")
             if not isinstance(selected, FieldProxy):
                 raise TypeError(
                     "order_by() selector must return a FieldProxy "
@@ -1050,34 +1076,67 @@ class Query(Generic[T]):
             route,
         )
 
-    async def update(self, **fields) -> int:
-        """Update all records matching the current query
+    async def update(
+        self,
+        recipe: Callable[[QueryProxy[T]], dict[str, Any]] | None = None,
+        /,
+        **fields: Any,
+    ) -> int:
+        """Update all records matching the current query.
+
+        Two doors, one SET wire: keyword literals (``update(name="x")``) or a
+        recipe callable (``update(lambda user: {"email": "x", "bonus":
+        user.score, "n": user.n + 1, "updated_at": now})``). Recipe values
+        are a literal, a root column copy, ``+`` / ``-`` arithmetic, the
+        imported ``now`` singleton, or ``.merge()`` (Postgres-only shallow
+        object merge). ``+`` does not fill empties — ``NULL + 1`` is NULL;
+        ``.merge()`` treats a NULL object column as ``{}``. The doors
+        cannot be mixed.
 
         Args:
-            **fields: Field names and values to update.
+            recipe: Optional positional callable receiving a
+                :class:`QueryProxy` and returning a non-empty ``dict`` of
+                root-column assignments.
+            **fields: Field names and literal values to update.
 
         Returns:
             The number of records updated.
 
         Raises:
-            ValueError: If ``limit()`` or ``offset()`` was set on this query, or
-                if the query traverses a relation (a ``where()`` predicate on a
-                related column, or an explicit ``join()``/``left_join()``) —
-                multi-table mutation has no portable SQL. Filter by a column on
-                the target model, or resolve the related primary keys first and
-                update by primary-key set.
+            TypeError: If both doors are used, a recipe is not callable or
+                does not return a dict, or a keyword value is not a literal.
+            ValueError: If the recipe is empty, ``limit()`` or ``offset()``
+                was set, or the query traverses a relation — multi-table
+                mutation has no portable SQL.
 
         Examples:
             >>> updated = await User.where(lambda user: user.id == 1).update(name="Taylor")
             >>> isinstance(updated, int)
             True
+            >>> from ferro import now
+            >>> n = await Counter.where(lambda counter: counter.id == cid).update(
+            ...     lambda counter: {
+            ...         "n": counter.n + 1,
+            ...         "total": counter.a + counter.b,
+            ...         "updated_at": now,
+            ...     }
+            ... )
         """
-        compiled = compile_query(self, "update")
+        if recipe is not None and fields:
+            raise TypeError(
+                "update() accepts either a recipe callable or keyword "
+                "literals, not both"
+            )
+        if recipe is not None:
+            compiled = compile_query(
+                self, "update", recipe=_resolve_update_recipe(recipe, self.model_cls)
+            )
+        else:
+            compiled = compile_query(self, "update", assignments=fields)
         route = await self._transaction_or_using()
         return await update_filtered(
             model_identity(self.model_cls),
             compiled.wire_json,
-            update_bind_payload(fields),
             route,
         )
 
@@ -1416,6 +1475,8 @@ class ProjectedQuery(Query[T]):
                 "not a column; order by a column on it instead "
                 f"(e.g. t.{relation}.<column>)."
             )
+        if isinstance(selected, ValueExpr):
+            selected._reject_clause("order_by")
         if not isinstance(selected, FieldProxy):
             raise TypeError(
                 "order_by() selector must return a FieldProxy "
@@ -1564,7 +1625,12 @@ class ProjectedQuery(Query[T]):
     # any coroutine or SQL exists (#280). A projection is a read shape;
     # silently ignoring it would make select(...) a no-op on mutations.
 
-    def update(self: Never, **fields: Any) -> NoReturn:  # type: ignore[override]
+    def update(  # type: ignore[override]
+        self: Never,
+        recipe: Callable[..., Any] | None = None,
+        /,
+        **fields: Any,
+    ) -> NoReturn:
         """Reject ``update()`` on a projected query (#280).
 
         Raises:

@@ -21,9 +21,26 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
-from .nodes import QueryNode, _serialize_query_value
+from .._bind_payload import update_bind_payload
+from .nodes import (
+    BinaryValueExpr,
+    FieldProxy,
+    MergeValueExpr,
+    NowExpr,
+    QueryNode,
+    RelationProxy,
+    ReverseRelationProxy,
+    ValueExpr,
+    _AGG_NUMERIC,
+    _aggregate_source_family,
+    _json_column_shape,
+    _query_value_kind,
+    _serialize_query_value,
+    now,
+    validate_query_column,
+)
 
 if TYPE_CHECKING:
     from .builder import Query
@@ -32,13 +49,10 @@ if TYPE_CHECKING:
 # mutate arm; they stay distinct values so guardrail errors name the caller.
 QueryVerb = Literal["fetch", "count", "update", "delete"]
 
-# Always 7 (#314 — unconditional bump, exactly like v6 at #310, v5 at #292,
-# v4 at #285, v3 at #278, and v2 at #269; there is no earlier envelope left
-# anywhere). v7 gives predicate trees the recursive ``exists`` node kind
-# beside ``leaf``/``compound``/``not`` (existence tests, ADR-0007). Python
-# and Rust ship in one wheel, so a single supported version is the whole
-# contract (#267 Implementation Decisions).
-_IR_VERSION = 7
+# Always 11 (#379 — unconditional bump, exactly like v10 at #378). v11
+# adds the ``merge`` SET value-expression kind. Python and Rust ship in
+# one wheel, so a single supported version is the whole contract.
+_IR_VERSION = 11
 
 
 class _AbsentType:
@@ -145,6 +159,92 @@ class M2mContext:
 
 
 @dataclass(frozen=True)
+class QueryValue:
+    """One typed literal value carried by a value-expression node."""
+
+    kind: str
+    value: Any
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind, "value": self.value}
+
+
+@dataclass(frozen=True)
+class LiteralValueExpr:
+    """A bound literal in the clause-agnostic SET value-expression family."""
+
+    value: QueryValue
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"kind": "literal", "value": self.value.to_ir_dict()}
+
+
+@dataclass(frozen=True)
+class ColumnRefValueExpr:
+    """An unqualified root-column copy in the SET value-expression family."""
+
+    column: str
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"kind": "column", "column": self.column}
+
+
+@dataclass(frozen=True)
+class BinarySetExpr:
+    """A binary ``+`` / ``-`` SET value expression (#378)."""
+
+    op: Literal["add", "sub"]
+    left: "SetValueExpr"
+    right: "SetValueExpr"
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.op,
+            "left": self.left.to_ir_dict(),
+            "right": self.right.to_ir_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class NowSetExpr:
+    """The database-clock SET value expression (#378)."""
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"kind": "now"}
+
+
+@dataclass(frozen=True)
+class MergeSetExpr:
+    """A Postgres-only shallow object-merge SET value expression (#379)."""
+
+    left: "SetValueExpr"
+    right: "SetValueExpr"
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "merge",
+            "left": self.left.to_ir_dict(),
+            "right": self.right.to_ir_dict(),
+        }
+
+
+SetValueExpr = (
+    LiteralValueExpr | ColumnRefValueExpr | BinarySetExpr | NowSetExpr | MergeSetExpr
+)
+
+
+@dataclass(frozen=True)
+class SetAssignment:
+    """One ordered root-column assignment in the canonical SET section."""
+
+    column: str
+    value: SetValueExpr
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"column": self.column, "value": self.value.to_ir_dict()}
+
+
+@dataclass(frozen=True)
 class RecordExpr:
     """The expression source of an aggregate record field (v5, ADR-0009).
 
@@ -247,6 +347,7 @@ class QueryIrPayload:
 
     model_name: str
     where: tuple[dict[str, Any], ...]
+    set: tuple[SetAssignment, ...]
     order_by: tuple[OrderByEntry, ...]
     limit: int | None | _AbsentType
     offset: int | None | _AbsentType
@@ -258,6 +359,7 @@ class QueryIrPayload:
         payload: dict[str, Any] = {
             "model_name": self.model_name,
             "where": list(self.where),
+            "set": [assignment.to_ir_dict() for assignment in self.set],
             "order_by": [entry.to_ir_dict() for entry in self.order_by],
         }
         if not isinstance(self.limit, _AbsentType):
@@ -431,6 +533,270 @@ def _materialization(query: "Query[Any]") -> Materialization:
     return RootInstances()
 
 
+_RECIPE_FORM = 'update(lambda t: {"col": ...})'
+
+
+def _reject_kwargs_value_expr(value: Any) -> None:
+    """Kwargs stay literals-only; expressions belong on the recipe door."""
+    if isinstance(
+        value,
+        (FieldProxy, ValueExpr, RelationProxy, ReverseRelationProxy),
+    ):
+        raise TypeError(
+            "update() keyword values must be literals; use the recipe form "
+            f"{_RECIPE_FORM} to assign a column or value expression"
+        )
+
+
+def _literal_assignment(column: str, value: Any) -> SetAssignment:
+    """Canonicalize one literal (including bytes) into a SET assignment."""
+    payload = update_bind_payload({column: value})
+    canon = payload[column]
+    if isinstance(canon, bytes):
+        query_value = QueryValue(kind="bytes", value=list(canon))
+    else:
+        query_value = QueryValue(kind=_query_value_kind(canon), value=canon)
+    return SetAssignment(column=column, value=LiteralValueExpr(value=query_value))
+
+
+def _literal_set(assignments: Mapping[str, Any] | None) -> tuple[SetAssignment, ...]:
+    """Compile kwargs literals into ordered, typed SET value-expression nodes."""
+    compiled: list[SetAssignment] = []
+    for column, value in (assignments or {}).items():
+        _reject_kwargs_value_expr(value)
+        compiled.append(_literal_assignment(column, value))
+    return tuple(compiled)
+
+
+def _relation_names(model_cls: type) -> set[str]:
+    relations = getattr(model_cls, "__ferro_relation_specs__", None) or {}
+    reverse = getattr(model_cls, "__ferro_reverse_specs__", None) or {}
+    return set(relations) | set(reverse)
+
+
+def _reject_relation(model_cls: type, name: str, *, role: str) -> None:
+    if name in _relation_names(model_cls):
+        raise TypeError(
+            f"update() cannot assign a relation {name!r} as a SET {role}; "
+            "targets and sources must be root columns on the updated table"
+        )
+
+
+def _column_family(model_cls: type, column: str) -> str:
+    spec = getattr(model_cls, "__ferro_columns__", {})[column]
+    return _aggregate_source_family(spec)
+
+
+def _column_ref_value(model_cls: type, target: str, value: FieldProxy) -> ColumnRefValueExpr:
+    if value.path:
+        raise TypeError(
+            f"update() cannot assign a traversed column "
+            f"({value._dotted()}); SET targets and sources must be "
+            "root columns on the updated table"
+        )
+    _reject_relation(model_cls, value.column, role="value")
+    validate_query_column(model_cls, value.column)
+    source_family = _column_family(model_cls, value.column)
+    target_family = _column_family(model_cls, target)
+    if source_family != target_family:
+        model = model_cls.__name__
+        raise TypeError(
+            f"cannot copy {model}.{value.column} ({source_family}) "
+            f"onto {model}.{target} ({target_family})"
+        )
+    return ColumnRefValueExpr(column=value.column)
+
+
+def _compile_operand(model_cls: type, target: str, value: Any) -> SetValueExpr:
+    """Compile one side of a binary SET expression (#378)."""
+    if isinstance(value, (RelationProxy, ReverseRelationProxy)):
+        relation = value._path[-1] if isinstance(value, RelationProxy) else value._name
+        raise TypeError(
+            f"update() cannot assign the relation {relation!r} as a SET "
+            "value; sources must be root columns on the updated table"
+        )
+    if isinstance(value, NowExpr) or value is now:
+        raise TypeError(
+            "now is the database clock, not a numeric operand; "
+            "+ / - take a numeric column (int, float, or Decimal)"
+        )
+    if isinstance(value, BinaryValueExpr):
+        return _compile_binary(model_cls, target, value)
+    if isinstance(value, MergeValueExpr):
+        raise TypeError(
+            ".merge() cannot be nested inside + / -; it is a SET value, "
+            "not an arithmetic operand"
+        )
+    if isinstance(value, ValueExpr):
+        raise TypeError(
+            "update() recipe values are a literal, a root column copy, "
+            "arithmetic, now, or .merge(); .concat() is not shipped yet"
+        )
+    if isinstance(value, FieldProxy):
+        if value.path:
+            raise TypeError(
+                f"update() cannot assign a traversed column "
+                f"({value._dotted()}); SET targets and sources must be "
+                "root columns on the updated table"
+            )
+        _reject_relation(model_cls, value.column, role="value")
+        validate_query_column(model_cls, value.column)
+        source_family = _column_family(model_cls, value.column)
+        if source_family not in _AGG_NUMERIC:
+            model = model_cls.__name__
+            raise TypeError(
+                f"{value._dotted()} is not supported as an arithmetic "
+                f"operand: {model}.{value.column} is {source_family}-typed, "
+                "and + / - take a numeric column (int, float, or Decimal)."
+            )
+        return ColumnRefValueExpr(column=value.column)
+    return _literal_assignment(target, value).value
+
+
+def _compile_binary(
+    model_cls: type, target: str, value: BinaryValueExpr
+) -> BinarySetExpr:
+    target_family = _column_family(model_cls, target)
+    if target_family not in _AGG_NUMERIC:
+        model = model_cls.__name__
+        raise TypeError(
+            f"cannot assign a numeric expression onto {model}.{target} "
+            f"({target_family})"
+        )
+    return BinarySetExpr(
+        op="add" if value.op == "+" else "sub",
+        left=_compile_operand(model_cls, target, value.left),
+        right=_compile_operand(model_cls, target, value.right),
+    )
+
+
+def _column_json_shape(model_cls: type, column: str) -> str | None:
+    spec = getattr(model_cls, "__ferro_columns__", {})[column]
+    return _json_column_shape(spec)
+
+
+def _require_postgres_merge(using: str | None) -> None:
+    """Reject ``.merge()`` when the connected dialect is SQLite (#379)."""
+    from .._core import connection_backend
+
+    if connection_backend(using) == "sqlite":
+        raise TypeError(
+            ".merge() is Postgres-only (jsonb ||). SQLite is not supported; "
+            "json_patch would delete keys on JSON null (RFC 7396), which is "
+            "a different meaning."
+        )
+
+
+def _compile_merge(
+    model_cls: type, target: str, value: MergeValueExpr, using: str | None
+) -> MergeSetExpr:
+    _require_postgres_merge(using)
+    target_shape = _column_json_shape(model_cls, target)
+    if target_shape == "array":
+        raise TypeError(
+            f"cannot assign .merge() onto {model_cls.__name__}.{target}: "
+            "it is list-typed; .concat() is not shipped yet"
+        )
+    if target_shape != "object":
+        family = _column_family(model_cls, target)
+        raise TypeError(
+            f".merge() can only be assigned to a json object column; "
+            f"{model_cls.__name__}.{target} is {family}-typed"
+        )
+    left = value.left
+    if left.path:
+        raise TypeError(
+            f"update() cannot assign a traversed column "
+            f"({left._dotted()}); SET targets and sources must be "
+            "root columns on the updated table"
+        )
+    _reject_relation(model_cls, left.column, role="value")
+    validate_query_column(model_cls, left.column)
+    source_shape = _column_json_shape(model_cls, left.column)
+    if source_shape == "array":
+        raise TypeError(
+            f"{left._dotted()}.merge() is not supported: "
+            f"{model_cls.__name__}.{left.column} is list-typed; "
+            ".concat() is not shipped yet"
+        )
+    if source_shape != "object":
+        family = _column_family(model_cls, left.column)
+        raise TypeError(
+            f"{left._dotted()}.merge() is not supported: "
+            f"{model_cls.__name__}.{left.column} is {family}-typed, "
+            "and .merge() takes a json object (dict or nested model)."
+        )
+    return MergeSetExpr(
+        left=ColumnRefValueExpr(column=left.column),
+        right=_literal_assignment(target, value.patch).value,
+    )
+
+
+def _recipe_set(
+    model_cls: type,
+    recipe: Mapping[str, Any],
+    using: str | None = None,
+) -> tuple[SetAssignment, ...]:
+    """Compile a recipe dict into the same SET list kwargs use."""
+    compiled: list[SetAssignment] = []
+    for column, value in recipe.items():
+        if not isinstance(column, str):
+            raise TypeError(
+                "update() recipe keys are root column names and must be "
+                f"strings, got {column!r} ({type(column).__name__})"
+            )
+        _reject_relation(model_cls, column, role="target")
+        validate_query_column(model_cls, column)
+        if isinstance(value, (RelationProxy, ReverseRelationProxy)):
+            relation = (
+                value._path[-1] if isinstance(value, RelationProxy) else value._name
+            )
+            raise TypeError(
+                f"update() cannot assign the relation {relation!r} as a SET "
+                "value; sources must be root columns on the updated table"
+            )
+        if isinstance(value, NowExpr) or value is now:
+            family = _column_family(model_cls, column)
+            if family != "datetime":
+                raise TypeError(
+                    f"now can only be assigned to a datetime column; "
+                    f"{model_cls.__name__}.{column} is {family}-typed"
+                )
+            compiled.append(SetAssignment(column=column, value=NowSetExpr()))
+            continue
+        if isinstance(value, BinaryValueExpr):
+            compiled.append(
+                SetAssignment(
+                    column=column,
+                    value=_compile_binary(model_cls, column, value),
+                )
+            )
+            continue
+        if isinstance(value, MergeValueExpr):
+            compiled.append(
+                SetAssignment(
+                    column=column,
+                    value=_compile_merge(model_cls, column, value, using),
+                )
+            )
+            continue
+        if isinstance(value, ValueExpr):
+            raise TypeError(
+                "update() recipe values are a literal, a root column copy, "
+                "arithmetic, now, or .merge(); .concat() is not shipped yet"
+            )
+        if isinstance(value, FieldProxy):
+            compiled.append(
+                SetAssignment(
+                    column=column,
+                    value=_column_ref_value(model_cls, column, value),
+                )
+            )
+            continue
+        compiled.append(_literal_assignment(column, value))
+    return tuple(compiled)
+
+
 def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
     """Reject query state a mutating verb cannot carry (FF-A A1, #273, #287).
 
@@ -514,7 +880,13 @@ def _payload_hop_classes(payload: QueryIrPayload) -> dict[str, type] | None:
     return hop_classes
 
 
-def compile_query(query: "Query[Any]", verb: QueryVerb) -> CompiledQuery:
+def compile_query(
+    query: "Query[Any]",
+    verb: QueryVerb,
+    *,
+    assignments: Mapping[str, Any] | None = None,
+    recipe: Mapping[str, Any] | None = None,
+) -> CompiledQuery:
     """Compile a built query into its wire artifact — the single choke point.
 
     What each verb carries is policy, stated here once:
@@ -536,9 +908,22 @@ def compile_query(query: "Query[Any]", verb: QueryVerb) -> CompiledQuery:
     where = tuple(node.to_ir_dict() for node in query.where_clause)
     if verb in ("update", "delete"):
         _reject_mutation_misuse(query, verb)
+        if verb == "update":
+            if recipe is not None and assignments:
+                raise TypeError(
+                    "compile_query() accepts either recipe or assignments, not both"
+                )
+            set_assignments = (
+                _recipe_set(query.model_cls, recipe, using=query._using)
+                if recipe is not None
+                else _literal_set(assignments)
+            )
+        else:
+            set_assignments = ()
         payload = QueryIrPayload(
             model_name=identity,
             where=where,
+            set=set_assignments,
             order_by=(),
             limit=_ABSENT,
             offset=_ABSENT,
@@ -550,6 +935,7 @@ def compile_query(query: "Query[Any]", verb: QueryVerb) -> CompiledQuery:
         payload = QueryIrPayload(
             model_name=identity,
             where=where,
+            set=(),
             order_by=(),
             limit=None,
             offset=None,
@@ -561,6 +947,7 @@ def compile_query(query: "Query[Any]", verb: QueryVerb) -> CompiledQuery:
         payload = QueryIrPayload(
             model_name=identity,
             where=where,
+            set=(),
             order_by=tuple(query.order_by_clause),
             limit=query._limit,
             offset=query._offset,

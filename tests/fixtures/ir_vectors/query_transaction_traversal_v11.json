@@ -1,34 +1,62 @@
 {
-  "vector_name": "query_transaction_left_join_v7",
+  "vector_name": "query_transaction_traversal_v11",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 7,
+    "ir_version": 11,
     "payload": {
       "model_name": "Transaction",
       "where": [
         {
-          "node_kind": "leaf",
-          "column": "email",
-          "operator": "==",
-          "value": {
-            "kind": "string",
-            "value": "owner@ferro.dev"
+          "node_kind": "compound",
+          "operator": "AND",
+          "left": {
+            "node_kind": "leaf",
+            "column": "email",
+            "operator": "==",
+            "value": {
+              "kind": "string",
+              "value": "owner@ferro.dev"
+            },
+            "path": [
+              "account",
+              "owner"
+            ]
           },
-          "path": [
-            "account",
-            "owner"
-          ]
+          "right": {
+            "node_kind": "leaf",
+            "column": "amount",
+            "operator": ">=",
+            "value": {
+              "kind": "int",
+              "value": 100
+            },
+            "path": []
+          }
         }
       ],
-      "order_by": [],
-      "limit": null,
-      "offset": null,
+      "set": [],
+      "order_by": [
+        {
+          "column": "name",
+          "direction": "asc",
+          "path": [
+            "account"
+          ]
+        },
+        {
+          "column": "id",
+          "direction": "asc",
+          "path": []
+        }
+      ],
+      "limit": 50,
+      "offset": 0,
       "m2m": null,
       "joins": [
         {
-          "join_type": "left",
+          "join_type": "inner",
           "path": [
             {
               "relation": "account",

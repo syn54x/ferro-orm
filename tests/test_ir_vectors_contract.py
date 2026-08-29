@@ -11,10 +11,9 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 7 (#314 — unconditional bump; predicate trees
-# gain the recursive `exists` node kind beside `leaf`/`compound`/`not`
-# (existence tests, ADR-0007)); `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 7, "codec": 1}
+# `query` is on ir_version 11 (#379 — unconditional bump; merge joins
+# add / sub / now); `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 11, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -35,6 +34,32 @@ def _load_vectors() -> list[tuple[Path, dict[str, Any]]]:
 def _require_keys(obj: dict[str, Any], required: set[str], label: str) -> None:
     missing = required - set(obj.keys())
     assert not missing, f"{label} missing keys: {sorted(missing)}"
+
+
+def _validate_set_value(expr: Any, label: str) -> None:
+    """Accept literal, column, add/sub, and now SET value expressions (#378)."""
+    assert isinstance(expr, dict), f"{label} must be object"
+    assert "kind" in expr, f"{label} missing kind"
+    kind = expr["kind"]
+    assert kind in {"literal", "column", "add", "sub", "now", "merge"}, (
+        f"{label}.kind invalid: {kind!r}"
+    )
+    if kind == "literal":
+        _require_keys(expr, {"kind", "value"}, label)
+        literal = expr["value"]
+        assert isinstance(literal, dict), f"{label}.value must be object"
+        _require_keys(literal, {"kind", "value"}, f"{label}.value")
+    elif kind == "column":
+        _require_keys(expr, {"kind", "column"}, label)
+        assert isinstance(expr["column"], str) and expr["column"], (
+            f"{label}.column must be a non-empty string"
+        )
+    elif kind in {"add", "sub", "merge"}:
+        _require_keys(expr, {"kind", "left", "right"}, label)
+        _validate_set_value(expr["left"], f"{label}.left")
+        _validate_set_value(expr["right"], f"{label}.right")
+    else:
+        _require_keys(expr, {"kind"}, label)
 
 
 def _validate_query_node(node: dict[str, Any], label: str) -> None:
@@ -225,9 +250,8 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         {
             "model_name",
             "where",
+            "set",
             "order_by",
-            "limit",
-            "offset",
             "m2m",
             "joins",
             "materialization",
@@ -247,6 +271,16 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         node_label = f"{label}.where[{i}]"
         assert isinstance(node, dict), f"{node_label} must be object"
         _validate_query_node(node, node_label)
+    assignments = payload["set"]
+    assert isinstance(assignments, list), f"{label}.set must be a list"
+    for i, assignment in enumerate(assignments):
+        assignment_label = f"{label}.set[{i}]"
+        assert isinstance(assignment, dict), f"{assignment_label} must be object"
+        _require_keys(assignment, {"column", "value"}, assignment_label)
+        assert isinstance(assignment["column"], str) and assignment["column"], (
+            f"{assignment_label}.column must be non-empty string"
+        )
+        _validate_set_value(assignment["value"], f"{assignment_label}.value")
     assert isinstance(payload["order_by"], list), f"{label}.order_by must be list"
     for i, order in enumerate(payload["order_by"]):
         order_label = f"{label}.order_by[{i}]"
@@ -258,11 +292,14 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
                 f"{order_label}.nulls must be 'first' or 'last' when present, "
                 f"got {order['nulls']!r}"
             )
-    if payload["limit"] is not None:
+    has_limit = "limit" in payload
+    has_offset = "offset" in payload
+    assert has_limit == has_offset, f"{label}.limit/offset must be present together"
+    if has_limit and payload["limit"] is not None:
         assert isinstance(payload["limit"], int) and payload["limit"] >= 0, (
             f"{label}.limit must be null or non-negative int"
         )
-    if payload["offset"] is not None:
+    if has_offset and payload["offset"] is not None:
         assert isinstance(payload["offset"], int) and payload["offset"] >= 0, (
             f"{label}.offset must be null or non-negative int"
         )

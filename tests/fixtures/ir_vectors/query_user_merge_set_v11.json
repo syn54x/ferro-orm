@@ -1,0 +1,53 @@
+{
+  "vector_name": "query_user_merge_set_v11",
+  "domain": "query",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "query",
+    "ir_version": 11,
+    "payload": {
+      "model_name": "User",
+      "where": [
+        {
+          "node_kind": "leaf",
+          "column": "active",
+          "operator": "==",
+          "value": {
+            "kind": "bool",
+            "value": true
+          },
+          "path": []
+        }
+      ],
+      "set": [
+        {
+          "column": "turns",
+          "value": {
+            "kind": "merge",
+            "left": {
+              "kind": "column",
+              "column": "turns"
+            },
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "object",
+                "value": {
+                  "run": {
+                    "ok": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "order_by": [],
+      "m2m": null,
+      "joins": [],
+      "materialization": {
+        "kind": "root_instances"
+      }
+    }
+  }
+}

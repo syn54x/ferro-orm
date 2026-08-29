@@ -33,7 +33,15 @@ Every model that wants timestamps repeats the same two field declarations and ad
 --8<-- "docs/examples/timestamps.py:usage"
 ```
 
-`created_at` is set once when the instance is created; every subsequent `save()` advances `updated_at`. Note that the mixin only hooks instance `save()` (which `create()` paths go through) — batch updates like `Note.where(...).update(...)` write columns directly and will not touch `updated_at` unless you set it explicitly in the update.
+`created_at` is set once when the instance is created; every subsequent `save()` advances `updated_at`. Note that the mixin only hooks instance `save()` (which `create()` paths go through) — batch updates like `Note.where(...).update(...)` write columns directly and will not touch `updated_at` unless you set it explicitly. Use a recipe with the imported `now` singleton for the database clock:
+
+```python
+from ferro import now
+
+await Note.where(lambda note: note.id == nid).update(
+    lambda note: {"updated_at": now}
+)
+```
 
 ## Timezone Notes
 

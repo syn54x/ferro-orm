@@ -8,13 +8,14 @@ use crate::backend::{
 };
 use crate::query::{JoinPlan, QueryPlan};
 use crate::state::{
-    Dialect, TRANSACTION_REGISTRY,
-    TransactionConnection, TransactionHandle, connection_for_route, ensure_session_idle_for_close,
-    engine_for_connection, register_session, session_state, unregister_session,
+    Dialect, TRANSACTION_REGISTRY, TransactionConnection, TransactionHandle, connection_for_route,
+    engine_for_connection, ensure_session_idle_for_close, register_session, session_state,
+    unregister_session,
 };
 use dashmap::DashMap;
-use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoinHop};
+use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoinHop, QueryValueExpr};
 use pyo3::prelude::*;
+use sea_query::extension::postgres::PgExpr;
 use sea_query::{
     Alias, Condition, Expr, Iden, InsertStatement, JoinType, NullOrdering, OnConflict, Order,
     PostgresQueryBuilder, Query, SelectStatement, SimpleExpr, SqliteQueryBuilder, UpdateStatement,
@@ -36,14 +37,17 @@ fn active_connection_for_route(using: Option<String>) -> PyResult<(String, Arc<E
 /// session / explicit-`using` precedence into it.
 fn route_engine(
     route: &crate::state::RouteHandle,
-) -> PyResult<(String, Arc<EngineHandle>, Option<TransactionConnection>, Dialect)> {
+) -> PyResult<(
+    String,
+    Arc<EngineHandle>,
+    Option<TransactionConnection>,
+    Dialect,
+)> {
     let engine = engine_for_connection(Some(route.connection_name.clone()))?;
     let tx_conn = match &route.tx_id {
         Some(tx_id) => Some(
             tx_get(route.session_id.as_deref(), tx_id)?
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Transaction not found")
-                })?
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?
                 .conn,
         ),
         None => None,
@@ -100,8 +104,7 @@ fn maybe_sweep(
 ) {
     debug_assert_gil_held();
     use std::sync::atomic::Ordering;
-    if ops.fetch_add(1, Ordering::Relaxed) % IDENTITY_SWEEP_INTERVAL
-        == IDENTITY_SWEEP_INTERVAL - 1
+    if ops.fetch_add(1, Ordering::Relaxed) % IDENTITY_SWEEP_INTERVAL == IDENTITY_SWEEP_INTERVAL - 1
     {
         map.retain(|_, weak| weakref_is_live(py, weak));
     }
@@ -121,7 +124,10 @@ fn identity_map_get(
     let session = session_state(session_id)?;
     // Clone the weakref out of the shard guard before touching Python:
     // GIL-before-shard ordering is the invariant (see maybe_sweep).
-    let weak = session.identity_map.get(key).map(|e| e.value().clone_ref(py));
+    let weak = session
+        .identity_map
+        .get(key)
+        .map(|e| e.value().clone_ref(py));
     let Some(weak) = weak else { return Ok(None) };
     // Upgrade to a strong ref; hit-vs-miss is decided on the upgraded ref so
     // the instance cannot die between the check and use.
@@ -206,7 +212,10 @@ pub fn identity_map_len(py: Python<'_>, session_id: Option<String>) -> PyResult<
         return Ok(0);
     };
     let map = &session_state(&session_id)?.identity_map;
-    Ok(map.iter().filter(|e| weakref_is_live(py, e.value())).count())
+    Ok(map
+        .iter()
+        .filter(|e| weakref_is_live(py, e.value()))
+        .count())
 }
 
 fn tx_get(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<TransactionHandle>> {
@@ -243,12 +252,12 @@ fn tx_remove(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<Transacti
     Ok(TRANSACTION_REGISTRY.remove(tx_id).map(|(_, handle)| handle))
 }
 
-/// The only QueryIR version this build accepts (#269, #278, #285, #292, #310, #314).
+/// The only QueryIR version this build accepts (#269 through #378).
 ///
 /// Python and Rust ship in one wheel, so there is exactly one supported version at any
 /// time — no negotiation, no fallback. A mismatch can only mean a mixed build (a stale
 /// `.so` next to a rebuilt Python package, or vice versa).
-const SUPPORTED_QUERY_IR_VERSION: u32 = 7;
+const SUPPORTED_QUERY_IR_VERSION: u32 = 11;
 
 /// Envelope shell used only to read `ir_kind`/`ir_version` before committing to a strict
 /// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real earlier-version
@@ -645,8 +654,7 @@ fn apply_select_list(
     for field in fields {
         match &field.source {
             ProjectedSource::Column { column, path } => {
-                let qualifier =
-                    record_field_qualifier(table_name, join_plan, &field.name, path)?;
+                let qualifier = record_field_qualifier(table_name, join_plan, &field.name, path)?;
                 let source = Expr::col((Alias::new(qualifier), Alias::new(column.as_str())));
                 if derive_group_by {
                     select.add_group_by([source.clone().into()]);
@@ -654,8 +662,7 @@ fn apply_select_list(
                 select.expr_as(source, Alias::new(field.name.as_str()));
             }
             ProjectedSource::Aggregate { func, column, path } => {
-                let qualifier =
-                    record_field_qualifier(table_name, join_plan, &field.name, path)?;
+                let qualifier = record_field_qualifier(table_name, join_plan, &field.name, path)?;
                 let source = Expr::col((Alias::new(qualifier), Alias::new(column.as_str())));
                 let call = match func {
                     ferro_schema_ir::AggregateFn::Count => sea_query::Func::count(source),
@@ -902,17 +909,12 @@ fn record_rows_to_parsed_data(
                 )));
             };
             let value = match field_decode.agg {
-                Some(func) => decode_aggregate_value(
-                    func,
-                    value,
-                    field_decode.plan,
-                    field_decode.column,
-                ),
-                None => crate::codec::decode_engine_value(
-                    value,
-                    field_decode.plan,
-                    field_decode.column,
-                ),
+                Some(func) => {
+                    decode_aggregate_value(func, value, field_decode.plan, field_decode.column)
+                }
+                None => {
+                    crate::codec::decode_engine_value(value, field_decode.plan, field_decode.column)
+                }
             };
             decoded_fields.push((name, value));
         }
@@ -962,9 +964,7 @@ fn record_enum_classes_for<'py>(
             })?;
             if !hop_enums.contains_key(table) {
                 let hop_cls = hop_classes
-                    .and_then(|classes| {
-                        classes.bind(py).get_item(table.as_str()).ok().flatten()
-                    })
+                    .and_then(|classes| classes.bind(py).get_item(table.as_str()).ok().flatten())
                     .ok_or_else(|| {
                         pyo3::exceptions::PyValueError::new_err(format!(
                             "record field {:?} decodes through table {table:?} \
@@ -1114,7 +1114,10 @@ fn instances_rows_to_parsed_data(
     let mut aliased: HashMap<String, (usize, String)> = HashMap::new();
     for (i, hop) in hops.iter().enumerate() {
         for column in &hop.registration.column_names {
-            aliased.insert(include_column_alias(&hop.alias, column), (i, column.clone()));
+            aliased.insert(
+                include_column_alias(&hop.alias, column),
+                (i, column.clone()),
+            );
         }
     }
     rows.into_iter()
@@ -1215,17 +1218,51 @@ fn materialize_model_row<'py>(
     Ok(instance)
 }
 
-/// Reject `limit`/`offset` on mutating operations (FF-A A1, #171).
-///
-/// Portable SQL has no `UPDATE/DELETE ... LIMIT`. The Python builder raises
-/// before serializing and omits the keys from mutating payloads; this
-/// boundary guard keeps the contract from regressing via any other caller.
-fn reject_pagination_on_mutation(plan: &QueryPlan, operation: &str) -> PyResult<()> {
-    if plan.limit.is_some() || plan.offset.is_some() {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "{operation}() does not support limit/offset: portable SQL has no {} ... LIMIT",
-            operation.to_uppercase()
-        )));
+/// Enforce the v8 verb contract for `limit`/`offset` key presence.
+fn validate_paging_shape(plan: &QueryPlan, operation: &str) -> PyResult<()> {
+    match operation {
+        "update" | "delete" if plan.limit.is_some() || plan.offset.is_some() => {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{operation} QueryIR must omit limit/offset keys"
+            )))
+        }
+        "fetch" | "count" if plan.limit.is_none() || plan.offset.is_none() => {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{operation} QueryIR must carry limit/offset keys (null when unset)"
+            )))
+        }
+        "update" | "delete" | "fetch" | "count" => Ok(()),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown QueryIR operation {operation:?}"
+        ))),
+    }
+}
+
+/// Enforce the verb-specific QueryIR SET shape at the Rust trust boundary.
+fn validate_set_shape(plan: &QueryPlan, operation: &str) -> PyResult<()> {
+    if operation != "update" {
+        if !plan.set_assignments.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{operation} QueryIR must carry an empty SET section"
+            )));
+        }
+        return Ok(());
+    }
+
+    if plan.set_assignments.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "update QueryIR must carry at least one SET assignment",
+        ));
+    }
+
+    let mut columns = HashSet::with_capacity(plan.set_assignments.len());
+    for assignment in &plan.set_assignments {
+        if !columns.insert(assignment.column.as_str()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "update QueryIR carries duplicate SET assignment for column {:?}",
+                assignment.column
+            )));
+        }
     }
     Ok(())
 }
@@ -1526,7 +1563,9 @@ async fn postgres_table_catalog(
 ) -> PyResult<Arc<TableCatalog>> {
     if backend != Dialect::Postgres {
         static EMPTY: std::sync::OnceLock<Arc<TableCatalog>> = std::sync::OnceLock::new();
-        return Ok(EMPTY.get_or_init(|| Arc::new(TableCatalog::default())).clone());
+        return Ok(EMPTY
+            .get_or_init(|| Arc::new(TableCatalog::default()))
+            .clone());
     }
 
     if let Some(cached) = engine.cached_table_catalog(table_name) {
@@ -1645,8 +1684,9 @@ pub fn begin_transaction(
         let r = route.get();
         let tx_id = uuid::Uuid::new_v4().to_string();
         if let Some(parent_tx_id) = r.tx_id.clone() {
-            let parent = tx_get(r.session_id.as_deref(), &parent_tx_id)?
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Parent transaction not found"))?;
+            let parent = tx_get(r.session_id.as_deref(), &parent_tx_id)?.ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Parent transaction not found")
+            })?;
             let conn = parent.conn.clone();
             let connection_name = parent.connection_name.clone();
 
@@ -1781,9 +1821,7 @@ pub fn rollback_transaction(
         }
 
         // Re-acquire the GIL before accessing identity map (async context has no GIL).
-        pyo3::Python::attach(|_py| {
-            identity_map_clear(session_id.as_deref())
-        })?;
+        pyo3::Python::attach(|_py| identity_map_clear(session_id.as_deref()))?;
         Ok(())
     })
 }
@@ -2262,7 +2300,11 @@ pub fn save_record<'py>(
         let pk_is_auto = schema.meta.pk_autoincrement;
 
         let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
-        let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
+        let TableCatalog {
+            enum_udt,
+            uuid_columns,
+            ts_cast,
+        } = &*catalog;
         let (sql, bind_values, needs_postgres_returning) = build_save_sql(
             &schema,
             &table_name,
@@ -2337,7 +2379,11 @@ pub fn update_record<'py>(
         let pk_col = schema.meta.pk_col.clone();
 
         let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
-        let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
+        let TableCatalog {
+            enum_udt,
+            uuid_columns,
+            ts_cast,
+        } = &*catalog;
 
         let plan = build_update_by_pk_sql(
             &schema,
@@ -2352,10 +2398,14 @@ pub fn update_record<'py>(
 
         match plan {
             UpdateByPkSql::Update(sql, bind_values) => {
-                let rows_affected =
-                    execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
-                        .await
-                        .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
+                let rows_affected = execute_statement_with_optional_tx(
+                    &engine,
+                    tx_conn.as_ref(),
+                    &sql,
+                    &bind_values.0,
+                )
+                .await
+                .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
                 Ok(rows_affected)
             }
             UpdateByPkSql::ExistenceCheck(sql, bind_values) => {
@@ -2423,7 +2473,11 @@ pub fn save_bulk_records<'py>(
         let pk_is_auto = schema.meta.pk_autoincrement;
 
         let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
-        let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
+        let TableCatalog {
+            enum_udt,
+            uuid_columns,
+            ts_cast,
+        } = &*catalog;
 
         // Columns come from the first row's order (skip a null auto-pk).
         let mut column_names: Vec<String> = Vec::new();
@@ -2456,8 +2510,14 @@ pub fn save_bulk_records<'py>(
                 for col in &column_names {
                     let input = lookup.get(col.as_str()).copied().unwrap_or(&null_input);
                     row_values.push(bind_input_to_expr(
-                        &schema, &table_name, col, input,
-                        enum_udt, uuid_columns, ts_cast, backend,
+                        &schema,
+                        &table_name,
+                        col,
+                        input,
+                        enum_udt,
+                        uuid_columns,
+                        ts_cast,
+                        backend,
                     )?);
                 }
                 insert_stmt.values(row_values).map_err(|e| {
@@ -2593,6 +2653,8 @@ pub fn fetch_filtered<'py>(
     let cls_py = cls.unbind();
 
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    validate_paging_shape(&plan, "fetch")?;
+    validate_set_shape(&plan, "fetch")?;
     let include_paths: Option<Vec<Vec<QueryJoinHop>>> = match &plan.materialization {
         Materialization::Instances { paths } => Some(paths.clone()),
         _ => None,
@@ -2732,9 +2794,7 @@ pub fn fetch_filtered<'py>(
             // a matching name renders as the bare result-column alias.
             for order in &plan.order_by {
                 let col = match projected.as_deref() {
-                    Some(fields) => {
-                        record_order_by_expr(order, fields, &table_name, &join_plan)?
-                    }
+                    Some(fields) => record_order_by_expr(order, fields, &table_name, &join_plan)?,
                     None => crate::query::qualify_column_with_joins(
                         &table_name,
                         &join_plan,
@@ -2745,10 +2805,10 @@ pub fn fetch_filtered<'py>(
                 };
                 apply_order_by_term(&mut select, col.into(), order)?;
             }
-            if let Some(limit) = plan.limit {
+            if let Some(limit) = plan.limit.flatten() {
                 select.limit(limit);
             }
-            if let Some(offset) = plan.offset {
+            if let Some(offset) = plan.offset.flatten() {
                 select.offset(offset);
             }
             let (s, values) = sea_query_build_for_backend!(select, backend);
@@ -2777,10 +2837,14 @@ pub fn fetch_filtered<'py>(
             // Instances path (#286): decode root + hops (each against its own
             // model's codec plan), then hydrate the populated graph — every
             // node through the full identity-map protocol.
-            let parsed_data =
-                instances_rows_to_parsed_data(rows, &schema_for_decode, pk_for_decode, &include_hops);
-            let hop_classes_py = hop_classes_py
-                .expect("validated above: an instances plan carries hop_classes");
+            let parsed_data = instances_rows_to_parsed_data(
+                rows,
+                &schema_for_decode,
+                pk_for_decode,
+                &include_hops,
+            );
+            let hop_classes_py =
+                hop_classes_py.expect("validated above: an instances plan carries hop_classes");
 
             return Python::attach(|py| {
                 let results = pyo3::types::PyList::empty(py);
@@ -2798,14 +2862,13 @@ pub fn fetch_filtered<'py>(
                 }
                 let mut hop_ctx: Vec<HopPyCtx<'_>> = Vec::with_capacity(include_hops.len());
                 for (i, hop) in include_hops.iter().enumerate() {
-                    let hop_cls =
-                        hop_classes.get_item(hop.table.as_str())?.ok_or_else(|| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "fetch_filtered(): hop_classes has no model class \
+                    let hop_cls = hop_classes.get_item(hop.table.as_str())?.ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "fetch_filtered(): hop_classes has no model class \
                                  for included table {:?}.",
-                                hop.table
-                            ))
-                        })?;
+                            hop.table
+                        ))
+                    })?;
                     let identity = crate::state::model_identity(&hop_cls)?;
                     let enum_classes = crate::hydration::enum_classes_for(py, &hop_cls);
                     let mut py_col_names = HashMap::new();
@@ -3007,6 +3070,8 @@ pub fn count_filtered(
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    validate_paging_shape(&plan, "count")?;
+    validate_set_shape(&plan, "count")?;
     // count() is unaffected by projection (PRD #277 verb table): the Python
     // builder always emits root_instances on count payloads, projected or not.
     reject_unsupported_materialization(&plan, "count_filtered")?;
@@ -3043,11 +3108,10 @@ pub fn count_filtered(
                 let target_col = Alias::new(&m2m.target_col);
 
                 // We need the PK name of the target table to join
-                let pk_name = schema
-                    .meta
-                    .pk_col
-                    .clone()
-                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
+                let pk_name =
+                    schema.meta.pk_col.clone().ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("No primary key")
+                    })?;
 
                 select.from(Alias::new(&table_name));
                 select.inner_join(
@@ -3228,7 +3292,8 @@ pub fn delete_filtered(
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
-    reject_pagination_on_mutation(&plan, "delete")?;
+    validate_set_shape(&plan, "delete")?;
+    validate_paging_shape(&plan, "delete")?;
     reject_traversal_on_mutation(&plan, "delete")?;
     reject_unsupported_materialization(&plan, "delete")?;
 
@@ -3268,23 +3333,18 @@ pub fn delete_filtered(
         // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
         // Re-acquire the GIL before accessing identity map (async context has no GIL).
         if engine.is_identity_map_enabled() {
-            pyo3::Python::attach(|_py| {
-                identity_map_retain_model(session_id.as_deref(), &name)
-            })?;
+            pyo3::Python::attach(|_py| identity_map_retain_model(session_id.as_deref(), &name))?;
         }
 
         Ok(rows_affected)
     })
 }
 
-/// Update rows matching a filtered query with column values from JSON.
+/// Update rows matching a filtered query using its canonical QueryIR SET section.
 ///
 /// Args:
 ///     name (str): Model class name.
 ///     query_ir_json (str): Serialized Query IR envelope JSON.
-///     updates (dict): Per-column value map; ``bytes`` values are bound
-///         directly (non-UTF-8 safe), all other values are routed through
-///         the schema casting authority.
 ///     tx_id (str | None): Optional active transaction.
 ///     using (str | None): Connection override.
 ///     session_id (str | None): Session-scoped routing when set.
@@ -3295,20 +3355,24 @@ pub fn delete_filtered(
 /// # Errors
 /// `PyTypeError` for unbindable column values; `PyRuntimeError` on execute failure.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, updates, route))]
+#[pyo3(signature = (name, query_ir_json, route))]
 pub fn update_filtered<'py>(
     py: Python<'py>,
     name: String,
     query_ir_json: String,
-    updates: Bound<'py, pyo3::types::PyDict>,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
-    reject_pagination_on_mutation(&plan, "update")?;
+    validate_set_shape(&plan, "update")?;
+    if name != plan.model_name {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "update model identity mismatch: argument {name:?}, QueryIR declares {:?}",
+            plan.model_name
+        )));
+    }
+    validate_paging_shape(&plan, "update")?;
     reject_traversal_on_mutation(&plan, "update")?;
     reject_unsupported_materialization(&plan, "update")?;
-    let update_inputs = bind_inputs_from_py(&updates)?;
-
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
@@ -3318,7 +3382,11 @@ pub fn update_filtered<'py>(
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
         let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
-        let TableCatalog { enum_udt, uuid_columns, ts_cast } = &*catalog;
+        let TableCatalog {
+            enum_udt,
+            uuid_columns,
+            ts_cast,
+        } = &*catalog;
         plan.postgres_enum_udt = enum_udt.clone();
         // ... sql ...
         let (sql, bind_values) = {
@@ -3333,14 +3401,15 @@ pub fn update_filtered<'py>(
                     Some(&table_name),
                 )?)
                 .to_owned();
-            for (key, input) in &update_inputs {
+            for assignment in &plan.set_assignments {
+                let key = &assignment.column;
                 update.value(
                     Alias::new(key),
-                    bind_input_to_expr(
+                    set_value_to_expr(
                         &schema,
                         &table_name,
                         key,
-                        input,
+                        &assignment.value,
                         enum_udt,
                         uuid_columns,
                         ts_cast,
@@ -3359,9 +3428,7 @@ pub fn update_filtered<'py>(
         // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
         // Re-acquire the GIL before accessing identity map (async context has no GIL).
         if engine.is_identity_map_enabled() {
-            pyo3::Python::attach(|_py| {
-                identity_map_retain_model(session_id.as_deref(), &name)
-            })?;
+            pyo3::Python::attach(|_py| identity_map_retain_model(session_id.as_deref(), &name))?;
         }
 
         Ok(rows_affected)
@@ -3419,12 +3486,7 @@ pub fn add_m2m_links<'py>(
             for t_id in t_ids {
                 insert
                     .values(vec![
-                        backend_column_value_expr(
-                            &source_col,
-                            s_id.clone(),
-                            uuid_columns,
-                            backend,
-                        ),
+                        backend_column_value_expr(&source_col, s_id.clone(), uuid_columns, backend),
                         backend_column_value_expr(&target_col, t_id, uuid_columns, backend),
                     ])
                     .map_err(|e| {
@@ -3621,6 +3683,195 @@ impl BindInput {
     }
 }
 
+/// Decode one QueryIR SET value expression into the existing schema-guided
+/// write input. Binary literals use a JSON byte array on the wire and become
+/// native bytes again before bind lowering.
+fn set_value_bind_input(value: &QueryValueExpr, col: &str) -> PyResult<BindInput> {
+    match value {
+        QueryValueExpr::Literal { value } if value.kind == "bytes" => {
+            let items = value.value.as_array().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR bytes literal for SET column {col:?}: value must be an array"
+                ))
+            })?;
+            let mut bytes = Vec::with_capacity(items.len());
+            for item in items {
+                let byte = item
+                    .as_u64()
+                    .filter(|n| *n <= u8::MAX as u64)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Invalid QueryIR bytes literal for SET column {col:?}: \
+                             every item must be an integer from 0 through 255"
+                        ))
+                    })?;
+                bytes.push(byte as u8);
+            }
+            Ok(BindInput::Bytes(bytes))
+        }
+        QueryValueExpr::Literal { value } => {
+            let valid = match value.kind.as_str() {
+                "null" => value.value.is_null(),
+                "bool" => value.value.is_boolean(),
+                "int" => value.value.as_i64().is_some() || value.value.as_u64().is_some(),
+                "float" => {
+                    value.value.as_f64().is_some()
+                        && value.value.as_i64().is_none()
+                        && value.value.as_u64().is_none()
+                }
+                "string" => value.value.is_string(),
+                "list" => value.value.is_array(),
+                "object" => value.value.is_object(),
+                _ => false,
+            };
+            if !valid {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR literal for SET column {col:?}: kind {:?} does not match value {}",
+                    value.kind, value.value
+                )));
+            }
+            Ok(BindInput::Json(value.value.clone()))
+        }
+        QueryValueExpr::Column { .. } => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "SET column {col:?} is a column-ref and must not be bound as a literal"
+        ))),
+        QueryValueExpr::Add { .. } | QueryValueExpr::Sub { .. } => {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "SET column {col:?} is an arithmetic expression and must not be bound as a literal"
+            )))
+        }
+        QueryValueExpr::Now => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "SET column {col:?} is now and must not be bound as a literal"
+        ))),
+        QueryValueExpr::Merge { .. } => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "SET column {col:?} is a merge expression and must not be bound as a literal"
+        ))),
+    }
+}
+
+/// Lower one SET value expression to a SeaQuery expr. Literals bind;
+/// column refs stay column exprs; arithmetic is an operator tree;
+/// ``now`` is the portable database clock (`CURRENT_TIMESTAMP`).
+fn set_value_to_expr(
+    schema: &crate::state::RegisteredModel,
+    table_name: &str,
+    target: &str,
+    value: &QueryValueExpr,
+    enum_udt: &HashMap<String, String>,
+    uuid_columns: &HashSet<String>,
+    ts_cast: &HashMap<String, String>,
+    backend: Dialect,
+) -> PyResult<SimpleExpr> {
+    match value {
+        QueryValueExpr::Literal { .. } => {
+            let input = set_value_bind_input(value, target)?;
+            bind_input_to_expr(
+                schema,
+                table_name,
+                target,
+                &input,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )
+        }
+        QueryValueExpr::Column { column } => {
+            if column.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR column-ref SET for column {target:?}: \
+                     source column must be a non-empty name"
+                )));
+            }
+            Ok(Expr::col(Alias::new(column.as_str())).into())
+        }
+        QueryValueExpr::Add { left, right } => {
+            let left_expr = set_value_to_expr(
+                schema,
+                table_name,
+                target,
+                left,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )?;
+            let right_expr = set_value_to_expr(
+                schema,
+                table_name,
+                target,
+                right,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )?;
+            Ok(left_expr.add(right_expr))
+        }
+        QueryValueExpr::Sub { left, right } => {
+            let left_expr = set_value_to_expr(
+                schema,
+                table_name,
+                target,
+                left,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )?;
+            let right_expr = set_value_to_expr(
+                schema,
+                table_name,
+                target,
+                right,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )?;
+            Ok(left_expr.sub(right_expr))
+        }
+        QueryValueExpr::Now => Ok(Expr::cust("CURRENT_TIMESTAMP")),
+        QueryValueExpr::Merge { left, right } => {
+            if backend != Dialect::Postgres {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    ".merge() is Postgres-only (jsonb ||); SQLite is not supported",
+                ));
+            }
+            let QueryValueExpr::Column { column } = left.as_ref() else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR merge SET for column {target:?}: \
+                     left must be a column"
+                )));
+            };
+            if column.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR merge SET for column {target:?}: \
+                     source column must be a non-empty name"
+                )));
+            }
+            let input = set_value_bind_input(right, target)?;
+            let BindInput::Json(patch) = input else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR merge SET for column {target:?}: \
+                     patch must be a JSON object"
+                )));
+            };
+            if !patch.is_object() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR merge SET for column {target:?}: \
+                     patch must be a JSON object"
+                )));
+            }
+            let quoted = column.replace('"', "");
+            let left = Expr::cust(format!("COALESCE(\"{quoted}\", '{{}}')"));
+            let right =
+                Expr::value(SeaValue::String(Some(Box::new(patch.to_string())))).cast_as("jsonb");
+            Ok(left.concatenate(right))
+        }
+    }
+}
+
 /// Convert a JSON-safe Python value (scalar or nested container) into a
 /// `serde_json::Value`. `bytes` are handled by `bind_input_from_py` *before*
 /// this is called; anything else that is not JSON-representable is rejected
@@ -3704,9 +3955,9 @@ fn bind_input_from_py(value: &Bound<'_, PyAny>, col: &str) -> PyResult<BindInput
 fn bind_inputs_from_py(map: &Bound<'_, pyo3::types::PyDict>) -> PyResult<Vec<(String, BindInput)>> {
     let mut out = Vec::with_capacity(map.len());
     for (k, v) in map.iter() {
-        let key: String = k.extract().map_err(|_| {
-            pyo3::exceptions::PyTypeError::new_err("Record keys must be strings")
-        })?;
+        let key: String = k
+            .extract()
+            .map_err(|_| pyo3::exceptions::PyTypeError::new_err("Record keys must be strings"))?;
         let input = bind_input_from_py(&v, &key)?;
         out.push((key, input));
     }
@@ -3730,7 +3981,14 @@ fn bind_input_to_expr(
     match input {
         BindInput::Bytes(b) => Ok(Expr::value(SeaValue::Bytes(Some(Box::new(b.clone()))))),
         BindInput::Json(v) => crate::codec::schema_bind_expr(
-            &model.codec_plan, table_name, col_name, v, enum_udt, uuid_columns, ts_cast, backend,
+            &model.codec_plan,
+            table_name,
+            col_name,
+            v,
+            enum_udt,
+            uuid_columns,
+            ts_cast,
+            backend,
         ),
     }
 }
@@ -3791,13 +4049,11 @@ fn get_raw_tx_conn(
 ) -> PyResult<Option<TransactionConnection>> {
     match tx_id {
         Some(id) => {
-            let conn = tx_get(session_id, &id)?
-                .map(|tx| tx.conn)
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(
-                        "Transaction has already been closed or never existed",
-                    )
-                })?;
+            let conn = tx_get(session_id, &id)?.map(|tx| tx.conn).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "Transaction has already been closed or never existed",
+                )
+            })?;
             Ok(Some(conn))
         }
         None => Ok(None),
@@ -3833,7 +4089,11 @@ pub fn raw_execute<'py>(
     // to preserve its sharper "transaction already closed" error surface.
     let (route_connection_name, route_tx_id, route_session_id) = {
         let r = route.get();
-        (r.connection_name.clone(), r.tx_id.clone(), r.session_id.clone())
+        (
+            r.connection_name.clone(),
+            r.tx_id.clone(),
+            r.session_id.clone(),
+        )
     };
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
@@ -3874,7 +4134,11 @@ pub fn raw_fetch_all<'py>(
         .collect::<PyResult<_>>()?;
     let (route_connection_name, route_tx_id, route_session_id) = {
         let r = route.get();
-        (r.connection_name.clone(), r.tx_id.clone(), r.session_id.clone())
+        (
+            r.connection_name.clone(),
+            r.tx_id.clone(),
+            r.session_id.clone(),
+        )
     };
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
@@ -3930,7 +4194,11 @@ pub fn raw_fetch_one<'py>(
         .collect::<PyResult<_>>()?;
     let (route_connection_name, route_tx_id, route_session_id) = {
         let r = route.get();
-        (r.connection_name.clone(), r.tx_id.clone(), r.session_id.clone())
+        (
+            r.connection_name.clone(),
+            r.tx_id.clone(),
+            r.session_id.clone(),
+        )
     };
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
@@ -3980,12 +4248,15 @@ pub fn _catalog_query_count_for_test(using: Option<String>) -> PyResult<u64> {
 #[cfg(test)]
 mod m2m_value_tests {
     use super::{
-        backend_column_value_expr, bind_input_from_py, bind_input_to_expr, py_to_json_value,
-        python_to_sea_value, BindInput,
+        BindInput, backend_column_value_expr, bind_input_from_py, bind_input_to_expr,
+        py_to_json_value, python_to_sea_value, set_value_bind_input, set_value_to_expr,
     };
     use crate::state::Dialect;
+    use ferro_schema_ir::QueryValueExpr;
     use pyo3::Python;
-    use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
+    use sea_query::{
+        Alias, Expr, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue,
+    };
     use std::collections::{HashMap, HashSet};
 
     fn extract_pg_value(expr: sea_query::SimpleExpr) -> SeaValue {
@@ -4093,8 +4364,8 @@ mod m2m_value_tests {
     #[test]
     fn py_to_json_value_maps_json_scalars_and_containers() {
         Python::attach(|py| {
-            use pyo3::types::{PyDict, PyDictMethods, PyList};
             use pyo3::IntoPyObject;
+            use pyo3::types::{PyDict, PyDictMethods, PyList};
 
             let i = 42i64.into_pyobject(py).unwrap().into_any();
             assert_eq!(py_to_json_value(&i, "c").unwrap(), serde_json::json!(42));
@@ -4106,12 +4377,18 @@ mod m2m_value_tests {
             assert_eq!(py_to_json_value(&s, "c").unwrap(), serde_json::json!("hi"));
 
             let list = PyList::new(py, [1i64, 2, 3]).unwrap().into_any();
-            assert_eq!(py_to_json_value(&list, "c").unwrap(), serde_json::json!([1, 2, 3]));
+            assert_eq!(
+                py_to_json_value(&list, "c").unwrap(),
+                serde_json::json!([1, 2, 3])
+            );
 
             let dict = PyDict::new(py);
             dict.set_item("w", 10i64).unwrap();
             let d = dict.into_any();
-            assert_eq!(py_to_json_value(&d, "c").unwrap(), serde_json::json!({"w": 10}));
+            assert_eq!(
+                py_to_json_value(&d, "c").unwrap(),
+                serde_json::json!({"w": 10})
+            );
         });
     }
 
@@ -4138,6 +4415,295 @@ mod m2m_value_tests {
     }
 
     #[test]
+    fn query_ir_set_bytes_decode_to_native_bind_input() {
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "literal",
+            "value": {"kind": "bytes", "value": [137, 0, 255, 254]}
+        }))
+        .expect("literal bytes value expression");
+
+        match set_value_bind_input(&value, "data").expect("valid byte array") {
+            BindInput::Bytes(bytes) => assert_eq!(bytes, vec![0x89, 0x00, 0xff, 0xfe]),
+            other => panic!("expected native bytes bind input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_ir_set_rejects_malformed_bytes() {
+        for invalid in [
+            serde_json::json!("not-an-array"),
+            serde_json::json!([-1]),
+            serde_json::json!([1.5]),
+            serde_json::json!(["1"]),
+            serde_json::json!([256]),
+        ] {
+            let value: ferro_schema_ir::QueryValueExpr =
+                serde_json::from_value(serde_json::json!({
+                    "kind": "literal",
+                    "value": {"kind": "bytes", "value": invalid}
+                }))
+                .expect("literal bytes value expression");
+
+            let err = set_value_bind_input(&value, "data")
+                .expect_err("malformed bytes must fail before statement execution");
+            assert!(err.to_string().contains("bytes"));
+            assert!(err.to_string().contains("data"));
+        }
+    }
+
+    #[test]
+    fn query_ir_set_rejects_every_malformed_literal_kind_value_pair() {
+        for (kind, invalid) in [
+            ("null", serde_json::json!(false)),
+            ("bool", serde_json::json!(null)),
+            ("int", serde_json::json!(1.5)),
+            ("float", serde_json::json!(1)),
+            ("string", serde_json::json!([137])),
+            ("list", serde_json::json!({"item": 1})),
+            ("object", serde_json::json!([1])),
+            ("bytes", serde_json::json!("not-an-array")),
+            ("unknown", serde_json::json!(null)),
+        ] {
+            let value: ferro_schema_ir::QueryValueExpr =
+                serde_json::from_value(serde_json::json!({
+                    "kind": "literal",
+                    "value": {"kind": kind, "value": invalid}
+                }))
+                .expect("literal value expression");
+
+            let err = set_value_bind_input(&value, "payload")
+                .expect_err("mismatched kind must fail before statement execution");
+            let message = err.to_string();
+            assert!(
+                message.contains(kind),
+                "error must name literal kind {kind:?}: {message}"
+            );
+            assert!(
+                message.contains("payload"),
+                "error must name SET column: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_ir_set_rejects_integer_outside_native_json_range() {
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_str(
+            r#"{"kind":"literal","value":{"kind":"int","value":1267650600228229401496703205376}}"#,
+        )
+        .expect("JSON parser accepts the oversized number representation");
+
+        let err = set_value_bind_input(&value, "count")
+            .expect_err("rounded integer must not reach schema bind lowering");
+        assert!(err.to_string().contains("int"));
+        assert!(err.to_string().contains("count"));
+    }
+
+    #[test]
+    fn query_ir_set_column_ref_renders_as_column_expr() {
+        use sea_query::{Alias, SqliteQueryBuilder, UpdateStatement};
+
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "column",
+            "column": "score"
+        }))
+        .expect("column-ref value expression");
+
+        let QueryValueExpr::Column { column } = &value else {
+            panic!("expected column-ref arm");
+        };
+        let mut update = UpdateStatement::new();
+        update
+            .table(Alias::new("user"))
+            .value(Alias::new("bonus"), Expr::col(Alias::new(column.as_str())));
+        let (sql, values) = update.build(SqliteQueryBuilder);
+        assert!(
+            sql.contains("score"),
+            "column-ref SET must render the source column: {sql}"
+        );
+        assert!(
+            !sql.contains('?'),
+            "column-ref SET must not bind a literal: {sql}"
+        );
+        assert!(
+            values.0.is_empty(),
+            "column-ref SET must carry no bind values: {values:?}"
+        );
+    }
+
+    #[test]
+    fn query_ir_set_add_column_literal_renders_operator_not_bind() {
+        use sea_query::{Alias, SqliteQueryBuilder, UpdateStatement};
+
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "add",
+            "left": {"kind": "column", "column": "n"},
+            "right": {"kind": "literal", "value": {"kind": "int", "value": 1}}
+        }))
+        .expect("add value expression");
+
+        let schema = crate::state::RegisteredModel::new_for_test(
+            serde_json::json!({
+                "properties": { "n": { "type": "integer" } }
+            }),
+            "counter".to_string(),
+        );
+        let empty_udt = HashMap::new();
+        let empty_uuid = HashSet::new();
+        let empty_ts = HashMap::new();
+        let expr = set_value_to_expr(
+            &schema,
+            "counter",
+            "n",
+            &value,
+            &empty_udt,
+            &empty_uuid,
+            &empty_ts,
+            Dialect::Sqlite,
+        )
+        .expect("add must lower");
+
+        let mut update = UpdateStatement::new();
+        update
+            .table(Alias::new("counter"))
+            .value(Alias::new("n"), expr);
+        let (sql, values) = update.build(SqliteQueryBuilder);
+        assert!(
+            sql.contains("n") && (sql.contains('+') || sql.contains(" + ")),
+            "arithmetic SET must render an operator: {sql}"
+        );
+        assert_eq!(
+            values.0.len(),
+            1,
+            "literal operand must stay a bind, not be precomputed: {values:?}"
+        );
+    }
+
+    #[test]
+    fn query_ir_set_now_renders_clock_not_bound_datetime() {
+        use sea_query::{Alias, SqliteQueryBuilder, UpdateStatement};
+
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "now"
+        }))
+        .expect("now value expression");
+
+        let schema = crate::state::RegisteredModel::new_for_test(
+            serde_json::json!({
+                "properties": { "updated_at": { "type": "string", "format": "date-time" } }
+            }),
+            "stamp".to_string(),
+        );
+        let empty_udt = HashMap::new();
+        let empty_uuid = HashSet::new();
+        let empty_ts = HashMap::new();
+        let expr = set_value_to_expr(
+            &schema,
+            "stamp",
+            "updated_at",
+            &value,
+            &empty_udt,
+            &empty_uuid,
+            &empty_ts,
+            Dialect::Sqlite,
+        )
+        .expect("now must lower");
+
+        let mut update = UpdateStatement::new();
+        update
+            .table(Alias::new("stamp"))
+            .value(Alias::new("updated_at"), expr);
+        let (sql, values) = update.build(SqliteQueryBuilder);
+        assert!(
+            sql.to_uppercase().contains("CURRENT_TIMESTAMP"),
+            "now must render the database clock: {sql}"
+        );
+        assert!(
+            values.0.is_empty(),
+            "now must not bind a Python datetime: {values:?}"
+        );
+    }
+
+    #[test]
+    fn query_ir_set_rejects_unknown_value_expr_kind() {
+        let err = serde_json::from_value::<ferro_schema_ir::QueryValueExpr>(serde_json::json!({
+            "kind": "concat",
+            "left": {"kind": "column", "column": "score"},
+            "right": {"kind": "literal", "value": {"kind": "int", "value": 1}}
+        }))
+        .expect_err("unknown value-expr kind must fail at the trust boundary");
+        let message = err.to_string();
+        assert!(
+            message.contains("concat"),
+            "error must name the unknown kind: {message}"
+        );
+    }
+
+    #[test]
+    fn query_ir_set_merge_renders_coalesce_concat_not_premerged_bind() {
+        use sea_query::{Alias, PostgresQueryBuilder, UpdateStatement};
+
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "merge",
+            "left": {"kind": "column", "column": "turns"},
+            "right": {
+                "kind": "literal",
+                "value": {"kind": "object", "value": {"k": "v"}}
+            }
+        }))
+        .expect("merge value expression");
+
+        let schema = crate::state::RegisteredModel::new_for_test(
+            serde_json::json!({
+                "properties": { "turns": { "type": "object" } }
+            }),
+            "conversation".to_string(),
+        );
+        let empty_udt = HashMap::new();
+        let empty_uuid = HashSet::new();
+        let empty_ts = HashMap::new();
+        let expr = set_value_to_expr(
+            &schema,
+            "conversation",
+            "turns",
+            &value,
+            &empty_udt,
+            &empty_uuid,
+            &empty_ts,
+            Dialect::Postgres,
+        )
+        .expect("merge must lower");
+
+        let mut update = UpdateStatement::new();
+        update
+            .table(Alias::new("conversation"))
+            .value(Alias::new("turns"), expr);
+        let (sql, values) = update.build(PostgresQueryBuilder);
+        let upper = sql.to_uppercase();
+        assert!(
+            upper.contains("COALESCE") && sql.contains("||") && sql.contains("jsonb"),
+            "merge SET must render COALESCE + || + jsonb, not a pre-merged bind: {sql}"
+        );
+        assert!(
+            sql.contains("turns"),
+            "merge SET must keep the column as a column, not a bind: {sql}"
+        );
+        assert_eq!(
+            values.0.len(),
+            1,
+            "patch must stay a bound json literal: {sql} {values:?}"
+        );
+        let bound = format!("{:?}", values.0[0]);
+        assert!(
+            bound.contains("k") && bound.contains("v"),
+            "bound patch must be the json object, not pre-merged: {values:?}"
+        );
+        assert!(
+            !bound.contains("COALESCE"),
+            "must not bind a pre-merged Python dict: {values:?}"
+        );
+    }
+
+    #[test]
     fn bind_input_to_expr_binds_bytes_to_sea_bytes() {
         use sea_query::{Alias, Query, SqliteQueryBuilder};
         let schema = serde_json::json!({
@@ -4146,9 +4712,16 @@ mod m2m_value_tests {
         let input = BindInput::Bytes(vec![0x89, 0x00, 0xff]);
         let model = crate::state::RegisteredModel::new_for_test(schema, "test_table".to_string());
         let expr = bind_input_to_expr(
-            &model, "doc", "data", &input,
-            &HashMap::new(), &HashSet::new(), &HashMap::new(), Dialect::Sqlite,
-        ).unwrap();
+            &model,
+            "doc",
+            "data",
+            &input,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            Dialect::Sqlite,
+        )
+        .unwrap();
         let (_, values) = Query::insert()
             .into_table(Alias::new("doc"))
             .columns([Alias::new("data")])
@@ -4183,7 +4756,8 @@ mod schema_value_expr_tests {
     ) -> pyo3::PyResult<(String, sea_query::Values)> {
         let enum_udt = HashMap::new();
         let ts_cast = HashMap::new();
-        let model = crate::state::RegisteredModel::new_for_test(schema.clone(), "test_table".to_string());
+        let model =
+            crate::state::RegisteredModel::new_for_test(schema.clone(), "test_table".to_string());
         let expr = schema_value_expr(
             &model,
             table,
@@ -4399,7 +4973,10 @@ mod schema_value_expr_tests {
             let _ = py;
 
             let err = schema_value_expr(
-                &crate::state::RegisteredModel::new_for_test(schema.clone(), "test_table".to_string()),
+                &crate::state::RegisteredModel::new_for_test(
+                    schema.clone(),
+                    "test_table".to_string(),
+                ),
                 "thing",
                 "id",
                 &serde_json::Value::String("not-a-uuid".to_string()),
@@ -4803,13 +5380,14 @@ mod engine_value_to_rust_value_tests {
 
 #[cfg(test)]
 mod mutation_pagination_guard_tests {
-    use super::{query_plan_from_ir_json, reject_pagination_on_mutation};
+    use super::{query_plan_from_ir_json, validate_paging_shape, validate_set_shape};
 
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 7,
+            "ir_version": 11,
             "payload": {
+                "set": [],
                 "model_name": "Widget",
                 "where": [{
                     "node_kind": "leaf",
@@ -4837,40 +5415,157 @@ mod mutation_pagination_guard_tests {
     #[test]
     fn guard_allows_mutation_without_pagination() {
         let plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        assert!(reject_pagination_on_mutation(&plan, "delete").is_ok());
-        assert!(reject_pagination_on_mutation(&plan, "update").is_ok());
+        assert!(validate_paging_shape(&plan, "delete").is_ok());
+        assert!(validate_paging_shape(&plan, "update").is_ok());
     }
 
     #[test]
-    fn guard_rejects_limit_with_pyvalueerror() {
-        let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        plan.limit = Some(5);
+    fn guard_rejects_explicit_null_pagination_for_mutations() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["limit"] = serde_json::Value::Null;
+        envelope["payload"]["offset"] = serde_json::Value::Null;
+        let plan = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+
         pyo3::Python::attach(|py| {
-            let err = reject_pagination_on_mutation(&plan, "delete")
+            for operation in ["update", "delete"] {
+                let err = validate_paging_shape(&plan, operation)
+                    .expect_err("mutating payloads must omit both pagination keys");
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(operation));
+            }
+        });
+    }
+
+    #[test]
+    fn guard_rejects_limit_value_for_mutations() {
+        let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        plan.limit = Some(Some(5));
+        pyo3::Python::attach(|py| {
+            let err = validate_paging_shape(&plan, "delete")
                 .expect_err("limit on a mutating query must be rejected");
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
-            let msg = err.to_string();
-            assert!(
-                msg.contains("delete") && msg.contains("limit"),
-                "message should name the operation and limit: {msg}"
-            );
+            assert!(err.to_string().contains("delete"));
         });
     }
 
     #[test]
-    fn guard_rejects_offset_with_pyvalueerror() {
+    fn guard_rejects_offset_value_for_mutations() {
         let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        plan.offset = Some(2);
+        plan.offset = Some(Some(2));
         pyo3::Python::attach(|py| {
-            let err = reject_pagination_on_mutation(&plan, "update")
+            let err = validate_paging_shape(&plan, "update")
                 .expect_err("offset on a mutating query must be rejected");
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
-            let msg = err.to_string();
-            assert!(
-                msg.contains("update") && msg.contains("offset"),
-                "message should name the operation and offset: {msg}"
-            );
+            assert!(err.to_string().contains("update"));
         });
+    }
+
+    #[test]
+    fn guard_rejects_missing_pagination_for_reads() {
+        let plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+
+        pyo3::Python::attach(|py| {
+            for operation in ["fetch", "count"] {
+                let err = validate_paging_shape(&plan, operation)
+                    .expect_err("read payloads must carry both pagination keys");
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(operation));
+            }
+        });
+    }
+
+    #[test]
+    fn guard_accepts_valid_read_paging_shape() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["limit"] = serde_json::Value::Null;
+        envelope["payload"]["offset"] = serde_json::Value::Null;
+        let read = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+        assert!(validate_paging_shape(&read, "fetch").is_ok());
+        assert!(validate_paging_shape(&read, "count").is_ok());
+    }
+
+    #[test]
+    fn guard_rejects_non_empty_set_for_non_update_operations() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["set"] = serde_json::json!([{
+            "column": "name",
+            "value": {
+                "kind": "literal",
+                "value": {"kind": "string", "value": "changed"}
+            }
+        }]);
+        let plan = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+
+        pyo3::Python::attach(|py| {
+            for operation in ["fetch", "count", "delete"] {
+                let err = validate_set_shape(&plan, operation)
+                    .expect_err("only update payloads may carry SET assignments");
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(operation));
+                assert!(err.to_string().contains("SET"));
+            }
+        });
+    }
+
+    #[test]
+    fn guard_rejects_duplicate_update_set_columns() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["set"] = serde_json::json!([
+            {
+                "column": "name",
+                "value": {
+                    "kind": "literal",
+                    "value": {"kind": "string", "value": "first"}
+                }
+            },
+            {
+                "column": "name",
+                "value": {
+                    "kind": "literal",
+                    "value": {"kind": "string", "value": "second"}
+                }
+            }
+        ]);
+        let plan = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+
+        pyo3::Python::attach(|py| {
+            let err = validate_set_shape(&plan, "update")
+                .expect_err("an update column may only be assigned once");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("duplicate"));
+            assert!(err.to_string().contains("name"));
+        });
+    }
+
+    #[test]
+    fn guard_rejects_empty_update_set() {
+        let plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        pyo3::Python::attach(|py| {
+            let err = validate_set_shape(&plan, "update")
+                .expect_err("update payloads must carry at least one SET assignment");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("SET"));
+        });
+    }
+
+    #[test]
+    fn query_ir_rejects_unknown_value_expr_kind() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["set"] = serde_json::json!([{
+            "column": "bonus",
+            "value": {"kind": "concat", "left": {"kind": "column", "column": "score"}}
+        }]);
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("unknown value-expr kind must fail at the trust boundary");
+        assert!(
+            err.to_string().contains("concat"),
+            "error must name the unknown kind: {err}"
+        );
     }
 }
 
@@ -4878,11 +5573,12 @@ mod mutation_pagination_guard_tests {
 mod query_ir_version_gate_tests {
     use super::query_plan_from_ir_json;
 
-    fn v7_envelope() -> serde_json::Value {
+    fn v11_envelope() -> serde_json::Value {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 7,
+            "ir_version": 11,
             "payload": {
+                "set": [],
                 "model_name": "Widget",
                 "where": [],
                 "order_by": [],
@@ -4896,9 +5592,9 @@ mod query_ir_version_gate_tests {
     }
 
     /// Assert a rejected envelope's message names the received version, this
-    /// build's supported version (7), and the one-wheel fix — the actionable
+    /// build's supported version (8), and the one-wheel fix — the actionable
     /// shape pinned since the v1-at-v2 bump (#269), re-pinned at v3 (#278),
-    /// v4 (#285), v5 (#292), v6 (#310), and v7 (#314).
+    /// v4 (#285), v5 (#292), v6 (#310), v7 (#314), v8 (#376), v9 (#377), v10 (#378), and v11 (#379).
     fn assert_actionable_version_rejection(err: pyo3::PyErr, received: char) {
         pyo3::Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
@@ -4909,7 +5605,7 @@ mod query_ir_version_gate_tests {
             "message should name the received version: {msg}"
         );
         assert!(
-            msg.contains('7'),
+            msg.contains("11"),
             "message should name the supported version: {msg}"
         );
         assert!(
@@ -4923,9 +5619,81 @@ mod query_ir_version_gate_tests {
     }
 
     #[test]
-    fn accepts_version_7() {
-        query_plan_from_ir_json(&v7_envelope().to_string())
-            .expect("a well-formed v7 envelope must be accepted");
+    fn accepts_version_11() {
+        query_plan_from_ir_json(&v11_envelope().to_string())
+            .expect("a well-formed v11 envelope must be accepted");
+    }
+
+    #[test]
+    fn rejects_v8_payload_without_set_section() {
+        let mut envelope = v11_envelope();
+        envelope["payload"]
+            .as_object_mut()
+            .expect("payload object")
+            .remove("set");
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v11 payload without its required SET section must be rejected");
+        assert!(
+            err.to_string().contains("set"),
+            "must name the missing section: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_v7_envelope_with_actionable_message() {
+        let mut envelope = v11_envelope();
+        envelope["ir_version"] = serde_json::json!(7);
+        envelope["payload"]
+            .as_object_mut()
+            .expect("payload object")
+            .remove("set");
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v7 envelope must be rejected before payload parsing");
+        assert_actionable_version_rejection(err, '7');
+    }
+
+    #[test]
+    fn rejects_v8_envelope_with_actionable_message() {
+        let mut envelope = v11_envelope();
+        envelope["ir_version"] = serde_json::json!(8);
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v8 envelope must be rejected before payload parsing");
+        assert_actionable_version_rejection(err, '8');
+    }
+
+    #[test]
+    fn rejects_v9_envelope_with_actionable_message() {
+        let mut envelope = v11_envelope();
+        envelope["ir_version"] = serde_json::json!(9);
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v9 envelope must be rejected before payload parsing");
+        assert_actionable_version_rejection(err, '9');
+    }
+
+    #[test]
+    fn rejects_v10_envelope_with_actionable_message() {
+        let mut envelope = v11_envelope();
+        envelope["ir_version"] = serde_json::json!(10);
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v10 envelope must be rejected before payload parsing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("10"),
+            "message should name the received version: {msg}"
+        );
+        assert!(
+            msg.contains("11"),
+            "message should name the supported version: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("one wheel"),
+            "message should explain Python/Rust ship in one wheel: {msg}"
+        );
     }
 
     /// Contract test (#314 acceptance criteria): a v6 envelope must be
@@ -5111,14 +5879,14 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_unsupported_future_version() {
-        let mut envelope = v7_envelope();
-        envelope["ir_version"] = serde_json::json!(8);
+        let mut envelope = v11_envelope();
+        envelope["ir_version"] = serde_json::json!(12);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("an unsupported future version must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains('8'),
+            msg.contains("12"),
             "message should name the received version: {msg}"
         );
     }
@@ -5127,7 +5895,7 @@ mod query_ir_version_gate_tests {
     /// naming the bad kind and the supported ones (#278).
     #[test]
     fn rejects_unknown_materialization_kind() {
-        let mut envelope = v7_envelope();
+        let mut envelope = v11_envelope();
         envelope["payload"]["materialization"] = serde_json::json!({"kind": "row_dicts"});
 
         let err = query_plan_from_ir_json(&envelope.to_string())
@@ -5140,18 +5908,18 @@ mod query_ir_version_gate_tests {
         );
     }
 
-    /// A v7 payload with NO materialization section fails the strict parse:
+    /// A v8 payload with NO materialization section fails the strict parse:
     /// the plan travels with the query as data (ADR-0007), never defaulted.
     #[test]
-    fn rejects_v7_payload_missing_materialization() {
-        let mut envelope = v7_envelope();
+    fn rejects_v8_payload_missing_materialization() {
+        let mut envelope = v11_envelope();
         envelope["payload"]
             .as_object_mut()
             .unwrap()
             .remove("materialization");
 
         let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v7 payload without a materialization section must be rejected");
+            .expect_err("a v8 payload without a materialization section must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("materialization"),
@@ -5171,8 +5939,9 @@ mod materialization_walker_gate_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 11,
                 "payload": {
+                    "set": [],
                     "model_name": "Widget",
                     "where": [],
                     "order_by": [],
@@ -5249,8 +6018,8 @@ mod record_select_list_tests {
     //! #295 ORDER BY scoping rules.
 
     use super::{
-        apply_relation_joins, apply_select_list, projected_record_fields,
-        query_join_plan, query_plan_from_ir_json, record_order_by_expr,
+        apply_relation_joins, apply_select_list, projected_record_fields, query_join_plan,
+        query_plan_from_ir_json, record_order_by_expr,
     };
     use crate::query::JoinPlan;
     use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder};
@@ -5263,8 +6032,9 @@ mod record_select_list_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 11,
                 "payload": {
+                    "set": [],
                     "model_name": "Transaction",
                     "where": where_nodes,
                     "order_by": [],
@@ -5313,8 +6083,13 @@ mod record_select_list_tests {
             .expect("record plan projects fields");
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
-            .expect("root fields render");
+        apply_select_list(
+            &mut select,
+            "transaction",
+            Some(&projected),
+            &JoinPlan::default(),
+        )
+        .expect("root fields render");
         select.from(Alias::new("transaction"));
 
         // Every field renders under its output name (#293) — `AS "id"` here,
@@ -5361,8 +6136,13 @@ mod record_select_list_tests {
             .expect("record plan projects fields");
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
-            .expect("aliased field renders");
+        apply_select_list(
+            &mut select,
+            "transaction",
+            Some(&projected),
+            &JoinPlan::default(),
+        )
+        .expect("aliased field renders");
         select.from(Alias::new("transaction"));
         let sql = select.to_string(PostgresQueryBuilder);
         assert_eq!(
@@ -5456,9 +6236,13 @@ mod record_select_list_tests {
             .expect("record plan projects fields");
 
         let mut select = Query::select();
-        let err =
-            apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
-                .expect_err("a pathed field with no join entry must error");
+        let err = apply_select_list(
+            &mut select,
+            "transaction",
+            Some(&projected),
+            &JoinPlan::default(),
+        )
+        .expect_err("a pathed field with no join entry must error");
         let msg = err.to_string();
         assert!(
             msg.contains("account_name") && msg.contains("account"),
@@ -5488,8 +6272,13 @@ mod record_select_list_tests {
             .expect("record plan projects fields");
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
-            .expect("aggregates render");
+        apply_select_list(
+            &mut select,
+            "transaction",
+            Some(&projected),
+            &JoinPlan::default(),
+        )
+        .expect("aggregates render");
         select.from(Alias::new("transaction"));
         let sql = select.to_string(PostgresQueryBuilder);
         assert_eq!(
@@ -5500,7 +6289,10 @@ mod record_select_list_tests {
              MIN(\"transaction\".\"amount\") AS \"lo\", \
              MAX(\"transaction\".\"amount\") AS \"hi\" FROM \"transaction\""
         );
-        assert!(!sql.contains("GROUP BY"), "no grouping on a global aggregate: {sql}");
+        assert!(
+            !sql.contains("GROUP BY"),
+            "no grouping on a global aggregate: {sql}"
+        );
     }
 
     #[test]
@@ -5568,9 +6360,7 @@ mod record_select_list_tests {
 
         let sql = select.to_string(PostgresQueryBuilder);
         assert!(
-            sql.contains(
-                "GROUP BY \"j1_account\".\"name\", \"transaction\".\"account_id\""
-            ),
+            sql.contains("GROUP BY \"j1_account\".\"name\", \"transaction\".\"account_id\""),
             "every plain field is a group key, in selection order: {sql}"
         );
         assert!(
@@ -5592,11 +6382,19 @@ mod record_select_list_tests {
             .expect("record plan projects fields");
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", Some(&projected), &JoinPlan::default())
-            .expect("plain plan renders");
+        apply_select_list(
+            &mut select,
+            "transaction",
+            Some(&projected),
+            &JoinPlan::default(),
+        )
+        .expect("plain plan renders");
         select.from(Alias::new("transaction"));
         let sql = select.to_string(PostgresQueryBuilder);
-        assert!(!sql.contains("GROUP BY"), "no aggregate, no grouping: {sql}");
+        assert!(
+            !sql.contains("GROUP BY"),
+            "no aggregate, no grouping: {sql}"
+        );
     }
 
     #[test]
@@ -5737,8 +6535,9 @@ mod instances_select_list_tests {
         let mut plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 11,
                 "payload": {
+                    "set": [],
                     "model_name": "Transaction",
                     "where": [], "order_by": [], "limit": null, "offset": null,
                     "m2m": null,
@@ -5773,8 +6572,7 @@ mod instances_select_list_tests {
     fn rendered_select_widens_with_aliased_hop_columns_and_left_join() {
         let plan = include_plan();
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
-        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization
-        else {
+        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization else {
             panic!("include plan expected");
         };
         let hops = resolve_include_hops(paths, &join_plan, &plan).expect("hops resolve");
@@ -5809,8 +6607,7 @@ mod instances_select_list_tests {
         // protocol.
         let plan = include_plan();
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
-        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization
-        else {
+        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization else {
             panic!("include plan expected");
         };
         let hops = resolve_include_hops(paths, &join_plan, &plan).expect("hops resolve");
@@ -5854,8 +6651,7 @@ mod instances_select_list_tests {
         // PK is None — the graph hydrator's populated-`None` signal.
         let plan = include_plan();
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
-        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization
-        else {
+        let ferro_schema_ir::Materialization::Instances { paths } = &plan.materialization else {
             panic!("include plan expected");
         };
         let hops = resolve_include_hops(paths, &join_plan, &plan).expect("hops resolve");
@@ -5899,8 +6695,9 @@ mod mutation_qualification_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 11,
                 "payload": {
+                    "set": [],
                     "model_name": "Widget",
                     "where": [{
                         "node_kind": "leaf",
@@ -5985,8 +6782,9 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 11,
                 "payload": {
+                    "set": [],
                     "model_name": "Transaction",
                     "where": [{
                         "node_kind": "leaf",
@@ -6091,8 +6889,9 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 11,
                 "payload": {
+                    "set": [],
                     "model_name": model_name,
                     "where": [], "order_by": [],
                     "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
@@ -6113,8 +6912,9 @@ mod select_join_render_tests {
         let plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 11,
                 "payload": {
+                    "set": [],
                     "model_name": "Transaction",
                     "where": [{
                         "node_kind": "leaf",
@@ -6261,9 +7061,7 @@ mod order_by_nulls_render_tests {
     //! both Postgres and SQLite via sea-query. Absent key keeps plain ASC/DESC.
 
     use super::apply_order_by_term;
-    use sea_query::{
-        Alias, Expr, PostgresQueryBuilder, Query, SqliteQueryBuilder,
-    };
+    use sea_query::{Alias, Expr, PostgresQueryBuilder, Query, SqliteQueryBuilder};
 
     fn order_term(
         column: &str,
@@ -6328,10 +7126,7 @@ mod order_by_nulls_render_tests {
         let order = order_term("pinned_at", "desc", None);
         for (postgres, label) in [(true, "postgres"), (false, "sqlite")] {
             let sql = render_order_sql(&order, postgres).expect(label);
-            assert!(
-                sql.contains("DESC"),
-                "{label} must still emit DESC: {sql}"
-            );
+            assert!(sql.contains("DESC"), "{label} must still emit DESC: {sql}");
             assert!(
                 !sql.contains("NULLS"),
                 "{label} must omit NULLS when unset: {sql}"
@@ -6658,7 +7453,10 @@ mod executor_tests {
             .unwrap();
         assert_eq!(res.rows_affected, 1);
         assert_eq!(res.last_insert_id, Some(2));
-        let rows = exec.fetch_all("SELECT v FROM t ORDER BY id", &[]).await.unwrap();
+        let rows = exec
+            .fetch_all("SELECT v FROM t ORDER BY id", &[])
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 2);
     }
 

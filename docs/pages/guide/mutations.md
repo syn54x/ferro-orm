@@ -188,10 +188,53 @@ inserted = await User.bulk_create([User(name="a", age=1), User(name="b", age=2)]
 fresh = await User.where(lambda user: user.name.in_(["a", "b"])).all()
 ```
 
-## Not Yet Supported
+## Recipe updates
 
-!!! note "On the roadmap"
-    Atomic update expressions — e.g. `update(views=Post.views + 1)` or `update(price=Product.price * 0.9)` — are **not yet implemented**; see the [Roadmap](../roadmap.md). In the meantime, load–modify–`save()` (last write wins), or use [raw SQL](raw-sql.md) for a truly atomic `UPDATE ... SET views = views + 1`.
+Keyword `update(name="x")` stays literals-only. A recipe callable assigns expressions that run in the database — increment a counter, copy a column, stamp `updated_at` with the database clock, or shallow-merge a JSON object:
+
+```python
+--8<-- "docs/examples/mutations.py:recipe-update"
+```
+
+`+` and `-` are honest SQL: `NULL + 1` is NULL. They do not fill empties. `.merge()` does — a NULL object column is treated as `{}` (`COALESCE`). `now` is a singleton import (`from ferro import now`), not `now()`, and only assigns to a `datetime` column.
+
+`.merge()` is Postgres-only shallow object merge (right-hand patch wins on key overlap). It is not deep merge, not `jsonb_set`, and not key-remove. SQLite, a list-typed column, or a list patch fail at build time (list concat is `.concat()`, not shipped yet).
+
+=== "Assignment"
+
+    ```python
+    from ferro import Field, Model
+
+
+    class Conversation(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        turns: dict = Field(default_factory=dict)
+
+
+    await Conversation.where(lambda conversation: conversation.id == cid).update(
+        lambda conversation: {"turns": conversation.turns.merge({run_id: entry})}
+    )
+    ```
+
+=== "Annotated"
+
+    ```python
+    from typing import Annotated
+
+    from ferro import Field, Model
+
+
+    class Conversation(Model):
+        id: Annotated[int | None, Field(default=None, primary_key=True)]
+        turns: Annotated[dict, Field(default_factory=dict)]
+
+
+    await Conversation.where(lambda conversation: conversation.id == cid).update(
+        lambda conversation: {"turns": conversation.turns.merge({run_id: entry})}
+    )
+    ```
+
+Multiplication and string concat are not in this door yet.
 
 ## See Also
 

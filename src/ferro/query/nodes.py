@@ -2,10 +2,10 @@
 
 import difflib
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar, get_origin
 
 TField = TypeVar("TField")
 TModel = TypeVar("TModel")
@@ -42,6 +42,18 @@ def _aggregate_source_family(spec: Any) -> str:
     if spec.enum_values is not None or spec.enum_class is not None:
         return "enum"
     return spec.logical_type
+
+
+def _json_column_shape(spec: Any) -> str | None:
+    """``object`` / ``array`` for a json-family column, else ``None`` (#379)."""
+    if _aggregate_source_family(spec) != "json":
+        return None
+    from .._annotation_utils import _strip_optional_and_annotated
+
+    hint = _strip_optional_and_annotated(spec.python_type)
+    if hint is list or get_origin(hint) is list:
+        return "array"
+    return "object"
 
 
 class QueryNode:
@@ -530,6 +542,55 @@ class FieldProxy(Generic[TField]):
         """
         return self.in_(other)
 
+    def __add__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("+", self, other)
+
+    def __sub__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("-", self, other)
+
+    def __radd__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("+", other, self)
+
+    def __rsub__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("-", other, self)
+
+    def merge(self, patch: Any) -> "MergeValueExpr":
+        """Shallow object merge — Postgres ``jsonb ||`` (#379).
+
+        The patch mapping wins on key overlap. A NULL object column becomes
+        ``{}`` at render time. Lists and non-object targets fail here so
+        SQLite / ``.concat()`` never become a late execute surprise.
+        """
+        if isinstance(patch, (list, tuple)):
+            raise TypeError(
+                f"{self._dotted()}.merge() is object merge; a list patch is "
+                ".concat() (not shipped yet)"
+            )
+        if not isinstance(patch, Mapping):
+            raise TypeError(
+                f"{self._dotted()}.merge() takes a mapping patch, "
+                f"got {type(patch).__name__}"
+            )
+        if self._owner is not None:
+            spec = getattr(self._owner, "__ferro_columns__", {}).get(self.column)
+            if spec is not None:
+                shape = _json_column_shape(spec)
+                if shape == "array":
+                    raise TypeError(
+                        f"{self._dotted()}.merge() is not supported: "
+                        f"{self._owner.__name__}.{self.column} is list-typed; "
+                        ".concat() is not shipped yet"
+                    )
+                if shape != "object":
+                    family = _aggregate_source_family(spec)
+                    raise TypeError(
+                        f"{self._dotted()}.merge() is not supported: "
+                        f"{self._owner.__name__}.{self.column} is "
+                        f"{family}-typed, and .merge() takes a json object "
+                        "(dict or nested model)."
+                    )
+        return MergeValueExpr(self, dict(patch))
+
     def __repr__(self):
         """Return a developer-friendly representation of the field proxy"""
         return f"FieldProxy(column={self.column!r})"
@@ -592,12 +653,178 @@ class AggregateExpr:
     def __bool__(self) -> NoReturn:
         raise TypeError(
             f"{self._dotted()} has no truth value; an aggregate expression "
-            "is a projection source (select(lambda t: {\"total\": "
+            'is a projection source (select(lambda t: {"total": '
             f"{self._dotted()}}})), not a predicate."
         )
 
     def __repr__(self) -> str:
-        return f"AggregateExpr(fn={self.fn!r}, column={self.column!r}, path={self.path!r})"
+        return (
+            f"AggregateExpr(fn={self.fn!r}, column={self.column!r}, path={self.path!r})"
+        )
+
+
+def _numeric_operand_family(value: Any) -> str | None:
+    """Classify a ``+`` / ``-`` operand, or ``None`` when already gated."""
+    if isinstance(value, FieldProxy):
+        if value._owner is None:
+            return None
+        spec = getattr(value._owner, "__ferro_columns__", {}).get(value.column)
+        if spec is None:
+            return None
+        return _aggregate_source_family(spec)
+    if isinstance(value, BinaryValueExpr):
+        return None
+    if isinstance(value, NowExpr):
+        return "datetime"
+    if isinstance(value, ValueExpr):
+        return "value-expression"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, Decimal):
+        return "decimal"
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
+def _require_numeric_operand(value: Any, op: str) -> None:
+    """Reject a ``+`` / ``-`` operand that is not a numeric family (#378)."""
+    family = _numeric_operand_family(value)
+    if family is None or family in _AGG_NUMERIC:
+        return
+    if isinstance(value, FieldProxy) and value._owner is not None:
+        model = value._owner.__name__
+        raise TypeError(
+            f"{value._dotted()} {op} ... is not supported: "
+            f"{model}.{value.column} is {family}-typed, and {op} "
+            "takes a numeric column (int, float, or Decimal)."
+        )
+    if isinstance(value, NowExpr):
+        raise TypeError(
+            f"now is the database clock, not a numeric value; {op} "
+            "takes a numeric column (int, float, or Decimal)."
+        )
+    if isinstance(value, ValueExpr):
+        raise TypeError(
+            f"this value expression cannot be used with {op}; "
+            ".concat() is not shipped yet"
+        )
+    raise TypeError(
+        f"{op} takes a numeric value (int, float, or Decimal), "
+        f"got {family}-typed {type(value).__name__}"
+    )
+
+
+def _binary_value(op: str, left: Any, right: Any) -> "BinaryValueExpr":
+    _require_numeric_operand(left, op)
+    _require_numeric_operand(right, op)
+    return BinaryValueExpr(op, left, right)
+
+
+class ValueExpr:
+    """A SET value-producing expression (#377). Sibling of :class:`AggregateExpr`.
+
+    Not a :class:`QueryNode`. Literals and root :class:`FieldProxy` copies
+    compile at the ``update()`` recipe door; ``+`` / ``-`` / ``now`` (#378)
+    and ``.merge()`` (#379) produce instances of this type. ``.concat()``
+    is not shipped yet. Comparing one to build a predicate is #327;
+    projecting or ordering by one is #309.
+    """
+
+    def _reject_clause(self, clause: str) -> NoReturn:
+        raise TypeError(
+            f"value expressions cannot appear in {clause}(); "
+            "comparing a value expression to produce a predicate is #327; "
+            "projecting or ordering by one is #309."
+        )
+
+    def _reject_comparison(self, symbol: str) -> NoReturn:
+        raise TypeError(
+            f"comparing a value expression ({symbol}) is not a where() "
+            "predicate (#327). Value expressions are SET sources "
+            '(update(lambda t: {"col": ...})); projecting or ordering by '
+            "one is #309."
+        )
+
+    def __eq__(self, other: object) -> NoReturn:  # type: ignore[override]
+        self._reject_comparison("==")
+
+    def __ne__(self, other: object) -> NoReturn:  # type: ignore[override]
+        self._reject_comparison("!=")
+
+    def __lt__(self, other: object) -> NoReturn:
+        self._reject_comparison("<")
+
+    def __le__(self, other: object) -> NoReturn:
+        self._reject_comparison("<=")
+
+    def __gt__(self, other: object) -> NoReturn:
+        self._reject_comparison(">")
+
+    def __ge__(self, other: object) -> NoReturn:
+        self._reject_comparison(">=")
+
+    def __bool__(self) -> NoReturn:
+        raise TypeError(
+            "ValueExpr has no truth value; it is a SET source "
+            '(update(lambda t: {"col": ...})), not a predicate. '
+            "Comparing one is #327; projecting or ordering by one is #309."
+        )
+
+    def __add__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("+", self, other)
+
+    def __sub__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("-", self, other)
+
+    def __radd__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("+", other, self)
+
+    def __rsub__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("-", other, self)
+
+    def __repr__(self) -> str:
+        return "ValueExpr()"
+
+
+class BinaryValueExpr(ValueExpr):
+    """One binary ``+`` / ``-`` SET node (#378). Either side is a value."""
+
+    def __init__(self, op: str, left: Any, right: Any) -> None:
+        self.op = op
+        self.left = left
+        self.right = right
+
+    def __repr__(self) -> str:
+        return f"BinaryValueExpr({self.op!r}, {self.left!r}, {self.right!r})"
+
+
+class NowExpr(ValueExpr):
+    """The database clock singleton (#378). Assign ``now``, not ``now()``."""
+
+    def __call__(self) -> NoReturn:
+        raise TypeError("now is a singleton, not a function; assign now, not now()")
+
+    def __repr__(self) -> str:
+        return "now"
+
+
+class MergeValueExpr(ValueExpr):
+    """One ``.merge(patch)`` SET node (#379). Left is a json object column."""
+
+    def __init__(self, left: FieldProxy, patch: dict[str, Any]) -> None:
+        self.left = left
+        self.patch = patch
+
+    def __repr__(self) -> str:
+        return f"MergeValueExpr({self.left!r}, {self.patch!r})"
+
+
+now = NowExpr()
 
 
 def validate_query_column(model_cls: type, name: str) -> str:
@@ -730,9 +957,7 @@ class RelationProxy:
 
     __slots__ = ("_root_model", "_path", "_target")
 
-    def __init__(
-        self, root_model: type, path: tuple[str, ...], target: type
-    ) -> None:
+    def __init__(self, root_model: type, path: tuple[str, ...], target: type) -> None:
         self._root_model = root_model
         self._path = path
         self._target = target
