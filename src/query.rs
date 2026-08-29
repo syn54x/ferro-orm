@@ -342,10 +342,10 @@ pub struct QueryPlan {
     pub set_assignments: Vec<QuerySetAssignment>,
     /// `ORDER BY` terms in application order; empty = no ORDER BY.
     pub order_by: Vec<QueryOrderBy>,
-    /// `LIMIT` clause.
-    pub limit: Option<u64>,
-    /// `OFFSET` clause.
-    pub offset: Option<u64>,
+    /// `LIMIT` key presence and value (`None` = absent, `Some(None)` = null).
+    pub limit: Option<Option<u64>>,
+    /// `OFFSET` key presence and value (`None` = absent, `Some(None)` = null).
+    pub offset: Option<Option<u64>>,
     /// Relation JOINs collected from WHERE traversal, in registration order.
     /// Empty for non-traversal queries; rendered by the SELECT walkers (#270).
     pub joins: Vec<QueryJoin>,
@@ -409,8 +409,8 @@ impl QueryPlan {
             where_clause: payload.where_clause,
             set_assignments: payload.set_assignments,
             order_by: payload.order_by,
-            limit: payload.limit.flatten(),
-            offset: payload.offset.flatten(),
+            limit: payload.limit,
+            offset: payload.offset,
             joins: payload.joins,
             m2m,
             materialization: payload.materialization,
@@ -939,8 +939,8 @@ mod tests {
             where_clause: Vec::new(),
             set_assignments: Vec::new(),
             order_by: Vec::new(),
-            limit: None,
-            offset: None,
+            limit: Some(None),
+            offset: Some(None),
             joins: Vec::new(),
             m2m: None,
             materialization: ferro_schema_ir::Materialization::RootInstances,
@@ -980,7 +980,7 @@ mod tests {
         .expect("payload deserializes");
         let plan = super::QueryPlan::from_ir_payload(payload).expect("plan builds");
         assert_eq!(plan.order_by.len(), 1);
-        assert_eq!(plan.limit, Some(10));
+        assert_eq!(plan.limit, Some(Some(10)));
 
         let mut select = Query::select();
         select.from(Alias::new("pending")).cond_where(

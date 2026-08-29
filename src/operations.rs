@@ -1215,19 +1215,24 @@ fn materialize_model_row<'py>(
     Ok(instance)
 }
 
-/// Reject `limit`/`offset` on mutating operations (FF-A A1, #171).
-///
-/// Portable SQL has no `UPDATE/DELETE ... LIMIT`. The Python builder raises
-/// before serializing and omits the keys from mutating payloads; this
-/// boundary guard keeps the contract from regressing via any other caller.
-fn reject_pagination_on_mutation(plan: &QueryPlan, operation: &str) -> PyResult<()> {
-    if plan.limit.is_some() || plan.offset.is_some() {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "{operation}() does not support limit/offset: portable SQL has no {} ... LIMIT",
-            operation.to_uppercase()
-        )));
+/// Enforce the v8 verb contract for `limit`/`offset` key presence.
+fn validate_paging_shape(plan: &QueryPlan, operation: &str) -> PyResult<()> {
+    match operation {
+        "update" | "delete" if plan.limit.is_some() || plan.offset.is_some() => {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{operation} QueryIR must omit limit/offset keys"
+            )))
+        }
+        "fetch" | "count" if plan.limit.is_none() || plan.offset.is_none() => {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{operation} QueryIR must carry limit/offset keys (null when unset)"
+            )))
+        }
+        "update" | "delete" | "fetch" | "count" => Ok(()),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown QueryIR operation {operation:?}"
+        ))),
     }
-    Ok(())
 }
 
 /// Enforce the verb-specific QueryIR SET shape at the Rust trust boundary.
@@ -2616,6 +2621,7 @@ pub fn fetch_filtered<'py>(
     let cls_py = cls.unbind();
 
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    validate_paging_shape(&plan, "fetch")?;
     validate_set_shape(&plan, "fetch")?;
     let include_paths: Option<Vec<Vec<QueryJoinHop>>> = match &plan.materialization {
         Materialization::Instances { paths } => Some(paths.clone()),
@@ -2769,10 +2775,10 @@ pub fn fetch_filtered<'py>(
                 };
                 apply_order_by_term(&mut select, col.into(), order)?;
             }
-            if let Some(limit) = plan.limit {
+            if let Some(limit) = plan.limit.flatten() {
                 select.limit(limit);
             }
-            if let Some(offset) = plan.offset {
+            if let Some(offset) = plan.offset.flatten() {
                 select.offset(offset);
             }
             let (s, values) = sea_query_build_for_backend!(select, backend);
@@ -3031,6 +3037,7 @@ pub fn count_filtered(
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    validate_paging_shape(&plan, "count")?;
     validate_set_shape(&plan, "count")?;
     // count() is unaffected by projection (PRD #277 verb table): the Python
     // builder always emits root_instances on count payloads, projected or not.
@@ -3254,7 +3261,7 @@ pub fn delete_filtered(
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     validate_set_shape(&plan, "delete")?;
-    reject_pagination_on_mutation(&plan, "delete")?;
+    validate_paging_shape(&plan, "delete")?;
     reject_traversal_on_mutation(&plan, "delete")?;
     reject_unsupported_materialization(&plan, "delete")?;
 
@@ -3333,7 +3340,7 @@ pub fn update_filtered<'py>(
             plan.model_name
         )));
     }
-    reject_pagination_on_mutation(&plan, "update")?;
+    validate_paging_shape(&plan, "update")?;
     reject_traversal_on_mutation(&plan, "update")?;
     reject_unsupported_materialization(&plan, "update")?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -4945,7 +4952,7 @@ mod engine_value_to_rust_value_tests {
 
 #[cfg(test)]
 mod mutation_pagination_guard_tests {
-    use super::{query_plan_from_ir_json, reject_pagination_on_mutation};
+    use super::{query_plan_from_ir_json, validate_paging_shape};
 
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
@@ -4980,40 +4987,75 @@ mod mutation_pagination_guard_tests {
     #[test]
     fn guard_allows_mutation_without_pagination() {
         let plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        assert!(reject_pagination_on_mutation(&plan, "delete").is_ok());
-        assert!(reject_pagination_on_mutation(&plan, "update").is_ok());
+        assert!(validate_paging_shape(&plan, "delete").is_ok());
+        assert!(validate_paging_shape(&plan, "update").is_ok());
     }
 
     #[test]
-    fn guard_rejects_limit_with_pyvalueerror() {
-        let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        plan.limit = Some(5);
+    fn guard_rejects_explicit_null_pagination_for_mutations() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["limit"] = serde_json::Value::Null;
+        envelope["payload"]["offset"] = serde_json::Value::Null;
+        let plan = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+
         pyo3::Python::attach(|py| {
-            let err = reject_pagination_on_mutation(&plan, "delete")
+            for operation in ["update", "delete"] {
+                let err = validate_paging_shape(&plan, operation)
+                    .expect_err("mutating payloads must omit both pagination keys");
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(operation));
+            }
+        });
+    }
+
+    #[test]
+    fn guard_rejects_limit_value_for_mutations() {
+        let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        plan.limit = Some(Some(5));
+        pyo3::Python::attach(|py| {
+            let err = validate_paging_shape(&plan, "delete")
                 .expect_err("limit on a mutating query must be rejected");
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
-            let msg = err.to_string();
-            assert!(
-                msg.contains("delete") && msg.contains("limit"),
-                "message should name the operation and limit: {msg}"
-            );
+            assert!(err.to_string().contains("delete"));
         });
     }
 
     #[test]
-    fn guard_rejects_offset_with_pyvalueerror() {
+    fn guard_rejects_offset_value_for_mutations() {
         let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        plan.offset = Some(2);
+        plan.offset = Some(Some(2));
         pyo3::Python::attach(|py| {
-            let err = reject_pagination_on_mutation(&plan, "update")
+            let err = validate_paging_shape(&plan, "update")
                 .expect_err("offset on a mutating query must be rejected");
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
-            let msg = err.to_string();
-            assert!(
-                msg.contains("update") && msg.contains("offset"),
-                "message should name the operation and offset: {msg}"
-            );
+            assert!(err.to_string().contains("update"));
         });
+    }
+
+    #[test]
+    fn guard_rejects_missing_pagination_for_reads() {
+        let plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+
+        pyo3::Python::attach(|py| {
+            for operation in ["fetch", "count"] {
+                let err = validate_paging_shape(&plan, operation)
+                    .expect_err("read payloads must carry both pagination keys");
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(operation));
+            }
+        });
+    }
+
+    #[test]
+    fn guard_accepts_valid_read_paging_shape() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["limit"] = serde_json::Value::Null;
+        envelope["payload"]["offset"] = serde_json::Value::Null;
+        let read = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+        assert!(validate_paging_shape(&read, "fetch").is_ok());
+        assert!(validate_paging_shape(&read, "count").is_ok());
     }
 }
 
