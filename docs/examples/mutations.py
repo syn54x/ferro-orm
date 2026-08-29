@@ -84,6 +84,16 @@ async def main() -> None:
         assert row.name == "Bobby"
         assert row.plan == "pro"
 
+        # --8<-- [start:save-exclude]
+        row.name = "Robert"
+        row.plan = "enterprise"  # excluded: left untouched in the database
+        await row.save(exclude={"plan"})
+        # --8<-- [end:save-exclude]
+
+        await row.refresh()
+        assert row.name == "Robert"
+        assert row.plan == "pro"
+
         # --8<-- [start:upsert]
         # No row with this primary key: INSERT
         carol = await Customer.upsert(id=100, email="carol@example.com", name="Carol")

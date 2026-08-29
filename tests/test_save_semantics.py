@@ -662,3 +662,253 @@ async def test_save_only_mixin_forwards_and_does_not_expand(db_url):
         fetched = await SaveOnlyMixinDoc.get(1)
         assert fetched.title == "b"
         assert fetched.token == "orig"
+
+
+async def test_save_exclude_skips_named_columns(db_url):
+    class SaveExcludeNamed(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        keep: str
+        change: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveExcludeNamed.create(id=1, keep="orig", change="a")
+        row.keep = "mutated-in-memory"
+        row.change = "b"
+        await row.save(exclude={"keep"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveExcludeNamed.get(1)
+        assert fetched.change == "b"
+        assert fetched.keep == "orig"
+
+
+async def test_save_exclude_empty_set_is_full_write(db_url):
+    class SaveExcludeEmptyFull(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        keep: str
+        change: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveExcludeEmptyFull.create(id=1, keep="orig", change="a")
+        row.keep = "rewritten"
+        row.change = "b"
+        await row.save(exclude=set())
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveExcludeEmptyFull.get(1)
+        assert fetched.keep == "rewritten"
+        assert fetched.change == "b"
+
+
+async def test_save_only_and_exclude_together_errors(db_url):
+    class SaveWriteSetBoth(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        keep: str
+        change: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveWriteSetBoth.create(id=1, keep="orig", change="a")
+        row.keep = "mutated-in-memory"
+        row.change = "b"
+        with pytest.raises(ValueError):
+            await row.save(only={"change"}, exclude={"keep"})
+        with pytest.raises(TypeError, match=r'only=\{"messages"\}'):
+            await row.save(only="change", exclude={"keep"})
+        with pytest.raises(TypeError, match=r'exclude=\{"turns"\}'):
+            await row.save(only={"change"}, exclude="keep")
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveWriteSetBoth.get(1)
+        assert fetched.keep == "orig"
+        assert fetched.change == "a"
+
+
+async def test_save_exclude_rejects_transient_instance(db_url):
+    class SaveExcludeTransient(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = SaveExcludeTransient(name="ghost")
+        with pytest.raises(ValueError, match="persisted"):
+            await row.save(exclude={"name"})
+
+        assert await SaveExcludeTransient.all() == []
+
+
+async def test_save_exclude_rejects_on_conflict_update(db_url):
+    class SaveExcludeUpsert(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveExcludeUpsert.create(id=1, name="a")
+        row.name = "b"
+        with pytest.raises(ValueError, match="persisted"):
+            await row.save(exclude={"name"}, on_conflict="update")
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveExcludeUpsert.get(1)
+        assert fetched.name == "a"
+
+
+async def test_save_exclude_rejects_unknown_name(db_url):
+    class SaveExcludeUnknown(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveExcludeUnknown.create(id=1, name="a")
+        with pytest.raises(ValueError, match="nope") as excinfo:
+            await row.save(exclude={"nope"})
+        message = str(excinfo.value)
+        assert "name" in message
+
+
+async def test_save_exclude_rejects_relation_name(db_url):
+    from ferro import BackRef, ForeignKey, Relation
+
+    class SaveExcludeAuthor(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        posts: Relation[list["SaveExcludePost"]] = BackRef()
+
+    class SaveExcludePost(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        author: Annotated[SaveExcludeAuthor, ForeignKey(related_name="posts")]
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        author = await SaveExcludeAuthor.create(id=1, name="ada")
+        post = await SaveExcludePost.create(id=1, title="first", author=author)
+        post.title = "second"
+        with pytest.raises(ValueError, match="author_id") as excinfo:
+            await post.save(exclude={"author"})
+        assert "author" in str(excinfo.value)
+
+        with pytest.raises(ValueError, match="posts"):
+            await author.save(exclude={"posts"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveExcludePost.get(1)
+        assert fetched.title == "first"
+
+
+async def test_save_exclude_pk_in_set_is_ignored(db_url):
+    class SaveExcludePkIgnored(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveExcludePkIgnored.create(id=1, name="a")
+        row.name = "b"
+        await row.save(exclude={"id"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveExcludePkIgnored.get(1)
+        assert fetched.name == "b"
+
+
+async def test_save_exclude_empty_write_set_errors(db_url):
+    class SaveExcludeEmpty(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveExcludeEmpty.create(id=1, name="a")
+        with pytest.raises(ValueError):
+            await row.save(exclude={"name"})
+        with pytest.raises(ValueError):
+            await row.save(exclude={"id", "name"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveExcludeEmpty.get(1)
+        assert fetched.name == "a"
+
+
+async def test_save_exclude_accepts_name_containers(db_url):
+    class SaveExcludeContainers(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        keep: str
+        change: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveExcludeContainers.create(id=1, keep="orig", change="a")
+        for exclude in ({"keep"}, frozenset({"keep"}), ["keep"], ("keep",)):
+            row.change = "b"
+            row.keep = "orig"
+            await row.save(exclude=exclude)
+            await row.refresh()
+            assert row.change == "b"
+            assert row.keep == "orig"
+
+
+async def test_save_exclude_rejects_bare_str_and_bytes(db_url):
+    class SaveExcludeBadContainer(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        turns: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveExcludeBadContainer.create(id=1, turns="a")
+        with pytest.raises(TypeError, match=r'exclude=\{"turns"\}'):
+            await row.save(exclude="turns")
+        with pytest.raises(TypeError, match=r'exclude=\{"turns"\}'):
+            await row.save(exclude=b"turns")
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveExcludeBadContainer.get(1)
+        assert fetched.turns == "a"
+
+
+async def test_save_exclude_mixin_forwards_and_does_not_expand(db_url):
+    class SaveExcludeMixin:
+        async def save(self, **kwargs):
+            self.token = "touched"
+            await super().save(**kwargs)
+
+    class SaveExcludeMixinDoc(SaveExcludeMixin, Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        token: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveExcludeMixinDoc.create(id=1, title="a", token="orig")
+        await SaveExcludeMixinDoc.where(lambda doc: doc.id == 1).update(token="orig")
+        row.title = "b"
+        await row.save(exclude={"token"})
+        assert row.token == "touched"
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveExcludeMixinDoc.get(1)
+        assert fetched.title == "b"
+        assert fetched.token == "orig"
