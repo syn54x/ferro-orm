@@ -24,7 +24,17 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 from .._bind_payload import update_bind_payload
-from .nodes import QueryNode, _query_value_kind, _serialize_query_value
+from .nodes import (
+    FieldProxy,
+    QueryNode,
+    RelationProxy,
+    ReverseRelationProxy,
+    ValueExpr,
+    _aggregate_source_family,
+    _query_value_kind,
+    _serialize_query_value,
+    validate_query_column,
+)
 
 if TYPE_CHECKING:
     from .builder import Query
@@ -33,11 +43,11 @@ if TYPE_CHECKING:
 # mutate arm; they stay distinct values so guardrail errors name the caller.
 QueryVerb = Literal["fetch", "count", "update", "delete"]
 
-# Always 8 (#376 — unconditional bump, exactly like v7 at #314 and the prior
-# query contract changes; there is no earlier envelope left anywhere). v8
-# gives every query a required canonical ``set`` section. Python and Rust ship
-# in one wheel, so a single supported version is the whole contract.
-_IR_VERSION = 8
+# Always 9 (#377 — unconditional bump, exactly like v8 at #376 and v7 at
+# #314). v9 adds the column-ref SET value-expression kind beside literal.
+# Python and Rust ship in one wheel, so a single supported version is the
+# whole contract.
+_IR_VERSION = 9
 
 
 class _AbsentType:
@@ -165,11 +175,21 @@ class LiteralValueExpr:
 
 
 @dataclass(frozen=True)
+class ColumnRefValueExpr:
+    """An unqualified root-column copy in the SET value-expression family."""
+
+    column: str
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"kind": "column", "column": self.column}
+
+
+@dataclass(frozen=True)
 class SetAssignment:
     """One ordered root-column assignment in the canonical SET section."""
 
     column: str
-    value: LiteralValueExpr
+    value: LiteralValueExpr | ColumnRefValueExpr
 
     def to_ir_dict(self) -> dict[str, Any]:
         return {"column": self.column, "value": self.value.to_ir_dict()}
@@ -464,20 +484,111 @@ def _materialization(query: "Query[Any]") -> Materialization:
     return RootInstances()
 
 
+_RECIPE_FORM = 'update(lambda t: {"col": ...})'
+
+
+def _reject_kwargs_value_expr(value: Any) -> None:
+    """Kwargs stay literals-only; expressions belong on the recipe door."""
+    if isinstance(
+        value,
+        (FieldProxy, ValueExpr, RelationProxy, ReverseRelationProxy),
+    ):
+        raise TypeError(
+            "update() keyword values must be literals; use the recipe form "
+            f"{_RECIPE_FORM} to assign a column or value expression"
+        )
+
+
+def _literal_assignment(column: str, value: Any) -> SetAssignment:
+    """Canonicalize one literal (including bytes) into a SET assignment."""
+    payload = update_bind_payload({column: value})
+    canon = payload[column]
+    if isinstance(canon, bytes):
+        query_value = QueryValue(kind="bytes", value=list(canon))
+    else:
+        query_value = QueryValue(kind=_query_value_kind(canon), value=canon)
+    return SetAssignment(column=column, value=LiteralValueExpr(value=query_value))
+
+
 def _literal_set(assignments: Mapping[str, Any] | None) -> tuple[SetAssignment, ...]:
     """Compile kwargs literals into ordered, typed SET value-expression nodes."""
     compiled: list[SetAssignment] = []
-    for column, value in update_bind_payload(assignments or {}).items():
-        if isinstance(value, bytes):
-            query_value = QueryValue(kind="bytes", value=list(value))
-        else:
-            query_value = QueryValue(kind=_query_value_kind(value), value=value)
-        compiled.append(
-            SetAssignment(
-                column=column,
-                value=LiteralValueExpr(value=query_value),
-            )
+    for column, value in (assignments or {}).items():
+        _reject_kwargs_value_expr(value)
+        compiled.append(_literal_assignment(column, value))
+    return tuple(compiled)
+
+
+def _relation_names(model_cls: type) -> set[str]:
+    relations = getattr(model_cls, "__ferro_relation_specs__", None) or {}
+    reverse = getattr(model_cls, "__ferro_reverse_specs__", None) or {}
+    return set(relations) | set(reverse)
+
+
+def _reject_relation(model_cls: type, name: str, *, role: str) -> None:
+    if name in _relation_names(model_cls):
+        raise TypeError(
+            f"update() cannot assign a relation {name!r} as a SET {role}; "
+            "targets and sources must be root columns on the updated table"
         )
+
+
+def _column_family(model_cls: type, column: str) -> str:
+    spec = getattr(model_cls, "__ferro_columns__", {})[column]
+    return _aggregate_source_family(spec)
+
+
+def _recipe_set(
+    model_cls: type, recipe: Mapping[str, Any]
+) -> tuple[SetAssignment, ...]:
+    """Compile a recipe dict into the same SET list kwargs use."""
+    compiled: list[SetAssignment] = []
+    for column, value in recipe.items():
+        if not isinstance(column, str):
+            raise TypeError(
+                "update() recipe keys are root column names and must be "
+                f"strings, got {column!r} ({type(column).__name__})"
+            )
+        _reject_relation(model_cls, column, role="target")
+        validate_query_column(model_cls, column)
+        if isinstance(value, (RelationProxy, ReverseRelationProxy)):
+            relation = (
+                value._path[-1] if isinstance(value, RelationProxy) else value._name
+            )
+            raise TypeError(
+                f"update() cannot assign the relation {relation!r} as a SET "
+                "value; sources must be root columns on the updated table"
+            )
+        if isinstance(value, ValueExpr):
+            raise TypeError(
+                "update() recipe values are a literal or a root column copy; "
+                "other value expressions land in #378 / #379"
+            )
+        if isinstance(value, FieldProxy):
+            if value.path:
+                raise TypeError(
+                    f"update() cannot assign a traversed column "
+                    f"({value._dotted()}); SET targets and sources must be "
+                    "root columns on the updated table"
+                )
+            _reject_relation(model_cls, value.column, role="value")
+            validate_query_column(model_cls, value.column)
+            source_family = _column_family(model_cls, value.column)
+            target_family = _column_family(model_cls, column)
+            if source_family != target_family:
+                model = model_cls.__name__
+                raise TypeError(
+                    f"cannot copy {model}.{value.column} ({source_family}) "
+                    f"onto {model}.{column} ({target_family})"
+                )
+            compiled.append(
+                SetAssignment(
+                    column=column,
+                    value=ColumnRefValueExpr(column=value.column),
+                )
+            )
+            continue
+        compiled.append(_literal_assignment(column, value))
     return tuple(compiled)
 
 
@@ -569,6 +680,7 @@ def compile_query(
     verb: QueryVerb,
     *,
     assignments: Mapping[str, Any] | None = None,
+    recipe: Mapping[str, Any] | None = None,
 ) -> CompiledQuery:
     """Compile a built query into its wire artifact — the single choke point.
 
@@ -591,10 +703,22 @@ def compile_query(
     where = tuple(node.to_ir_dict() for node in query.where_clause)
     if verb in ("update", "delete"):
         _reject_mutation_misuse(query, verb)
+        if verb == "update":
+            if recipe is not None and assignments:
+                raise TypeError(
+                    "compile_query() accepts either recipe or assignments, not both"
+                )
+            set_assignments = (
+                _recipe_set(query.model_cls, recipe)
+                if recipe is not None
+                else _literal_set(assignments)
+            )
+        else:
+            set_assignments = ()
         payload = QueryIrPayload(
             model_name=identity,
             where=where,
-            set=_literal_set(assignments) if verb == "update" else (),
+            set=set_assignments,
             order_by=(),
             limit=_ABSENT,
             offset=_ABSENT,

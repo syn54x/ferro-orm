@@ -23,7 +23,6 @@ async def test_bulk_update_operation(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         await BulkProduct(name="P1", in_stock=True, category="Electronics").save()
         await BulkProduct(name="P2", in_stock=True, category="Electronics").save()
         await BulkProduct(name="P3", in_stock=True, category="Furniture").save()
@@ -55,7 +54,6 @@ async def test_bulk_update_evicts_identity_map(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         p1 = BulkProduct(name="Gadget", price=10.0)
         await p1.save()
 
@@ -128,3 +126,70 @@ async def test_bulk_update_rejects_query_ir_model_identity_mismatch(db_url):
         assert source_identity in message
         assert other_identity in message
         assert (await Source.get(source.id)).value == "original"
+
+
+@pytest.mark.asyncio
+async def test_recipe_mixed_literal_and_column_copy(db_url):
+    """Recipe door: literal + root column copy persist on both backends (#377)."""
+
+    class User(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        email: str
+        active: bool
+        score: int
+        bonus: int
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await User(email="a@ferro.dev", active=True, score=10, bonus=1).save()
+        await User(email="b@ferro.dev", active=True, score=20, bonus=2).save()
+        await User(email="c@ferro.dev", active=False, score=30, bonus=3).save()
+
+        updated = await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {
+                "email": "updated@ferro.dev",
+                "bonus": user.score,
+            }
+        )
+        assert updated == 2
+
+        rows = await User.where(lambda user: user.active == True).all()  # noqa: E712
+        assert {row.email for row in rows} == {"updated@ferro.dev"}
+        assert {row.bonus for row in rows} == {10, 20}
+
+        inactive = await User.where(lambda user: user.active == False).first()  # noqa: E712
+        assert inactive is not None
+        assert inactive.email == "c@ferro.dev"
+        assert inactive.bonus == 3
+
+
+@pytest.mark.asyncio
+async def test_recipe_update_evicts_identity_map(db_url):
+    """Recipe-door update reuses update_filtered eviction (#377)."""
+
+    class User(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        email: str
+        score: int
+        bonus: int
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        user = User(email="cached@ferro.dev", score=7, bonus=1)
+        await user.save()
+
+        cached = await User.get(user.id)
+        assert cached is user
+
+        updated = await User.where(lambda row: row.id == user.id).update(
+            lambda row: {
+                "email": "updated@ferro.dev",
+                "bonus": row.score,
+            }
+        )
+        assert updated == 1
+
+        fresh = await User.get(user.id)
+        assert fresh is not user
+        assert fresh.email == "updated@ferro.dev"
+        assert fresh.bonus == 7

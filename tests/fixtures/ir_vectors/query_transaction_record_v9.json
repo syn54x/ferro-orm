@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_transaction_include_v8",
+  "vector_name": "query_transaction_record_v9",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 8,
+    "ir_version": 9,
     "payload": {
       "model_name": "Transaction",
       "where": [
@@ -22,26 +22,28 @@
       "set": [],
       "order_by": [
         {
-          "column": "id",
-          "direction": "asc",
+          "column": "amount",
+          "direction": "desc",
           "path": []
         }
       ],
-      "limit": null,
+      "limit": 25,
       "offset": null,
       "m2m": null,
       "joins": [],
       "materialization": {
-        "kind": "instances",
-        "paths": [
-          [
-            {
-              "relation": "account",
-              "from_column": "account_id",
-              "to_table": "account",
-              "to_column": "id"
-            }
-          ]
+        "kind": "record",
+        "fields": [
+          {
+            "name": "id",
+            "column": "id",
+            "path": []
+          },
+          {
+            "name": "amount",
+            "column": "amount",
+            "path": []
+          }
         ]
       }
     }

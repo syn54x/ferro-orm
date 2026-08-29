@@ -11,9 +11,9 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 8 (#376 — unconditional bump; every payload gains
-# the required canonical SET section); `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 8, "codec": 1}
+# `query` is on ir_version 9 (#377 — unconditional bump; column-ref SET
+# kind joins literal); `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 9, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -256,19 +256,27 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         )
         expr = assignment["value"]
         assert isinstance(expr, dict), f"{assignment_label}.value must be object"
-        _require_keys(expr, {"kind", "value"}, f"{assignment_label}.value")
-        assert expr["kind"] == "literal", (
-            f"{assignment_label}.value.kind invalid: {expr['kind']!r}"
+        assert "kind" in expr, f"{assignment_label}.value missing kind"
+        kind = expr["kind"]
+        assert kind in {"literal", "column"}, (
+            f"{assignment_label}.value.kind invalid: {kind!r}"
         )
-        literal = expr["value"]
-        assert isinstance(literal, dict), (
-            f"{assignment_label}.value.value must be object"
-        )
-        _require_keys(
-            literal,
-            {"kind", "value"},
-            f"{assignment_label}.value.value",
-        )
+        if kind == "literal":
+            _require_keys(expr, {"kind", "value"}, f"{assignment_label}.value")
+            literal = expr["value"]
+            assert isinstance(literal, dict), (
+                f"{assignment_label}.value.value must be object"
+            )
+            _require_keys(
+                literal,
+                {"kind", "value"},
+                f"{assignment_label}.value.value",
+            )
+        else:
+            _require_keys(expr, {"kind", "column"}, f"{assignment_label}.value")
+            assert isinstance(expr["column"], str) and expr["column"], (
+                f"{assignment_label}.value.column must be a non-empty string"
+            )
     assert isinstance(payload["order_by"], list), f"{label}.order_by must be list"
     for i, order in enumerate(payload["order_by"]):
         order_label = f"{label}.order_by[{i}]"
