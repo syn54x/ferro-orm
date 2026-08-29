@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from ._bind_payload import save_bind_payload
+from ._bind_payload import apply_save_only, normalize_save_only, save_bind_payload
 from ._core import (
     begin_transaction,
     commit_transaction,
@@ -300,6 +300,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         using: str | None = None,
         session: "Session | None" = None,
         on_conflict: Literal["update"] | None = None,
+        only: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None = None,
     ) -> None:
         """Persist the current model instance.
 
@@ -310,6 +311,18 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         key. Pass ``on_conflict="update"`` for insert-or-update semantics
         regardless of persistence state (the primitive behind
         :meth:`upsert`).
+
+        On a persisted UPDATE, ``only=`` is an explicit column allowlist:
+        ``await row.save(only={"messages", "updated_at"})`` writes those
+        columns' current in-memory values (including ``None`` → NULL) and
+        leaves every other database column untouched. The primary key may
+        appear in the set and is never SET. The instance is not refreshed;
+        omitted in-memory fields may diverge from the row. Mixins that
+        assign ``updated_at`` then call ``super().save(**kwargs)`` write
+        that field only if it is in ``only=`` — the allowlist is not
+        expanded. ``only=`` is rejected on INSERT and on
+        ``on_conflict="update"``. Use :meth:`Query.update` for set-oriented
+        or expression writes.
 
         Note that ``model_copy()`` copies persistence state: saving a copy of
         a persisted instance updates the same row. The UPDATE targets the
@@ -322,23 +335,40 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             using: Connection name override.
             session: Session scope for the operation.
             on_conflict: ``None`` (default) or ``"update"`` to upsert.
+            only: Persisted-UPDATE column allowlist (``set`` / ``frozenset``
+                / ``list`` / ``tuple`` of column names). ``None`` writes
+                every column.
 
         Raises:
             UniqueViolationError: A duplicate primary key or unique value on
                 INSERT.
             ModelDoesNotExist: The row behind a persisted instance no longer
                 exists (deleted underneath, or the PK was mutated).
-            ValueError: ``on_conflict`` is not ``None`` or ``"update"``, or a
-                persisted instance has no primary-key value.
+            TypeError: ``only=`` is a bare ``str`` or ``bytes``.
+            ValueError: ``on_conflict`` is not ``None`` or ``"update"``, a
+                persisted instance has no primary-key value, ``only=`` is
+                used on INSERT / upsert, the allowlist is empty after
+                stripping the PK, or a name is unknown / a relation.
 
         Examples:
             >>> user = User(name="Taylor")
             >>> await user.save()
+            >>> row.messages = msgs
+            >>> row.updated_at = utcnow()
+            >>> await row.save(only={"messages", "updated_at"})
         """
         if on_conflict not in (None, "update"):
             raise ValueError(
                 f'on_conflict must be None or "update", got {on_conflict!r}'
             )
+        if only is not None:
+            normalize_save_only(only)
+            if on_conflict is not None or not _is_persisted(self):
+                raise ValueError(
+                    "save(only=...) is only valid on a persisted UPDATE "
+                    "(on_conflict must be None). "
+                    "Use Query.update() for set-oriented or expression writes."
+                )
         route, identity_using = await _instance_transaction_route(self, using, session)
         new_id = None
         if on_conflict == "update":
@@ -356,9 +386,12 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     f"Cannot UPDATE a persisted {self.__class__.__name__} "
                     "without a primary key value"
                 )
+            payload = save_bind_payload(self)
+            if only is not None:
+                payload = apply_save_only(self, payload, only)
             rows_affected = await update_record(
                 self.__class__.__ferro_identity__,
-                save_bind_payload(self),
+                payload,
                 route,
             )
             if rows_affected == 0:
