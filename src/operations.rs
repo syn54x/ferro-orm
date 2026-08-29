@@ -4255,22 +4255,43 @@ mod m2m_value_tests {
 
             let err = set_value_bind_input(&value, "data")
                 .expect_err("malformed bytes must fail before statement execution");
+            assert!(err.to_string().contains("bytes"));
             assert!(err.to_string().contains("data"));
         }
     }
 
     #[test]
-    fn query_ir_set_rejects_mismatched_literal_kind() {
-        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
-            "kind": "literal",
-            "value": {"kind": "string", "value": [137]}
-        }))
-        .expect("literal value expression");
+    fn query_ir_set_rejects_every_malformed_literal_kind_value_pair() {
+        for (kind, invalid) in [
+            ("null", serde_json::json!(false)),
+            ("bool", serde_json::json!(null)),
+            ("int", serde_json::json!(1.5)),
+            ("float", serde_json::json!(1)),
+            ("string", serde_json::json!([137])),
+            ("list", serde_json::json!({"item": 1})),
+            ("object", serde_json::json!([1])),
+            ("bytes", serde_json::json!("not-an-array")),
+            ("unknown", serde_json::json!(null)),
+        ] {
+            let value: ferro_schema_ir::QueryValueExpr =
+                serde_json::from_value(serde_json::json!({
+                    "kind": "literal",
+                    "value": {"kind": kind, "value": invalid}
+                }))
+                .expect("literal value expression");
 
-        let err = set_value_bind_input(&value, "data")
-            .expect_err("mismatched kind must fail before statement execution");
-        assert!(err.to_string().contains("string"));
-        assert!(err.to_string().contains("data"));
+            let err = set_value_bind_input(&value, "payload")
+                .expect_err("mismatched kind must fail before statement execution");
+            let message = err.to_string();
+            assert!(
+                message.contains(kind),
+                "error must name literal kind {kind:?}: {message}"
+            );
+            assert!(
+                message.contains("payload"),
+                "error must name SET column: {message}"
+            );
+        }
     }
 
     #[test]
@@ -4952,7 +4973,7 @@ mod engine_value_to_rust_value_tests {
 
 #[cfg(test)]
 mod mutation_pagination_guard_tests {
-    use super::{query_plan_from_ir_json, validate_paging_shape};
+    use super::{query_plan_from_ir_json, validate_paging_shape, validate_set_shape};
 
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
@@ -5056,6 +5077,61 @@ mod mutation_pagination_guard_tests {
         let read = query_plan_from_ir_json(&envelope.to_string()).unwrap();
         assert!(validate_paging_shape(&read, "fetch").is_ok());
         assert!(validate_paging_shape(&read, "count").is_ok());
+    }
+
+    #[test]
+    fn guard_rejects_non_empty_set_for_non_update_operations() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["set"] = serde_json::json!([{
+            "column": "name",
+            "value": {
+                "kind": "literal",
+                "value": {"kind": "string", "value": "changed"}
+            }
+        }]);
+        let plan = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+
+        pyo3::Python::attach(|py| {
+            for operation in ["fetch", "count", "delete"] {
+                let err = validate_set_shape(&plan, operation)
+                    .expect_err("only update payloads may carry SET assignments");
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(operation));
+                assert!(err.to_string().contains("SET"));
+            }
+        });
+    }
+
+    #[test]
+    fn guard_rejects_duplicate_update_set_columns() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["set"] = serde_json::json!([
+            {
+                "column": "name",
+                "value": {
+                    "kind": "literal",
+                    "value": {"kind": "string", "value": "first"}
+                }
+            },
+            {
+                "column": "name",
+                "value": {
+                    "kind": "literal",
+                    "value": {"kind": "string", "value": "second"}
+                }
+            }
+        ]);
+        let plan = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+
+        pyo3::Python::attach(|py| {
+            let err = validate_set_shape(&plan, "update")
+                .expect_err("an update column may only be assigned once");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("duplicate"));
+            assert!(err.to_string().contains("name"));
+        });
     }
 }
 

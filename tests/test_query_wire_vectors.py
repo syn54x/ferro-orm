@@ -396,6 +396,32 @@ def test_literal_set_emission_matches_hand_authored_vector(
     assert emitted == expected
 
 
+def test_literal_set_preserves_interleaved_bytes_assignment_order(
+    models: dict[str, type],
+) -> None:
+    payload = json.loads(
+        compile_query(
+            models["User"].select(),
+            "update",
+            assignments={
+                "first_blob": b"\x01",
+                "count": 2,
+                "second_blob": bytearray(b"\x03"),
+                "label": "four",
+            },
+        ).wire_json
+    )["payload"]
+
+    assert [assignment["column"] for assignment in payload["set"]] == [
+        "first_blob",
+        "count",
+        "second_blob",
+        "label",
+    ]
+    assert payload["set"][0]["value"]["value"] == {"kind": "bytes", "value": [1]}
+    assert payload["set"][2]["value"]["value"] == {"kind": "bytes", "value": [3]}
+
+
 @pytest.mark.parametrize(
     ("value", "kind", "wire_value"),
     [
