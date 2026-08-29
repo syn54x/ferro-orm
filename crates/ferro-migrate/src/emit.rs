@@ -6,13 +6,13 @@ use ferro_ddl_lowering::{
     canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
     fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
     refused_conversion_warning, render_check_addition, render_check_drop, render_check_rebuild,
-    render_db_check,
-    render_pg_enum_create_type, render_table_check_body, resolve_column_storage, single_index_name,
+    render_db_check, render_json_backfill_default, render_pg_enum_create_type,
+    render_table_check_body, resolve_column_storage, single_index_name,
     single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
-    Alias, ColumnDef, ForeignKey, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table,
+    Alias, ColumnDef, Expr, ForeignKey, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table,
 };
 use std::collections::BTreeMap;
 
@@ -365,30 +365,40 @@ fn emit_add_column(
         });
     }
 
-    let backfill_default = if col.nullable {
+    // Field defaults are Pydantic/client defaults. ADD COLUMN uses them only
+    // as a temporary backfill for NOT NULL; nullable adds stay DEFAULT-free.
+    let json_backfill = if col.nullable {
         None
     } else {
-        match col.default.as_ref().and_then(literal_default_value) {
-            Some(value) => Some(value),
-            None => {
-                return Err(EmissionError {
-                    message: format!(
-                        "Cannot add NOT NULL column '{}.{}' to an existing table: it has no \
-                         literal default to backfill existing rows. Make the field nullable, \
-                         give it a literal default, or use Alembic for this migration.",
-                        table, column
-                    ),
-                });
-            }
-        }
+        col.default
+            .as_ref()
+            .and_then(|d| render_json_backfill_default(d, &storage, dialect))
     };
+    let scalar_backfill = if col.nullable || json_backfill.is_some() {
+        None
+    } else {
+        col.default.as_ref().and_then(literal_default_value)
+    };
+    let has_backfill = json_backfill.is_some() || scalar_backfill.is_some();
+    if !col.nullable && !has_backfill {
+        return Err(EmissionError {
+            message: format!(
+                "Cannot add NOT NULL column '{}.{}' to an existing table: it has no \
+                 literal default to backfill existing rows. Make the field nullable, \
+                 give it a literal default, or use Alembic for this migration.",
+                table, column
+            ),
+        });
+    }
 
     let mut col_def = ColumnDef::new(Alias::new(column));
     apply_resolved_storage(&mut col_def, &storage, ld);
     if !col.nullable {
         col_def.not_null();
     }
-    if let Some(default_value) = &backfill_default {
+    if let Some(expr) = &json_backfill {
+        col_def.default(Expr::cust(expr.clone()));
+    } else if let Some(default_value) = &scalar_backfill {
         col_def.default(default_value.clone());
     }
 
@@ -409,7 +419,7 @@ fn emit_add_column(
         Dialect::Postgres => stmt.to_string(PostgresQueryBuilder),
     });
 
-    if backfill_default.is_some() && dialect == Dialect::Postgres {
+    if has_backfill && dialect == Dialect::Postgres {
         result.statements.push(format!(
             "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
             quote_ident(table),

@@ -191,8 +191,8 @@ Database options accepted by `Field()` (and `FerroField()`):
 | `unique` | `bool` | `False` | Single-column uniqueness constraint. For multi-column uniqueness see [Composite Constraints](#composite-constraints). |
 | `index` | `bool` | `False` | Create a non-unique index on this column. |
 | `nullable` | `"infer" \| bool` | `"infer"` | Column nullability. `"infer"` follows whether the annotation allows `None`; `True`/`False` force it (useful when the Python type diverges from the column on purpose). |
-| `default` | any | — | Pydantic default value (also used to backfill when [`migrate_updates`](migrations.md) adds a NOT NULL column). |
-| `default_factory` | callable | — | Pydantic default factory, e.g. `default_factory=datetime.now`. |
+| `default` | any | — | Pydantic default value. Also used to backfill when [`migrate_updates`](migrations.md) adds a NOT NULL column — including a JSON object or array on a json-family field. |
+| `default_factory` | callable | — | Pydantic default factory, e.g. `default_factory=datetime.now`. On json-family fields (`dict` / `list` / nested model), `default_factory=dict` / `list` is snapshotted once as a backfill literal; `uuid4` and `datetime.now` are not. |
 | `db_type` | `DbType \| None` | `None` | Column-type override (see above). |
 | `db_check` | `bool` | `False` | Emit a DB-side `CHECK` constraint for closed-domain types; only valid with `db_type`. |
 

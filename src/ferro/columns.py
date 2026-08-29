@@ -8,17 +8,23 @@ class-body time (provisional) and replaced during relationship resolution
 
 from __future__ import annotations
 
+import json
 import types
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, ForwardRef, Union, get_args, get_origin, get_type_hints
 from uuid import UUID
 
+from pydantic import BaseModel
+from pydantic_core import PydanticUndefined, to_json
+
 from ._annotation_utils import (
     annotation_allows_none,
     annotation_is_decimal,
     enum_subclass_from_annotation,
     validate_db_type_declaration,
+    _is_json_family,
+    _strip_optional_and_annotated,
 )
 from ._shadow_fk_types import _scalar_part_of_annotation
 from .base import ForeignKey, foreign_key_allows_none
@@ -237,7 +243,9 @@ def _resolve_ref(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, 
     }
 
 
-def _resolve_nested_refs(schema: dict[str, Any], col_info: dict[str, Any]) -> dict[str, Any]:
+def _resolve_nested_refs(
+    schema: dict[str, Any], col_info: dict[str, Any]
+) -> dict[str, Any]:
     """Resolve local refs in one-level nested ``anyOf`` entries."""
     any_of = col_info.get("anyOf")
     if not isinstance(any_of, list):
@@ -282,6 +290,34 @@ def _logical_type(col_info: dict[str, Any]) -> str:
         return "json"
     return "unknown"
 
+
+def _column_default(prop: dict[str, Any], field_info: Any, annotation: Any) -> Any:
+    """JSON-schema default, or a one-shot json-family factory snapshot (#373).
+
+    Pydantic omits ``default_factory`` from JSON Schema. On json-family fields
+    (``dict`` / ``list`` / nested model) we call the factory once, JSON-dump,
+    and store the result. Scalar factories are never invoked. A factory that
+    raises, needs arguments, or dumps a non-container leaves the spec unset.
+    """
+    if "default" in prop:
+        return prop["default"]
+    if field_info is None or annotation is None:
+        return None
+    if not _is_json_family(_strip_optional_and_annotated(annotation)):
+        return None
+    factory = getattr(field_info, "default_factory", None)
+    if factory is None or factory is PydanticUndefined or not callable(factory):
+        return None
+    try:
+        value = factory()
+    except Exception:
+        return None
+    if not isinstance(value, (dict, list, BaseModel)):
+        return None
+    try:
+        return json.loads(to_json(value))
+    except Exception:
+        return None
 
 
 def _effective_type_and_format(col_info: dict[str, Any]) -> tuple[Any, Any]:
@@ -448,7 +484,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             autoincrement=autoincrement,
             unique=unique,
             index=index,
-            default=prop.get("default"),
+            default=_column_default(prop, field_info, ann),
             format=fmt,
             python_type=python_type,
             enum_values=tuple(enum_values) if isinstance(enum_values, list) else None,
@@ -575,7 +611,9 @@ def pk_spec(name: str, python_type: Any) -> ColumnSpec:
     Mirrors the historical ``schema_fragment_for_pk`` mapping, including the
     fall-back-to-string for None/unknown types.
     """
-    scalar = _scalar_part_of_annotation(python_type) if python_type is not None else None
+    scalar = (
+        _scalar_part_of_annotation(python_type) if python_type is not None else None
+    )
     origin = get_origin(scalar)
     if origin is Union or origin is types.UnionType:
         non_none = [a for a in get_args(scalar) if a is not type(None)]
