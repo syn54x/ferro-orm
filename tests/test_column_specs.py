@@ -89,6 +89,105 @@ class TestTypeFacts:
         assert spec.db_type == "varchar(255)" and spec.db_type_explicit is True
 
 
+class TestJsonFamilyDefaultSnapshot:
+    """#373: json-family factories snapshot onto ColumnSpec.default; scalar factories do not."""
+
+    def test_dict_factory_snapshots_empty_object(self, clean_registry):
+        from ferro import Field
+
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            turns: dict[str, dict] = Field(default_factory=dict)
+
+        assert build_column_specs(M)["turns"].default == {}
+
+    def test_list_factory_snapshots_empty_array(self, clean_registry):
+        from ferro import Field
+
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            tags: list[str] = Field(default_factory=list)
+
+        assert build_column_specs(M)["tags"].default == []
+
+    def test_static_object_default_stays_on_spec(self, clean_registry):
+        from ferro import Field
+
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            flags: dict[str, int] = Field(default={"role": "guest"})
+
+        assert build_column_specs(M)["flags"].default == {"role": "guest"}
+
+    def test_uuid_factory_is_not_snapshotted(self, clean_registry):
+        from uuid import uuid4
+
+        from ferro import Field
+
+        class M(Model):
+            id: UUID = Field(default_factory=uuid4, primary_key=True)
+
+        assert build_column_specs(M)["id"].default is None
+
+    def test_datetime_factory_is_not_snapshotted(self, clean_registry):
+        from datetime import datetime
+
+        from ferro import Field
+
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            created_at: datetime = Field(default_factory=datetime.now)
+
+        assert build_column_specs(M)["created_at"].default is None
+
+    def test_raising_json_factory_leaves_default_unset(self, clean_registry):
+        from ferro import Field
+
+        def boom() -> dict:
+            raise RuntimeError("nope")
+
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            payload: dict = Field(default_factory=boom)
+
+        assert build_column_specs(M)["payload"].default is None
+
+    def test_one_arg_json_factory_leaves_default_unset(self, clean_registry):
+        from ferro import Field
+
+        def needs_data(data: dict) -> dict:
+            return {}
+
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            payload: dict = Field(default_factory=needs_data)
+
+        assert build_column_specs(M)["payload"].default is None
+
+    def test_annotated_dict_factory_snapshots(self, clean_registry):
+        from ferro import Field
+
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            turns: Annotated[dict[str, dict], Field(default_factory=dict)]
+
+        assert build_column_specs(M)["turns"].default == {}
+
+    def test_nested_model_factory_snapshots_object(self, clean_registry):
+        from pydantic import BaseModel as PydanticModel
+
+        from ferro import Field
+
+        class Settings(PydanticModel):
+            theme: str = "dark"
+
+        class M(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            settings: Settings = Field(default_factory=Settings)
+
+        assert build_column_specs(M)["settings"].default == {"theme": "dark"}
+
+
 class TestJoinTableProducers:
     def test_pk_spec_uuid(self):
         spec = pk_spec("user_id", UUID)

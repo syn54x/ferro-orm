@@ -1501,6 +1501,36 @@ pub fn literal_default_value(default: &serde_json::Value) -> Option<sea_query::V
     }
 }
 
+/// DEFAULT right-hand side for a JSON object/array backfill, or [`None`] when
+/// the value is not a container or the resolved storage is not json/jsonb.
+///
+/// Postgres spells `'<json>'::jsonb` or `'<json>'::json` from the storage
+/// token. SQLite has no json/jsonb types: `'<json>'` with no cast. Object and
+/// array on any other storage stay non-renderable (the add-column emitter
+/// then falls through to [`literal_default_value`] and refuses).
+pub fn render_json_backfill_default(
+    default: &serde_json::Value,
+    storage: &ResolvedStorage,
+    dialect: Dialect,
+) -> Option<String> {
+    if !matches!(
+        default,
+        serde_json::Value::Object(_) | serde_json::Value::Array(_)
+    ) {
+        return None;
+    }
+    let json_token = match storage {
+        ResolvedStorage::Scalar(CanonicalType::Json) => "json",
+        ResolvedStorage::Scalar(CanonicalType::Jsonb) => "jsonb",
+        _ => return None,
+    };
+    let body = default.to_string().replace('\'', "''");
+    Some(match dialect {
+        Dialect::Postgres => format!("'{body}'::{json_token}"),
+        Dialect::Sqlite => format!("'{body}'"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1538,6 +1568,39 @@ mod tests {
             result,
             db_check_constraint_name("verylongtable", &long_suffix),
             "table and column checks share the truncation rule"
+        );
+    }
+
+    #[test]
+    fn json_object_backfill_spells_storage_token() {
+        let empty = serde_json::json!({});
+        let jsonb = ResolvedStorage::Scalar(CanonicalType::Jsonb);
+        let json = ResolvedStorage::Scalar(CanonicalType::Json);
+        let text = ResolvedStorage::Scalar(CanonicalType::Text);
+        assert_eq!(
+            render_json_backfill_default(&empty, &jsonb, Dialect::Postgres).as_deref(),
+            Some("'{}'::jsonb")
+        );
+        assert_eq!(
+            render_json_backfill_default(&empty, &json, Dialect::Postgres).as_deref(),
+            Some("'{}'::json")
+        );
+        assert_eq!(
+            render_json_backfill_default(&empty, &json, Dialect::Sqlite).as_deref(),
+            Some("'{}'")
+        );
+        assert_eq!(
+            render_json_backfill_default(&empty, &text, Dialect::Postgres),
+            None
+        );
+        assert_eq!(
+            render_json_backfill_default(&serde_json::json!([]), &jsonb, Dialect::Postgres)
+                .as_deref(),
+            Some("'[]'::jsonb")
+        );
+        assert_eq!(
+            render_json_backfill_default(&serde_json::json!("draft"), &jsonb, Dialect::Postgres),
+            None
         );
     }
 

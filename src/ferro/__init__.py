@@ -235,7 +235,8 @@ async def connect(
               missing from the live table, using the same column DDL ``CREATE TABLE``
               would emit (including single-column indexes and, on Postgres, CHECK
               constraints and foreign keys). NOT NULL fields need a literal default
-              to backfill existing rows — connecting fails with a clear error
+              to backfill existing rows — a json-family object/array (`Field(default={})`,
+              `default_factory=dict`) counts; connecting fails with a clear error
               otherwise.
             - **Postgres only**: column type changes
               (``ALTER COLUMN ... TYPE ... USING`` cast) and nullability changes

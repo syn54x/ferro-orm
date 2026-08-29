@@ -749,6 +749,96 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
         ), "existing rows backfilled with the literal default"
 
 
+@pytest.mark.asyncio
+async def test_json_factory_default_backfills_existing_rows(
+    db_url, db_backend, clean_registry
+):
+    """#373: default_factory=dict is a NOT NULL ADD COLUMN backfill literal."""
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        if db_backend == "sqlite":
+            await execute(
+                'CREATE TABLE "migturns" '
+                '("id" integer PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL)'
+            )
+        else:
+            await execute(
+                'CREATE TABLE "migturns" ("id" serial PRIMARY KEY, "name" varchar NOT NULL)'
+            )
+        await execute('INSERT INTO "migturns" ("name") VALUES (\'alpha\')')
+    ferro.reset_engine()
+
+    class MigTurns(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        name: str
+        turns: dict[str, dict] = ferro.Field(default_factory=dict)
+
+    await ferro.connect(db_url, migrate_updates=True)
+    async with ferro.engines.session():
+        rows = await MigTurns.all()
+        assert len(rows) == 1
+        assert rows[0].name == "alpha"
+        assert rows[0].turns == {}
+
+        created = await MigTurns.create(name="beta")
+        assert created.turns == {}
+
+        if db_backend == "postgres":
+            info = await fetch_all(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'migturns' "
+                "AND column_name = 'turns'"
+            )
+            assert info[0]["column_default"] is None, "backfill default must not linger"
+        else:
+            dflt = _sqlite_columns(db_url, "migturns")["turns"][4]
+            assert dflt == "'{}'", "SQLite cannot DROP DEFAULT; backfill lingers"
+
+
+@pytest.mark.asyncio
+async def test_json_static_object_default_backfills_existing_rows(
+    db_url, db_backend, clean_registry
+):
+    """#373: Field(default={}) on json-family storage is the same literal."""
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        if db_backend == "sqlite":
+            await execute(
+                'CREATE TABLE "migflags" '
+                '("id" integer PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL)'
+            )
+        else:
+            await execute(
+                'CREATE TABLE "migflags" ("id" serial PRIMARY KEY, "name" varchar NOT NULL)'
+            )
+        await execute('INSERT INTO "migflags" ("name") VALUES (\'alpha\')')
+    ferro.reset_engine()
+
+    class MigFlags(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        name: str
+        flags: dict[str, str] = ferro.Field(default={})
+
+    await ferro.connect(db_url, migrate_updates=True)
+    async with ferro.engines.session():
+        rows = await MigFlags.all()
+        assert rows[0].flags == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_json_factory_is_not_a_create_table_server_default(db_url, clean_registry):
+    """Field defaults stay client-side on CREATE TABLE (#373)."""
+
+    class MigFreshTurns(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        turns: dict[str, dict] = ferro.Field(default_factory=dict)
+
+    await ferro.connect(db_url, auto_migrate=True)
+    dflt = _sqlite_columns(db_url, "migfreshturns")["turns"][4]
+    assert dflt is None
+
+
 # ---------------------------------------------------------------------------
 # Index reconciliation (issue #144)
 # ---------------------------------------------------------------------------

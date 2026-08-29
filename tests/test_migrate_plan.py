@@ -125,6 +125,82 @@ class TestAddColumn:
             'ALTER TABLE "invoice" ADD COLUMN "status" varchar NOT NULL DEFAULT \'draft\'',
         ]
 
+    def test_not_null_json_object_default_backfills_with_storage_cast(self):
+        """#373: a JSON object default is a backfill literal on json-family storage."""
+        derived = schema_with(
+            {
+                "turns": {
+                    "type": "object",
+                    "ferro_nullable": False,
+                    "default": {},
+                }
+            }
+        )
+        stmts, _ = render(derived, PK_ONLY_LIVE, "postgres")
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD COLUMN "turns" jsonb NOT NULL DEFAULT \'{}\'::jsonb',
+            'ALTER TABLE "invoice" ALTER COLUMN "turns" DROP DEFAULT',
+        ]
+        stmts, _ = render(derived, PK_ONLY_LIVE, "sqlite")
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD COLUMN "turns" JSON NOT NULL DEFAULT \'{}\'',
+        ]
+
+        explicit_json = schema_with(
+            {
+                "turns": {
+                    "type": "object",
+                    "db_type": "json",
+                    "ferro_nullable": False,
+                    "default": {},
+                }
+            }
+        )
+        stmts, _ = render(explicit_json, PK_ONLY_LIVE, "postgres")
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD COLUMN "turns" json NOT NULL DEFAULT \'{}\'::json',
+            'ALTER TABLE "invoice" ALTER COLUMN "turns" DROP DEFAULT',
+        ]
+
+    def test_not_null_json_array_default_backfills(self):
+        schema = schema_with(
+            {
+                "tags": {
+                    "type": "array",
+                    "ferro_nullable": False,
+                    "default": [],
+                }
+            }
+        )
+        stmts, _ = render(schema, PK_ONLY_LIVE, "postgres")
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD COLUMN "tags" jsonb NOT NULL DEFAULT \'[]\'::jsonb',
+            'ALTER TABLE "invoice" ALTER COLUMN "tags" DROP DEFAULT',
+        ]
+
+    def test_json_object_default_on_non_json_storage_still_refused(self):
+        schema = schema_with(
+            {
+                "note": {
+                    "type": "string",
+                    "ferro_nullable": False,
+                    "default": {},
+                }
+            }
+        )
+        for dialect in ("sqlite", "postgres"):
+            with pytest.raises(ValueError, match=r"invoice\.note.*Alembic"):
+                render(schema, PK_ONLY_LIVE, dialect)
+
+    def test_not_null_json_without_default_fails_loudly(self):
+        """Unset json-family default (failed factory snapshot) uses today's refusal."""
+        schema = schema_with(
+            {"turns": {"type": "object", "ferro_nullable": False}}
+        )
+        for dialect in ("sqlite", "postgres"):
+            with pytest.raises(ValueError, match=r"invoice\.turns.*Alembic"):
+                render(schema, PK_ONLY_LIVE, dialect)
+
     def test_not_null_without_default_fails_loudly(self):
         schema = schema_with(
             {
