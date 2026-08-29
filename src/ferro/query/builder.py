@@ -64,6 +64,16 @@ E = TypeVar("E")
 _ROWS_OF_ROW: type[Rows[Row]] = Rows[Row]
 
 
+def _normalize_order_by_nulls(nulls: str | None) -> str | None:
+    """Lower-case and validate ``nulls=``; ``None`` stays omitted on the wire."""
+    if nulls is None:
+        return None
+    normalized = nulls.lower()
+    if normalized not in ("first", "last"):
+        raise ValueError("nulls must be 'first' or 'last'")
+    return normalized
+
+
 def _resolve_where_node(predicate: "Predicate[Any]", model_cls: type) -> QueryNode:
     """Evaluate a lambda predicate against a validating ``QueryProxy``."""
     if not callable(predicate):
@@ -740,6 +750,8 @@ class Query(Generic[T]):
         self,
         field: "str | Callable[[QueryProxy[T]], FieldProxy[Any]]",
         direction: str = "asc",
+        *,
+        nulls: str | None = None,
     ) -> Self:
         """Add an ordering clause and return a new query.
 
@@ -761,6 +773,8 @@ class Query(Generic[T]):
             field: Column selector — lambda receiving a :class:`QueryProxy`,
                 or a column-name string.
             direction: ``"asc"`` (default) or ``"desc"``.
+            nulls: Optional ``"first"`` or ``"last"`` null placement (keyword-
+                only). Omitted when unset.
 
         Returns:
             A new ``Query`` with the ordering added; ``self`` is unchanged.
@@ -770,13 +784,15 @@ class Query(Generic[T]):
             TypeError: If a lambda selector returns something other than a
                 single column reference (a bare relation, e.g.
                 ``lambda t: t.account``, is meaningless as a sort key).
-            ValueError: If ``direction`` is not ``"asc"`` or ``"desc"``.
+            ValueError: If ``direction`` is not ``"asc"`` or ``"desc"``, or
+                ``nulls`` is not ``"first"`` or ``"last"``.
 
         Examples:
             >>> newest = await Post.select().order_by(lambda p: p.created_at, "desc").all()
         """
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
+        nulls_norm = _normalize_order_by_nulls(nulls)
 
         path: tuple[str, ...] = ()
         if isinstance(field, str):
@@ -809,7 +825,12 @@ class Query(Generic[T]):
 
         new = self._clone()
         new.order_by_clause.append(
-            OrderByEntry(column=col_name, direction=direction.lower(), path=path)
+            OrderByEntry(
+                column=col_name,
+                direction=direction.lower(),
+                path=path,
+                nulls=nulls_norm,
+            )
         )
         if path:
             new._joins.setdefault(path, "inner")
@@ -1269,12 +1290,22 @@ class ProjectedQuery(Query[T]):
         return any(field.agg for field in self._projection)
 
     def _append_order_by(
-        self, column: str, direction: str, path: tuple[str, ...]
+        self,
+        column: str,
+        direction: str,
+        path: tuple[str, ...],
+        *,
+        nulls: str | None = None,
     ) -> Self:
         """Clone with one resolved ORDER BY entry appended (#295)."""
         new = self._clone()
         new.order_by_clause.append(
-            OrderByEntry(column=column, direction=direction.lower(), path=path)
+            OrderByEntry(
+                column=column,
+                direction=direction.lower(),
+                path=path,
+                nulls=nulls,
+            )
         )
         if path:
             new._joins.setdefault(path, "inner")
@@ -1284,6 +1315,8 @@ class ProjectedQuery(Query[T]):
         self,
         field: "str | Callable[[QueryProxy[T]], Any]",
         direction: str = "asc",
+        *,
+        nulls: str | None = None,
     ) -> Self:
         """Add an ordering clause to a projected query (#295's three rules).
 
@@ -1304,14 +1337,17 @@ class ProjectedQuery(Query[T]):
             field: Output field name or root column-name string, or a lambda
                 naming a source column / aggregate expression.
             direction: ``"asc"`` (default) or ``"desc"``.
+            nulls: Optional ``"first"`` or ``"last"`` null placement (keyword-
+                only). Omitted when unset.
 
         Returns:
             A new query with the ordering added; ``self`` is unchanged.
 
         Raises:
-            ValueError: If ``direction`` is invalid, or the sort key is not a
-                group key or aggregate on an aggregate projection (including
-                an aggregate expression matching no projected field).
+            ValueError: If ``direction`` is invalid, ``nulls`` is invalid, or
+                the sort key is not a group key or aggregate on an aggregate
+                projection (including an aggregate expression matching no
+                projected field).
             AttributeError: If a string names neither an output field nor a
                 queryable root column.
             TypeError: If a lambda resolves to a bare relation or any other
@@ -1319,6 +1355,7 @@ class ProjectedQuery(Query[T]):
         """
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
+        nulls_norm = _normalize_order_by_nulls(nulls)
         has_aggregate = self._has_aggregate()
         output_names = {f.name for f in self._projection}
 
@@ -1326,7 +1363,7 @@ class ProjectedQuery(Query[T]):
             # Rule 1: output field names first (group keys and aggregates
             # both sort by name), then root columns.
             if field in output_names:
-                return self._append_order_by(field, direction, ())
+                return self._append_order_by(field, direction, (), nulls=nulls_norm)
             try:
                 validate_query_column(self.model_cls, field)
             except AttributeError as exc:
@@ -1345,7 +1382,7 @@ class ProjectedQuery(Query[T]):
                     "by an output field name, or project the column as a "
                     "group key."
                 )
-            return self._append_order_by(field, direction, ())
+            return self._append_order_by(field, direction, (), nulls=nulls_norm)
 
         if not callable(field):
             raise TypeError(
@@ -1363,7 +1400,9 @@ class ProjectedQuery(Query[T]):
                     and proj.column == selected.column
                     and proj.path == selected.path
                 ):
-                    return self._append_order_by(proj.name, direction, ())
+                    return self._append_order_by(
+                        proj.name, direction, (), nulls=nulls_norm
+                    )
             raise ValueError(
                 f"order_by() aggregate {selected._dotted()} matches no "
                 "projected field; project it to sort by it (e.g. "
@@ -1394,7 +1433,9 @@ class ProjectedQuery(Query[T]):
                 "column, so each group would answer with an arbitrary row's "
                 "value. Project it as a group key, or sort by an aggregate."
             )
-        return self._append_order_by(selected.column, direction, selected.path)
+        return self._append_order_by(
+            selected.column, direction, selected.path, nulls=nulls_norm
+        )
 
     def _is_group_key_source(self, column: str, path: tuple[str, ...]) -> bool:
         """True when ``(column, path)`` is some plain field's source (#295)."""
