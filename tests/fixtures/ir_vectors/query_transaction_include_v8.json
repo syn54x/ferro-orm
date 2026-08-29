@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_transaction_include_v7",
+  "vector_name": "query_transaction_include_v8",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 7,
+    "ir_version": 8,
     "payload": {
       "model_name": "Transaction",
       "where": [
@@ -19,6 +19,7 @@
           "path": []
         }
       ],
+      "set": [],
       "order_by": [
         {
           "column": "id",

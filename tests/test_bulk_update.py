@@ -64,3 +64,21 @@ async def test_bulk_update_evicts_identity_map(db_url):
         fresh_p1 = await BulkProduct.get(p1.id)
         assert fresh_p1 is not p1
         assert fresh_p1.price == 20.0
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_rejects_integer_outside_native_bind_range(db_url):
+    class Counter(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        value: int
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        counter = Counter(value=1)
+        await counter.save()
+
+        with pytest.raises(ValueError, match="int|number out of range"):
+            await Counter.where(lambda row: row.id == counter.id).update(value=2**100)
+
+        fresh = await Counter.get(counter.id)
+        assert fresh.value == 1

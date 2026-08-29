@@ -1,0 +1,66 @@
+{
+  "vector_name": "query_user_literal_set_v8",
+  "domain": "query",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "query",
+    "ir_version": 8,
+    "payload": {
+      "model_name": "User",
+      "where": [
+        {
+          "node_kind": "leaf",
+          "column": "active",
+          "operator": "==",
+          "value": {
+            "kind": "bool",
+            "value": true
+          },
+          "path": []
+        }
+      ],
+      "set": [
+        {
+          "column": "active",
+          "value": {
+            "kind": "literal",
+            "value": {
+              "kind": "bool",
+              "value": false
+            }
+          }
+        },
+        {
+          "column": "email",
+          "value": {
+            "kind": "literal",
+            "value": {
+              "kind": "string",
+              "value": "updated@ferro.dev"
+            }
+          }
+        },
+        {
+          "column": "blob",
+          "value": {
+            "kind": "literal",
+            "value": {
+              "kind": "bytes",
+              "value": [
+                137,
+                0,
+                255
+              ]
+            }
+          }
+        }
+      ],
+      "order_by": [],
+      "m2m": null,
+      "joins": [],
+      "materialization": {
+        "kind": "root_instances"
+      }
+    }
+  }
+}

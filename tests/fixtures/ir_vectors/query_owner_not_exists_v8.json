@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_owner_not_exists_v7",
+  "vector_name": "query_owner_not_exists_v8",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 7,
+    "ir_version": 8,
     "payload": {
       "model_name": "Owner",
       "where": [
@@ -24,6 +24,7 @@
           }
         }
       ],
+      "set": [],
       "order_by": [],
       "limit": null,
       "offset": null,

@@ -1,37 +1,62 @@
 {
-  "vector_name": "query_transaction_traversed_record_v7",
+  "vector_name": "query_transaction_traversal_v8",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 7,
+    "ir_version": 8,
     "payload": {
       "model_name": "Transaction",
       "where": [
         {
-          "node_kind": "leaf",
-          "column": "amount",
-          "operator": ">=",
-          "value": {
-            "kind": "int",
-            "value": 100
+          "node_kind": "compound",
+          "operator": "AND",
+          "left": {
+            "node_kind": "leaf",
+            "column": "email",
+            "operator": "==",
+            "value": {
+              "kind": "string",
+              "value": "owner@ferro.dev"
+            },
+            "path": [
+              "account",
+              "owner"
+            ]
           },
-          "path": []
+          "right": {
+            "node_kind": "leaf",
+            "column": "amount",
+            "operator": ">=",
+            "value": {
+              "kind": "int",
+              "value": 100
+            },
+            "path": []
+          }
         }
       ],
+      "set": [],
       "order_by": [
+        {
+          "column": "name",
+          "direction": "asc",
+          "path": [
+            "account"
+          ]
+        },
         {
           "column": "id",
           "direction": "asc",
           "path": []
         }
       ],
-      "limit": null,
-      "offset": null,
+      "limit": 50,
+      "offset": 0,
       "m2m": null,
       "joins": [
         {
-          "join_type": "left",
+          "join_type": "inner",
           "path": [
             {
               "relation": "account",
@@ -60,24 +85,7 @@
         }
       ],
       "materialization": {
-        "kind": "record",
-        "fields": [
-          {
-            "name": "txn_id",
-            "column": "id",
-            "path": []
-          },
-          {
-            "name": "account_name",
-            "column": "name",
-            "path": ["account"]
-          },
-          {
-            "name": "owner_email",
-            "column": "email",
-            "path": ["account", "owner"]
-          }
-        ]
+        "kind": "root_instances"
       }
     }
   }
