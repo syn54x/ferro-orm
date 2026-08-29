@@ -70,6 +70,20 @@ async def main() -> None:
         assert bobs == 1  # two saves, one row
         # --8<-- [end:save-insert-update]
 
+        # --8<-- [start:save-only]
+        row = await Customer.get(bob.id)
+        row.name = "Bobby"
+        row.updated_at = datetime.now()
+        row.plan = "enterprise"  # omitted: left untouched in the database
+        await row.save(only={"name", "updated_at"})
+        # instance is not refreshed — omitted in-memory fields may diverge
+        assert row.plan == "enterprise"
+        # --8<-- [end:save-only]
+
+        await row.refresh()
+        assert row.name == "Bobby"
+        assert row.plan == "pro"
+
         # --8<-- [start:upsert]
         # No row with this primary key: INSERT
         carol = await Customer.upsert(id=100, email="carol@example.com", name="Carol")

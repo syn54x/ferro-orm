@@ -356,3 +356,309 @@ async def test_model_connection_upsert(tmp_path):
             service_row = await ConnUpsertMarker.using("service").get(1)
         assert app_row.label == "app"
         assert service_row.label == "service-v2"
+
+
+async def test_save_only_updates_named_columns(db_url):
+    class SaveOnlyNamed(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        keep: str
+        change: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyNamed.create(id=1, keep="orig", change="a")
+        row.keep = "mutated-in-memory"
+        row.change = "b"
+        await row.save(only={"change"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyNamed.get(1)
+        assert fetched.change == "b"
+        assert fetched.keep == "orig"
+
+
+async def test_bare_save_still_writes_every_column(db_url):
+    class SaveOnlyBare(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        keep: str
+        change: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyBare.create(id=1, keep="orig", change="a")
+        row.keep = "rewritten"
+        row.change = "b"
+        await row.save()
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyBare.get(1)
+        assert fetched.keep == "rewritten"
+        assert fetched.change == "b"
+
+
+async def test_save_only_rejects_transient_instance(db_url):
+    class SaveOnlyTransient(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = SaveOnlyTransient(name="ghost")
+        with pytest.raises(ValueError, match="persisted"):
+            await row.save(only={"name"})
+
+        assert await SaveOnlyTransient.all() == []
+
+
+async def test_save_only_rejects_on_conflict_update(db_url):
+    class SaveOnlyUpsert(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyUpsert.create(id=1, name="a")
+        row.name = "b"
+        with pytest.raises(ValueError, match="persisted"):
+            await row.save(only={"name"}, on_conflict="update")
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyUpsert.get(1)
+        assert fetched.name == "a"
+
+
+async def test_save_only_rejects_unknown_name(db_url):
+    class SaveOnlyUnknown(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyUnknown.create(id=1, name="a")
+        with pytest.raises(ValueError, match="nope") as excinfo:
+            await row.save(only={"nope"})
+        message = str(excinfo.value)
+        assert "name" in message
+
+
+async def test_save_only_rejects_relation_name(db_url):
+    from ferro import BackRef, ForeignKey, Relation
+
+    class SaveOnlyAuthor(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        posts: Relation[list["SaveOnlyPost"]] = BackRef()
+
+    class SaveOnlyPost(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        author: Annotated[SaveOnlyAuthor, ForeignKey(related_name="posts")]
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        author = await SaveOnlyAuthor.create(id=1, name="ada")
+        post = await SaveOnlyPost.create(id=1, title="first", author=author)
+        post.title = "second"
+        with pytest.raises(ValueError, match="author_id") as excinfo:
+            await post.save(only={"author"})
+        assert "author" in str(excinfo.value)
+
+        with pytest.raises(ValueError, match="posts"):
+            await author.save(only={"posts"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyPost.get(1)
+        assert fetched.title == "first"
+
+
+async def test_save_only_pk_in_set_is_ignored(db_url):
+    class SaveOnlyPkIgnored(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyPkIgnored.create(id=1, name="a")
+        row.name = "b"
+        await row.save(only={"id", "name"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyPkIgnored.get(1)
+        assert fetched.name == "b"
+
+
+async def test_save_only_empty_write_set_errors(db_url):
+    class SaveOnlyEmpty(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyEmpty.create(id=1, name="a")
+        with pytest.raises(ValueError):
+            await row.save(only=set())
+        with pytest.raises(ValueError):
+            await row.save(only={"id"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyEmpty.get(1)
+        assert fetched.name == "a"
+
+
+async def test_pk_only_model_bare_save_is_existence_check(db_url):
+    class SaveOnlyPkOnly(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyPkOnly.create(id=1)
+        await row.save()
+        assert await SaveOnlyPkOnly.get(1) is row
+
+        await SaveOnlyPkOnly.where(lambda m: m.id == 1).delete()
+        with pytest.raises(ModelDoesNotExist):
+            await row.save()
+
+
+async def test_save_only_none_clears_nullable_column(db_url):
+    class SaveOnlyNullable(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        note: str | None = None
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyNullable.create(id=1, name="a", note="kept")
+        row.note = None
+        row.name = "mutated-in-memory"
+        await row.save(only={"note"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyNullable.get(1)
+        assert fetched.note is None
+        assert fetched.name == "a"
+
+
+async def test_save_only_missing_row_raises_model_does_not_exist(db_url):
+    class SaveOnlyMissing(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyMissing.create(id=4, name="here")
+        await SaveOnlyMissing.where(lambda u: u.id == 4).delete()
+        row.name = "gone"
+        with pytest.raises(ModelDoesNotExist) as excinfo:
+            await row.save(only={"name"})
+        assert excinfo.value.model is SaveOnlyMissing
+        assert excinfo.value.pk == 4
+
+
+async def test_save_only_does_not_refresh_instance_or_identity(db_url):
+    class SaveOnlyIdentity(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        keep: str
+        change: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyIdentity.create(id=1, keep="orig", change="a")
+        row.keep = "stale-in-memory"
+        row.change = "b"
+        await row.save(only={"change"})
+
+        assert row.keep == "stale-in-memory"
+        again = await SaveOnlyIdentity.get(1)
+        assert again is row
+
+        copy = row.model_copy()
+        copy.change = "c"
+        await copy.save(only={"change"})
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyIdentity.get(1)
+        assert fetched.change == "c"
+        assert fetched.keep == "orig"
+
+
+async def test_save_only_accepts_name_containers(db_url):
+    class SaveOnlyContainers(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        keep: str
+        change: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyContainers.create(id=1, keep="orig", change="a")
+        for only in ({"change"}, frozenset({"change"}), ["change"], ("change",)):
+            row.change = "b"
+            row.keep = "orig"
+            await row.save(only=only)
+            await row.refresh()
+            assert row.change == "b"
+            assert row.keep == "orig"
+
+
+async def test_save_only_rejects_bare_str_and_bytes(db_url):
+    class SaveOnlyBadContainer(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        messages: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyBadContainer.create(id=1, messages="a")
+        with pytest.raises(TypeError, match=r'only=\{"messages"\}'):
+            await row.save(only="messages")
+        with pytest.raises(TypeError, match=r'only=\{"messages"\}'):
+            await row.save(only=b"messages")
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyBadContainer.get(1)
+        assert fetched.messages == "a"
+
+
+async def test_save_only_mixin_forwards_and_does_not_expand(db_url):
+    class SaveOnlyMixin:
+        async def save(self, **kwargs):
+            self.token = "touched"
+            await super().save(**kwargs)
+
+    class SaveOnlyMixinDoc(SaveOnlyMixin, Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        token: str
+
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await SaveOnlyMixinDoc.create(id=1, title="a", token="orig")
+        # create() goes through save(), so the mixin already wrote token.
+        await SaveOnlyMixinDoc.where(lambda doc: doc.id == 1).update(token="orig")
+        row.title = "b"
+        await row.save(only={"title"})
+        assert row.token == "touched"
+
+    ferro.reset_engine()
+    await connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        fetched = await SaveOnlyMixinDoc.get(1)
+        assert fetched.title == "b"
+        assert fetched.token == "orig"
