@@ -253,6 +253,11 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         assert isinstance(order, dict), f"{order_label} must be object"
         _require_keys(order, {"column", "direction", "path"}, order_label)
         assert isinstance(order["path"], list), f"{order_label}.path must be a list"
+        if "nulls" in order:
+            assert order["nulls"] in {"first", "last"}, (
+                f"{order_label}.nulls must be 'first' or 'last' when present, "
+                f"got {order['nulls']!r}"
+            )
     if payload["limit"] is not None:
         assert isinstance(payload["limit"], int) and payload["limit"] >= 0, (
             f"{label}.limit must be null or non-negative int"

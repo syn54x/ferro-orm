@@ -108,18 +108,22 @@ class QueryJoin:
 
 @dataclass(frozen=True)
 class OrderByEntry:
-    """One ``ORDER BY`` clause: column, direction, and relation path."""
+    """One ``ORDER BY`` clause: column, direction, relation path, and nulls."""
 
     column: str
     direction: str
     path: tuple[str, ...]
+    nulls: str | None = None
 
     def to_ir_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "column": self.column,
             "direction": self.direction,
             "path": list(self.path),
         }
+        if self.nulls is not None:
+            payload["nulls"] = self.nulls
+        return payload
 
 
 @dataclass(frozen=True)

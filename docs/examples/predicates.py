@@ -1,6 +1,7 @@
 """Runnable companion to the Queries guide (docs/pages/guide/queries.md)."""
 
 import asyncio
+from datetime import UTC, datetime
 
 # --8<-- [start:setup]
 from ferro import Field, Model, connect, engines
@@ -21,6 +22,15 @@ class Invoice(Model):
     reference: str
     amount: float | None = None  # None until the invoice is issued
 # --8<-- [end:nullable-model]
+
+
+# --8<-- [start:card-model]
+class Card(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    pinned_at: datetime | None = None
+    updated_at: datetime
+# --8<-- [end:card-model]
 
 
 async def main() -> None:
@@ -107,6 +117,34 @@ async def main() -> None:
         # --8<-- [end:ordering-slicing]
         assert oldest_first[0].name == "carol"
         assert len(second_page) == 2
+
+        t0 = datetime(2026, 1, 1, tzinfo=UTC)
+        t1 = datetime(2026, 2, 1, tzinfo=UTC)
+        t2 = datetime(2026, 3, 1, tzinfo=UTC)
+        await Card.bulk_create(
+            [
+                Card(title="unpinned-old", pinned_at=None, updated_at=t0),
+                Card(title="pinned-early", pinned_at=t0, updated_at=t0),
+                Card(title="unpinned-new", pinned_at=None, updated_at=t2),
+                Card(title="pinned-late", pinned_at=t1, updated_at=t1),
+            ]
+        )
+
+        # --8<-- [start:nulls-ordering]
+        cards = (
+            await Card.select()
+            .order_by(lambda card: card.pinned_at, "desc", nulls="last")
+            .order_by(lambda card: card.updated_at, "desc")
+            .order_by(lambda card: card.id, "desc")
+            .all()
+        )
+        # --8<-- [end:nulls-ordering]
+        assert [card.title for card in cards] == [
+            "pinned-late",
+            "pinned-early",
+            "unpinned-new",
+            "unpinned-old",
+        ]
 
         # --8<-- [start:terminals]
         everyone = await User.all()

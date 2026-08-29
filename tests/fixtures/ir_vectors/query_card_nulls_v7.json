@@ -1,0 +1,44 @@
+{
+  "vector_name": "query_card_nulls_v7",
+  "domain": "query",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "query",
+    "ir_version": 7,
+    "payload": {
+      "model_name": "Card",
+      "where": [
+        {
+          "node_kind": "leaf",
+          "column": "id",
+          "operator": "!=",
+          "value": {
+            "kind": "null",
+            "value": null
+          },
+          "path": []
+        }
+      ],
+      "order_by": [
+        {
+          "column": "pinned_at",
+          "direction": "desc",
+          "path": [],
+          "nulls": "last"
+        },
+        {
+          "column": "updated_at",
+          "direction": "desc",
+          "path": []
+        }
+      ],
+      "limit": null,
+      "offset": null,
+      "m2m": null,
+      "joins": [],
+      "materialization": {
+        "kind": "root_instances"
+      }
+    }
+  }
+}
