@@ -166,7 +166,31 @@ For a row where `amount` is `NULL`, `amount > 100` is unknown, `NOT unknown` is 
 
 ## Ordering, Limit & Offset
 
-Sort with `.order_by(field, direction)` (direction defaults to ascending; pass `"desc"` to reverse) and slice with `.limit()` / `.offset()`. `field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time:
+Sort with `.order_by(field, direction, *, nulls=...)` (direction defaults to ascending; pass `"desc"` to reverse) and slice with `.limit()` / `.offset()`. Pass `nulls="first"` or `nulls="last"` to pin where `NULL` sort keys land. `field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time.
+
+A pinned-first list is the usual reason to care — put unpinned cards (`pinned_at IS NULL`) after pinned ones, then break ties by recency:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/predicates.py:card-model"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/predicates_annotated.py:card-model"
+    ```
+
+```python
+--8<-- "docs/examples/predicates.py:nulls-ordering"
+```
+
+```sql
+ORDER BY pinned_at DESC NULLS LAST, updated_at DESC, id DESC
+```
+
+Omitting `nulls=` on a nullable sort key leaves placement to the dialect: PostgreSQL `DESC` puts `NULL`s first; SQLite `DESC` puts them last. Pass `nulls=` when you care.
 
 ```python
 --8<-- "docs/examples/predicates.py:ordering-slicing"
@@ -342,8 +366,8 @@ When you want the relation-less rows *kept* rather than filtered out, opt into a
 
 A bare `left_join` on a path also traversed by `where()` lifts the shared edge to LEFT — an explicit LEFT always beats an implicit INNER on the same edge (declaring `join` **and** `left_join` on one edge is a build-time `ValueError`).
 
-!!! note "NULL ordering diverges by dialect under `left_join`"
-    Once relation-less rows survive into an `order_by` on a related column, their `NULL` sort key lands in a dialect-specific spot: **PostgreSQL sorts `NULL`s last on an ascending sort; SQLite sorts them first.** This divergence only appears because you opted into `left_join` — plain INNER traversal drops those rows, so it never surfaces (ADR-0006).
+!!! note "NULL ordering is dialect-defined unless you set `nulls=`"
+    Relation-less rows under `left_join` land as `NULL` sort keys on a related column — the same dialect-default split that hits a nullable **root** column. Pass `nulls="first"` or `nulls="last"` when you care — see [Ordering, Limit & Offset](#ordering-limit--offset).
 
 ### Two foreign keys to the same table
 
