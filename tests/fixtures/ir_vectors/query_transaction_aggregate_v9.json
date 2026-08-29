@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_transaction_traversed_record_v8",
+  "vector_name": "query_transaction_aggregate_v9",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 8,
+    "ir_version": 9,
     "payload": {
       "model_name": "Transaction",
       "where": [
@@ -22,26 +22,15 @@
       "set": [],
       "order_by": [
         {
-          "column": "id",
-          "direction": "asc",
+          "column": "total",
+          "direction": "desc",
           "path": []
         }
       ],
-      "limit": null,
+      "limit": 5,
       "offset": null,
       "m2m": null,
       "joins": [
-        {
-          "join_type": "left",
-          "path": [
-            {
-              "relation": "account",
-              "from_column": "account_id",
-              "to_table": "account",
-              "to_column": "id"
-            }
-          ]
-        },
         {
           "join_type": "inner",
           "path": [
@@ -49,12 +38,6 @@
               "relation": "account",
               "from_column": "account_id",
               "to_table": "account",
-              "to_column": "id"
-            },
-            {
-              "relation": "owner",
-              "from_column": "owner_id",
-              "to_table": "owner",
               "to_column": "id"
             }
           ]
@@ -64,11 +47,6 @@
         "kind": "record",
         "fields": [
           {
-            "name": "txn_id",
-            "column": "id",
-            "path": []
-          },
-          {
             "name": "account_name",
             "column": "name",
             "path": [
@@ -76,12 +54,29 @@
             ]
           },
           {
-            "name": "owner_email",
-            "column": "email",
-            "path": [
-              "account",
-              "owner"
-            ]
+            "name": "total",
+            "path": [],
+            "expr": {
+              "fn": "sum",
+              "column": "amount",
+              "path": []
+            }
+          },
+          {
+            "name": "avg_balance",
+            "path": [],
+            "expr": {
+              "fn": "avg",
+              "column": "balance",
+              "path": [
+                {
+                  "relation": "account",
+                  "from_column": "account_id",
+                  "to_table": "account",
+                  "to_column": "id"
+                }
+              ]
+            }
           }
         ]
       }

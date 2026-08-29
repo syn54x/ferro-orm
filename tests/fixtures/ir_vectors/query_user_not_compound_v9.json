@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_user_not_compound_v8",
+  "vector_name": "query_user_not_compound_v9",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 8,
+    "ir_version": 9,
     "payload": {
       "model_name": "User",
       "where": [

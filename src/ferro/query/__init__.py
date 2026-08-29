@@ -9,6 +9,7 @@ from .nodes import (
     QueryProxy,
     RelationProxy,
     RowSelector,
+    ValueExpr,
 )
 from .rows import Row, Rows
 
@@ -25,4 +26,5 @@ __all__ = [
     "Row",
     "RowSelector",
     "Rows",
+    "ValueExpr",
 ]

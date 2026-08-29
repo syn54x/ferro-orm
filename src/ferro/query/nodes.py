@@ -592,12 +592,67 @@ class AggregateExpr:
     def __bool__(self) -> NoReturn:
         raise TypeError(
             f"{self._dotted()} has no truth value; an aggregate expression "
-            "is a projection source (select(lambda t: {\"total\": "
+            'is a projection source (select(lambda t: {"total": '
             f"{self._dotted()}}})), not a predicate."
         )
 
     def __repr__(self) -> str:
-        return f"AggregateExpr(fn={self.fn!r}, column={self.column!r}, path={self.path!r})"
+        return (
+            f"AggregateExpr(fn={self.fn!r}, column={self.column!r}, path={self.path!r})"
+        )
+
+
+class ValueExpr:
+    """A SET value-producing expression (#377). Sibling of :class:`AggregateExpr`.
+
+    Not a :class:`QueryNode`. Literals and root :class:`FieldProxy` copies
+    compile at the ``update()`` recipe door; later slices (``+`` / ``now``,
+    ``.merge()`` / ``.concat()``) produce instances of this type. Comparing
+    one to build a predicate is #327; projecting or ordering by one is #309.
+    """
+
+    def _reject_clause(self, clause: str) -> NoReturn:
+        raise TypeError(
+            f"value expressions cannot appear in {clause}(); "
+            "comparing a value expression to produce a predicate is #327; "
+            "projecting or ordering by one is #309."
+        )
+
+    def _reject_comparison(self, symbol: str) -> NoReturn:
+        raise TypeError(
+            f"comparing a value expression ({symbol}) is not a where() "
+            "predicate (#327). Value expressions are SET sources "
+            '(update(lambda t: {"col": ...})); projecting or ordering by '
+            "one is #309."
+        )
+
+    def __eq__(self, other: object) -> NoReturn:  # type: ignore[override]
+        self._reject_comparison("==")
+
+    def __ne__(self, other: object) -> NoReturn:  # type: ignore[override]
+        self._reject_comparison("!=")
+
+    def __lt__(self, other: object) -> NoReturn:
+        self._reject_comparison("<")
+
+    def __le__(self, other: object) -> NoReturn:
+        self._reject_comparison("<=")
+
+    def __gt__(self, other: object) -> NoReturn:
+        self._reject_comparison(">")
+
+    def __ge__(self, other: object) -> NoReturn:
+        self._reject_comparison(">=")
+
+    def __bool__(self) -> NoReturn:
+        raise TypeError(
+            "ValueExpr has no truth value; it is a SET source "
+            '(update(lambda t: {"col": ...})), not a predicate. '
+            "Comparing one is #327; projecting or ordering by one is #309."
+        )
+
+    def __repr__(self) -> str:
+        return "ValueExpr()"
 
 
 def validate_query_column(model_cls: type, name: str) -> str:
@@ -730,9 +785,7 @@ class RelationProxy:
 
     __slots__ = ("_root_model", "_path", "_target")
 
-    def __init__(
-        self, root_model: type, path: tuple[str, ...], target: type
-    ) -> None:
+    def __init__(self, root_model: type, path: tuple[str, ...], target: type) -> None:
         self._root_model = root_model
         self._path = path
         self._target = target
