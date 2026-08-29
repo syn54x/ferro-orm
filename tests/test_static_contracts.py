@@ -21,18 +21,9 @@ def test_wire_module_is_the_only_query_payload_serializer():
 def test_mutating_query_methods_cannot_carry_pagination():
     source = Path("src/ferro/query/builder.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    query_cls = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "Query"
-    )
+    query_cls = _class_def(tree, "Query")
     for method_name in ("update", "delete"):
-        method = next(
-            node
-            for node in query_cls.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == method_name
-        )
+        method = _method_def(query_cls, method_name)
         attributes = {
             node.attr for node in ast.walk(method) if isinstance(node, ast.Attribute)
         }
@@ -67,12 +58,22 @@ def _class_def(tree: ast.Module, class_name: str) -> ast.ClassDef:
     )
 
 
+def _is_overload(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for dec in node.decorator_list:
+        if isinstance(dec, ast.Name) and dec.id == "overload":
+            return True
+        if isinstance(dec, ast.Attribute) and dec.attr == "overload":
+            return True
+    return False
+
+
 def _method_def(cls: ast.ClassDef, method_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     return next(
         node
         for node in cls.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name == method_name
+        and not _is_overload(node)
     )
 
 
