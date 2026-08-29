@@ -1087,9 +1087,11 @@ class Query(Generic[T]):
         Two doors, one SET wire: keyword literals (``update(name="x")``) or a
         recipe callable (``update(lambda user: {"email": "x", "bonus":
         user.score, "n": user.n + 1, "updated_at": now})``). Recipe values
-        are a literal, a root column copy, ``+`` / ``-`` arithmetic, or the
-        imported ``now`` singleton. ``+`` does not fill empties — ``NULL + 1``
-        is NULL (``.merge()`` fills, #379). The doors cannot be mixed.
+        are a literal, a root column copy, ``+`` / ``-`` arithmetic, the
+        imported ``now`` singleton, or ``.merge()`` (Postgres-only shallow
+        object merge). ``+`` does not fill empties — ``NULL + 1`` is NULL;
+        ``.merge()`` treats a NULL object column as ``{}``. The doors
+        cannot be mixed.
 
         Args:
             recipe: Optional positional callable receiving a

@@ -2,10 +2,10 @@
 
 import difflib
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar, get_origin
 
 TField = TypeVar("TField")
 TModel = TypeVar("TModel")
@@ -42,6 +42,18 @@ def _aggregate_source_family(spec: Any) -> str:
     if spec.enum_values is not None or spec.enum_class is not None:
         return "enum"
     return spec.logical_type
+
+
+def _json_column_shape(spec: Any) -> str | None:
+    """``object`` / ``array`` for a json-family column, else ``None`` (#379)."""
+    if _aggregate_source_family(spec) != "json":
+        return None
+    from .._annotation_utils import _strip_optional_and_annotated
+
+    hint = _strip_optional_and_annotated(spec.python_type)
+    if hint is list or get_origin(hint) is list:
+        return "array"
+    return "object"
 
 
 class QueryNode:
@@ -542,6 +554,43 @@ class FieldProxy(Generic[TField]):
     def __rsub__(self, other: Any) -> "BinaryValueExpr":
         return _binary_value("-", other, self)
 
+    def merge(self, patch: Any) -> "MergeValueExpr":
+        """Shallow object merge — Postgres ``jsonb ||`` (#379).
+
+        The patch mapping wins on key overlap. A NULL object column becomes
+        ``{}`` at render time. Lists and non-object targets fail here so
+        SQLite / ``.concat()`` never become a late execute surprise.
+        """
+        if isinstance(patch, (list, tuple)):
+            raise TypeError(
+                f"{self._dotted()}.merge() is object merge; a list patch is "
+                ".concat() (not shipped yet)"
+            )
+        if not isinstance(patch, Mapping):
+            raise TypeError(
+                f"{self._dotted()}.merge() takes a mapping patch, "
+                f"got {type(patch).__name__}"
+            )
+        if self._owner is not None:
+            spec = getattr(self._owner, "__ferro_columns__", {}).get(self.column)
+            if spec is not None:
+                shape = _json_column_shape(spec)
+                if shape == "array":
+                    raise TypeError(
+                        f"{self._dotted()}.merge() is not supported: "
+                        f"{self._owner.__name__}.{self.column} is list-typed; "
+                        ".concat() is not shipped yet"
+                    )
+                if shape != "object":
+                    family = _aggregate_source_family(spec)
+                    raise TypeError(
+                        f"{self._dotted()}.merge() is not supported: "
+                        f"{self._owner.__name__}.{self.column} is "
+                        f"{family}-typed, and .merge() takes a json object "
+                        "(dict or nested model)."
+                    )
+        return MergeValueExpr(self, dict(patch))
+
     def __repr__(self):
         """Return a developer-friendly representation of the field proxy"""
         return f"FieldProxy(column={self.column!r})"
@@ -662,7 +711,7 @@ def _require_numeric_operand(value: Any, op: str) -> None:
     if isinstance(value, ValueExpr):
         raise TypeError(
             f"this value expression cannot be used with {op}; "
-            ".merge() / .concat() land in #379"
+            ".concat() is not shipped yet"
         )
     raise TypeError(
         f"{op} takes a numeric value (int, float, or Decimal), "
@@ -681,9 +730,9 @@ class ValueExpr:
 
     Not a :class:`QueryNode`. Literals and root :class:`FieldProxy` copies
     compile at the ``update()`` recipe door; ``+`` / ``-`` / ``now`` (#378)
-    produce instances of this type. ``.merge()`` / ``.concat()`` land in
-    #379. Comparing one to build a predicate is #327; projecting or
-    ordering by one is #309.
+    and ``.merge()`` (#379) produce instances of this type. ``.concat()``
+    is not shipped yet. Comparing one to build a predicate is #327;
+    projecting or ordering by one is #309.
     """
 
     def _reject_clause(self, clause: str) -> NoReturn:
@@ -762,6 +811,17 @@ class NowExpr(ValueExpr):
 
     def __repr__(self) -> str:
         return "now"
+
+
+class MergeValueExpr(ValueExpr):
+    """One ``.merge(patch)`` SET node (#379). Left is a json object column."""
+
+    def __init__(self, left: FieldProxy, patch: dict[str, Any]) -> None:
+        self.left = left
+        self.patch = patch
+
+    def __repr__(self) -> str:
+        return f"MergeValueExpr({self.left!r}, {self.patch!r})"
 
 
 now = NowExpr()

@@ -126,6 +126,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(connection::reset_engine, m)?)?;
     m.add_function(wrap_pyfunction!(connection::set_default_connection, m)?)?;
+    m.add_function(wrap_pyfunction!(connection::connection_backend, m)?)?;
     m.add_function(wrap_pyfunction!(clear_registry, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(schema::create_tables, m)?)?;
@@ -153,7 +154,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_composite_index_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_composite_unique_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_check_constraint_name, m)?)?;
-    m.add_function(wrap_pyfunction!(naming_ffi::_ddl_table_check_constraint_name, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        naming_ffi::_ddl_table_check_constraint_name,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_fk_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_resolve_storage_type, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_render_check_body, m)?)?;
@@ -166,7 +170,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         introspect::_live_table_checks_for_test,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(hydration::_verify_hydration_abi_for_test, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        hydration::_verify_hydration_abi_for_test,
+        m
+    )?)?;
 
     Ok(())
 }

@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_user_mixed_set_v10",
+  "vector_name": "query_user_literal_set_v11",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 10,
+    "ir_version": 11,
     "payload": {
       "model_name": "User",
       "where": [
@@ -21,6 +21,16 @@
       ],
       "set": [
         {
+          "column": "active",
+          "value": {
+            "kind": "literal",
+            "value": {
+              "kind": "bool",
+              "value": false
+            }
+          }
+        },
+        {
           "column": "email",
           "value": {
             "kind": "literal",
@@ -31,10 +41,17 @@
           }
         },
         {
-          "column": "bonus",
+          "column": "blob",
           "value": {
-            "kind": "column",
-            "column": "score"
+            "kind": "literal",
+            "value": {
+              "kind": "bytes",
+              "value": [
+                137,
+                0,
+                255
+              ]
+            }
           }
         }
       ],

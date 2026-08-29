@@ -27,6 +27,7 @@ from .._bind_payload import update_bind_payload
 from .nodes import (
     BinaryValueExpr,
     FieldProxy,
+    MergeValueExpr,
     NowExpr,
     QueryNode,
     RelationProxy,
@@ -34,6 +35,7 @@ from .nodes import (
     ValueExpr,
     _AGG_NUMERIC,
     _aggregate_source_family,
+    _json_column_shape,
     _query_value_kind,
     _serialize_query_value,
     now,
@@ -47,11 +49,10 @@ if TYPE_CHECKING:
 # mutate arm; they stay distinct values so guardrail errors name the caller.
 QueryVerb = Literal["fetch", "count", "update", "delete"]
 
-# Always 10 (#378 — unconditional bump, exactly like v9 at #377 and v8 at
-# #376). v10 adds binary ``+`` / ``-`` and ``now`` SET value-expression
-# kinds. Python and Rust ship in one wheel, so a single supported version
-# is the whole contract.
-_IR_VERSION = 10
+# Always 11 (#379 — unconditional bump, exactly like v10 at #378). v11
+# adds the ``merge`` SET value-expression kind. Python and Rust ship in
+# one wheel, so a single supported version is the whole contract.
+_IR_VERSION = 11
 
 
 class _AbsentType:
@@ -212,7 +213,24 @@ class NowSetExpr:
         return {"kind": "now"}
 
 
-SetValueExpr = LiteralValueExpr | ColumnRefValueExpr | BinarySetExpr | NowSetExpr
+@dataclass(frozen=True)
+class MergeSetExpr:
+    """A Postgres-only shallow object-merge SET value expression (#379)."""
+
+    left: "SetValueExpr"
+    right: "SetValueExpr"
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "merge",
+            "left": self.left.to_ir_dict(),
+            "right": self.right.to_ir_dict(),
+        }
+
+
+SetValueExpr = (
+    LiteralValueExpr | ColumnRefValueExpr | BinarySetExpr | NowSetExpr | MergeSetExpr
+)
 
 
 @dataclass(frozen=True)
@@ -604,10 +622,15 @@ def _compile_operand(model_cls: type, target: str, value: Any) -> SetValueExpr:
         )
     if isinstance(value, BinaryValueExpr):
         return _compile_binary(model_cls, target, value)
+    if isinstance(value, MergeValueExpr):
+        raise TypeError(
+            ".merge() cannot be nested inside + / -; it is a SET value, "
+            "not an arithmetic operand"
+        )
     if isinstance(value, ValueExpr):
         raise TypeError(
             "update() recipe values are a literal, a root column copy, "
-            "arithmetic, or now; .merge() / .concat() land in #379"
+            "arithmetic, now, or .merge(); .concat() is not shipped yet"
         )
     if isinstance(value, FieldProxy):
         if value.path:
@@ -647,8 +670,72 @@ def _compile_binary(
     )
 
 
+def _column_json_shape(model_cls: type, column: str) -> str | None:
+    spec = getattr(model_cls, "__ferro_columns__", {})[column]
+    return _json_column_shape(spec)
+
+
+def _require_postgres_merge(using: str | None) -> None:
+    """Reject ``.merge()`` when the connected dialect is SQLite (#379)."""
+    from .._core import connection_backend
+
+    if connection_backend(using) == "sqlite":
+        raise TypeError(
+            ".merge() is Postgres-only (jsonb ||). SQLite is not supported; "
+            "json_patch would delete keys on JSON null (RFC 7396), which is "
+            "a different meaning."
+        )
+
+
+def _compile_merge(
+    model_cls: type, target: str, value: MergeValueExpr, using: str | None
+) -> MergeSetExpr:
+    _require_postgres_merge(using)
+    target_shape = _column_json_shape(model_cls, target)
+    if target_shape == "array":
+        raise TypeError(
+            f"cannot assign .merge() onto {model_cls.__name__}.{target}: "
+            "it is list-typed; .concat() is not shipped yet"
+        )
+    if target_shape != "object":
+        family = _column_family(model_cls, target)
+        raise TypeError(
+            f".merge() can only be assigned to a json object column; "
+            f"{model_cls.__name__}.{target} is {family}-typed"
+        )
+    left = value.left
+    if left.path:
+        raise TypeError(
+            f"update() cannot assign a traversed column "
+            f"({left._dotted()}); SET targets and sources must be "
+            "root columns on the updated table"
+        )
+    _reject_relation(model_cls, left.column, role="value")
+    validate_query_column(model_cls, left.column)
+    source_shape = _column_json_shape(model_cls, left.column)
+    if source_shape == "array":
+        raise TypeError(
+            f"{left._dotted()}.merge() is not supported: "
+            f"{model_cls.__name__}.{left.column} is list-typed; "
+            ".concat() is not shipped yet"
+        )
+    if source_shape != "object":
+        family = _column_family(model_cls, left.column)
+        raise TypeError(
+            f"{left._dotted()}.merge() is not supported: "
+            f"{model_cls.__name__}.{left.column} is {family}-typed, "
+            "and .merge() takes a json object (dict or nested model)."
+        )
+    return MergeSetExpr(
+        left=ColumnRefValueExpr(column=left.column),
+        right=_literal_assignment(target, value.patch).value,
+    )
+
+
 def _recipe_set(
-    model_cls: type, recipe: Mapping[str, Any]
+    model_cls: type,
+    recipe: Mapping[str, Any],
+    using: str | None = None,
 ) -> tuple[SetAssignment, ...]:
     """Compile a recipe dict into the same SET list kwargs use."""
     compiled: list[SetAssignment] = []
@@ -685,10 +772,18 @@ def _recipe_set(
                 )
             )
             continue
+        if isinstance(value, MergeValueExpr):
+            compiled.append(
+                SetAssignment(
+                    column=column,
+                    value=_compile_merge(model_cls, column, value, using),
+                )
+            )
+            continue
         if isinstance(value, ValueExpr):
             raise TypeError(
                 "update() recipe values are a literal, a root column copy, "
-                "arithmetic, or now; .merge() / .concat() land in #379"
+                "arithmetic, now, or .merge(); .concat() is not shipped yet"
             )
         if isinstance(value, FieldProxy):
             compiled.append(
@@ -819,7 +914,7 @@ def compile_query(
                     "compile_query() accepts either recipe or assignments, not both"
                 )
             set_assignments = (
-                _recipe_set(query.model_cls, recipe)
+                _recipe_set(query.model_cls, recipe, using=query._using)
                 if recipe is not None
                 else _literal_set(assignments)
             )

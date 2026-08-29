@@ -11,9 +11,9 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 10 (#378 — unconditional bump; binary + / -
-# and now join column-ref / literal); `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 10, "codec": 1}
+# `query` is on ir_version 11 (#379 — unconditional bump; merge joins
+# add / sub / now); `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 11, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -41,7 +41,7 @@ def _validate_set_value(expr: Any, label: str) -> None:
     assert isinstance(expr, dict), f"{label} must be object"
     assert "kind" in expr, f"{label} missing kind"
     kind = expr["kind"]
-    assert kind in {"literal", "column", "add", "sub", "now"}, (
+    assert kind in {"literal", "column", "add", "sub", "now", "merge"}, (
         f"{label}.kind invalid: {kind!r}"
     )
     if kind == "literal":
@@ -54,7 +54,7 @@ def _validate_set_value(expr: Any, label: str) -> None:
         assert isinstance(expr["column"], str) and expr["column"], (
             f"{label}.column must be a non-empty string"
         )
-    elif kind in {"add", "sub"}:
+    elif kind in {"add", "sub", "merge"}:
         _require_keys(expr, {"kind", "left", "right"}, label)
         _validate_set_value(expr["left"], f"{label}.left")
         _validate_set_value(expr["right"], f"{label}.right")
