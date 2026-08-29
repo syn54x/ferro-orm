@@ -4,7 +4,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import FerroField, Model, connect, engines, now
+from ferro import Field, FerroField, Model, connect, engines, now
 from ferro._core import update_filtered
 from ferro.query.wire import compile_query, model_identity
 from ferro.state import resolve_operation_scope
@@ -295,3 +295,70 @@ async def test_recipe_now_writes_database_clock(db_url):
         if written.tzinfo is None:
             written = written.replace(tzinfo=UTC)
         assert written >= before
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_recipe_merge_shallow_and_null_object(db_url):
+    """Postgres-only shallow merge; NULL object column becomes the patch (#379)."""
+
+    class Conversation(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        turns: dict | None = None
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        filled = Conversation(turns={"keep": 1, "overlap": "old"})
+        await filled.save()
+        empty = Conversation(turns=None)
+        await empty.save()
+        fid, eid = filled.id, empty.id
+
+        updated = await Conversation.where(
+            lambda conversation: conversation.id == fid
+        ).update(
+            lambda conversation: {
+                "turns": conversation.turns.merge({"overlap": "new", "added": 2})
+            }
+        )
+        assert updated == 1
+        fresh = await Conversation.get(fid)
+        assert fresh.turns == {"keep": 1, "overlap": "new", "added": 2}
+
+        updated = await Conversation.where(
+            lambda conversation: conversation.id == eid
+        ).update(
+            lambda conversation: {
+                "turns": conversation.turns.merge({"run": {"ok": True}})
+            }
+        )
+        assert updated == 1
+        assert (await Conversation.get(eid)).turns == {"run": {"ok": True}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_recipe_merge_evicts_identity_map(db_url):
+    """Merge updates reuse the existing update() eviction / rowcount contract."""
+
+    class Conversation(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        turns: dict = Field(default_factory=dict)
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        row = Conversation(turns={"a": 1})
+        await row.save()
+        cid = row.id
+
+        cached = await Conversation.get(cid)
+        assert cached is row
+
+        updated = await Conversation.where(
+            lambda conversation: conversation.id == cid
+        ).update(lambda conversation: {"turns": conversation.turns.merge({"b": 2})})
+        assert updated == 1
+
+        fresh = await Conversation.get(cid)
+        assert fresh is not row
+        assert fresh.turns == {"a": 1, "b": 2}

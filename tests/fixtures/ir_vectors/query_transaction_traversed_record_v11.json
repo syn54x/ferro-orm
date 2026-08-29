@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_transaction_aggregate_v10",
+  "vector_name": "query_transaction_traversed_record_v11",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 10,
+    "ir_version": 11,
     "payload": {
       "model_name": "Transaction",
       "where": [
@@ -22,15 +22,26 @@
       "set": [],
       "order_by": [
         {
-          "column": "total",
-          "direction": "desc",
+          "column": "id",
+          "direction": "asc",
           "path": []
         }
       ],
-      "limit": 5,
+      "limit": null,
       "offset": null,
       "m2m": null,
       "joins": [
+        {
+          "join_type": "left",
+          "path": [
+            {
+              "relation": "account",
+              "from_column": "account_id",
+              "to_table": "account",
+              "to_column": "id"
+            }
+          ]
+        },
         {
           "join_type": "inner",
           "path": [
@@ -38,6 +49,12 @@
               "relation": "account",
               "from_column": "account_id",
               "to_table": "account",
+              "to_column": "id"
+            },
+            {
+              "relation": "owner",
+              "from_column": "owner_id",
+              "to_table": "owner",
               "to_column": "id"
             }
           ]
@@ -47,6 +64,11 @@
         "kind": "record",
         "fields": [
           {
+            "name": "txn_id",
+            "column": "id",
+            "path": []
+          },
+          {
             "name": "account_name",
             "column": "name",
             "path": [
@@ -54,29 +76,12 @@
             ]
           },
           {
-            "name": "total",
-            "path": [],
-            "expr": {
-              "fn": "sum",
-              "column": "amount",
-              "path": []
-            }
-          },
-          {
-            "name": "avg_balance",
-            "path": [],
-            "expr": {
-              "fn": "avg",
-              "column": "balance",
-              "path": [
-                {
-                  "relation": "account",
-                  "from_column": "account_id",
-                  "to_table": "account",
-                  "to_column": "id"
-                }
-              ]
-            }
+            "name": "owner_email",
+            "column": "email",
+            "path": [
+              "account",
+              "owner"
+            ]
           }
         ]
       }

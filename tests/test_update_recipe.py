@@ -9,7 +9,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation, now
+from ferro import BackRef, Field, FerroField, ForeignKey, Model, Relation, now
 from ferro.query.nodes import QueryProxy, ValueExpr
 from ferro.relations import resolve_relationships
 
@@ -32,6 +32,8 @@ def models(clean_registry: None) -> dict[str, type]:
         updated_at: datetime | None = None
         born: date | None = None
         opens_at: time | None = None
+        turns: dict = Field(default_factory=dict)
+        items: list = Field(default_factory=list)
 
     resolve_relationships()
     return {"User": User, "Account": Account}
@@ -212,13 +214,66 @@ async def test_now_on_time_column_names_family(models: dict[str, type]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_bare_value_expr_still_names_merge_followup(
+async def test_bare_value_expr_names_concat_followup(
     models: dict[str, type],
 ) -> None:
     User = models["User"]
-    with pytest.raises(TypeError, match=r"#379"):
+    with pytest.raises(TypeError, match=r"\.concat\(\)"):
         await User.where(lambda user: user.active == True).update(  # noqa: E712
             lambda user: {"email": ValueExpr()}
+        )
+
+
+@pytest.mark.asyncio
+async def test_merge_on_sqlite_names_postgres(models: dict[str, type]) -> None:
+    from ferro import connect, engines
+
+    User = models["User"]
+    await connect("sqlite::memory:", auto_migrate=True)
+    async with engines.session():
+        with pytest.raises(TypeError, match=r"Postgres"):
+            await User.where(lambda user: user.active == True).update(  # noqa: E712
+                lambda user: {"turns": user.turns.merge({"k": 1})}
+            )
+
+
+@pytest.mark.asyncio
+async def test_merge_on_list_column_names_concat(models: dict[str, type]) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"\.concat\(\)"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {"items": user.items.merge({"k": 1})}
+        )
+
+
+@pytest.mark.asyncio
+async def test_merge_list_patch_names_concat(models: dict[str, type]) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"\.concat\(\)"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {"turns": user.turns.merge(["not", "an", "object"])}  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_merge_on_non_json_column_is_build_time_error(
+    models: dict[str, type],
+) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"json object|object"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {"email": user.email.merge({"k": 1})}
+        )
+
+
+@pytest.mark.asyncio
+async def test_merge_target_non_object_is_build_time_error(
+    models: dict[str, type],
+) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"json object|object"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {"score": user.turns.merge({"k": 1})}
         )
 
 
@@ -230,4 +285,16 @@ async def test_now_in_kwargs_still_names_recipe_form(
     with pytest.raises(TypeError, match=r"update\(lambda .*: \{\"col\":"):
         await User.where(lambda user: user.active == True).update(  # noqa: E712
             updated_at=now
+        )
+
+
+@pytest.mark.asyncio
+async def test_merge_in_kwargs_still_names_recipe_form(
+    models: dict[str, type],
+) -> None:
+    User = models["User"]
+    proxy = QueryProxy(User).turns
+    with pytest.raises(TypeError, match=r"update\(lambda .*: \{\"col\":"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            turns=proxy.merge({"k": 1})
         )

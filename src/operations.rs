@@ -15,6 +15,7 @@ use crate::state::{
 use dashmap::DashMap;
 use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoinHop, QueryValueExpr};
 use pyo3::prelude::*;
+use sea_query::extension::postgres::PgExpr;
 use sea_query::{
     Alias, Condition, Expr, Iden, InsertStatement, JoinType, NullOrdering, OnConflict, Order,
     PostgresQueryBuilder, Query, SelectStatement, SimpleExpr, SqliteQueryBuilder, UpdateStatement,
@@ -256,7 +257,7 @@ fn tx_remove(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<Transacti
 /// Python and Rust ship in one wheel, so there is exactly one supported version at any
 /// time — no negotiation, no fallback. A mismatch can only mean a mixed build (a stale
 /// `.so` next to a rebuilt Python package, or vice versa).
-const SUPPORTED_QUERY_IR_VERSION: u32 = 10;
+const SUPPORTED_QUERY_IR_VERSION: u32 = 11;
 
 /// Envelope shell used only to read `ir_kind`/`ir_version` before committing to a strict
 /// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real earlier-version
@@ -3742,6 +3743,9 @@ fn set_value_bind_input(value: &QueryValueExpr, col: &str) -> PyResult<BindInput
         QueryValueExpr::Now => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "SET column {col:?} is now and must not be bound as a literal"
         ))),
+        QueryValueExpr::Merge { .. } => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "SET column {col:?} is a merge expression and must not be bound as a literal"
+        ))),
     }
 }
 
@@ -3828,6 +3832,43 @@ fn set_value_to_expr(
             Ok(left_expr.sub(right_expr))
         }
         QueryValueExpr::Now => Ok(Expr::cust("CURRENT_TIMESTAMP")),
+        QueryValueExpr::Merge { left, right } => {
+            if backend != Dialect::Postgres {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    ".merge() is Postgres-only (jsonb ||); SQLite is not supported",
+                ));
+            }
+            let QueryValueExpr::Column { column } = left.as_ref() else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR merge SET for column {target:?}: \
+                     left must be a column"
+                )));
+            };
+            if column.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR merge SET for column {target:?}: \
+                     source column must be a non-empty name"
+                )));
+            }
+            let input = set_value_bind_input(right, target)?;
+            let BindInput::Json(patch) = input else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR merge SET for column {target:?}: \
+                     patch must be a JSON object"
+                )));
+            };
+            if !patch.is_object() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR merge SET for column {target:?}: \
+                     patch must be a JSON object"
+                )));
+            }
+            let quoted = column.replace('"', "");
+            let left = Expr::cust(format!("COALESCE(\"{quoted}\", '{{}}')"));
+            let right =
+                Expr::value(SeaValue::String(Some(Box::new(patch.to_string())))).cast_as("jsonb");
+            Ok(left.concatenate(right))
+        }
     }
 }
 
@@ -4585,15 +4626,80 @@ mod m2m_value_tests {
     #[test]
     fn query_ir_set_rejects_unknown_value_expr_kind() {
         let err = serde_json::from_value::<ferro_schema_ir::QueryValueExpr>(serde_json::json!({
-            "kind": "merge",
+            "kind": "concat",
             "left": {"kind": "column", "column": "score"},
             "right": {"kind": "literal", "value": {"kind": "int", "value": 1}}
         }))
         .expect_err("unknown value-expr kind must fail at the trust boundary");
         let message = err.to_string();
         assert!(
-            message.contains("merge"),
+            message.contains("concat"),
             "error must name the unknown kind: {message}"
+        );
+    }
+
+    #[test]
+    fn query_ir_set_merge_renders_coalesce_concat_not_premerged_bind() {
+        use sea_query::{Alias, PostgresQueryBuilder, UpdateStatement};
+
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "merge",
+            "left": {"kind": "column", "column": "turns"},
+            "right": {
+                "kind": "literal",
+                "value": {"kind": "object", "value": {"k": "v"}}
+            }
+        }))
+        .expect("merge value expression");
+
+        let schema = crate::state::RegisteredModel::new_for_test(
+            serde_json::json!({
+                "properties": { "turns": { "type": "object" } }
+            }),
+            "conversation".to_string(),
+        );
+        let empty_udt = HashMap::new();
+        let empty_uuid = HashSet::new();
+        let empty_ts = HashMap::new();
+        let expr = set_value_to_expr(
+            &schema,
+            "conversation",
+            "turns",
+            &value,
+            &empty_udt,
+            &empty_uuid,
+            &empty_ts,
+            Dialect::Postgres,
+        )
+        .expect("merge must lower");
+
+        let mut update = UpdateStatement::new();
+        update
+            .table(Alias::new("conversation"))
+            .value(Alias::new("turns"), expr);
+        let (sql, values) = update.build(PostgresQueryBuilder);
+        let upper = sql.to_uppercase();
+        assert!(
+            upper.contains("COALESCE") && sql.contains("||") && sql.contains("jsonb"),
+            "merge SET must render COALESCE + || + jsonb, not a pre-merged bind: {sql}"
+        );
+        assert!(
+            sql.contains("turns"),
+            "merge SET must keep the column as a column, not a bind: {sql}"
+        );
+        assert_eq!(
+            values.0.len(),
+            1,
+            "patch must stay a bound json literal: {sql} {values:?}"
+        );
+        let bound = format!("{:?}", values.0[0]);
+        assert!(
+            bound.contains("k") && bound.contains("v"),
+            "bound patch must be the json object, not pre-merged: {values:?}"
+        );
+        assert!(
+            !bound.contains("COALESCE"),
+            "must not bind a pre-merged Python dict: {values:?}"
         );
     }
 
@@ -5279,7 +5385,7 @@ mod mutation_pagination_guard_tests {
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 10,
+            "ir_version": 11,
             "payload": {
                 "set": [],
                 "model_name": "Widget",
@@ -5452,12 +5558,12 @@ mod mutation_pagination_guard_tests {
             serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
         envelope["payload"]["set"] = serde_json::json!([{
             "column": "bonus",
-            "value": {"kind": "merge", "left": {"kind": "column", "column": "score"}}
+            "value": {"kind": "concat", "left": {"kind": "column", "column": "score"}}
         }]);
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("unknown value-expr kind must fail at the trust boundary");
         assert!(
-            err.to_string().contains("merge"),
+            err.to_string().contains("concat"),
             "error must name the unknown kind: {err}"
         );
     }
@@ -5467,10 +5573,10 @@ mod mutation_pagination_guard_tests {
 mod query_ir_version_gate_tests {
     use super::query_plan_from_ir_json;
 
-    fn v10_envelope() -> serde_json::Value {
+    fn v11_envelope() -> serde_json::Value {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 10,
+            "ir_version": 11,
             "payload": {
                 "set": [],
                 "model_name": "Widget",
@@ -5488,7 +5594,7 @@ mod query_ir_version_gate_tests {
     /// Assert a rejected envelope's message names the received version, this
     /// build's supported version (8), and the one-wheel fix — the actionable
     /// shape pinned since the v1-at-v2 bump (#269), re-pinned at v3 (#278),
-    /// v4 (#285), v5 (#292), v6 (#310), v7 (#314), v8 (#376), v9 (#377), and v10 (#378).
+    /// v4 (#285), v5 (#292), v6 (#310), v7 (#314), v8 (#376), v9 (#377), v10 (#378), and v11 (#379).
     fn assert_actionable_version_rejection(err: pyo3::PyErr, received: char) {
         pyo3::Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
@@ -5499,7 +5605,7 @@ mod query_ir_version_gate_tests {
             "message should name the received version: {msg}"
         );
         assert!(
-            msg.contains("10"),
+            msg.contains("11"),
             "message should name the supported version: {msg}"
         );
         assert!(
@@ -5513,21 +5619,21 @@ mod query_ir_version_gate_tests {
     }
 
     #[test]
-    fn accepts_version_10() {
-        query_plan_from_ir_json(&v10_envelope().to_string())
-            .expect("a well-formed v10 envelope must be accepted");
+    fn accepts_version_11() {
+        query_plan_from_ir_json(&v11_envelope().to_string())
+            .expect("a well-formed v11 envelope must be accepted");
     }
 
     #[test]
     fn rejects_v8_payload_without_set_section() {
-        let mut envelope = v10_envelope();
+        let mut envelope = v11_envelope();
         envelope["payload"]
             .as_object_mut()
             .expect("payload object")
             .remove("set");
 
         let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v10 payload without its required SET section must be rejected");
+            .expect_err("a v11 payload without its required SET section must be rejected");
         assert!(
             err.to_string().contains("set"),
             "must name the missing section: {err}"
@@ -5536,7 +5642,7 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_v7_envelope_with_actionable_message() {
-        let mut envelope = v10_envelope();
+        let mut envelope = v11_envelope();
         envelope["ir_version"] = serde_json::json!(7);
         envelope["payload"]
             .as_object_mut()
@@ -5550,7 +5656,7 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_v8_envelope_with_actionable_message() {
-        let mut envelope = v10_envelope();
+        let mut envelope = v11_envelope();
         envelope["ir_version"] = serde_json::json!(8);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
@@ -5560,12 +5666,34 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_v9_envelope_with_actionable_message() {
-        let mut envelope = v10_envelope();
+        let mut envelope = v11_envelope();
         envelope["ir_version"] = serde_json::json!(9);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("a v9 envelope must be rejected before payload parsing");
         assert_actionable_version_rejection(err, '9');
+    }
+
+    #[test]
+    fn rejects_v10_envelope_with_actionable_message() {
+        let mut envelope = v11_envelope();
+        envelope["ir_version"] = serde_json::json!(10);
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v10 envelope must be rejected before payload parsing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("10"),
+            "message should name the received version: {msg}"
+        );
+        assert!(
+            msg.contains("11"),
+            "message should name the supported version: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("one wheel"),
+            "message should explain Python/Rust ship in one wheel: {msg}"
+        );
     }
 
     /// Contract test (#314 acceptance criteria): a v6 envelope must be
@@ -5751,14 +5879,14 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_unsupported_future_version() {
-        let mut envelope = v10_envelope();
-        envelope["ir_version"] = serde_json::json!(11);
+        let mut envelope = v11_envelope();
+        envelope["ir_version"] = serde_json::json!(12);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("an unsupported future version must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("11"),
+            msg.contains("12"),
             "message should name the received version: {msg}"
         );
     }
@@ -5767,7 +5895,7 @@ mod query_ir_version_gate_tests {
     /// naming the bad kind and the supported ones (#278).
     #[test]
     fn rejects_unknown_materialization_kind() {
-        let mut envelope = v10_envelope();
+        let mut envelope = v11_envelope();
         envelope["payload"]["materialization"] = serde_json::json!({"kind": "row_dicts"});
 
         let err = query_plan_from_ir_json(&envelope.to_string())
@@ -5784,7 +5912,7 @@ mod query_ir_version_gate_tests {
     /// the plan travels with the query as data (ADR-0007), never defaulted.
     #[test]
     fn rejects_v8_payload_missing_materialization() {
-        let mut envelope = v10_envelope();
+        let mut envelope = v11_envelope();
         envelope["payload"]
             .as_object_mut()
             .unwrap()
@@ -5811,7 +5939,7 @@ mod materialization_walker_gate_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 10,
+                "ir_version": 11,
                 "payload": {
                     "set": [],
                     "model_name": "Widget",
@@ -5904,7 +6032,7 @@ mod record_select_list_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 10,
+                "ir_version": 11,
                 "payload": {
                     "set": [],
                     "model_name": "Transaction",
@@ -6407,7 +6535,7 @@ mod instances_select_list_tests {
         let mut plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 10,
+                "ir_version": 11,
                 "payload": {
                     "set": [],
                     "model_name": "Transaction",
@@ -6567,7 +6695,7 @@ mod mutation_qualification_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 10,
+                "ir_version": 11,
                 "payload": {
                     "set": [],
                     "model_name": "Widget",
@@ -6654,7 +6782,7 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 10,
+                "ir_version": 11,
                 "payload": {
                     "set": [],
                     "model_name": "Transaction",
@@ -6761,7 +6889,7 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 10,
+                "ir_version": 11,
                 "payload": {
                     "set": [],
                     "model_name": model_name,
@@ -6784,7 +6912,7 @@ mod select_join_render_tests {
         let plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 10,
+                "ir_version": 11,
                 "payload": {
                     "set": [],
                     "model_name": "Transaction",

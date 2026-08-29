@@ -26,7 +26,7 @@ def test_compile_query_emits_nulls_only_when_set():
         .order_by(lambda c: c.updated_at, "desc")
     )
     envelope = json.loads(compile_query(query, "fetch").wire_json)
-    assert envelope["ir_version"] == 10
+    assert envelope["ir_version"] == 11
     order_by = envelope["payload"]["order_by"]
     assert order_by == [
         {
@@ -54,7 +54,7 @@ def test_compile_query_nulls_first_on_projected_query():
         lambda t: {"note": t.note, "total": t.amount.sum()}
     ).order_by("total", "desc", nulls="first")
     envelope = json.loads(compile_query(query, "fetch").wire_json)
-    assert envelope["ir_version"] == 10
+    assert envelope["ir_version"] == 11
     assert envelope["payload"]["order_by"] == [
         {
             "column": "total",
@@ -88,7 +88,7 @@ def test_compile_query_nulls_with_traversal_path():
     ]
 
 
-def test_compile_query_omitted_nulls_keeps_ir_version_10():
+def test_compile_query_omitted_nulls_keeps_ir_version_11():
     class WirePlain(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         age: int = 0
@@ -96,7 +96,7 @@ def test_compile_query_omitted_nulls_keeps_ir_version_10():
     envelope = json.loads(
         compile_query(WirePlain.select().order_by("age"), "fetch").wire_json
     )
-    assert envelope["ir_version"] == 10
+    assert envelope["ir_version"] == 11
     entry = envelope["payload"]["order_by"][0]
     assert entry == {"column": "age", "direction": "asc", "path": []}
     assert "nulls" not in entry

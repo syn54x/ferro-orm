@@ -6,7 +6,8 @@
 use crate::backend::{EngineHandle, PoolSpec, dialect_from_url};
 use crate::migrate::{MigrateOptions, internal_migrate};
 use crate::state::{
-    CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, ENGINE, SESSION_REGISTRY, TRANSACTION_REGISTRY,
+    CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, Dialect, ENGINE, SESSION_REGISTRY,
+    TRANSACTION_REGISTRY, connection_for_route,
 };
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -151,7 +152,6 @@ fn duplicate_connection_error(connection_name: &str, is_implicit_default: bool) 
     })
 }
 
-
 async fn connect_engine_handle(
     connection_url: &str,
     backend: crate::state::Dialect,
@@ -209,10 +209,7 @@ pub fn connect(
     let (connection_url, search_path) = split_search_path(&url);
     let redacted_url = redact_connection_url(&connection_url);
     let backend = dialect_from_url(&connection_url).map_err(|e| {
-        crate::errors::interface_error(format!(
-            "DB Connection failed for {}: {}",
-            redacted_url, e
-        ))
+        crate::errors::interface_error(format!("DB Connection failed for {}: {}", redacted_url, e))
     })?;
     let (connection_name, is_implicit_default) = normalized_connection_name(name)?;
     let should_select_default = default || is_implicit_default;
@@ -338,6 +335,22 @@ pub fn reset_engine() -> PyResult<()> {
     // maps are session-scoped only).
     SESSION_REGISTRY.clear();
     Ok(())
+}
+
+/// The connected dialect for ``using``, or the default connection.
+///
+/// ``None`` when no engine is initialized — recipe compile stays
+/// dialect-agnostic for goldens. SQLite vs Postgres is available after
+/// ``connect()`` so Postgres-only expressions can fail at build time.
+#[pyfunction]
+#[pyo3(signature = (using=None))]
+pub fn connection_backend(using: Option<String>) -> Option<String> {
+    connection_for_route(using)
+        .ok()
+        .map(|(_, engine)| match engine.backend() {
+            Dialect::Sqlite => "sqlite".to_string(),
+            Dialect::Postgres => "postgres".to_string(),
+        })
 }
 
 /// Selects the default connection used by legacy unqualified operations.
