@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_user_not_leaf_v9",
+  "vector_name": "query_user_not_leaf_v10",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 9,
+    "ir_version": 10,
     "payload": {
       "model_name": "User",
       "where": [

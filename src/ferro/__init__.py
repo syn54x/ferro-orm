@@ -42,7 +42,7 @@ from .exceptions import (
 )
 from .fields import BackRef, Field, ManyToMany
 from .models import Model, evict_instance, transaction
-from .query import Relation, Row, Rows
+from .query import Relation, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .session import Session, engines
 
@@ -371,4 +371,5 @@ __all__ = [
     "Transaction",
     "Session",
     "engines",
+    "now",
 ]

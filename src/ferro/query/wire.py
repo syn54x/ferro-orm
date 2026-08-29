@@ -25,14 +25,18 @@ from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 from .._bind_payload import update_bind_payload
 from .nodes import (
+    BinaryValueExpr,
     FieldProxy,
+    NowExpr,
     QueryNode,
     RelationProxy,
     ReverseRelationProxy,
     ValueExpr,
+    _AGG_NUMERIC,
     _aggregate_source_family,
     _query_value_kind,
     _serialize_query_value,
+    now,
     validate_query_column,
 )
 
@@ -43,11 +47,11 @@ if TYPE_CHECKING:
 # mutate arm; they stay distinct values so guardrail errors name the caller.
 QueryVerb = Literal["fetch", "count", "update", "delete"]
 
-# Always 9 (#377 — unconditional bump, exactly like v8 at #376 and v7 at
-# #314). v9 adds the column-ref SET value-expression kind beside literal.
-# Python and Rust ship in one wheel, so a single supported version is the
-# whole contract.
-_IR_VERSION = 9
+# Always 10 (#378 — unconditional bump, exactly like v9 at #377 and v8 at
+# #376). v10 adds binary ``+`` / ``-`` and ``now`` SET value-expression
+# kinds. Python and Rust ship in one wheel, so a single supported version
+# is the whole contract.
+_IR_VERSION = 10
 
 
 class _AbsentType:
@@ -185,11 +189,38 @@ class ColumnRefValueExpr:
 
 
 @dataclass(frozen=True)
+class BinarySetExpr:
+    """A binary ``+`` / ``-`` SET value expression (#378)."""
+
+    op: Literal["add", "sub"]
+    left: "SetValueExpr"
+    right: "SetValueExpr"
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.op,
+            "left": self.left.to_ir_dict(),
+            "right": self.right.to_ir_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class NowSetExpr:
+    """The database-clock SET value expression (#378)."""
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"kind": "now"}
+
+
+SetValueExpr = LiteralValueExpr | ColumnRefValueExpr | BinarySetExpr | NowSetExpr
+
+
+@dataclass(frozen=True)
 class SetAssignment:
     """One ordered root-column assignment in the canonical SET section."""
 
     column: str
-    value: LiteralValueExpr | ColumnRefValueExpr
+    value: SetValueExpr
 
     def to_ir_dict(self) -> dict[str, Any]:
         return {"column": self.column, "value": self.value.to_ir_dict()}
@@ -538,6 +569,84 @@ def _column_family(model_cls: type, column: str) -> str:
     return _aggregate_source_family(spec)
 
 
+def _column_ref_value(model_cls: type, target: str, value: FieldProxy) -> ColumnRefValueExpr:
+    if value.path:
+        raise TypeError(
+            f"update() cannot assign a traversed column "
+            f"({value._dotted()}); SET targets and sources must be "
+            "root columns on the updated table"
+        )
+    _reject_relation(model_cls, value.column, role="value")
+    validate_query_column(model_cls, value.column)
+    source_family = _column_family(model_cls, value.column)
+    target_family = _column_family(model_cls, target)
+    if source_family != target_family:
+        model = model_cls.__name__
+        raise TypeError(
+            f"cannot copy {model}.{value.column} ({source_family}) "
+            f"onto {model}.{target} ({target_family})"
+        )
+    return ColumnRefValueExpr(column=value.column)
+
+
+def _compile_operand(model_cls: type, target: str, value: Any) -> SetValueExpr:
+    """Compile one side of a binary SET expression (#378)."""
+    if isinstance(value, (RelationProxy, ReverseRelationProxy)):
+        relation = value._path[-1] if isinstance(value, RelationProxy) else value._name
+        raise TypeError(
+            f"update() cannot assign the relation {relation!r} as a SET "
+            "value; sources must be root columns on the updated table"
+        )
+    if isinstance(value, NowExpr) or value is now:
+        raise TypeError(
+            "now is the database clock, not a numeric operand; "
+            "+ / - take a numeric column (int, float, or Decimal)"
+        )
+    if isinstance(value, BinaryValueExpr):
+        return _compile_binary(model_cls, target, value)
+    if isinstance(value, ValueExpr):
+        raise TypeError(
+            "update() recipe values are a literal, a root column copy, "
+            "arithmetic, or now; .merge() / .concat() land in #379"
+        )
+    if isinstance(value, FieldProxy):
+        if value.path:
+            raise TypeError(
+                f"update() cannot assign a traversed column "
+                f"({value._dotted()}); SET targets and sources must be "
+                "root columns on the updated table"
+            )
+        _reject_relation(model_cls, value.column, role="value")
+        validate_query_column(model_cls, value.column)
+        source_family = _column_family(model_cls, value.column)
+        if source_family not in _AGG_NUMERIC:
+            model = model_cls.__name__
+            raise TypeError(
+                f"{value._dotted()} is not supported as an arithmetic "
+                f"operand: {model}.{value.column} is {source_family}-typed, "
+                "and + / - take a numeric column (int, float, or Decimal)."
+            )
+        return ColumnRefValueExpr(column=value.column)
+    return _literal_assignment(target, value).value
+
+
+def _compile_binary(
+    model_cls: type, target: str, value: BinaryValueExpr
+) -> BinarySetExpr:
+    target_family = _column_family(model_cls, target)
+    if target_family not in _AGG_NUMERIC:
+        model = model_cls.__name__
+        raise TypeError(
+            f"cannot assign a numeric expression onto {model}.{target} "
+            f"({target_family})"
+        )
+    return BinarySetExpr(
+        op="add" if value.op == "+" else "sub",
+        left=_compile_operand(model_cls, target, value.left),
+        right=_compile_operand(model_cls, target, value.right),
+    )
+
+
 def _recipe_set(
     model_cls: type, recipe: Mapping[str, Any]
 ) -> tuple[SetAssignment, ...]:
@@ -559,32 +668,33 @@ def _recipe_set(
                 f"update() cannot assign the relation {relation!r} as a SET "
                 "value; sources must be root columns on the updated table"
             )
-        if isinstance(value, ValueExpr):
-            raise TypeError(
-                "update() recipe values are a literal or a root column copy; "
-                "other value expressions land in #378 / #379"
-            )
-        if isinstance(value, FieldProxy):
-            if value.path:
+        if isinstance(value, NowExpr) or value is now:
+            family = _column_family(model_cls, column)
+            if family != "datetime":
                 raise TypeError(
-                    f"update() cannot assign a traversed column "
-                    f"({value._dotted()}); SET targets and sources must be "
-                    "root columns on the updated table"
+                    f"now can only be assigned to a datetime column; "
+                    f"{model_cls.__name__}.{column} is {family}-typed"
                 )
-            _reject_relation(model_cls, value.column, role="value")
-            validate_query_column(model_cls, value.column)
-            source_family = _column_family(model_cls, value.column)
-            target_family = _column_family(model_cls, column)
-            if source_family != target_family:
-                model = model_cls.__name__
-                raise TypeError(
-                    f"cannot copy {model}.{value.column} ({source_family}) "
-                    f"onto {model}.{column} ({target_family})"
-                )
+            compiled.append(SetAssignment(column=column, value=NowSetExpr()))
+            continue
+        if isinstance(value, BinaryValueExpr):
             compiled.append(
                 SetAssignment(
                     column=column,
-                    value=ColumnRefValueExpr(column=value.column),
+                    value=_compile_binary(model_cls, column, value),
+                )
+            )
+            continue
+        if isinstance(value, ValueExpr):
+            raise TypeError(
+                "update() recipe values are a literal, a root column copy, "
+                "arithmetic, or now; .merge() / .concat() land in #379"
+            )
+        if isinstance(value, FieldProxy):
+            compiled.append(
+                SetAssignment(
+                    column=column,
+                    value=_column_ref_value(model_cls, column, value),
                 )
             )
             continue

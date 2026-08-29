@@ -1,14 +1,15 @@
-"""Build-time doors for ``update(lambda t: {...})`` (#377).
+"""Build-time doors for ``update(lambda t: {...})`` (#377 / #378).
 
 Stops at compile / call time — no SQL execution. Backend persistence lives
 in ``test_bulk_update.py``.
 """
 
+from datetime import date, datetime, time
 from typing import Annotated
 
 import pytest
 
-from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro import BackRef, FerroField, ForeignKey, Model, Relation, now
 from ferro.query.nodes import QueryProxy, ValueExpr
 from ferro.relations import resolve_relationships
 
@@ -28,6 +29,9 @@ def models(clean_registry: None) -> dict[str, type]:
         bonus: int = 0
         name: str = ""
         account: Annotated[Account | None, ForeignKey(related_name="users")] = None
+        updated_at: datetime | None = None
+        born: date | None = None
+        opens_at: time | None = None
 
     resolve_relationships()
     return {"User": User, "Account": Account}
@@ -165,3 +169,65 @@ def test_projected_query_recipe_stays_hard_reject(models: dict[str, type]) -> No
         ValueError, match=r"update\(\) is not supported on a projected query"
     ):
         projected.update(lambda user: {"email": "x@ferro.dev"})  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_plus_on_non_numeric_column_names_family(
+    models: dict[str, type],
+) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"email.*string.*numeric"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {"name": user.email + 1}
+        )
+
+
+@pytest.mark.asyncio
+async def test_minus_on_non_numeric_column_names_family(
+    models: dict[str, type],
+) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"email.*string.*numeric"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {"score": user.email - 1}
+        )
+
+
+@pytest.mark.asyncio
+async def test_now_on_date_column_names_family(models: dict[str, type]) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"now.*born.*date"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {"born": now}
+        )
+
+
+@pytest.mark.asyncio
+async def test_now_on_time_column_names_family(models: dict[str, type]) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"now.*opens_at.*time"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {"opens_at": now}
+        )
+
+
+@pytest.mark.asyncio
+async def test_bare_value_expr_still_names_merge_followup(
+    models: dict[str, type],
+) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"#379"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            lambda user: {"email": ValueExpr()}
+        )
+
+
+@pytest.mark.asyncio
+async def test_now_in_kwargs_still_names_recipe_form(
+    models: dict[str, type],
+) -> None:
+    User = models["User"]
+    with pytest.raises(TypeError, match=r"update\(lambda .*: \{\"col\":"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            updated_at=now
+        )

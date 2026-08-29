@@ -2,7 +2,9 @@
 
 import asyncio
 
-from ferro import Field, Model, UniqueViolationError, connect, engines
+from datetime import datetime
+
+from ferro import Field, Model, UniqueViolationError, connect, engines, now
 
 
 class Customer(Model):
@@ -10,6 +12,8 @@ class Customer(Model):
     email: str = Field(unique=True)
     name: str = ""
     plan: str = "free"
+    views: int = 0
+    updated_at: datetime | None = None
 
 
 async def main() -> None:
@@ -90,7 +94,16 @@ async def main() -> None:
             print(exc.driver_message)  # original driver text, for logs
         # --8<-- [end:handling-errors]
 
-        await Customer.create(email="dora@example.com")  # plan defaults to "free"
+        dora = await Customer.create(email="dora@example.com")  # plan defaults to "free"
+
+        # --8<-- [start:recipe-update]
+        await Customer.where(lambda customer: customer.id == dora.id).update(
+            lambda customer: {
+                "views": customer.views + 1,
+                "updated_at": now,
+            }
+        )
+        # --8<-- [end:recipe-update]
 
         # --8<-- [start:mutation-guard]
         free = Customer.where(lambda customer: customer.plan == "free")

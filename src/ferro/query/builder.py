@@ -1086,8 +1086,10 @@ class Query(Generic[T]):
 
         Two doors, one SET wire: keyword literals (``update(name="x")``) or a
         recipe callable (``update(lambda user: {"email": "x", "bonus":
-        user.score})``). Recipe values are a literal or a root column copy.
-        The doors cannot be mixed.
+        user.score, "n": user.n + 1, "updated_at": now})``). Recipe values
+        are a literal, a root column copy, ``+`` / ``-`` arithmetic, or the
+        imported ``now`` singleton. ``+`` does not fill empties — ``NULL + 1``
+        is NULL (``.merge()`` fills, #379). The doors cannot be mixed.
 
         Args:
             recipe: Optional positional callable receiving a
@@ -1109,6 +1111,14 @@ class Query(Generic[T]):
             >>> updated = await User.where(lambda user: user.id == 1).update(name="Taylor")
             >>> isinstance(updated, int)
             True
+            >>> from ferro import now
+            >>> n = await Counter.where(lambda counter: counter.id == cid).update(
+            ...     lambda counter: {
+            ...         "n": counter.n + 1,
+            ...         "total": counter.a + counter.b,
+            ...         "updated_at": now,
+            ...     }
+            ... )
         """
         if recipe is not None and fields:
             raise TypeError(

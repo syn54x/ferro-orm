@@ -1,9 +1,10 @@
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import pytest
 
-from ferro import Model, connect, FerroField, engines
+from ferro import FerroField, Model, connect, engines, now
 from ferro._core import update_filtered
 from ferro.query.wire import compile_query, model_identity
 from ferro.state import resolve_operation_scope
@@ -193,3 +194,104 @@ async def test_recipe_update_evicts_identity_map(db_url):
         assert fresh is not user
         assert fresh.email == "updated@ferro.dev"
         assert fresh.bonus == 7
+
+
+@pytest.mark.asyncio
+async def test_recipe_increment_persists(db_url):
+    """``counter.n + 1`` writes ``n = n + 1`` on both backends (#378)."""
+
+    class Counter(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        n: int = 0
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        row = Counter(n=10)
+        await row.save()
+        cid = row.id
+
+        updated = await Counter.where(lambda counter: counter.id == cid).update(
+            lambda counter: {"n": counter.n + 1}
+        )
+        assert updated == 1
+        assert (await Counter.get(cid)).n == 11
+
+        updated = await Counter.where(lambda counter: counter.id == cid).update(
+            lambda counter: {"n": counter.n - 1}
+        )
+        assert updated == 1
+        assert (await Counter.get(cid)).n == 10
+
+
+@pytest.mark.asyncio
+async def test_recipe_column_plus_column_persists(db_url):
+    """``counter.a + counter.b`` writes the sum on both backends (#378)."""
+
+    class Counter(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        a: int = 0
+        b: int = 0
+        n: int = 0
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        row = Counter(a=3, b=4, n=0)
+        await row.save()
+        cid = row.id
+
+        updated = await Counter.where(lambda counter: counter.id == cid).update(
+            lambda counter: {"n": counter.a + counter.b}
+        )
+        assert updated == 1
+        assert (await Counter.get(cid)).n == 7
+
+
+@pytest.mark.asyncio
+async def test_recipe_null_plus_one_stays_null(db_url):
+    """Honest SQL NULL: ``NULL + 1`` is NULL — no COALESCE (#378)."""
+
+    class Counter(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        n: int | None = None
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        row = Counter(n=None)
+        await row.save()
+        cid = row.id
+
+        updated = await Counter.where(lambda counter: counter.id == cid).update(
+            lambda counter: {"n": counter.n + 1}
+        )
+        assert updated == 1
+        assert (await Counter.get(cid)).n is None
+
+
+@pytest.mark.asyncio
+async def test_recipe_now_writes_database_clock(db_url):
+    """``now`` is the DB clock on a datetime column, not a compile-time Python datetime (#378)."""
+
+    class Stamp(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        updated_at: datetime | None = None
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        old = datetime(2000, 1, 1, tzinfo=UTC)
+        row = Stamp(updated_at=old)
+        await row.save()
+        sid = row.id
+
+        before = datetime.now(UTC) - timedelta(seconds=5)
+        updated = await Stamp.where(lambda stamp: stamp.id == sid).update(
+            lambda stamp: {"updated_at": now}
+        )
+        assert updated == 1
+
+        fresh = await Stamp.get(sid)
+        assert fresh.updated_at is not None
+        assert fresh.updated_at != old
+        written = fresh.updated_at
+        if written.tzinfo is None:
+            written = written.replace(tzinfo=UTC)
+        assert written >= before

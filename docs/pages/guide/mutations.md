@@ -188,10 +188,17 @@ inserted = await User.bulk_create([User(name="a", age=1), User(name="b", age=2)]
 fresh = await User.where(lambda user: user.name.in_(["a", "b"])).all()
 ```
 
-## Not Yet Supported
+## Recipe updates
 
-!!! note "On the roadmap"
-    Atomic update expressions — e.g. `update(views=Post.views + 1)` or `update(price=Product.price * 0.9)` — are **not yet implemented**; see the [Roadmap](../roadmap.md). In the meantime, load–modify–`save()` (last write wins), or use [raw SQL](raw-sql.md) for a truly atomic `UPDATE ... SET views = views + 1`.
+Keyword `update(name="x")` stays literals-only. A recipe callable assigns expressions that run in the database — increment a counter, copy a column, or stamp `updated_at` with the database clock:
+
+```python
+--8<-- "docs/examples/mutations.py:recipe-update"
+```
+
+`+` and `-` are honest SQL: `NULL + 1` is NULL. They do not fill empties (`.merge()` does — that lands later, [#379](https://github.com/syn54x/ferro-orm/issues/379)). `now` is a singleton import (`from ferro import now`), not `now()`, and only assigns to a `datetime` column.
+
+Multiplication and string concat are not in this door yet.
 
 ## See Also
 
