@@ -45,6 +45,12 @@ async def test_update_with_offset_raises_value_error():
         ).update(name="renamed")
 
 
+@pytest.mark.asyncio
+async def test_update_guard_runs_before_assignment_serialization():
+    with pytest.raises(ValueError, match=r"update\(\) does not support limit/offset"):
+        await PaginationGuardItem.select().limit(1).update(name=object())
+
+
 def test_mutating_payload_omits_pagination_keys():
     from ferro.query.wire import compile_query
 

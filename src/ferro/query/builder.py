@@ -22,7 +22,6 @@ from typing import (
     overload,
 )
 
-from .._bind_payload import update_bind_payload
 from .._core import (
     add_m2m_links,
     clear_m2m_links,
@@ -1072,12 +1071,11 @@ class Query(Generic[T]):
             >>> isinstance(updated, int)
             True
         """
-        compiled = compile_query(self, "update")
+        compiled = compile_query(self, "update", assignments=fields)
         route = await self._transaction_or_using()
         return await update_filtered(
             model_identity(self.model_cls),
             compiled.wire_json,
-            update_bind_payload(fields),
             route,
         )
 

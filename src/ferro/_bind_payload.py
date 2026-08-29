@@ -43,9 +43,15 @@ def update_bind_payload(fields: Mapping[str, Any]) -> dict[str, Any]:
     Non-bytes values are canonicalized exactly as ``to_json`` does today; bytes
     values are overlaid raw.
     """
-    bytes_keys = {k for k, v in fields.items() if isinstance(v, (bytes, bytearray))}
-    non_bytes = {k: v for k, v in fields.items() if k not in bytes_keys}
-    payload: dict[str, Any] = json.loads(to_json(non_bytes)) if non_bytes else {}
-    for k in bytes_keys:
-        payload[k] = bytes(fields[k])
+    non_bytes = {
+        key: value
+        for key, value in fields.items()
+        if not isinstance(value, (bytes, bytearray))
+    }
+    canonical = json.loads(to_json(non_bytes)) if non_bytes else {}
+    payload: dict[str, Any] = {}
+    for key, value in fields.items():
+        payload[key] = (
+            bytes(value) if isinstance(value, (bytes, bytearray)) else canonical[key]
+        )
     return payload

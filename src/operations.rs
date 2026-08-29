@@ -13,7 +13,7 @@ use crate::state::{
     engine_for_connection, register_session, session_state, unregister_session,
 };
 use dashmap::DashMap;
-use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoinHop};
+use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoinHop, QueryValueExpr};
 use pyo3::prelude::*;
 use sea_query::{
     Alias, Condition, Expr, Iden, InsertStatement, JoinType, NullOrdering, OnConflict, Order,
@@ -243,12 +243,12 @@ fn tx_remove(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<Transacti
     Ok(TRANSACTION_REGISTRY.remove(tx_id).map(|(_, handle)| handle))
 }
 
-/// The only QueryIR version this build accepts (#269, #278, #285, #292, #310, #314).
+/// The only QueryIR version this build accepts (#269 through #314, then #376).
 ///
 /// Python and Rust ship in one wheel, so there is exactly one supported version at any
 /// time — no negotiation, no fallback. A mismatch can only mean a mixed build (a stale
 /// `.so` next to a rebuilt Python package, or vice versa).
-const SUPPORTED_QUERY_IR_VERSION: u32 = 7;
+const SUPPORTED_QUERY_IR_VERSION: u32 = 8;
 
 /// Envelope shell used only to read `ir_kind`/`ir_version` before committing to a strict
 /// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real earlier-version
@@ -1215,17 +1215,45 @@ fn materialize_model_row<'py>(
     Ok(instance)
 }
 
-/// Reject `limit`/`offset` on mutating operations (FF-A A1, #171).
-///
-/// Portable SQL has no `UPDATE/DELETE ... LIMIT`. The Python builder raises
-/// before serializing and omits the keys from mutating payloads; this
-/// boundary guard keeps the contract from regressing via any other caller.
-fn reject_pagination_on_mutation(plan: &QueryPlan, operation: &str) -> PyResult<()> {
-    if plan.limit.is_some() || plan.offset.is_some() {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "{operation}() does not support limit/offset: portable SQL has no {} ... LIMIT",
-            operation.to_uppercase()
-        )));
+/// Enforce the v8 verb contract for `limit`/`offset` key presence.
+fn validate_paging_shape(plan: &QueryPlan, operation: &str) -> PyResult<()> {
+    match operation {
+        "update" | "delete" if plan.limit.is_some() || plan.offset.is_some() => {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{operation} QueryIR must omit limit/offset keys"
+            )))
+        }
+        "fetch" | "count" if plan.limit.is_none() || plan.offset.is_none() => {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{operation} QueryIR must carry limit/offset keys (null when unset)"
+            )))
+        }
+        "update" | "delete" | "fetch" | "count" => Ok(()),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown QueryIR operation {operation:?}"
+        ))),
+    }
+}
+
+/// Enforce the verb-specific QueryIR SET shape at the Rust trust boundary.
+fn validate_set_shape(plan: &QueryPlan, operation: &str) -> PyResult<()> {
+    if operation != "update" {
+        if !plan.set_assignments.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{operation} QueryIR must carry an empty SET section"
+            )));
+        }
+        return Ok(());
+    }
+
+    let mut columns = HashSet::with_capacity(plan.set_assignments.len());
+    for assignment in &plan.set_assignments {
+        if !columns.insert(assignment.column.as_str()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "update QueryIR carries duplicate SET assignment for column {:?}",
+                assignment.column
+            )));
+        }
     }
     Ok(())
 }
@@ -2593,6 +2621,8 @@ pub fn fetch_filtered<'py>(
     let cls_py = cls.unbind();
 
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    validate_paging_shape(&plan, "fetch")?;
+    validate_set_shape(&plan, "fetch")?;
     let include_paths: Option<Vec<Vec<QueryJoinHop>>> = match &plan.materialization {
         Materialization::Instances { paths } => Some(paths.clone()),
         _ => None,
@@ -2745,10 +2775,10 @@ pub fn fetch_filtered<'py>(
                 };
                 apply_order_by_term(&mut select, col.into(), order)?;
             }
-            if let Some(limit) = plan.limit {
+            if let Some(limit) = plan.limit.flatten() {
                 select.limit(limit);
             }
-            if let Some(offset) = plan.offset {
+            if let Some(offset) = plan.offset.flatten() {
                 select.offset(offset);
             }
             let (s, values) = sea_query_build_for_backend!(select, backend);
@@ -3007,6 +3037,8 @@ pub fn count_filtered(
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
+    validate_paging_shape(&plan, "count")?;
+    validate_set_shape(&plan, "count")?;
     // count() is unaffected by projection (PRD #277 verb table): the Python
     // builder always emits root_instances on count payloads, projected or not.
     reject_unsupported_materialization(&plan, "count_filtered")?;
@@ -3228,7 +3260,8 @@ pub fn delete_filtered(
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
-    reject_pagination_on_mutation(&plan, "delete")?;
+    validate_set_shape(&plan, "delete")?;
+    validate_paging_shape(&plan, "delete")?;
     reject_traversal_on_mutation(&plan, "delete")?;
     reject_unsupported_materialization(&plan, "delete")?;
 
@@ -3277,14 +3310,11 @@ pub fn delete_filtered(
     })
 }
 
-/// Update rows matching a filtered query with column values from JSON.
+/// Update rows matching a filtered query using its canonical QueryIR SET section.
 ///
 /// Args:
 ///     name (str): Model class name.
 ///     query_ir_json (str): Serialized Query IR envelope JSON.
-///     updates (dict): Per-column value map; ``bytes`` values are bound
-///         directly (non-UTF-8 safe), all other values are routed through
-///         the schema casting authority.
 ///     tx_id (str | None): Optional active transaction.
 ///     using (str | None): Connection override.
 ///     session_id (str | None): Session-scoped routing when set.
@@ -3295,20 +3325,24 @@ pub fn delete_filtered(
 /// # Errors
 /// `PyTypeError` for unbindable column values; `PyRuntimeError` on execute failure.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, updates, route))]
+#[pyo3(signature = (name, query_ir_json, route))]
 pub fn update_filtered<'py>(
     py: Python<'py>,
     name: String,
     query_ir_json: String,
-    updates: Bound<'py, pyo3::types::PyDict>,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
-    reject_pagination_on_mutation(&plan, "update")?;
+    validate_set_shape(&plan, "update")?;
+    if name != plan.model_name {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "update model identity mismatch: argument {name:?}, QueryIR declares {:?}",
+            plan.model_name
+        )));
+    }
+    validate_paging_shape(&plan, "update")?;
     reject_traversal_on_mutation(&plan, "update")?;
     reject_unsupported_materialization(&plan, "update")?;
-    let update_inputs = bind_inputs_from_py(&updates)?;
-
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
@@ -3333,14 +3367,16 @@ pub fn update_filtered<'py>(
                     Some(&table_name),
                 )?)
                 .to_owned();
-            for (key, input) in &update_inputs {
+            for assignment in &plan.set_assignments {
+                let key = &assignment.column;
+                let input = set_value_bind_input(&assignment.value, key)?;
                 update.value(
                     Alias::new(key),
                     bind_input_to_expr(
                         &schema,
                         &table_name,
                         key,
-                        input,
+                        &input,
                         enum_udt,
                         uuid_columns,
                         ts_cast,
@@ -3618,6 +3654,56 @@ enum BindInput {
 impl BindInput {
     fn is_json_null(&self) -> bool {
         matches!(self, BindInput::Json(serde_json::Value::Null))
+    }
+}
+
+/// Decode one QueryIR SET value expression into the existing schema-guided
+/// write input. Binary literals use a JSON byte array on the wire and become
+/// native bytes again before bind lowering.
+fn set_value_bind_input(value: &QueryValueExpr, col: &str) -> PyResult<BindInput> {
+    match value {
+        QueryValueExpr::Literal { value } if value.kind == "bytes" => {
+            let items = value.value.as_array().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR bytes literal for SET column {col:?}: value must be an array"
+                ))
+            })?;
+            let mut bytes = Vec::with_capacity(items.len());
+            for item in items {
+                let byte = item
+                    .as_u64()
+                    .filter(|n| *n <= u8::MAX as u64)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Invalid QueryIR bytes literal for SET column {col:?}: \
+                             every item must be an integer from 0 through 255"
+                        ))
+                    })?;
+                bytes.push(byte as u8);
+            }
+            Ok(BindInput::Bytes(bytes))
+        }
+        QueryValueExpr::Literal { value } => {
+            let valid = match value.kind.as_str() {
+                "null" => value.value.is_null(),
+                "bool" => value.value.is_boolean(),
+                "int" => value.value.as_i64().is_some() || value.value.as_u64().is_some(),
+                "float" => value.value.as_f64().is_some()
+                    && value.value.as_i64().is_none()
+                    && value.value.as_u64().is_none(),
+                "string" => value.value.is_string(),
+                "list" => value.value.is_array(),
+                "object" => value.value.is_object(),
+                _ => false,
+            };
+            if !valid {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR literal for SET column {col:?}: kind {:?} does not match value {}",
+                    value.kind, value.value
+                )));
+            }
+            Ok(BindInput::Json(value.value.clone()))
+        }
     }
 }
 
@@ -3981,7 +4067,7 @@ pub fn _catalog_query_count_for_test(using: Option<String>) -> PyResult<u64> {
 mod m2m_value_tests {
     use super::{
         backend_column_value_expr, bind_input_from_py, bind_input_to_expr, py_to_json_value,
-        python_to_sea_value, BindInput,
+        python_to_sea_value, set_value_bind_input, BindInput,
     };
     use crate::state::Dialect;
     use pyo3::Python;
@@ -4135,6 +4221,90 @@ mod m2m_value_tests {
                 other => panic!("expected Bytes, got {other:?}"),
             }
         });
+    }
+
+    #[test]
+    fn query_ir_set_bytes_decode_to_native_bind_input() {
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "literal",
+            "value": {"kind": "bytes", "value": [137, 0, 255, 254]}
+        }))
+        .expect("literal bytes value expression");
+
+        match set_value_bind_input(&value, "data").expect("valid byte array") {
+            BindInput::Bytes(bytes) => assert_eq!(bytes, vec![0x89, 0x00, 0xff, 0xfe]),
+            other => panic!("expected native bytes bind input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_ir_set_rejects_malformed_bytes() {
+        for invalid in [
+            serde_json::json!("not-an-array"),
+            serde_json::json!([-1]),
+            serde_json::json!([1.5]),
+            serde_json::json!(["1"]),
+            serde_json::json!([256]),
+        ] {
+            let value: ferro_schema_ir::QueryValueExpr =
+                serde_json::from_value(serde_json::json!({
+                    "kind": "literal",
+                    "value": {"kind": "bytes", "value": invalid}
+                }))
+                .expect("literal bytes value expression");
+
+            let err = set_value_bind_input(&value, "data")
+                .expect_err("malformed bytes must fail before statement execution");
+            assert!(err.to_string().contains("bytes"));
+            assert!(err.to_string().contains("data"));
+        }
+    }
+
+    #[test]
+    fn query_ir_set_rejects_every_malformed_literal_kind_value_pair() {
+        for (kind, invalid) in [
+            ("null", serde_json::json!(false)),
+            ("bool", serde_json::json!(null)),
+            ("int", serde_json::json!(1.5)),
+            ("float", serde_json::json!(1)),
+            ("string", serde_json::json!([137])),
+            ("list", serde_json::json!({"item": 1})),
+            ("object", serde_json::json!([1])),
+            ("bytes", serde_json::json!("not-an-array")),
+            ("unknown", serde_json::json!(null)),
+        ] {
+            let value: ferro_schema_ir::QueryValueExpr =
+                serde_json::from_value(serde_json::json!({
+                    "kind": "literal",
+                    "value": {"kind": kind, "value": invalid}
+                }))
+                .expect("literal value expression");
+
+            let err = set_value_bind_input(&value, "payload")
+                .expect_err("mismatched kind must fail before statement execution");
+            let message = err.to_string();
+            assert!(
+                message.contains(kind),
+                "error must name literal kind {kind:?}: {message}"
+            );
+            assert!(
+                message.contains("payload"),
+                "error must name SET column: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_ir_set_rejects_integer_outside_native_json_range() {
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_str(
+            r#"{"kind":"literal","value":{"kind":"int","value":1267650600228229401496703205376}}"#,
+        )
+        .expect("JSON parser accepts the oversized number representation");
+
+        let err = set_value_bind_input(&value, "count")
+            .expect_err("rounded integer must not reach schema bind lowering");
+        assert!(err.to_string().contains("int"));
+        assert!(err.to_string().contains("count"));
     }
 
     #[test]
@@ -4803,13 +4973,14 @@ mod engine_value_to_rust_value_tests {
 
 #[cfg(test)]
 mod mutation_pagination_guard_tests {
-    use super::{query_plan_from_ir_json, reject_pagination_on_mutation};
+    use super::{query_plan_from_ir_json, validate_paging_shape, validate_set_shape};
 
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 7,
+            "ir_version": 8,
             "payload": {
+                "set": [],
                 "model_name": "Widget",
                 "where": [{
                     "node_kind": "leaf",
@@ -4837,39 +5008,129 @@ mod mutation_pagination_guard_tests {
     #[test]
     fn guard_allows_mutation_without_pagination() {
         let plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        assert!(reject_pagination_on_mutation(&plan, "delete").is_ok());
-        assert!(reject_pagination_on_mutation(&plan, "update").is_ok());
+        assert!(validate_paging_shape(&plan, "delete").is_ok());
+        assert!(validate_paging_shape(&plan, "update").is_ok());
     }
 
     #[test]
-    fn guard_rejects_limit_with_pyvalueerror() {
-        let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        plan.limit = Some(5);
+    fn guard_rejects_explicit_null_pagination_for_mutations() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["limit"] = serde_json::Value::Null;
+        envelope["payload"]["offset"] = serde_json::Value::Null;
+        let plan = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+
         pyo3::Python::attach(|py| {
-            let err = reject_pagination_on_mutation(&plan, "delete")
-                .expect_err("limit on a mutating query must be rejected");
-            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
-            let msg = err.to_string();
-            assert!(
-                msg.contains("delete") && msg.contains("limit"),
-                "message should name the operation and limit: {msg}"
-            );
+            for operation in ["update", "delete"] {
+                let err = validate_paging_shape(&plan, operation)
+                    .expect_err("mutating payloads must omit both pagination keys");
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(operation));
+            }
         });
     }
 
     #[test]
-    fn guard_rejects_offset_with_pyvalueerror() {
+    fn guard_rejects_limit_value_for_mutations() {
         let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
-        plan.offset = Some(2);
+        plan.limit = Some(Some(5));
         pyo3::Python::attach(|py| {
-            let err = reject_pagination_on_mutation(&plan, "update")
+            let err = validate_paging_shape(&plan, "delete")
+                .expect_err("limit on a mutating query must be rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("delete"));
+        });
+    }
+
+    #[test]
+    fn guard_rejects_offset_value_for_mutations() {
+        let mut plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+        plan.offset = Some(Some(2));
+        pyo3::Python::attach(|py| {
+            let err = validate_paging_shape(&plan, "update")
                 .expect_err("offset on a mutating query must be rejected");
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
-            let msg = err.to_string();
-            assert!(
-                msg.contains("update") && msg.contains("offset"),
-                "message should name the operation and offset: {msg}"
-            );
+            assert!(err.to_string().contains("update"));
+        });
+    }
+
+    #[test]
+    fn guard_rejects_missing_pagination_for_reads() {
+        let plan = query_plan_from_ir_json(&envelope_without_pagination_keys()).unwrap();
+
+        pyo3::Python::attach(|py| {
+            for operation in ["fetch", "count"] {
+                let err = validate_paging_shape(&plan, operation)
+                    .expect_err("read payloads must carry both pagination keys");
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(operation));
+            }
+        });
+    }
+
+    #[test]
+    fn guard_accepts_valid_read_paging_shape() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["limit"] = serde_json::Value::Null;
+        envelope["payload"]["offset"] = serde_json::Value::Null;
+        let read = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+        assert!(validate_paging_shape(&read, "fetch").is_ok());
+        assert!(validate_paging_shape(&read, "count").is_ok());
+    }
+
+    #[test]
+    fn guard_rejects_non_empty_set_for_non_update_operations() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["set"] = serde_json::json!([{
+            "column": "name",
+            "value": {
+                "kind": "literal",
+                "value": {"kind": "string", "value": "changed"}
+            }
+        }]);
+        let plan = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+
+        pyo3::Python::attach(|py| {
+            for operation in ["fetch", "count", "delete"] {
+                let err = validate_set_shape(&plan, operation)
+                    .expect_err("only update payloads may carry SET assignments");
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(operation));
+                assert!(err.to_string().contains("SET"));
+            }
+        });
+    }
+
+    #[test]
+    fn guard_rejects_duplicate_update_set_columns() {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
+        envelope["payload"]["set"] = serde_json::json!([
+            {
+                "column": "name",
+                "value": {
+                    "kind": "literal",
+                    "value": {"kind": "string", "value": "first"}
+                }
+            },
+            {
+                "column": "name",
+                "value": {
+                    "kind": "literal",
+                    "value": {"kind": "string", "value": "second"}
+                }
+            }
+        ]);
+        let plan = query_plan_from_ir_json(&envelope.to_string()).unwrap();
+
+        pyo3::Python::attach(|py| {
+            let err = validate_set_shape(&plan, "update")
+                .expect_err("an update column may only be assigned once");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("duplicate"));
+            assert!(err.to_string().contains("name"));
         });
     }
 }
@@ -4878,11 +5139,12 @@ mod mutation_pagination_guard_tests {
 mod query_ir_version_gate_tests {
     use super::query_plan_from_ir_json;
 
-    fn v7_envelope() -> serde_json::Value {
+    fn v8_envelope() -> serde_json::Value {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 7,
+            "ir_version": 8,
             "payload": {
+                "set": [],
                 "model_name": "Widget",
                 "where": [],
                 "order_by": [],
@@ -4896,9 +5158,9 @@ mod query_ir_version_gate_tests {
     }
 
     /// Assert a rejected envelope's message names the received version, this
-    /// build's supported version (7), and the one-wheel fix — the actionable
+    /// build's supported version (8), and the one-wheel fix — the actionable
     /// shape pinned since the v1-at-v2 bump (#269), re-pinned at v3 (#278),
-    /// v4 (#285), v5 (#292), v6 (#310), and v7 (#314).
+    /// v4 (#285), v5 (#292), v6 (#310), v7 (#314), and v8 (#376).
     fn assert_actionable_version_rejection(err: pyo3::PyErr, received: char) {
         pyo3::Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
@@ -4909,7 +5171,7 @@ mod query_ir_version_gate_tests {
             "message should name the received version: {msg}"
         );
         assert!(
-            msg.contains('7'),
+            msg.contains('8'),
             "message should name the supported version: {msg}"
         );
         assert!(
@@ -4923,9 +5185,39 @@ mod query_ir_version_gate_tests {
     }
 
     #[test]
-    fn accepts_version_7() {
-        query_plan_from_ir_json(&v7_envelope().to_string())
-            .expect("a well-formed v7 envelope must be accepted");
+    fn accepts_version_8() {
+        query_plan_from_ir_json(&v8_envelope().to_string())
+            .expect("a well-formed v8 envelope must be accepted");
+    }
+
+    #[test]
+    fn rejects_v8_payload_without_set_section() {
+        let mut envelope = v8_envelope();
+        envelope["payload"]
+            .as_object_mut()
+            .expect("payload object")
+            .remove("set");
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v8 payload without its required SET section must be rejected");
+        assert!(
+            err.to_string().contains("set"),
+            "must name the missing section: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_v7_envelope_with_actionable_message() {
+        let mut envelope = v8_envelope();
+        envelope["ir_version"] = serde_json::json!(7);
+        envelope["payload"]
+            .as_object_mut()
+            .expect("payload object")
+            .remove("set");
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v7 envelope must be rejected before payload parsing");
+        assert_actionable_version_rejection(err, '7');
     }
 
     /// Contract test (#314 acceptance criteria): a v6 envelope must be
@@ -5111,14 +5403,14 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_unsupported_future_version() {
-        let mut envelope = v7_envelope();
-        envelope["ir_version"] = serde_json::json!(8);
+        let mut envelope = v8_envelope();
+        envelope["ir_version"] = serde_json::json!(9);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("an unsupported future version must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains('8'),
+            msg.contains('9'),
             "message should name the received version: {msg}"
         );
     }
@@ -5127,7 +5419,7 @@ mod query_ir_version_gate_tests {
     /// naming the bad kind and the supported ones (#278).
     #[test]
     fn rejects_unknown_materialization_kind() {
-        let mut envelope = v7_envelope();
+        let mut envelope = v8_envelope();
         envelope["payload"]["materialization"] = serde_json::json!({"kind": "row_dicts"});
 
         let err = query_plan_from_ir_json(&envelope.to_string())
@@ -5140,18 +5432,18 @@ mod query_ir_version_gate_tests {
         );
     }
 
-    /// A v7 payload with NO materialization section fails the strict parse:
+    /// A v8 payload with NO materialization section fails the strict parse:
     /// the plan travels with the query as data (ADR-0007), never defaulted.
     #[test]
-    fn rejects_v7_payload_missing_materialization() {
-        let mut envelope = v7_envelope();
+    fn rejects_v8_payload_missing_materialization() {
+        let mut envelope = v8_envelope();
         envelope["payload"]
             .as_object_mut()
             .unwrap()
             .remove("materialization");
 
         let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v7 payload without a materialization section must be rejected");
+            .expect_err("a v8 payload without a materialization section must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("materialization"),
@@ -5171,8 +5463,9 @@ mod materialization_walker_gate_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 8,
                 "payload": {
+                    "set": [],
                     "model_name": "Widget",
                     "where": [],
                     "order_by": [],
@@ -5263,8 +5556,9 @@ mod record_select_list_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 8,
                 "payload": {
+                    "set": [],
                     "model_name": "Transaction",
                     "where": where_nodes,
                     "order_by": [],
@@ -5737,8 +6031,9 @@ mod instances_select_list_tests {
         let mut plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 8,
                 "payload": {
+                    "set": [],
                     "model_name": "Transaction",
                     "where": [], "order_by": [], "limit": null, "offset": null,
                     "m2m": null,
@@ -5899,8 +6194,9 @@ mod mutation_qualification_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 8,
                 "payload": {
+                    "set": [],
                     "model_name": "Widget",
                     "where": [{
                         "node_kind": "leaf",
@@ -5985,8 +6281,9 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 8,
                 "payload": {
+                    "set": [],
                     "model_name": "Transaction",
                     "where": [{
                         "node_kind": "leaf",
@@ -6091,8 +6388,9 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 8,
                 "payload": {
+                    "set": [],
                     "model_name": model_name,
                     "where": [], "order_by": [],
                     "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
@@ -6113,8 +6411,9 @@ mod select_join_render_tests {
         let plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 7,
+                "ir_version": 8,
                 "payload": {
+                    "set": [],
                     "model_name": "Transaction",
                     "where": [{
                         "node_kind": "leaf",

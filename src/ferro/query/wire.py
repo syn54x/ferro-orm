@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
-from .nodes import QueryNode, _serialize_query_value
+from .._bind_payload import update_bind_payload
+from .nodes import QueryNode, _query_value_kind, _serialize_query_value
 
 if TYPE_CHECKING:
     from .builder import Query
@@ -32,13 +33,11 @@ if TYPE_CHECKING:
 # mutate arm; they stay distinct values so guardrail errors name the caller.
 QueryVerb = Literal["fetch", "count", "update", "delete"]
 
-# Always 7 (#314 — unconditional bump, exactly like v6 at #310, v5 at #292,
-# v4 at #285, v3 at #278, and v2 at #269; there is no earlier envelope left
-# anywhere). v7 gives predicate trees the recursive ``exists`` node kind
-# beside ``leaf``/``compound``/``not`` (existence tests, ADR-0007). Python
-# and Rust ship in one wheel, so a single supported version is the whole
-# contract (#267 Implementation Decisions).
-_IR_VERSION = 7
+# Always 8 (#376 — unconditional bump, exactly like v7 at #314 and the prior
+# query contract changes; there is no earlier envelope left anywhere). v8
+# gives every query a required canonical ``set`` section. Python and Rust ship
+# in one wheel, so a single supported version is the whole contract.
+_IR_VERSION = 8
 
 
 class _AbsentType:
@@ -145,6 +144,38 @@ class M2mContext:
 
 
 @dataclass(frozen=True)
+class QueryValue:
+    """One typed literal value carried by a value-expression node."""
+
+    kind: str
+    value: Any
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind, "value": self.value}
+
+
+@dataclass(frozen=True)
+class LiteralValueExpr:
+    """A bound literal in the clause-agnostic SET value-expression family."""
+
+    value: QueryValue
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"kind": "literal", "value": self.value.to_ir_dict()}
+
+
+@dataclass(frozen=True)
+class SetAssignment:
+    """One ordered root-column assignment in the canonical SET section."""
+
+    column: str
+    value: LiteralValueExpr
+
+    def to_ir_dict(self) -> dict[str, Any]:
+        return {"column": self.column, "value": self.value.to_ir_dict()}
+
+
+@dataclass(frozen=True)
 class RecordExpr:
     """The expression source of an aggregate record field (v5, ADR-0009).
 
@@ -247,6 +278,7 @@ class QueryIrPayload:
 
     model_name: str
     where: tuple[dict[str, Any], ...]
+    set: tuple[SetAssignment, ...]
     order_by: tuple[OrderByEntry, ...]
     limit: int | None | _AbsentType
     offset: int | None | _AbsentType
@@ -258,6 +290,7 @@ class QueryIrPayload:
         payload: dict[str, Any] = {
             "model_name": self.model_name,
             "where": list(self.where),
+            "set": [assignment.to_ir_dict() for assignment in self.set],
             "order_by": [entry.to_ir_dict() for entry in self.order_by],
         }
         if not isinstance(self.limit, _AbsentType):
@@ -431,6 +464,23 @@ def _materialization(query: "Query[Any]") -> Materialization:
     return RootInstances()
 
 
+def _literal_set(assignments: Mapping[str, Any] | None) -> tuple[SetAssignment, ...]:
+    """Compile kwargs literals into ordered, typed SET value-expression nodes."""
+    compiled: list[SetAssignment] = []
+    for column, value in update_bind_payload(assignments or {}).items():
+        if isinstance(value, bytes):
+            query_value = QueryValue(kind="bytes", value=list(value))
+        else:
+            query_value = QueryValue(kind=_query_value_kind(value), value=value)
+        compiled.append(
+            SetAssignment(
+                column=column,
+                value=LiteralValueExpr(value=query_value),
+            )
+        )
+    return tuple(compiled)
+
+
 def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
     """Reject query state a mutating verb cannot carry (FF-A A1, #273, #287).
 
@@ -514,7 +564,12 @@ def _payload_hop_classes(payload: QueryIrPayload) -> dict[str, type] | None:
     return hop_classes
 
 
-def compile_query(query: "Query[Any]", verb: QueryVerb) -> CompiledQuery:
+def compile_query(
+    query: "Query[Any]",
+    verb: QueryVerb,
+    *,
+    assignments: Mapping[str, Any] | None = None,
+) -> CompiledQuery:
     """Compile a built query into its wire artifact — the single choke point.
 
     What each verb carries is policy, stated here once:
@@ -539,6 +594,7 @@ def compile_query(query: "Query[Any]", verb: QueryVerb) -> CompiledQuery:
         payload = QueryIrPayload(
             model_name=identity,
             where=where,
+            set=_literal_set(assignments) if verb == "update" else (),
             order_by=(),
             limit=_ABSENT,
             offset=_ABSENT,
@@ -550,6 +606,7 @@ def compile_query(query: "Query[Any]", verb: QueryVerb) -> CompiledQuery:
         payload = QueryIrPayload(
             model_name=identity,
             where=where,
+            set=(),
             order_by=(),
             limit=None,
             offset=None,
@@ -561,6 +618,7 @@ def compile_query(query: "Query[Any]", verb: QueryVerb) -> CompiledQuery:
         payload = QueryIrPayload(
             model_name=identity,
             where=where,
+            set=(),
             order_by=tuple(query.order_by_clause),
             limit=query._limit,
             offset=query._offset,

@@ -1,6 +1,12 @@
-import pytest
+import json
 from typing import Annotated
+
+import pytest
+
 from ferro import Model, connect, FerroField, engines
+from ferro._core import update_filtered
+from ferro.query.wire import compile_query, model_identity
+from ferro.state import resolve_operation_scope
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -64,3 +70,61 @@ async def test_bulk_update_evicts_identity_map(db_url):
         fresh_p1 = await BulkProduct.get(p1.id)
         assert fresh_p1 is not p1
         assert fresh_p1.price == 20.0
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_rejects_integer_outside_native_bind_range(db_url):
+    class Counter(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        value: int
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        counter = Counter(value=1)
+        await counter.save()
+
+        with pytest.raises(ValueError, match="int|number out of range"):
+            await Counter.where(lambda row: row.id == counter.id).update(value=2**100)
+
+        fresh = await Counter.get(counter.id)
+        assert fresh.value == 1
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_rejects_query_ir_model_identity_mismatch(db_url):
+    class Source(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        value: str
+
+    class Other(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        value: str
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        source = Source(value="original")
+        await source.save()
+
+        envelope = json.loads(
+            compile_query(
+                Source.where(lambda row: row.id == source.id),
+                "update",
+                assignments={"value": "mutated"},
+            ).wire_json
+        )
+        source_identity = model_identity(Source)
+        other_identity = model_identity(Other)
+        envelope["payload"]["model_name"] = other_identity
+        route = resolve_operation_scope(using=None, session=None)
+
+        with pytest.raises(ValueError) as exc_info:
+            await update_filtered(
+                source_identity,
+                json.dumps(envelope, separators=(",", ":")),
+                route,
+            )
+
+        message = str(exc_info.value)
+        assert source_identity in message
+        assert other_identity in message
+        assert (await Source.get(source.id)).value == "original"

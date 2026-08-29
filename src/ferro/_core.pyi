@@ -151,7 +151,6 @@ async def delete_filtered(
 async def update_filtered(
     name: str,
     query_ir_json: str,
-    updates: dict[str, Any],
     route: RouteHandle,
 ) -> int: ...
 async def add_m2m_links(

@@ -5,7 +5,9 @@
 //! null/UUID/enum binds via [`crate::codec`].
 
 use crate::state::Dialect;
-use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoin, QueryNode, QueryOrderBy};
+use ferro_schema_ir::{
+    Materialization, QueryIrPayload, QueryJoin, QueryNode, QueryOrderBy, QuerySetAssignment,
+};
 use sea_query::{Alias, Condition, Expr, JoinType, SimpleExpr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -336,12 +338,14 @@ pub struct QueryPlan {
     pub model_name: String,
     /// Root predicates (implicit AND), as canonical IR nodes.
     pub where_clause: Vec<QueryNode>,
+    /// Ordered root-column assignments from the canonical SET section.
+    pub set_assignments: Vec<QuerySetAssignment>,
     /// `ORDER BY` terms in application order; empty = no ORDER BY.
     pub order_by: Vec<QueryOrderBy>,
-    /// `LIMIT` clause.
-    pub limit: Option<u64>,
-    /// `OFFSET` clause.
-    pub offset: Option<u64>,
+    /// `LIMIT` key presence and value (`None` = absent, `Some(None)` = null).
+    pub limit: Option<Option<u64>>,
+    /// `OFFSET` key presence and value (`None` = absent, `Some(None)` = null).
+    pub offset: Option<Option<u64>>,
     /// Relation JOINs collected from WHERE traversal, in registration order.
     /// Empty for non-traversal queries; rendered by the SELECT walkers (#270).
     pub joins: Vec<QueryJoin>,
@@ -403,6 +407,7 @@ impl QueryPlan {
         Ok(QueryPlan {
             model_name: payload.model_name,
             where_clause: payload.where_clause,
+            set_assignments: payload.set_assignments,
             order_by: payload.order_by,
             limit: payload.limit,
             offset: payload.offset,
@@ -932,9 +937,10 @@ mod tests {
         QueryPlan {
             model_name: model_name.to_string(),
             where_clause: Vec::new(),
+            set_assignments: Vec::new(),
             order_by: Vec::new(),
-            limit: None,
-            offset: None,
+            limit: Some(None),
+            offset: Some(None),
             joins: Vec::new(),
             m2m: None,
             materialization: ferro_schema_ir::Materialization::RootInstances,
@@ -957,6 +963,7 @@ mod tests {
     #[test]
     fn query_plan_builds_from_ir_payload_and_lowers_null_eq_to_is_null() {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(serde_json::json!({
+            "set": [],
             "model_name": "Pending",
             "where": [
                 {"node_kind": "leaf", "column": "attached_at", "operator": "==",
@@ -973,7 +980,7 @@ mod tests {
         .expect("payload deserializes");
         let plan = super::QueryPlan::from_ir_payload(payload).expect("plan builds");
         assert_eq!(plan.order_by.len(), 1);
-        assert_eq!(plan.limit, Some(10));
+        assert_eq!(plan.limit, Some(Some(10)));
 
         let mut select = Query::select();
         select.from(Alias::new("pending")).cond_where(
@@ -992,6 +999,7 @@ mod tests {
     #[test]
     fn null_ne_emits_is_not_null_for_sqlite() {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Pending",
             "where": [
                 {"node_kind": "leaf", "column": "payload", "operator": "!=",
@@ -1020,6 +1028,7 @@ mod tests {
         // SQL `NOT (...)` over the rebuilt child — here NOT (role IN (...)),
         // with no operator rewriting.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Pending",
             "where": [
                 {"node_kind": "not", "child":
@@ -1049,6 +1058,7 @@ mod tests {
         // `~` over a compound negates the whole group (#313): NOT (a OR b),
         // never a De Morgan expansion of the children.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Pending",
             "where": [
                 {"node_kind": "not", "child":
@@ -1083,6 +1093,7 @@ mod tests {
         // correlated `EXISTS (SELECT 1 FROM child AS x1_rel WHERE
         // x1_rel.fk = root.pk)` against the enclosing scope's alias.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Txn",
             "where": [
                 {"node_kind": "exists",
@@ -1116,6 +1127,7 @@ mod tests {
         // NOT EXISTS is the ordinary `not` node over an `exists` node — the
         // exists node carries no negation flag (ADR-0008 composition).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Txn",
             "where": [
                 {"node_kind": "not", "child":
@@ -1147,6 +1159,7 @@ mod tests {
         // independent subqueries whose aliases cannot collide even though
         // both correlate to the same root.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Txn",
             "where": [
                 {"node_kind": "compound", "operator": "OR",
@@ -1182,6 +1195,7 @@ mod tests {
         // leaf resolves through the exists node's own `joins` section —
         // rendered as an INNER join inside the subquery (ADR-0006).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Acct",
             "where": [
                 {"node_kind": "exists",
@@ -1235,6 +1249,7 @@ mod tests {
         // resolves against the ENCLOSING SUBQUERY's alias, not the root —
         // recursion through the ExistsScope qualifier, no second mechanism.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Owner",
             "where": [
                 {"node_kind": "exists",
@@ -1275,6 +1290,7 @@ mod tests {
         // the second hop renders as an inner join inside the subquery, and
         // the inner tree qualifies by the LAST hop's alias (the target).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "User",
             "where": [
                 {"node_kind": "exists",
@@ -1327,6 +1343,7 @@ mod tests {
         // unit-test path fails loudly rather than emitting an uncorrelated
         // (always-true) subquery.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Txn",
             "where": [
                 {"node_kind": "exists",
@@ -1357,6 +1374,7 @@ mod tests {
         // UNKNOWN alike) — the wire stays faithful, only the rendering
         // simplifies.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Pending",
             "where": [
                 {"node_kind": "not", "child":
@@ -1384,6 +1402,7 @@ mod tests {
     #[test]
     fn to_condition_for_backend_qualifies_column_with_root_table_when_requested() {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Pending",
             "where": [
                 {"node_kind": "leaf", "column": "age", "operator": ">=",
@@ -1412,6 +1431,7 @@ mod tests {
     #[test]
     fn to_condition_for_backend_qualifies_column_with_root_table_on_postgres() {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Pending",
             "where": [
                 {"node_kind": "leaf", "column": "age", "operator": ">=",
@@ -1438,6 +1458,7 @@ mod tests {
     #[test]
     fn to_condition_for_backend_leaves_column_unqualified_without_root_table() {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Pending",
             "where": [
                 {"node_kind": "leaf", "column": "age", "operator": ">=",
@@ -1466,6 +1487,7 @@ mod tests {
     /// alias scheme, prefix dedup, and path-qualified WHERE column in one SQL string.
     fn traversal_payload() -> ferro_schema_ir::QueryIrPayload {
         serde_json::from_value(json!({
+            "set": [],
             "model_name": "Transaction",
             "where": [
                 {"node_kind": "compound", "operator": "AND",
@@ -1548,6 +1570,7 @@ mod tests {
     fn build_join_plan_two_paths_to_one_table_get_distinct_aliases() {
         // Transfer(from_account, to_account) -> two FKs into the same table.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Transfer",
             "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
@@ -1578,6 +1601,7 @@ mod tests {
         // A join into a table whose alias would collide with the M2M association
         // table name gets `_x` appended until unique.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Thing",
             "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
@@ -1598,6 +1622,7 @@ mod tests {
     #[test]
     fn build_join_plan_rejects_unknown_join_type() {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Thing",
             "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
@@ -1619,6 +1644,7 @@ mod tests {
     fn build_join_plan_marks_single_left_edge() {
         // A lone `"left"` 1-hop entry renders its edge LEFT (#272).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Note",
             "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
@@ -1640,6 +1666,7 @@ mod tests {
     fn build_join_plan_marks_whole_path_left_at_every_hop() {
         // Whole-path rule: a `"left"` 2-hop entry marks BOTH edges LEFT (#272).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Transaction",
             "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
@@ -1691,6 +1718,7 @@ mod tests {
         ]);
         for joins in [left_first, inner_first] {
             let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+                "set": [],
                 "model_name": "Transaction",
                 "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"},
                 "joins": joins
@@ -1723,6 +1751,7 @@ mod tests {
     /// and/or `instances` paths.
     fn union_plan(joins: serde_json::Value, paths: serde_json::Value) -> QueryPlan {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Transaction",
             "where": [], "order_by": [], "limit": null, "offset": null, "m2m": null,
             "joins": joins,
@@ -1824,6 +1853,7 @@ mod tests {
         // A path-carrying leaf whose path was never registered as a join entry is a
         // loud error, never a silently unqualified column.
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Transaction",
             "where": [
                 {"node_kind": "leaf", "column": "email", "operator": "==",
@@ -1857,6 +1887,7 @@ mod tests {
 
         // Leaf path with no joins list is also rejected (mutating payloads set joins=[]).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Transaction",
             "where": [
                 {"node_kind": "leaf", "column": "email", "operator": "==",
@@ -1877,6 +1908,7 @@ mod tests {
         // #271 lifts the blanket order_by-path rejection: a path-carrying order_by
         // entry now builds a plan like any other (the SELECT walkers render it).
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
             "model_name": "Pending",
             "where": [], "limit": null, "offset": null, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": [
                 {"join_type": "inner", "path": [
