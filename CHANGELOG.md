@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v0.20.0 (2026-08-29)
+
+### Chores
+
+- Add Context7 library config ([#357](https://github.com/syn54x/ferro-orm/pull/357),
+  [`ab8e79b`](https://github.com/syn54x/ferro-orm/commit/ab8e79b799e07fd64f7da8db09daa278af488877))
+
+### Features
+
+- **query**: Order_by nulls= first/last placement
+  ([#369](https://github.com/syn54x/ferro-orm/pull/369),
+  [`ef6c8b4`](https://github.com/syn54x/ferro-orm/commit/ef6c8b4c458d47a88ace4407a5fb368a8d91200a))
+
+
 ## v0.19.0 (2026-08-18)
 
 ### Bug Fixes
