@@ -259,7 +259,7 @@ Some SQLAlchemy features map differently, or have no Ferro counterpart today:
 - **Eager loading** (`selectinload` / `joinedload`) — forward-FK paths populate with [`include()`](../guide/queries.md#populating-relations-with-include) in one statement; `BackRef`/M2M collections still load lazily per access (reverse population is a future mechanism).
 - **Partial column selects** (`select(User.id, User.name)`) — [`select(lambda u: (u.id, u.name))`](../guide/queries.md#selecting-a-column-subset) returns projected records; traversal and output aliases use the dict form.
 - **`func.sum` / `avg` / `min` / `max` and `group_by()`** — aggregate methods on columns (`t.amount.sum()`), with [grouping derived from the projection](../guide/aggregations.md) — there is deliberately no `group_by()` chainer. `having()` is not built yet ([#291](https://github.com/syn54x/ferro-orm/issues/291)); filter groups in Python or use [raw SQL](../guide/raw-sql.md).
-- **Atomic update expressions** — recipe form, not SQLAlchemy's `update().values(...)`: `update(lambda counter: {"n": counter.n + 1, "updated_at": now})`. Keyword `update()` stays literals-only. `.merge()` / `.concat()` are still coming ([#379](https://github.com/syn54x/ferro-orm/issues/379)).
+- **Atomic update expressions** — recipe form, not SQLAlchemy's `update().values(...)`: `update(lambda counter: {"n": counter.n + 1, "updated_at": now})`. Keyword `update()` stays literals-only. Postgres `.merge()` is shipped on the recipe door; `.concat()` is still coming.
 
 For what's planned, see the [Roadmap](../roadmap.md). Where you hit a gap, `execute()` / `fetch_all()` give you full SQL with bound parameters.
 

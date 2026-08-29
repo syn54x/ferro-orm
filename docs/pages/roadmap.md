@@ -9,7 +9,7 @@ Ferro is pre-1.0 and under active development. The items below are known gaps we
 - **Reverse and many-to-many population** — [`include()`](guide/queries.md#populating-relations-with-include) populates forward-FK paths in one statement; populating `BackRef` collections and M2M sets is a separate future mechanism (a batched second query stitched onto the results). Today each awaited collection is its own query. (*Filtering* on reverse/M2M membership already works — the [existence test](guide/queries.md#existence-tests-on-reverse-many-to-many-relations), `t.lines.exists(...)`.)
 - **Cross-scope correlation in existence tests** — comparing an inner-lambda column against the outer scope (`t.lines.exists(lambda line: line.category_id == t.category_id)`) is rejected at build time today; correlated column-to-column comparison is [#309](https://github.com/syn54x/ferro-orm/issues/309).
 - **`ilike()`** — case-insensitive pattern matching. Workaround: `like()` with normalized case.
-- **Richer update recipes** — `+` / `-` and `now` already run in the database (`update(lambda counter: {"n": counter.n + 1, "updated_at": now})`). `.merge()` / `.concat()` are [#379](https://github.com/syn54x/ferro-orm/issues/379); other operators (`*`, `/`) are still load–modify–`save()` or [raw SQL](guide/raw-sql.md).
+- **Richer update recipes** — `+` / `-`, `now`, and Postgres `.merge()` already run in the database (`update(lambda counter: {"n": counter.n + 1, "updated_at": now})`, `update(lambda conversation: {"turns": conversation.turns.merge(patch)})`). `.concat()` and other operators (`*`, `/`) are still load–modify–`save()` or [raw SQL](guide/raw-sql.md).
 
 ## Connections
 

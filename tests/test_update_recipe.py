@@ -34,6 +34,7 @@ def models(clean_registry: None) -> dict[str, type]:
         opens_at: time | None = None
         turns: dict = Field(default_factory=dict)
         items: list = Field(default_factory=list)
+        recipe: str = ""
 
     resolve_relationships()
     return {"User": User, "Account": Account}
@@ -222,6 +223,44 @@ async def test_bare_value_expr_names_concat_followup(
         await User.where(lambda user: user.active == True).update(  # noqa: E712
             lambda user: {"email": ValueExpr()}
         )
+
+
+@pytest.mark.asyncio
+async def test_kwargs_can_set_column_named_recipe(models: dict[str, type]) -> None:
+    User = models["User"]
+    with pytest.raises(RuntimeError, match=r"No database route"):
+        await User.where(lambda user: user.active == True).update(  # noqa: E712
+            recipe="soup"
+        )
+
+
+@pytest.mark.asyncio
+async def test_merge_compile_uses_session_connection(
+    models: dict[str, type], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ferro.query.builder import Query
+    from ferro.query.wire import compile_query
+
+    def backend(using: str | None = None) -> str:
+        return "postgres" if using == "pg" else "sqlite"
+
+    monkeypatch.setattr("ferro._core.connection_backend", backend)
+
+    User = models["User"]
+    recipe = {"turns": QueryProxy(User).turns.merge({"k": 1})}
+
+    class _PgSession:
+        session_id = "s"
+        connection_name = "pg"
+
+    compile_query(Query(User, session=_PgSession()), "update", recipe=recipe)
+
+    class _SqliteSession:
+        session_id = "s"
+        connection_name = "app"
+
+    with pytest.raises(TypeError, match=r"Postgres"):
+        compile_query(Query(User, session=_SqliteSession()), "update", recipe=recipe)
 
 
 @pytest.mark.asyncio

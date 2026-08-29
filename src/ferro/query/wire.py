@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 from .._bind_payload import update_bind_payload
+from ..state import resolve_compile_connection_name
 from .nodes import (
     BinaryValueExpr,
     FieldProxy,
@@ -914,7 +915,13 @@ def compile_query(
                     "compile_query() accepts either recipe or assignments, not both"
                 )
             set_assignments = (
-                _recipe_set(query.model_cls, recipe, using=query._using)
+                _recipe_set(
+                    query.model_cls,
+                    recipe,
+                    using=resolve_compile_connection_name(
+                        using=query._using, session=query._session
+                    ),
+                )
                 if recipe is not None
                 else _literal_set(assignments)
             )

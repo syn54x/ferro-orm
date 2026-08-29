@@ -338,6 +338,29 @@ async def test_recipe_merge_shallow_and_null_object(db_url):
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
+async def test_recipe_merge_json_column_persists(db_url):
+    """db_type=json (ADR-0005 opt-out) still shallow-merges via jsonb ||."""
+
+    class Note(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        payload: dict = Field(default_factory=dict, db_type="json")
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        row = Note(payload={"keep": 1, "overlap": "old"})
+        await row.save()
+        nid = row.id
+
+        updated = await Note.where(lambda note: note.id == nid).update(
+            lambda note: {"payload": note.payload.merge({"overlap": "new", "added": 2})}
+        )
+        assert updated == 1
+        fresh = await Note.get(nid)
+        assert fresh.payload == {"keep": 1, "overlap": "new", "added": 2}
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
 async def test_recipe_merge_evicts_identity_map(db_url):
     """Merge updates reuse the existing update() eviction / rowcount contract."""
 
