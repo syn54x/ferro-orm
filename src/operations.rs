@@ -5452,12 +5452,12 @@ mod mutation_pagination_guard_tests {
             serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
         envelope["payload"]["set"] = serde_json::json!([{
             "column": "bonus",
-            "value": {"kind": "add", "left": {"kind": "column", "column": "score"}}
+            "value": {"kind": "merge", "left": {"kind": "column", "column": "score"}}
         }]);
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("unknown value-expr kind must fail at the trust boundary");
         assert!(
-            err.to_string().contains("add"),
+            err.to_string().contains("merge"),
             "error must name the unknown kind: {err}"
         );
     }
