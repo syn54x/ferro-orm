@@ -85,6 +85,29 @@ Every instance is either **transient** (constructed with `Model(...)` and never 
 
 `instance.delete()` returns the instance to transient, so a subsequent `save()` INSERTs a new row. `refresh()` keeps it persisted.
 
+### Partial UPDATE with `only=` / `exclude=`
+
+A loaded instance can persist an explicit write-set. `only=` is the allowlist — other columns on the row are left alone:
+
+```python
+--8<-- "docs/examples/mutations.py:save-only"
+```
+
+`exclude=` is the denylist — every persisted column except those names is written. `exclude=set()` is a full write:
+
+```python
+--8<-- "docs/examples/mutations.py:save-exclude"
+```
+
+Rules:
+
+- `only=` / `exclude=` are a persisted UPDATE. Transient `save(only=…)` / `save(exclude=…)` and the same with `on_conflict="update"` raise `ValueError` — persist the row first, or use [`Query.update()`](#recipe-updates) for set-oriented / expression writes (`n+1`, `now`, `.merge()`).
+- Pass one write-set, not both: `save(only=…, exclude=…)` raises `ValueError`.
+- Names are persisted column names (`messages`, shadow `user_id`). Relation / BackRef / M2M names are rejected (the error names the shadow `*_id` when one exists). Unknown names are rejected with the legal column list.
+- The primary key may appear in either set and is never SET. `only=set()`, `only={pk}`, and `exclude=` of every non-PK column raise — the write-set would be empty. A PK-only model's **bare** `save()` is still today's existence check.
+- Named columns write current memory, including `None` → `NULL`. Mixins that assign `updated_at` then call `super().save(**kwargs)` forward `only=` / `exclude=` without expanding the write-set.
+- There is no post-UPDATE `SELECT`. The instance and identity-map entry stay as they are, so an omitted in-memory mutation can diverge from the database until you `refresh()`.
+
 If the row behind a persisted instance no longer exists — deleted by another writer, or you mutated the primary-key field before saving — the UPDATE matches nothing and `save()` raises `ModelDoesNotExist` rather than silently resurrecting the row.
 
 !!! note "Copies share persistence state"
