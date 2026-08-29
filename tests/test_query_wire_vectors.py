@@ -76,6 +76,13 @@ def _build_models() -> dict[str, type]:
         name: str = ""
         users: Relation[list["User"]] = ManyToMany(related_name="tags")
 
+    # Dedicated model for the nulls= golden vector (#363) — do not hang
+    # pinned_at / updated_at onto User/Account/Transaction (existing fixtures).
+    class Card(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        pinned_at: str | None = None
+        updated_at: str = ""
+
     resolve_relationships()
     return {
         "Owner": Owner,
@@ -83,6 +90,7 @@ def _build_models() -> dict[str, type]:
         "Transaction": Transaction,
         "User": User,
         "Tag": Tag,
+        "Card": Card,
     }
 
 
@@ -261,6 +269,17 @@ def _q_m2m_exists(m: dict[str, type]) -> Any:
     return m["User"].where(lambda u: u.tags.exists(lambda tag: tag.name == "admin"))
 
 
+def _q_card_nulls(m: dict[str, type]) -> Any:
+    # #363: first order_by term carries nulls=, the next omits it.
+    return (
+        m["Card"]
+        .select()
+        .where(lambda c: c.id != None)  # noqa: E711
+        .order_by(lambda c: c.pinned_at, "desc", nulls="last")
+        .order_by(lambda c: c.updated_at, "desc")
+    )
+
+
 CASES: list[tuple[str, Callable[[dict[str, type]], Any], str]] = [
     ("query_user_compound_v7", _q_user_compound, "User"),
     ("query_user_not_leaf_v7", _q_not_leaf, "User"),
@@ -277,6 +296,7 @@ CASES: list[tuple[str, Callable[[dict[str, type]], Any], str]] = [
     ("query_transaction_traversed_record_v7", _q_traversed_record, "Transaction"),
     ("query_transaction_aggregate_v7", _q_aggregate, "Transaction"),
     ("query_transaction_global_aggregate_v7", _q_global_aggregate, "Transaction"),
+    ("query_card_nulls_v7", _q_card_nulls, "Card"),
 ]
 
 

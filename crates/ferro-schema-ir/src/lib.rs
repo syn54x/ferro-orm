@@ -1348,6 +1348,35 @@ mod tests {
     }
 
     #[test]
+    fn query_card_nulls_fixture_roundtrip() {
+        // #363: golden vector with nulls on the first order_by term and the
+        // key absent on the second — deserialize, pin shape, round-trip.
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_card_nulls_v7.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query card-nulls fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query card-nulls IR must deserialize");
+        assert_eq!(envelope.ir_version, 7);
+        assert_eq!(envelope.payload.order_by.len(), 2);
+        assert_eq!(
+            envelope.payload.order_by[0].nulls.as_deref(),
+            Some("last")
+        );
+        assert!(
+            envelope.payload.order_by[1].nulls.is_none(),
+            "second term must omit nulls"
+        );
+        let encoded =
+            serde_json::to_value(&envelope).expect("query card-nulls IR must serialize");
+        assert_eq!(encoded, ir, "query card-nulls round-trip must not drift");
+    }
+
+    #[test]
     fn codec_fixture_roundtrip() {
         let fixture =
             include_str!("../../../tests/fixtures/ir_vectors/codec_registry_core_v1.json");
