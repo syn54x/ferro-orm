@@ -132,6 +132,124 @@ class TestOrderByValidation:
         with pytest.raises(ValueError, match="asc"):
             ObUser6.select().order_by("id", "sideways")
 
+    def test_order_by_nulls_first_and_last_accepted(self):
+        class ObNullsUser(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            pinned_at: str | None = None
+
+        q_first = ObNullsUser.select().order_by(
+            lambda u: u.pinned_at, "desc", nulls="first"
+        )
+        assert q_first.order_by_clause == [
+            OrderByEntry(
+                column="pinned_at", direction="desc", path=(), nulls="first"
+            )
+        ]
+        q_last = ObNullsUser.select().order_by("pinned_at", nulls="last")
+        assert q_last.order_by_clause == [
+            OrderByEntry(column="pinned_at", direction="asc", path=(), nulls="last")
+        ]
+
+    def test_order_by_nulls_case_insensitive(self):
+        class ObNullsCase(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            pinned_at: str | None = None
+
+        q = ObNullsCase.select().order_by("pinned_at", "DESC", nulls="LAST")
+        assert q.order_by_clause[0].nulls == "last"
+        q2 = ObNullsCase.select().order_by(lambda u: u.pinned_at, nulls="FIRST")
+        assert q2.order_by_clause[0].nulls == "first"
+
+    def test_order_by_nulls_rejects_junk(self):
+        class ObNullsJunk(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            pinned_at: str | None = None
+
+        with pytest.raises(ValueError, match=r"first.*last"):
+            ObNullsJunk.select().order_by("pinned_at", nulls="sideways")
+        with pytest.raises(ValueError, match=r"first.*last"):
+            ObNullsJunk.select().order_by(
+                lambda u: u.pinned_at, "desc", nulls="nulls last"
+            )
+
+    def test_order_by_nulls_is_keyword_only(self):
+        class ObNullsKw(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+        with pytest.raises(TypeError):
+            ObNullsKw.select().order_by("id", "desc", "last")  # type: ignore[misc]
+
+    def test_order_by_nulls_on_not_null_column(self):
+        """nulls= is legal even when the column cannot store NULL."""
+
+        class ObNotNull(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            name: str = ""
+
+        q = ObNotNull.select().order_by(lambda u: u.name, nulls="last")
+        assert q.order_by_clause == [
+            OrderByEntry(column="name", direction="asc", path=(), nulls="last")
+        ]
+
+    def test_order_by_omitted_nulls_matches_legacy_entry(self):
+        class ObOmit(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            age: int = 0
+
+        q = ObOmit.select().order_by(lambda u: u.age, "desc")
+        assert q.order_by_clause == [
+            OrderByEntry(column="age", direction="desc", path=())
+        ]
+        assert q.order_by_clause[0].nulls is None
+
+    def test_order_by_nulls_with_relation_traversal(self):
+        class ObAuthor(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            name: str | None = None
+
+        class ObPost(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            author: Annotated[ObAuthor, ForeignKey(related_name="ob_posts")]
+
+        q = ObPost.select().order_by(lambda p: p.author.name, "desc", nulls="last")
+        assert q.order_by_clause == [
+            OrderByEntry(
+                column="name", direction="desc", path=("author",), nulls="last"
+            )
+        ]
+
+    def test_projected_order_by_nulls_output_alias_and_aggregate(self):
+        class ObAggAccount(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            label: str | None = None
+
+        class ObAggTxn(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            amount: int = 0
+            account: Annotated[
+                ObAggAccount | None, ForeignKey(related_name="ob_agg_txns")
+            ] = None
+
+        grouped = ObAggTxn.select(
+            lambda t: {"acct": t.account_id, "total": t.amount.sum()}
+        )
+        by_alias = grouped.order_by("total", "desc", nulls="first")
+        assert by_alias.order_by_clause == [
+            OrderByEntry(column="total", direction="desc", path=(), nulls="first")
+        ]
+        by_agg = grouped.order_by(lambda t: t.amount.sum(), nulls="last")
+        assert by_agg.order_by_clause == [
+            OrderByEntry(column="total", direction="asc", path=(), nulls="last")
+        ]
+        by_traversal = ObAggTxn.select(
+            lambda t: {"name": t.account.label, "total": t.amount.sum()}
+        ).order_by(lambda t: t.account.label, "asc", nulls="first")
+        assert by_traversal.order_by_clause == [
+            OrderByEntry(
+                column="label", direction="asc", path=("account",), nulls="first"
+            )
+        ]
+
 
 class TestOperatorSurfaceRemoved:
     def test_class_attribute_is_not_a_field_proxy(self):
