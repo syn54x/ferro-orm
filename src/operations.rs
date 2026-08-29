@@ -251,12 +251,12 @@ fn tx_remove(session_id: Option<&str>, tx_id: &str) -> PyResult<Option<Transacti
     Ok(TRANSACTION_REGISTRY.remove(tx_id).map(|(_, handle)| handle))
 }
 
-/// The only QueryIR version this build accepts (#269 through #377).
+/// The only QueryIR version this build accepts (#269 through #378).
 ///
 /// Python and Rust ship in one wheel, so there is exactly one supported version at any
 /// time — no negotiation, no fallback. A mismatch can only mean a mixed build (a stale
 /// `.so` next to a rebuilt Python package, or vice versa).
-const SUPPORTED_QUERY_IR_VERSION: u32 = 9;
+const SUPPORTED_QUERY_IR_VERSION: u32 = 10;
 
 /// Envelope shell used only to read `ir_kind`/`ir_version` before committing to a strict
 /// [`QueryIrPayload`] parse. `payload` is deliberately raw JSON: a real earlier-version
@@ -3402,33 +3402,19 @@ pub fn update_filtered<'py>(
                 .to_owned();
             for assignment in &plan.set_assignments {
                 let key = &assignment.column;
-                match &assignment.value {
-                    QueryValueExpr::Literal { .. } => {
-                        let input = set_value_bind_input(&assignment.value, key)?;
-                        update.value(
-                            Alias::new(key),
-                            bind_input_to_expr(
-                                &schema,
-                                &table_name,
-                                key,
-                                &input,
-                                enum_udt,
-                                uuid_columns,
-                                ts_cast,
-                                backend,
-                            )?,
-                        );
-                    }
-                    QueryValueExpr::Column { column } => {
-                        if column.is_empty() {
-                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "Invalid QueryIR column-ref SET for column {key:?}: \
-                                     source column must be a non-empty name"
-                            )));
-                        }
-                        update.value(Alias::new(key), Expr::col(Alias::new(column.as_str())));
-                    }
-                }
+                update.value(
+                    Alias::new(key),
+                    set_value_to_expr(
+                        &schema,
+                        &table_name,
+                        key,
+                        &assignment.value,
+                        enum_udt,
+                        uuid_columns,
+                        ts_cast,
+                        backend,
+                    )?,
+                );
             }
             sea_query_build_for_backend!(update, backend)
         };
@@ -3748,6 +3734,100 @@ fn set_value_bind_input(value: &QueryValueExpr, col: &str) -> PyResult<BindInput
         QueryValueExpr::Column { .. } => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "SET column {col:?} is a column-ref and must not be bound as a literal"
         ))),
+        QueryValueExpr::Add { .. } | QueryValueExpr::Sub { .. } => {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "SET column {col:?} is an arithmetic expression and must not be bound as a literal"
+            )))
+        }
+        QueryValueExpr::Now => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "SET column {col:?} is now and must not be bound as a literal"
+        ))),
+    }
+}
+
+/// Lower one SET value expression to a SeaQuery expr. Literals bind;
+/// column refs stay column exprs; arithmetic is an operator tree;
+/// ``now`` is the portable database clock (`CURRENT_TIMESTAMP`).
+fn set_value_to_expr(
+    schema: &crate::state::RegisteredModel,
+    table_name: &str,
+    target: &str,
+    value: &QueryValueExpr,
+    enum_udt: &HashMap<String, String>,
+    uuid_columns: &HashSet<String>,
+    ts_cast: &HashMap<String, String>,
+    backend: Dialect,
+) -> PyResult<SimpleExpr> {
+    match value {
+        QueryValueExpr::Literal { .. } => {
+            let input = set_value_bind_input(value, target)?;
+            bind_input_to_expr(
+                schema,
+                table_name,
+                target,
+                &input,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )
+        }
+        QueryValueExpr::Column { column } => {
+            if column.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid QueryIR column-ref SET for column {target:?}: \
+                     source column must be a non-empty name"
+                )));
+            }
+            Ok(Expr::col(Alias::new(column.as_str())).into())
+        }
+        QueryValueExpr::Add { left, right } => {
+            let left_expr = set_value_to_expr(
+                schema,
+                table_name,
+                target,
+                left,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )?;
+            let right_expr = set_value_to_expr(
+                schema,
+                table_name,
+                target,
+                right,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )?;
+            Ok(left_expr.add(right_expr))
+        }
+        QueryValueExpr::Sub { left, right } => {
+            let left_expr = set_value_to_expr(
+                schema,
+                table_name,
+                target,
+                left,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )?;
+            let right_expr = set_value_to_expr(
+                schema,
+                table_name,
+                target,
+                right,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+                backend,
+            )?;
+            Ok(left_expr.sub(right_expr))
+        }
+        QueryValueExpr::Now => Ok(Expr::cust("CURRENT_TIMESTAMP")),
     }
 }
 
@@ -4128,7 +4208,7 @@ pub fn _catalog_query_count_for_test(using: Option<String>) -> PyResult<u64> {
 mod m2m_value_tests {
     use super::{
         BindInput, backend_column_value_expr, bind_input_from_py, bind_input_to_expr,
-        py_to_json_value, python_to_sea_value, set_value_bind_input,
+        py_to_json_value, python_to_sea_value, set_value_bind_input, set_value_to_expr,
     };
     use crate::state::Dialect;
     use ferro_schema_ir::QueryValueExpr;
@@ -4410,16 +4490,109 @@ mod m2m_value_tests {
     }
 
     #[test]
+    fn query_ir_set_add_column_literal_renders_operator_not_bind() {
+        use sea_query::{Alias, SqliteQueryBuilder, UpdateStatement};
+
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "add",
+            "left": {"kind": "column", "column": "n"},
+            "right": {"kind": "literal", "value": {"kind": "int", "value": 1}}
+        }))
+        .expect("add value expression");
+
+        let schema = crate::state::RegisteredModel::new_for_test(
+            serde_json::json!({
+                "properties": { "n": { "type": "integer" } }
+            }),
+            "counter".to_string(),
+        );
+        let empty_udt = HashMap::new();
+        let empty_uuid = HashSet::new();
+        let empty_ts = HashMap::new();
+        let expr = set_value_to_expr(
+            &schema,
+            "counter",
+            "n",
+            &value,
+            &empty_udt,
+            &empty_uuid,
+            &empty_ts,
+            Dialect::Sqlite,
+        )
+        .expect("add must lower");
+
+        let mut update = UpdateStatement::new();
+        update
+            .table(Alias::new("counter"))
+            .value(Alias::new("n"), expr);
+        let (sql, values) = update.build(SqliteQueryBuilder);
+        assert!(
+            sql.contains("n") && (sql.contains('+') || sql.contains(" + ")),
+            "arithmetic SET must render an operator: {sql}"
+        );
+        assert_eq!(
+            values.0.len(),
+            1,
+            "literal operand must stay a bind, not be precomputed: {values:?}"
+        );
+    }
+
+    #[test]
+    fn query_ir_set_now_renders_clock_not_bound_datetime() {
+        use sea_query::{Alias, SqliteQueryBuilder, UpdateStatement};
+
+        let value: ferro_schema_ir::QueryValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "now"
+        }))
+        .expect("now value expression");
+
+        let schema = crate::state::RegisteredModel::new_for_test(
+            serde_json::json!({
+                "properties": { "updated_at": { "type": "string", "format": "date-time" } }
+            }),
+            "stamp".to_string(),
+        );
+        let empty_udt = HashMap::new();
+        let empty_uuid = HashSet::new();
+        let empty_ts = HashMap::new();
+        let expr = set_value_to_expr(
+            &schema,
+            "stamp",
+            "updated_at",
+            &value,
+            &empty_udt,
+            &empty_uuid,
+            &empty_ts,
+            Dialect::Sqlite,
+        )
+        .expect("now must lower");
+
+        let mut update = UpdateStatement::new();
+        update
+            .table(Alias::new("stamp"))
+            .value(Alias::new("updated_at"), expr);
+        let (sql, values) = update.build(SqliteQueryBuilder);
+        assert!(
+            sql.to_uppercase().contains("CURRENT_TIMESTAMP"),
+            "now must render the database clock: {sql}"
+        );
+        assert!(
+            values.0.is_empty(),
+            "now must not bind a Python datetime: {values:?}"
+        );
+    }
+
+    #[test]
     fn query_ir_set_rejects_unknown_value_expr_kind() {
         let err = serde_json::from_value::<ferro_schema_ir::QueryValueExpr>(serde_json::json!({
-            "kind": "add",
+            "kind": "merge",
             "left": {"kind": "column", "column": "score"},
             "right": {"kind": "literal", "value": {"kind": "int", "value": 1}}
         }))
         .expect_err("unknown value-expr kind must fail at the trust boundary");
         let message = err.to_string();
         assert!(
-            message.contains("add"),
+            message.contains("merge"),
             "error must name the unknown kind: {message}"
         );
     }
@@ -5106,7 +5279,7 @@ mod mutation_pagination_guard_tests {
     fn envelope_without_pagination_keys() -> String {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 9,
+            "ir_version": 10,
             "payload": {
                 "set": [],
                 "model_name": "Widget",
@@ -5279,12 +5452,12 @@ mod mutation_pagination_guard_tests {
             serde_json::from_str(&envelope_without_pagination_keys()).unwrap();
         envelope["payload"]["set"] = serde_json::json!([{
             "column": "bonus",
-            "value": {"kind": "add", "left": {"kind": "column", "column": "score"}}
+            "value": {"kind": "merge", "left": {"kind": "column", "column": "score"}}
         }]);
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("unknown value-expr kind must fail at the trust boundary");
         assert!(
-            err.to_string().contains("add"),
+            err.to_string().contains("merge"),
             "error must name the unknown kind: {err}"
         );
     }
@@ -5294,10 +5467,10 @@ mod mutation_pagination_guard_tests {
 mod query_ir_version_gate_tests {
     use super::query_plan_from_ir_json;
 
-    fn v9_envelope() -> serde_json::Value {
+    fn v10_envelope() -> serde_json::Value {
         serde_json::json!({
             "ir_kind": "query",
-            "ir_version": 9,
+            "ir_version": 10,
             "payload": {
                 "set": [],
                 "model_name": "Widget",
@@ -5315,7 +5488,7 @@ mod query_ir_version_gate_tests {
     /// Assert a rejected envelope's message names the received version, this
     /// build's supported version (8), and the one-wheel fix — the actionable
     /// shape pinned since the v1-at-v2 bump (#269), re-pinned at v3 (#278),
-    /// v4 (#285), v5 (#292), v6 (#310), v7 (#314), v8 (#376), and v9 (#377).
+    /// v4 (#285), v5 (#292), v6 (#310), v7 (#314), v8 (#376), v9 (#377), and v10 (#378).
     fn assert_actionable_version_rejection(err: pyo3::PyErr, received: char) {
         pyo3::Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
@@ -5326,7 +5499,7 @@ mod query_ir_version_gate_tests {
             "message should name the received version: {msg}"
         );
         assert!(
-            msg.contains('9'),
+            msg.contains("10"),
             "message should name the supported version: {msg}"
         );
         assert!(
@@ -5340,21 +5513,21 @@ mod query_ir_version_gate_tests {
     }
 
     #[test]
-    fn accepts_version_9() {
-        query_plan_from_ir_json(&v9_envelope().to_string())
-            .expect("a well-formed v9 envelope must be accepted");
+    fn accepts_version_10() {
+        query_plan_from_ir_json(&v10_envelope().to_string())
+            .expect("a well-formed v10 envelope must be accepted");
     }
 
     #[test]
     fn rejects_v8_payload_without_set_section() {
-        let mut envelope = v9_envelope();
+        let mut envelope = v10_envelope();
         envelope["payload"]
             .as_object_mut()
             .expect("payload object")
             .remove("set");
 
         let err = query_plan_from_ir_json(&envelope.to_string())
-            .expect_err("a v9 payload without its required SET section must be rejected");
+            .expect_err("a v10 payload without its required SET section must be rejected");
         assert!(
             err.to_string().contains("set"),
             "must name the missing section: {err}"
@@ -5363,7 +5536,7 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_v7_envelope_with_actionable_message() {
-        let mut envelope = v9_envelope();
+        let mut envelope = v10_envelope();
         envelope["ir_version"] = serde_json::json!(7);
         envelope["payload"]
             .as_object_mut()
@@ -5377,12 +5550,22 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_v8_envelope_with_actionable_message() {
-        let mut envelope = v9_envelope();
+        let mut envelope = v10_envelope();
         envelope["ir_version"] = serde_json::json!(8);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("a v8 envelope must be rejected before payload parsing");
         assert_actionable_version_rejection(err, '8');
+    }
+
+    #[test]
+    fn rejects_v9_envelope_with_actionable_message() {
+        let mut envelope = v10_envelope();
+        envelope["ir_version"] = serde_json::json!(9);
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v9 envelope must be rejected before payload parsing");
+        assert_actionable_version_rejection(err, '9');
     }
 
     /// Contract test (#314 acceptance criteria): a v6 envelope must be
@@ -5568,14 +5751,14 @@ mod query_ir_version_gate_tests {
 
     #[test]
     fn rejects_unsupported_future_version() {
-        let mut envelope = v9_envelope();
-        envelope["ir_version"] = serde_json::json!(10);
+        let mut envelope = v10_envelope();
+        envelope["ir_version"] = serde_json::json!(11);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("an unsupported future version must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("10"),
+            msg.contains("11"),
             "message should name the received version: {msg}"
         );
     }
@@ -5584,7 +5767,7 @@ mod query_ir_version_gate_tests {
     /// naming the bad kind and the supported ones (#278).
     #[test]
     fn rejects_unknown_materialization_kind() {
-        let mut envelope = v9_envelope();
+        let mut envelope = v10_envelope();
         envelope["payload"]["materialization"] = serde_json::json!({"kind": "row_dicts"});
 
         let err = query_plan_from_ir_json(&envelope.to_string())
@@ -5601,7 +5784,7 @@ mod query_ir_version_gate_tests {
     /// the plan travels with the query as data (ADR-0007), never defaulted.
     #[test]
     fn rejects_v8_payload_missing_materialization() {
-        let mut envelope = v9_envelope();
+        let mut envelope = v10_envelope();
         envelope["payload"]
             .as_object_mut()
             .unwrap()
@@ -5628,7 +5811,7 @@ mod materialization_walker_gate_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 9,
+                "ir_version": 10,
                 "payload": {
                     "set": [],
                     "model_name": "Widget",
@@ -5721,7 +5904,7 @@ mod record_select_list_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 9,
+                "ir_version": 10,
                 "payload": {
                     "set": [],
                     "model_name": "Transaction",
@@ -6224,7 +6407,7 @@ mod instances_select_list_tests {
         let mut plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 9,
+                "ir_version": 10,
                 "payload": {
                     "set": [],
                     "model_name": "Transaction",
@@ -6384,7 +6567,7 @@ mod mutation_qualification_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 9,
+                "ir_version": 10,
                 "payload": {
                     "set": [],
                     "model_name": "Widget",
@@ -6471,7 +6654,7 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 9,
+                "ir_version": 10,
                 "payload": {
                     "set": [],
                     "model_name": "Transaction",
@@ -6578,7 +6761,7 @@ mod select_join_render_tests {
         query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 9,
+                "ir_version": 10,
                 "payload": {
                     "set": [],
                     "model_name": model_name,
@@ -6601,7 +6784,7 @@ mod select_join_render_tests {
         let plan = query_plan_from_ir_json(
             &serde_json::json!({
                 "ir_kind": "query",
-                "ir_version": 9,
+                "ir_version": 10,
                 "payload": {
                     "set": [],
                     "model_name": "Transaction",

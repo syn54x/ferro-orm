@@ -530,6 +530,18 @@ class FieldProxy(Generic[TField]):
         """
         return self.in_(other)
 
+    def __add__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("+", self, other)
+
+    def __sub__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("-", self, other)
+
+    def __radd__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("+", other, self)
+
+    def __rsub__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("-", other, self)
+
     def __repr__(self):
         """Return a developer-friendly representation of the field proxy"""
         return f"FieldProxy(column={self.column!r})"
@@ -602,13 +614,76 @@ class AggregateExpr:
         )
 
 
+def _numeric_operand_family(value: Any) -> str | None:
+    """Classify a ``+`` / ``-`` operand, or ``None`` when already gated."""
+    if isinstance(value, FieldProxy):
+        if value._owner is None:
+            return None
+        spec = getattr(value._owner, "__ferro_columns__", {}).get(value.column)
+        if spec is None:
+            return None
+        return _aggregate_source_family(spec)
+    if isinstance(value, BinaryValueExpr):
+        return None
+    if isinstance(value, NowExpr):
+        return "datetime"
+    if isinstance(value, ValueExpr):
+        return "value-expression"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, Decimal):
+        return "decimal"
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
+def _require_numeric_operand(value: Any, op: str) -> None:
+    """Reject a ``+`` / ``-`` operand that is not a numeric family (#378)."""
+    family = _numeric_operand_family(value)
+    if family is None or family in _AGG_NUMERIC:
+        return
+    if isinstance(value, FieldProxy) and value._owner is not None:
+        model = value._owner.__name__
+        raise TypeError(
+            f"{value._dotted()} {op} ... is not supported: "
+            f"{model}.{value.column} is {family}-typed, and {op} "
+            "takes a numeric column (int, float, or Decimal)."
+        )
+    if isinstance(value, NowExpr):
+        raise TypeError(
+            f"now is the database clock, not a numeric value; {op} "
+            "takes a numeric column (int, float, or Decimal)."
+        )
+    if isinstance(value, ValueExpr):
+        raise TypeError(
+            f"this value expression cannot be used with {op}; "
+            ".merge() / .concat() land in #379"
+        )
+    raise TypeError(
+        f"{op} takes a numeric value (int, float, or Decimal), "
+        f"got {family}-typed {type(value).__name__}"
+    )
+
+
+def _binary_value(op: str, left: Any, right: Any) -> "BinaryValueExpr":
+    _require_numeric_operand(left, op)
+    _require_numeric_operand(right, op)
+    return BinaryValueExpr(op, left, right)
+
+
 class ValueExpr:
     """A SET value-producing expression (#377). Sibling of :class:`AggregateExpr`.
 
     Not a :class:`QueryNode`. Literals and root :class:`FieldProxy` copies
-    compile at the ``update()`` recipe door; later slices (``+`` / ``now``,
-    ``.merge()`` / ``.concat()``) produce instances of this type. Comparing
-    one to build a predicate is #327; projecting or ordering by one is #309.
+    compile at the ``update()`` recipe door; ``+`` / ``-`` / ``now`` (#378)
+    produce instances of this type. ``.merge()`` / ``.concat()`` land in
+    #379. Comparing one to build a predicate is #327; projecting or
+    ordering by one is #309.
     """
 
     def _reject_clause(self, clause: str) -> NoReturn:
@@ -651,8 +726,45 @@ class ValueExpr:
             "Comparing one is #327; projecting or ordering by one is #309."
         )
 
+    def __add__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("+", self, other)
+
+    def __sub__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("-", self, other)
+
+    def __radd__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("+", other, self)
+
+    def __rsub__(self, other: Any) -> "BinaryValueExpr":
+        return _binary_value("-", other, self)
+
     def __repr__(self) -> str:
         return "ValueExpr()"
+
+
+class BinaryValueExpr(ValueExpr):
+    """One binary ``+`` / ``-`` SET node (#378). Either side is a value."""
+
+    def __init__(self, op: str, left: Any, right: Any) -> None:
+        self.op = op
+        self.left = left
+        self.right = right
+
+    def __repr__(self) -> str:
+        return f"BinaryValueExpr({self.op!r}, {self.left!r}, {self.right!r})"
+
+
+class NowExpr(ValueExpr):
+    """The database clock singleton (#378). Assign ``now``, not ``now()``."""
+
+    def __call__(self) -> NoReturn:
+        raise TypeError("now is a singleton, not a function; assign now, not now()")
+
+    def __repr__(self) -> str:
+        return "now"
+
+
+now = NowExpr()
 
 
 def validate_query_column(model_cls: type, name: str) -> str:

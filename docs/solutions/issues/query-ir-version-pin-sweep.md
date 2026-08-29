@@ -8,7 +8,7 @@ related_files:
   - tests/test_ir_vectors_contract.py
   - tests/test_order_by_nulls_wire.py
   - tests/test_query_builder.py
-related_issues: [376, 377, 380]
+related_issues: [376, 377, 378, 380]
 related_prs: []
 captured: 2026-08-29
 ---
