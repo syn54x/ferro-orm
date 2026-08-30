@@ -12,6 +12,7 @@ from ferro.query import Query, QueryNode
 from ferro.query.nodes import FieldProxy, _serialize_query_value
 from ferro.query.wire import compile_query
 from pydantic import Field
+from pydantic_core import to_json
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -40,7 +41,7 @@ def test_serialize_query_value_normalizes_non_json_native_values():
 
     assert serialized["id"] == str(uid)
     assert serialized["price"] == "12.50"
-    assert serialized["happened_at"] == happened_at.isoformat()
+    assert serialized["happened_at"] == json.loads(to_json(happened_at))
     assert serialized["day"] == "2026-04-24"
     assert serialized["status"] == QueryStatus.ACTIVE
     assert serialized["nested"]["ids"] == [str(uid)]
@@ -67,7 +68,7 @@ def test_to_wire_json_serializes_m2m_context_without_mutating_query_state():
     assert query._m2m_context.source_id == source_id
     assert isinstance(query._m2m_context.source_id, uuid.UUID)
     assert payload["ir_kind"] == "query"
-    assert payload["ir_version"] == 12
+    assert payload["ir_version"] == 13
     assert payload["payload"]["m2m"]["source_id"] == str(source_id)
 
 
@@ -214,14 +215,18 @@ async def test_query_execution(db_url):
         assert {r.username for r in results} == {"taylor", "alice"}
 
         # 2. Test IN filter
-        results_in = await FilterUser.where(lambda t: t.username << ["jeff", "alice"]).all()
+        results_in = await FilterUser.where(
+            lambda t: t.username << ["jeff", "alice"]
+        ).all()
         assert len(results_in) == 2
         assert {r.username for r in results_in} == {"jeff", "alice"}
 
         # 3. Test combined filters (Chaining)
-        results_chained = await FilterUser.where(lambda t: t.age < 35).where(
-            lambda t: t.age > 20
-        ).all()
+        results_chained = (
+            await FilterUser.where(lambda t: t.age < 35)
+            .where(lambda t: t.age > 20)
+            .all()
+        )
         assert len(results_chained) == 2
         assert {r.username for r in results_chained} == {"taylor", "jeff"}
 
@@ -335,7 +340,9 @@ async def test_query_bitwise_multiple_where(db_url):
         await LogicUser(id=3, username="alice", age=35).save()
 
         # (A OR B) AND (C)
-        query = LogicUser.where(lambda t: (t.username == "jeff") | (t.username == "alice"))
+        query = LogicUser.where(
+            lambda t: (t.username == "jeff") | (t.username == "alice")
+        )
         query = query.where(lambda t: t.age > 30)
 
         results = await query.all()

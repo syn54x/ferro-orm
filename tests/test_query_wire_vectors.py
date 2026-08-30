@@ -290,23 +290,36 @@ def _q_card_nulls(m: dict[str, type]) -> Any:
     )
 
 
+def _q_user_after(m: dict[str, type]) -> Any:
+    return (
+        m["User"]
+        .select()
+        .where(lambda u: u.active == True)  # noqa: E712
+        .order_by(lambda u: u.score)
+        .order_by(lambda u: u.id)
+        .after((10, 3))
+        .limit(5)
+    )
+
+
 CASES: list[tuple[str, Callable[[dict[str, type]], Any], str]] = [
-    ("query_user_compound_v12", _q_user_compound, "User"),
-    ("query_user_not_leaf_v12", _q_not_leaf, "User"),
-    ("query_user_not_compound_v12", _q_not_compound, "User"),
-    ("query_account_exists_v12", _q_exists_bare, "Account"),
-    ("query_owner_not_exists_v12", _q_not_exists, "Owner"),
-    ("query_account_scoped_exists_v12", _q_scoped_exists, "Account"),
-    ("query_owner_nested_exists_v12", _q_nested_exists, "Owner"),
-    ("query_user_m2m_exists_v12", _q_m2m_exists, "User"),
-    ("query_transaction_traversal_v12", _q_traversal, "Transaction"),
-    ("query_transaction_left_join_v12", _q_left_join, "Transaction"),
-    ("query_transaction_include_v12", _q_include, "Transaction"),
-    ("query_transaction_record_v12", _q_record, "Transaction"),
-    ("query_transaction_traversed_record_v12", _q_traversed_record, "Transaction"),
-    ("query_transaction_aggregate_v12", _q_aggregate, "Transaction"),
-    ("query_transaction_global_aggregate_v12", _q_global_aggregate, "Transaction"),
-    ("query_card_nulls_v12", _q_card_nulls, "Card"),
+    ("query_user_compound_v13", _q_user_compound, "User"),
+    ("query_user_not_leaf_v13", _q_not_leaf, "User"),
+    ("query_user_not_compound_v13", _q_not_compound, "User"),
+    ("query_account_exists_v13", _q_exists_bare, "Account"),
+    ("query_owner_not_exists_v13", _q_not_exists, "Owner"),
+    ("query_account_scoped_exists_v13", _q_scoped_exists, "Account"),
+    ("query_owner_nested_exists_v13", _q_nested_exists, "Owner"),
+    ("query_user_m2m_exists_v13", _q_m2m_exists, "User"),
+    ("query_transaction_traversal_v13", _q_traversal, "Transaction"),
+    ("query_transaction_left_join_v13", _q_left_join, "Transaction"),
+    ("query_transaction_include_v13", _q_include, "Transaction"),
+    ("query_transaction_record_v13", _q_record, "Transaction"),
+    ("query_transaction_traversed_record_v13", _q_traversed_record, "Transaction"),
+    ("query_transaction_aggregate_v13", _q_aggregate, "Transaction"),
+    ("query_transaction_global_aggregate_v13", _q_global_aggregate, "Transaction"),
+    ("query_card_nulls_v13", _q_card_nulls, "Card"),
+    ("query_user_after_v13", _q_user_after, "User"),
 ]
 
 
@@ -352,8 +365,17 @@ def test_count_zeroes_ordering_and_paging_but_keeps_joins(
     assert payload["order_by"] == []
     assert payload["limit"] is None
     assert payload["offset"] is None
+    assert "after" not in payload
     assert len(payload["joins"]) == 1
     assert payload["materialization"] == {"kind": "root_instances"}
+
+
+def test_count_drops_after_bound(models: dict[str, type]) -> None:
+    query = models["User"].select().order_by("id").after((1,)).limit(3)
+    payload = _payload(query, "count")
+    assert "after" not in payload
+    assert payload["limit"] is None
+    assert payload["offset"] is None
 
 
 def test_count_on_a_projection_stays_root_instances(
@@ -378,6 +400,7 @@ def test_mutate_payload_omits_pagination_keys(models: dict[str, type]) -> None:
         payload = _payload(query, verb)
         assert "limit" not in payload
         assert "offset" not in payload
+        assert "after" not in payload
         assert payload["order_by"] == []
         assert payload["m2m"] is None
         assert payload["joins"] == []
@@ -387,7 +410,7 @@ def test_mutate_payload_omits_pagination_keys(models: dict[str, type]) -> None:
 def test_literal_set_emission_matches_hand_authored_vector(
     models: dict[str, type],
 ) -> None:
-    vector = _vector("query_user_literal_set_v12")
+    vector = _vector("query_user_literal_set_v13")
     expected = vector["ir"]
     assert expected["payload"]["model_name"] == "User"
 
@@ -408,7 +431,7 @@ def test_literal_set_emission_matches_hand_authored_vector(
 def test_mixed_set_emission_matches_hand_authored_vector(
     models: dict[str, type],
 ) -> None:
-    vector = _vector("query_user_mixed_set_v12")
+    vector = _vector("query_user_mixed_set_v13")
     expected = vector["ir"]
     assert expected["payload"]["model_name"] == "User"
 
@@ -486,13 +509,13 @@ def test_literal_set_emits_every_json_value_kind(
 def test_envelope_is_versioned(models: dict[str, type]) -> None:
     envelope = json.loads(compile_query(models["User"].select(), "fetch").wire_json)
     assert envelope["ir_kind"] == "query"
-    assert envelope["ir_version"] == 12
+    assert envelope["ir_version"] == 13
 
 
 def test_binary_add_column_literal_matches_hand_authored_vector(
     models: dict[str, type],
 ) -> None:
-    vector = _vector("query_user_add_literal_set_v12")
+    vector = _vector("query_user_add_literal_set_v13")
     expected = vector["ir"]
     assert expected["payload"]["model_name"] == "User"
 
@@ -512,7 +535,7 @@ def test_binary_add_column_literal_matches_hand_authored_vector(
 def test_binary_add_column_column_matches_hand_authored_vector(
     models: dict[str, type],
 ) -> None:
-    vector = _vector("query_user_add_columns_set_v12")
+    vector = _vector("query_user_add_columns_set_v13")
     expected = vector["ir"]
     assert expected["payload"]["model_name"] == "User"
 
@@ -531,7 +554,7 @@ def test_binary_add_column_column_matches_hand_authored_vector(
 
 
 def test_now_set_matches_hand_authored_vector(models: dict[str, type]) -> None:
-    vector = _vector("query_user_now_set_v12")
+    vector = _vector("query_user_now_set_v13")
     expected = vector["ir"]
     assert expected["payload"]["model_name"] == "User"
 
@@ -549,7 +572,7 @@ def test_now_set_matches_hand_authored_vector(models: dict[str, type]) -> None:
 
 
 def test_merge_set_matches_hand_authored_vector(models: dict[str, type]) -> None:
-    vector = _vector("query_user_merge_set_v12")
+    vector = _vector("query_user_merge_set_v13")
     expected = vector["ir"]
     assert expected["payload"]["model_name"] == "User"
 

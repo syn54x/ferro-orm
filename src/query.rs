@@ -7,6 +7,7 @@
 use crate::state::Dialect;
 use ferro_schema_ir::{
     Materialization, QueryIrPayload, QueryJoin, QueryNode, QueryOrderBy, QuerySetAssignment,
+    QueryValue,
 };
 use sea_query::{Alias, Condition, Expr, JoinType, SimpleExpr};
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,50 @@ pub fn qualify_column_with_joins(
         join_plan,
     };
     qualify_leaf_column(&qualifier, column, path)
+}
+
+/// One term of an exclusive stepwise (keyset) compare (#393).
+///
+/// #394 extends this with NULL-bucket facts; keep compare logic here, not in
+/// the SELECT builder.
+pub struct StepwiseKey {
+    /// Table-qualified order-key column.
+    pub column: Expr,
+    /// `"asc"` or `"desc"` (case-insensitive).
+    pub direction: String,
+    /// Bound value for this key, already typed as a SeaQuery expression.
+    pub bound: SimpleExpr,
+}
+
+/// Exclusive stepwise compare: rows strictly after the bound in declared order.
+///
+/// For two NOT NULL ASC keys: `(a > :a) OR (a = :a AND b > :b)`. DESC flips
+/// `>` to `<`. Mixed directions apply per key. #394 will extend this function
+/// for NULL-aware expansion — callers must not duplicate the compare tree.
+pub fn exclusive_stepwise_compare(keys: &[StepwiseKey]) -> Result<Condition, String> {
+    if keys.is_empty() {
+        return Err("exclusive stepwise compare requires at least one order key".to_string());
+    }
+    let mut any = Condition::any();
+    for i in 0..keys.len() {
+        let mut prefix = Condition::all();
+        for key in &keys[..i] {
+            prefix = prefix.add(key.column.clone().eq(key.bound.clone()));
+        }
+        prefix = prefix.add(stepwise_inequality(&keys[i])?);
+        any = any.add(prefix);
+    }
+    Ok(any)
+}
+
+fn stepwise_inequality(key: &StepwiseKey) -> Result<SimpleExpr, String> {
+    match key.direction.to_ascii_lowercase().as_str() {
+        "asc" => Ok(key.column.clone().gt(key.bound.clone())),
+        "desc" => Ok(key.column.clone().lt(key.bound.clone())),
+        other => Err(format!(
+            "invalid order_by direction {other:?}: expected \"asc\" or \"desc\""
+        )),
+    }
 }
 
 /// One rendered relation JOIN edge: `<join> <to_table> AS <alias> ON
@@ -207,7 +252,8 @@ impl JoinPlanBuilder {
             }
             self.used.insert(alias.clone());
             self.prefix_alias.insert(prefix.clone(), alias.clone());
-            self.prefix_table.insert(prefix.clone(), hop.to_table.clone());
+            self.prefix_table
+                .insert(prefix.clone(), hop.to_table.clone());
             self.renders.push(JoinRender {
                 join_type: edge_join_type.to_string(),
                 to_table: hop.to_table.clone(),
@@ -346,6 +392,9 @@ pub struct QueryPlan {
     pub limit: Option<Option<u64>>,
     /// `OFFSET` key presence and value (`None` = absent, `Some(None)` = null).
     pub offset: Option<Option<u64>>,
+    /// Exclusive position bound (`None` = omitted). Fetch only; count and
+    /// mutations omit it (#393).
+    pub after: Option<Vec<QueryValue>>,
     /// Relation JOINs collected from WHERE traversal, in registration order.
     /// Empty for non-traversal queries; rendered by the SELECT walkers (#270).
     pub joins: Vec<QueryJoin>,
@@ -411,6 +460,7 @@ impl QueryPlan {
             order_by: payload.order_by,
             limit: payload.limit,
             offset: payload.offset,
+            after: payload.after,
             joins: payload.joins,
             m2m,
             materialization: payload.materialization,
@@ -429,7 +479,10 @@ impl QueryPlan {
     /// traversal here is misuse; the error detail names the offending shape.
     pub fn ensure_no_traversal(&self) -> Result<(), String> {
         if !self.joins.is_empty() {
-            return Err(format!("query carries {} relation join(s)", self.joins.len()));
+            return Err(format!(
+                "query carries {} relation join(s)",
+                self.joins.len()
+            ));
         }
         for node in &self.where_clause {
             reject_non_empty_leaf_path(node)?;
@@ -466,11 +519,7 @@ impl QueryPlan {
     ///
     /// # Errors
     /// Returns `Err(String)` for an unknown `join_type` (see [`validate_join_type`]).
-    pub fn build_join_plan(
-        &self,
-        root_table: &str,
-        reserved: &[&str],
-    ) -> Result<JoinPlan, String> {
+    pub fn build_join_plan(&self, root_table: &str, reserved: &[&str]) -> Result<JoinPlan, String> {
         // Validate every entry's join_type and collect the set of LEFT edges.
         // A `"left"` entry is whole-path, so every one of its prefixes is a LEFT
         // edge; an edge is LEFT iff any `"left"` entry contains it.
@@ -563,6 +612,44 @@ impl QueryPlan {
             join_plan,
         };
         self.build_condition(backend, &qualifier)
+    }
+
+    /// Bind and qualify an ``after`` bound into an exclusive stepwise condition.
+    ///
+    /// Returns ``None`` when the payload omitted ``after``. Compare logic lives
+    /// in [`exclusive_stepwise_compare`] so #394 can extend one function.
+    pub fn after_condition(
+        &self,
+        backend: Dialect,
+        root_table: &str,
+        join_plan: &JoinPlan,
+    ) -> Result<Option<Condition>, String> {
+        let Some(values) = &self.after else {
+            return Ok(None);
+        };
+        if self.offset.flatten().is_some() {
+            return Err("after cannot be combined with offset: a query has one start".to_string());
+        }
+        if values.len() != self.order_by.len() {
+            return Err(format!(
+                "after bound has {} values but order_by has {} keys",
+                values.len(),
+                self.order_by.len()
+            ));
+        }
+        let mut keys = Vec::with_capacity(values.len());
+        for (order, value) in self.order_by.iter().zip(values) {
+            let column =
+                qualify_column_with_joins(root_table, join_plan, &order.column, &order.path)?;
+            let bound =
+                self.value_rhs_simple_expr_for_backend(&order.column, &value.value, false, backend);
+            keys.push(StepwiseKey {
+                column,
+                direction: order.direction.clone(),
+                bound,
+            });
+        }
+        Ok(Some(exclusive_stepwise_compare(&keys)?))
     }
 
     fn build_condition(
@@ -854,7 +941,13 @@ impl QueryPlan {
         &self,
         qualifier: &ColumnQualifier<'_>,
         path: &[String],
-    ) -> Result<(Option<&crate::codec_plan::ModelCodecPlan>, &HashMap<String, String>), String> {
+    ) -> Result<
+        (
+            Option<&crate::codec_plan::ModelCodecPlan>,
+            &HashMap<String, String>,
+        ),
+        String,
+    > {
         // Inside an EXISTS subquery (#314/#315) a leaf belongs to the
         // subquery scope — the scope table for an empty path, the inner
         // join plan's hop table for a traversed one — NEVER the root model;
@@ -923,9 +1016,11 @@ impl QueryPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::QueryPlan;
+    use super::{QueryPlan, StepwiseKey, exclusive_stepwise_compare};
     use crate::state::Dialect;
-    use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
+    use sea_query::{
+        Alias, Expr, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue,
+    };
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -941,6 +1036,7 @@ mod tests {
             order_by: Vec::new(),
             limit: Some(None),
             offset: Some(None),
+            after: None,
             joins: Vec::new(),
             m2m: None,
             materialization: ferro_schema_ir::Materialization::RootInstances,
@@ -958,6 +1054,66 @@ mod tests {
             .values_panic([rhs])
             .build(PostgresQueryBuilder);
         values.0.into_iter().next().expect("one value")
+    }
+
+    fn render_stepwise(keys: &[StepwiseKey]) -> String {
+        let cond = exclusive_stepwise_compare(keys).expect("stepwise compare");
+        let mut select = Query::select();
+        select
+            .column(Alias::new("id"))
+            .from(Alias::new("t"))
+            .cond_where(cond);
+        select.to_string(SqliteQueryBuilder)
+    }
+
+    #[test]
+    fn exclusive_stepwise_compare_asc_two_not_null_keys() {
+        let sql = render_stepwise(&[
+            StepwiseKey {
+                column: Expr::col(Alias::new("a")),
+                direction: "asc".into(),
+                bound: Expr::val(1).into(),
+            },
+            StepwiseKey {
+                column: Expr::col(Alias::new("b")),
+                direction: "asc".into(),
+                bound: Expr::val(2).into(),
+            },
+        ]);
+        let flat = sql.replace('"', "").replace('`', "");
+        assert!(
+            flat.contains("a > 1") && flat.contains("a = 1") && flat.contains("b > 2"),
+            "ASC exclusive compare: {sql}"
+        );
+        assert!(
+            !flat.contains("b = 2"),
+            "exclusive bound must not include the all-equal term: {sql}"
+        );
+    }
+
+    #[test]
+    fn exclusive_stepwise_compare_desc_two_not_null_keys() {
+        let sql = render_stepwise(&[
+            StepwiseKey {
+                column: Expr::col(Alias::new("a")),
+                direction: "desc".into(),
+                bound: Expr::val(1).into(),
+            },
+            StepwiseKey {
+                column: Expr::col(Alias::new("b")),
+                direction: "desc".into(),
+                bound: Expr::val(2).into(),
+            },
+        ]);
+        let flat = sql.replace('"', "").replace('`', "");
+        assert!(
+            flat.contains("a < 1") && flat.contains("a = 1") && flat.contains("b < 2"),
+            "DESC exclusive compare: {sql}"
+        );
+        assert!(
+            !flat.contains("b = 2"),
+            "exclusive bound must not include the all-equal term: {sql}"
+        );
     }
 
     #[test]
@@ -1521,7 +1677,11 @@ mod tests {
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
 
         // A 1-hop path and a 2-hop path sharing its prefix produce exactly two edges.
-        assert_eq!(join_plan.renders.len(), 2, "shared prefix must dedup to 2 JOINs");
+        assert_eq!(
+            join_plan.renders.len(),
+            2,
+            "shared prefix must dedup to 2 JOINs"
+        );
         assert_eq!(join_plan.renders[0].alias, "j1_account");
         assert_eq!(join_plan.renders[0].prev_alias, "transaction");
         assert_eq!(join_plan.renders[1].alias, "j2_owner");
@@ -1551,7 +1711,8 @@ mod tests {
                 "owner".to_string(),
             ),
         );
-        plan.hop_enum_udt.insert("owner".to_string(), HashMap::new());
+        plan.hop_enum_udt
+            .insert("owner".to_string(), HashMap::new());
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
         let sql = plan
             .to_condition_with_joins(Dialect::Postgres, "transaction", &join_plan)
@@ -1807,9 +1968,15 @@ mod tests {
         // `.include(account)` + `.include(account.owner)` renders the same
         // two joins as `.include(account.owner)` alone (#287): shared
         // prefixes dedup by path identity, every include-only edge LEFT.
-        let expanded = union_plan(json!([]), json!([[account_hop()], [account_hop(), owner_hop()]]));
+        let expanded = union_plan(
+            json!([]),
+            json!([[account_hop()], [account_hop(), owner_hop()]]),
+        );
         let collapsed = union_plan(json!([]), json!([[account_hop(), owner_hop()]]));
-        let reversed = union_plan(json!([]), json!([[account_hop(), owner_hop()], [account_hop()]]));
+        let reversed = union_plan(
+            json!([]),
+            json!([[account_hop(), owner_hop()], [account_hop()]]),
+        );
         for plan in [expanded, collapsed, reversed] {
             let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
             assert_eq!(join_plan.renders.len(), 2, "shared prefix dedups");
@@ -1832,8 +1999,14 @@ mod tests {
         );
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
         assert_eq!(join_plan.renders.len(), 2);
-        assert_eq!(join_plan.renders[0].join_type, "inner", "shared prefix untouched");
-        assert_eq!(join_plan.renders[1].join_type, "left", "include-only edge LEFT");
+        assert_eq!(
+            join_plan.renders[0].join_type, "inner",
+            "shared prefix untouched"
+        );
+        assert_eq!(
+            join_plan.renders[1].join_type, "left",
+            "include-only edge LEFT"
+        );
     }
 
     #[test]
@@ -1932,13 +2105,8 @@ mod tests {
         let plan = QueryPlan::from_ir_payload(traversal_payload()).expect("plan builds");
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
 
-        let root_col = super::qualify_column_with_joins(
-            "transaction",
-            &join_plan,
-            "id",
-            &[],
-        )
-        .expect("root column qualifies");
+        let root_col = super::qualify_column_with_joins("transaction", &join_plan, "id", &[])
+            .expect("root column qualifies");
         let sql = Query::select()
             .expr(root_col)
             .to_string(PostgresQueryBuilder)
@@ -2032,11 +2200,14 @@ mod tests {
         // nullable integer column "count" so model_column lookups succeed.
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetIntNull".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetIntNull");
 
@@ -2057,11 +2228,14 @@ mod tests {
     fn null_rhs_emits_typed_bool_null_for_bool_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetBoolNull".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "active": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "active": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetBoolNull");
 
@@ -2082,11 +2256,14 @@ mod tests {
     fn null_rhs_emits_typed_uuid_null_for_uuid_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetUuidNull".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "id": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "null"}]}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "id": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "null"}]}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetUuidNull");
 
@@ -2107,11 +2284,14 @@ mod tests {
     fn binary_rhs_emits_typed_bytes_no_cast() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetBinary".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "blob": {"type": "string", "format": "binary"}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "blob": {"type": "string", "format": "binary"}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetBinary");
 
@@ -2159,11 +2339,14 @@ mod tests {
     fn enum_rhs_skips_cast_without_native_enum_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetTextColor".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "color": {"enum_type_name": "color", "db_type": "text"}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "color": {"enum_type_name": "color", "db_type": "text"}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetTextColor");
 
@@ -2188,20 +2371,23 @@ mod tests {
         // Decimal still uses CAST AS numeric on Postgres.
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetDecimal".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "amount": {
-                        // The enriched shape registration emits for Decimal
-                        // annotations; the pattern alone must NOT make a
-                        // column decimal (F5).
-                        "anyOf": [
-                            {"type": "number"},
-                            {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"}
-                        ],
-                        "format": "decimal"
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "amount": {
+                            // The enriched shape registration emits for Decimal
+                            // annotations; the pattern alone must NOT make a
+                            // column decimal (F5).
+                            "anyOf": [
+                                {"type": "number"},
+                                {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"}
+                            ],
+                            "format": "decimal"
+                        }
                     }
-                }
-            }), "widget".to_string()),
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetDecimal");
 

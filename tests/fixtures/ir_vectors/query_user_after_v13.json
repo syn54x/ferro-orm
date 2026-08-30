@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_user_mixed_set_v12",
+  "vector_name": "query_user_after_v13",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 12,
+    "ir_version": 13,
     "payload": {
       "model_name": "User",
       "where": [
@@ -19,26 +19,33 @@
           "path": []
         }
       ],
-      "set": [
+      "set": [],
+      "order_by": [
         {
-          "column": "email",
-          "value": {
-            "kind": "literal",
-            "value": {
-              "kind": "string",
-              "value": "updated@ferro.dev"
-            }
-          }
+          "column": "score",
+          "direction": "asc",
+          "path": [],
+          "nulls": "last"
         },
         {
-          "column": "bonus",
-          "value": {
-            "kind": "column",
-            "column": "score"
-          }
+          "column": "id",
+          "direction": "asc",
+          "path": [],
+          "nulls": "last"
         }
       ],
-      "order_by": [],
+      "limit": 5,
+      "offset": null,
+      "after": [
+        {
+          "kind": "int",
+          "value": 10
+        },
+        {
+          "kind": "int",
+          "value": 3
+        }
+      ],
       "m2m": null,
       "joins": [],
       "materialization": {

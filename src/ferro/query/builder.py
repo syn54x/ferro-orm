@@ -555,6 +555,7 @@ class Query(Generic[T]):
         self.order_by_clause: list[OrderByEntry] = []
         self._limit: int | None = None
         self._offset: int | None = None
+        self._after: tuple[Any, ...] | None = None
         self._m2m_context: M2mContext | None = None
         # Relation paths that must render a join, insertion-ordered (full path
         # tuple -> registered join_type). Populated by where()/order_by()
@@ -1029,13 +1030,126 @@ class Query(Generic[T]):
         Returns:
             A new ``Query`` with the clause added; ``self`` is unchanged.
 
+        Raises:
+            ValueError: If ``after()`` is already set — a query has one start.
+
         Examples:
             >>> query = User.select().offset(20)
             >>> query._offset
             20
         """
+        if self._after is not None:
+            raise ValueError(
+                "after() cannot be combined with offset(): a query has one "
+                "start (an offset or a position bound, never both)."
+            )
         new = self._clone()
         new._offset = value
+        return new
+
+    def _assert_after_order_keys(self) -> None:
+        """Require root, non-null order keys that include the primary key (#393)."""
+        pk = getattr(self.model_cls, "__ferro_pk__", None)
+        if pk is None:
+            raise ValueError(
+                f"{self.model_cls.__name__} has no primary-key column, and "
+                "after()/position_of() require one."
+            )
+        if not self.order_by_clause:
+            raise ValueError(
+                "after() requires order_by() keys that include the model's "
+                "primary key"
+            )
+        specs = getattr(self.model_cls, "__ferro_columns__", {})
+        pk_seen = False
+        for entry in self.order_by_clause:
+            if entry.path:
+                dotted = ".".join((*entry.path, entry.column))
+                raise ValueError(
+                    "after() requires root-column order keys; traversed "
+                    f"order key {dotted!r} is not supported yet"
+                )
+            spec = specs.get(entry.column)
+            if spec is not None and spec.nullable:
+                raise ValueError(
+                    f"after() does not support nullable order key "
+                    f"{entry.column!r}"
+                )
+            if entry.column == pk:
+                pk_seen = True
+        if not pk_seen:
+            raise ValueError(
+                "after() requires the model's primary key in the order keys; "
+                "Ferro will not append it silently"
+            )
+
+    def position_of(self, row: T) -> tuple[Any, ...]:
+        """Read this query's order-key tuple off a model instance.
+
+        Args:
+            row: A hydrated instance of the queried model.
+
+        Returns:
+            The ordered tuple of order-key values, matching ``order_by``
+            declaration order.
+
+        Raises:
+            TypeError: If ``row`` is not an instance of the queried model.
+            ValueError: If the order keys are not a legal ``after()`` set
+                (no primary key, a nullable key, or a traversed key).
+        """
+        if not isinstance(row, self.model_cls):
+            raise TypeError(
+                "position_of() expected an instance of "
+                f"{self.model_cls.__name__}, got {type(row).__name__}"
+            )
+        self._assert_after_order_keys()
+        return tuple(getattr(row, entry.column) for entry in self.order_by_clause)
+
+    def after(self, position: tuple[Any, ...] | T) -> Self:
+        """Start the page after an exclusive position in the declared order.
+
+        ``position`` is the ordered tuple of this query's order-key values, or
+        a model instance (sugar for ``after(position_of(row))``). Order keys
+        must be root columns, include the primary key, and be non-nullable.
+
+        Args:
+            position: A tuple of order-key values, or a model instance.
+
+        Returns:
+            A new ``Query`` with the bound set; ``self`` is unchanged.
+
+        Raises:
+            TypeError: If ``position`` is neither a tuple nor a model instance.
+            ValueError: If the order keys are illegal for ``after()``, the
+                tuple has the wrong arity, a slot is ``None``, or ``offset()``
+                is already set.
+        """
+        if self._offset is not None:
+            raise ValueError(
+                "after() cannot be combined with offset(): a query has one "
+                "start (an offset or a position bound, never both)."
+            )
+        if isinstance(position, tuple):
+            self._assert_after_order_keys()
+            expected = len(self.order_by_clause)
+            if len(position) != expected:
+                raise ValueError(
+                    f"after() expected {expected} position values "
+                    f"(one per order_by key), got {len(position)}"
+                )
+            bound = position
+        elif isinstance(position, self.model_cls):
+            bound = self.position_of(position)
+        else:
+            raise TypeError(
+                "after() expected a position tuple or a model instance, "
+                f"got {type(position).__name__}"
+            )
+        if any(value is None for value in bound):
+            raise ValueError("after() does not support None in a position slot")
+        new = self._clone()
+        new._after = bound
         return new
 
     async def all(self) -> list[T]:

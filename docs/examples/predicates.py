@@ -118,6 +118,26 @@ async def main() -> None:
         assert oldest_first[0].name == "carol"
         assert len(second_page) == 2
 
+        # --8<-- [start:after-paging]
+        page = (
+            await User.select()
+            .order_by(lambda user: user.age)
+            .order_by(lambda user: user.id)
+            .limit(2)
+            .all()
+        )
+        next_page = (
+            await User.select()
+            .order_by(lambda user: user.age)
+            .order_by(lambda user: user.id)
+            .after(page[-1])
+            .limit(2)
+            .all()
+        )
+        # --8<-- [end:after-paging]
+        assert [user.name for user in page] == ["dave", "bob"]
+        assert [user.name for user in next_page] == ["alice", "carol"]
+
         t0 = datetime(2026, 1, 1, tzinfo=UTC)
         t1 = datetime(2026, 2, 1, tzinfo=UTC)
         t2 = datetime(2026, 3, 1, tzinfo=UTC)
