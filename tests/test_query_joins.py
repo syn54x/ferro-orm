@@ -881,9 +881,11 @@ async def test_left_join_retains_relation_less_rows(db_url):
 
 @pytest.mark.asyncio
 async def test_left_join_null_retention_in_ordered_results(db_url):
-    """left_join + order_by on a RELATED column retains the NULL-FK row. NULL
-    placement diverges by dialect (ADR-0006: Postgres NULLs last on ASC, SQLite
-    first), so assert the full row set + the non-NULL order per-backend."""
+    """left_join + order_by on a RELATED column retains the NULL-FK row.
+
+    Omitted ``nulls=`` means last on both dialects (ADR-0017), so the orphan
+    lands after the two labeled rows.
+    """
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         core = await _seed_core()
@@ -899,15 +901,8 @@ async def test_left_join_null_retention_in_ordered_results(db_url):
             .all()
         )
         ids = [r.id for r in rows]
-        # Full set retained (orphan kept by LEFT join).
-        assert set(ids) == {1, 2, 3}
-        # Non-NULL rows keep their relative order (label a1 < a2 → id 1 before 2).
-        assert ids.index(1) < ids.index(2)
-        # NULL-FK row's position is dialect-specific but deterministic.
-        if db_url.startswith("postgres"):
-            assert ids == [1, 2, 3]  # NULLs last on ASC
-        else:
-            assert ids == [3, 1, 2]  # SQLite sorts NULLs first
+        # Full set retained (orphan kept by LEFT join); omitted nulls= is last.
+        assert ids == [1, 2, 3]
 
 
 @pytest.mark.asyncio
