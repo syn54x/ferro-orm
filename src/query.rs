@@ -1130,7 +1130,7 @@ mod tests {
                  "right": {"node_kind": "leaf", "column": "name", "operator": "LIKE",
                            "value": {"kind": "string", "value": "a%"}, "path": []}}
             ],
-            "order_by": [{"column": "age", "direction": "desc", "path": []}],
+            "order_by": [{"column": "age", "direction": "desc", "path": [], "nulls": "last"}],
             "limit": 10, "offset": 5, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
         }))
         .expect("payload deserializes");
@@ -1653,7 +1653,7 @@ mod tests {
                  "right": {"node_kind": "leaf", "column": "amount", "operator": ">=",
                            "value": {"kind": "int", "value": 100}, "path": []}}
             ],
-            "order_by": [{"column": "id", "direction": "asc", "path": []}],
+            "order_by": [{"column": "id", "direction": "asc", "path": [], "nulls": "last"}],
             "limit": 50, "offset": 0, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
                 {"join_type": "inner", "path": [
@@ -2089,7 +2089,7 @@ mod tests {
                      "to_table": "account", "to_column": "id"}
                 ]}
             ],
-            "order_by": [{"column": "name", "direction": "asc", "path": ["account"]}]
+            "order_by": [{"column": "name", "direction": "asc", "path": ["account"], "nulls": "last"}]
         }))
         .expect("payload deserializes");
 
