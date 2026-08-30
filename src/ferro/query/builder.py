@@ -1476,7 +1476,7 @@ class ProjectedQuery(Query[T]):
         direction: str,
         path: tuple[str, ...],
         *,
-        nulls: str | None = None,
+        nulls: str,
     ) -> Self:
         """Clone with one resolved ORDER BY entry appended (#295)."""
         new = self._clone()
