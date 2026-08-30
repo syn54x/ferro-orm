@@ -65,6 +65,17 @@ class TestImmutableChaining:
         assert q2._after == (18, 1)
         assert q2 is not q1
 
+    def test_before_does_not_mutate(self):
+        class ImmUserBefore(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            age: int = 0
+
+        q1 = Query(ImmUserBefore).order_by("age").order_by("id")
+        q2 = q1.before((18, 1)).limit(2)
+        assert q1._before is None
+        assert q2._before == (18, 1)
+        assert q2 is not q1
+
     def test_m2m_context_is_immutable_so_clones_share_it_safely(self):
         class ImmUser4(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None

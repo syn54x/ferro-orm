@@ -210,6 +210,14 @@ To page forward from a known row, pass that row's place in the declared order to
 --8<-- "docs/examples/predicates.py:after-null-paging"
 ```
 
+To page backward, `.before(position)` is the other start. With a limit it is the **adjacent previous page**, still yielded in the declared order. Without a limit it is every earlier row in declared order — a prefix, not a page. The bound is exclusive. `after` and `before` cannot share a query.
+
+```python
+--8<-- "docs/examples/predicates.py:before-paging"
+```
+
+On unbounded `before()`, `first()` and `all()[0]` disagree: `first()` is `limit(1)` (the adjacent previous row) and `all()[0]` is the head of the prefix (the earliest earlier row). That is accepted.
+
 For robust pagination patterns, see [Pagination](../howto/pagination.md).
 
 ## Executing Queries

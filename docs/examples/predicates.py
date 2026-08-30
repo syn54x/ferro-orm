@@ -138,6 +138,36 @@ async def main() -> None:
         assert [user.name for user in page] == ["dave", "bob"]
         assert [user.name for user in next_page] == ["alice", "carol"]
 
+        # --8<-- [start:before-paging]
+        previous_page = (
+            await User.select()
+            .order_by(lambda user: user.age)
+            .order_by(lambda user: user.id)
+            .before(next_page[0])
+            .limit(2)
+            .all()
+        )
+        earlier = (
+            await User.select()
+            .order_by(lambda user: user.age)
+            .order_by(lambda user: user.id)
+            .before(next_page[0])
+            .all()
+        )
+        adjacent = (
+            await User.select()
+            .order_by(lambda user: user.age)
+            .order_by(lambda user: user.id)
+            .before(next_page[0])
+            .first()
+        )
+        # --8<-- [end:before-paging]
+        assert [user.name for user in previous_page] == ["dave", "bob"]
+        assert [user.name for user in earlier] == ["dave", "bob"]
+        assert adjacent is not None and adjacent.name == "bob"
+        assert earlier[0].name == "dave"
+        assert adjacent.name != earlier[0].name
+
         t0 = datetime(2026, 1, 1, tzinfo=UTC)
         t1 = datetime(2026, 2, 1, tzinfo=UTC)
         t2 = datetime(2026, 3, 1, tzinfo=UTC)

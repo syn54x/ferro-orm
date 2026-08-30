@@ -11,9 +11,9 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 13 (#393 — optional `after` position bound);
+# `query` is on ir_version 14 (#395 — optional `before` position bound);
 # `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 13, "codec": 1}
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 14, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -315,6 +315,20 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         assert not payload.get("offset"), (
             f"{label} cannot carry after and a non-null offset"
         )
+    if "before" in payload:
+        before = payload["before"]
+        assert isinstance(before, list) and before, f"{label}.before must be a non-empty list"
+        assert len(before) == len(payload["order_by"]), (
+            f"{label}.before arity must match order_by"
+        )
+        for i, value in enumerate(before):
+            value_label = f"{label}.before[{i}]"
+            assert isinstance(value, dict), f"{value_label} must be object"
+            _require_keys(value, {"kind", "value"}, value_label)
+        assert not payload.get("offset"), (
+            f"{label} cannot carry before and a non-null offset"
+        )
+        assert "after" not in payload, f"{label} cannot carry after and before"
     if payload["m2m"] is not None:
         assert isinstance(payload["m2m"], dict), f"{label}.m2m must be null or object"
     joins = payload["joins"]

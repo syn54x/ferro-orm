@@ -217,6 +217,42 @@ fn stepwise_inequality(key: &StepwiseKey) -> Result<SimpleExpr, String> {
     }
 }
 
+/// Invert one order key for `before()` (#395): `asc`↔`desc`, `first`↔`last`,
+/// `"native"` stays `"native"` (it resolves from [`Dialect`] at render).
+pub fn invert_order_key(direction: &str, nulls: &str) -> Result<(String, String), String> {
+    let direction = match direction.to_ascii_lowercase().as_str() {
+        "asc" => "desc".to_string(),
+        "desc" => "asc".to_string(),
+        other => {
+            return Err(format!(
+                "invalid order_by direction {other:?}: expected \"asc\" or \"desc\""
+            ));
+        }
+    };
+    let nulls = match nulls.to_ascii_lowercase().as_str() {
+        "first" => "last".to_string(),
+        "last" => "first".to_string(),
+        "native" => "native".to_string(),
+        other => {
+            return Err(format!(
+                "invalid order_by nulls {other:?}: expected \"first\", \"last\", or \"native\""
+            ));
+        }
+    };
+    Ok((direction, nulls))
+}
+
+/// Invert a wire `order_by` term the same way [`invert_order_key`] does.
+pub fn invert_order_by(order: &QueryOrderBy) -> Result<QueryOrderBy, String> {
+    let (direction, nulls) = invert_order_key(&order.direction, &order.nulls)?;
+    Ok(QueryOrderBy {
+        column: order.column.clone(),
+        direction,
+        path: order.path.clone(),
+        nulls,
+    })
+}
+
 /// One rendered relation JOIN edge: `<join> <to_table> AS <alias> ON
 /// <prev_alias>.<from_column> = <alias>.<to_column>`.
 #[derive(Debug, Clone)]
@@ -466,6 +502,9 @@ pub struct QueryPlan {
     /// Exclusive position bound (`None` = omitted). Fetch only; count and
     /// mutations omit it (#393).
     pub after: Option<Vec<QueryValue>>,
+    /// Exclusive previous-page bound (`None` = omitted). Fetch only; count
+    /// and mutations omit it (#395). Combined with `after` is a loud error.
+    pub before: Option<Vec<QueryValue>>,
     /// Relation JOINs collected from WHERE traversal, in registration order.
     /// Empty for non-traversal queries; rendered by the SELECT walkers (#270).
     pub joins: Vec<QueryJoin>,
@@ -520,6 +559,9 @@ impl QueryPlan {
                 .map_err(|e| format!("invalid QueryIR m2m payload: {e}"))?,
             None => None,
         };
+        if payload.after.is_some() && payload.before.is_some() {
+            return Err("after cannot be combined with before: a query has one start".to_string());
+        }
         let registration = crate::state::MODEL_REGISTRY
             .read()
             .ok()
@@ -532,6 +574,7 @@ impl QueryPlan {
             limit: payload.limit,
             offset: payload.offset,
             after: payload.after,
+            before: payload.before,
             joins: payload.joins,
             m2m,
             materialization: payload.materialization,
@@ -696,30 +739,74 @@ impl QueryPlan {
         root_table: &str,
         join_plan: &JoinPlan,
     ) -> Result<Option<Condition>, String> {
-        let Some(values) = &self.after else {
+        self.position_condition(self.after.as_deref(), false, backend, root_table, join_plan)
+    }
+
+    /// Bind a ``before`` bound as ``after`` on inverted order keys (#395).
+    ///
+    /// Invert happens here; [`exclusive_stepwise_compare`] is the only expander.
+    pub fn before_condition(
+        &self,
+        backend: Dialect,
+        root_table: &str,
+        join_plan: &JoinPlan,
+    ) -> Result<Option<Condition>, String> {
+        self.position_condition(self.before.as_deref(), true, backend, root_table, join_plan)
+    }
+
+    /// `ORDER BY` terms for the SELECT: inverted when ``before`` is set so
+    /// `LIMIT n` fetches the adjacent previous page.
+    pub fn order_by_for_select(&self) -> Result<Vec<QueryOrderBy>, String> {
+        if self.before.is_some() {
+            self.order_by.iter().map(invert_order_by).collect()
+        } else {
+            Ok(self.order_by.clone())
+        }
+    }
+
+    fn position_condition(
+        &self,
+        values: Option<&[QueryValue]>,
+        invert: bool,
+        backend: Dialect,
+        root_table: &str,
+        join_plan: &JoinPlan,
+    ) -> Result<Option<Condition>, String> {
+        if self.after.is_some() && self.before.is_some() {
+            return Err("after cannot be combined with before: a query has one start".to_string());
+        }
+        let Some(values) = values else {
             return Ok(None);
         };
+        let start = if invert { "before" } else { "after" };
         if self.offset.flatten().is_some() {
-            return Err("after cannot be combined with offset: a query has one start".to_string());
+            return Err(format!(
+                "{start} cannot be combined with offset: a query has one start"
+            ));
         }
         if values.len() != self.order_by.len() {
             return Err(format!(
-                "after bound has {} values but order_by has {} keys",
+                "{start} bound has {} values but order_by has {} keys",
                 values.len(),
                 self.order_by.len()
             ));
         }
         let mut keys = Vec::with_capacity(values.len());
         for (order, value) in self.order_by.iter().zip(values) {
+            let (direction, nulls) = if invert {
+                invert_order_key(&order.direction, &order.nulls)?
+            } else {
+                (order.direction.clone(), order.nulls.clone())
+            };
             let column =
                 qualify_column_with_joins(root_table, join_plan, &order.column, &order.path)?;
             let bound =
                 self.value_rhs_simple_expr_for_backend(&order.column, &value.value, false, backend);
             keys.push(StepwiseKey {
                 column,
-                direction: order.direction.clone(),
+                direction,
                 bound,
-                nulls: order.nulls.clone(),
+                nulls,
                 bound_is_null: value.kind.eq_ignore_ascii_case("null") || value.value.is_null(),
             });
         }
@@ -1111,6 +1198,7 @@ mod tests {
             limit: Some(None),
             offset: Some(None),
             after: None,
+            before: None,
             joins: Vec::new(),
             m2m: None,
             materialization: ferro_schema_ir::Materialization::RootInstances,
@@ -1406,6 +1494,125 @@ mod tests {
         assert!(
             sqlite_desc.contains("a is null"),
             "SQLite DESC native treats NULL as smaller (last): {sqlite_desc}"
+        );
+    }
+
+    #[test]
+    fn invert_order_key_swaps_direction_and_first_last_keeps_native() {
+        assert_eq!(
+            super::invert_order_key("asc", "last").expect("invert"),
+            ("desc".into(), "first".into())
+        );
+        assert_eq!(
+            super::invert_order_key("desc", "first").expect("invert"),
+            ("asc".into(), "last".into())
+        );
+        assert_eq!(
+            super::invert_order_key("ASC", "NATIVE").expect("invert"),
+            ("desc".into(), "native".into())
+        );
+    }
+
+    fn before_plan(order: &[(&str, &str, &str)], before: serde_json::Value) -> QueryPlan {
+        let order_by: Vec<serde_json::Value> = order
+            .iter()
+            .map(|(column, direction, nulls)| {
+                json!({
+                    "column": column,
+                    "direction": direction,
+                    "path": [],
+                    "nulls": nulls,
+                })
+            })
+            .collect();
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
+            "model_name": "Pending",
+            "where": [],
+            "order_by": order_by,
+            "limit": null,
+            "offset": null,
+            "before": before,
+            "m2m": null,
+            "materialization": {"kind": "root_instances"},
+            "joins": []
+        }))
+        .expect("before payload deserializes");
+        QueryPlan::from_ir_payload(payload).expect("plan builds")
+    }
+
+    fn render_before(
+        order: &[(&str, &str, &str)],
+        before: serde_json::Value,
+        dialect: Dialect,
+    ) -> String {
+        let plan = before_plan(order, before);
+        let cond = plan
+            .before_condition(dialect, "t", &JoinPlan::default())
+            .expect("before_condition")
+            .expect("before present");
+        let mut select = Query::select();
+        select
+            .column(Alias::new("id"))
+            .from(Alias::new("t"))
+            .cond_where(cond);
+        match dialect {
+            Dialect::Sqlite => select.to_string(SqliteQueryBuilder),
+            Dialect::Postgres => select.to_string(PostgresQueryBuilder),
+        }
+    }
+
+    #[test]
+    fn before_is_after_on_inverted_keys_same_expander() {
+        let order = &[("pinned_at", "desc", "last"), ("id", "asc", "last")];
+        let inverted = &[("pinned_at", "asc", "first"), ("id", "desc", "first")];
+        let bound = json!([{"kind": "null", "value": null}, {"kind": "int", "value": 4}]);
+        let before_sql = flatten_sql(&render_before(order, bound.clone(), Dialect::Sqlite));
+        let after_sql = flatten_sql(&render_after(inverted, bound, Dialect::Sqlite));
+        assert_eq!(
+            before_sql, after_sql,
+            "before must reuse exclusive_stepwise_compare via inverted keys"
+        );
+    }
+
+    #[test]
+    fn before_native_stays_native_when_inverting() {
+        let order = &[("a", "asc", "native"), ("b", "asc", "last")];
+        let inverted = &[("a", "desc", "native"), ("b", "desc", "first")];
+        let bound = json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]);
+        let before_pg = flatten_sql(&render_before(order, bound.clone(), Dialect::Postgres));
+        let after_pg = flatten_sql(&render_after(inverted, bound.clone(), Dialect::Postgres));
+        assert_eq!(before_pg, after_pg, "native must stay native: {before_pg}");
+        let before_sqlite = flatten_sql(&render_before(order, bound.clone(), Dialect::Sqlite));
+        let after_sqlite = flatten_sql(&render_after(inverted, bound, Dialect::Sqlite));
+        assert_eq!(
+            before_sqlite, after_sqlite,
+            "native must stay native on sqlite: {before_sqlite}"
+        );
+    }
+
+    #[test]
+    fn after_and_before_together_fail_loud() {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
+            "model_name": "Pending",
+            "where": [],
+            "order_by": [
+                {"column": "id", "direction": "asc", "path": [], "nulls": "last"}
+            ],
+            "limit": null,
+            "offset": null,
+            "after": [{"kind": "int", "value": 1}],
+            "before": [{"kind": "int", "value": 2}],
+            "m2m": null,
+            "materialization": {"kind": "root_instances"},
+            "joins": []
+        }))
+        .expect("payload with both bounds deserializes");
+        let err = QueryPlan::from_ir_payload(payload).expect_err("after + before must fail");
+        assert!(
+            err.contains("after") && err.contains("before"),
+            "error must name both starts: {err}"
         );
     }
 

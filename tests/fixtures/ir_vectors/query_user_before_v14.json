@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_user_after_v13",
+  "vector_name": "query_user_before_v14",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 13,
+    "ir_version": 14,
     "payload": {
       "model_name": "User",
       "where": [
@@ -36,7 +36,7 @@
       ],
       "limit": 5,
       "offset": null,
-      "after": [
+      "before": [
         {
           "kind": "int",
           "value": 10

@@ -60,6 +60,7 @@ def test_mutating_payload_omits_pagination_keys():
         assert "limit" not in payload
         assert "offset" not in payload
         assert "after" not in payload
+        assert "before" not in payload
         assert payload["model_name"] == PaginationGuardItem.__ferro_identity__
         assert payload["order_by"] == []
         assert payload["m2m"] is None

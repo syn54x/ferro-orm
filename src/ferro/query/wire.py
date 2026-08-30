@@ -11,6 +11,7 @@ serde round-trips in the Rust crate's tests).
 
 Friend contract: :func:`compile_query` reads the query object's build state
 (``where_clause``, ``order_by_clause``, ``_limit``, ``_offset``, ``_after``,
+``_before``,
 ``_joins``, ``_explicit_edges``, ``_includes``, ``_m2m_context``,
 ``_projection``) directly — the builder and this module are one package, and
 the seam is ``compile_query``, not a snapshot type. The builder owns
@@ -51,10 +52,10 @@ if TYPE_CHECKING:
 # mutate arm; they stay distinct values so guardrail errors name the caller.
 QueryVerb = Literal["fetch", "count", "update", "delete"]
 
-# Always 13 (#393 — unconditional bump). v13 adds an optional ``after``
+# Always 14 (#395 — unconditional bump). v14 adds an optional ``before``
 # position bound on fetch payloads. Python and Rust ship in one wheel, so a
 # single supported version is the whole contract.
-_IR_VERSION = 13
+_IR_VERSION = 14
 
 
 class _AbsentType:
@@ -342,8 +343,8 @@ class QueryIrPayload:
     Mirrors ``ferro_schema_ir::QueryIrPayload`` field-for-field. ``where``
     holds :meth:`QueryNode.to_ir_dict` output — the node module owns the
     predicate wire shape. ``limit``/``offset`` may be :data:`_ABSENT`
-    (mutating payloads omit the keys entirely). ``after`` is omitted when
-    unset (fetch, count, and mutating payloads alike).
+    (mutating payloads omit the keys entirely). ``after`` / ``before`` are
+    omitted when unset (fetch, count, and mutating payloads alike).
     """
 
     model_name: str
@@ -353,6 +354,7 @@ class QueryIrPayload:
     limit: int | None | _AbsentType
     offset: int | None | _AbsentType
     after: tuple[QueryValue, ...] | None
+    before: tuple[QueryValue, ...] | None
     m2m: M2mContext | None
     joins: tuple[QueryJoin, ...]
     materialization: Materialization
@@ -370,6 +372,8 @@ class QueryIrPayload:
             payload["offset"] = self.offset
         if self.after:
             payload["after"] = [value.to_ir_dict() for value in self.after]
+        if self.before:
+            payload["before"] = [value.to_ir_dict() for value in self.before]
         payload["m2m"] = self.m2m.to_ir_dict() if self.m2m is not None else None
         payload["joins"] = [join.to_ir_dict() for join in self.joins]
         payload["materialization"] = self.materialization.to_ir_dict()
@@ -802,7 +806,7 @@ def _recipe_set(
 
 
 def _after_query_values(position: tuple[Any, ...]) -> tuple[QueryValue, ...]:
-    """Typed query-value nodes for one ``after`` bound (same shape as WHERE leaves)."""
+    """Typed query-value nodes for one position bound (same shape as WHERE leaves)."""
     values: list[QueryValue] = []
     for item in position:
         serialized = _serialize_query_value(item)
@@ -810,24 +814,36 @@ def _after_query_values(position: tuple[Any, ...]) -> tuple[QueryValue, ...]:
     return tuple(values)
 
 
+def _compile_position(
+    query: "Query[Any]", bound: tuple[Any, ...] | None, *, op: str
+) -> tuple[QueryValue, ...] | None:
+    """Serialize a fetch payload's ``after`` / ``before`` bound."""
+    if bound is None:
+        return None
+    query._assert_position_order_keys()
+    if len(bound) != len(query.order_by_clause):
+        raise ValueError(
+            f"{op}() expected {len(query.order_by_clause)} position values "
+            f"(one per order_by key), got {len(bound)}"
+        )
+    return _after_query_values(bound)
+
+
 def _compile_after(query: "Query[Any]") -> tuple[QueryValue, ...] | None:
     """Serialize a fetch payload's ``after`` bound, re-checking current order keys."""
-    if query._after is None:
-        return None
-    query._assert_after_order_keys()
-    if len(query._after) != len(query.order_by_clause):
-        raise ValueError(
-            f"after() expected {len(query.order_by_clause)} position values "
-            f"(one per order_by key), got {len(query._after)}"
-        )
-    return _after_query_values(query._after)
+    return _compile_position(query, query._after, op="after")
+
+
+def _compile_before(query: "Query[Any]") -> tuple[QueryValue, ...] | None:
+    """Serialize a fetch payload's ``before`` bound, re-checking current order keys."""
+    return _compile_position(query, query._before, op="before")
 
 
 def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
     """Reject query state a mutating verb cannot carry (FF-A A1, #273, #287).
 
     Raises:
-        ValueError: If ``limit()``/``offset()``/``after()`` was set, the query
+        ValueError: If ``limit()``/``offset()``/``after()``/``before()`` was set, the query
             traverses a relation (a joined/explicit-edge path, or a where-clause
             leaf carrying a non-empty path — portable SQL has no
             ``UPDATE/DELETE ... JOIN``; a join-free shadow-FK filter stays
@@ -839,11 +855,12 @@ def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
         query._limit is not None
         or query._offset is not None
         or query._after is not None
+        or query._before is not None
     ):
         raise ValueError(
-            f"{operation}() does not support limit/offset/after: portable SQL "
+            f"{operation}() does not support limit/offset/after/before: portable SQL "
             f"has no {operation.upper()} ... LIMIT. Remove the "
-            f".limit()/.offset()/.after() call, or fetch primary keys first "
+            f".limit()/.offset()/.after()/.before() call, or fetch primary keys first "
             f"and {operation} by primary-key set."
         )
     if (
@@ -923,11 +940,11 @@ def compile_query(
     What each verb carries is policy, stated here once:
 
     - ``fetch`` carries everything: ordering, paging (``limit``/``offset``
-      keys, plus an optional ``after`` bound), m2m context, joins, and the
-      query's own materialization plan.
+      keys, plus optional ``after`` / ``before`` bounds), m2m context, joins,
+      and the query's own materialization plan.
     - ``count`` is unaffected by ordering, paging, and projection (PRD #277
       verb table): it materializes a scalar, so ordering is dropped, paging
-      is ``null`` (``after`` omitted), and the plan is ``root_instances``
+      is ``null`` (``after`` / ``before`` omitted), and the plan is ``root_instances``
       even on a projected query — joins and the m2m context still shape
       membership.
     - ``update``/``delete`` are single-table write shapes: guardrails reject
@@ -967,6 +984,7 @@ def compile_query(
             limit=_ABSENT,
             offset=_ABSENT,
             after=None,
+            before=None,
             m2m=None,
             joins=(),
             materialization=RootInstances(),
@@ -980,6 +998,7 @@ def compile_query(
             limit=None,
             offset=None,
             after=None,
+            before=None,
             m2m=query._m2m_context,
             joins=_serialize_joins(query),
             materialization=RootInstances(),
@@ -993,6 +1012,7 @@ def compile_query(
             limit=query._limit,
             offset=query._offset,
             after=_compile_after(query),
+            before=_compile_before(query),
             m2m=query._m2m_context,
             joins=_serialize_joins(query),
             materialization=_materialization(query),
