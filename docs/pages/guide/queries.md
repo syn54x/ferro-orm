@@ -196,7 +196,15 @@ Omitting `nulls=` on a nullable sort key means `NULLS LAST` on every backend. Pa
 --8<-- "docs/examples/predicates.py:ordering-slicing"
 ```
 
-Chain `.order_by()` multiple times for multi-column sorts. For robust pagination patterns, see [Pagination](../howto/pagination.md).
+Chain `.order_by()` multiple times for multi-column sorts.
+
+To page forward from a known row, pass that row's place in the declared order to `.after()`. The bound is exclusive, the order keys must include the primary key, and every key must be a non-nullable root column:
+
+```python
+--8<-- "docs/examples/predicates.py:after-paging"
+```
+
+`after(row)` is the same as `after(position_of(row))`. `after()` cannot be combined with `offset()` — a query has one start. For robust pagination patterns, see [Pagination](../howto/pagination.md).
 
 ## Executing Queries
 

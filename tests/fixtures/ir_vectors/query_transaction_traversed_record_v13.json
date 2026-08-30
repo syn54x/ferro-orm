@@ -1,29 +1,33 @@
 {
-  "vector_name": "query_transaction_left_join_v12",
+  "vector_name": "query_transaction_traversed_record_v13",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 12,
+    "ir_version": 13,
     "payload": {
       "model_name": "Transaction",
       "where": [
         {
           "node_kind": "leaf",
-          "column": "email",
-          "operator": "==",
+          "column": "amount",
+          "operator": ">=",
           "value": {
-            "kind": "string",
-            "value": "owner@ferro.dev"
+            "kind": "int",
+            "value": 100
           },
-          "path": [
-            "account",
-            "owner"
-          ]
+          "path": []
         }
       ],
       "set": [],
-      "order_by": [],
+      "order_by": [
+        {
+          "column": "id",
+          "direction": "asc",
+          "path": [],
+          "nulls": "last"
+        }
+      ],
       "limit": null,
       "offset": null,
       "m2m": null,
@@ -58,7 +62,29 @@
         }
       ],
       "materialization": {
-        "kind": "root_instances"
+        "kind": "record",
+        "fields": [
+          {
+            "name": "txn_id",
+            "column": "id",
+            "path": []
+          },
+          {
+            "name": "account_name",
+            "column": "name",
+            "path": [
+              "account"
+            ]
+          },
+          {
+            "name": "owner_email",
+            "column": "email",
+            "path": [
+              "account",
+              "owner"
+            ]
+          }
+        ]
       }
     }
   }

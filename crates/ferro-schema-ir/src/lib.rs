@@ -225,8 +225,8 @@ pub enum CheckOperand {
 /// Query IR: filter, sort, pagination, joins, materialization plan, and
 /// optional M2M join context.
 ///
-/// `ir_version: 12` (unconditional, no earlier version emitted anywhere —
-/// #269, #278, #285, #292, #310, #314, #376, #377, #378, #379, #392). `set` is required
+/// `ir_version: 13` (unconditional, no earlier version emitted anywhere —
+/// #269, #278, #285, #292, #310, #314, #376, #377, #378, #379, #392, #393). `set` is required
 /// and always present (`[]` outside updates); `joins` is required and always
 /// present (`[]` when the query traverses no relation); every leaf and
 /// `order_by` entry carries a `path` (required, `[]` = root model);
@@ -238,7 +238,8 @@ pub enum CheckOperand {
 /// the canonical SET assignment section with literal value expressions;
 /// v9 adds the column-ref SET value-expression kind; v10 adds binary
 /// `+` / `-` and the `now` clock; v11 adds Postgres ``merge``; v12 requires
-/// explicit ``nulls`` on every ``order_by`` term (#392).
+/// explicit ``nulls`` on every ``order_by`` term (#392); v13 adds an optional
+/// ``after`` position bound on fetch payloads (#393).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryIrPayload {
     /// Model class name the query targets.
@@ -266,6 +267,11 @@ pub struct QueryIrPayload {
         skip_serializing_if = "Option::is_none"
     )]
     pub offset: Option<Option<u64>>,
+    /// Exclusive position bound (`after`). Omitted when unset — fetch payloads
+    /// carry it only when paging from a position; count and mutating payloads
+    /// omit it (v13, #393).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Vec<QueryValue>>,
     /// Many-to-many join metadata JSON, deserialized into [`M2mContext`] downstream.
     pub m2m: Option<Value>,
     /// Relation joins collected from traversal (`[]` until #270 renders them).
@@ -692,7 +698,7 @@ mod tests {
     #[test]
     fn query_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query fixture must parse");
         let ir = parsed
@@ -713,7 +719,7 @@ mod tests {
     #[test]
     fn query_literal_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_literal_set_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_literal_set_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query literal-set fixture must parse");
         let ir = parsed
@@ -722,7 +728,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query literal-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 12);
+        assert_eq!(envelope.ir_version, 13);
         assert_eq!(envelope.payload.set_assignments.len(), 3);
         assert_eq!(envelope.payload.set_assignments[0].column, "active");
         match &envelope.payload.set_assignments[2].value {
@@ -739,7 +745,7 @@ mod tests {
     #[test]
     fn query_mixed_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_mixed_set_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_mixed_set_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query mixed-set fixture must parse");
         let ir = parsed
@@ -748,7 +754,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query mixed-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 12);
+        assert_eq!(envelope.ir_version, 13);
         assert_eq!(envelope.payload.set_assignments.len(), 2);
         assert_eq!(envelope.payload.set_assignments[0].column, "email");
         match &envelope.payload.set_assignments[0].value {
@@ -770,7 +776,7 @@ mod tests {
     #[test]
     fn query_add_literal_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_add_literal_set_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_add_literal_set_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query add-literal-set fixture must parse");
         let ir = parsed
@@ -779,7 +785,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query add-literal-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 12);
+        assert_eq!(envelope.ir_version, 13);
         match &envelope.payload.set_assignments[0].value {
             QueryValueExpr::Add { left, right } => {
                 match left.as_ref() {
@@ -807,7 +813,7 @@ mod tests {
     #[test]
     fn query_add_columns_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_add_columns_set_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_add_columns_set_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query add-columns-set fixture must parse");
         let ir = parsed
@@ -816,7 +822,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query add-columns-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 12);
+        assert_eq!(envelope.ir_version, 13);
         match &envelope.payload.set_assignments[0].value {
             QueryValueExpr::Add { left, right } => {
                 match left.as_ref() {
@@ -841,7 +847,7 @@ mod tests {
     #[test]
     fn query_now_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_now_set_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_now_set_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query now-set fixture must parse");
         let ir = parsed
@@ -850,7 +856,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query now-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 12);
+        assert_eq!(envelope.ir_version, 13);
         match &envelope.payload.set_assignments[0].value {
             QueryValueExpr::Now => {}
             other => panic!("expected now assignment, got {other:?}"),
@@ -862,7 +868,7 @@ mod tests {
     #[test]
     fn query_merge_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_merge_set_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_merge_set_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query merge-set fixture must parse");
         let ir = parsed
@@ -871,7 +877,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query merge-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 12);
+        assert_eq!(envelope.ir_version, 13);
         match &envelope.payload.set_assignments[0].value {
             QueryValueExpr::Merge { left, right } => {
                 match left.as_ref() {
@@ -899,7 +905,7 @@ mod tests {
         // leaf `IN` comparison (the NOT IN spelling) — and must survive a
         // deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_leaf_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_leaf_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query not-leaf fixture must parse");
         let ir = parsed
@@ -926,7 +932,7 @@ mod tests {
         // OR compound whole — no De Morgan expansion on the wire — and must
         // survive a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_compound_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_compound_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query not-compound fixture must parse");
         let ir = parsed
@@ -954,7 +960,7 @@ mod tests {
         // condition tree, and must survive a deserialize/serialize
         // round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_account_exists_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_account_exists_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query exists fixture must parse");
         let ir = parsed
@@ -986,7 +992,7 @@ mod tests {
         // node — the exists node carries no negation flag (ADR-0008
         // composition; #314).
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_owner_not_exists_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_owner_not_exists_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query not-exists fixture must parse");
         let ir = parsed
@@ -1013,7 +1019,7 @@ mod tests {
         // ride the exists node's own `joins` section (rendered INSIDE the
         // subquery). Must survive a deserialize/serialize round-trip.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_account_scoped_exists_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_account_scoped_exists_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query scoped-exists fixture must parse");
         let ir = parsed
@@ -1047,7 +1053,7 @@ mod tests {
         // mechanism, and the bare inner node omits `joins` entirely (absent,
         // not empty — pinned wire bytes via skip_serializing_if).
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_owner_nested_exists_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_owner_nested_exists_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query nested-exists fixture must parse");
         let ir = parsed
@@ -1078,7 +1084,7 @@ mod tests {
         // the target — with the scoped inner tree over the target model.
         // Must survive a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_m2m_exists_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_m2m_exists_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query m2m-exists fixture must parse");
         let ir = parsed
@@ -1109,7 +1115,7 @@ mod tests {
         // Multi-hop `joins` section + path-carrying leaves must survive a
         // deserialize/serialize round-trip without drift (#270 wire stability).
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_traversal_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_traversal_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversal fixture must parse");
         let ir = parsed
@@ -1137,7 +1143,7 @@ mod tests {
         // deserialize/serialize round-trip without drift, and the join_type
         // tokens must reach Rust exactly as written on the wire.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query left_join fixture must parse");
         let ir = parsed
@@ -1163,7 +1169,7 @@ mod tests {
         // payload — predicate, order, limit, and a two-field record plan —
         // survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query record fixture must parse");
         let ir = parsed
@@ -1362,7 +1368,7 @@ mod tests {
         // identity) — survives a deserialize/serialize round-trip without
         // drift. No group keys: the whole result collapses to one record.
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_global_aggregate_v12.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_global_aggregate_v13.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("global aggregate fixture must parse");
@@ -1399,7 +1405,7 @@ mod tests {
         // joins section included — survives a deserialize/serialize
         // round-trip without drift.
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_traversed_record_v12.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversed_record_v13.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversed record fixture must parse");
@@ -1440,7 +1446,7 @@ mod tests {
         // a deserialize/serialize round-trip without drift. GROUP BY does not
         // travel: the renderer derives it from the non-expr fields (ADR-0009).
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_aggregate_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_aggregate_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query aggregate fixture must parse");
         let ir = parsed
@@ -1507,7 +1513,7 @@ mod tests {
         // payload — root predicate, empty `joins`, and a one-path instances
         // plan — survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v12.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query include fixture must parse");
         let ir = parsed
@@ -1611,7 +1617,7 @@ mod tests {
     #[test]
     fn query_card_nulls_fixture_roundtrip() {
         // #392: golden vector with explicit nulls on every order_by term.
-        let fixture = include_str!("../../../tests/fixtures/ir_vectors/query_card_nulls_v12.json");
+        let fixture = include_str!("../../../tests/fixtures/ir_vectors/query_card_nulls_v13.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query card-nulls fixture must parse");
         let ir = parsed
@@ -1620,16 +1626,41 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query card-nulls IR must deserialize");
-        assert_eq!(envelope.ir_version, 12);
+        assert_eq!(envelope.ir_version, 13);
         assert_eq!(envelope.payload.order_by.len(), 2);
         assert_eq!(envelope.payload.order_by[0].nulls, "last");
         assert_eq!(
-            envelope.payload.order_by[1].nulls,
-            "last",
+            envelope.payload.order_by[1].nulls, "last",
             "second term must carry explicit nulls"
         );
         let encoded = serde_json::to_value(&envelope).expect("query card-nulls IR must serialize");
         assert_eq!(encoded, ir, "query card-nulls round-trip must not drift");
+    }
+
+    #[test]
+    fn query_after_fixture_roundtrip() {
+        let fixture = include_str!("../../../tests/fixtures/ir_vectors/query_user_after_v13.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query after fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query after IR must deserialize");
+        assert_eq!(envelope.ir_version, 13);
+        let after = envelope
+            .payload
+            .after
+            .as_ref()
+            .expect("fetch payload must carry after");
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].kind, "int");
+        assert_eq!(after[0].value, serde_json::json!(10));
+        assert_eq!(after[1].kind, "int");
+        assert_eq!(after[1].value, serde_json::json!(3));
+        let encoded = serde_json::to_value(&envelope).expect("query after IR must serialize");
+        assert_eq!(encoded, ir, "query after round-trip must not drift");
     }
 
     #[test]
