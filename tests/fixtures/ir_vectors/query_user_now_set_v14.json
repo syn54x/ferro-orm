@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_user_add_literal_set_v13",
+  "vector_name": "query_user_now_set_v14",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 13,
+    "ir_version": 14,
     "payload": {
       "model_name": "User",
       "where": [
@@ -21,20 +21,9 @@
       ],
       "set": [
         {
-          "column": "n",
+          "column": "updated_at",
           "value": {
-            "kind": "add",
-            "left": {
-              "kind": "column",
-              "column": "n"
-            },
-            "right": {
-              "kind": "literal",
-              "value": {
-                "kind": "int",
-                "value": 1
-              }
-            }
+            "kind": "now"
           }
         }
       ],

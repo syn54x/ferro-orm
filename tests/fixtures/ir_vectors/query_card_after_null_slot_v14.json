@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_card_nulls_v13",
+  "vector_name": "query_card_after_null_slot_v14",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 13,
+    "ir_version": 14,
     "payload": {
       "model_name": "Card",
       "where": [
@@ -28,14 +28,24 @@
           "nulls": "last"
         },
         {
-          "column": "updated_at",
-          "direction": "desc",
+          "column": "id",
+          "direction": "asc",
           "path": [],
           "nulls": "last"
         }
       ],
       "limit": null,
       "offset": null,
+      "after": [
+        {
+          "kind": "null",
+          "value": null
+        },
+        {
+          "kind": "int",
+          "value": 4
+        }
+      ],
       "m2m": null,
       "joins": [],
       "materialization": {

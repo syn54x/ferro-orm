@@ -556,6 +556,7 @@ class Query(Generic[T]):
         self._limit: int | None = None
         self._offset: int | None = None
         self._after: tuple[Any, ...] | None = None
+        self._before: tuple[Any, ...] | None = None
         self._m2m_context: M2mContext | None = None
         # Relation paths that must render a join, insertion-ordered (full path
         # tuple -> registered join_type). Populated by where()/order_by()
@@ -1031,49 +1032,50 @@ class Query(Generic[T]):
             A new ``Query`` with the clause added; ``self`` is unchanged.
 
         Raises:
-            ValueError: If ``after()`` is already set — a query has one start.
+            ValueError: If ``after()`` or ``before()`` is already set — a query
+                has one start.
 
         Examples:
             >>> query = User.select().offset(20)
             >>> query._offset
             20
         """
-        if self._after is not None:
+        if self._after is not None or self._before is not None:
             raise ValueError(
-                "after() cannot be combined with offset(): a query has one "
-                "start (an offset or a position bound, never both)."
+                "after()/before() cannot be combined with offset(): a query "
+                "has one start (an offset or a position bound, never both)."
             )
         new = self._clone()
         new._offset = value
         return new
 
-    def _assert_after_order_keys(self) -> None:
-        """Require root order keys that include the primary key (#393/#394)."""
+    def _assert_position_order_keys(self) -> None:
+        """Require root order keys that include the primary key (#393/#395)."""
         pk = getattr(self.model_cls, "__ferro_pk__", None)
         if pk is None:
             raise ValueError(
                 f"{self.model_cls.__name__} has no primary-key column, and "
-                "after()/position_of() require one."
+                "after()/before()/position_of() require one."
             )
         if not self.order_by_clause:
             raise ValueError(
-                "after() requires order_by() keys that include the model's "
-                "primary key"
+                "after()/before() require order_by() keys that include the "
+                "model's primary key"
             )
         pk_seen = False
         for entry in self.order_by_clause:
             if entry.path:
                 dotted = ".".join((*entry.path, entry.column))
                 raise ValueError(
-                    "after() requires root-column order keys; traversed "
-                    f"order key {dotted!r} is not supported yet"
+                    "after()/before() require root-column order keys; "
+                    f"traversed order key {dotted!r} is not supported yet"
                 )
             if entry.column == pk:
                 pk_seen = True
         if not pk_seen:
             raise ValueError(
-                "after() requires the model's primary key in the order keys; "
-                "Ferro will not append it silently"
+                "after()/before() require the model's primary key in the "
+                "order keys; Ferro will not append it silently"
             )
 
     def position_of(self, row: T) -> tuple[Any, ...]:
@@ -1088,7 +1090,7 @@ class Query(Generic[T]):
 
         Raises:
             TypeError: If ``row`` is not an instance of the queried model.
-            ValueError: If the order keys are not a legal ``after()`` set
+            ValueError: If the order keys are not a legal position-paging set
                 (no primary key or a traversed key).
         """
         if not isinstance(row, self.model_cls):
@@ -1096,8 +1098,48 @@ class Query(Generic[T]):
                 "position_of() expected an instance of "
                 f"{self.model_cls.__name__}, got {type(row).__name__}"
             )
-        self._assert_after_order_keys()
+        self._assert_position_order_keys()
         return tuple(getattr(row, entry.column) for entry in self.order_by_clause)
+
+    def _resolve_position(self, position: tuple[Any, ...] | T, *, op: str) -> tuple[Any, ...]:
+        """Validate a position bound for ``after()`` / ``before()``."""
+        if self._offset is not None:
+            raise ValueError(
+                f"{op}() cannot be combined with offset(): a query has one "
+                "start (an offset or a position bound, never both)."
+            )
+        if op == "after" and self._before is not None:
+            raise ValueError(
+                "after() cannot be combined with before(): a query has one start."
+            )
+        if op == "before" and self._after is not None:
+            raise ValueError(
+                "after() cannot be combined with before(): a query has one start."
+            )
+        if isinstance(position, tuple):
+            self._assert_position_order_keys()
+            expected = len(self.order_by_clause)
+            if len(position) != expected:
+                raise ValueError(
+                    f"{op}() expected {expected} position values "
+                    f"(one per order_by key), got {len(position)}"
+                )
+            bound = position
+        elif isinstance(position, self.model_cls):
+            bound = self.position_of(position)
+        else:
+            raise TypeError(
+                f"{op}() expected a position tuple or a model instance, "
+                f"got {type(position).__name__}"
+            )
+        pk = getattr(self.model_cls, "__ferro_pk__", None)
+        for entry, value in zip(self.order_by_clause, bound, strict=True):
+            if entry.column == pk and value is None:
+                raise ValueError(
+                    f"{op}() does not support None in the primary-key "
+                    "position slot"
+                )
+        return bound
 
     def after(self, position: tuple[Any, ...] | T) -> Self:
         """Start the page after an exclusive position in the declared order.
@@ -1116,39 +1158,42 @@ class Query(Generic[T]):
         Raises:
             TypeError: If ``position`` is neither a tuple nor a model instance.
             ValueError: If the order keys are illegal for ``after()``, the
-                tuple has the wrong arity, the PK slot is ``None``, or
-                ``offset()`` is already set.
+                tuple has the wrong arity, the PK slot is ``None``,
+                ``offset()`` is already set, or ``before()`` is already set.
         """
-        if self._offset is not None:
-            raise ValueError(
-                "after() cannot be combined with offset(): a query has one "
-                "start (an offset or a position bound, never both)."
-            )
-        if isinstance(position, tuple):
-            self._assert_after_order_keys()
-            expected = len(self.order_by_clause)
-            if len(position) != expected:
-                raise ValueError(
-                    f"after() expected {expected} position values "
-                    f"(one per order_by key), got {len(position)}"
-                )
-            bound = position
-        elif isinstance(position, self.model_cls):
-            bound = self.position_of(position)
-        else:
-            raise TypeError(
-                "after() expected a position tuple or a model instance, "
-                f"got {type(position).__name__}"
-            )
-        pk = getattr(self.model_cls, "__ferro_pk__", None)
-        for entry, value in zip(self.order_by_clause, bound, strict=True):
-            if entry.column == pk and value is None:
-                raise ValueError(
-                    "after() does not support None in the primary-key "
-                    "position slot"
-                )
+        bound = self._resolve_position(position, op="after")
         new = self._clone()
         new._after = bound
+        return new
+
+    def before(self, position: tuple[Any, ...] | T) -> Self:
+        """Start at the rows immediately before an exclusive position.
+
+        With a limit this is the adjacent previous page, yielded in the
+        declared order. Without a limit it is every earlier row in declared
+        order (a prefix, not a page). On unbounded ``before()``, ``first()``
+        is the adjacent previous row and ``all()[0]`` is the head of the
+        prefix — they disagree, and that is accepted.
+
+        ``before(row)`` is sugar for ``before(position_of(row))``. Same
+        order-key rules as ``after()``. Cannot be combined with ``after()``
+        or ``offset()``.
+
+        Args:
+            position: A tuple of order-key values, or a model instance.
+
+        Returns:
+            A new ``Query`` with the bound set; ``self`` is unchanged.
+
+        Raises:
+            TypeError: If ``position`` is neither a tuple nor a model instance.
+            ValueError: If the order keys are illegal, the tuple has the
+                wrong arity, the PK slot is ``None``, ``offset()`` is
+                already set, or ``after()`` is already set.
+        """
+        bound = self._resolve_position(position, op="before")
+        new = self._clone()
+        new._before = bound
         return new
 
     async def all(self) -> list[T]:
@@ -1164,12 +1209,15 @@ class Query(Generic[T]):
         """
         compiled = compile_query(self, "fetch")
         route = await self._transaction_or_using()
-        return await fetch_filtered(
+        rows = await fetch_filtered(
             self.model_cls,
             compiled.wire_json,
             route,
             hop_classes=compiled.hop_classes,
         )
+        if self._before is not None:
+            rows.reverse()
+        return rows
 
     async def count(self) -> int:
         """Return the number of records that match the current query
@@ -1688,6 +1736,8 @@ class ProjectedQuery(Query[T]):
             record_cls=Row,
             hop_classes=compiled.hop_classes,
         )
+        if self._before is not None:
+            records.reverse()
         return _ROWS_OF_ROW._wrap(records)
 
     async def first(self) -> Row | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
