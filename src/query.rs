@@ -1592,6 +1592,56 @@ mod tests {
     }
 
     #[test]
+    fn before_condition_qualifies_path_carrying_order_key() {
+        // before inverts keys then reuses exclusive_stepwise_compare; the
+        // column still goes through qualify_column_with_joins (#396).
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
+            "model_name": "Transaction",
+            "where": [],
+            "order_by": [
+                {"column": "label", "direction": "asc", "path": ["account"], "nulls": "last"},
+                {"column": "id", "direction": "asc", "path": [], "nulls": "last"}
+            ],
+            "limit": null,
+            "offset": null,
+            "before": [
+                {"kind": "string", "value": "a1"},
+                {"kind": "int", "value": 2}
+            ],
+            "m2m": null,
+            "materialization": {"kind": "root_instances"},
+            "joins": [
+                {"join_type": "inner", "path": [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"}
+                ]}
+            ]
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+        let cond = plan
+            .before_condition(Dialect::Sqlite, "transaction", &join_plan)
+            .expect("before_condition")
+            .expect("before present");
+        let mut select = Query::select();
+        select
+            .column(Alias::new("id"))
+            .from(Alias::new("transaction"))
+            .cond_where(cond);
+        let sql = flatten_sql(&select.to_string(SqliteQueryBuilder));
+        assert!(
+            sql.contains("j1_account.label"),
+            "before+path must qualify the traversed key by its join alias: {sql}"
+        );
+        assert!(
+            sql.contains("transaction.id"),
+            "root PK key stays on the root table: {sql}"
+        );
+    }
+
+    #[test]
     fn after_and_before_together_fail_loud() {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
             "set": [],

@@ -29,9 +29,9 @@ class Transaction(Model):
     id: int | None = Field(default=None, primary_key=True)
     amount: int
     memo: str
-    account: Annotated[
-        Account | None, ForeignKey(related_name="transactions")
-    ] = None
+    account: Annotated[Account | None, ForeignKey(related_name="transactions")] = None
+
+
 # --8<-- [end:schema]
 
 
@@ -90,9 +90,7 @@ async def main() -> None:
         # A selected field may reach across a relation, at any depth.
         # Unaliased, the field takes the bare leaf column name.
         rows = await (
-            Transaction.select(lambda t: (t.memo, t.account.label))
-            .order_by("id")
-            .all()
+            Transaction.select(lambda t: (t.memo, t.account.label)).order_by("id").all()
         )
         assert rows[0].model_dump() == {"memo": "coffee", "label": "a1"}
         # --8<-- [end:traversed]
@@ -164,6 +162,22 @@ async def main() -> None:
         row = await Transaction.select(lambda t: t.memo).order_by("id").first()
         assert row is not None and row.memo == "coffee"
         # --8<-- [end:compose]
+
+        # --8<-- [start:projected-paging]
+        # Projected records page the same way instances do. position_of(Row)
+        # requires every order key in the projection; otherwise pass a tuple.
+        projected = (
+            Transaction.select(lambda t: {"label": t.account.label, "id": t.id})
+            .order_by(lambda t: t.account.label)
+            .order_by(lambda t: t.id)
+        )
+        records = await projected.all()
+        next_records = (
+            await projected.after(projected.position_of(records[1])).limit(2).all()
+        )
+        # --8<-- [end:projected-paging]
+        assert [r.id for r in records] == [1, 2, 3]
+        assert [r.id for r in next_records] == [3]
 
         # --8<-- [start:count]
         # count()/exists() are unaffected by projection: they measure the
