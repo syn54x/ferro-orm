@@ -302,6 +302,17 @@ def _q_user_after(m: dict[str, type]) -> Any:
     )
 
 
+def _q_card_after_null_slot(m: dict[str, type]) -> Any:
+    return (
+        m["Card"]
+        .select()
+        .where(lambda c: c.id != None)  # noqa: E711
+        .order_by(lambda c: c.pinned_at, "desc")
+        .order_by(lambda c: c.id)
+        .after((None, 4))
+    )
+
+
 CASES: list[tuple[str, Callable[[dict[str, type]], Any], str]] = [
     ("query_user_compound_v13", _q_user_compound, "User"),
     ("query_user_not_leaf_v13", _q_not_leaf, "User"),
@@ -320,6 +331,7 @@ CASES: list[tuple[str, Callable[[dict[str, type]], Any], str]] = [
     ("query_transaction_global_aggregate_v13", _q_global_aggregate, "Transaction"),
     ("query_card_nulls_v13", _q_card_nulls, "Card"),
     ("query_user_after_v13", _q_user_after, "User"),
+    ("query_card_after_null_slot_v13", _q_card_after_null_slot, "Card"),
 ]
 
 
