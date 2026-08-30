@@ -165,9 +165,9 @@ class TestOrderByValidation:
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             pinned_at: str | None = None
 
-        with pytest.raises(ValueError, match=r"first.*last"):
+        with pytest.raises(ValueError, match=r"first.*last.*native"):
             ObNullsJunk.select().order_by("pinned_at", nulls="sideways")
-        with pytest.raises(ValueError, match=r"first.*last"):
+        with pytest.raises(ValueError, match=r"first.*last.*native"):
             ObNullsJunk.select().order_by(
                 lambda u: u.pinned_at, "desc", nulls="nulls last"
             )
@@ -191,16 +191,28 @@ class TestOrderByValidation:
             OrderByEntry(column="name", direction="asc", path=(), nulls="last")
         ]
 
-    def test_order_by_omitted_nulls_matches_legacy_entry(self):
+    def test_order_by_nulls_native_accepted(self):
+        class ObNative(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            pinned_at: str | None = None
+
+        q = ObNative.select().order_by("pinned_at", "desc", nulls="native")
+        assert q.order_by_clause == [
+            OrderByEntry(
+                column="pinned_at", direction="desc", path=(), nulls="native"
+            )
+        ]
+
+    def test_order_by_omitted_nulls_defaults_to_last(self):
         class ObOmit(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             age: int = 0
 
         q = ObOmit.select().order_by(lambda u: u.age, "desc")
         assert q.order_by_clause == [
-            OrderByEntry(column="age", direction="desc", path=())
+            OrderByEntry(column="age", direction="desc", path=(), nulls="last")
         ]
-        assert q.order_by_clause[0].nulls is None
+        assert q.order_by_clause[0].nulls == "last"
 
     def test_order_by_nulls_with_relation_traversal(self):
         class ObAuthor(Model):

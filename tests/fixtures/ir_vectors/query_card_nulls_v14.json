@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_card_nulls_v11",
+  "vector_name": "query_card_nulls_v14",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 11,
+    "ir_version": 14,
     "payload": {
       "model_name": "Card",
       "where": [
@@ -30,7 +30,8 @@
         {
           "column": "updated_at",
           "direction": "desc",
-          "path": []
+          "path": [],
+          "nulls": "last"
         }
       ],
       "limit": null,

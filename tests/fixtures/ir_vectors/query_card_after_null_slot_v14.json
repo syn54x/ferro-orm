@@ -1,0 +1,56 @@
+{
+  "vector_name": "query_card_after_null_slot_v14",
+  "domain": "query",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "query",
+    "ir_version": 14,
+    "payload": {
+      "model_name": "Card",
+      "where": [
+        {
+          "node_kind": "leaf",
+          "column": "id",
+          "operator": "!=",
+          "value": {
+            "kind": "null",
+            "value": null
+          },
+          "path": []
+        }
+      ],
+      "set": [],
+      "order_by": [
+        {
+          "column": "pinned_at",
+          "direction": "desc",
+          "path": [],
+          "nulls": "last"
+        },
+        {
+          "column": "id",
+          "direction": "asc",
+          "path": [],
+          "nulls": "last"
+        }
+      ],
+      "limit": null,
+      "offset": null,
+      "after": [
+        {
+          "kind": "null",
+          "value": null
+        },
+        {
+          "kind": "int",
+          "value": 4
+        }
+      ],
+      "m2m": null,
+      "joins": [],
+      "materialization": {
+        "kind": "root_instances"
+      }
+    }
+  }
+}

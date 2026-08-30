@@ -11,9 +11,9 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 11 (#379 — unconditional bump; merge joins
-# add / sub / now); `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 11, "codec": 1}
+# `query` is on ir_version 14 (#395 — optional `before` position bound);
+# `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 14, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -285,13 +285,12 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
     for i, order in enumerate(payload["order_by"]):
         order_label = f"{label}.order_by[{i}]"
         assert isinstance(order, dict), f"{order_label} must be object"
-        _require_keys(order, {"column", "direction", "path"}, order_label)
+        _require_keys(order, {"column", "direction", "path", "nulls"}, order_label)
         assert isinstance(order["path"], list), f"{order_label}.path must be a list"
-        if "nulls" in order:
-            assert order["nulls"] in {"first", "last"}, (
-                f"{order_label}.nulls must be 'first' or 'last' when present, "
-                f"got {order['nulls']!r}"
-            )
+        assert order["nulls"] in {"first", "last", "native"}, (
+            f"{order_label}.nulls must be 'first', 'last', or 'native', "
+            f"got {order['nulls']!r}"
+        )
     has_limit = "limit" in payload
     has_offset = "offset" in payload
     assert has_limit == has_offset, f"{label}.limit/offset must be present together"
@@ -303,6 +302,33 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         assert isinstance(payload["offset"], int) and payload["offset"] >= 0, (
             f"{label}.offset must be null or non-negative int"
         )
+    if "after" in payload:
+        after = payload["after"]
+        assert isinstance(after, list) and after, f"{label}.after must be a non-empty list"
+        assert len(after) == len(payload["order_by"]), (
+            f"{label}.after arity must match order_by"
+        )
+        for i, value in enumerate(after):
+            value_label = f"{label}.after[{i}]"
+            assert isinstance(value, dict), f"{value_label} must be object"
+            _require_keys(value, {"kind", "value"}, value_label)
+        assert not payload.get("offset"), (
+            f"{label} cannot carry after and a non-null offset"
+        )
+    if "before" in payload:
+        before = payload["before"]
+        assert isinstance(before, list) and before, f"{label}.before must be a non-empty list"
+        assert len(before) == len(payload["order_by"]), (
+            f"{label}.before arity must match order_by"
+        )
+        for i, value in enumerate(before):
+            value_label = f"{label}.before[{i}]"
+            assert isinstance(value, dict), f"{value_label} must be object"
+            _require_keys(value, {"kind", "value"}, value_label)
+        assert not payload.get("offset"), (
+            f"{label} cannot carry before and a non-null offset"
+        )
+        assert "after" not in payload, f"{label} cannot carry after and before"
     if payload["m2m"] is not None:
         assert isinstance(payload["m2m"], dict), f"{label}.m2m must be null or object"
     joins = payload["joins"]

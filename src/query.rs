@@ -7,6 +7,7 @@
 use crate::state::Dialect;
 use ferro_schema_ir::{
     Materialization, QueryIrPayload, QueryJoin, QueryNode, QueryOrderBy, QuerySetAssignment,
+    QueryValue,
 };
 use sea_query::{Alias, Condition, Expr, JoinType, SimpleExpr};
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,157 @@ pub fn qualify_column_with_joins(
         join_plan,
     };
     qualify_leaf_column(&qualifier, column, path)
+}
+
+/// One term of an exclusive stepwise (keyset) compare (#393/#394).
+///
+/// Keep compare logic here, not in the SELECT builder. `nulls` is the wire
+/// token (`"last"` / `"first"` / `"native"`); `"native"` resolves from
+/// [`Dialect`] inside [`exclusive_stepwise_compare`].
+pub struct StepwiseKey {
+    /// Table-qualified order-key column.
+    pub column: Expr,
+    /// `"asc"` or `"desc"` (case-insensitive).
+    pub direction: String,
+    /// Bound value for this key, already typed as a SeaQuery expression.
+    pub bound: SimpleExpr,
+    /// Wire `order_by[].nulls` token (`"last"` / `"first"` / `"native"`).
+    pub nulls: String,
+    /// Whether this slot's bound is SQL NULL (`kind: "null"`).
+    pub bound_is_null: bool,
+}
+
+/// Resolved NULLS placement after `"native"` is lowered for one dialect.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NullsPlacement {
+    First,
+    Last,
+}
+
+/// Exclusive stepwise compare: rows strictly after the bound in declared order.
+///
+/// For two NOT NULL ASC keys: `(a > :a) OR (a = :a AND b > :b)`. DESC flips
+/// `>` to `<`. NULL placement and a NULL bound fold into the same tree so a
+/// cursor can cross the NULL bucket in one query. `"native"` resolves here
+/// from `dialect` (Postgres: NULL is larger; SQLite: NULL is smaller).
+pub fn exclusive_stepwise_compare(
+    keys: &[StepwiseKey],
+    dialect: Dialect,
+) -> Result<Condition, String> {
+    if keys.is_empty() {
+        return Err("exclusive stepwise compare requires at least one order key".to_string());
+    }
+    let mut any = Condition::any();
+    let mut added = false;
+    for i in 0..keys.len() {
+        let Some(after_term) = stepwise_after_term(&keys[i], dialect)? else {
+            continue;
+        };
+        let mut prefix = Condition::all();
+        for key in &keys[..i] {
+            prefix = prefix.add(stepwise_eq(key));
+        }
+        prefix = prefix.add(after_term);
+        any = any.add(prefix);
+        added = true;
+    }
+    if !added {
+        return Ok(Condition::all().add(Expr::cust("FALSE")));
+    }
+    Ok(any)
+}
+
+fn resolve_nulls_placement(
+    nulls: &str,
+    direction: &str,
+    dialect: Dialect,
+) -> Result<NullsPlacement, String> {
+    match nulls.to_ascii_lowercase().as_str() {
+        "first" => Ok(NullsPlacement::First),
+        "last" => Ok(NullsPlacement::Last),
+        "native" => {
+            let desc = direction.to_ascii_lowercase() == "desc";
+            Ok(match (dialect, desc) {
+                (Dialect::Postgres, false) => NullsPlacement::Last,
+                (Dialect::Postgres, true) => NullsPlacement::First,
+                (Dialect::Sqlite, false) => NullsPlacement::First,
+                (Dialect::Sqlite, true) => NullsPlacement::Last,
+            })
+        }
+        other => Err(format!(
+            "invalid order_by nulls {other:?}: expected \"first\", \"last\", or \"native\""
+        )),
+    }
+}
+
+fn stepwise_eq(key: &StepwiseKey) -> SimpleExpr {
+    if key.bound_is_null {
+        key.column.clone().is_null()
+    } else {
+        key.column.clone().eq(key.bound.clone())
+    }
+}
+
+fn stepwise_after_term(key: &StepwiseKey, dialect: Dialect) -> Result<Option<Condition>, String> {
+    let placement = resolve_nulls_placement(&key.nulls, &key.direction, dialect)?;
+    if key.bound_is_null {
+        return Ok(match placement {
+            NullsPlacement::Last => None,
+            NullsPlacement::First => Some(Condition::all().add(key.column.clone().is_not_null())),
+        });
+    }
+    let mut term = Condition::any();
+    term = term.add(stepwise_inequality(key)?);
+    if placement == NullsPlacement::Last {
+        term = term.add(key.column.clone().is_null());
+    }
+    Ok(Some(term))
+}
+
+fn stepwise_inequality(key: &StepwiseKey) -> Result<SimpleExpr, String> {
+    match key.direction.to_ascii_lowercase().as_str() {
+        "asc" => Ok(key.column.clone().gt(key.bound.clone())),
+        "desc" => Ok(key.column.clone().lt(key.bound.clone())),
+        other => Err(format!(
+            "invalid order_by direction {other:?}: expected \"asc\" or \"desc\""
+        )),
+    }
+}
+
+/// Invert one order key for `before()` (#395): `asc`↔`desc`, `first`↔`last`,
+/// `"native"` stays `"native"` (it resolves from [`Dialect`] at render).
+pub fn invert_order_key(direction: &str, nulls: &str) -> Result<(String, String), String> {
+    let direction = match direction.to_ascii_lowercase().as_str() {
+        "asc" => "desc".to_string(),
+        "desc" => "asc".to_string(),
+        other => {
+            return Err(format!(
+                "invalid order_by direction {other:?}: expected \"asc\" or \"desc\""
+            ));
+        }
+    };
+    let nulls = match nulls.to_ascii_lowercase().as_str() {
+        "first" => "last".to_string(),
+        "last" => "first".to_string(),
+        "native" => "native".to_string(),
+        other => {
+            return Err(format!(
+                "invalid order_by nulls {other:?}: expected \"first\", \"last\", or \"native\""
+            ));
+        }
+    };
+    Ok((direction, nulls))
+}
+
+/// Invert a wire `order_by` term the same way [`invert_order_key`] does.
+pub fn invert_order_by(order: &QueryOrderBy) -> Result<QueryOrderBy, String> {
+    let (direction, nulls) = invert_order_key(&order.direction, &order.nulls)?;
+    Ok(QueryOrderBy {
+        column: order.column.clone(),
+        direction,
+        path: order.path.clone(),
+        nulls,
+    })
 }
 
 /// One rendered relation JOIN edge: `<join> <to_table> AS <alias> ON
@@ -207,7 +359,8 @@ impl JoinPlanBuilder {
             }
             self.used.insert(alias.clone());
             self.prefix_alias.insert(prefix.clone(), alias.clone());
-            self.prefix_table.insert(prefix.clone(), hop.to_table.clone());
+            self.prefix_table
+                .insert(prefix.clone(), hop.to_table.clone());
             self.renders.push(JoinRender {
                 join_type: edge_join_type.to_string(),
                 to_table: hop.to_table.clone(),
@@ -346,6 +499,12 @@ pub struct QueryPlan {
     pub limit: Option<Option<u64>>,
     /// `OFFSET` key presence and value (`None` = absent, `Some(None)` = null).
     pub offset: Option<Option<u64>>,
+    /// Exclusive position bound (`None` = omitted). Fetch only; count and
+    /// mutations omit it (#393).
+    pub after: Option<Vec<QueryValue>>,
+    /// Exclusive previous-page bound (`None` = omitted). Fetch only; count
+    /// and mutations omit it (#395). Combined with `after` is a loud error.
+    pub before: Option<Vec<QueryValue>>,
     /// Relation JOINs collected from WHERE traversal, in registration order.
     /// Empty for non-traversal queries; rendered by the SELECT walkers (#270).
     pub joins: Vec<QueryJoin>,
@@ -400,6 +559,9 @@ impl QueryPlan {
                 .map_err(|e| format!("invalid QueryIR m2m payload: {e}"))?,
             None => None,
         };
+        if payload.after.is_some() && payload.before.is_some() {
+            return Err("after cannot be combined with before: a query has one start".to_string());
+        }
         let registration = crate::state::MODEL_REGISTRY
             .read()
             .ok()
@@ -411,6 +573,8 @@ impl QueryPlan {
             order_by: payload.order_by,
             limit: payload.limit,
             offset: payload.offset,
+            after: payload.after,
+            before: payload.before,
             joins: payload.joins,
             m2m,
             materialization: payload.materialization,
@@ -429,7 +593,10 @@ impl QueryPlan {
     /// traversal here is misuse; the error detail names the offending shape.
     pub fn ensure_no_traversal(&self) -> Result<(), String> {
         if !self.joins.is_empty() {
-            return Err(format!("query carries {} relation join(s)", self.joins.len()));
+            return Err(format!(
+                "query carries {} relation join(s)",
+                self.joins.len()
+            ));
         }
         for node in &self.where_clause {
             reject_non_empty_leaf_path(node)?;
@@ -466,11 +633,7 @@ impl QueryPlan {
     ///
     /// # Errors
     /// Returns `Err(String)` for an unknown `join_type` (see [`validate_join_type`]).
-    pub fn build_join_plan(
-        &self,
-        root_table: &str,
-        reserved: &[&str],
-    ) -> Result<JoinPlan, String> {
+    pub fn build_join_plan(&self, root_table: &str, reserved: &[&str]) -> Result<JoinPlan, String> {
         // Validate every entry's join_type and collect the set of LEFT edges.
         // A `"left"` entry is whole-path, so every one of its prefixes is a LEFT
         // edge; an edge is LEFT iff any `"left"` entry contains it.
@@ -563,6 +726,91 @@ impl QueryPlan {
             join_plan,
         };
         self.build_condition(backend, &qualifier)
+    }
+
+    /// Bind and qualify an ``after`` bound into an exclusive stepwise condition.
+    ///
+    /// Returns ``None`` when the payload omitted ``after``. Compare logic lives
+    /// in [`exclusive_stepwise_compare`] — this walker only qualifies, binds,
+    /// and passes each key's ``nulls`` token plus a NULL-bound fact.
+    pub fn after_condition(
+        &self,
+        backend: Dialect,
+        root_table: &str,
+        join_plan: &JoinPlan,
+    ) -> Result<Option<Condition>, String> {
+        self.position_condition(self.after.as_deref(), false, backend, root_table, join_plan)
+    }
+
+    /// Bind a ``before`` bound as ``after`` on inverted order keys (#395).
+    ///
+    /// Invert happens here; [`exclusive_stepwise_compare`] is the only expander.
+    pub fn before_condition(
+        &self,
+        backend: Dialect,
+        root_table: &str,
+        join_plan: &JoinPlan,
+    ) -> Result<Option<Condition>, String> {
+        self.position_condition(self.before.as_deref(), true, backend, root_table, join_plan)
+    }
+
+    /// `ORDER BY` terms for the SELECT: inverted when ``before`` is set so
+    /// `LIMIT n` fetches the adjacent previous page.
+    pub fn order_by_for_select(&self) -> Result<Vec<QueryOrderBy>, String> {
+        if self.before.is_some() {
+            self.order_by.iter().map(invert_order_by).collect()
+        } else {
+            Ok(self.order_by.clone())
+        }
+    }
+
+    fn position_condition(
+        &self,
+        values: Option<&[QueryValue]>,
+        invert: bool,
+        backend: Dialect,
+        root_table: &str,
+        join_plan: &JoinPlan,
+    ) -> Result<Option<Condition>, String> {
+        if self.after.is_some() && self.before.is_some() {
+            return Err("after cannot be combined with before: a query has one start".to_string());
+        }
+        let Some(values) = values else {
+            return Ok(None);
+        };
+        let start = if invert { "before" } else { "after" };
+        if self.offset.flatten().is_some() {
+            return Err(format!(
+                "{start} cannot be combined with offset: a query has one start"
+            ));
+        }
+        if values.len() != self.order_by.len() {
+            return Err(format!(
+                "{start} bound has {} values but order_by has {} keys",
+                values.len(),
+                self.order_by.len()
+            ));
+        }
+        let mut keys = Vec::with_capacity(values.len());
+        for (order, value) in self.order_by.iter().zip(values) {
+            let (direction, nulls) = if invert {
+                invert_order_key(&order.direction, &order.nulls)?
+            } else {
+                (order.direction.clone(), order.nulls.clone())
+            };
+            let column =
+                qualify_column_with_joins(root_table, join_plan, &order.column, &order.path)?;
+            let bound =
+                self.value_rhs_simple_expr_for_backend(&order.column, &value.value, false, backend);
+            keys.push(StepwiseKey {
+                column,
+                direction,
+                bound,
+                nulls,
+                bound_is_null: value.kind.eq_ignore_ascii_case("null") || value.value.is_null(),
+            });
+        }
+        Ok(Some(exclusive_stepwise_compare(&keys, backend)?))
     }
 
     fn build_condition(
@@ -854,7 +1102,13 @@ impl QueryPlan {
         &self,
         qualifier: &ColumnQualifier<'_>,
         path: &[String],
-    ) -> Result<(Option<&crate::codec_plan::ModelCodecPlan>, &HashMap<String, String>), String> {
+    ) -> Result<
+        (
+            Option<&crate::codec_plan::ModelCodecPlan>,
+            &HashMap<String, String>,
+        ),
+        String,
+    > {
         // Inside an EXISTS subquery (#314/#315) a leaf belongs to the
         // subquery scope — the scope table for an empty path, the inner
         // join plan's hop table for a traversed one — NEVER the root model;
@@ -923,9 +1177,11 @@ impl QueryPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::QueryPlan;
+    use super::{exclusive_stepwise_compare, JoinPlan, QueryPlan, StepwiseKey};
     use crate::state::Dialect;
-    use sea_query::{Alias, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue};
+    use sea_query::{
+        Alias, Expr, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue,
+    };
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -941,6 +1197,8 @@ mod tests {
             order_by: Vec::new(),
             limit: Some(None),
             offset: Some(None),
+            after: None,
+            before: None,
             joins: Vec::new(),
             m2m: None,
             materialization: ferro_schema_ir::Materialization::RootInstances,
@@ -960,6 +1218,454 @@ mod tests {
         values.0.into_iter().next().expect("one value")
     }
 
+    fn render_stepwise(keys: &[StepwiseKey]) -> String {
+        let cond = exclusive_stepwise_compare(keys, Dialect::Sqlite).expect("stepwise compare");
+        let mut select = Query::select();
+        select
+            .column(Alias::new("id"))
+            .from(Alias::new("t"))
+            .cond_where(cond);
+        select.to_string(SqliteQueryBuilder)
+    }
+
+    #[test]
+    fn exclusive_stepwise_compare_asc_two_not_null_keys() {
+        let sql = render_stepwise(&[
+            StepwiseKey {
+                column: Expr::col(Alias::new("a")),
+                direction: "asc".into(),
+                bound: Expr::val(1).into(),
+                nulls: "last".into(),
+                bound_is_null: false,
+            },
+            StepwiseKey {
+                column: Expr::col(Alias::new("b")),
+                direction: "asc".into(),
+                bound: Expr::val(2).into(),
+                nulls: "last".into(),
+                bound_is_null: false,
+            },
+        ]);
+        let flat = sql.replace('"', "").replace('`', "");
+        assert!(
+            flat.contains("a > 1") && flat.contains("a = 1") && flat.contains("b > 2"),
+            "ASC exclusive compare: {sql}"
+        );
+        assert!(
+            !flat.contains("b = 2"),
+            "exclusive bound must not include the all-equal term: {sql}"
+        );
+    }
+
+    #[test]
+    fn exclusive_stepwise_compare_desc_two_not_null_keys() {
+        let sql = render_stepwise(&[
+            StepwiseKey {
+                column: Expr::col(Alias::new("a")),
+                direction: "desc".into(),
+                bound: Expr::val(1).into(),
+                nulls: "last".into(),
+                bound_is_null: false,
+            },
+            StepwiseKey {
+                column: Expr::col(Alias::new("b")),
+                direction: "desc".into(),
+                bound: Expr::val(2).into(),
+                nulls: "last".into(),
+                bound_is_null: false,
+            },
+        ]);
+        let flat = sql.replace('"', "").replace('`', "");
+        assert!(
+            flat.contains("a < 1") && flat.contains("a = 1") && flat.contains("b < 2"),
+            "DESC exclusive compare: {sql}"
+        );
+        assert!(
+            !flat.contains("b = 2"),
+            "exclusive bound must not include the all-equal term: {sql}"
+        );
+    }
+
+    fn after_plan(order: &[(&str, &str, &str)], after: serde_json::Value) -> QueryPlan {
+        let order_by: Vec<serde_json::Value> = order
+            .iter()
+            .map(|(column, direction, nulls)| {
+                json!({
+                    "column": column,
+                    "direction": direction,
+                    "path": [],
+                    "nulls": nulls,
+                })
+            })
+            .collect();
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
+            "model_name": "Pending",
+            "where": [],
+            "order_by": order_by,
+            "limit": null,
+            "offset": null,
+            "after": after,
+            "m2m": null,
+            "materialization": {"kind": "root_instances"},
+            "joins": []
+        }))
+        .expect("after payload deserializes");
+        QueryPlan::from_ir_payload(payload).expect("plan builds")
+    }
+
+    fn render_after(
+        order: &[(&str, &str, &str)],
+        after: serde_json::Value,
+        dialect: Dialect,
+    ) -> String {
+        let plan = after_plan(order, after);
+        let cond = plan
+            .after_condition(dialect, "t", &JoinPlan::default())
+            .expect("after_condition")
+            .expect("after present");
+        let mut select = Query::select();
+        select
+            .column(Alias::new("id"))
+            .from(Alias::new("t"))
+            .cond_where(cond);
+        match dialect {
+            Dialect::Sqlite => select.to_string(SqliteQueryBuilder),
+            Dialect::Postgres => select.to_string(PostgresQueryBuilder),
+        }
+    }
+
+    fn flatten_sql(sql: &str) -> String {
+        sql.replace('"', "").replace('`', "").to_lowercase()
+    }
+
+    #[test]
+    fn after_asc_last_non_null_includes_later_null_bucket() {
+        let sql = render_after(
+            &[("a", "asc", "last"), ("b", "asc", "last")],
+            json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a > 1") && flat.contains("a is null") && flat.contains("a = 1"),
+            "ASC last after non-NULL must cross into the NULL bucket: {sql}"
+        );
+        assert!(
+            flat.contains("b > 2"),
+            "prefix-equal arm must keep the next-key inequality: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_desc_last_pinch_non_null_crosses_into_null_bucket() {
+        let sql = render_after(
+            &[("pinned_at", "desc", "last"), ("id", "asc", "last")],
+            json!([{"kind": "int", "value": 10}, {"kind": "int", "value": 3}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("pinned_at < 10") && flat.contains("pinned_at is null"),
+            "DESC last after a pinned value must include unpinned: {sql}"
+        );
+        assert!(
+            flat.contains("pinned_at = 10") && flat.contains("id > 3"),
+            "same-pin prefix must continue by PK: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_desc_last_pinch_null_bound_stays_in_null_bucket() {
+        let sql = render_after(
+            &[("pinned_at", "desc", "last"), ("id", "asc", "last")],
+            json!([{"kind": "null", "value": null}, {"kind": "int", "value": 4}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("pinned_at is null") && flat.contains("id > 4"),
+            "after((None, id)) must walk remaining NULLs by PK: {sql}"
+        );
+        assert!(
+            !flat.contains("pinned_at is not null"),
+            "NULLS LAST has nothing after the NULL bucket: {sql}"
+        );
+        assert!(
+            !flat.contains("pinned_at <") && !flat.contains("pinned_at >"),
+            "NULL bound must not emit an inequality on the leading key: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_asc_first_null_bound_crosses_into_non_null_bucket() {
+        let sql = render_after(
+            &[("a", "asc", "first"), ("b", "asc", "last")],
+            json!([{"kind": "null", "value": null}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a is not null"),
+            "ASC first after NULL must include the later non-NULL bucket: {sql}"
+        );
+        assert!(
+            flat.contains("a is null") && flat.contains("b > 2"),
+            "remaining NULL-bucket rows continue by the next key: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_asc_first_non_null_does_not_reenter_null_bucket() {
+        let sql = render_after(
+            &[("a", "asc", "first"), ("b", "asc", "last")],
+            json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a > 1") && flat.contains("a = 1") && flat.contains("b > 2"),
+            "ASC first after non-NULL keeps the exclusive compare: {sql}"
+        );
+        assert!(
+            !flat.contains("a is null"),
+            "NULLs already precede the cursor: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_desc_first_non_null_does_not_reenter_null_bucket() {
+        let sql = render_after(
+            &[("a", "desc", "first"), ("b", "desc", "last")],
+            json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a < 1") && flat.contains("a = 1") && flat.contains("b < 2"),
+            "DESC first after non-NULL keeps the exclusive compare: {sql}"
+        );
+        assert!(
+            !flat.contains("a is null"),
+            "NULLs already precede the cursor: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_desc_first_null_bound_crosses_into_non_null_bucket() {
+        let sql = render_after(
+            &[("a", "desc", "first"), ("b", "asc", "last")],
+            json!([{"kind": "null", "value": null}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a is not null"),
+            "DESC first after NULL must include later non-NULL values: {sql}"
+        );
+        assert!(
+            flat.contains("a is null") && flat.contains("b > 2"),
+            "remaining NULL-bucket rows continue by the next key: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_native_resolves_at_render_from_dialect() {
+        let order = &[("a", "asc", "native"), ("b", "asc", "last")];
+        let after = json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]);
+        let pg = flatten_sql(&render_after(order, after.clone(), Dialect::Postgres));
+        let sqlite = flatten_sql(&render_after(order, after.clone(), Dialect::Sqlite));
+        assert!(
+            pg.contains("a is null"),
+            "Postgres ASC native treats NULL as larger (last): {pg}"
+        );
+        assert!(
+            !sqlite.contains("a is null"),
+            "SQLite ASC native treats NULL as smaller (first): {sqlite}"
+        );
+
+        let desc = &[("a", "desc", "native"), ("b", "asc", "last")];
+        let pg_desc = flatten_sql(&render_after(desc, after.clone(), Dialect::Postgres));
+        let sqlite_desc = flatten_sql(&render_after(desc, after, Dialect::Sqlite));
+        assert!(
+            !pg_desc.contains("a is null"),
+            "Postgres DESC native treats NULL as larger (first): {pg_desc}"
+        );
+        assert!(
+            sqlite_desc.contains("a is null"),
+            "SQLite DESC native treats NULL as smaller (last): {sqlite_desc}"
+        );
+    }
+
+    #[test]
+    fn invert_order_key_swaps_direction_and_first_last_keeps_native() {
+        assert_eq!(
+            super::invert_order_key("asc", "last").expect("invert"),
+            ("desc".into(), "first".into())
+        );
+        assert_eq!(
+            super::invert_order_key("desc", "first").expect("invert"),
+            ("asc".into(), "last".into())
+        );
+        assert_eq!(
+            super::invert_order_key("ASC", "NATIVE").expect("invert"),
+            ("desc".into(), "native".into())
+        );
+    }
+
+    fn before_plan(order: &[(&str, &str, &str)], before: serde_json::Value) -> QueryPlan {
+        let order_by: Vec<serde_json::Value> = order
+            .iter()
+            .map(|(column, direction, nulls)| {
+                json!({
+                    "column": column,
+                    "direction": direction,
+                    "path": [],
+                    "nulls": nulls,
+                })
+            })
+            .collect();
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
+            "model_name": "Pending",
+            "where": [],
+            "order_by": order_by,
+            "limit": null,
+            "offset": null,
+            "before": before,
+            "m2m": null,
+            "materialization": {"kind": "root_instances"},
+            "joins": []
+        }))
+        .expect("before payload deserializes");
+        QueryPlan::from_ir_payload(payload).expect("plan builds")
+    }
+
+    fn render_before(
+        order: &[(&str, &str, &str)],
+        before: serde_json::Value,
+        dialect: Dialect,
+    ) -> String {
+        let plan = before_plan(order, before);
+        let cond = plan
+            .before_condition(dialect, "t", &JoinPlan::default())
+            .expect("before_condition")
+            .expect("before present");
+        let mut select = Query::select();
+        select
+            .column(Alias::new("id"))
+            .from(Alias::new("t"))
+            .cond_where(cond);
+        match dialect {
+            Dialect::Sqlite => select.to_string(SqliteQueryBuilder),
+            Dialect::Postgres => select.to_string(PostgresQueryBuilder),
+        }
+    }
+
+    #[test]
+    fn before_is_after_on_inverted_keys_same_expander() {
+        let order = &[("pinned_at", "desc", "last"), ("id", "asc", "last")];
+        let inverted = &[("pinned_at", "asc", "first"), ("id", "desc", "first")];
+        let bound = json!([{"kind": "null", "value": null}, {"kind": "int", "value": 4}]);
+        let before_sql = flatten_sql(&render_before(order, bound.clone(), Dialect::Sqlite));
+        let after_sql = flatten_sql(&render_after(inverted, bound, Dialect::Sqlite));
+        assert_eq!(
+            before_sql, after_sql,
+            "before must reuse exclusive_stepwise_compare via inverted keys"
+        );
+    }
+
+    #[test]
+    fn before_native_stays_native_when_inverting() {
+        let order = &[("a", "asc", "native"), ("b", "asc", "last")];
+        let inverted = &[("a", "desc", "native"), ("b", "desc", "first")];
+        let bound = json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]);
+        let before_pg = flatten_sql(&render_before(order, bound.clone(), Dialect::Postgres));
+        let after_pg = flatten_sql(&render_after(inverted, bound.clone(), Dialect::Postgres));
+        assert_eq!(before_pg, after_pg, "native must stay native: {before_pg}");
+        let before_sqlite = flatten_sql(&render_before(order, bound.clone(), Dialect::Sqlite));
+        let after_sqlite = flatten_sql(&render_after(inverted, bound, Dialect::Sqlite));
+        assert_eq!(
+            before_sqlite, after_sqlite,
+            "native must stay native on sqlite: {before_sqlite}"
+        );
+    }
+
+    #[test]
+    fn before_condition_qualifies_path_carrying_order_key() {
+        // before inverts keys then reuses exclusive_stepwise_compare; the
+        // column still goes through qualify_column_with_joins (#396).
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
+            "model_name": "Transaction",
+            "where": [],
+            "order_by": [
+                {"column": "label", "direction": "asc", "path": ["account"], "nulls": "last"},
+                {"column": "id", "direction": "asc", "path": [], "nulls": "last"}
+            ],
+            "limit": null,
+            "offset": null,
+            "before": [
+                {"kind": "string", "value": "a1"},
+                {"kind": "int", "value": 2}
+            ],
+            "m2m": null,
+            "materialization": {"kind": "root_instances"},
+            "joins": [
+                {"join_type": "inner", "path": [
+                    {"relation": "account", "from_column": "account_id",
+                     "to_table": "account", "to_column": "id"}
+                ]}
+            ]
+        }))
+        .expect("payload deserializes");
+        let plan = QueryPlan::from_ir_payload(payload).expect("plan builds");
+        let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
+        let cond = plan
+            .before_condition(Dialect::Sqlite, "transaction", &join_plan)
+            .expect("before_condition")
+            .expect("before present");
+        let mut select = Query::select();
+        select
+            .column(Alias::new("id"))
+            .from(Alias::new("transaction"))
+            .cond_where(cond);
+        let sql = flatten_sql(&select.to_string(SqliteQueryBuilder));
+        assert!(
+            sql.contains("j1_account.label"),
+            "before+path must qualify the traversed key by its join alias: {sql}"
+        );
+        assert!(
+            sql.contains("transaction.id"),
+            "root PK key stays on the root table: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_and_before_together_fail_loud() {
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
+            "model_name": "Pending",
+            "where": [],
+            "order_by": [
+                {"column": "id", "direction": "asc", "path": [], "nulls": "last"}
+            ],
+            "limit": null,
+            "offset": null,
+            "after": [{"kind": "int", "value": 1}],
+            "before": [{"kind": "int", "value": 2}],
+            "m2m": null,
+            "materialization": {"kind": "root_instances"},
+            "joins": []
+        }))
+        .expect("payload with both bounds deserializes");
+        let err = QueryPlan::from_ir_payload(payload).expect_err("after + before must fail");
+        assert!(
+            err.contains("after") && err.contains("before"),
+            "error must name both starts: {err}"
+        );
+    }
+
     #[test]
     fn query_plan_builds_from_ir_payload_and_lowers_null_eq_to_is_null() {
         let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(serde_json::json!({
@@ -974,7 +1680,7 @@ mod tests {
                  "right": {"node_kind": "leaf", "column": "name", "operator": "LIKE",
                            "value": {"kind": "string", "value": "a%"}, "path": []}}
             ],
-            "order_by": [{"column": "age", "direction": "desc", "path": []}],
+            "order_by": [{"column": "age", "direction": "desc", "path": [], "nulls": "last"}],
             "limit": 10, "offset": 5, "m2m": null, "materialization": {"kind": "root_instances"}, "joins": []
         }))
         .expect("payload deserializes");
@@ -1497,7 +2203,7 @@ mod tests {
                  "right": {"node_kind": "leaf", "column": "amount", "operator": ">=",
                            "value": {"kind": "int", "value": 100}, "path": []}}
             ],
-            "order_by": [{"column": "id", "direction": "asc", "path": []}],
+            "order_by": [{"column": "id", "direction": "asc", "path": [], "nulls": "last"}],
             "limit": 50, "offset": 0, "m2m": null, "materialization": {"kind": "root_instances"},
             "joins": [
                 {"join_type": "inner", "path": [
@@ -1521,7 +2227,11 @@ mod tests {
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
 
         // A 1-hop path and a 2-hop path sharing its prefix produce exactly two edges.
-        assert_eq!(join_plan.renders.len(), 2, "shared prefix must dedup to 2 JOINs");
+        assert_eq!(
+            join_plan.renders.len(),
+            2,
+            "shared prefix must dedup to 2 JOINs"
+        );
         assert_eq!(join_plan.renders[0].alias, "j1_account");
         assert_eq!(join_plan.renders[0].prev_alias, "transaction");
         assert_eq!(join_plan.renders[1].alias, "j2_owner");
@@ -1551,7 +2261,8 @@ mod tests {
                 "owner".to_string(),
             ),
         );
-        plan.hop_enum_udt.insert("owner".to_string(), HashMap::new());
+        plan.hop_enum_udt
+            .insert("owner".to_string(), HashMap::new());
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
         let sql = plan
             .to_condition_with_joins(Dialect::Postgres, "transaction", &join_plan)
@@ -1807,9 +2518,15 @@ mod tests {
         // `.include(account)` + `.include(account.owner)` renders the same
         // two joins as `.include(account.owner)` alone (#287): shared
         // prefixes dedup by path identity, every include-only edge LEFT.
-        let expanded = union_plan(json!([]), json!([[account_hop()], [account_hop(), owner_hop()]]));
+        let expanded = union_plan(
+            json!([]),
+            json!([[account_hop()], [account_hop(), owner_hop()]]),
+        );
         let collapsed = union_plan(json!([]), json!([[account_hop(), owner_hop()]]));
-        let reversed = union_plan(json!([]), json!([[account_hop(), owner_hop()], [account_hop()]]));
+        let reversed = union_plan(
+            json!([]),
+            json!([[account_hop(), owner_hop()], [account_hop()]]),
+        );
         for plan in [expanded, collapsed, reversed] {
             let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
             assert_eq!(join_plan.renders.len(), 2, "shared prefix dedups");
@@ -1832,8 +2549,14 @@ mod tests {
         );
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
         assert_eq!(join_plan.renders.len(), 2);
-        assert_eq!(join_plan.renders[0].join_type, "inner", "shared prefix untouched");
-        assert_eq!(join_plan.renders[1].join_type, "left", "include-only edge LEFT");
+        assert_eq!(
+            join_plan.renders[0].join_type, "inner",
+            "shared prefix untouched"
+        );
+        assert_eq!(
+            join_plan.renders[1].join_type, "left",
+            "include-only edge LEFT"
+        );
     }
 
     #[test]
@@ -1916,7 +2639,7 @@ mod tests {
                      "to_table": "account", "to_column": "id"}
                 ]}
             ],
-            "order_by": [{"column": "name", "direction": "asc", "path": ["account"]}]
+            "order_by": [{"column": "name", "direction": "asc", "path": ["account"], "nulls": "last"}]
         }))
         .expect("payload deserializes");
 
@@ -1932,13 +2655,8 @@ mod tests {
         let plan = QueryPlan::from_ir_payload(traversal_payload()).expect("plan builds");
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
 
-        let root_col = super::qualify_column_with_joins(
-            "transaction",
-            &join_plan,
-            "id",
-            &[],
-        )
-        .expect("root column qualifies");
+        let root_col = super::qualify_column_with_joins("transaction", &join_plan, "id", &[])
+            .expect("root column qualifies");
         let sql = Query::select()
             .expr(root_col)
             .to_string(PostgresQueryBuilder)
@@ -2032,11 +2750,14 @@ mod tests {
         // nullable integer column "count" so model_column lookups succeed.
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetIntNull".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetIntNull");
 
@@ -2057,11 +2778,14 @@ mod tests {
     fn null_rhs_emits_typed_bool_null_for_bool_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetBoolNull".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "active": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "active": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetBoolNull");
 
@@ -2082,11 +2806,14 @@ mod tests {
     fn null_rhs_emits_typed_uuid_null_for_uuid_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetUuidNull".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "id": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "null"}]}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "id": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "null"}]}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetUuidNull");
 
@@ -2107,11 +2834,14 @@ mod tests {
     fn binary_rhs_emits_typed_bytes_no_cast() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetBinary".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "blob": {"type": "string", "format": "binary"}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "blob": {"type": "string", "format": "binary"}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetBinary");
 
@@ -2159,11 +2889,14 @@ mod tests {
     fn enum_rhs_skips_cast_without_native_enum_column() {
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetTextColor".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "color": {"enum_type_name": "color", "db_type": "text"}
-                }
-            }), "widget".to_string()),
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "color": {"enum_type_name": "color", "db_type": "text"}
+                    }
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetTextColor");
 
@@ -2188,20 +2921,23 @@ mod tests {
         // Decimal still uses CAST AS numeric on Postgres.
         crate::state::MODEL_REGISTRY.write().unwrap().insert(
             "WidgetDecimal".to_string(),
-            crate::state::RegisteredModel::new_for_test(json!({
-                "properties": {
-                    "amount": {
-                        // The enriched shape registration emits for Decimal
-                        // annotations; the pattern alone must NOT make a
-                        // column decimal (F5).
-                        "anyOf": [
-                            {"type": "number"},
-                            {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"}
-                        ],
-                        "format": "decimal"
+            crate::state::RegisteredModel::new_for_test(
+                json!({
+                    "properties": {
+                        "amount": {
+                            // The enriched shape registration emits for Decimal
+                            // annotations; the pattern alone must NOT make a
+                            // column decimal (F5).
+                            "anyOf": [
+                                {"type": "number"},
+                                {"type": "string", "pattern": "^-?\\d+(\\.\\d+)?$"}
+                            ],
+                            "format": "decimal"
+                        }
                     }
-                }
-            }), "widget".to_string()),
+                }),
+                "widget".to_string(),
+            ),
         );
         let plan = empty_query_plan("WidgetDecimal");
 

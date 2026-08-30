@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_owner_nested_exists_v11",
+  "vector_name": "query_owner_nested_exists_v14",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 11,
+    "ir_version": 14,
     "payload": {
       "model_name": "Owner",
       "where": [

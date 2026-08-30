@@ -64,13 +64,40 @@ E = TypeVar("E")
 _ROWS_OF_ROW: type[Rows[Row]] = Rows[Row]
 
 
-def _normalize_order_by_nulls(nulls: str | None) -> str | None:
-    """Lower-case and validate ``nulls=``; ``None`` stays omitted on the wire."""
+def _dotted_order_key(entry: OrderByEntry) -> str:
+    """``account.label`` for a traversed key, ``id`` for a root key."""
+    return ".".join((*entry.path, entry.column))
+
+
+def _read_instance_order_value(row: Any, entry: OrderByEntry) -> Any:
+    """Walk a populated relation path; unpopulated is a loud build-time error.
+
+    Include-population puts the relation name in the instance ``__dict__``,
+    shadowing the class-level ``ForwardDescriptor``. A missing key is the
+    awaitable (unpopulated) contract — do not follow the descriptor.
+    """
+    current = row
+    for hop in entry.path:
+        if hop not in vars(current):
+            dotted = _dotted_order_key(entry)
+            raise ValueError(
+                f"position_of() requires relation path {dotted!r} populated "
+                "on the instance; pass a tuple if you only have the values"
+            )
+        hop_value = vars(current)[hop]
+        if hop_value is None:
+            return None
+        current = hop_value
+    return getattr(current, entry.column)
+
+
+def _normalize_order_by_nulls(nulls: str | None) -> str:
+    """Lower-case and validate ``nulls=``; omitted means ``last`` on the wire (#392)."""
     if nulls is None:
-        return None
+        return "last"
     normalized = nulls.lower()
-    if normalized not in ("first", "last"):
-        raise ValueError("nulls must be 'first' or 'last'")
+    if normalized not in ("first", "last", "native"):
+        raise ValueError("nulls must be 'first', 'last', or 'native'")
     return normalized
 
 
@@ -555,6 +582,8 @@ class Query(Generic[T]):
         self.order_by_clause: list[OrderByEntry] = []
         self._limit: int | None = None
         self._offset: int | None = None
+        self._after: tuple[Any, ...] | None = None
+        self._before: tuple[Any, ...] | None = None
         self._m2m_context: M2mContext | None = None
         # Relation paths that must render a join, insertion-ordered (full path
         # tuple -> registered join_type). Populated by where()/order_by()
@@ -797,8 +826,9 @@ class Query(Generic[T]):
             field: Column selector — lambda receiving a :class:`QueryProxy`,
                 or a column-name string.
             direction: ``"asc"`` (default) or ``"desc"``.
-            nulls: Optional ``"first"`` or ``"last"`` null placement (keyword-
-                only). Omitted when unset.
+            nulls: Optional ``"first"``, ``"last"``, or ``"native"`` null
+                placement (keyword-only). Omitted means ``"last"``; ``"native"``
+                keeps each backend's dialect default.
 
         Returns:
             A new ``Query`` with the ordering added; ``self`` is unchanged.
@@ -809,7 +839,7 @@ class Query(Generic[T]):
                 single column reference (a bare relation, e.g.
                 ``lambda t: t.account``, is meaningless as a sort key).
             ValueError: If ``direction`` is not ``"asc"`` or ``"desc"``, or
-                ``nulls`` is not ``"first"`` or ``"last"``.
+                ``nulls`` is not ``"first"``, ``"last"``, or ``"native"``.
 
         Examples:
             >>> newest = await Post.select().order_by(lambda p: p.created_at, "desc").all()
@@ -1028,13 +1058,181 @@ class Query(Generic[T]):
         Returns:
             A new ``Query`` with the clause added; ``self`` is unchanged.
 
+        Raises:
+            ValueError: If ``after()`` or ``before()`` is already set — a query
+                has one start.
+
         Examples:
             >>> query = User.select().offset(20)
             >>> query._offset
             20
         """
+        if self._after is not None or self._before is not None:
+            raise ValueError(
+                "after()/before() cannot be combined with offset(): a query "
+                "has one start (an offset or a position bound, never both)."
+            )
         new = self._clone()
         new._offset = value
+        return new
+
+    def _assert_position_order_keys(self) -> None:
+        """Require order keys that include the root primary key (#393/#396).
+
+        Root and traversed columns are both legal. A related column named
+        ``id`` is not the model's primary key — only a root PK slot counts.
+        Aggregate output names are rejected even when the PK is also a
+        group key.
+        """
+        pk = getattr(self.model_cls, "__ferro_pk__", None)
+        if pk is None:
+            raise ValueError(
+                f"{self.model_cls.__name__} has no primary-key column, and "
+                "after()/before()/position_of() require one."
+            )
+        if not self.order_by_clause:
+            raise ValueError(
+                "after()/before() require order_by() keys that include the "
+                "model's primary key"
+            )
+        pk_seen = False
+        for entry in self.order_by_clause:
+            if not entry.path and entry.column == pk:
+                pk_seen = True
+        if not pk_seen:
+            raise ValueError(
+                "after()/before() require the model's primary key in the "
+                "order keys; Ferro will not append it silently"
+            )
+        projection = getattr(self, "_projection", None)
+        if projection:
+            agg_names = {field.name for field in projection if field.agg}
+            for entry in self.order_by_clause:
+                if not entry.path and entry.column in agg_names:
+                    raise ValueError(
+                        "after()/before()/position_of() do not support "
+                        f"aggregate order key {entry.column!r}"
+                    )
+
+    def position_of(self, row: T) -> tuple[Any, ...]:
+        """Read this query's order-key tuple off a model instance.
+
+        Args:
+            row: A hydrated instance of the queried model.
+
+        Returns:
+            The ordered tuple of order-key values, matching ``order_by``
+            declaration order.
+
+        Raises:
+            TypeError: If ``row`` is not an instance of the queried model.
+            ValueError: If the order keys are not a legal position-paging
+                set, or a traversed order key's relation is unpopulated.
+        """
+        if not isinstance(row, self.model_cls):
+            raise TypeError(
+                "position_of() expected an instance of "
+                f"{self.model_cls.__name__}, got {type(row).__name__}"
+            )
+        self._assert_position_order_keys()
+        return tuple(
+            _read_instance_order_value(row, entry) for entry in self.order_by_clause
+        )
+
+    def _resolve_position(
+        self, position: tuple[Any, ...] | T, *, op: str
+    ) -> tuple[Any, ...]:
+        """Validate a position bound for ``after()`` / ``before()``."""
+        if self._offset is not None:
+            raise ValueError(
+                f"{op}() cannot be combined with offset(): a query has one "
+                "start (an offset or a position bound, never both)."
+            )
+        if op == "after" and self._before is not None:
+            raise ValueError(
+                "after() cannot be combined with before(): a query has one start."
+            )
+        if op == "before" and self._after is not None:
+            raise ValueError(
+                "after() cannot be combined with before(): a query has one start."
+            )
+        if isinstance(position, tuple):
+            self._assert_position_order_keys()
+            expected = len(self.order_by_clause)
+            if len(position) != expected:
+                raise ValueError(
+                    f"{op}() expected {expected} position values "
+                    f"(one per order_by key), got {len(position)}"
+                )
+            bound = position
+        elif isinstance(position, (self.model_cls, Row)):
+            bound = self.position_of(position)
+        else:
+            raise TypeError(
+                f"{op}() expected a position tuple or a model instance, "
+                f"got {type(position).__name__}"
+            )
+        pk = getattr(self.model_cls, "__ferro_pk__", None)
+        for entry, value in zip(self.order_by_clause, bound, strict=True):
+            if not entry.path and entry.column == pk and value is None:
+                raise ValueError(
+                    f"{op}() does not support None in the primary-key position slot"
+                )
+        return bound
+
+    def after(self, position: tuple[Any, ...] | T) -> Self:
+        """Start the page after an exclusive position in the declared order.
+
+        ``position`` is the ordered tuple of this query's order-key values, or
+        a model instance (sugar for ``after(position_of(row))``). Order keys
+        may be root or traversed columns and must include the primary key.
+        ``None`` is legal in every non-PK slot; the PK slot cannot be empty.
+
+        Args:
+            position: A tuple of order-key values, or a model instance.
+
+        Returns:
+            A new ``Query`` with the bound set; ``self`` is unchanged.
+
+        Raises:
+            TypeError: If ``position`` is neither a tuple nor a model instance.
+            ValueError: If the order keys are illegal for ``after()``, the
+                tuple has the wrong arity, the PK slot is ``None``,
+                ``offset()`` is already set, or ``before()`` is already set.
+        """
+        bound = self._resolve_position(position, op="after")
+        new = self._clone()
+        new._after = bound
+        return new
+
+    def before(self, position: tuple[Any, ...] | T) -> Self:
+        """Start at the rows immediately before an exclusive position.
+
+        With a limit this is the adjacent previous page, yielded in the
+        declared order. Without a limit it is every earlier row in declared
+        order (a prefix, not a page). On unbounded ``before()``, ``first()``
+        is the adjacent previous row and ``all()[0]`` is the head of the
+        prefix — they disagree, and that is accepted.
+
+        ``before(row)`` is sugar for ``before(position_of(row))``. Same
+        order-key rules as ``after()`` (root or traversed columns, PK
+        required). Cannot be combined with ``after()`` or ``offset()``.
+
+        Args:
+            position: A tuple of order-key values, or a model instance.
+
+        Returns:
+            A new ``Query`` with the bound set; ``self`` is unchanged.
+
+        Raises:
+            TypeError: If ``position`` is neither a tuple nor a model instance.
+            ValueError: If the order keys are illegal, the tuple has the
+                wrong arity, the PK slot is ``None``, ``offset()`` is
+                already set, or ``after()`` is already set.
+        """
+        bound = self._resolve_position(position, op="before")
+        new = self._clone()
+        new._before = bound
         return new
 
     async def all(self) -> list[T]:
@@ -1050,12 +1248,15 @@ class Query(Generic[T]):
         """
         compiled = compile_query(self, "fetch")
         route = await self._transaction_or_using()
-        return await fetch_filtered(
+        rows = await fetch_filtered(
             self.model_cls,
             compiled.wire_json,
             route,
             hop_classes=compiled.hop_classes,
         )
+        if self._before is not None:
+            rows.reverse()
+        return rows
 
     async def count(self) -> int:
         """Return the number of records that match the current query
@@ -1361,7 +1562,7 @@ class ProjectedQuery(Query[T]):
         direction: str,
         path: tuple[str, ...],
         *,
-        nulls: str | None = None,
+        nulls: str,
     ) -> Self:
         """Clone with one resolved ORDER BY entry appended (#295)."""
         new = self._clone()
@@ -1403,8 +1604,9 @@ class ProjectedQuery(Query[T]):
             field: Output field name or root column-name string, or a lambda
                 naming a source column / aggregate expression.
             direction: ``"asc"`` (default) or ``"desc"``.
-            nulls: Optional ``"first"`` or ``"last"`` null placement (keyword-
-                only). Omitted when unset.
+            nulls: Optional ``"first"``, ``"last"``, or ``"native"`` null
+                placement (keyword-only). Omitted means ``"last"``; ``"native"``
+                keeps each backend's dialect default.
 
         Returns:
             A new query with the ordering added; ``self`` is unchanged.
@@ -1552,6 +1754,50 @@ class ProjectedQuery(Query[T]):
             )
         return super().exists()
 
+    def position_of(self, row: T | Row) -> tuple[Any, ...]:
+        """Read this query's order-key tuple off a projected record or instance.
+
+        Every order key must be in the projection (matched by source column
+        and path, or by output name). Otherwise pass a tuple to
+        ``after()``/``before()``.
+
+        Raises:
+            TypeError: If ``row`` is neither a :class:`Row` nor a model
+                instance of the queried model.
+            ValueError: If an order key is missing from the projection, the
+                order keys are illegal, or a traversed key on a model
+                instance is unpopulated.
+        """
+        if isinstance(row, Row):
+            self._assert_position_order_keys()
+            return tuple(
+                self._read_projected_order_value(row, entry)
+                for entry in self.order_by_clause
+            )
+        return super().position_of(row)
+
+    def _projected_name_for_order_key(self, entry: OrderByEntry) -> str | None:
+        """Output field name that carries this order key, or ``None``."""
+        name_match: str | None = None
+        for field in self._projection:
+            if field.agg:
+                continue
+            if field.column == entry.column and field.path == entry.path:
+                return field.name
+            if not entry.path and field.name == entry.column:
+                name_match = field.name
+        return name_match
+
+    def _read_projected_order_value(self, row: Row, entry: OrderByEntry) -> Any:
+        name = self._projected_name_for_order_key(entry)
+        if name is None:
+            dotted = _dotted_order_key(entry)
+            raise ValueError(
+                f"position_of() cannot read order key {dotted!r} from the "
+                "projection; select it, or pass a tuple"
+            )
+        return getattr(row, name)
+
     async def all(self) -> Rows[Row]:  # type: ignore[override]  # ty: ignore[invalid-method-override]
         """Return the projected records for every matching row.
 
@@ -1573,6 +1819,8 @@ class ProjectedQuery(Query[T]):
             record_cls=Row,
             hop_classes=compiled.hop_classes,
         )
+        if self._before is not None:
+            records.reverse()
         return _ROWS_OF_ROW._wrap(records)
 
     async def first(self) -> Row | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]

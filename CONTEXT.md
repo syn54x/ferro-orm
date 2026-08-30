@@ -88,6 +88,22 @@ _Avoid_: Select list, projection spec, hydration mode flag
 The single typed wire artifact a query ships to the Rust runtime — model identity, predicates, ordering, paging, joins, and exactly one materialization plan, inside a versioned envelope. Compiled only by `compile_query`; no other code assembles query wire shape.
 _Avoid_: Query dict, query def, payload dict
 
+**Paging**:
+The QueryIR window over matching rows: a size (`limit`) and a start. A start is either an offset or one position bound (`after` or `before`, never both). Both bounds are exclusive of the position. A limited `before` is the adjacent previous page; an unbounded `before` is every earlier row in declared order. Paging is not a predicate — it does not change which rows match — and `count()` drops it.
+_Avoid_: pagination, cursor, page filter
+
+**Position**:
+The ordered tuple of a query's order-key values that marks one row's place in that order. Two rows never share a position: the order keys include the model's primary key. A non-PK slot may be empty (`None`); the PK slot may not. `after`/`before` start the page from a position; `position_of` reads one off a model instance, or off a projected record that carries every order key. Traversed order keys require those relations populated. Not a cursor — encoding is the caller's.
+_Avoid_: cursor, bookmark, page token, keyset
+
+**Order key**:
+One term in a query's `order_by`: the column (root or traversed), its direction, and its null placement. A position holds one value per order key, in declaration order.
+_Avoid_: sort field, sort column, order term
+
+**Null placement**:
+Where NULL sort keys land for one order key: `last`, `first`, or `native` (that backend's own default — Postgres and SQLite are opposites). Omitted means `last`, so the same order on every backend. `native` is never implied.
+_Avoid_: dialect default, omitted nulls
+
 **Compiled query**:
 The single artifact `compile_query` returns: the QueryIR payload, its wire JSON, and the plan-scoped hop-class map, all views of one compile. The map is collected from the hop facts the payload itself carries, so wire and hop classes can never disagree; it is `None` unless the materialization plan decodes or hydrates through a hop model's class (mirroring the Rust `needs_hop_classes` guard — a both-sides double-check). No other code assembles hop classes for the FFI.
 _Avoid_: payload + kwargs, hop-class side-channel, wire tuple

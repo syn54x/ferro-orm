@@ -28,8 +28,11 @@ Rules:
 
 - `domain` and `ir.ir_kind` must match.
 - `ir.ir_version` must equal `1` for `schema` and `codec` vectors. `query`
-  vectors are on `ir_version: 11` (#379 — unconditional bump; every payload
-  carries a required canonical `set` list). v7 introduced the recursive
+  vectors are on `ir_version: 14` (#395 — optional `before` position bound on
+  fetch payloads; omitted when unset; `after` from v13 still omitted when
+  unset; every `order_by` term still carries explicit `nulls`; every payload
+  carries a required canonical `set` list).
+  v7 introduced the recursive
   `exists` node kind beside `leaf`/`compound`/`not` (ADR-0007):
   `{"node_kind": "exists", "hops": [...], "where": [...]}` — `hops` is the
   correlation hop path in the `joins`-section hop shape (1 hop reverse FK,

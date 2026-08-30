@@ -225,8 +225,8 @@ pub enum CheckOperand {
 /// Query IR: filter, sort, pagination, joins, materialization plan, and
 /// optional M2M join context.
 ///
-/// `ir_version: 11` (unconditional, no earlier version emitted anywhere —
-/// #269, #278, #285, #292, #310, #314, #376, #377, #378, #379). `set` is required
+/// `ir_version: 14` (unconditional, no earlier version emitted anywhere —
+/// #269, #278, #285, #292, #310, #314, #376, #377, #378, #379, #392, #393, #395). `set` is required
 /// and always present (`[]` outside updates); `joins` is required and always
 /// present (`[]` when the query traverses no relation); every leaf and
 /// `order_by` entry carries a `path` (required, `[]` = root model);
@@ -237,7 +237,10 @@ pub enum CheckOperand {
 /// recursive `exists` node kind (existence tests, #314, ADR-0007); v8 adds
 /// the canonical SET assignment section with literal value expressions;
 /// v9 adds the column-ref SET value-expression kind; v10 adds binary
-/// `+` / `-` and the `now` clock; v11 adds Postgres ``merge``.
+/// `+` / `-` and the `now` clock; v11 adds Postgres ``merge``; v12 requires
+/// explicit ``nulls`` on every ``order_by`` term (#392); v13 adds an optional
+/// ``after`` position bound on fetch payloads (#393); v14 adds an optional
+/// ``before`` position bound (#395).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryIrPayload {
     /// Model class name the query targets.
@@ -265,6 +268,15 @@ pub struct QueryIrPayload {
         skip_serializing_if = "Option::is_none"
     )]
     pub offset: Option<Option<u64>>,
+    /// Exclusive position bound (`after`). Omitted when unset — fetch payloads
+    /// carry it only when paging from a position; count and mutating payloads
+    /// omit it (v13, #393).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Vec<QueryValue>>,
+    /// Exclusive previous-page bound (`before`). Omitted when unset, same
+    /// policy as `after` (v14, #395). Combined with `after` is a loud error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Vec<QueryValue>>,
     /// Many-to-many join metadata JSON, deserialized into [`M2mContext`] downstream.
     pub m2m: Option<Value>,
     /// Relation joins collected from traversal (`[]` until #270 renders them).
@@ -483,11 +495,10 @@ pub struct QueryOrderBy {
     /// Relation field names from the root model to the ordered column's table;
     /// `[]` = root model (#269 requires this empty until #270 renders joins).
     pub path: Vec<String>,
-    /// Optional NULLS placement (`"first"` / `"last"`, case-insensitive in the
-    /// planner). Omitted on the wire when unset so existing fixtures keep
-    /// byte-identical round-trips (#361).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nulls: Option<String>,
+    /// Required NULLS placement (`"first"` / `"last"` / `"native"`, case-
+    /// insensitive in the planner). Every order_by term on the wire carries
+    /// this key; Python omitted ``nulls=`` compiles to ``"last"`` (#392).
+    pub nulls: String,
 }
 
 /// Predicate tree node in query IR: leaf comparison, compound AND/OR, a
@@ -692,7 +703,7 @@ mod tests {
     #[test]
     fn query_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_compound_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query fixture must parse");
         let ir = parsed
@@ -713,7 +724,7 @@ mod tests {
     #[test]
     fn query_literal_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_literal_set_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_literal_set_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query literal-set fixture must parse");
         let ir = parsed
@@ -722,7 +733,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query literal-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 11);
+        assert_eq!(envelope.ir_version, 14);
         assert_eq!(envelope.payload.set_assignments.len(), 3);
         assert_eq!(envelope.payload.set_assignments[0].column, "active");
         match &envelope.payload.set_assignments[2].value {
@@ -739,7 +750,7 @@ mod tests {
     #[test]
     fn query_mixed_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_mixed_set_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_mixed_set_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query mixed-set fixture must parse");
         let ir = parsed
@@ -748,7 +759,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query mixed-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 11);
+        assert_eq!(envelope.ir_version, 14);
         assert_eq!(envelope.payload.set_assignments.len(), 2);
         assert_eq!(envelope.payload.set_assignments[0].column, "email");
         match &envelope.payload.set_assignments[0].value {
@@ -770,7 +781,7 @@ mod tests {
     #[test]
     fn query_add_literal_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_add_literal_set_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_add_literal_set_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query add-literal-set fixture must parse");
         let ir = parsed
@@ -779,7 +790,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query add-literal-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 11);
+        assert_eq!(envelope.ir_version, 14);
         match &envelope.payload.set_assignments[0].value {
             QueryValueExpr::Add { left, right } => {
                 match left.as_ref() {
@@ -807,7 +818,7 @@ mod tests {
     #[test]
     fn query_add_columns_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_add_columns_set_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_add_columns_set_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query add-columns-set fixture must parse");
         let ir = parsed
@@ -816,7 +827,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query add-columns-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 11);
+        assert_eq!(envelope.ir_version, 14);
         match &envelope.payload.set_assignments[0].value {
             QueryValueExpr::Add { left, right } => {
                 match left.as_ref() {
@@ -841,7 +852,7 @@ mod tests {
     #[test]
     fn query_now_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_now_set_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_now_set_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query now-set fixture must parse");
         let ir = parsed
@@ -850,7 +861,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query now-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 11);
+        assert_eq!(envelope.ir_version, 14);
         match &envelope.payload.set_assignments[0].value {
             QueryValueExpr::Now => {}
             other => panic!("expected now assignment, got {other:?}"),
@@ -862,7 +873,7 @@ mod tests {
     #[test]
     fn query_merge_set_fixture_roundtrip() {
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_merge_set_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_merge_set_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query merge-set fixture must parse");
         let ir = parsed
@@ -871,7 +882,7 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query merge-set IR must deserialize");
-        assert_eq!(envelope.ir_version, 11);
+        assert_eq!(envelope.ir_version, 14);
         match &envelope.payload.set_assignments[0].value {
             QueryValueExpr::Merge { left, right } => {
                 match left.as_ref() {
@@ -899,7 +910,7 @@ mod tests {
         // leaf `IN` comparison (the NOT IN spelling) — and must survive a
         // deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_leaf_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_leaf_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query not-leaf fixture must parse");
         let ir = parsed
@@ -926,7 +937,7 @@ mod tests {
         // OR compound whole — no De Morgan expansion on the wire — and must
         // survive a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_compound_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_not_compound_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query not-compound fixture must parse");
         let ir = parsed
@@ -954,7 +965,7 @@ mod tests {
         // condition tree, and must survive a deserialize/serialize
         // round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_account_exists_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_account_exists_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query exists fixture must parse");
         let ir = parsed
@@ -986,7 +997,7 @@ mod tests {
         // node — the exists node carries no negation flag (ADR-0008
         // composition; #314).
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_owner_not_exists_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_owner_not_exists_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query not-exists fixture must parse");
         let ir = parsed
@@ -1013,7 +1024,7 @@ mod tests {
         // ride the exists node's own `joins` section (rendered INSIDE the
         // subquery). Must survive a deserialize/serialize round-trip.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_account_scoped_exists_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_account_scoped_exists_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query scoped-exists fixture must parse");
         let ir = parsed
@@ -1047,7 +1058,7 @@ mod tests {
         // mechanism, and the bare inner node omits `joins` entirely (absent,
         // not empty — pinned wire bytes via skip_serializing_if).
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_owner_nested_exists_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_owner_nested_exists_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query nested-exists fixture must parse");
         let ir = parsed
@@ -1078,7 +1089,7 @@ mod tests {
         // the target — with the scoped inner tree over the target model.
         // Must survive a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_user_m2m_exists_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_user_m2m_exists_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query m2m-exists fixture must parse");
         let ir = parsed
@@ -1109,7 +1120,7 @@ mod tests {
         // Multi-hop `joins` section + path-carrying leaves must survive a
         // deserialize/serialize round-trip without drift (#270 wire stability).
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_traversal_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_traversal_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversal fixture must parse");
         let ir = parsed
@@ -1137,7 +1148,7 @@ mod tests {
         // deserialize/serialize round-trip without drift, and the join_type
         // tokens must reach Rust exactly as written on the wire.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_left_join_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query left_join fixture must parse");
         let ir = parsed
@@ -1163,7 +1174,7 @@ mod tests {
         // payload — predicate, order, limit, and a two-field record plan —
         // survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_record_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query record fixture must parse");
         let ir = parsed
@@ -1362,7 +1373,7 @@ mod tests {
         // identity) — survives a deserialize/serialize round-trip without
         // drift. No group keys: the whole result collapses to one record.
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_global_aggregate_v11.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_global_aggregate_v14.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("global aggregate fixture must parse");
@@ -1399,7 +1410,7 @@ mod tests {
         // joins section included — survives a deserialize/serialize
         // round-trip without drift.
         let fixture = include_str!(
-            "../../../tests/fixtures/ir_vectors/query_transaction_traversed_record_v11.json"
+            "../../../tests/fixtures/ir_vectors/query_transaction_traversed_record_v14.json"
         );
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query traversed record fixture must parse");
@@ -1440,7 +1451,7 @@ mod tests {
         // a deserialize/serialize round-trip without drift. GROUP BY does not
         // travel: the renderer derives it from the non-expr fields (ADR-0009).
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_aggregate_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_aggregate_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query aggregate fixture must parse");
         let ir = parsed
@@ -1507,7 +1518,7 @@ mod tests {
         // payload — root predicate, empty `joins`, and a one-path instances
         // plan — survives a deserialize/serialize round-trip without drift.
         let fixture =
-            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v11.json");
+            include_str!("../../../tests/fixtures/ir_vectors/query_transaction_include_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query include fixture must parse");
         let ir = parsed
@@ -1574,9 +1585,8 @@ mod tests {
     }
 
     #[test]
-    fn query_order_by_nulls_optional_wire() {
-        // #361: optional `nulls` on an order_by term — present key round-trips;
-        // absent key deserializes as None and is omitted on serialize.
+    fn query_order_by_nulls_required_wire() {
+        // #392: every order_by term carries required `nulls`; absent key fails.
         let with: QueryOrderBy = serde_json::from_value(serde_json::json!({
             "column": "pinned_at",
             "direction": "desc",
@@ -1584,29 +1594,35 @@ mod tests {
             "nulls": "last"
         }))
         .expect("order_by with nulls must deserialize");
-        assert_eq!(with.nulls.as_deref(), Some("last"));
+        assert_eq!(with.nulls, "last");
         let encoded = serde_json::to_value(&with).expect("serialize with nulls");
         assert_eq!(encoded["nulls"], "last");
 
-        let without: QueryOrderBy = serde_json::from_value(serde_json::json!({
+        let native: QueryOrderBy = serde_json::from_value(serde_json::json!({
+            "column": "pinned_at",
+            "direction": "desc",
+            "path": [],
+            "nulls": "native"
+        }))
+        .expect("order_by with native nulls must deserialize");
+        assert_eq!(native.nulls, "native");
+
+        let err = serde_json::from_value::<QueryOrderBy>(serde_json::json!({
             "column": "pinned_at",
             "direction": "desc",
             "path": []
         }))
-        .expect("order_by without nulls must deserialize");
-        assert_eq!(without.nulls, None);
-        let encoded = serde_json::to_value(&without).expect("serialize without nulls");
+        .expect_err("order_by without nulls must fail");
         assert!(
-            encoded.get("nulls").is_none(),
-            "unset nulls must be omitted from the wire: {encoded}"
+            err.to_string().contains("nulls"),
+            "missing nulls must name the field: {err}"
         );
     }
 
     #[test]
     fn query_card_nulls_fixture_roundtrip() {
-        // #363: golden vector with nulls on the first order_by term and the
-        // key absent on the second — deserialize, pin shape, round-trip.
-        let fixture = include_str!("../../../tests/fixtures/ir_vectors/query_card_nulls_v11.json");
+        // #392: golden vector with explicit nulls on every order_by term.
+        let fixture = include_str!("../../../tests/fixtures/ir_vectors/query_card_nulls_v14.json");
         let parsed: serde_json::Value =
             serde_json::from_str(fixture).expect("query card-nulls fixture must parse");
         let ir = parsed
@@ -1615,15 +1631,101 @@ mod tests {
             .expect("fixture must contain ir envelope");
         let envelope: IrEnvelope<QueryIrPayload> =
             serde_json::from_value(ir.clone()).expect("query card-nulls IR must deserialize");
-        assert_eq!(envelope.ir_version, 11);
+        assert_eq!(envelope.ir_version, 14);
         assert_eq!(envelope.payload.order_by.len(), 2);
-        assert_eq!(envelope.payload.order_by[0].nulls.as_deref(), Some("last"));
-        assert!(
-            envelope.payload.order_by[1].nulls.is_none(),
-            "second term must omit nulls"
+        assert_eq!(envelope.payload.order_by[0].nulls, "last");
+        assert_eq!(
+            envelope.payload.order_by[1].nulls, "last",
+            "second term must carry explicit nulls"
         );
         let encoded = serde_json::to_value(&envelope).expect("query card-nulls IR must serialize");
         assert_eq!(encoded, ir, "query card-nulls round-trip must not drift");
+    }
+
+    #[test]
+    fn query_after_fixture_roundtrip() {
+        let fixture = include_str!("../../../tests/fixtures/ir_vectors/query_user_after_v14.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query after fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query after IR must deserialize");
+        assert_eq!(envelope.ir_version, 14);
+        let after = envelope
+            .payload
+            .after
+            .as_ref()
+            .expect("fetch payload must carry after");
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].kind, "int");
+        assert_eq!(after[0].value, serde_json::json!(10));
+        assert_eq!(after[1].kind, "int");
+        assert_eq!(after[1].value, serde_json::json!(3));
+        let encoded = serde_json::to_value(&envelope).expect("query after IR must serialize");
+        assert_eq!(encoded, ir, "query after round-trip must not drift");
+    }
+
+    #[test]
+    fn query_after_null_slot_fixture_roundtrip() {
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_card_after_null_slot_v14.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query after-null-slot fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query after-null-slot IR must deserialize");
+        assert_eq!(envelope.ir_version, 14);
+        let after = envelope
+            .payload
+            .after
+            .as_ref()
+            .expect("fetch payload must carry after");
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].kind, "null");
+        assert_eq!(after[0].value, serde_json::json!(null));
+        assert_eq!(after[1].kind, "int");
+        assert_eq!(after[1].value, serde_json::json!(4));
+        assert_eq!(envelope.payload.order_by[0].nulls, "last");
+        assert_eq!(envelope.payload.order_by[1].nulls, "last");
+        let encoded =
+            serde_json::to_value(&envelope).expect("query after-null-slot IR must serialize");
+        assert_eq!(
+            encoded, ir,
+            "query after-null-slot round-trip must not drift"
+        );
+    }
+
+    #[test]
+    fn query_before_fixture_roundtrip() {
+        let fixture = include_str!("../../../tests/fixtures/ir_vectors/query_user_before_v14.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query before fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query before IR must deserialize");
+        assert_eq!(envelope.ir_version, 14);
+        let before = envelope
+            .payload
+            .before
+            .as_ref()
+            .expect("fetch payload must carry before");
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[0].kind, "int");
+        assert_eq!(before[0].value, serde_json::json!(10));
+        assert_eq!(before[1].kind, "int");
+        assert_eq!(before[1].value, serde_json::json!(3));
+        assert!(envelope.payload.after.is_none());
+        let encoded = serde_json::to_value(&envelope).expect("query before IR must serialize");
+        assert_eq!(encoded, ir, "query before round-trip must not drift");
     }
 
     #[test]

@@ -1,10 +1,10 @@
 {
-  "vector_name": "query_transaction_aggregate_v11",
+  "vector_name": "query_transaction_global_aggregate_v14",
   "domain": "query",
   "expect_valid": true,
   "ir": {
     "ir_kind": "query",
-    "ir_version": 11,
+    "ir_version": 14,
     "payload": {
       "model_name": "Transaction",
       "where": [
@@ -20,14 +20,8 @@
         }
       ],
       "set": [],
-      "order_by": [
-        {
-          "column": "total",
-          "direction": "desc",
-          "path": []
-        }
-      ],
-      "limit": 5,
+      "order_by": [],
+      "limit": null,
       "offset": null,
       "m2m": null,
       "joins": [
@@ -47,11 +41,13 @@
         "kind": "record",
         "fields": [
           {
-            "name": "account_name",
-            "column": "name",
-            "path": [
-              "account"
-            ]
+            "name": "n",
+            "path": [],
+            "expr": {
+              "fn": "count",
+              "column": "id",
+              "path": []
+            }
           },
           {
             "name": "total",

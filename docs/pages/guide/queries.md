@@ -166,7 +166,7 @@ For a row where `amount` is `NULL`, `amount > 100` is unknown, `NOT unknown` is 
 
 ## Ordering, Limit & Offset
 
-Sort with `.order_by(field, direction, *, nulls=...)` (direction defaults to ascending; pass `"desc"` to reverse) and slice with `.limit()` / `.offset()`. Pass `nulls="first"` or `nulls="last"` to pin where `NULL` sort keys land. `field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time.
+Sort with `.order_by(field, direction, *, nulls=...)` (direction defaults to ascending; pass `"desc"` to reverse) and slice with `.limit()` / `.offset()`. Omitted `nulls=` means `NULL`s sort last on every backend; pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for each dialect's default placement. `field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time.
 
 A pinned-first list is the usual reason to care — put unpinned cards (`pinned_at IS NULL`) after pinned ones, then break ties by recency:
 
@@ -190,13 +190,37 @@ A pinned-first list is the usual reason to care — put unpinned cards (`pinned_
 ORDER BY pinned_at DESC NULLS LAST, updated_at DESC, id DESC
 ```
 
-Omitting `nulls=` on a nullable sort key leaves placement to the dialect: PostgreSQL `DESC` puts `NULL`s first; SQLite `DESC` puts them last. Pass `nulls=` when you care.
+Omitting `nulls=` on a nullable sort key means `NULLS LAST` on every backend. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` when you want each dialect's default (PostgreSQL and SQLite disagree on `DESC`).
 
 ```python
 --8<-- "docs/examples/predicates.py:ordering-slicing"
 ```
 
-Chain `.order_by()` multiple times for multi-column sorts. For robust pagination patterns, see [Pagination](../howto/pagination.md).
+Chain `.order_by()` multiple times for multi-column sorts.
+
+To page forward from a known row, pass that row's place in the declared order to `.after()`. The bound is exclusive and the order keys must include the primary key. `None` is legal in every non-PK slot — that is how a pinned-first list continues through unpinned rows:
+
+```python
+--8<-- "docs/examples/predicates.py:after-paging"
+```
+
+`after(row)` is the same as `after(position_of(row))`. `after()` cannot be combined with `offset()` — a query has one start. For the pinned-first shape (`order_by(pinned_at, "desc")`, omitted `nulls=` → last), `after((None, id))` continues through the remaining unpinned rows:
+
+```python
+--8<-- "docs/examples/predicates.py:after-null-paging"
+```
+
+To page backward, `.before(position)` is the other start. With a limit it is the **adjacent previous page**, still yielded in the declared order. Without a limit it is every earlier row in declared order — a prefix, not a page. The bound is exclusive. `after` and `before` cannot share a query.
+
+```python
+--8<-- "docs/examples/predicates.py:before-paging"
+```
+
+On unbounded `before()`, `first()` and `all()[0]` disagree: `first()` is `limit(1)` (the adjacent previous row) and `all()[0]` is the head of the prefix (the earliest earlier row). That is accepted.
+
+The same chainers work when an order key is a related column (`order_by(lambda t: t.account.label)`) or the query is a projected record: pass a tuple of the order-key values. `position_of` on a model instance requires those relations populated; `position_of` on a `Row` requires every order key to be in the projection.
+
+For robust pagination patterns, see [Pagination](../howto/pagination.md).
 
 ## Executing Queries
 
@@ -308,6 +332,12 @@ The narrowing is query-wide, not per-clause: the join is rendered once for the w
 
 Because the sort join is INNER too, ordering by a related column drops relation-less rows — the same narrowing as `where()`. (Use `left_join` to keep them; see below.)
 
+`after()` / `before()` take a decoded **tuple** of those order-key values — `include()` is not required to page. `position_of` on a model instance does require the relation populated.
+
+```python
+--8<-- "docs/examples/traversal.py:traversed-paging"
+```
+
 ### One join per relation path
 
 The relation path is the join's identity. Reference the same path in two `where()` calls, in an `&`/`|` tree, or across `where()` and `order_by()`, and it renders as **one** join. Distinct paths — even to the same table — render as distinct joins. There is no alias to name and none to manage; the path does that job.
@@ -366,8 +396,8 @@ When you want the relation-less rows *kept* rather than filtered out, opt into a
 
 A bare `left_join` on a path also traversed by `where()` lifts the shared edge to LEFT — an explicit LEFT always beats an implicit INNER on the same edge (declaring `join` **and** `left_join` on one edge is a build-time `ValueError`).
 
-!!! note "NULL ordering is dialect-defined unless you set `nulls=`"
-    Relation-less rows under `left_join` land as `NULL` sort keys on a related column — the same dialect-default split that hits a nullable **root** column. Pass `nulls="first"` or `nulls="last"` when you care — see [Ordering, Limit & Offset](#ordering-limit--offset).
+!!! note "NULL ordering defaults to last unless you override it"
+    Relation-less rows under `left_join` land as `NULL` sort keys on a related column — omitted `nulls=` still means last. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for dialect-default placement — see [Ordering, Limit & Offset](#ordering-limit--offset).
 
 ### Two foreign keys to the same table
 
@@ -782,10 +812,14 @@ Projection traversal is ordinary traversal (ADR-0006): it renders an INNER join 
 
 ### Projections compose like any other query
 
-`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, and `first()` all work unchanged; on a plain projection `count()` and `exists()` are unaffected — they measure the same matching rows a full query would. (On an *aggregate* projection they raise with guidance instead — see [Aggregations & Grouped Queries](aggregations.md#the-loud-limits).)
+`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, `after()`/`before()`, and `first()` all work unchanged; on a plain projection `count()` and `exists()` are unaffected — they measure the same matching rows a full query would. (On an *aggregate* projection they raise with guidance instead — see [Aggregations & Grouped Queries](aggregations.md#the-loud-limits).) `position_of` on a `Row` requires every order key in the projection; otherwise pass a tuple.
 
 ```python
 --8<-- "docs/examples/partial_selects.py:compose"
+```
+
+```python
+--8<-- "docs/examples/partial_selects.py:projected-paging"
 ```
 
 ```python
