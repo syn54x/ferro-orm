@@ -1664,6 +1664,39 @@ mod tests {
     }
 
     #[test]
+    fn query_after_null_slot_fixture_roundtrip() {
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/query_card_after_null_slot_v13.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("query after-null-slot fixture must parse");
+        let ir = parsed
+            .get("ir")
+            .cloned()
+            .expect("fixture must contain ir envelope");
+        let envelope: IrEnvelope<QueryIrPayload> =
+            serde_json::from_value(ir.clone()).expect("query after-null-slot IR must deserialize");
+        assert_eq!(envelope.ir_version, 13);
+        let after = envelope
+            .payload
+            .after
+            .as_ref()
+            .expect("fetch payload must carry after");
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].kind, "null");
+        assert_eq!(after[0].value, serde_json::json!(null));
+        assert_eq!(after[1].kind, "int");
+        assert_eq!(after[1].value, serde_json::json!(4));
+        assert_eq!(envelope.payload.order_by[0].nulls, "last");
+        assert_eq!(envelope.payload.order_by[1].nulls, "last");
+        let encoded =
+            serde_json::to_value(&envelope).expect("query after-null-slot IR must serialize");
+        assert_eq!(
+            encoded, ir,
+            "query after-null-slot round-trip must not drift"
+        );
+    }
+
+    #[test]
     fn codec_fixture_roundtrip() {
         let fixture =
             include_str!("../../../tests/fixtures/ir_vectors/codec_registry_core_v1.json");

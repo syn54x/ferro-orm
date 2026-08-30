@@ -1048,7 +1048,7 @@ class Query(Generic[T]):
         return new
 
     def _assert_after_order_keys(self) -> None:
-        """Require root, non-null order keys that include the primary key (#393)."""
+        """Require root order keys that include the primary key (#393/#394)."""
         pk = getattr(self.model_cls, "__ferro_pk__", None)
         if pk is None:
             raise ValueError(
@@ -1060,7 +1060,6 @@ class Query(Generic[T]):
                 "after() requires order_by() keys that include the model's "
                 "primary key"
             )
-        specs = getattr(self.model_cls, "__ferro_columns__", {})
         pk_seen = False
         for entry in self.order_by_clause:
             if entry.path:
@@ -1068,12 +1067,6 @@ class Query(Generic[T]):
                 raise ValueError(
                     "after() requires root-column order keys; traversed "
                     f"order key {dotted!r} is not supported yet"
-                )
-            spec = specs.get(entry.column)
-            if spec is not None and spec.nullable:
-                raise ValueError(
-                    f"after() does not support nullable order key "
-                    f"{entry.column!r}"
                 )
             if entry.column == pk:
                 pk_seen = True
@@ -1096,7 +1089,7 @@ class Query(Generic[T]):
         Raises:
             TypeError: If ``row`` is not an instance of the queried model.
             ValueError: If the order keys are not a legal ``after()`` set
-                (no primary key, a nullable key, or a traversed key).
+                (no primary key or a traversed key).
         """
         if not isinstance(row, self.model_cls):
             raise TypeError(
@@ -1111,7 +1104,8 @@ class Query(Generic[T]):
 
         ``position`` is the ordered tuple of this query's order-key values, or
         a model instance (sugar for ``after(position_of(row))``). Order keys
-        must be root columns, include the primary key, and be non-nullable.
+        must be root columns and include the primary key. ``None`` is legal in
+        every non-PK slot; the PK slot cannot be empty.
 
         Args:
             position: A tuple of order-key values, or a model instance.
@@ -1122,8 +1116,8 @@ class Query(Generic[T]):
         Raises:
             TypeError: If ``position`` is neither a tuple nor a model instance.
             ValueError: If the order keys are illegal for ``after()``, the
-                tuple has the wrong arity, a slot is ``None``, or ``offset()``
-                is already set.
+                tuple has the wrong arity, the PK slot is ``None``, or
+                ``offset()`` is already set.
         """
         if self._offset is not None:
             raise ValueError(
@@ -1146,8 +1140,13 @@ class Query(Generic[T]):
                 "after() expected a position tuple or a model instance, "
                 f"got {type(position).__name__}"
             )
-        if any(value is None for value in bound):
-            raise ValueError("after() does not support None in a position slot")
+        pk = getattr(self.model_cls, "__ferro_pk__", None)
+        for entry, value in zip(self.order_by_clause, bound, strict=True):
+            if entry.column == pk and value is None:
+                raise ValueError(
+                    "after() does not support None in the primary-key "
+                    "position slot"
+                )
         new = self._clone()
         new._after = bound
         return new

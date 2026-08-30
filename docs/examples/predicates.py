@@ -166,6 +166,28 @@ async def main() -> None:
             "unpinned-old",
         ]
 
+        # --8<-- [start:after-null-paging]
+        last_pinned = cards[1]
+        unpinned_page = (
+            await Card.select()
+            .order_by(lambda card: card.pinned_at, "desc")
+            .order_by(lambda card: card.updated_at, "desc")
+            .order_by(lambda card: card.id, "desc")
+            .after(last_pinned)
+            .all()
+        )
+        remaining_unpinned = (
+            await Card.select()
+            .order_by(lambda card: card.pinned_at, "desc")
+            .order_by(lambda card: card.updated_at, "desc")
+            .order_by(lambda card: card.id, "desc")
+            .after((None, cards[2].updated_at, cards[2].id))
+            .all()
+        )
+        # --8<-- [end:after-null-paging]
+        assert [card.title for card in unpinned_page] == ["unpinned-new", "unpinned-old"]
+        assert [card.title for card in remaining_unpinned] == ["unpinned-old"]
+
         # --8<-- [start:terminals]
         everyone = await User.all()
         first_admin = await User.where(lambda user: user.role == "admin").first()

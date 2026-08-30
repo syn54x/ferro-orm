@@ -102,10 +102,11 @@ pub fn qualify_column_with_joins(
     qualify_leaf_column(&qualifier, column, path)
 }
 
-/// One term of an exclusive stepwise (keyset) compare (#393).
+/// One term of an exclusive stepwise (keyset) compare (#393/#394).
 ///
-/// #394 extends this with NULL-bucket facts; keep compare logic here, not in
-/// the SELECT builder.
+/// Keep compare logic here, not in the SELECT builder. `nulls` is the wire
+/// token (`"last"` / `"first"` / `"native"`); `"native"` resolves from
+/// [`Dialect`] inside [`exclusive_stepwise_compare`].
 pub struct StepwiseKey {
     /// Table-qualified order-key column.
     pub column: Expr,
@@ -113,27 +114,97 @@ pub struct StepwiseKey {
     pub direction: String,
     /// Bound value for this key, already typed as a SeaQuery expression.
     pub bound: SimpleExpr,
+    /// Wire `order_by[].nulls` token (`"last"` / `"first"` / `"native"`).
+    pub nulls: String,
+    /// Whether this slot's bound is SQL NULL (`kind: "null"`).
+    pub bound_is_null: bool,
+}
+
+/// Resolved NULLS placement after `"native"` is lowered for one dialect.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NullsPlacement {
+    First,
+    Last,
 }
 
 /// Exclusive stepwise compare: rows strictly after the bound in declared order.
 ///
 /// For two NOT NULL ASC keys: `(a > :a) OR (a = :a AND b > :b)`. DESC flips
-/// `>` to `<`. Mixed directions apply per key. #394 will extend this function
-/// for NULL-aware expansion — callers must not duplicate the compare tree.
-pub fn exclusive_stepwise_compare(keys: &[StepwiseKey]) -> Result<Condition, String> {
+/// `>` to `<`. NULL placement and a NULL bound fold into the same tree so a
+/// cursor can cross the NULL bucket in one query. `"native"` resolves here
+/// from `dialect` (Postgres: NULL is larger; SQLite: NULL is smaller).
+pub fn exclusive_stepwise_compare(
+    keys: &[StepwiseKey],
+    dialect: Dialect,
+) -> Result<Condition, String> {
     if keys.is_empty() {
         return Err("exclusive stepwise compare requires at least one order key".to_string());
     }
     let mut any = Condition::any();
+    let mut added = false;
     for i in 0..keys.len() {
+        let Some(after_term) = stepwise_after_term(&keys[i], dialect)? else {
+            continue;
+        };
         let mut prefix = Condition::all();
         for key in &keys[..i] {
-            prefix = prefix.add(key.column.clone().eq(key.bound.clone()));
+            prefix = prefix.add(stepwise_eq(key));
         }
-        prefix = prefix.add(stepwise_inequality(&keys[i])?);
+        prefix = prefix.add(after_term);
         any = any.add(prefix);
+        added = true;
+    }
+    if !added {
+        return Ok(Condition::all().add(Expr::cust("FALSE")));
     }
     Ok(any)
+}
+
+fn resolve_nulls_placement(
+    nulls: &str,
+    direction: &str,
+    dialect: Dialect,
+) -> Result<NullsPlacement, String> {
+    match nulls.to_ascii_lowercase().as_str() {
+        "first" => Ok(NullsPlacement::First),
+        "last" => Ok(NullsPlacement::Last),
+        "native" => {
+            let desc = direction.to_ascii_lowercase() == "desc";
+            Ok(match (dialect, desc) {
+                (Dialect::Postgres, false) => NullsPlacement::Last,
+                (Dialect::Postgres, true) => NullsPlacement::First,
+                (Dialect::Sqlite, false) => NullsPlacement::First,
+                (Dialect::Sqlite, true) => NullsPlacement::Last,
+            })
+        }
+        other => Err(format!(
+            "invalid order_by nulls {other:?}: expected \"first\", \"last\", or \"native\""
+        )),
+    }
+}
+
+fn stepwise_eq(key: &StepwiseKey) -> SimpleExpr {
+    if key.bound_is_null {
+        key.column.clone().is_null()
+    } else {
+        key.column.clone().eq(key.bound.clone())
+    }
+}
+
+fn stepwise_after_term(key: &StepwiseKey, dialect: Dialect) -> Result<Option<Condition>, String> {
+    let placement = resolve_nulls_placement(&key.nulls, &key.direction, dialect)?;
+    if key.bound_is_null {
+        return Ok(match placement {
+            NullsPlacement::Last => None,
+            NullsPlacement::First => Some(Condition::all().add(key.column.clone().is_not_null())),
+        });
+    }
+    let mut term = Condition::any();
+    term = term.add(stepwise_inequality(key)?);
+    if placement == NullsPlacement::Last {
+        term = term.add(key.column.clone().is_null());
+    }
+    Ok(Some(term))
 }
 
 fn stepwise_inequality(key: &StepwiseKey) -> Result<SimpleExpr, String> {
@@ -617,7 +688,8 @@ impl QueryPlan {
     /// Bind and qualify an ``after`` bound into an exclusive stepwise condition.
     ///
     /// Returns ``None`` when the payload omitted ``after``. Compare logic lives
-    /// in [`exclusive_stepwise_compare`] so #394 can extend one function.
+    /// in [`exclusive_stepwise_compare`] — this walker only qualifies, binds,
+    /// and passes each key's ``nulls`` token plus a NULL-bound fact.
     pub fn after_condition(
         &self,
         backend: Dialect,
@@ -647,9 +719,11 @@ impl QueryPlan {
                 column,
                 direction: order.direction.clone(),
                 bound,
+                nulls: order.nulls.clone(),
+                bound_is_null: value.kind.eq_ignore_ascii_case("null") || value.value.is_null(),
             });
         }
-        Ok(Some(exclusive_stepwise_compare(&keys)?))
+        Ok(Some(exclusive_stepwise_compare(&keys, backend)?))
     }
 
     fn build_condition(
@@ -1016,7 +1090,7 @@ impl QueryPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::{QueryPlan, StepwiseKey, exclusive_stepwise_compare};
+    use super::{exclusive_stepwise_compare, JoinPlan, QueryPlan, StepwiseKey};
     use crate::state::Dialect;
     use sea_query::{
         Alias, Expr, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue,
@@ -1057,7 +1131,7 @@ mod tests {
     }
 
     fn render_stepwise(keys: &[StepwiseKey]) -> String {
-        let cond = exclusive_stepwise_compare(keys).expect("stepwise compare");
+        let cond = exclusive_stepwise_compare(keys, Dialect::Sqlite).expect("stepwise compare");
         let mut select = Query::select();
         select
             .column(Alias::new("id"))
@@ -1073,11 +1147,15 @@ mod tests {
                 column: Expr::col(Alias::new("a")),
                 direction: "asc".into(),
                 bound: Expr::val(1).into(),
+                nulls: "last".into(),
+                bound_is_null: false,
             },
             StepwiseKey {
                 column: Expr::col(Alias::new("b")),
                 direction: "asc".into(),
                 bound: Expr::val(2).into(),
+                nulls: "last".into(),
+                bound_is_null: false,
             },
         ]);
         let flat = sql.replace('"', "").replace('`', "");
@@ -1098,11 +1176,15 @@ mod tests {
                 column: Expr::col(Alias::new("a")),
                 direction: "desc".into(),
                 bound: Expr::val(1).into(),
+                nulls: "last".into(),
+                bound_is_null: false,
             },
             StepwiseKey {
                 column: Expr::col(Alias::new("b")),
                 direction: "desc".into(),
                 bound: Expr::val(2).into(),
+                nulls: "last".into(),
+                bound_is_null: false,
             },
         ]);
         let flat = sql.replace('"', "").replace('`', "");
@@ -1113,6 +1195,217 @@ mod tests {
         assert!(
             !flat.contains("b = 2"),
             "exclusive bound must not include the all-equal term: {sql}"
+        );
+    }
+
+    fn after_plan(order: &[(&str, &str, &str)], after: serde_json::Value) -> QueryPlan {
+        let order_by: Vec<serde_json::Value> = order
+            .iter()
+            .map(|(column, direction, nulls)| {
+                json!({
+                    "column": column,
+                    "direction": direction,
+                    "path": [],
+                    "nulls": nulls,
+                })
+            })
+            .collect();
+        let payload: ferro_schema_ir::QueryIrPayload = serde_json::from_value(json!({
+            "set": [],
+            "model_name": "Pending",
+            "where": [],
+            "order_by": order_by,
+            "limit": null,
+            "offset": null,
+            "after": after,
+            "m2m": null,
+            "materialization": {"kind": "root_instances"},
+            "joins": []
+        }))
+        .expect("after payload deserializes");
+        QueryPlan::from_ir_payload(payload).expect("plan builds")
+    }
+
+    fn render_after(
+        order: &[(&str, &str, &str)],
+        after: serde_json::Value,
+        dialect: Dialect,
+    ) -> String {
+        let plan = after_plan(order, after);
+        let cond = plan
+            .after_condition(dialect, "t", &JoinPlan::default())
+            .expect("after_condition")
+            .expect("after present");
+        let mut select = Query::select();
+        select
+            .column(Alias::new("id"))
+            .from(Alias::new("t"))
+            .cond_where(cond);
+        match dialect {
+            Dialect::Sqlite => select.to_string(SqliteQueryBuilder),
+            Dialect::Postgres => select.to_string(PostgresQueryBuilder),
+        }
+    }
+
+    fn flatten_sql(sql: &str) -> String {
+        sql.replace('"', "").replace('`', "").to_lowercase()
+    }
+
+    #[test]
+    fn after_asc_last_non_null_includes_later_null_bucket() {
+        let sql = render_after(
+            &[("a", "asc", "last"), ("b", "asc", "last")],
+            json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a > 1") && flat.contains("a is null") && flat.contains("a = 1"),
+            "ASC last after non-NULL must cross into the NULL bucket: {sql}"
+        );
+        assert!(
+            flat.contains("b > 2"),
+            "prefix-equal arm must keep the next-key inequality: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_desc_last_pinch_non_null_crosses_into_null_bucket() {
+        let sql = render_after(
+            &[("pinned_at", "desc", "last"), ("id", "asc", "last")],
+            json!([{"kind": "int", "value": 10}, {"kind": "int", "value": 3}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("pinned_at < 10") && flat.contains("pinned_at is null"),
+            "DESC last after a pinned value must include unpinned: {sql}"
+        );
+        assert!(
+            flat.contains("pinned_at = 10") && flat.contains("id > 3"),
+            "same-pin prefix must continue by PK: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_desc_last_pinch_null_bound_stays_in_null_bucket() {
+        let sql = render_after(
+            &[("pinned_at", "desc", "last"), ("id", "asc", "last")],
+            json!([{"kind": "null", "value": null}, {"kind": "int", "value": 4}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("pinned_at is null") && flat.contains("id > 4"),
+            "after((None, id)) must walk remaining NULLs by PK: {sql}"
+        );
+        assert!(
+            !flat.contains("pinned_at is not null"),
+            "NULLS LAST has nothing after the NULL bucket: {sql}"
+        );
+        assert!(
+            !flat.contains("pinned_at <") && !flat.contains("pinned_at >"),
+            "NULL bound must not emit an inequality on the leading key: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_asc_first_null_bound_crosses_into_non_null_bucket() {
+        let sql = render_after(
+            &[("a", "asc", "first"), ("b", "asc", "last")],
+            json!([{"kind": "null", "value": null}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a is not null"),
+            "ASC first after NULL must include the later non-NULL bucket: {sql}"
+        );
+        assert!(
+            flat.contains("a is null") && flat.contains("b > 2"),
+            "remaining NULL-bucket rows continue by the next key: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_asc_first_non_null_does_not_reenter_null_bucket() {
+        let sql = render_after(
+            &[("a", "asc", "first"), ("b", "asc", "last")],
+            json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a > 1") && flat.contains("a = 1") && flat.contains("b > 2"),
+            "ASC first after non-NULL keeps the exclusive compare: {sql}"
+        );
+        assert!(
+            !flat.contains("a is null"),
+            "NULLs already precede the cursor: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_desc_first_non_null_does_not_reenter_null_bucket() {
+        let sql = render_after(
+            &[("a", "desc", "first"), ("b", "desc", "last")],
+            json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a < 1") && flat.contains("a = 1") && flat.contains("b < 2"),
+            "DESC first after non-NULL keeps the exclusive compare: {sql}"
+        );
+        assert!(
+            !flat.contains("a is null"),
+            "NULLs already precede the cursor: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_desc_first_null_bound_crosses_into_non_null_bucket() {
+        let sql = render_after(
+            &[("a", "desc", "first"), ("b", "asc", "last")],
+            json!([{"kind": "null", "value": null}, {"kind": "int", "value": 2}]),
+            Dialect::Sqlite,
+        );
+        let flat = flatten_sql(&sql);
+        assert!(
+            flat.contains("a is not null"),
+            "DESC first after NULL must include later non-NULL values: {sql}"
+        );
+        assert!(
+            flat.contains("a is null") && flat.contains("b > 2"),
+            "remaining NULL-bucket rows continue by the next key: {sql}"
+        );
+    }
+
+    #[test]
+    fn after_native_resolves_at_render_from_dialect() {
+        let order = &[("a", "asc", "native"), ("b", "asc", "last")];
+        let after = json!([{"kind": "int", "value": 1}, {"kind": "int", "value": 2}]);
+        let pg = flatten_sql(&render_after(order, after.clone(), Dialect::Postgres));
+        let sqlite = flatten_sql(&render_after(order, after.clone(), Dialect::Sqlite));
+        assert!(
+            pg.contains("a is null"),
+            "Postgres ASC native treats NULL as larger (last): {pg}"
+        );
+        assert!(
+            !sqlite.contains("a is null"),
+            "SQLite ASC native treats NULL as smaller (first): {sqlite}"
+        );
+
+        let desc = &[("a", "desc", "native"), ("b", "asc", "last")];
+        let pg_desc = flatten_sql(&render_after(desc, after.clone(), Dialect::Postgres));
+        let sqlite_desc = flatten_sql(&render_after(desc, after, Dialect::Sqlite));
+        assert!(
+            !pg_desc.contains("a is null"),
+            "Postgres DESC native treats NULL as larger (first): {pg_desc}"
+        );
+        assert!(
+            sqlite_desc.contains("a is null"),
+            "SQLite DESC native treats NULL as smaller (last): {sqlite_desc}"
         );
     }
 

@@ -198,13 +198,19 @@ Omitting `nulls=` on a nullable sort key means `NULLS LAST` on every backend. Pa
 
 Chain `.order_by()` multiple times for multi-column sorts.
 
-To page forward from a known row, pass that row's place in the declared order to `.after()`. The bound is exclusive, the order keys must include the primary key, and every key must be a non-nullable root column:
+To page forward from a known row, pass that row's place in the declared order to `.after()`. The bound is exclusive and the order keys must include the primary key. `None` is legal in every non-PK slot — that is how a pinned-first list continues through unpinned rows:
 
 ```python
 --8<-- "docs/examples/predicates.py:after-paging"
 ```
 
-`after(row)` is the same as `after(position_of(row))`. `after()` cannot be combined with `offset()` — a query has one start. For robust pagination patterns, see [Pagination](../howto/pagination.md).
+`after(row)` is the same as `after(position_of(row))`. `after()` cannot be combined with `offset()` — a query has one start. For the pinned-first shape (`order_by(pinned_at, "desc")`, omitted `nulls=` → last), `after((None, id))` continues through the remaining unpinned rows:
+
+```python
+--8<-- "docs/examples/predicates.py:after-null-paging"
+```
+
+For robust pagination patterns, see [Pagination](../howto/pagination.md).
 
 ## Executing Queries
 
