@@ -1,8 +1,8 @@
-"""Backend-matrix e2e for ``order_by(..., nulls=...)`` placement (#363).
+"""Backend-matrix e2e for ``order_by(..., nulls=...)`` placement (#363, #392).
 
 Asserts result-set order only — same row order on SQLite and Postgres when
-``nulls=`` is set. Omitted-``nulls`` DESC on a nullable column is deliberately
-not cross-backend-asserted (dialect defaults diverge).
+``nulls=`` is set. Omitted ``nulls=`` compiles to ``last`` and is
+cross-backend-asserted.
 """
 
 from typing import Annotated
@@ -92,6 +92,23 @@ async def _seed_items() -> None:
 # ---------------------------------------------------------------------------
 # Acceptance.
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_omitted_nulls_means_last_on_both_backends(db_url):
+    """Omitted nulls= on DESC sorts set values first, NULLs last, on both backends."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_cards()
+
+        rows = await (
+            ObnCard.select()
+            .order_by(lambda c: c.pinned_at, "desc")
+            .order_by(lambda c: c.id)
+            .all()
+        )
+
+        assert [r.id for r in rows] == [3, 1, 5, 2, 4]
 
 
 @pytest.mark.asyncio

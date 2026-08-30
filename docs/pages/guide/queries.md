@@ -166,7 +166,7 @@ For a row where `amount` is `NULL`, `amount > 100` is unknown, `NOT unknown` is 
 
 ## Ordering, Limit & Offset
 
-Sort with `.order_by(field, direction, *, nulls=...)` (direction defaults to ascending; pass `"desc"` to reverse) and slice with `.limit()` / `.offset()`. Pass `nulls="first"` or `nulls="last"` to pin where `NULL` sort keys land. `field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time.
+Sort with `.order_by(field, direction, *, nulls=...)` (direction defaults to ascending; pass `"desc"` to reverse) and slice with `.limit()` / `.offset()`. Omitted `nulls=` means `NULL`s sort last on every backend; pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for each dialect's default placement. `field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time.
 
 A pinned-first list is the usual reason to care — put unpinned cards (`pinned_at IS NULL`) after pinned ones, then break ties by recency:
 
@@ -190,7 +190,7 @@ A pinned-first list is the usual reason to care — put unpinned cards (`pinned_
 ORDER BY pinned_at DESC NULLS LAST, updated_at DESC, id DESC
 ```
 
-Omitting `nulls=` on a nullable sort key leaves placement to the dialect: PostgreSQL `DESC` puts `NULL`s first; SQLite `DESC` puts them last. Pass `nulls=` when you care.
+Omitting `nulls=` on a nullable sort key means `NULLS LAST` on every backend. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` when you want each dialect's default (PostgreSQL and SQLite disagree on `DESC`).
 
 ```python
 --8<-- "docs/examples/predicates.py:ordering-slicing"
@@ -366,8 +366,8 @@ When you want the relation-less rows *kept* rather than filtered out, opt into a
 
 A bare `left_join` on a path also traversed by `where()` lifts the shared edge to LEFT — an explicit LEFT always beats an implicit INNER on the same edge (declaring `join` **and** `left_join` on one edge is a build-time `ValueError`).
 
-!!! note "NULL ordering is dialect-defined unless you set `nulls=`"
-    Relation-less rows under `left_join` land as `NULL` sort keys on a related column — the same dialect-default split that hits a nullable **root** column. Pass `nulls="first"` or `nulls="last"` when you care — see [Ordering, Limit & Offset](#ordering-limit--offset).
+!!! note "NULL ordering defaults to last unless you override it"
+    Relation-less rows under `left_join` land as `NULL` sort keys on a related column — omitted `nulls=` still means last. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for dialect-default placement — see [Ordering, Limit & Offset](#ordering-limit--offset).
 
 ### Two foreign keys to the same table
 

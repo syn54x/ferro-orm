@@ -11,9 +11,9 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
-# `query` is on ir_version 11 (#379 — unconditional bump; merge joins
-# add / sub / now); `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 11, "codec": 1}
+# `query` is on ir_version 12 (#392 — explicit nulls on every order_by term);
+# `schema`/`codec` remain v1.
+SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 12, "codec": 1}
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -285,13 +285,12 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
     for i, order in enumerate(payload["order_by"]):
         order_label = f"{label}.order_by[{i}]"
         assert isinstance(order, dict), f"{order_label} must be object"
-        _require_keys(order, {"column", "direction", "path"}, order_label)
+        _require_keys(order, {"column", "direction", "path", "nulls"}, order_label)
         assert isinstance(order["path"], list), f"{order_label}.path must be a list"
-        if "nulls" in order:
-            assert order["nulls"] in {"first", "last"}, (
-                f"{order_label}.nulls must be 'first' or 'last' when present, "
-                f"got {order['nulls']!r}"
-            )
+        assert order["nulls"] in {"first", "last", "native"}, (
+            f"{order_label}.nulls must be 'first', 'last', or 'native', "
+            f"got {order['nulls']!r}"
+        )
     has_limit = "limit" in payload
     has_offset = "offset" in payload
     assert has_limit == has_offset, f"{label}.limit/offset must be present together"

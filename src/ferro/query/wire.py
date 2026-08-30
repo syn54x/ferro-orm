@@ -50,10 +50,10 @@ if TYPE_CHECKING:
 # mutate arm; they stay distinct values so guardrail errors name the caller.
 QueryVerb = Literal["fetch", "count", "update", "delete"]
 
-# Always 11 (#379 — unconditional bump, exactly like v10 at #378). v11
-# adds the ``merge`` SET value-expression kind. Python and Rust ship in
-# one wheel, so a single supported version is the whole contract.
-_IR_VERSION = 11
+# Always 12 (#392 — unconditional bump). v12 requires explicit ``nulls``
+# on every ``order_by`` term (omitted in Python means ``last``). Python and
+# Rust ship in one wheel, so a single supported version is the whole contract.
+_IR_VERSION = 12
 
 
 class _AbsentType:
@@ -128,17 +128,15 @@ class OrderByEntry:
     column: str
     direction: str
     path: tuple[str, ...]
-    nulls: str | None = None
+    nulls: str = "last"
 
     def to_ir_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        return {
             "column": self.column,
             "direction": self.direction,
             "path": list(self.path),
+            "nulls": self.nulls,
         }
-        if self.nulls is not None:
-            payload["nulls"] = self.nulls
-        return payload
 
 
 @dataclass(frozen=True)
