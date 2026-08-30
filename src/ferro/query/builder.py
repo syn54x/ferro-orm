@@ -64,13 +64,13 @@ E = TypeVar("E")
 _ROWS_OF_ROW: type[Rows[Row]] = Rows[Row]
 
 
-def _normalize_order_by_nulls(nulls: str | None) -> str | None:
-    """Lower-case and validate ``nulls=``; ``None`` stays omitted on the wire."""
+def _normalize_order_by_nulls(nulls: str | None) -> str:
+    """Lower-case and validate ``nulls=``; omitted means ``last`` on the wire (#392)."""
     if nulls is None:
-        return None
+        return "last"
     normalized = nulls.lower()
-    if normalized not in ("first", "last"):
-        raise ValueError("nulls must be 'first' or 'last'")
+    if normalized not in ("first", "last", "native"):
+        raise ValueError("nulls must be 'first', 'last', or 'native'")
     return normalized
 
 
@@ -797,8 +797,9 @@ class Query(Generic[T]):
             field: Column selector — lambda receiving a :class:`QueryProxy`,
                 or a column-name string.
             direction: ``"asc"`` (default) or ``"desc"``.
-            nulls: Optional ``"first"`` or ``"last"`` null placement (keyword-
-                only). Omitted when unset.
+            nulls: Optional ``"first"``, ``"last"``, or ``"native"`` null
+                placement (keyword-only). Omitted means ``"last"``; ``"native"``
+                keeps each backend's dialect default.
 
         Returns:
             A new ``Query`` with the ordering added; ``self`` is unchanged.
@@ -809,7 +810,7 @@ class Query(Generic[T]):
                 single column reference (a bare relation, e.g.
                 ``lambda t: t.account``, is meaningless as a sort key).
             ValueError: If ``direction`` is not ``"asc"`` or ``"desc"``, or
-                ``nulls`` is not ``"first"`` or ``"last"``.
+                ``nulls`` is not ``"first"``, ``"last"``, or ``"native"``.
 
         Examples:
             >>> newest = await Post.select().order_by(lambda p: p.created_at, "desc").all()
@@ -1403,8 +1404,9 @@ class ProjectedQuery(Query[T]):
             field: Output field name or root column-name string, or a lambda
                 naming a source column / aggregate expression.
             direction: ``"asc"`` (default) or ``"desc"``.
-            nulls: Optional ``"first"`` or ``"last"`` null placement (keyword-
-                only). Omitted when unset.
+            nulls: Optional ``"first"``, ``"last"``, or ``"native"`` null
+                placement (keyword-only). Omitted means ``"last"``; ``"native"``
+                keeps each backend's dialect default.
 
         Returns:
             A new query with the ordering added; ``self`` is unchanged.
