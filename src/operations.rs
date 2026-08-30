@@ -5699,6 +5699,28 @@ mod query_ir_version_gate_tests {
         );
     }
 
+    #[test]
+    fn rejects_v11_envelope_with_actionable_message() {
+        let mut envelope = v12_envelope();
+        envelope["ir_version"] = serde_json::json!(11);
+
+        let err = query_plan_from_ir_json(&envelope.to_string())
+            .expect_err("a v11 envelope must be rejected before payload parsing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("11"),
+            "message should name the received version: {msg}"
+        );
+        assert!(
+            msg.contains("12"),
+            "message should name the supported version: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("one wheel"),
+            "message should explain Python/Rust ship in one wheel: {msg}"
+        );
+    }
+
     /// Contract test (#314 acceptance criteria): a v6 envelope must be
     /// rejected on the version check with the actionable one-wheel message.
     /// v7 is a pure widening of the v6 predicate-tree shape (the recursive
@@ -5883,13 +5905,13 @@ mod query_ir_version_gate_tests {
     #[test]
     fn rejects_unsupported_future_version() {
         let mut envelope = v12_envelope();
-        envelope["ir_version"] = serde_json::json!(12);
+        envelope["ir_version"] = serde_json::json!(13);
 
         let err = query_plan_from_ir_json(&envelope.to_string())
             .expect_err("an unsupported future version must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("12"),
+            msg.contains("13"),
             "message should name the received version: {msg}"
         );
     }
