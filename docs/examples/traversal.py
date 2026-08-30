@@ -10,7 +10,16 @@ asserts the exact rows that come back.
 import asyncio
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation, connect, engines
+from ferro import (
+    BackRef,
+    Field,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    connect,
+    engines,
+)
 
 
 # --8<-- [start:schema]
@@ -39,6 +48,8 @@ class Transaction(Model):
     id: int | None = Field(default=None, primary_key=True)
     amount: int
     account: Annotated[Account, ForeignKey(related_name="transactions")]
+
+
 # --8<-- [end:schema]
 
 
@@ -47,6 +58,8 @@ class Note(Model):
     id: int | None = Field(default=None, primary_key=True)
     body: str
     account: Annotated[Account | None, ForeignKey(related_name="notes")] = None
+
+
 # --8<-- [end:note-model]
 
 
@@ -62,6 +75,8 @@ class Flight(Model):
     id: int | None = Field(default=None, primary_key=True)
     origin: Annotated[Airport, ForeignKey(related_name="departures")]
     destination: Annotated[Airport, ForeignKey(related_name="arrivals")]
+
+
 # --8<-- [end:two-fk-model]
 
 
@@ -69,8 +84,12 @@ class Flight(Model):
 class Employee(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
-    manager: Annotated["Employee", ForeignKey(related_name="reports", nullable=True)] = None
+    manager: Annotated[
+        "Employee", ForeignKey(related_name="reports", nullable=True)
+    ] = None
     reports: Relation[list["Employee"]] = BackRef()
+
+
 # --8<-- [end:self-fk-model]
 
 
@@ -92,6 +111,8 @@ class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
     title: str
     tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
+
+
 # --8<-- [end:m2m-model]
 
 
@@ -147,7 +168,9 @@ async def main() -> None:
 
         # --8<-- [start:pinch]
         top = await (
-            Transaction.where(lambda transaction: transaction.account.ledger_id == ledger_a.id)
+            Transaction.where(
+                lambda transaction: transaction.account.ledger_id == ledger_a.id
+            )
             .where(lambda transaction: transaction.amount >= 20)
             .order_by(lambda transaction: transaction.amount, "desc")
             .limit(2)
@@ -187,6 +210,19 @@ async def main() -> None:
         )
         # --8<-- [end:order-by]
         assert [r.id for r in ordered] == [1, 2, 3, 4, 5, 6]
+
+        # --8<-- [start:traversed-paging]
+        # after/before take a decoded tuple — include() is not required to page.
+        next_page = await (
+            Transaction.select()
+            .order_by(lambda transaction: transaction.account.label)
+            .order_by(lambda transaction: transaction.id)
+            .after(("a1", 2))
+            .limit(2)
+            .all()
+        )
+        # --8<-- [end:traversed-paging]
+        assert [r.id for r in next_page] == [3, 4]
 
         # --8<-- [start:instance-eq]
         # `== instance` filters by the shadow FK column, with no join.
@@ -291,9 +327,7 @@ async def _run_m2m() -> None:
     # --8<-- [start:m2m-query]
     # The association context (post.tags) and forward-FK traversal on the tag
     # compose in one statement.
-    admin_tags = await post.tags.where(
-        lambda tag: tag.created_by.role == "admin"
-    ).all()
+    admin_tags = await post.tags.where(lambda tag: tag.created_by.role == "admin").all()
     # --8<-- [end:m2m-query]
     assert {t.id for t in admin_tags} == {1}
 

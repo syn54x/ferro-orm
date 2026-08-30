@@ -218,6 +218,8 @@ To page backward, `.before(position)` is the other start. With a limit it is the
 
 On unbounded `before()`, `first()` and `all()[0]` disagree: `first()` is `limit(1)` (the adjacent previous row) and `all()[0]` is the head of the prefix (the earliest earlier row). That is accepted.
 
+The same chainers work when an order key is a related column (`order_by(lambda t: t.account.label)`) or the query is a projected record: pass a tuple of the order-key values. `position_of` on a model instance requires those relations populated; `position_of` on a `Row` requires every order key to be in the projection.
+
 For robust pagination patterns, see [Pagination](../howto/pagination.md).
 
 ## Executing Queries
@@ -329,6 +331,12 @@ The narrowing is query-wide, not per-clause: the join is rendered once for the w
 ```
 
 Because the sort join is INNER too, ordering by a related column drops relation-less rows — the same narrowing as `where()`. (Use `left_join` to keep them; see below.)
+
+`after()` / `before()` take a decoded **tuple** of those order-key values — `include()` is not required to page. `position_of` on a model instance does require the relation populated.
+
+```python
+--8<-- "docs/examples/traversal.py:traversed-paging"
+```
 
 ### One join per relation path
 
@@ -804,10 +812,14 @@ Projection traversal is ordinary traversal (ADR-0006): it renders an INNER join 
 
 ### Projections compose like any other query
 
-`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, and `first()` all work unchanged; on a plain projection `count()` and `exists()` are unaffected — they measure the same matching rows a full query would. (On an *aggregate* projection they raise with guidance instead — see [Aggregations & Grouped Queries](aggregations.md#the-loud-limits).)
+`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, `after()`/`before()`, and `first()` all work unchanged; on a plain projection `count()` and `exists()` are unaffected — they measure the same matching rows a full query would. (On an *aggregate* projection they raise with guidance instead — see [Aggregations & Grouped Queries](aggregations.md#the-loud-limits).) `position_of` on a `Row` requires every order key in the projection; otherwise pass a tuple.
 
 ```python
 --8<-- "docs/examples/partial_selects.py:compose"
+```
+
+```python
+--8<-- "docs/examples/partial_selects.py:projected-paging"
 ```
 
 ```python
