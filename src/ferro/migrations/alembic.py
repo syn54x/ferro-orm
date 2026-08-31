@@ -9,13 +9,17 @@ except ImportError:
 from .._annotation_utils import _VARCHAR_RE
 from .._core import (
     _ddl_fk_name,
+    _is_ferro_row_policy_name,
     _plan_check_addition,
     _plan_check_drop,
     _plan_check_rebuild,
     _plan_enum_label_addition,
+    _plan_row_security,
+    _plan_row_security_reconcile,
     _render_check_body,
     _render_table_check_body,
     _resolve_storage_type,
+    _row_policy_command_from_catalog_code,
 )
 
 #: SQLAlchemy ``naming_convention`` mirroring the Rust emitter's names. IR-backed
@@ -321,6 +325,7 @@ try:
     from alembic.autogenerate import comparators as _alembic_comparators
     from alembic.autogenerate import renderers as _alembic_renderers
     from alembic.operations.ops import MigrateOperation as _MigrateOperation
+    from alembic.util import DispatchPriority as _AlembicDispatchPriority
 except ImportError:  # pragma: no cover - alembic optional at import time
     _alembic_comparators = None
 
@@ -662,3 +667,451 @@ if _alembic_comparators is not None:
             lines.append("with op.get_context().autocommit_block():")
             lines.extend(f"    op.execute({stmt!r})" for stmt in op.statements)
         return lines
+
+    # -----------------------------------------------------------------------
+    # Row-security comparator (PRD #406, #413/#414; AGENTS.md § I-1 entries
+    # 15/16; ADR-0019).
+    #
+    # SQLAlchemy metadata has no policy construct, so unlike CHECK constraints
+    # (which ride the native ``create_table``/``add_constraint`` diff) row
+    # security needs its own comparator for BOTH a brand-new table (the
+    # create-pass decision, ``_plan_row_security``) and a live one (the
+    # reconciliation decision, ``_plan_row_security_reconcile``). Neither side
+    # is re-derived here — the diff AND the rendered statements come from the
+    # Rust core over FFI, byte-identical to what `auto_migrate` executes.
+    #
+    # `_plan_row_security_reconcile` is called TWICE per live table, with
+    # `destructive` false then true. Its own documented statement order —
+    # flags, missing creates, drifted rebuilds, then (destructive only) orphan
+    # drops and flag teardown — makes the non-destructive call's statements an
+    # exact prefix of the destructive call's, so slicing the tail off isolates
+    # the orphan/teardown-only statements without re-deriving the diff or
+    # rendering anything a second way.
+    #
+    # There is no `migrate_updates`/`migrate_destructive` gate on either op:
+    # running autogenerate is itself the request for a diff, and orphan/
+    # teardown drops are always proposed — the same posture `_plan_check_drop`
+    # takes (ADR-0013): the auto-migrate flags are connect-time safety, a
+    # generated revision is reviewed before it ever runs.
+    #
+    # Two categories the reconcile plan reports are never turned into ops, on
+    # purpose, and silently: a **foreign** policy (ferro does not own it) is
+    # untouched on every migration door already — the checks family's own
+    # comparator has no comment precedent for "found nothing to act on", and
+    # inventing one here would make every revision comment on policies nobody
+    # asked ferro about. An **unverifiable** raw policy is ADR-0019's other
+    # one-way case: ferro cannot tell an edited raw `using=`/`with_check=`
+    # from Postgres's own re-spelling of an unedited one, so — matching the
+    # runtime pass, which only *warns* about it on `migrate_updates` and never
+    # touches it — autogenerate stays silent rather than emit a comment op the
+    # checks family has no shape for either. Both are visible today via the
+    # runtime's own connect-time warnings; a raw policy that needs a change
+    # goes through a reviewed migration written by hand, or gets rewritten in
+    # the shorthand form ferro can compare.
+    # -----------------------------------------------------------------------
+
+    def _live_row_security_by_table(connection) -> dict[str, Dict[str, Any]]:
+        """Every ordinary table's live row-security state: the two
+        ``pg_class`` flags plus every policy on it, ferro-owned or not.
+
+        Mirrors ``src/introspect.rs``'s ``live_table_row_security`` query —
+        same joins, same columns — batched across every table in one pass
+        (the ``_live_check_names_by_table`` shape) instead of one table at a
+        time. The command decode and the ownership test are NOT
+        re-implemented here: both come from the Rust core over FFI
+        (``_row_policy_command_from_catalog_code``,
+        ``_is_ferro_row_policy_name``), the same functions
+        ``live_table_row_security`` calls, so the two introspection paths
+        cannot drift apart (AGENTS.md § I-1).
+
+        Both queries filter ``rel.relkind = 'r'`` (ordinary tables) so a
+        row this batch's two queries disagree about (a partitioned table's
+        policies, say, with no matching flags row) can never fabricate a
+        flags-off default for something the flags query never saw —
+        ``live_table_row_security`` has no equivalent filter, but it reads
+        one already-named table by ``relname`` at a time, where that
+        ambiguity cannot arise.
+        """
+        flag_rows = connection.execute(
+            sa.text(
+                "SELECT rel.relname AS table_name, "
+                "       rel.relrowsecurity AS enabled, "
+                "       rel.relforcerowsecurity AS forced "
+                "FROM pg_class rel "
+                "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
+                "WHERE nsp.nspname = current_schema() AND rel.relkind = 'r'"
+            )
+        ).fetchall()
+        live: dict[str, Dict[str, Any]] = {
+            row.table_name: {
+                "enabled": bool(row.enabled),
+                "forced": bool(row.forced),
+                "policies": [],
+            }
+            for row in flag_rows
+        }
+
+        policy_rows = connection.execute(
+            sa.text(
+                "SELECT rel.relname AS table_name, "
+                "       pol.polname::text AS name, "
+                "       pol.polcmd::text AS cmd, "
+                "       pol.polpermissive AS permissive, "
+                "       pg_get_expr(pol.polqual, pol.polrelid)::text AS using_expr, "
+                "       pg_get_expr(pol.polwithcheck, pol.polrelid)::text AS with_check_expr, "
+                "       COALESCE(("
+                "           SELECT string_agg(role_name, ',' ORDER BY role_name)"
+                "           FROM ("
+                "               SELECT CASE WHEN oid = 0 THEN 'public'"
+                "                           ELSE pg_get_userbyid(oid)::text END AS role_name"
+                "               FROM unnest(pol.polroles) AS oid"
+                "           ) AS resolved"
+                "       ), '') AS roles "
+                "FROM pg_policy pol "
+                "JOIN pg_class rel ON rel.oid = pol.polrelid "
+                "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
+                "WHERE nsp.nspname = current_schema() AND rel.relkind = 'r' "
+                "ORDER BY rel.relname, pol.polname"
+            )
+        ).fetchall()
+        for row in policy_rows:
+            table = live.setdefault(
+                row.table_name, {"enabled": False, "forced": False, "policies": []}
+            )
+            name = row.name
+            command = _row_policy_command_from_catalog_code(row.cmd) or row.cmd
+            roles = [role for role in (row.roles or "").split(",") if role]
+            table["policies"].append(
+                {
+                    "name": name,
+                    "command": command,
+                    "restrictive": not bool(row.permissive),
+                    "using": row.using_expr,
+                    "with_check": row.with_check_expr,
+                    "roles": roles,
+                    "ferro_owned": _is_ferro_row_policy_name(name),
+                }
+            )
+        return live
+
+    def _synthetic_ferro_owned_live(
+        names: list[str], *, enabled: bool, forced: bool
+    ) -> Dict[str, Any]:
+        """The ``LiveRowSecurity`` shape for exactly the policies ONE op is
+        about to create, as they will exist immediately after its upgrade
+        runs — enough for ``_teardown_row_security_statements`` to compute a
+        real reverse for it.
+
+        Command, body, and roles are irrelevant to that computation (dropping
+        a policy by name and reading the flags do not need them) and are left
+        at defaults; only the name and ``ferro_owned=True`` matter.
+
+        ``enabled``/``forced`` must be the flags AS THEY WILL STAND right
+        after this op's upgrade runs — never hardcoded. A table whose row
+        security predates the declaration (a DBA enabled it; ferro's op only
+        adds a policy) must reverse to "policy dropped, flags untouched": if
+        the caller passed ``enabled=True`` unconditionally here, the computed
+        reverse would ``DISABLE ROW LEVEL SECURITY`` on a fence ferro never
+        turned on — the exact incident
+        ``ferro_ddl_lowering::excess_row_security_flag_statements``'s own
+        ownership gate exists to prevent, reached through the back door of a
+        downgrade instead of ``migrate_destructive``.
+        """
+        return {
+            "enabled": enabled,
+            "forced": forced,
+            "policies": [
+                {
+                    "name": name,
+                    "command": "all",
+                    "restrictive": False,
+                    "using": None,
+                    "with_check": None,
+                    "roles": [],
+                    "ferro_owned": True,
+                }
+                for name in names
+            ],
+        }
+
+    def _teardown_row_security_statements(
+        model_ir: Dict[str, Any], live_row_security: Dict[str, Any]
+    ) -> list[str]:
+        """What it takes to undo exactly the row security captured in
+        ``live_row_security`` for this table.
+
+        Computed by asking the SAME reconcile decision forward, with a
+        declaration that no longer exists: treating the table as though its
+        model declares no ``__ferro_rls__`` turns every ferro-owned policy in
+        ``live_row_security`` into an orphan, and — because at least one is
+        ferro-owned (`ferro_manages_row_security`) — its flags into a
+        teardown too. That is exactly ADR-0013's destructive ladder and
+        ADR-0019's ownership gate, already exercised by
+        ``test_row_security_orphans.py``'s "declaration removed" case; this
+        helper reuses it rather than rendering a second `DROP POLICY` /
+        `DISABLE ROW LEVEL SECURITY` template in Python. It is how
+        ``FerroRowSecurityOp.reverse()`` gets real SQL instead of an empty
+        downgrade.
+        """
+        synthetic_model_ir = dict(model_ir)
+        synthetic_model_ir["row_security"] = None
+        plan = json.loads(
+            _plan_row_security_reconcile(
+                json.dumps(synthetic_model_ir),
+                json.dumps(live_row_security),
+                "postgres",
+                True,
+            )
+        )
+        return plan["statements"]
+
+    def _teardown_flag_labels(statements: list[str]) -> list[str]:
+        """Human labels for the flag-only statements inside a teardown tail
+        (``"force"`` for ``NO FORCE ROW LEVEL SECURITY``, ``"enabled"`` for
+        ``DISABLE ROW LEVEL SECURITY``), for ``FerroRowSecurityDropOp``'s diff
+        tuple — the same text classification
+        ``row_security_teardown_warning`` uses on its own rendered output, so
+        a force=False flip with no orphaned policy still names *something* in
+        the diff instead of an empty tuple next to real DDL.
+        """
+        labels = []
+        for statement in statements:
+            if "NO FORCE" in statement:
+                labels.append("force")
+            elif "DISABLE" in statement:
+                labels.append("enabled")
+        return labels
+
+    class FerroRowSecurityOp(_MigrateOperation):
+        """Autogenerate carrier for one table's missing row-security flags and
+        policies, plus any policy rebuilt because its metadata (command,
+        permissive/restrictive, clauses, or roles) drifted.
+
+        Renders to plain ``op.execute`` calls — a generated revision does not
+        import ferro to run.
+        """
+
+        def __init__(
+            self,
+            table_name: str,
+            statements: list[str],
+            names: list[str],
+            reverse_statements: list[str],
+        ) -> None:
+            self.table_name = table_name
+            self.statements = statements
+            self.names = names
+            self.reverse_statements = reverse_statements
+
+        def to_diff_tuple(self):
+            return ("ferro_row_security", self.table_name, tuple(self.names))
+
+        def reverse(self) -> "FerroRowSecurityOp":
+            return FerroRowSecurityOp(
+                self.table_name,
+                self.reverse_statements,
+                self.names,
+                self.statements,
+            )
+
+    class FerroRowSecurityDropOp(_MigrateOperation):
+        """Autogenerate carrier for one table's leftover ferro-owned row
+        policies (orphans), the flag teardown that goes with a fully removed
+        declaration, AND the narrower ``force=False`` flip on its own (a
+        live-declared model whose declaration still exists but no longer
+        asks for ``force=True`` — ``NO FORCE ROW LEVEL SECURITY`` with no
+        policy drop alongside it, so ``names`` can be flag-only labels from
+        ``_teardown_flag_labels`` with no policy name in it at all).
+
+        Renders to plain ``op.execute`` calls — a generated revision does not
+        import ferro to run.
+        """
+
+        def __init__(
+            self, table_name: str, statements: list[str], names: list[str]
+        ) -> None:
+            self.table_name = table_name
+            self.statements = statements
+            self.names = names
+
+        def to_diff_tuple(self):
+            return ("ferro_drop_row_security", self.table_name, tuple(self.names))
+
+        def reverse(self) -> "FerroRowSecurityDropOp":
+            # Recreating a dropped/orphaned policy's exact live body is a
+            # reviewed edit, not an autogenerated downgrade — the same call
+            # FerroCheckDropOp makes for a leftover CHECK, and ADR-0019's own
+            # posture: ferro reports the bodies it does not own or no longer
+            # declares, it does not reconstruct them. This is deliberately
+            # true of the force=False flip too: an empty reverse never
+            # restores FORCE ROW LEVEL SECURITY, the same "reviewed edit, not
+            # an autogenerated one" call, for the same reason — the op has no
+            # record of whether the live FORCE predated ferro's own
+            # declaration or was ferro's to begin with.
+            return FerroRowSecurityDropOp(self.table_name, [], self.names)
+
+    # `priority=LAST`: unlike the check/enum comparators above (which only
+    # ever touch a table already live — a table this SAME revision creates
+    # rides its own `create_table` op's inline constraints, no separate op
+    # needed), this comparator's new-table branch appends a real op that
+    # must run AFTER that table exists. Alembic's own table-creation
+    # comparator is merged into `autogen_context.comparators` per-instance
+    # (`Plugin.populate_autogenerate_priority_dispatch`), AFTER whatever a
+    # module already registered directly on the global dispatcher at import
+    # time — so a same-priority (`MEDIUM`, the default) registration here
+    # would run and append to `upgrade_ops.ops` BEFORE `create_table` is
+    # even in the list. Running last guarantees it is there to append after.
+    @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.LAST)
+    def _compare_row_security(autogen_context, upgrade_ops, schemas) -> None:
+        if autogen_context.dialect.name != "postgresql":
+            return
+        metadata = autogen_context.metadata
+        if metadata is None:
+            return
+
+        from .. import ensure_resolved_modelset
+
+        models = ensure_resolved_modelset().get("payload", {}).get("models", [])
+        if not models:
+            return
+
+        live = _live_row_security_by_table(autogen_context.connection)
+
+        add_ops: list[FerroRowSecurityOp] = []
+        drop_ops: list[FerroRowSecurityDropOp] = []
+        for model_ir in models:
+            if not isinstance(model_ir, dict):
+                continue
+            table_name = model_ir.get("table_name")
+            if not isinstance(table_name, str) or not table_name:
+                continue
+            if table_name not in metadata.tables:
+                continue
+
+            table_live = live.get(table_name)
+            if table_live is None:
+                # A table THIS revision is about to create: no SA construct
+                # renders row security inline (metadata has no policy
+                # concept), so a declared table gets its own op here, off the
+                # create-pass decision (#418) instead of the reconciliation
+                # one — there is no live state to reconcile against yet.
+                row_security_ir = model_ir.get("row_security")
+                if not row_security_ir:
+                    continue
+                create_plan = json.loads(
+                    _plan_row_security(json.dumps(model_ir), "postgres")
+                )
+                if not create_plan["statements"]:
+                    continue
+                # A brand-new table's create pass genuinely enables it (there
+                # is no live state to have enabled it already) and forces it
+                # iff the declaration asks for that — both real post-upgrade
+                # facts, not an assumption.
+                after_live = _synthetic_ferro_owned_live(
+                    create_plan["names"],
+                    enabled=True,
+                    forced=bool(row_security_ir.get("force", False)),
+                )
+                reverse_statements = _teardown_row_security_statements(
+                    model_ir, after_live
+                )
+                add_ops.append(
+                    FerroRowSecurityOp(
+                        table_name,
+                        create_plan["statements"],
+                        create_plan["names"],
+                        reverse_statements,
+                    )
+                )
+                continue
+
+            model_ir_json = json.dumps(model_ir)
+            live_json = json.dumps(table_live)
+            add_plan = json.loads(
+                _plan_row_security_reconcile(
+                    model_ir_json, live_json, "postgres", False
+                )
+            )
+            full_plan = json.loads(
+                _plan_row_security_reconcile(model_ir_json, live_json, "postgres", True)
+            )
+            # Invariant `plan_row_security_reconcile` documents on itself:
+            # the destructive call's statements begin with EXACTLY the
+            # non-destructive call's statements. This comparator relies on
+            # that prefix to split an add-op from a drop-op by slicing
+            # rather than a second traversal — if it ever stopped holding,
+            # slicing would silently misclassify teardown DDL as part of the
+            # (ungated) add op. Fail loudly instead (AGENTS.md § I-6).
+            add_statements = add_plan["statements"]
+            prefix_len = len(add_statements)
+            if full_plan["statements"][:prefix_len] != add_statements:
+                raise RuntimeError(
+                    f"ferro internal invariant violated for table {table_name!r}: "
+                    "_plan_row_security_reconcile's destructive-call statements "
+                    "must extend its non-destructive-call statements as a strict "
+                    "prefix. This is a ferro bug in ferro_ddl_lowering, not a "
+                    "data problem — please file an issue."
+                )
+            teardown_statements = full_plan["statements"][prefix_len:]
+
+            if add_statements:
+                reverse_statements: list[str] = []
+                if add_plan["missing"]:
+                    # A rebuilt policy's reverse is empty (mirrors
+                    # FerroCheckRebuildOp): its OLD body was either
+                    # unverifiable raw SQL ferro never rendered, or the
+                    # server's own re-spelling of what ferro already writes,
+                    # and reconstructing either one is a reviewed edit, not
+                    # an autogenerated downgrade. A newly created policy has
+                    # no such history, so only `missing` gets a real reverse.
+                    #
+                    # The post-upgrade flags fed into the synthetic live
+                    # state are exactly what THIS op turned on — never a
+                    # blanket `True`: a table whose row security predates
+                    # the declaration (flags already on, force=False so no
+                    # FORCE emitted either) must reverse to "policy dropped,
+                    # flags untouched", not to `DISABLE ROW LEVEL SECURITY`
+                    # on a fence ferro never enabled.
+                    row_security_ir = model_ir.get("row_security") or {}
+                    enable_emitted = not table_live["enabled"]
+                    force_emitted = (
+                        bool(row_security_ir.get("force", False))
+                        and not table_live["forced"]
+                    )
+                    after_live = _synthetic_ferro_owned_live(
+                        add_plan["missing"],
+                        enabled=enable_emitted,
+                        forced=force_emitted,
+                    )
+                    reverse_statements = _teardown_row_security_statements(
+                        model_ir, after_live
+                    )
+                add_ops.append(
+                    FerroRowSecurityOp(
+                        table_name,
+                        add_statements,
+                        add_plan["missing"] + add_plan["drifted"],
+                        reverse_statements,
+                    )
+                )
+            if teardown_statements:
+                drop_ops.append(
+                    FerroRowSecurityDropOp(
+                        table_name,
+                        teardown_statements,
+                        full_plan["extra"] + _teardown_flag_labels(teardown_statements),
+                    )
+                )
+
+        upgrade_ops.ops.extend(add_ops)
+        upgrade_ops.ops.extend(drop_ops)
+
+    @_alembic_renderers.dispatch_for(FerroRowSecurityOp)
+    def _render_row_security(autogen_context, op: FerroRowSecurityOp) -> list[str]:
+        return [f"op.execute({stmt!r})" for stmt in op.statements]
+
+    @_alembic_renderers.dispatch_for(FerroRowSecurityDropOp)
+    def _render_row_security_drops(
+        autogen_context, op: FerroRowSecurityDropOp
+    ) -> list[str]:
+        return [f"op.execute({stmt!r})" for stmt in op.statements]

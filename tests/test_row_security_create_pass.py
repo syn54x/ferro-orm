@@ -420,7 +420,7 @@ def test_a_model_without_a_declaration_keeps_an_unchanged_envelope():
 
 
 def test_row_security_statement_parity_pin():
-    """The FFI the Alembic operation (#414) will consume renders the same bytes
+    """The FFI the Alembic operation (#414) consumes renders the same bytes
     the create pass executes. If either side drifts, the two migration doors
     would police the same model differently."""
     _define_ledger_row()

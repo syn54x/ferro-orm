@@ -1926,6 +1926,20 @@ pub struct RowSecurityReconcilePlan {
 /// `NO FORCE` / `DISABLE` teardown (policies go before the flag that made them
 /// matter).
 ///
+/// **Invariant callers may rely on**: calling this function twice for the
+/// SAME `(model, live)` pair — once with `destructive: false`, once with
+/// `destructive: true` — the destructive call's `statements` begin with
+/// EXACTLY the non-destructive call's `statements`, in the same order. The
+/// flags/missing/drifted portion of the plan never depends on `destructive`
+/// (only the trailing orphan-drop/flag-teardown portion does), so the
+/// destructive call's statements are always the non-destructive call's as a
+/// strict prefix, plus a destructive-only tail. The Alembic autogenerate
+/// comparator (`src/ferro/migrations/alembic.py`) relies on exactly this to
+/// split an add-op from a drop-op by slicing that tail off, rather than
+/// tracing the decision a second way — pinned by
+/// `plan_row_security_reconcile_destructive_is_the_non_destructive_plan_plus_a_strict_tail`
+/// below, with every drift category present at once.
+///
 /// Postgres-only (ADR-0014): SQLite has no row-level security, so this returns
 /// an empty plan and the create pass's one warning per table stands alone.
 pub fn plan_row_security_reconcile(
@@ -4959,6 +4973,82 @@ mod tests {
                 "ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY".to_string(),
                 "ALTER TABLE \"ledgerrow\" DISABLE ROW LEVEL SECURITY".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn plan_row_security_reconcile_destructive_is_the_non_destructive_plan_plus_a_strict_tail() {
+        // The invariant plan_row_security_reconcile's own doc comment
+        // states and the Alembic comparator relies on: with every drift
+        // category present at once (a missing policy, a drifted one, an
+        // orphan, and a force flag not yet applied), the destructive call's
+        // statements begin with EXACTLY the non-destructive call's
+        // statements, and the tail is destructive-only.
+        let mut model = reconcile_model();
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![
+                shorthand_policy(), // drifted below: live command differs
+                setting_policy(
+                    "rls_ledgerrow_invitee",
+                    "n",
+                    "pinch.invitee_id",
+                    ferro_schema_ir::RowPolicyCommand::All,
+                    false,
+                ), // missing: no live counterpart at all
+            ],
+        });
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: false, // declared force=true, live not forced -> a flag statement
+            policies: vec![
+                LiveRowPolicy {
+                    name: "rls_ledgerrow_ledger_id".to_string(),
+                    command: "select".to_string(), // declared "all": drift
+                    restrictive: false,
+                    using: Some(catalog_fixtures::UUID_SHORTHAND_LIVE.to_string()),
+                    with_check: None,
+                    roles: public_roles(),
+                    ferro_owned: true,
+                },
+                LiveRowPolicy {
+                    name: "rls_ledgerrow_orphan".to_string(),
+                    command: "select".to_string(),
+                    restrictive: false,
+                    using: Some("(true)".to_string()),
+                    with_check: None,
+                    roles: public_roles(),
+                    ferro_owned: true,
+                },
+            ],
+        };
+
+        let non_destructive =
+            plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
+        let destructive =
+            plan_row_security_reconcile(&model, &live, Dialect::Postgres, true).unwrap();
+
+        // Every category actually fired, or this pin would not be exercising
+        // what it claims to.
+        assert_eq!(
+            non_destructive.missing,
+            vec!["rls_ledgerrow_invitee".to_string()]
+        );
+        assert_eq!(
+            non_destructive.drifted,
+            vec!["rls_ledgerrow_ledger_id".to_string()]
+        );
+        assert_eq!(destructive.extra, vec!["rls_ledgerrow_orphan".to_string()]);
+        assert!(!non_destructive.statements.is_empty());
+
+        let prefix_len = non_destructive.statements.len();
+        assert_eq!(
+            destructive.statements[..prefix_len],
+            non_destructive.statements[..]
+        );
+        assert_eq!(
+            destructive.statements[prefix_len..],
+            vec![render_drop_row_policy("ledgerrow", "rls_ledgerrow_orphan")]
         );
     }
 

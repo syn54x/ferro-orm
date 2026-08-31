@@ -383,3 +383,18 @@ def _normalize_row_policy_expr(expr: str) -> str:
     through this one function; equal output means the same predicate.
     """
     ...
+
+def _row_policy_command_from_catalog_code(code: str) -> str | None:
+    """Decode one ``pg_policy.polcmd`` code into ferro's command vocabulary.
+
+    ``None`` for a code ferro does not recognize. The Alembic autogenerate
+    comparator's own ``pg_policy`` introspection uses this to build the
+    ``LiveRowPolicy`` payload ``_plan_row_security_reconcile`` expects —
+    the same decode ``src/introspect.rs``'s ``live_table_row_security`` uses
+    (AGENTS.md § I-1).
+    """
+    ...
+
+def _is_ferro_row_policy_name(name: str) -> bool:
+    """Whether a live policy name follows ferro's ``rls_`` ownership prefix."""
+    ...

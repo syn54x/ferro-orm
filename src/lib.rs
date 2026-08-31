@@ -211,6 +211,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_normalize_row_policy_expr, m)?)?;
     m.add_function(wrap_pyfunction!(
+        naming_ffi::_row_policy_command_from_catalog_code,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_is_ferro_row_policy_name, m)?)?;
+    m.add_function(wrap_pyfunction!(
         introspect::_live_table_checks_for_test,
         m
     )?)?;

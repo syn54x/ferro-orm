@@ -406,3 +406,29 @@ pub fn _plan_row_security_reconcile(
 pub fn _normalize_row_policy_expr(expr: String) -> String {
     ferro_ddl_lowering::normalize_row_policy_expr(&expr)
 }
+
+/// Decode one `pg_policy.polcmd` catalog code into ferro's command vocabulary
+/// (`"all"`, `"select"`, `"insert"`, `"update"`, `"delete"`), or `None` for a
+/// code ferro does not recognize.
+///
+/// The Alembic autogenerate comparator introspects `pg_policy` directly (it
+/// has no `EngineHandle` to call `live_table_row_security` through) and needs
+/// this exact decode to build the `LiveRowPolicy` payload
+/// `_plan_row_security_reconcile` expects — the same table
+/// `src/introspect.rs`'s `live_table_row_security` uses, over FFI, so the two
+/// introspection paths cannot drift apart (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _row_policy_command_from_catalog_code(code: String) -> Option<String> {
+    ferro_ddl_lowering::row_policy_command_from_catalog_code(&code).map(str::to_string)
+}
+
+/// Whether a live policy name follows ferro's `rls_` ownership convention.
+///
+/// The Alembic autogenerate comparator's own `pg_policy` introspection needs
+/// this to fill in `LiveRowPolicy.ferro_owned` — the same test
+/// `src/introspect.rs`'s `live_table_row_security` applies, over FFI
+/// (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _is_ferro_row_policy_name(name: String) -> bool {
+    ferro_ddl_lowering::is_ferro_row_policy_name(&name)
+}

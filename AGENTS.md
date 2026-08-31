@@ -118,10 +118,11 @@ For a single model, every emitter must agree on:
     table over FFI (`_core._ddl_row_policy_name`, `_core._rls_shorthand_cast`,
     `_core._rls_command_matrix`) rather than keeping its own copies, so a
     declaration fails at class definition for exactly the columns and clauses
-    DDL would fail for. The Alembic autogenerate operation (#414) **will**
-    consume the whole emission over FFI (`_core._plan_row_security`; the seam
-    and its byte-parity with the create pass are already pinned by
-    `test_row_security_statement_parity_pin`). Pinned by
+    DDL would fail for. The Alembic autogenerate operation
+    (`FerroRowSecurityOp` in `src/ferro/migrations/alembic.py`) consumes the
+    whole emission over FFI (`_core._plan_row_security`, for a table this
+    same revision creates — the seam and its byte-parity with the create pass
+    are pinned by `test_row_security_statement_parity_pin`). Pinned by
     `tests/test_row_security_create_pass.py` and the ferro-ddl-lowering unit
     pins. Postgres-only; SQLite gets one warning per table and no DDL
     (ADR-0014 posture). See PRD #406.
@@ -148,20 +149,38 @@ For a single model, every emitter must agree on:
     `row_security_migrator_warning`). The
     auto-migrate reconciliation pass consumes it directly (`src/migrate.rs`,
     after that table's column and data steps); the Alembic autogenerate
-    operation (#414) **will** consume it over FFI
-    (`_core._plan_row_security_reconcile`, whose byte-parity with the pass is
-    already pinned). Live state comes from `src/introspect.rs`
+    operation (`FerroRowSecurityOp` / `FerroRowSecurityDropOp` in
+    `src/ferro/migrations/alembic.py`) consumes it over FFI
+    (`_core._plan_row_security_reconcile`, called once non-destructive and
+    once destructive per live table — the destructive call's statements are
+    the non-destructive call's as an exact prefix, so the comparator slices
+    the tail to isolate the orphan/teardown-only statements without
+    re-deriving anything; whose byte-parity with the pass is pinned). Live
+    state comes from `src/introspect.rs` for the runtime pass
     (`live_table_row_security`: `pg_class.relrowsecurity` /
-    `relforcerowsecurity` plus `pg_policy` — name, command, permissive,
-    both `pg_get_expr` bodies, and `polroles` resolved to role names — with
-    `ferro_owned` decided by `is_ferro_row_policy_name`). Pinned by
+    `relforcerowsecurity` plus `pg_policy` — name, command, permissive, both
+    `pg_get_expr` bodies, and `polroles` resolved to role names — with
+    `ferro_owned` decided by `is_ferro_row_policy_name`) and from the
+    comparator's own equivalent `pg_class`/`pg_policy` query for the Alembic
+    side (`_live_row_security_by_table` in `src/ferro/migrations/alembic.py`,
+    the same shape `_live_check_names_by_table` uses) — the command decode
+    and the ownership test are the same two functions over FFI
+    (`_core._row_policy_command_from_catalog_code`,
+    `_core._is_ferro_row_policy_name`), never a second copy. Pinned by
     `tests/test_row_security_reconcile.py`,
     `tests/test_row_security_rebuild.py`,
     `tests/test_row_security_orphans.py` and the ferro-ddl-lowering unit pins
     (which carry real `pg_get_expr` fixtures). Postgres-only: SQLite plans
-    nothing and keeps the create pass's single warning (ADR-0014). See
-    ADR-0019 (rebuild the bodies ferro writes, report the bodies you write;
-    flags are one-way) and PRD #406.
+    nothing and keeps the create pass's single warning (ADR-0014). Two
+    reported categories never become an autogenerate op, on purpose and
+    silently: a **foreign** policy (never altered on any migration door) and
+    an **unverifiable** raw body (ADR-0019: ferro cannot tell an edit from
+    Postgres's own re-spelling, so it changes nothing and only warns on
+    `migrate_updates`) — the checks family has no comment-op precedent for
+    either shape, so autogenerate stays silent and the runtime's own
+    connect-time warnings remain the only word on them. See ADR-0019
+    (rebuild the bodies ferro writes, report the bodies you write; flags are
+    one-way) and PRD #406.
 
 ### Why this invariant exists
 
