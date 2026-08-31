@@ -44,12 +44,15 @@ query) wraps itself in an implicit transaction to carry it — see
 [Session settings](#session-settings) below. This is safe on direct Postgres,
 PgBouncer transaction mode, RDS Proxy, and the Supabase pooler alike.
 
-**`connection` delivery is opt-in and never automatic** — `PoolConfig(pool=...,
-settings_delivery="connection")`. It pins one pool connection per
-settings-bearing session and sets values with plain `SET` once, for the whole
-session. That is **an explicit operator promise that this pool talks to
-Postgres directly.** Reaching for it against a transaction-mode pooler is the
-exact leak the paragraph above describes — see
+**`connection` delivery is opt-in and never automatic** —
+`connect(url, pool=PoolConfig(settings_delivery="connection"))`. It pins one
+pool connection per settings-bearing session and applies values once, for the
+whole session, with the same parameter-bound `set_config($1, $2, false)` —
+never a plain `SET`, never interpolated SQL, just `is_local=false` instead of
+`true` so the value survives past the transaction that set it. That is **an
+explicit operator promise that this pool talks to Postgres directly.**
+Reaching for it against a transaction-mode pooler is the exact leak the
+paragraph above describes — see
 [Connection delivery mode](#connection-delivery-mode) for the full trade-off
 before opting in.
 
@@ -72,22 +75,32 @@ itself.
 
 There is deliberately no adoption-gate flag (no `migrate_rls=False` to hold
 the line back). Declaring `RowSecurity` and running `migrate_updates` enforces
-it immediately, the same as every other schema artifact Ferro manages. The one
-automatic guardrail is at connect time: if the reconciliation pass is about to
-turn `FORCE` on for a table and the role running the migration is neither a
-superuser nor `BYPASSRLS`, Ferro warns —
+it immediately, the same as every other schema artifact Ferro manages.
+
+One automatic guardrail exists, and it's narrower than a general reversed-order
+detector — know its exact shape before you rely on it. On a
+`connect(migrate_updates=True)` (or `migrate_destructive=True`, which implies
+it) connect, for every **existing** table whose model declares
+`RowSecurity(force=True)`, Ferro checks whether the connecting role is a
+superuser or `BYPASSRLS` — with no check of whether that table's live `FORCE`
+flag was already set before this connect — and warns if it is not:
 
 > The connected role is neither a superuser nor BYPASSRLS, and this migration
 > touches table(s) 'invoice' with FORCE ROW LEVEL SECURITY. Row policies apply
 > to the migrating role too, so a backfill or data step can silently see and
 > update zero rows. Migrate as a role with BYPASSRLS if this pass moves data.
 
-— which catches the same-shaped mistake for your migrator before it reaches
-your users: if a role this unprivileged is about to be filtered by its own
-migration, ordinary application traffic on an unscoped connection is in
-exactly as much trouble. Give your migrator `BYPASSRLS` (see
-[BYPASSRLS](#bypassrls) below) and treat the warning as a deploy-ordering
-smoke test, not just a migration-safety one.
+This fires only on the `migrate_updates` connect path, and only for tables
+that already existed before that connect — a plain `auto_migrate=True` create
+pass (or a bare `create_tables()` call) never reaches this check, because a
+freshly created table has no existing rows for a migration step to silently
+miss. It still catches the same-shaped mistake for your migrator on every
+later `migrate_updates` deploy: if a role this unprivileged would be filtered
+by its own migration, ordinary application traffic on an unscoped connection
+is in exactly as much trouble. Give your migrator `BYPASSRLS` (see
+[BYPASSRLS](#bypassrls) below), and don't rely on this warning alone to catch
+a reversed rollout on its very first deploy — prove settings delivery in
+staging first, as step 1 above says.
 
 ## Declaring row security
 
@@ -143,41 +156,25 @@ AND-compose with everything. That is what lets a model express Postgres'
 full "owner has full access, an invited member can read" shape declaratively —
 own scope-fence plus shared-read:
 
-```python
-class Doc(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    ledger_id: uuid.UUID
-    owner: str
-    title: str
+=== "Assignment"
 
-    __ferro_rls__: ClassVar = RowSecurity(
-        # RESTRICTIVE: AND-composes with everything below. No ledger scope,
-        # no rows — whoever you are.
-        RowPolicy(
-            name="tenant", column="ledger_id", setting="pinch.ledger_id",
-            restrictive=True,
-        ),
-        # Permissive, unscoped by command: the owner reads and writes.
-        RowPolicy(
-            name="owner_all",
-            using="\"owner\" = NULLIF(current_setting('pinch.member', true), '')",
-            with_check="\"owner\" = NULLIF(current_setting('pinch.member', true), '')",
-        ),
-        # Permissive, SELECT-only: an invited member reads and nothing more.
-        RowPolicy(
-            name="invitee_read",
-            command="select",
-            using=(
-                '"id" IN (SELECT doc_id FROM membership WHERE member = '
-                "NULLIF(current_setting('pinch.member', true), ''))"
-            ),
-        ),
-    )
-```
+    ```python
+    --8<-- "docs/examples/row_level_security.py:multi_policy"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/row_level_security_annotated.py:multi_policy"
+    ```
 
 Every policy needs a unique `name` per model (duplicates are a
 class-definition-time error); `command=` scopes a policy to `"all"` (the
-default), `"select"`, `"insert"`, `"update"`, or `"delete"`.
+default), `"select"`, `"insert"`, `"update"`, or `"delete"`. `name=` is a
+**suffix**, not the live name: `RowPolicy(name="tenant", ...)` on `Doc`
+becomes the catalog policy `rls_doc_tenant`, matching the `rls_<table>_<name>`
+naming every other policy on this page follows — it must itself match
+`[a-z][a-z0-9_]*` and may not already start with `rls_`.
 
 ### The raw escape hatch
 
@@ -185,9 +182,12 @@ When the shorthand's single column/setting comparison isn't enough — a
 membership subquery, a function call, boolean composition — pass `using=`
 and/or `with_check=` directly, as `owner_all` and `invitee_read` do above.
 The raw form requires `name=` (there's no column to derive it from), and
-Postgres' own command rules apply: `using=` only on commands that read
-existing rows, `with_check=` only on commands that write, and a `FOR INSERT`
-policy needs `with_check=` since there's no existing row to read.
+Ferro validates the same command/clause rules Postgres itself enforces —
+eagerly, at class-definition time, before any connection exists: `using=` is
+rejected on a command that only writes (Postgres never consults it there),
+`with_check=` is rejected on a command that only reads, a `command="insert"`
+policy requires `with_check=` (there's no existing row for `using=` to read),
+and every other command requires `using=`.
 
 ## Session settings
 
@@ -196,16 +196,17 @@ policy needs `with_check=` since there's no existing row to read.
 ```python
 async with ferro.engines.session(settings={"pinch.ledger_id": "acme"}):
     open_invoices = await Invoice.where(
-        lambda invoice: invoice.status == "open"
+        lambda invoice: invoice.total > 0
     ).all()
 ```
 
 Every operation in the session is scoped, whether or not you opened a
 `transaction()` — a plain `where().all()`, `create()`, `save()`, or raw query
-outside one wraps itself in an implicit transaction to carry the value, at a
-cost of roughly two extra round-trips per operation not already inside a
-`transaction()` block. Put a multi-operation flow in `transaction()` and it
-pays once, for the whole block, instead of once per operation.
+outside one wraps itself in an implicit transaction to carry the value: a
+`BEGIN`, the `set_config` batch, and a `COMMIT` around the operation's own
+statement(s), three extra round-trips instead of zero. Put a multi-operation
+flow in `transaction()` and it pays that cost once, for the whole block,
+instead of once per operation.
 
 Settings are validated eagerly, before any connection is touched: values must
 be `str` (Postgres settings are text), keys must contain a dot
@@ -247,25 +248,60 @@ async with ferro.engines.session(settings={"pinch.ledger_id": "acme", "pinch.rol
         ...  # sees ledger_id=acme (inherited), role=auditor (overridden)
 ```
 
-Settings follow the **session**, not the connection route — a nested session
-opened against a different named connection (`transaction(using="reporting")`
-included) still carries the outer scope. A settings-bearing session (or a
-settings-bearing operation routed with `using=`) against a non-Postgres
-connection raises loudly at open/at the operation, rather than silently
-scoping nothing; **inherited** settings on a non-Postgres nested session are
-carried but sit inert — opening the session and running its operations both
-work, because there is nothing there to apply them to.
+Settings follow the **session**, not the connection route: nest a session on
+a different named connection and it inherits the outer scope there too —
+
+```python
+async with ferro.engines.session("primary", settings={"pinch.ledger_id": "acme"}):
+    async with ferro.engines.session("secondary"):
+        async with ferro.transaction(using="secondary") as tx:
+            ...  # sees pinch.ledger_id = 'acme' here too
+```
+
+— which is the only way to reach a second Postgres connection with the outer
+scope. `transaction(using=...)` cannot do it on its own while a session is
+already ambient: an explicit `using=` that names a connection **other than**
+the ambient session's own is a routing error (`ValueError`), not a way to
+cross connections — open the nested session first, as above, and `using=`
+naming that session's own connection then matches it with nothing to
+conflict.
+
+Only settings **declared** at a session's own open (`settings=` on that call)
+have to be honourable on that connection: opening a settings-bearing session
+against a non-Postgres connection raises immediately, rather than silently
+scoping nothing. **Inherited** settings are treated differently — a nested
+session (or an operation an inherited-settings session runs) against a
+non-Postgres connection never raises. It simply cannot apply what it inherited
+there: opening the session and running its operations both work, unwrapped
+and unscoped, because there is nothing on that backend to `set_config` in the
+first place.
 
 ### Scope stability mid-operation
 
-`set_config` takes effect for any operation or `transaction()` **started**
-after it returns — from any task, since the change commits before
-`set_config`'s `await` returns. An operation already in flight when
-`set_config` runs keeps running under the scope it started with; this is the
-pre-existing operation-atomicity guarantee at work, not a race `set_config`
-has to resolve. The one place it gets special handling is a `transaction()`
-block already open in the *same* task that calls `set_config`: there, the very
-next statement in that same transaction sees the new value immediately.
+`set_config` takes effect for anything **started** after it returns — from
+any task, since the change commits before `set_config`'s `await` returns. What
+"already running" means splits three ways, and the split matters if a session
+is ever shared across tasks:
+
+- **A self-wrapped, multi-statement operation** (the implicit transaction a
+  chunked `bulk_create` opens, say) that is already in flight keeps running
+  under the scope it started with — the pre-existing operation-atomicity
+  guarantee at work, not a race `set_config` has to resolve.
+- **An explicit `transaction()` block already open when `set_config` runs** —
+  in the calling task or any other task sharing the session — gets the new
+  value re-applied (a fresh `SET LOCAL` batch on that transaction's own
+  connection) and its very next statement sees it, regardless of which task
+  opened the block. This is what makes the same-task case from the example
+  above work; it is not special-cased, it falls out of re-applying to every
+  transaction the session currently has open.
+- **Under `connection` delivery**, the new value also lands on the session's
+  pinned connection immediately, at database-session scope. That reaches
+  further than the transaction case: a *sibling* task's self-wrapped
+  multi-statement operation already in flight can observe the change from its
+  next statement onward too — the one place `connection` delivery's scope
+  stability is looser than `transaction` delivery's. Reaching this case at all
+  requires sharing one session across tasks and changing its scope underneath
+  them, which is an unusual thing to do on purpose.
 
 ## The NULLIF contract
 
@@ -369,6 +405,13 @@ Litestar's `AbstractMiddleware`, placed **after** authentication in the stack,
 reads the tenant from the auth-populated `scope["user"]` and wraps the
 downstream call in a settings-bearing session:
 
+!!! note "`AbstractMiddleware` vs `ASGIMiddleware`"
+    The snippet below targets `AbstractMiddleware`, valid on every Litestar
+    2.x release. Litestar 2.15 introduced `ASGIMiddleware` as the newer,
+    recommended base; `AbstractMiddleware` still works but is the legacy
+    path going forward. The `exclude=`/`exclude_opt_key` shape and the
+    `Provide` warning below apply to both.
+
 ```python
 from litestar.middleware import AbstractMiddleware
 from litestar.types import ASGIApp, Receive, Scope, Send
@@ -453,8 +496,11 @@ app = FastAPI(dependencies=[Depends(tenant_session)])
 
 `dependencies=` at the `FastAPI(...)` level runs for every route the app
 serves, with no per-handler signature to remember — the same "run always"
-property the Litestar middleware recipe relies on. Opt a router out by
-mounting it separately, without the dependency.
+property the Litestar middleware recipe relies on. It also applies to routers
+attached with `app.include_router(...)`, since those routes still belong to
+this same `app`. The only way to opt a set of routes out is to serve them from
+a genuinely separate ASGI application `app.mount(...)`s alongside this one —
+a mounted sub-app has its own dependency graph and never sees `tenant_session`.
 
 ### Generic ASGI
 
@@ -492,14 +538,17 @@ would.
 
 `PoolConfig(settings_delivery="connection")` is the opt-in alternative to the
 default `transaction` delivery: a settings-bearing session pins one pool
-connection at its first operation, applies its settings once with plain `SET`,
-and sends every later statement bare — no per-operation wrap.
+connection at its first operation, applies its settings once with a
+parameter-bound `set_config($1, $2, false)` batch (`is_local=false`, so the
+value lives for the whole session rather than one transaction), and sends
+every later statement bare — no per-operation wrap.
 
 **When to use it.** Only when you know the pool is a **direct** connection to
 Postgres — no PgBouncer transaction mode, no transaction-mode proxy in front
-of it. It trades roughly two round-trips per non-transactional operation for
-one round-trip for the session's entire life, which matters for
-request-heavy, short-transaction workloads on a direct pool.
+of it. It trades the three extra round-trips (`BEGIN`, `set_config`, `COMMIT`)
+`transaction` delivery spends on every non-transactional operation for one
+`set_config` round-trip spent once, for the session's entire life — which
+matters for request-heavy, short-transaction workloads on a direct pool.
 
 **The concurrency cap.** A settings-bearing session holds its pinned
 connection from first use until it closes, so no more settings-bearing
@@ -513,11 +562,12 @@ session run sequentially, and a sibling operation waits out an open
 `transaction()` block itself are unaffected — they already own the
 connection.
 
-**The release-probe cost.** While no session on a pool is pinned, this mode
-costs nothing at all. While *any* session on that pool is pinned, every
-connection release on that pool performs one marker check — including
-releases from settings-less sessions and sessionless operations sharing the
-same pool.
+**The release-probe cost.** This mode installs a release hook that a
+`transaction`-delivery pool never registers at all. While no session on this
+pool is pinned, the hook costs no query — one atomic check and it returns.
+While *any* session on this pool is pinned, every connection release on that
+pool pays one `SELECT current_setting(...)` — including releases from
+settings-less sessions and sessionless operations sharing the same pool.
 
 **`autocommit=True` is tenant-scoped here — the reverse of `transaction`
 delivery.** Under the default mode, `autocommit=True` opts a statement out of
@@ -572,31 +622,64 @@ first — until the declaration is restored or `migrate_destructive` tears it
 down explicitly. A policy Ferro doesn't recognize (any name that isn't
 `rls_*`) is reported and never altered, on any flag; an orphaned `rls_*`
 policy (declared once, no longer) warns on `migrate_updates` and drops only
-under `migrate_destructive`. See [ADR-0019](https://github.com/syn54x/ferro-orm/blob/main/docs/adr/0019-row-policy-drift-and-the-one-way-flags.md)
-for the full reconciliation contract, including why a table a DBA enabled RLS
-on by hand — with only their own policies — is left completely alone by every
-one of these mechanisms.
+under `migrate_destructive`.
+
+**Teardown only touches tables Ferro has evidence it manages.** Every one of
+the mechanisms above — the removed-declaration warning, the orphan drop, the
+`migrate_destructive` teardown itself — is gated on that table carrying at
+least one live `rls_*` policy. `relrowsecurity` alone carries no authorship,
+so a table a DBA enabled RLS on by hand, with only their own policies, is left
+completely alone by all of it — no warning accusing anyone of removing a
+declaration nobody wrote, and no flag a destructive run for an unrelated
+column could take with it (ADR-0019).
 
 ## Alembic
 
 With the [Alembic bridge](migrations.md#alembic-for-production) installed,
-`alembic revision --autogenerate` emits the same policy DDL the runtime
-reconciliation pass would, from the same drift comparison — add, rebuild, and
-drop operations, plus the `ENABLE`/`FORCE` flags, as a custom autogenerate
-operation (row security has no `SQLAlchemy` metadata construct to carry it,
-the same reason table checks use one).
+`alembic revision --autogenerate` emits the same DDL the runtime
+reconciliation pass would, from the same drift comparison, as two custom
+autogenerate operations (row security has no `SQLAlchemy` metadata construct
+to carry it, the same reason table checks use one):
+
+- **The add operation** carries a table's missing policies, its ferro-owned
+  policies rebuilt for metadata drift, and the `ENABLE`/`FORCE` flags it
+  needs turned on — a rebuild rides this same op, not a separate one.
+- **The drop operation** carries orphaned ferro-owned policies, and the
+  teardown statements for a removed declaration or a `force=True` →
+  `force=False` flip.
+
+**Autogenerate is silent exactly where the runtime pass only warns.** Raw
+(`using=`/`with_check=`) policies whose body ferro cannot verify, and
+policies ferro does not own at all, are things the runtime reconciliation
+pass reports with a `UserWarning` on every connect (see
+[Raw policies and drift](#raw-policies-and-drift)) — autogenerate does not
+carry either of those into the generated revision as a DDL op or a comment.
+Reading the revision's diff is not a substitute for watching your
+`migrate_updates` warnings for those two cases.
 
 Downgrade semantics are deliberately asymmetric, matching the one-way flags
-above:
+above — and narrower than "add reverses to drop" in two places worth knowing
+before you trust a downgrade blindly:
 
-- A **new declaration**'s downgrade drops the policy it added — a clean
-  reverse of an add.
+- A **newly added** policy's downgrade drops exactly that policy — a clean
+  reverse.
+- A **rebuilt** policy's downgrade is an intentional no-op: its old body was
+  either raw SQL ferro never rendered, or the server's own re-spelling of
+  what ferro already writes, and reconstructing either is a reviewed edit.
+  **This means a table whose add op mixes new policies with rebuilt ones
+  downgrades to the new policies gone and the rebuilt ones still in their
+  post-upgrade bodies** — the op's reverse only undoes what it added, never
+  what it rebuilt.
+- **A flags-only add op** (every policy already existed; only `ENABLE`/
+  `FORCE` needed turning on) has an **empty** downgrade — there is no policy
+  add to reverse, and turning a flag back off is the same reviewed-edit call
+  as the point below.
 - A **removed declaration**'s downgrade is an intentional no-op: recreating a
-  dropped policy's exact live body from a downgrade path is a reviewed edit,
-  not something autogenerate should reconstruct.
-- A **flag-only** change (`force=True` → `force=False`) downgrades to nothing:
-  restoring `FORCE ROW LEVEL SECURITY` is a decision for a human, not an
-  automatic reverse.
+  dropped or orphaned policy's exact live body from a downgrade path is a
+  reviewed edit, not something autogenerate should reconstruct.
+- A **flag-only** change (`force=True` → `force=False`) downgrades to
+  nothing: restoring `FORCE ROW LEVEL SECURITY` is a decision for a human,
+  not an automatic reverse.
 - Flags and policies that predate Ferro's declaration (a DBA's own fence) are
   never touched by either the upgrade or the downgrade — the same ownership
   gate that protects them at runtime protects them here.

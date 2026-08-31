@@ -228,10 +228,15 @@ async def test_declared_policy_scopes_plain_queries_and_rejects_cross_tenant_wri
             assert await _amounts(TenantInvoice) == [100, 200]
 
             # WITH CHECK: a write outside the session's own ledger is rejected
-            # by the very same declaration, not by application code.
-            with pytest.raises(Exception) as excinfo:
+            # by the very same declaration, not by application code. Postgres
+            # reports a row-security violation as SQLSTATE 42501, which isn't
+            # one of ferro's IntegrityError subclasses (unique/FK/not-null/
+            # check) -- it falls through to OperationalError, so pin both the
+            # class and the SQLSTATE rather than a bare `Exception` substring.
+            with pytest.raises(ferro.exceptions.OperationalError) as excinfo:
                 await TenantInvoice.create(ledger_id=LEDGER_B, amount=1)
-            assert "policy" in str(excinfo.value).lower()
+            assert excinfo.value.sqlstate == "42501"
+            assert "row-level security policy" in str(excinfo.value).lower()
 
             # The session recovers and keeps working after the failed write.
             await TenantInvoice.create(ledger_id=LEDGER_A, amount=300)
@@ -407,11 +412,15 @@ async def test_owner_and_restrictive_tenant_fence_compose_end_to_end(
 
         # Wrong ledger: the RESTRICTIVE tenant fence AND-composes, so even the
         # owner's permissive policy cannot bring the row back — even though
-        # `owner` still matches.
+        # `owner` still matches. Assert what IS visible too, so a broken
+        # policy that hides everything (or a broken query) can't make the
+        # `not in` below pass vacuously.
         async with engines.session(
             "tenant", settings={LEDGER_KEY: str(LEDGER_A), MEMBER_KEY: "alice"}
         ):
-            assert other_ledger_doc.id not in {row.id for row in await SharedDoc.all()}
+            visible_ids = {row.id for row in await SharedDoc.all()}
+            assert visible_ids == {doc.id}, "alice's own in-ledger doc must still show up"
+            assert other_ledger_doc.id not in visible_ids
     finally:
         async with engines.session():
             await _drop_tenant_role(tenant_role)
