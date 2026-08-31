@@ -725,6 +725,25 @@ impl EngineConnection {
         self.execute_sql("ROLLBACK").await?;
         Ok(())
     }
+
+    /// Take this connection out of its pool and close it.
+    ///
+    /// For the connection whose state we can no longer vouch for: a failed
+    /// `ROLLBACK` may leave it idle-in-transaction, and sqlx only pings on
+    /// release, so dropping it would hand that state to the next checkout.
+    /// `detach` severs the pool's claim (the pool opens a fresh connection in
+    /// its place) and `close` says goodbye to the server properly.
+    ///
+    /// # Errors
+    /// The `sqlx::Error` from the close handshake. Callers are already on an
+    /// error path — the point is that the connection is gone either way.
+    pub async fn detach_and_close(self) -> Result<(), sqlx::Error> {
+        use sqlx::Connection;
+        match self {
+            EngineConnection::Sqlite(conn) => conn.detach().close().await,
+            EngineConnection::Postgres(conn) => conn.detach().close().await,
+        }
+    }
 }
 
 fn materialize_engine_row<R>(row: &R) -> EngineRow

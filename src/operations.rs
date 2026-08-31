@@ -7,6 +7,10 @@ use crate::backend::{
     EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind, TableCatalog,
 };
 use crate::query::{JoinPlan, QueryPlan};
+use crate::session_settings::{
+    SessionSetting, begin_transaction_with_settings, ensure_postgres_for_settings,
+    settings_would_apply,
+};
 use crate::state::{
     Dialect, TRANSACTION_REGISTRY, TransactionConnection, TransactionHandle, connection_for_route,
     engine_for_connection, ensure_session_idle_for_close, register_session, session_state,
@@ -1686,6 +1690,11 @@ fn backend_column_value_expr(
 /// Root transactions call `BEGIN` on a fresh pool connection. Nested transactions require
 /// `parent_tx_id` and issue `SAVEPOINT` on the parent's connection.
 ///
+/// When the route's session carries session settings, the root `BEGIN` is
+/// immediately followed by one parameter-bound `set_config` batch (see
+/// [`crate::session_settings`]) so every statement in the transaction — nested
+/// savepoints included — runs with the session's settings applied.
+///
 /// Args:
 ///     route (RouteHandle): Resolved route (FF-D D3); `route.tx_id` is the
 ///         *parent* transaction for nested savepoints, or `None` to open a
@@ -1695,8 +1704,9 @@ fn backend_column_value_expr(
 ///     str: Opaque transaction id for `commit_transaction` / `rollback_transaction`.
 ///
 /// # Errors
-/// `PyRuntimeError` when the parent transaction id is unknown, or on
-/// BEGIN/SAVEPOINT failure.
+/// `PyRuntimeError` when the parent transaction id is unknown, when a
+/// settings-bearing session routes a root transaction to a non-Postgres
+/// connection, or on BEGIN/SAVEPOINT/settings-batch failure.
 #[pyfunction]
 #[pyo3(signature = (route))]
 pub fn begin_transaction(
@@ -1725,10 +1735,16 @@ pub fn begin_transaction(
             )?;
         } else {
             let (connection_name, engine, _, _) = route_engine(r)?;
-            let conn = engine
-                .begin_transaction_connection()
-                .await
-                .map_err(|e| crate::errors::map_db_error("Failed to BEGIN", e))?;
+            // Settings delivery (`transaction` mode): the shared seam applies
+            // the session's set_config batch before any user statement can run
+            // in this transaction. Nested savepoints need nothing — SET LOCAL
+            // is transaction-scoped.
+            let conn = begin_transaction_with_settings(
+                &engine,
+                r.session_id.as_deref(),
+                "Failed to BEGIN",
+            )
+            .await?;
 
             tx_insert(
                 r.session_id.as_deref(),
@@ -1853,17 +1869,38 @@ pub fn rollback_transaction(
 ///
 /// Args:
 ///     using (str | None): Connection to bind; defaults to the selected default connection.
+///     settings (list[tuple[str, str]] | None): Effective session settings in
+///         declaration order — this session's own settings merged over those it
+///         inherited from an enclosing session. Python has already validated and
+///         merged them (see `ferro.session.Session`). Stored on the session and
+///         applied at every Postgres `BEGIN` it opens.
+///     declared (list[tuple[str, str]] | None): The subset this session declared
+///         itself. Only these are a promise the backend must be able to keep;
+///         inherited settings lie inert on a non-Postgres connection so that
+///         ordinary multi-database nesting keeps working.
 ///
 /// Returns:
 ///     tuple[str, str]: `(session_id, connection_name)`.
 ///
 /// # Errors
-/// Same routing errors as [`crate::state::connection_for_route`].
+/// Same routing errors as [`crate::state::connection_for_route`], plus
+/// `PyRuntimeError` when `declared` is non-empty and the resolved connection is
+/// not Postgres — a tenancy scope the author asked for and the backend cannot
+/// apply fails at open rather than silently no-opping.
 #[pyfunction]
-#[pyo3(signature = (using=None))]
-pub fn open_session(using: Option<String>) -> PyResult<(String, String)> {
-    let (connection_name, _) = active_connection_for_route(using)?;
-    let session_id = register_session();
+#[pyo3(signature = (using=None, settings=None, declared=None))]
+pub fn open_session(
+    using: Option<String>,
+    settings: Option<Vec<SessionSetting>>,
+    declared: Option<Vec<SessionSetting>>,
+) -> PyResult<(String, String)> {
+    let (connection_name, engine) = active_connection_for_route(using)?;
+    ensure_postgres_for_settings(
+        engine.backend(),
+        &connection_name,
+        &declared.unwrap_or_default(),
+    )?;
+    let session_id = register_session(settings.unwrap_or_default());
     Ok((session_id, connection_name))
 }
 
@@ -2557,16 +2594,32 @@ pub fn save_bulk_records<'py>(
 
         // A bare multi-statement call opens its own transaction: the single
         // statement it replaces was atomic, and chunking must not regress
-        // that. With an ambient transaction (or a single statement) the
-        // existing execution path already gives the right boundary.
-        let own_tx: Option<TransactionConnection> = if tx_conn.is_none() && statements.len() > 1 {
-            let conn = engine.begin_transaction_connection().await.map_err(|e| {
-                crate::errors::map_db_error(&format!("Bulk save failed for '{}'", name), e)
-            })?;
-            Some(Arc::new(tokio::sync::Mutex::new(conn)))
-        } else {
-            None
-        };
+        // that. With an ambient transaction the existing execution path
+        // already gives the right boundary.
+        //
+        // A settings-bearing session wraps too, even for a single statement.
+        // Settings ride transactions, so without the wrap whether a
+        // `bulk_create` was tenant-scoped would depend on whether the batch
+        // happened to be big enough to chunk — the same call scoped at 13,200
+        // rows and unscoped at 13,000. Tenancy must not be a function of input
+        // size.
+        //
+        // Either way the `BEGIN` goes through the same settings seam, so the
+        // rows this batch writes are scoped exactly as they would be inside
+        // `transaction()`.
+        let wrap_for_settings = settings_would_apply(backend, r.session_id.as_deref())?;
+        let own_tx: Option<TransactionConnection> =
+            if tx_conn.is_none() && (statements.len() > 1 || wrap_for_settings) {
+                let conn = begin_transaction_with_settings(
+                    &engine,
+                    r.session_id.as_deref(),
+                    &format!("Bulk save failed for '{}'", name),
+                )
+                .await?;
+                Some(Arc::new(tokio::sync::Mutex::new(conn)))
+            } else {
+                None
+            };
         let exec_conn = tx_conn.as_ref().or(own_tx.as_ref());
 
         let mut rows_affected: u64 = 0;

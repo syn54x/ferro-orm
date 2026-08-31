@@ -17,6 +17,7 @@ mod operations;
 mod query;
 mod schema;
 mod schema_bind;
+mod session_settings;
 mod state;
 
 use pyo3::prelude::*;

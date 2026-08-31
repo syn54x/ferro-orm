@@ -24,6 +24,9 @@ _CURRENT_TRANSACTION_CONNECTION: ContextVar[str | None] = ContextVar(
 class SessionLike(Protocol):
     session_id: str
     connection_name: str
+    # Settings this session runs with, snapshotted at enter; empty for the
+    # sessions that declare none. Read by a nested session to inherit from.
+    effective_settings: dict[str, str]
 
 
 _CURRENT_SESSION: ContextVar[SessionLike | None] = ContextVar(
