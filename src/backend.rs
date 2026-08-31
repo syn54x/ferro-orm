@@ -116,12 +116,14 @@ impl PoolSpec {
 /// reason about how: it is to refuse it.
 ///
 /// **What it costs, plainly.** The hook runs on every connection this pool
-/// releases, but it only *asks the database anything* while at least one
-/// settings-bearing session holds a pin (`pins`). With no pin outstanding —
-/// every moment on a `transaction`-delivery pool, and every moment a
-/// `connection`-delivery pool is serving only settings-less work — it returns
-/// immediately and adds nothing. While a pin is outstanding, each release of
-/// some *other* connection pays one `SELECT current_setting(...)`.
+/// releases. With no pin outstanding — every moment on a
+/// `transaction`-delivery pool, and every moment a `connection`-delivery pool
+/// is serving only settings-less work — it reads one atomic and returns,
+/// adding nothing. But while *any* session on this pool holds a pin, every
+/// connection release pool-wide pays one `SELECT current_setting(...)`,
+/// including releases by settings-less sessions and by sessionless
+/// operations. That cost is stated where the mode is documented
+/// (`ferro.PoolConfig`) rather than buried here.
 ///
 /// Returning `Ok(false)` tells sqlx to close the connection instead of pooling
 /// it. The replacement it opens runs `after_connect` again, so pool-level
@@ -469,8 +471,35 @@ impl EngineHandle {
         // After the swap, so a concurrent operation cannot re-populate the
         // cache from the old pool between clear and swap.
         self.clear_catalog_cache();
+        self.warn_if_pins_block_refresh();
         old_pool.close().await;
         Ok(())
+    }
+
+    /// Warn before a pool refresh waits on connections a pinned session owns.
+    ///
+    /// Closing the old pool waits for every connection to come back, and a
+    /// session under `connection` settings delivery holds one until it closes
+    /// — which may be for the length of a request, or longer. So a schema
+    /// change in one task can sit behind a tenant-scoped session in another,
+    /// with nothing on screen to say why. This says why.
+    ///
+    /// A warning rather than an error: waiting is correct (a refreshed pool
+    /// must not leave stale connections behind), and the operator, not Ferro,
+    /// decides whether to run migrations against a live tenant workload.
+    fn warn_if_pins_block_refresh(&self) {
+        let pinned = self.pins.load(Ordering::SeqCst);
+        if pinned == 0 {
+            return;
+        }
+        crate::emit_user_warning_always(&format!(
+            "refreshing the connection pool while {pinned} settings-bearing session(s) \
+             hold a pinned connection (settings_delivery=\"connection\"). Closing the \
+             old pool waits for those connections, and they are not released until \
+             those sessions close — so this will block until they do. Run schema \
+             changes before opening tenant-scoped sessions, or on a connection \
+             configured for the default `transaction` delivery."
+        ));
     }
 
     /// Acquire every pool connection and clear its statement cache. Holding

@@ -319,6 +319,163 @@ async def test_a_failed_multi_statement_operation_rolls_back_and_keeps_the_pin(d
 
 
 # ---------------------------------------------------------------------------
+# One session, one connection, therefore one operation at a time
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_sibling_atomic_operations_stay_atomic(db_url):
+    """Per-operation atomicity survives many tasks sharing one pinned session.
+
+    This is the bug a per-*statement* lock would leave open. Concurrent
+    ``bulk_create`` calls each open a transaction on the one connection the
+    session owns; interleaved, the second ``BEGIN`` is a no-op Postgres merely
+    warns about, the first ``COMMIT`` commits the other operation's
+    half-written rows, and the other's rollback rolls back nothing. The pin is
+    therefore claimed for the whole operation, not each statement.
+
+    The unique index makes half the batches fail partway, so "atomic" has
+    something to prove: a failed batch's rows must be entirely absent while
+    every successful batch's are entirely present. Many pairs at once, because
+    the window a per-statement lock would leave open is narrow — the
+    deterministic proof of the claim is
+    ``test_a_sibling_operation_waits_for_an_open_transaction`` below; this one
+    is the end-to-end scenario it protects.
+    """
+    await _open_pinned_pool(db_url, max_connections=2)
+    tag = uuid.uuid4().hex[:8]
+    pairs = 8
+
+    async def good(n: int) -> None:
+        await DeliveryRow.bulk_create(
+            [
+                DeliveryRow(ledger=ACME, label=f"good-{n}-a-{tag}"),
+                DeliveryRow(ledger=ACME, label=f"good-{n}-b-{tag}"),
+            ]
+        )
+
+    async def doomed(n: int) -> None:
+        clash = f"clash-{n}-{tag}"
+        with pytest.raises(Exception):
+            await DeliveryRow.bulk_create(
+                [
+                    DeliveryRow(ledger=ACME, label=f"doomed-{n}-{tag}"),
+                    DeliveryRow(ledger=ACME, label=clash),
+                    DeliveryRow(ledger=ACME, label=clash),
+                ]
+            )
+
+    async with engines.session(settings={TENANT_KEY: ACME}):
+        pinned_pid = await _pid()
+        # The timeout is the regression detector: a pin that deadlocks fails
+        # this test instead of hanging the suite.
+        await asyncio.wait_for(
+            asyncio.gather(
+                *(good(n) for n in range(pairs)),
+                *(doomed(n) for n in range(pairs)),
+            ),
+            timeout=30,
+        )
+
+        labels = {
+            row.label
+            for row in await DeliveryRow.where(lambda row: row.ledger == ACME).all()
+        }
+        for n in range(pairs):
+            assert f"good-{n}-a-{tag}" in labels and f"good-{n}-b-{tag}" in labels, (
+                "an operation that succeeded lost rows to a sibling's rollback"
+            )
+            assert f"doomed-{n}-{tag}" not in labels, (
+                "an operation that failed left rows behind — a sibling's COMMIT "
+                "committed them"
+            )
+            assert f"clash-{n}-{tag}" not in labels
+        assert await _pid() == pinned_pid, "every operation ran on the one pin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_a_sibling_operation_waits_for_an_open_transaction(db_url):
+    """A sibling task's operation runs after the block, never inside it.
+
+    Without the claim, task B's insert would land inside task A's open
+    transaction and vanish with A's rollback. Rolling A back is exactly how
+    the test can tell: B's row has to survive it.
+    """
+    await _open_pinned_pool(db_url, max_connections=2)
+    tag = uuid.uuid4().hex[:8]
+    holding = asyncio.Event()
+    release = asyncio.Event()
+
+    class Abandon(Exception):
+        pass
+
+    async with engines.session(settings={TENANT_KEY: ACME}):
+
+        async def holder() -> None:
+            try:
+                async with ferro.transaction():
+                    await DeliveryRow.create(ledger=ACME, label=f"rolled-{tag}")
+                    holding.set()
+                    await release.wait()
+                    raise Abandon
+            except Abandon:
+                pass
+
+        holding_task = asyncio.create_task(holder())
+        await asyncio.wait_for(holding.wait(), timeout=10)
+
+        # Created outside the transaction's context, so this task routes as an
+        # ordinary operation on the session — not as part of the block.
+        sibling = asyncio.create_task(
+            DeliveryRow.create(ledger=ACME, label=f"kept-{tag}")
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(sibling), timeout=0.5)
+        assert not sibling.done(), (
+            "a sibling task's operation ran while a transaction() block held "
+            "the pinned connection"
+        )
+
+        release.set()
+        await asyncio.wait_for(holding_task, timeout=10)
+        await asyncio.wait_for(sibling, timeout=10)
+
+        labels = {
+            row.label
+            for row in await DeliveryRow.where(lambda row: row.ledger == ACME).all()
+        }
+        assert f"kept-{tag}" in labels, (
+            "the sibling's row was inside the rolled-back transaction"
+        )
+        assert f"rolled-{tag}" not in labels
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_an_operation_inside_its_own_transaction_still_runs(db_url):
+    """The reentrancy case: same task, inside the block, takes no new claim.
+
+    If an operation inside ``transaction()`` tried to claim the pin the block
+    already holds, every transactional write in this mode would deadlock. It
+    doesn't — the block owns the span, and its operations ride it.
+    """
+    await _open_pinned_pool(db_url, max_connections=1)
+    tag = uuid.uuid4().hex[:8]
+
+    async def body() -> None:
+        async with engines.session(settings={TENANT_KEY: ACME}):
+            async with ferro.transaction():
+                await DeliveryRow.create(ledger=ACME, label=f"inner-1-{tag}")
+                await DeliveryRow.create(ledger=ACME, label=f"inner-2-{tag}")
+                assert await _setting(TENANT_KEY) == ACME
+            assert await DeliveryRow.where(lambda row: row.ledger == ACME).count() >= 2
+
+    await asyncio.wait_for(body(), timeout=20)
+
+
+# ---------------------------------------------------------------------------
 # Cancellation: a discarded connection, never a recycled dirty one
 # ---------------------------------------------------------------------------
 

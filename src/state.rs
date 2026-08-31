@@ -12,7 +12,7 @@ use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
@@ -439,50 +439,198 @@ pub struct TransactionHandle {
     pub savepoint_name: Option<String>,
     /// Connection name the transaction was opened on (for routing and identity map keys).
     pub connection_name: String,
+    /// This block's exclusive claim on a session's pinned connection
+    /// (`connection` settings delivery), held from `BEGIN` until the handle
+    /// is removed from the registry and dropped by `COMMIT`/`ROLLBACK`.
+    ///
+    /// That span is the point: while a `transaction()` block is open on a
+    /// pinned session, a sibling task's operation must wait rather than land
+    /// its statements *inside* the block — where the block's `COMMIT` would
+    /// commit them early, and its `ROLLBACK` would throw them away.
+    /// Operations in the same task *inside* the block ride the ambient
+    /// transaction and take no claim of their own, so they are reentrant by
+    /// construction.
+    ///
+    /// `Arc` only because [`TransactionHandle`] is `Clone` and a
+    /// `MutexGuard` is not; the claim is released when the last clone goes,
+    /// which is the handle the commit path took ownership of. `None` for
+    /// every root transaction on a pool connection, and for every nested
+    /// savepoint (its root holds the claim).
+    pub pin_hold: Option<Arc<crate::session_settings::PinHold>>,
 }
 
-/// One checked-out connection behind an async mutex — or `None`, once it has
-/// been discarded.
+/// One checked-out connection, and the tombstone that says it must never be
+/// used or pooled again.
 ///
 /// Every route an operation's statements can run on is one of these: the
 /// connection an explicit `transaction()` block holds, the implicit
 /// transaction `transaction` settings delivery opens around a lone operation,
 /// and the connection a session pins under `connection` delivery.
 ///
-/// The `Option` is what makes *discarding* expressible from a synchronous
-/// `Drop`. A connection whose state Ferro can no longer vouch for — one
-/// abandoned mid-statement by a cancelled task, one whose `ROLLBACK` failed —
-/// must never go back to the pool, and the only way to sever the pool's claim
-/// is [`EngineConnection::detach`], which consumes the connection. Taking it
-/// out of the slot is how a `Drop` gets to own it; what stays behind is an
-/// empty slot, which is a loud error at the next use rather than a silent
-/// reuse of a connection that is already gone.
-pub type ConnectionSlot = Mutex<Option<EngineConnection>>;
+/// # Why the connection lives inside an `Option`
+///
+/// It is what makes *discarding* expressible from a synchronous `Drop`. A
+/// connection whose state Ferro can no longer vouch for — one abandoned
+/// mid-statement by a cancelled task, one whose `ROLLBACK` failed, one still
+/// carrying a session's settings — must never go back to the pool, and the
+/// only way to sever the pool's claim is [`EngineConnection::detach`], which
+/// consumes the connection. Taking it out of the slot is how a `Drop` gets to
+/// own it.
+///
+/// # Why there is also a tombstone
+///
+/// Taking it out needs the lock, and a `Drop` cannot wait for one. In the rare
+/// case where the lock is held by a statement still in flight, [`Self::discard`]
+/// sets `discarded` — which needs no lock — and leaves the taking to whoever
+/// can do it: a spawned task, or, failing even that, this slot's own `Drop`,
+/// which has exclusive access by definition and needs no runtime at all.
+///
+/// So there is no path, on a runtime or off one, by which a slot that has been
+/// discarded hands its connection back to the pool. A discarded slot is a loud
+/// error at the next use ([`SlotGuard::live`]), never a silent reuse.
+pub struct ConnectionSlot {
+    conn: Mutex<Option<EngineConnection>>,
+    discarded: AtomicBool,
+}
 
 /// A [`ConnectionSlot`] shared between the transaction registry, a session's
 /// pin, and the operations running on it.
 pub type TransactionConnection = Arc<ConnectionSlot>;
 
 pub(crate) const DISCARDED_CONNECTION_MSG: &str =
-    "This connection was discarded (its operation was cancelled, or its \
-     ROLLBACK failed) and cannot run further statements. Ferro never returns \
-     a connection whose state it cannot vouch for to the pool.";
+    "This connection is no longer available to this route: it was either \
+     released back to the pool (its session closed) or discarded because \
+     Ferro could not vouch for its state (a cancelled operation, or a failed \
+     ROLLBACK). Ferro never reuses either.";
 
-/// The live connection in a slot guard, or a loud error when it is gone.
-///
-/// The single read seam for [`ConnectionSlot`], so "the connection was
-/// discarded" has one message and one shape wherever a statement is issued.
-///
-/// # Errors
-/// `sqlx::Error::Protocol` carrying [`DISCARDED_CONNECTION_MSG`].
-pub fn live_connection(
-    guard: &mut Option<EngineConnection>,
-) -> Result<&mut EngineConnection, sqlx::Error> {
-    guard
-        .as_mut()
-        .ok_or_else(|| sqlx::Error::Protocol(DISCARDED_CONNECTION_MSG.to_string()))
+impl ConnectionSlot {
+    /// Put a freshly checked-out connection in a slot.
+    #[must_use]
+    pub fn new(conn: EngineConnection) -> Self {
+        Self {
+            conn: Mutex::new(Some(conn)),
+            discarded: AtomicBool::new(false),
+        }
+    }
+
+    /// Lock the slot for the duration of one statement.
+    pub async fn lock(&self) -> SlotGuard<'_> {
+        SlotGuard {
+            slot: self,
+            guard: self.conn.lock().await,
+        }
+    }
+
+    /// Lock the slot without waiting — for the synchronous discard paths.
+    pub fn try_lock(&self) -> Option<SlotGuard<'_>> {
+        self.conn
+            .try_lock()
+            .ok()
+            .map(|guard| SlotGuard { slot: self, guard })
+    }
+
+    /// Whether this slot has been given up on.
+    #[must_use]
+    pub fn is_discarded(&self) -> bool {
+        self.discarded.load(Ordering::SeqCst)
+    }
+
+    /// Give up on this slot's connection: it will never be used or pooled
+    /// again, whether or not the caller can take it out right now.
+    ///
+    /// Lock-free on purpose — a `Drop` can always do this much.
+    pub fn tombstone(&self) {
+        self.discarded.store(true, Ordering::SeqCst);
+    }
+
+    /// Take the connection out of a slot the caller owns outright — the
+    /// implicit transaction an operation opened for itself, which nothing
+    /// else can reach. No lock is needed for exclusive access.
+    #[must_use]
+    pub fn take_owned(&mut self) -> Option<EngineConnection> {
+        self.conn.get_mut().take()
+    }
 }
 
+/// A slot dropped while tombstoned discards its connection.
+///
+/// The backstop for the one case [`crate::session_settings`]'s discard path
+/// cannot finish itself: the lock was held, and there was no runtime to spawn
+/// the take onto. `Drop` has exclusive access, so it needs neither.
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        if !self.is_discarded() {
+            return;
+        }
+        let taken = self.conn.get_mut().take();
+        discard_connection(taken);
+    }
+}
+
+/// One locked slot.
+pub struct SlotGuard<'a> {
+    slot: &'a ConnectionSlot,
+    guard: tokio::sync::MutexGuard<'a, Option<EngineConnection>>,
+}
+
+impl SlotGuard<'_> {
+    /// The connection to run a statement on, or a loud error when this slot no
+    /// longer has one to give.
+    ///
+    /// The single read seam for [`ConnectionSlot`], so "this connection is
+    /// gone" has one message and one shape wherever a statement is issued.
+    ///
+    /// # Errors
+    /// `sqlx::Error::Protocol` carrying [`DISCARDED_CONNECTION_MSG`].
+    pub fn live(&mut self) -> Result<&mut EngineConnection, sqlx::Error> {
+        if self.slot.is_discarded() {
+            return Err(sqlx::Error::Protocol(DISCARDED_CONNECTION_MSG.to_string()));
+        }
+        self.guard
+            .as_mut()
+            .ok_or_else(|| sqlx::Error::Protocol(DISCARDED_CONNECTION_MSG.to_string()))
+    }
+
+    /// Whether the slot still holds a connection.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.guard.is_none()
+    }
+
+    /// Take the connection out to hand it back to the pool. Only ever called
+    /// after Ferro has put the connection back the way it found it.
+    #[must_use]
+    pub fn release(&mut self) -> Option<EngineConnection> {
+        self.guard.take()
+    }
+
+    /// Take the connection out to throw it away, tombstoning the slot first so
+    /// that nothing can use it in the meantime.
+    #[must_use]
+    pub fn discard(&mut self) -> Option<EngineConnection> {
+        self.slot.tombstone();
+        self.guard.take()
+    }
+}
+
+/// Sever the pool's claim on a connection and close it in the background.
+///
+/// [`EngineConnection::detach`] is synchronous, which is the whole point: the
+/// pool loses its claim right here, before anything else can be handed the
+/// connection, and opens a replacement. The close handshake is spawned when
+/// there is a runtime to spawn it on; without one the value simply drops and
+/// the socket shuts.
+pub fn discard_connection(conn: Option<EngineConnection>) {
+    let Some(conn) = conn else {
+        return;
+    };
+    let detached = conn.detach();
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            let _ = detached.close().await;
+        });
+    }
+}
 impl TransactionHandle {
     /// Create a root transaction handle after `BEGIN`.
     ///
@@ -491,9 +639,10 @@ impl TransactionHandle {
     /// * `connection_name` — Registered Ferro connection name.
     pub fn root(conn: EngineConnection, connection_name: String) -> Self {
         Self {
-            conn: Arc::new(Mutex::new(Some(conn))),
+            conn: Arc::new(ConnectionSlot::new(conn)),
             savepoint_name: None,
             connection_name,
+            pin_hold: None,
         }
     }
 
@@ -508,11 +657,18 @@ impl TransactionHandle {
     /// # Arguments
     /// * `conn` — The session's pinned connection slot.
     /// * `connection_name` — Registered Ferro connection name.
-    pub fn on_pinned(conn: TransactionConnection, connection_name: String) -> Self {
+    /// * `hold` — The block's claim on the pinned connection, held until the
+    ///   handle is dropped by `COMMIT`/`ROLLBACK`.
+    pub fn on_pinned(
+        conn: TransactionConnection,
+        connection_name: String,
+        hold: crate::session_settings::PinHold,
+    ) -> Self {
         Self {
             conn,
             savepoint_name: None,
             connection_name,
+            pin_hold: Some(Arc::new(hold)),
         }
     }
 
@@ -531,6 +687,10 @@ impl TransactionHandle {
             conn,
             savepoint_name: Some(savepoint_name),
             connection_name,
+            // The root holds the claim for the whole nest; `SET LOCAL` and
+            // connection ownership are transaction-scoped, not
+            // savepoint-scoped.
+            pin_hold: None,
         }
     }
 }

@@ -38,7 +38,7 @@
 
 use crate::backend::{EngineBindValue, EngineConnection, EngineHandle};
 use crate::state::{
-    ConnectionSlot, SessionState, TransactionConnection, TransactionHandle, live_connection,
+    ConnectionSlot, SessionState, TransactionConnection, TransactionHandle, discard_connection,
     session_state,
 };
 use ferro_ddl_lowering::Dialect;
@@ -46,7 +46,7 @@ use pyo3::PyResult;
 use pyo3::exceptions::PyRuntimeError;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
 /// How a session's settings reach the database (CONTEXT.md, *Settings
@@ -172,6 +172,16 @@ pub fn render_set_config_batch(
 /// `ferro_search_path`, applied once by the pool's `after_connect` hook —
 /// and `RESET ALL` would take that with it, leaving every later query on that
 /// connection resolving tables in the wrong schema.
+///
+/// **What "default" means, exactly.** A reset restores the value the
+/// connection *started* with, not the empty string. For a custom setting no
+/// one has configured, those are the same thing and the key reads back as
+/// `''` — which is the fail-closed behaviour the `NULLIF` policy contract
+/// relies on. But `ALTER ROLE ... SET myapp.tenant_id = ...` or
+/// `ALTER DATABASE ... SET ...` makes that configured value the startup value,
+/// so resetting brings it *back* rather than clearing it. Never set a tenancy
+/// key as a role or database default: a session that reset it would then be
+/// scoped to whatever the operator configured instead of to nothing.
 ///
 /// # Arguments
 /// * `keys` — Every key this session applied on the connection, plus
@@ -441,7 +451,8 @@ async fn execute_on_connections(
 ) -> PyResult<()> {
     for conn in connections {
         let mut guard = conn.lock().await;
-        live_connection(&mut guard)
+        guard
+            .live()
             .map_err(|e| crate::errors::map_db_error("Failed to apply session settings", e))?
             .execute_sql_with_binds(sql, binds)
             .await
@@ -511,12 +522,14 @@ pub async fn reapply_settings_to_open_transactions(
         // routing bug surfaces as this named invariant breaking under
         // `cargo test`, rather than as a confusing "no such function:
         // set_config" error from whichever backend it was sent to instead.
+        let mut guard = conn.lock().await;
+        let dialect = guard
+            .live()
+            .map(|conn| conn.dialect())
+            .unwrap_or(Dialect::Postgres);
+        drop(guard);
         debug_assert_eq!(
-            conn.lock()
-                .await
-                .as_ref()
-                .map(EngineConnection::dialect)
-                .unwrap_or(Dialect::Postgres),
+            dialect,
             Dialect::Postgres,
             "reapply_settings_to_open_transactions dispatched a Postgres-only \
              set_config batch to a non-Postgres connection"
@@ -625,31 +638,58 @@ pub struct PinnedConnection {
     /// The checked-out connection. Emptied by [`release_pinned_connection`]
     /// (reset, then back to the pool) or by a discard (detached, gone).
     conn: TransactionConnection,
+    /// Serializes whole *operations* on this connection.
+    ///
+    /// The connection's own mutex only serializes one statement at a time,
+    /// which is not enough. Two sibling tasks sharing a pinned session would
+    /// otherwise interleave the statements of two multi-statement operations
+    /// on one connection: nested `BEGIN`s (which Postgres warns about and
+    /// then ignores), one operation's `COMMIT` committing the other's
+    /// half-written rows, and the other's later failure rolling back nothing.
+    /// Per-operation atomicity would be gone, silently.
+    ///
+    /// So the unit of exclusion is the operation, not the statement: an
+    /// operation takes this for its whole body, and a `transaction()` block
+    /// takes it for its whole `BEGIN`→`COMMIT`/`ROLLBACK` span. A pinned
+    /// session therefore serializes everything it does, which is the honest
+    /// meaning of a session that owns exactly one connection — and exactly
+    /// what the documented concurrency cap already says.
+    ///
+    /// Operations running *inside* an ambient `transaction()` do not take it:
+    /// the block already owns the span they run in, so they are reentrant by
+    /// construction and no recursive locking is needed.
+    gate: Arc<Mutex<()>>,
     /// Every settings key ever applied on this connection, in the order it
     /// was first applied — the exact reset list at close.
     touched: RwLock<Vec<String>>,
-    /// Set when the connection has been discarded, so the session's next
-    /// operation pins a fresh one instead of reaching for a slot it can no
-    /// longer use. Readable without locking the connection, which is the
-    /// point: the check happens while another task may be mid-statement.
-    discarded: AtomicBool,
     /// The engine's outstanding-pin gauge. See [`crate::backend::PoolSpec`]:
     /// it is what lets the pool's release hook cost nothing at all when no
     /// session is pinned, which is every moment on a `transaction`-delivery
-    /// pool and most moments on a `connection`-delivery one.
+    /// pool and every moment a `connection`-delivery pool is serving only
+    /// settings-less work.
     pins: Arc<AtomicUsize>,
 }
+
+/// An operation's exclusive claim on a pinned connection, held for the whole
+/// operation (or the whole `transaction()` block). See [`PinnedConnection::gate`].
+pub type PinHold = tokio::sync::OwnedMutexGuard<()>;
 
 impl PinnedConnection {
     /// Take ownership of a freshly pinned connection.
     fn new(conn: EngineConnection, keys: Vec<String>, pins: Arc<AtomicUsize>) -> Self {
         pins.fetch_add(1, Ordering::SeqCst);
         Self {
-            conn: Arc::new(Mutex::new(Some(conn))),
+            conn: Arc::new(ConnectionSlot::new(conn)),
+            gate: Arc::new(Mutex::new(())),
             touched: RwLock::new(keys),
-            discarded: AtomicBool::new(false),
             pins,
         }
+    }
+
+    /// Claim this connection for one whole operation, waiting for whatever
+    /// operation or `transaction()` block currently holds it.
+    pub async fn hold(&self) -> PinHold {
+        self.gate.clone().lock_owned().await
     }
 
     /// The slot this session's statements run on.
@@ -666,9 +706,15 @@ impl PinnedConnection {
     }
 
     /// Whether this pin still holds a usable connection.
+    ///
+    /// Read straight off the slot's tombstone, which is the single owner of
+    /// the fact: whoever gives up on the connection — a cancelled operation,
+    /// a failed reset, a `transaction()` whose `COMMIT` failed — tombstones
+    /// the slot, and every reader agrees immediately. The check is lock-free
+    /// on purpose: it happens while another task may be mid-statement.
     #[must_use]
     pub fn is_live(&self) -> bool {
-        !self.discarded.load(Ordering::SeqCst)
+        !self.conn.is_discarded()
     }
 
     /// Record keys applied on this connection, keeping first-applied order.
@@ -690,22 +736,44 @@ impl PinnedConnection {
         }
     }
 
-    /// Every key applied on this connection, plus [`PIN_MARKER_KEY`] — the
-    /// exact reset list.
+    /// Every settings key applied on this connection — the value
+    /// [`PIN_MARKER_KEY`] advertises, and the one shape both writers use.
     #[must_use]
-    pub fn reset_keys(&self) -> Vec<String> {
-        let touched = match self.touched.read() {
+    pub fn touched_keys(&self) -> Vec<String> {
+        match self.touched.read() {
             Ok(guard) => guard.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        let mut keys = touched;
+        }
+    }
+
+    /// The exact reset list at close: every touched key, plus the marker that
+    /// advertised them.
+    #[must_use]
+    pub fn reset_keys(&self) -> Vec<String> {
+        let mut keys = self.touched_keys();
         keys.push(PIN_MARKER_KEY.to_string());
         keys
     }
 
-    /// Give up on this connection: it never goes back to the pool.
+    /// The settings batch to send on this connection: the effective settings,
+    /// plus the marker naming every key they will have touched.
+    ///
+    /// The single marker writer, so pin time and a live `set_config` can never
+    /// advertise two different shapes — the marker is a diagnostic, and one
+    /// that sometimes lists itself is not one.
+    #[must_use]
+    fn batch_with_marker(&self, settings: &[SessionSetting]) -> Vec<SessionSetting> {
+        let mut batch = settings.to_vec();
+        batch.push((
+            PIN_MARKER_KEY.to_string(),
+            render_pin_marker(&self.touched_keys()),
+        ));
+        batch
+    }
+
+    /// Give up on this connection: it never goes back to the pool, and the
+    /// session's next operation pins a fresh one.
     pub fn discard(&self) {
-        self.discarded.store(true, Ordering::SeqCst);
         discard_connection_slot(&self.conn);
     }
 }
@@ -723,40 +791,28 @@ impl Drop for PinnedConnection {
 
 /// Take a connection out of its slot and sever the pool's claim on it.
 ///
-/// Synchronous whenever it can be: `try_lock` succeeds in every case that
-/// matters (a cancelled operation's future has already been dropped, guard
-/// and all), and the detach that follows happens before anything else can
-/// reach the connection. The contended fallback keeps the slot alive inside a
-/// spawned task rather than dropping it, because dropping the last handle on
-/// a slot that still holds a connection is precisely what would hand it back
-/// to the pool.
-fn discard_connection_slot(slot: &TransactionConnection) {
-    if let Ok(mut guard) = slot.try_lock() {
-        close_detached(guard.take());
+/// Tombstoning comes first and needs no lock, so from this line on the slot
+/// can never be used or pooled again whatever else happens. Taking the
+/// connection out is then done by whoever can: this call if the lock is free
+/// (which it is in every case that matters — a cancelled operation's future
+/// was dropped, guard and all), a spawned task if it is not, and the slot's
+/// own `Drop` if there is no runtime to spawn on.
+pub fn discard_connection_slot(slot: &TransactionConnection) {
+    slot.tombstone();
+    if let Some(mut guard) = slot.try_lock() {
+        discard_connection(guard.discard());
         return;
     }
     let slot = slot.clone();
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(async move {
-            let taken = slot.lock().await.take();
-            close_detached(taken);
+            let taken = slot.lock().await.discard();
+            discard_connection(taken);
         });
     }
 }
 
-/// Detach a connection and spawn its close handshake.
-fn close_detached(conn: Option<EngineConnection>) {
-    let Some(conn) = conn else {
-        return;
-    };
-    let detached = conn.detach();
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        runtime.spawn(async move {
-            let _ = detached.close().await;
-        });
-    }
-}
-
+/// The session whose pinned connection this route runs on, when there is one.
 /// The session whose pinned connection this route runs on, when there is one.
 ///
 /// `Some` only for a settings-bearing session on a Postgres pool configured
@@ -832,6 +888,34 @@ pub async fn pinned_connection_for_session(
     Ok(pin)
 }
 
+/// This session's pinned connection, claimed for one whole operation.
+///
+/// Two steps, in this order and never nested: pin (or reuse the pin), then
+/// wait for whatever operation currently owns the connection. The session's
+/// pin slot is released before the wait, so a task waiting its turn never
+/// blocks another task from finding the same pin.
+///
+/// The re-check afterwards closes the one gap between them: a cancelled
+/// operation can discard the pin while this call is queued for it, and a
+/// discarded pin's connection is gone. Rather than fail an operation that
+/// never started, the loop pins again — [`pinned_connection_for_session`]
+/// replaces a dead pin with a fresh connection.
+///
+/// # Errors
+/// Whatever [`pinned_connection_for_session`] raises.
+pub async fn hold_pinned_connection(
+    engine: &EngineHandle,
+    session_id: &str,
+) -> PyResult<(Arc<PinnedConnection>, PinHold)> {
+    loop {
+        let pin = pinned_connection_for_session(engine, session_id).await?;
+        let hold = pin.hold().await;
+        if pin.is_live() {
+            return Ok((pin, hold));
+        }
+    }
+}
+
 /// `BEGIN` on a session's pinned connection, applying no settings.
 ///
 /// A `transaction()` block inside a pinned session runs on the connection the
@@ -844,8 +928,10 @@ pub async fn pinned_connection_for_session(
 /// `PyRuntimeError` when `BEGIN` fails or the pinned connection was discarded.
 pub async fn begin_on_pinned(pin: &PinnedConnection, context: &str) -> PyResult<()> {
     let mut guard = pin.slot().lock().await;
-    let conn = live_connection(&mut guard).map_err(|e| crate::errors::map_db_error(context, e))?;
-    conn.execute_sql("BEGIN")
+    guard
+        .live()
+        .map_err(|e| crate::errors::map_db_error(context, e))?
+        .execute_sql("BEGIN")
         .await
         .map_err(|e| crate::errors::map_db_error(context, e))?;
     Ok(())
@@ -858,11 +944,22 @@ pub async fn begin_on_pinned(pin: &PinnedConnection, context: &str) -> PyResult<
 /// - `connection` delivery, session already pinned — re-send the whole batch
 ///   at database-session scope on the pinned connection. It takes effect for
 ///   the very next statement, transaction open or not.
-/// - `connection` delivery, not pinned yet — nothing to deliver: the session's
-///   first operation will pin and apply the new set at that point.
+/// - `connection` delivery, not pinned yet — nothing to deliver here. A
+///   session that had no settings at open has not pinned anything, so it pins
+///   on its **next operation** and applies the new set at that point.
 /// - `transaction` delivery — re-apply `SET LOCAL` to every transaction the
 ///   session currently has open (see
 ///   [`reapply_settings_to_open_transactions`]).
+///
+/// This deliberately does **not** take the pin's operation hold: `set_config`
+/// is legal from inside an open `transaction()` in the same task, and that
+/// block already owns the hold — waiting for it would deadlock. The
+/// consequence is worth stating: on a pinned connection the new value lands
+/// on the connection immediately, so a *sibling* task's multi-statement
+/// operation that is already in flight can see it from its next statement
+/// onward. Under `transaction` delivery that operation would finish under the
+/// scope it began with. Sharing one session across tasks and changing its
+/// scope underneath them is the only way to reach the difference.
 ///
 /// # Errors
 /// `PyRuntimeError` when the batch fails. See `operations::set_session_config`
@@ -888,14 +985,11 @@ pub async fn deliver_changed_settings(
     };
 
     pin.record_keys(settings);
-    let mut batch = settings.to_vec();
-    batch.push((
-        PIN_MARKER_KEY.to_string(),
-        render_pin_marker(&pin.reset_keys()),
-    ));
+    let batch = pin.batch_with_marker(settings);
 
     let mut guard = pin.slot().lock().await;
-    let conn = live_connection(&mut guard)
+    let conn = guard
+        .live()
         .map_err(|e| crate::errors::map_db_error("Failed to apply session settings", e))?;
     apply_settings_batch(conn, &batch, false)
         .await
@@ -910,6 +1004,11 @@ pub async fn deliver_changed_settings(
 /// the reset fails, the connection is discarded instead of returned: a
 /// connection Ferro cannot prove is clean is not one another session may have.
 ///
+/// Takes the pin's operation hold first, so the reset can never land between
+/// two statements of an operation a sibling task still has in flight. A close
+/// therefore waits for such an operation to finish, which is the same wait
+/// any other operation on the session would do.
+///
 /// The caller must already have removed the session from the registry, so
 /// that a close whose `await` is cancelled here drops `pin` — and `Drop`
 /// discards, rather than stranding a connection the pool can never reclaim.
@@ -921,6 +1020,8 @@ pub async fn deliver_changed_settings(
 /// `PyRuntimeError` when the reset batch fails; the connection has been
 /// discarded by then.
 pub async fn release_pinned_connection(pin: Arc<PinnedConnection>) -> PyResult<()> {
+    let _hold = pin.hold().await;
+
     let keys = pin.reset_keys();
     let Some((sql, binds)) = render_reset_config_batch(&keys) else {
         return Ok(());
@@ -928,15 +1029,18 @@ pub async fn release_pinned_connection(pin: Arc<PinnedConnection>) -> PyResult<(
 
     let outcome = {
         let mut guard = pin.slot().lock().await;
-        let Some(conn) = guard.as_mut() else {
+        if guard.is_empty() || pin.slot().is_discarded() {
             // Already discarded (a cancelled operation). Nothing to reset and
             // nothing to hand back.
             return Ok(());
-        };
+        }
+        let conn = guard
+            .live()
+            .map_err(|e| crate::errors::map_db_error("Failed to reset session settings", e))?;
         match conn.execute_sql_with_binds(&sql, &binds).await {
             // Taken out of the slot deliberately: dropping it *after* the
             // guard is what returns it to the pool, clean.
-            Ok(_) => Ok(guard.take()),
+            Ok(_) => Ok(guard.release()),
             Err(err) => Err(err),
         }
     };
@@ -1013,9 +1117,16 @@ enum ScopeRoute {
     /// the session's job, at close. `wrapped` is set when the operation needed
     /// multi-statement atomicity and this scope opened a bare transaction on
     /// the pinned connection for it.
+    ///
+    /// `_hold` is this operation's exclusive claim on the connection, kept
+    /// for its lifetime rather than its value: holding it is what keeps two
+    /// sibling tasks' operations from interleaving their statements on the
+    /// one connection the session owns, and dropping it — however the scope
+    /// ends — is what lets the next one in (see [`PinnedConnection::hold`]).
     Pinned {
         pin: Arc<PinnedConnection>,
         wrapped: bool,
+        _hold: PinHold,
     },
 }
 
@@ -1055,7 +1166,9 @@ impl OperationScope {
         }
 
         if let Some(session_id) = pinned_session(engine, session_id)? {
-            let pin = pinned_connection_for_session(engine, &session_id).await?;
+            // Claimed for the whole operation, not just each statement: two
+            // sibling tasks sharing this session run one after the other.
+            let (pin, hold) = hold_pinned_connection(engine, &session_id).await?;
             // The settings are already on this connection at database-session
             // scope, so an atomic operation opens a bare transaction: the
             // atomicity it asked for, and not one round trip more.
@@ -1066,6 +1179,7 @@ impl OperationScope {
                 route: Some(ScopeRoute::Pinned {
                     pin,
                     wrapped: atomic_required,
+                    _hold: hold,
                 }),
             });
         }
@@ -1078,7 +1192,7 @@ impl OperationScope {
 
         let conn = begin_transaction_with_settings(engine, session_id, context).await?;
         Ok(Self {
-            route: Some(ScopeRoute::Owned(Mutex::new(Some(conn)))),
+            route: Some(ScopeRoute::Owned(ConnectionSlot::new(conn))),
         })
     }
 
@@ -1117,11 +1231,12 @@ impl OperationScope {
             });
         }
         if let Some(session_id) = pinned_session(engine, session_id)? {
-            let pin = pinned_connection_for_session(engine, &session_id).await?;
+            let (pin, hold) = hold_pinned_connection(engine, &session_id).await?;
             return Ok(Self {
                 route: Some(ScopeRoute::Pinned {
                     pin,
                     wrapped: false,
+                    _hold: hold,
                 }),
             });
         }
@@ -1165,11 +1280,11 @@ impl OperationScope {
             // connection opened nothing, so it closes nothing. The connection
             // stays with the session until the session closes.
             Some(ScopeRoute::Pinned { wrapped: false, .. }) => outcome,
-            Some(ScopeRoute::Pinned { pin, wrapped: true }) => {
-                close_pinned_wrap(&pin, outcome).await
-            }
-            Some(ScopeRoute::Owned(slot)) => {
-                let Some(mut conn) = slot.into_inner() else {
+            Some(ScopeRoute::Pinned {
+                pin, wrapped: true, ..
+            }) => close_pinned_wrap(&pin, outcome).await,
+            Some(ScopeRoute::Owned(mut slot)) => {
+                let Some(mut conn) = slot.take_owned() else {
                     // Unreachable today: an owned slot is only ever emptied by
                     // a discard, which happens on the `Drop` path instead.
                     return outcome;
@@ -1205,15 +1320,26 @@ impl OperationScope {
 /// discarded and the session's next operation pins a fresh one.
 async fn close_pinned_wrap<T>(pin: &PinnedConnection, outcome: PyResult<T>) -> PyResult<T> {
     let mut guard = pin.slot().lock().await;
-    let Ok(conn) = live_connection(&mut guard) else {
+    let Ok(conn) = guard.live() else {
         return outcome;
     };
     match outcome {
         Ok(value) => {
-            conn.commit()
-                .await
-                .map_err(|e| crate::errors::map_db_error("Failed to COMMIT", e))?;
-            Ok(value)
+            let committed = conn.commit().await;
+            drop(guard);
+            match committed {
+                Ok(()) => Ok(value),
+                Err(err) => {
+                    // Symmetric with the rollback arm below, and for the same
+                    // reason: a connection whose COMMIT failed may be sitting
+                    // in an aborted or still-open transaction, and every later
+                    // statement on it — including the session's own close
+                    // reset — would fail with it. Ferro cannot vouch for it,
+                    // so it does not keep it.
+                    pin.discard();
+                    Err(crate::errors::map_db_error("Failed to COMMIT", err))
+                }
+            }
         }
         Err(err) => {
             let rolled_back = conn.rollback().await.is_ok();
@@ -1259,7 +1385,7 @@ async fn close_pinned_wrap<T>(pin: &PinnedConnection, outcome: PyResult<T>) -> P
 impl Drop for OperationScope {
     fn drop(&mut self) {
         match self.route.take() {
-            Some(ScopeRoute::Owned(slot)) => close_detached(slot.into_inner()),
+            Some(ScopeRoute::Owned(mut slot)) => discard_connection(slot.take_owned()),
             Some(ScopeRoute::Pinned { pin, .. }) => pin.discard(),
             _ => {}
         }
@@ -1551,7 +1677,9 @@ mod tests {
             .await
             .expect("scope opens");
         let conn = scope.connection().expect("an atomic operation gets a wrap");
-        live_connection(&mut *conn.lock().await)
+        conn.lock()
+            .await
+            .live()
             .expect("the wrap's connection is live")
             .execute_sql("INSERT INTO marker (id) VALUES (1)")
             .await
@@ -1569,17 +1697,16 @@ mod tests {
         let scope = OperationScope::open(&engine, None, None, true, "test")
             .await
             .expect("scope opens");
-        live_connection(
-            &mut *scope
-                .connection()
-                .expect("an atomic operation gets a wrap")
-                .lock()
-                .await,
-        )
-        .expect("the wrap's connection is live")
-        .execute_sql("INSERT INTO marker (id) VALUES (1)")
-        .await
-        .expect("insert");
+        scope
+            .connection()
+            .expect("an atomic operation gets a wrap")
+            .lock()
+            .await
+            .live()
+            .expect("the wrap's connection is live")
+            .execute_sql("INSERT INTO marker (id) VALUES (1)")
+            .await
+            .expect("insert");
 
         let failure: PyResult<()> = Err(PyRuntimeError::new_err("operation failed"));
         let err = scope.finish(failure).await.expect_err("the failure stands");
@@ -1611,17 +1738,16 @@ mod tests {
             let scope = OperationScope::open(&engine, None, None, true, "test")
                 .await
                 .expect("scope opens");
-            live_connection(
-                &mut *scope
-                    .connection()
-                    .expect("an atomic operation gets a wrap")
-                    .lock()
-                    .await,
-            )
-            .expect("the wrap's connection is live")
-            .execute_sql("INSERT INTO marker (id) VALUES (1)")
-            .await
-            .expect("insert");
+            scope
+                .connection()
+                .expect("an atomic operation gets a wrap")
+                .lock()
+                .await
+                .live()
+                .expect("the wrap's connection is live")
+                .execute_sql("INSERT INTO marker (id) VALUES (1)")
+                .await
+                .expect("insert");
             // Dropped without `finish`: exactly what happens when the caller's
             // asyncio task is cancelled mid-operation.
         }
@@ -1671,32 +1797,33 @@ mod tests {
         let engine = sqlite_engine().await;
         create_marker_table(&engine).await;
 
-        let tx: TransactionConnection = Arc::new(Mutex::new(Some(
+        let tx: TransactionConnection = Arc::new(ConnectionSlot::new(
             engine
                 .begin_transaction_connection()
                 .await
                 .expect("begin transaction"),
-        )));
+        ));
 
         let scope = OperationScope::open(&engine, None, Some(tx.clone()), true, "test")
             .await
             .expect("scope opens");
-        live_connection(
-            &mut *scope
-                .connection()
-                .expect("the operation runs on the open transaction")
-                .lock()
-                .await,
-        )
-        .expect("the ambient transaction's connection is live")
-        .execute_sql("INSERT INTO marker (id) VALUES (1)")
-        .await
-        .expect("insert");
+        scope
+            .connection()
+            .expect("the operation runs on the open transaction")
+            .lock()
+            .await
+            .live()
+            .expect("the ambient transaction's connection is live")
+            .execute_sql("INSERT INTO marker (id) VALUES (1)")
+            .await
+            .expect("insert");
 
         // `atomic_required` is set, and it still must not end a transaction it
         // does not own: `transaction()` decides when this commits.
         scope.finish(Ok(())).await.expect("finish");
-        live_connection(&mut *tx.lock().await)
+        tx.lock()
+            .await
+            .live()
             .expect("the ambient transaction's connection is live")
             .rollback()
             .await
@@ -1965,15 +2092,62 @@ mod tests {
 
         assert!(!pin.is_live(), "a discarded pin never gets reused");
         assert!(
-            pin.slot().lock().await.is_none(),
+            pin.slot().lock().await.is_empty(),
             "the connection was taken out of the slot, not left for a later drop to pool"
         );
         assert!(
-            live_connection(&mut *pin.slot().lock().await).is_err(),
+            pin.slot().lock().await.live().is_err(),
             "and a straggler that tries to use it gets a loud error, not a silent reuse"
         );
 
         drop(pin);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_tombstoned_slot_discards_even_when_the_discard_could_not_take_it() {
+        // The one path the synchronous discard cannot finish itself: the slot
+        // is locked by a statement still in flight, so the connection cannot
+        // be taken out here and now. The tombstone is what closes it — every
+        // later reader refuses the slot, and the slot's own `Drop` (which has
+        // exclusive access and needs no runtime) throws the connection away
+        // instead of letting it fall back into the pool.
+        let (engine, path) = marker_engine().await;
+        let pins = Arc::new(AtomicUsize::new(0));
+        let conn = engine
+            .acquire_pinned_connection()
+            .await
+            .expect("pool hands out a connection to pin");
+        let pin = PinnedConnection::new(conn, vec!["pinch.ledger_id".to_string()], pins.clone());
+        let slot = pin.shared_slot();
+
+        // Hold the slot's lock, exactly as an in-flight statement would.
+        let held = slot.lock().await;
+        pin.discard();
+
+        assert!(
+            slot.is_discarded(),
+            "the tombstone must not need the lock — a Drop cannot wait for one"
+        );
+        assert!(!pin.is_live(), "and the pin is dead the moment it is set");
+        drop(held);
+
+        // Even a reader that gets the lock afterwards is refused, so the
+        // connection cannot be used while the take is still pending.
+        let mut guard = slot.lock().await;
+        assert!(guard.live().is_err());
+        drop(guard);
+
+        drop(pin);
+        drop(slot);
+        tokio::task::yield_now().await;
+
+        // The pool of one replaced what it lost rather than handing the
+        // tombstoned connection to the next caller.
+        engine
+            .execute_sql("INSERT INTO marker (id) VALUES (3)")
+            .await
+            .expect("the pool replaced the discarded connection");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2028,7 +2202,8 @@ mod tests {
 
         for handle in [&handle_a, &handle_b] {
             let mut guard = handle.conn.lock().await;
-            let rows = live_connection(&mut guard)
+            let rows = guard
+                .live()
                 .expect("the transaction's connection is live")
                 .fetch_all_sql_with_binds("SELECT id FROM marker", &[])
                 .await
@@ -2077,7 +2252,8 @@ mod tests {
             .expect("no settings renders no batch, so there is nothing to dispatch");
 
         let mut guard = handle.conn.lock().await;
-        let rows = live_connection(&mut guard)
+        let rows = guard
+            .live()
             .expect("the transaction's connection is live")
             .fetch_all_sql_with_binds("SELECT id FROM marker", &[])
             .await

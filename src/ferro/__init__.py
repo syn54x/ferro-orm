@@ -231,13 +231,52 @@ class PoolConfig(BaseModel):
     settings-bearing session costs one extra round trip for its whole life
     instead of about two per operation outside ``transaction()``.
 
-    What it costs: a settings-bearing session holds one pool connection from
-    its first operation until it closes, so **no more settings-bearing
-    sessions can run at once than the pool has connections**. Number
-    ``max_connections`` + 1's first query waits for a connection, exactly like
-    any other pool checkout. Size the pool for peak concurrent scoped
-    sessions. Sessions *without* settings are unaffected in either mode — same
-    statements, same connections, no pinning.
+    What it costs, and there are four costs worth knowing before you opt in.
+
+    **One connection per scoped session.** A settings-bearing session holds a
+    pool connection from its first operation until it closes, so **no more
+    settings-bearing sessions can run at once than the pool has
+    connections**. Number ``max_connections`` + 1's first query waits for a
+    connection, exactly like any other pool checkout. Size the pool for peak
+    concurrent scoped sessions.
+
+    **One session, one connection, therefore one thing at a time.** Everything
+    a pinned session does is serialized: two sibling tasks sharing the session
+    run one after the other, and while a ``transaction()`` block is open a
+    sibling task's operation waits for it rather than running inside it.
+    That is the honest meaning of a session that owns a single connection —
+    the same fact as the cap above, seen from inside one session. Operations
+    in the same task *inside* a ``transaction()`` block are unaffected; they
+    already own the block.
+
+    **A marker check on release while anyone is pinned.** The pool verifies
+    that a connection coming back is not still carrying a session's settings.
+    While no session is pinned this costs nothing at all. While *any* session
+    on the pool is pinned, every connection release on that pool performs one
+    marker check — including releases by settings-less sessions and by
+    sessionless operations.
+
+    **Schema changes wait for scoped sessions.** ``connect(migrate_updates=…)``
+    and ``migrate()`` refresh the pool afterwards, and a refresh cannot finish
+    until every connection comes back — including the pinned ones. Migrating
+    while long-lived tenant sessions are open therefore blocks until they
+    close; Ferro warns, naming how many it is waiting on. Run schema changes
+    before opening tenant-scoped sessions.
+
+    Sessions *without* settings never pin: same statements, same connections,
+    no wrap, no serialization.
+
+    Two smaller behaviours worth knowing:
+
+    * A session that opens with no ``settings`` and gains them later via
+      ``set_config`` has nothing pinned yet, so it pins on its **next
+      operation** and applies the values then.
+    * Closing a session resets its keys to the value the connection *started*
+      with. For an ordinary custom setting that is the empty string, which is
+      what fail-closed policies rely on. If an operator has set a default with
+      ``ALTER ROLE ... SET myapp.tenant_id = ...`` or ``ALTER DATABASE ... SET
+      ...``, resetting brings that value *back* rather than clearing it — so
+      never configure a tenancy key as a role or database default.
     """
 
     model_config = ConfigDict(frozen=True)
