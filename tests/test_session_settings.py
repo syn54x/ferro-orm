@@ -177,22 +177,35 @@ async def test_values_are_bound_not_interpolated(db_url):
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-async def test_setting_does_not_survive_the_transaction(db_url):
-    """`is_local=true` is what makes pooling safe: the value dies at COMMIT,
-    so the connection goes back to the pool clean."""
+async def test_setting_does_not_survive_onto_a_settings_less_session(db_url):
+    """`is_local=true` is what makes pooling safe: the value dies at COMMIT, so
+    the connection goes back to the pool clean.
+
+    Inside the session you still see it everywhere, because every operation
+    carries it — that is per-operation delivery (#410). What must never happen
+    is the *next* user of that recycled connection seeing it.
+    """
+    from ferro.raw import fetch_one
+
     await connect(db_url)
     async with engines.session(settings={TENANT_KEY: "acme"}) as session:
         async with transaction() as tx:
             assert await _current_setting(tx, TENANT_KEY) == "acme"
-
-        from ferro.raw import fetch_one
 
         row = await fetch_one(
             "select current_setting($1, true) as v",
             TENANT_KEY,
             session=session,
         )
-        assert (row["v"] or "") == ""
+        assert row["v"] == "acme"
+
+    async with engines.session() as plain:
+        row = await fetch_one(
+            "select current_setting($1, true) as v",
+            TENANT_KEY,
+            session=plain,
+        )
+        assert (row["v"] or "") == "", "a recycled connection kept the old scope"
 
 
 @pytest.mark.asyncio

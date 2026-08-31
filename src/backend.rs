@@ -496,10 +496,16 @@ impl EngineHandle {
     /// Acquiring explicitly here (instead of handing sqlx `&Pool` to
     /// `.execute()`/`.fetch_all()` as the executor, which acquires and
     /// releases a connection internally) is behaviorally identical for one
-    /// statement, but it is what lets a future per-operation transaction wrap
-    /// (ticket #410) surround the statement — issuing `BEGIN`/settings SQL
-    /// before it and `COMMIT`/`ROLLBACK` after — by changing this one method
-    /// instead of every call site.
+    /// statement, and it is what proved every non-transactional statement
+    /// funnels through one place.
+    ///
+    /// The per-operation settings wrap (#410) ended up one level above this,
+    /// in `session_settings::OperationScope`, and this method is deliberately
+    /// unchanged by it: the wrap must cover a whole ORM operation, and a
+    /// statement-level seam cannot see where one operation ends and the next
+    /// begins. So an operation that needs a wrap never reaches here — it runs
+    /// on the transaction connection its scope opened — and everything that
+    /// does reach here is genuinely unwrapped work.
     async fn acquire_nontx_connection(&self) -> Result<EngineConnection, sqlx::Error> {
         match &self.pool_snapshot() {
             BackendPool::Sqlite(pool) => Ok(EngineConnection::Sqlite(pool.acquire().await?)),
@@ -1047,8 +1053,9 @@ mod tests {
     /// their own statement, rather than opening a transaction itself. This
     /// pins that contract: a statement run through the seam autocommits with
     /// no `BEGIN` wrapping it, exactly as `pool.as_ref()` execution did
-    /// before the refactor. Ticket #410 changes this deliberately; this test
-    /// guards against it changing by accident.
+    /// before the refactor — and it stayed that way through #410, which put
+    /// the settings wrap a level above the seam (per operation, not per
+    /// statement). Everything that reaches the seam is unwrapped work.
     #[tokio::test]
     async fn nontx_seam_autocommits_without_wrapping_transaction() {
         let pool = SqlitePoolOptions::new()
