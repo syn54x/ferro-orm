@@ -7,7 +7,7 @@ use ferro_ddl_lowering::{
     fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
     refused_conversion_warning, render_check_addition, render_check_drop, render_check_rebuild,
     render_db_check, render_json_backfill_default, render_pg_enum_create_type,
-    render_table_check_body, resolve_column_storage, single_index_name,
+    render_table_check_body, resolve_column_storage, row_security_statements, single_index_name,
     single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
@@ -292,6 +292,15 @@ fn post_create_artifacts(
         if let Some(warning) = emission.warning {
             warnings.push(warning);
         }
+    }
+
+    // Row security lands last: the flags and policies go on after the table's
+    // columns, indexes and checks exist, so nothing this pass runs against the
+    // fresh table is itself filtered (PRD #406).
+    let rls = row_security_statements(model, dialect).map_err(|message| EmissionError { message })?;
+    statements.extend(rls.statements);
+    if let Some(warning) = rls.warning {
+        warnings.push(warning);
     }
 
     Ok((statements, warnings))

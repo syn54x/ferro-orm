@@ -98,6 +98,26 @@ For a single model, every emitter must agree on:
     the byte-identical statements. Pinned by
     `tests/test_table_check_orphans.py`. See ADR-0013 (leftover warning +
     destructive ladder) and ADR-0014 (SQLite warn-skip).
+15. **Row policy names and DDL** — the live policy name
+    (`rls_<table>_<name>`; `name` defaults to the shorthand's column), the
+    column/setting shorthand's cast (from `resolve_column_storage`; `uuid`,
+    `text`/`varchar` and the integer families only), the rendered
+    `<col> = NULLIF(current_setting('<key>', true), '')::<cast>` expression,
+    and the full `ALTER TABLE … ENABLE/FORCE ROW LEVEL SECURITY` +
+    `CREATE POLICY` statements are decided by ONE family of functions in
+    `ferro_ddl_lowering`: `row_policy_name` / `is_ferro_row_policy_name` /
+    `row_policy_shorthand_cast` / `render_row_policy_setting_expr` /
+    `row_policy_clauses` / `render_create_row_policy` /
+    `render_enable_row_security` / `render_force_row_security` /
+    `row_security_statements`. The auto-migrate create pass consumes them
+    through `ferro_migrate::render_create_table`; the Python IR compiler
+    consumes the name and cast decisions over FFI (`_core._ddl_row_policy_name`,
+    `_core._rls_shorthand_cast`) so a declaration fails at class definition for
+    exactly the columns DDL would fail for; the Alembic autogenerate operation
+    consumes the whole emission over FFI (`_core._plan_row_security`). Pinned
+    by `tests/test_row_security_create_pass.py` and the ferro-ddl-lowering unit
+    pins. Postgres-only; SQLite gets one warning per table and no DDL
+    (ADR-0014 posture). See PRD #406.
 
 ### Why this invariant exists
 

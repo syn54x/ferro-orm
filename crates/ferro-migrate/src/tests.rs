@@ -44,6 +44,7 @@ fn schema_model(table: &str, cols: Vec<SchemaColumn>) -> SchemaModel {
         uniques: Vec::<SchemaUnique>::new(),
         checks: Vec::<SchemaCheck>::new(),
         table_checks: Vec::new(),
+        row_security: None,
     }
 }
 
@@ -2310,4 +2311,111 @@ fn emit_sql_with_ir_add_fk_postgres_and_sqlite() {
     assert!(sqlite.statements.is_empty());
     assert_eq!(sqlite.warnings.len(), 1);
     assert!(sqlite.warnings[0].contains("SQLite cannot add table constraints"));
+}
+
+// ---------------------------------------------------------------------------
+// Row security in the create pass (#409). A NEW table gets its flags and
+// policies WITH its creation; ADR-0010 keeps this pass off existing tables, so
+// there is nothing here for a table that already exists (that is #413).
+// ---------------------------------------------------------------------------
+
+fn ledgerrow_model_with_row_security(force: bool) -> SchemaModel {
+    SchemaModel {
+        row_security: Some(ferro_schema_ir::SchemaRowSecurity {
+            force,
+            policies: vec![ferro_schema_ir::SchemaRowPolicy {
+                name: "rls_ledgerrow_ledger_id".to_string(),
+                command: ferro_schema_ir::RowPolicyCommand::All,
+                restrictive: false,
+                expr: ferro_schema_ir::RowPolicyExpr::Setting {
+                    column: "ledger_id".to_string(),
+                    setting: "pinch.ledger_id".to_string(),
+                },
+            }],
+        }),
+        ..schema_model(
+            "ledgerrow",
+            vec![pk_col("id", "int"), col("ledger_id", "uuid", false)],
+        )
+    }
+}
+
+#[test]
+fn create_pass_emits_row_security_after_the_tables_other_artifacts() {
+    let model = ledgerrow_model_with_row_security(true);
+    let emission = render_create_table(&model, Dialect::Postgres).unwrap();
+    assert!(emission.create_sql.starts_with("CREATE TABLE"));
+    assert_eq!(
+        emission.post_create_sqls,
+        vec![
+            "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY".to_string(),
+            "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY".to_string(),
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL \
+             USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) \
+             WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+                .to_string(),
+        ]
+    );
+    assert!(emission.warnings.is_empty());
+}
+
+#[test]
+fn create_pass_omits_force_when_the_declaration_does() {
+    let model = ledgerrow_model_with_row_security(false);
+    let emission = render_create_table(&model, Dialect::Postgres).unwrap();
+    assert!(
+        !emission
+            .post_create_sqls
+            .iter()
+            .any(|sql| sql.contains("FORCE")),
+        "{:?}",
+        emission.post_create_sqls
+    );
+}
+
+#[test]
+fn create_pass_skips_row_security_on_sqlite_with_one_warning() {
+    let model = ledgerrow_model_with_row_security(true);
+    let emission = render_create_table(&model, Dialect::Sqlite).unwrap();
+    assert!(emission.create_sql.starts_with("CREATE TABLE"));
+    assert!(
+        !emission
+            .post_create_sqls
+            .iter()
+            .any(|sql| sql.contains("ROW LEVEL SECURITY") || sql.contains("CREATE POLICY")),
+        "{:?}",
+        emission.post_create_sqls
+    );
+    assert_eq!(emission.warnings.len(), 1);
+    assert!(emission.warnings[0].contains("ledgerrow"));
+    assert!(emission.warnings[0].contains("PostgreSQL-only"));
+}
+
+#[test]
+fn add_table_pass_carries_row_security_through_emit_sql_with_ir() {
+    let model = ledgerrow_model_with_row_security(true);
+    let new_ir = envelope(vec![model]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddTable {
+            table: "ledgerrow".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let emitted = emit_sql_with_ir(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
+    assert!(
+        emitted
+            .statements
+            .iter()
+            .any(|sql| sql == "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY"),
+        "{:?}",
+        emitted.statements
+    );
+    assert!(
+        emitted
+            .statements
+            .iter()
+            .any(|sql| sql.starts_with("CREATE POLICY \"rls_ledgerrow_ledger_id\"")),
+        "{:?}",
+        emitted.statements
+    );
 }

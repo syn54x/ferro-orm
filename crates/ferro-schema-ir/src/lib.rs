@@ -62,6 +62,70 @@ pub struct SchemaModel {
     /// Table-level CHECK constraints (`Check(suffix, predicate)`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub table_checks: Vec<SchemaTableCheck>,
+    /// Row security declaration (`__ferro_rls__`), absent when undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_security: Option<SchemaRowSecurity>,
+}
+
+/// A model's row security declaration: the table flags plus its row policies.
+///
+/// Absent (not empty) when the model declares no `__ferro_rls__`, so every
+/// existing model's envelope — and therefore its fingerprint — is unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchemaRowSecurity {
+    /// `ALTER TABLE ... FORCE ROW LEVEL SECURITY` — binds the table owner too.
+    pub force: bool,
+    /// Declared policies in declaration order.
+    pub policies: Vec<SchemaRowPolicy>,
+}
+
+/// One row policy: its canonical live name, scope, and expression source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchemaRowPolicy {
+    /// Canonical live policy name (`rls_<table>_<name>`).
+    pub name: String,
+    /// The command the policy applies to.
+    pub command: RowPolicyCommand,
+    /// `true` renders `AS RESTRICTIVE` (AND-composition); `false` is permissive.
+    pub restrictive: bool,
+    /// Where the USING / WITH CHECK expressions come from.
+    pub expr: RowPolicyExpr,
+}
+
+/// The command a row policy is scoped to (`FOR <command>`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RowPolicyCommand {
+    All,
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+/// A row policy's expression source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum RowPolicyExpr {
+    /// Column/setting shorthand: ferro renders the `NULLIF(current_setting(...))`
+    /// comparison, casting to the column's own storage type.
+    #[serde(rename = "setting")]
+    Setting {
+        /// The model column compared against the setting.
+        column: String,
+        /// The custom Postgres setting (GUC) key carrying the scope value.
+        setting: String,
+    },
+    /// Raw SQL escape hatch: the author's own expressions, rendered verbatim.
+    #[serde(rename = "raw")]
+    Raw {
+        /// `USING (...)` expression, when declared.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        using: Option<String>,
+        /// `WITH CHECK (...)` expression, when declared.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with_check: Option<String>,
+    },
 }
 
 /// One column in schema IR.
@@ -698,6 +762,64 @@ mod tests {
         let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_value(wire)
             .expect("legacy schema payload without table_checks must deserialize");
         assert!(envelope.payload.models[0].table_checks.is_empty());
+        assert!(envelope.payload.models[0].row_security.is_none());
+    }
+
+    #[test]
+    fn schema_row_security_roundtrip() {
+        let wire = serde_json::json!({
+            "ir_kind": "schema",
+            "ir_version": 1,
+            "payload": {
+                "dialect_agnostic": true,
+                "models": [{
+                    "model_name": "LedgerRow",
+                    "table_name": "ledgerrow",
+                    "columns": [],
+                    "foreign_keys": [],
+                    "indexes": [],
+                    "uniques": [],
+                    "checks": [],
+                    "row_security": {
+                        "force": true,
+                        "policies": [
+                            {
+                                "name": "rls_ledgerrow_ledger_id",
+                                "command": "all",
+                                "restrictive": false,
+                                "expr": {
+                                    "kind": "setting",
+                                    "column": "ledger_id",
+                                    "setting": "pinch.ledger_id"
+                                }
+                            },
+                            {
+                                "name": "rls_ledgerrow_invitee_read",
+                                "command": "select",
+                                "restrictive": true,
+                                "expr": {
+                                    "kind": "raw",
+                                    "using": "id IN (SELECT row_id FROM membership)"
+                                }
+                            }
+                        ]
+                    }
+                }]
+            }
+        });
+        let envelope: IrEnvelope<SchemaIrPayload> =
+            serde_json::from_value(wire.clone()).expect("row security schema IR must deserialize");
+        let declaration = envelope.payload.models[0]
+            .row_security
+            .as_ref()
+            .expect("row security must survive the wire");
+        assert!(declaration.force);
+        assert_eq!(declaration.policies.len(), 2);
+        assert_eq!(declaration.policies[0].command, RowPolicyCommand::All);
+        assert!(declaration.policies[1].restrictive);
+        let encoded =
+            serde_json::to_value(&envelope).expect("row security schema IR must serialize");
+        assert_eq!(encoded, wire, "row security round-trip must not drift");
     }
 
     #[test]

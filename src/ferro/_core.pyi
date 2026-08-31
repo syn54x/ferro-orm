@@ -292,3 +292,29 @@ def _plan_check_drop(
     request for a diff.
     """
     ...
+
+def _ddl_row_policy_name(table: str, name: str) -> str:
+    """Canonical row-policy name (``rls_<table>_<name>``), 63-char guarded."""
+    ...
+
+def _rls_shorthand_cast(column_ir_json: str) -> str:
+    """The column/setting shorthand's cast decision for one IR column.
+
+    Returns JSON: ``{"supported": true, "cast": "uuid" | null}`` for a column
+    the shorthand can render (``null`` = the column already stores text, so no
+    cast), or ``{"supported": false, "reason": "..."}``. The emitters render
+    with the same decision, so class definition fails for exactly the columns
+    DDL would fail for (I-1).
+    """
+    ...
+
+def _plan_row_security(model_ir_json: str, dialect: str = "postgres") -> str:
+    """The row-security create decision (PRD #406) for one model.
+
+    Returns JSON: ``{"statements": [...], "names": [...], "warning": str|None}``
+    — the Rust-rendered ``ENABLE``/``FORCE ROW LEVEL SECURITY`` and
+    ``CREATE POLICY`` statements a freshly created table needs, in execution
+    order, plus the policy names. Byte-identical to what the create pass
+    executes (I-1). On ``"sqlite"`` there are no statements and one warning.
+    """
+    ...

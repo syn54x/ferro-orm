@@ -239,3 +239,79 @@ pub fn _render_table_check_body(predicate_json: String) -> PyResult<String> {
         })?;
     Ok(ferro_ddl_lowering::render_check_expr(&predicate))
 }
+
+/// Canonical row-policy name (`rls_<table>_<name>`) — the shared builder the
+/// IR compiler stamps onto every `SchemaRowPolicy.name`, so no emitter ever
+/// re-derives it (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _ddl_row_policy_name(table: String, name: String) -> String {
+    ferro_ddl_lowering::row_policy_name(&table, &name)
+}
+
+/// The column/setting shorthand's cast decision for one IR column, as a JSON
+/// object: `{"supported": true, "cast": "uuid" | null}` for a column the
+/// shorthand can render, `{"supported": false, "reason": "..."}` otherwise.
+///
+/// The IR compiler calls this at class-definition time so an unsupported column
+/// type fails where the model is written, and the emitters call
+/// `row_policy_shorthand_cast` for the same decision at render time — one
+/// function, two doors (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _rls_shorthand_cast(column_ir_json: String) -> PyResult<String> {
+    let col: ferro_schema_ir::SchemaColumn =
+        serde_json::from_str(&column_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR column: {e}"))
+        })?;
+    let payload = match ferro_ddl_lowering::row_policy_shorthand_cast(&col) {
+        Ok(cast) => serde_json::json!({ "supported": true, "cast": cast }),
+        Err(reason) => serde_json::json!({ "supported": false, "reason": reason }),
+    };
+    Ok(payload.to_string())
+}
+
+/// The row-security create decision over FFI (PRD #406): given one model's
+/// compiled SchemaIR, return the Rust-rendered Postgres statements a freshly
+/// created table needs — `ENABLE`, `FORCE` when declared, then one
+/// `CREATE POLICY` per policy in declaration order — plus the policy names.
+///
+/// This is the seam the Alembic autogenerate operation (#414) consumes so its
+/// generated revision executes byte-identical SQL to the auto-migrate create
+/// pass; neither side re-derives the diff or re-renders the SQL. Postgres-only
+/// (ADR-0014): on SQLite the same function returns no statements and one
+/// warning naming the table.
+#[pyfunction]
+#[pyo3(signature = (model_ir_json, dialect="postgres".to_string()))]
+pub fn _plan_row_security(model_ir_json: String, dialect: String) -> PyResult<String> {
+    let dialect = match dialect.as_str() {
+        "postgres" => Dialect::Postgres,
+        "sqlite" => Dialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown dialect {other:?}; expected 'postgres' or 'sqlite'"
+            )));
+        }
+    };
+    let model: ferro_schema_ir::SchemaModel =
+        serde_json::from_str(&model_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
+        })?;
+    let emission = ferro_ddl_lowering::row_security_statements(&model, dialect)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let names: Vec<String> = model
+        .row_security
+        .as_ref()
+        .map(|declaration| {
+            declaration
+                .policies
+                .iter()
+                .map(|policy| policy.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(serde_json::json!({
+        "statements": emission.statements,
+        "names": names,
+        "warning": emission.warning,
+    })
+    .to_string())
+}
