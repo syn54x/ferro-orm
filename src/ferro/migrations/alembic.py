@@ -723,6 +723,14 @@ if _alembic_comparators is not None:
         ``_is_ferro_row_policy_name``), the same functions
         ``live_table_row_security`` calls, so the two introspection paths
         cannot drift apart (AGENTS.md § I-1).
+
+        Both queries filter ``rel.relkind = 'r'`` (ordinary tables) so a
+        row this batch's two queries disagree about (a partitioned table's
+        policies, say, with no matching flags row) can never fabricate a
+        flags-off default for something the flags query never saw —
+        ``live_table_row_security`` has no equivalent filter, but it reads
+        one already-named table by ``relname`` at a time, where that
+        ambiguity cannot arise.
         """
         flag_rows = connection.execute(
             sa.text(
@@ -762,7 +770,7 @@ if _alembic_comparators is not None:
                 "FROM pg_policy pol "
                 "JOIN pg_class rel ON rel.oid = pol.polrelid "
                 "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
-                "WHERE nsp.nspname = current_schema() "
+                "WHERE nsp.nspname = current_schema() AND rel.relkind = 'r' "
                 "ORDER BY rel.relname, pol.polname"
             )
         ).fetchall()
@@ -787,7 +795,7 @@ if _alembic_comparators is not None:
         return live
 
     def _synthetic_ferro_owned_live(
-        model_ir: Dict[str, Any], names: list[str]
+        names: list[str], *, enabled: bool, forced: bool
     ) -> Dict[str, Any]:
         """The ``LiveRowSecurity`` shape for exactly the policies ONE op is
         about to create, as they will exist immediately after its upgrade
@@ -796,13 +804,22 @@ if _alembic_comparators is not None:
 
         Command, body, and roles are irrelevant to that computation (dropping
         a policy by name and reading the flags do not need them) and are left
-        at defaults; only the name and ``ferro_owned=True`` matter, plus the
-        flags the declaration's own ``force`` value says will be true.
+        at defaults; only the name and ``ferro_owned=True`` matter.
+
+        ``enabled``/``forced`` must be the flags AS THEY WILL STAND right
+        after this op's upgrade runs — never hardcoded. A table whose row
+        security predates the declaration (a DBA enabled it; ferro's op only
+        adds a policy) must reverse to "policy dropped, flags untouched": if
+        the caller passed ``enabled=True`` unconditionally here, the computed
+        reverse would ``DISABLE ROW LEVEL SECURITY`` on a fence ferro never
+        turned on — the exact incident
+        ``ferro_ddl_lowering::excess_row_security_flag_statements``'s own
+        ownership gate exists to prevent, reached through the back door of a
+        downgrade instead of ``migrate_destructive``.
         """
-        row_security = model_ir.get("row_security") or {}
         return {
-            "enabled": True,
-            "forced": bool(row_security.get("force", False)),
+            "enabled": enabled,
+            "forced": forced,
             "policies": [
                 {
                     "name": name,
@@ -848,6 +865,23 @@ if _alembic_comparators is not None:
         )
         return plan["statements"]
 
+    def _teardown_flag_labels(statements: list[str]) -> list[str]:
+        """Human labels for the flag-only statements inside a teardown tail
+        (``"force"`` for ``NO FORCE ROW LEVEL SECURITY``, ``"enabled"`` for
+        ``DISABLE ROW LEVEL SECURITY``), for ``FerroRowSecurityDropOp``'s diff
+        tuple — the same text classification
+        ``row_security_teardown_warning`` uses on its own rendered output, so
+        a force=False flip with no orphaned policy still names *something* in
+        the diff instead of an empty tuple next to real DDL.
+        """
+        labels = []
+        for statement in statements:
+            if "NO FORCE" in statement:
+                labels.append("force")
+            elif "DISABLE" in statement:
+                labels.append("enabled")
+        return labels
+
     class FerroRowSecurityOp(_MigrateOperation):
         """Autogenerate carrier for one table's missing row-security flags and
         policies, plus any policy rebuilt because its metadata (command,
@@ -882,8 +916,12 @@ if _alembic_comparators is not None:
 
     class FerroRowSecurityDropOp(_MigrateOperation):
         """Autogenerate carrier for one table's leftover ferro-owned row
-        policies (orphans) and, when the whole declaration was removed, the
-        flag teardown that goes with them.
+        policies (orphans), the flag teardown that goes with a fully removed
+        declaration, AND the narrower ``force=False`` flip on its own (a
+        live-declared model whose declaration still exists but no longer
+        asks for ``force=True`` — ``NO FORCE ROW LEVEL SECURITY`` with no
+        policy drop alongside it, so ``names`` can be flag-only labels from
+        ``_teardown_flag_labels`` with no policy name in it at all).
 
         Renders to plain ``op.execute`` calls — a generated revision does not
         import ferro to run.
@@ -904,7 +942,12 @@ if _alembic_comparators is not None:
             # reviewed edit, not an autogenerated downgrade — the same call
             # FerroCheckDropOp makes for a leftover CHECK, and ADR-0019's own
             # posture: ferro reports the bodies it does not own or no longer
-            # declares, it does not reconstruct them.
+            # declares, it does not reconstruct them. This is deliberately
+            # true of the force=False flip too: an empty reverse never
+            # restores FORCE ROW LEVEL SECURITY, the same "reviewed edit, not
+            # an autogenerated one" call, for the same reason — the op has no
+            # record of whether the live FORCE predated ferro's own
+            # declaration or was ferro's to begin with.
             return FerroRowSecurityDropOp(self.table_name, [], self.names)
 
     # `priority=LAST`: unlike the check/enum comparators above (which only
@@ -960,7 +1003,15 @@ if _alembic_comparators is not None:
                 )
                 if not create_plan["statements"]:
                     continue
-                after_live = _synthetic_ferro_owned_live(model_ir, create_plan["names"])
+                # A brand-new table's create pass genuinely enables it (there
+                # is no live state to have enabled it already) and forces it
+                # iff the declaration asks for that — both real post-upgrade
+                # facts, not an assumption.
+                after_live = _synthetic_ferro_owned_live(
+                    create_plan["names"],
+                    enabled=True,
+                    forced=bool(row_security_ir.get("force", False)),
+                )
                 reverse_statements = _teardown_row_security_statements(
                     model_ir, after_live
                 )
@@ -984,9 +1035,26 @@ if _alembic_comparators is not None:
             full_plan = json.loads(
                 _plan_row_security_reconcile(model_ir_json, live_json, "postgres", True)
             )
-            teardown_statements = full_plan["statements"][len(add_plan["statements"]) :]
+            # Invariant `plan_row_security_reconcile` documents on itself:
+            # the destructive call's statements begin with EXACTLY the
+            # non-destructive call's statements. This comparator relies on
+            # that prefix to split an add-op from a drop-op by slicing
+            # rather than a second traversal — if it ever stopped holding,
+            # slicing would silently misclassify teardown DDL as part of the
+            # (ungated) add op. Fail loudly instead (AGENTS.md § I-6).
+            add_statements = add_plan["statements"]
+            prefix_len = len(add_statements)
+            if full_plan["statements"][:prefix_len] != add_statements:
+                raise RuntimeError(
+                    f"ferro internal invariant violated for table {table_name!r}: "
+                    "_plan_row_security_reconcile's destructive-call statements "
+                    "must extend its non-destructive-call statements as a strict "
+                    "prefix. This is a ferro bug in ferro_ddl_lowering, not a "
+                    "data problem — please file an issue."
+                )
+            teardown_statements = full_plan["statements"][prefix_len:]
 
-            if add_plan["statements"]:
+            if add_statements:
                 reverse_statements: list[str] = []
                 if add_plan["missing"]:
                     # A rebuilt policy's reverse is empty (mirrors
@@ -996,8 +1064,24 @@ if _alembic_comparators is not None:
                     # and reconstructing either one is a reviewed edit, not
                     # an autogenerated downgrade. A newly created policy has
                     # no such history, so only `missing` gets a real reverse.
+                    #
+                    # The post-upgrade flags fed into the synthetic live
+                    # state are exactly what THIS op turned on — never a
+                    # blanket `True`: a table whose row security predates
+                    # the declaration (flags already on, force=False so no
+                    # FORCE emitted either) must reverse to "policy dropped,
+                    # flags untouched", not to `DISABLE ROW LEVEL SECURITY`
+                    # on a fence ferro never enabled.
+                    row_security_ir = model_ir.get("row_security") or {}
+                    enable_emitted = not table_live["enabled"]
+                    force_emitted = (
+                        bool(row_security_ir.get("force", False))
+                        and not table_live["forced"]
+                    )
                     after_live = _synthetic_ferro_owned_live(
-                        model_ir, add_plan["missing"]
+                        add_plan["missing"],
+                        enabled=enable_emitted,
+                        forced=force_emitted,
                     )
                     reverse_statements = _teardown_row_security_statements(
                         model_ir, after_live
@@ -1005,7 +1089,7 @@ if _alembic_comparators is not None:
                 add_ops.append(
                     FerroRowSecurityOp(
                         table_name,
-                        add_plan["statements"],
+                        add_statements,
                         add_plan["missing"] + add_plan["drifted"],
                         reverse_statements,
                     )
@@ -1013,7 +1097,9 @@ if _alembic_comparators is not None:
             if teardown_statements:
                 drop_ops.append(
                     FerroRowSecurityDropOp(
-                        table_name, teardown_statements, full_plan["extra"]
+                        table_name,
+                        teardown_statements,
+                        full_plan["extra"] + _teardown_flag_labels(teardown_statements),
                     )
                 )
 

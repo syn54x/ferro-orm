@@ -597,23 +597,39 @@ async def test_autogenerate_proposes_the_same_teardown_as_the_runtime(
 
 
 def test_the_reconcile_seam_the_comparator_consumes_is_directly_pinned():
-    """Guards the exact seam the comparator relies on: calling
-    ``_plan_row_security_reconcile`` non-destructive then destructive for the
-    same (model, live) pair yields the destructive statements as the
-    non-destructive statements plus a strict tail — the slicing the
-    comparator performs to split add-ops from drop-ops without re-deriving
-    anything."""
-    _define_ledger_row()  # does NOT declare the "retired" policy below
+    """Guards the exact seam the comparator relies on, with every drift
+    category present AT ONCE — a missing policy, a drifted one, an orphan,
+    and a ``force`` flag not yet applied — so the non-destructive plan is
+    genuinely non-empty (a fixture where it plans nothing would make the
+    prefix assertion below trivially true regardless of whether the seam
+    actually holds). Calling ``_plan_row_security_reconcile`` non-destructive
+    then destructive for the SAME (model, live) pair must yield the
+    destructive statements as the non-destructive statements plus a strict
+    tail — the slicing the comparator performs to split add-ops from
+    drop-ops without re-deriving anything. Mirrored at the Rust level by
+    ``plan_row_security_reconcile_destructive_call_extends_the_non_destructive_one_as_a_strict_prefix``."""
+
+    class LedgerRow(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        ledger_id: uuid.UUID
+        label: str
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(column="ledger_id", setting=SETTING),  # drifted below
+            RowPolicy(name="invitee", command="select", using='"label" IS NOT NULL'),
+            force=True,  # live.forced is False below: a flag statement too
+        )
+
     live = {
         "enabled": True,
-        "forced": True,
+        "forced": False,
         "policies": [
             {
                 "name": POLICY_NAME,
-                "command": "all",
+                "command": "select",  # declared "all": metadata drift
                 "restrictive": False,
                 "using": CATALOG_SHORTHAND,
-                "with_check": CATALOG_SHORTHAND,
+                "with_check": None,
                 "ferro_owned": True,
             },
             {
@@ -636,10 +652,64 @@ def test_the_reconcile_seam_the_comparator_consumes_is_directly_pinned():
             json.dumps(_model_ir()), json.dumps(live), "postgres", True
         )
     )
+    # Every category actually fired, or this pin is not exercising what it
+    # claims to.
+    assert non_destructive["missing"] == ["rls_ledgerrow_invitee"]
+    assert non_destructive["drifted"] == [POLICY_NAME]
+    assert destructive["extra"] == [ORPHAN_NAME]
+    assert non_destructive["statements"] != []
+
     prefix_len = len(non_destructive["statements"])
     assert destructive["statements"][:prefix_len] == non_destructive["statements"]
     tail = destructive["statements"][prefix_len:]
     assert tail == [f'DROP POLICY "{ORPHAN_NAME}" ON "ledgerrow"']
+
+
+# ---------------------------------------------------------------------------
+# The narrower force=False flip: no orphan, no removed declaration, just the
+# FORCE flag clearing on its own (#414 review item 5)
+# ---------------------------------------------------------------------------
+
+
+def test_teardown_flag_labels_names_a_flag_only_tail():
+    from ferro.migrations.alembic import _teardown_flag_labels
+
+    assert _teardown_flag_labels([NO_FORCE_SQL]) == ["force"]
+    assert _teardown_flag_labels([DISABLE_SQL]) == ["enabled"]
+    assert _teardown_flag_labels([NO_FORCE_SQL, DISABLE_SQL]) == ["force", "enabled"]
+    assert _teardown_flag_labels([DROP_POLICY_SQL]) == []
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_force_only_flip_proposes_a_narrow_drop_op_labeled_force(
+    db_url, postgres_base_url, db_schema_name
+):
+    """A live-declared model whose declaration still exists but no longer
+    asks for ``force=True`` proposes just ``NO FORCE ROW LEVEL SECURITY`` —
+    no orphaned policy, no removed declaration — and the diff tuple names
+    the flag instead of carrying an empty tuple next to real DDL."""
+    _define_ledger_row(force=True)
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    _define_ledger_row(force=False)
+    await connect(db_url, migrate_updates=True)  # warns; never clears FORCE itself
+
+    from ferro.migrations.alembic import FerroRowSecurityDropOp
+
+    script = _produce_migration_script(postgres_base_url, db_schema_name)
+    drop_ops = [
+        op for op in script.upgrade_ops.ops if isinstance(op, FerroRowSecurityDropOp)
+    ]
+    assert len(drop_ops) == 1, script.upgrade_ops.ops
+    op = drop_ops[0]
+    assert op.statements == [NO_FORCE_SQL]
+    assert op.names == ["force"]
+    # And its reverse is the same deliberate no-op as any other
+    # FerroRowSecurityDropOp: restoring FORCE is a reviewed edit.
+    assert op.reverse().statements == []
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +752,62 @@ async def test_generated_revision_round_trips(
         assert flags["relrowsecurity"] is False
         assert flags["relforcerowsecurity"] is False
         assert await _pg_policy_names("ledgerrow") == []
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_downgrade_never_disables_row_security_that_predates_the_declaration(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Regression for a review BLOCKER: a table whose row security predates
+    ferro's declaration (a DBA enabled it and wrote a foreign policy) must
+    downgrade to "policy dropped, flags untouched" — never
+    ``DISABLE ROW LEVEL SECURITY`` on a fence ferro never turned on. That is
+    exactly the incident
+    ``ferro_ddl_lowering::excess_row_security_flag_statements``'s ownership
+    gate exists to prevent, reached through the back door of an
+    autogenerated downgrade instead of ``migrate_destructive`` if
+    ``_synthetic_ferro_owned_live`` ever hardcoded ``enabled=True``."""
+    _define_ledger_row(declared=False)
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await execute('ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY')
+        await execute(
+            f'CREATE POLICY "{FOREIGN_NAME}" ON "ledgerrow" FOR ALL USING (true)'
+        )
+    _rewind_registry()
+
+    _define_ledger_row(force=False)
+    await connect(db_url)  # no auto-migrate: only ferro's own policy is missing
+
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    # The flags are already on: upgrade must not propose either one.
+    assert "ENABLE ROW LEVEL SECURITY'" not in upgrade_code
+    assert "FORCE ROW LEVEL SECURITY'" not in upgrade_code
+    _assert_statement_in_code(CREATE_POLICY_SQL, upgrade_code)
+    # And the downgrade must be equally narrow: drop the policy, leave the
+    # DBA's fence exactly as it was.
+    assert "DISABLE" not in downgrade_code
+    assert "NO FORCE" not in downgrade_code
+    _assert_statement_in_code(DROP_POLICY_SQL, downgrade_code)
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    async with engines.session():
+        flags = await _pg_flags("ledgerrow")
+        assert flags["relrowsecurity"] is True
+        assert flags["relforcerowsecurity"] is False
+        assert await _pg_policy_names("ledgerrow") == [FOREIGN_NAME, POLICY_NAME]
+
+    _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
+    async with engines.session():
+        flags = await _pg_flags("ledgerrow")
+        # Still enabled: the DBA's fence is untouched by the downgrade.
+        assert flags["relrowsecurity"] is True
+        assert flags["relforcerowsecurity"] is False
+        assert await _pg_policy_names("ledgerrow") == [FOREIGN_NAME]
 
 
 @pytest.mark.backend_matrix
