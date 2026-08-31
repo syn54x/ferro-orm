@@ -378,6 +378,60 @@ async def test_a_settings_bearing_session_wraps_a_single_statement_write(db_url)
         assert [row["tenant"] for row in rows] == [ACME]
 
 
+# ---------------------------------------------------------------------------
+# Live mutation (#411): a session opened with NO settings, scoped mid-request
+# by `Session.set_config` — through the same policed table and NOSUPERUSER
+# role as the rest of this file, so the assertion is "the policy let rows
+# through", not just "the GUC round-tripped".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_set_config_mid_request_scopes_subsequent_plain_queries(
+    db_url, tenant_role
+):
+    """Deferred resolution, end to end: the session starts with no settings at
+    all (the tenant isn't known yet), and a plain query outside any
+    ``transaction()`` sees the scope the moment ``set_config`` supplies it —
+    exactly the shape of resolving a tenant from an auth chain mid-request."""
+    await _seed_and_open_tenant_connection(db_url, tenant_role)
+    try:
+        async with engines.session("tenant") as session:
+            assert session.effective_settings == {}
+            assert await _labels() == [], "no scope yet, so nothing is visible"
+
+            await session.set_config(TENANT_KEY, ACME)
+
+            assert await _labels() == ["a1", "a2"]
+    finally:
+        async with engines.session():
+            await _drop_tenant_role(tenant_role)
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_set_config_via_current_session_scopes_a_helper_called_deep_in_the_stack(
+    db_url, tenant_role
+):
+    """The documented pattern: reach the ambient session with
+    ``ferro.current_session()`` rather than threading it through every
+    function signature."""
+    import ferro
+
+    async def resolve_tenant_and_scope(tenant: str) -> None:
+        await ferro.current_session().set_config(TENANT_KEY, tenant)
+
+    await _seed_and_open_tenant_connection(db_url, tenant_role)
+    try:
+        async with engines.session("tenant"):
+            await resolve_tenant_and_scope(ACME)
+            assert await _labels() == ["a1", "a2"]
+    finally:
+        async with engines.session():
+            await _drop_tenant_role(tenant_role)
+
+
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
 async def test_a_settings_less_session_opens_no_wrap(db_url):

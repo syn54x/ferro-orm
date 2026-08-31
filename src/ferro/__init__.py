@@ -45,7 +45,7 @@ from .models import Model, evict_instance, transaction
 from .query import Relation, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .rowsecurity import RowPolicy, RowSecurity
-from .session import Session, engines
+from .session import Session, current_session, engines
 
 # Set up the Ferro logger
 _logger = logging.getLogger("ferro")
@@ -374,5 +374,6 @@ __all__ = [
     "Transaction",
     "Session",
     "engines",
+    "current_session",
     "now",
 ]

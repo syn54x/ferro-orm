@@ -497,9 +497,18 @@ pub struct SessionState {
     /// Transactions opened within this session (isolated from global registry).
     pub transaction_registry: DashMap<String, TransactionHandle>,
     /// Effective session settings, snapshotted at open in declaration order
-    /// (see [`crate::session_settings`]). Empty for the vast majority of
-    /// sessions, which then pay nothing for the feature.
-    pub settings: Vec<SessionSetting>,
+    /// (see [`crate::session_settings`]) and mutable thereafter through
+    /// `Session.set_config` (#411). Empty for the vast majority of sessions,
+    /// which then pay nothing for the feature. A plain `RwLock` rather than
+    /// `DashMap`'s per-key sharding: this is one value read on every
+    /// operation and written rarely, not a keyed collection.
+    settings: RwLock<Vec<SessionSetting>>,
+    /// Serializes a `set_config` mutation's whole sequence — compare, swap,
+    /// reapply to open transactions, evict the identity map — so two
+    /// concurrent `set_config` calls on the same session (from sibling tasks
+    /// sharing it) cannot interleave their reapplication out of order. Reads
+    /// of `settings` never take this; only a mutation does.
+    settings_write_lock: Mutex<()>,
     /// Session-local identity map — the *only* identity map (FF-D D2:
     /// sessionless operations cache nothing); values are `weakref.ref`
     /// objects (FF-D D1).
@@ -516,10 +525,42 @@ impl SessionState {
     pub fn new(settings: Vec<SessionSetting>) -> Self {
         Self {
             transaction_registry: DashMap::new(),
-            settings,
+            settings: RwLock::new(settings),
+            settings_write_lock: Mutex::new(()),
             identity_map: DashMap::new(),
             identity_ops: AtomicUsize::new(0),
         }
+    }
+
+    /// Snapshot the session's current effective settings, in declaration
+    /// order. Poisoning is recovered rather than propagated, matching
+    /// `EngineHandle::pool_snapshot` — the value itself is always valid
+    /// (writers only ever replace it wholesale), and panicking here would
+    /// cross the FFI boundary (AGENTS.md § I-3).
+    pub fn settings_snapshot(&self) -> Vec<SessionSetting> {
+        match self.settings.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Replace the session's effective settings wholesale. Callers that need
+    /// "did this actually change" must snapshot and compare themselves
+    /// first — [`crate::session_settings::settings_changed`] is the shared
+    /// answer to that question, kept out of this setter so it stays a pure
+    /// unconditional write.
+    pub fn replace_settings(&self, new: Vec<SessionSetting>) {
+        let mut guard = match self.settings.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = new;
+    }
+
+    /// Serialize one `set_config` mutation's sequence against any other on
+    /// this session. See [`Self::settings_write_lock`].
+    pub async fn lock_settings_for_mutation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.settings_write_lock.lock().await
     }
 }
 

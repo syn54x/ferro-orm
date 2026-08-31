@@ -206,6 +206,11 @@ def open_session(
     declared: Optional[list[tuple[str, str]]] = None,
 ) -> tuple[str, str]: ...
 def close_session(session_id: str) -> None: ...
+async def set_session_config(
+    session_id: str,
+    connection_name: str,
+    effective_settings: list[tuple[str, str]],
+) -> bool: ...
 async def raw_execute(
     sql: str,
     args: list[Any],

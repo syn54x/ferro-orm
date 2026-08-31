@@ -151,6 +151,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(operations::rollback_transaction, m)?)?;
     m.add_function(wrap_pyfunction!(operations::open_session, m)?)?;
     m.add_function(wrap_pyfunction!(operations::close_session, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::set_session_config, m)?)?;
     m.add_function(wrap_pyfunction!(operations::raw_execute, m)?)?;
     m.add_function(wrap_pyfunction!(operations::raw_fetch_all, m)?)?;
     m.add_function(wrap_pyfunction!(operations::raw_fetch_one, m)?)?;

@@ -9,6 +9,7 @@ use crate::backend::{
 use crate::query::{JoinPlan, QueryPlan};
 use crate::session_settings::{
     OperationScope, SessionSetting, begin_transaction_with_settings, ensure_postgres_for_settings,
+    reapply_settings_to_open_transactions, settings_changed,
 };
 use crate::state::{
     Dialect, TRANSACTION_REGISTRY, TransactionConnection, TransactionHandle, connection_for_route,
@@ -1930,6 +1931,80 @@ pub fn close_session(session_id: String) -> PyResult<()> {
         )));
     }
     Ok(())
+}
+
+/// Mutate a live session's effective settings (`Session.set_config`, #411).
+///
+/// `effective_settings` is the FULL new effective set — the session's prior
+/// settings merged with the one key/value `Session.set_config` just
+/// validated — computed on the Python side (`Session._merge_ambient_settings`
+/// is already the one place that merge happens). Passing the merged whole
+/// rather than just the changed pair makes the no-op check exact: a call that
+/// changes nothing does nothing at all, not even a round trip.
+///
+/// A session's own connection must be Postgres for this to succeed,
+/// regardless of what the session declared (or didn't) at open —
+/// `set_config` is a declaration-equivalent act (PRD #406 / #408's second
+/// amendment): a value the caller explicitly asked to set has to be
+/// honoured, the same promise `open_session` makes for `settings=`. A value a
+/// session only *inherited* is different and never reaches this function at
+/// all — nothing here changes how inherited settings behave.
+///
+/// On a real change this does three things, in order, all inside one
+/// serialized sequence so two concurrent `set_config` calls on the same
+/// session cannot interleave: swap the session's stored settings, reapply the
+/// new batch to every transaction the session currently has open (so the very
+/// next statement in an already-open `transaction()` sees it), then evict the
+/// session's identity map (instances loaded under the old scope must not be
+/// served under the new one). The very next operation this session runs —
+/// transactional or not — reads the new settings too, because every `BEGIN`
+/// re-reads them (`session_settings_for`); nothing further is needed for that
+/// path.
+///
+/// Args:
+///     session_id (str): Id returned by `open_session`.
+///     connection_name (str): The session's own resolved connection.
+///     effective_settings (list[tuple[str, str]]): Full new effective
+///         settings, in declaration order.
+///
+/// Returns:
+///     bool: `True` when the settings actually changed (and were reapplied
+///         and the identity map evicted); `False` when `effective_settings`
+///         equals what the session already had — a true no-op.
+///
+/// # Errors
+/// `PyRuntimeError` when the session's connection is not Postgres, the
+/// session id is unknown, or reapplying to one of the session's open
+/// transactions fails.
+#[pyfunction]
+pub fn set_session_config(
+    py: Python<'_>,
+    session_id: String,
+    connection_name: String,
+    effective_settings: Vec<SessionSetting>,
+) -> PyResult<Bound<'_, PyAny>> {
+    let engine = engine_for_connection(Some(connection_name.clone()))?;
+    ensure_postgres_for_settings(engine.backend(), &connection_name, &effective_settings)?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let session = session_state(&session_id)?;
+        // Serializes the whole sequence below against any other `set_config`
+        // on this session — see `SessionState::lock_settings_for_mutation`.
+        let _serialize = session.lock_settings_for_mutation().await;
+
+        let current = session.settings_snapshot();
+        if !settings_changed(&current, &effective_settings) {
+            return Ok(false);
+        }
+        session.replace_settings(effective_settings.clone());
+
+        reapply_settings_to_open_transactions(&session, &effective_settings).await?;
+
+        // Re-acquire the GIL before accessing identity map (async context has
+        // no GIL) — the same pattern `rollback_transaction` uses.
+        pyo3::Python::attach(|_py| identity_map_clear(Some(&session_id)))?;
+        Ok(true)
+    })
 }
 
 /// Fetches all records for a given model class.

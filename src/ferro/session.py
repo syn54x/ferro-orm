@@ -10,11 +10,19 @@ from typing import Any
 
 from ._core import close_session as _core_close_session
 from ._core import open_session as _core_open_session
+from ._core import set_session_config as _core_set_session_config
 from .state import _CURRENT_SESSION
 
 _SESSION_CLOSE_AMBIENT_MISMATCH = (
     "Session close failed: ambient session does not match the closing session. "
     "This usually indicates session lifecycle misuse in the current asyncio context."
+)
+
+_SET_CONFIG_NOT_OPEN_MESSAGE = (
+    "Cannot set_config on a session that is not open. `set_config` mutates a "
+    "live session's settings, so the session has to exist first: enter it with "
+    "`async with` before calling `set_config` — including from inside that "
+    "block, via `ferro.current_session()`."
 )
 
 
@@ -81,6 +89,10 @@ class Session:
     over anything it inherits from an enclosing session — is snapshotted. See
     `EngineManager.session` for the full contract, including what an operation
     outside a transaction sends and how inherited settings behave off Postgres.
+
+    A value not known until partway through the session's life — resolved
+    from an auth chain, say — is set with `set_config` rather than at open;
+    see there for the mid-transaction and identity-map-eviction contract.
     """
 
     connection_name: str | None = None
@@ -223,10 +235,109 @@ class Session:
             return declared
         return {**inherited, **declared}
 
+    async def set_config(self, key: str, value: str) -> None:
+        """Mutate this session's settings while it is open.
+
+        Everything you can `settings=` at open, you can also set later, for the
+        case where the value isn't known until partway through a request — an
+        auth chain that resolves the tenant only after checking a token, say:
+
+            async with engines.session() as session:      # no settings yet
+                tenant = await resolve_tenant_from_auth_header(request)
+                await session.set_config("myapp.tenant_id", tenant)
+                # every query from here on is scoped to `tenant`
+                invoices = await Invoice.where(lambda invoice: invoice.paid).all()
+
+        Deep in a call stack, reach the session through `ferro.current_session()`
+        rather than threading it through every function signature:
+
+            async def resolve_tenant_and_scope(request) -> None:
+                tenant = await resolve_tenant_from_auth_header(request)
+                await ferro.current_session().set_config("myapp.tenant_id", tenant)
+
+        The new value reaches the very next statement this session sends —
+        including the next statement inside an already-open `transaction()`
+        block, which gets it immediately rather than waiting for that
+        transaction to end and a new one to begin:
+
+            async with engines.session() as session:
+                async with transaction():
+                    await session.set_config("myapp.tenant_id", "acme")
+                    # this SELECT, in the SAME transaction, already sees it
+                    rows = await Invoice.where(lambda invoice: invoice.paid).all()
+
+        `set_config` also evicts this session's identity map: an instance
+        `get()`-ed under the old scope is never handed back under the new one —
+        the next `get()` for that primary key refetches instead.
+
+        Validation matches `engines.session(settings=...)` exactly (see there
+        for the full rationale): `key` and `value` must be `str`, and `key` must
+        be a dotted custom setting name.
+
+        Args:
+            key: Dotted custom Postgres setting name (e.g. `"myapp.tenant_id"`).
+            value: The setting's new value.
+
+        Raises:
+            RuntimeError: This session is not open (`set_config` mutates a live
+                session, so there has to be one), or this session's connection
+                is not Postgres — `set_config` is a declaration, exactly like
+                `settings=` at open, so it has to be honourable rather than a
+                silent no-op on a backend with no GUCs.
+            TypeError: `key` or `value` is not a `str`.
+            ValueError: `key` is not a dotted custom setting name.
+        """
+        if self.session_id is None:
+            raise RuntimeError(_SET_CONFIG_NOT_OPEN_MESSAGE)
+        # `connection_name` is resolved by `__aenter__` alongside `session_id`
+        # (see there), so a live `session_id` guarantees a resolved connection.
+        assert self.connection_name is not None
+
+        validated = _validated_settings({key: value})
+        ((validated_key, validated_value),) = validated.items()
+
+        new_effective = {**self.effective_settings, validated_key: validated_value}
+        await _core_set_session_config(
+            self.session_id,
+            self.connection_name,
+            list(new_effective.items()),
+        )
+        # Only committed once the core call succeeds — a rejected mutation
+        # (non-Postgres connection) must leave this session's scope untouched.
+        self.effective_settings = new_effective
+
     def query(self, model_cls):
         from .query import Query
 
         return Query(model_cls, session=self)
+
+
+def current_session() -> "Session | None":
+    """Return the session open in the current asyncio task, or `None`.
+
+    A `Session` is ambient: once you `async with engines.session(...)`, code
+    called from inside that block doesn't need the session passed down through
+    every function signature — it can just ask for it. This is what makes the
+    deferred-resolution pattern possible: open a session before you know the
+    tenant, resolve it partway through the request, and hand it to the session
+    from wherever that resolution happens:
+
+        async with engines.session():             # tenant not known yet
+            await handle_request(request)          # ... called deep inside ...
+
+        async def handle_request(request) -> None:
+            tenant = await resolve_tenant_from_auth_header(request)
+            await ferro.current_session().set_config("myapp.tenant_id", tenant)
+            # every query for the rest of this request is scoped to `tenant`
+
+    Nested sessions each become the ambient one for the code inside their own
+    `async with` block; `current_session()` always returns the innermost one,
+    and `None` outside every session.
+
+    Returns:
+        Session | None: The ambient session, or `None` if none is open.
+    """
+    return _CURRENT_SESSION.get()  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
 
 
 class EngineManager:
