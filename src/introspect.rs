@@ -928,7 +928,10 @@ pub fn _live_row_security_for_test(
 mod tests {
     use super::*;
     use crate::backend::PoolSpec;
+    use crate::session_settings::SettingsDelivery;
     use ferro_ddl_lowering::Dialect;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     async fn memory_engine() -> EngineHandle {
         EngineHandle::connect(PoolSpec {
@@ -937,6 +940,8 @@ mod tests {
             search_path: None,
             max_connections: 1,
             min_connections: 0,
+            settings_delivery: SettingsDelivery::Transaction,
+            pins: Arc::new(AtomicUsize::new(0)),
         })
         .await
         .unwrap()

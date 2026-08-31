@@ -441,8 +441,47 @@ pub struct TransactionHandle {
     pub connection_name: String,
 }
 
-/// Async mutex wrapper around a checked-out [`EngineConnection`].
-pub type TransactionConnection = Arc<Mutex<EngineConnection>>;
+/// One checked-out connection behind an async mutex — or `None`, once it has
+/// been discarded.
+///
+/// Every route an operation's statements can run on is one of these: the
+/// connection an explicit `transaction()` block holds, the implicit
+/// transaction `transaction` settings delivery opens around a lone operation,
+/// and the connection a session pins under `connection` delivery.
+///
+/// The `Option` is what makes *discarding* expressible from a synchronous
+/// `Drop`. A connection whose state Ferro can no longer vouch for — one
+/// abandoned mid-statement by a cancelled task, one whose `ROLLBACK` failed —
+/// must never go back to the pool, and the only way to sever the pool's claim
+/// is [`EngineConnection::detach`], which consumes the connection. Taking it
+/// out of the slot is how a `Drop` gets to own it; what stays behind is an
+/// empty slot, which is a loud error at the next use rather than a silent
+/// reuse of a connection that is already gone.
+pub type ConnectionSlot = Mutex<Option<EngineConnection>>;
+
+/// A [`ConnectionSlot`] shared between the transaction registry, a session's
+/// pin, and the operations running on it.
+pub type TransactionConnection = Arc<ConnectionSlot>;
+
+pub(crate) const DISCARDED_CONNECTION_MSG: &str =
+    "This connection was discarded (its operation was cancelled, or its \
+     ROLLBACK failed) and cannot run further statements. Ferro never returns \
+     a connection whose state it cannot vouch for to the pool.";
+
+/// The live connection in a slot guard, or a loud error when it is gone.
+///
+/// The single read seam for [`ConnectionSlot`], so "the connection was
+/// discarded" has one message and one shape wherever a statement is issued.
+///
+/// # Errors
+/// `sqlx::Error::Protocol` carrying [`DISCARDED_CONNECTION_MSG`].
+pub fn live_connection(
+    guard: &mut Option<EngineConnection>,
+) -> Result<&mut EngineConnection, sqlx::Error> {
+    guard
+        .as_mut()
+        .ok_or_else(|| sqlx::Error::Protocol(DISCARDED_CONNECTION_MSG.to_string()))
+}
 
 impl TransactionHandle {
     /// Create a root transaction handle after `BEGIN`.
@@ -452,7 +491,26 @@ impl TransactionHandle {
     /// * `connection_name` — Registered Ferro connection name.
     pub fn root(conn: EngineConnection, connection_name: String) -> Self {
         Self {
-            conn: Arc::new(Mutex::new(conn)),
+            conn: Arc::new(Mutex::new(Some(conn))),
+            savepoint_name: None,
+            connection_name,
+        }
+    }
+
+    /// Create a root transaction handle for a `BEGIN` issued on a connection
+    /// the session already owns — its pinned connection under `connection`
+    /// settings delivery.
+    ///
+    /// Unlike [`Self::root`], the slot is *shared* with the session's pin, so
+    /// ending this transaction (`COMMIT`/`ROLLBACK`) returns nothing to the
+    /// pool: the session keeps the connection until it closes.
+    ///
+    /// # Arguments
+    /// * `conn` — The session's pinned connection slot.
+    /// * `connection_name` — Registered Ferro connection name.
+    pub fn on_pinned(conn: TransactionConnection, connection_name: String) -> Self {
+        Self {
+            conn,
             savepoint_name: None,
             connection_name,
         }
@@ -518,6 +576,16 @@ pub struct SessionState {
     pub identity_map: DashMap<(String, String, String), Py<PyAny>>,
     /// Amortized-sweep op counter for `identity_map`.
     pub identity_ops: AtomicUsize,
+    /// The pool connection this session pinned under `connection` settings
+    /// delivery, and the keys it applied on it (see
+    /// [`crate::session_settings::PinnedConnection`]).
+    ///
+    /// `None` for every session on a `transaction`-delivery pool, every
+    /// settings-less session, and any session whose pinned connection was
+    /// discarded — the next operation pins a fresh one. The async mutex is
+    /// held only across the pin decision itself, so two sibling tasks racing
+    /// a session's *first* operation cannot pin two connections.
+    pub pinned: Mutex<Option<Arc<crate::session_settings::PinnedConnection>>>,
 }
 
 impl SessionState {
@@ -529,6 +597,7 @@ impl SessionState {
             settings_write_lock: Mutex::new(()),
             identity_map: DashMap::new(),
             identity_ops: AtomicUsize::new(0),
+            pinned: Mutex::new(None),
         }
     }
 
@@ -587,9 +656,13 @@ pub fn register_session(settings: Vec<SessionSetting>) -> String {
 /// * `session_id` — Id returned by [`register_session`].
 ///
 /// # Returns
-/// `true` when the session existed and was removed.
-pub fn unregister_session(session_id: &str) -> bool {
-    SESSION_REGISTRY.remove(session_id).is_some()
+/// The removed session's state, or `None` when the id was not registered.
+/// Callers that need the state after removal — the close path, which has to
+/// release a pinned connection *after* the session is gone from the registry
+/// so a cancelled close cannot strand it — take it from here rather than
+/// re-reading a registry the session is no longer in.
+pub fn unregister_session(session_id: &str) -> Option<Arc<SessionState>> {
+    SESSION_REGISTRY.remove(session_id).map(|(_, state)| state)
 }
 
 /// Look up active session state.
@@ -783,7 +856,7 @@ mod session_close_tests {
                 .transaction_registry
                 .is_empty()
         );
-        assert!(unregister_session(&session_id));
+        assert!(unregister_session(&session_id).is_some());
     }
 }
 

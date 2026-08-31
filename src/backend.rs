@@ -3,6 +3,7 @@
 //! [`EngineHandle`] is the per-connection runtime entry point. All SQL execution flows through
 //! it so pool refresh, identity-map policy, and shadow-runtime hooks stay centralized.
 
+use crate::session_settings::SettingsDelivery;
 use ferro_ddl_lowering::Dialect;
 use sqlx::ColumnIndex;
 use sqlx::pool::PoolConnection;
@@ -11,7 +12,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Column, Connection, PgPool, Postgres, Row, Sqlite, SqlitePool, ValueRef};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Infer the SQL dialect / backend from a connection-URL scheme.
@@ -41,6 +42,16 @@ pub struct PoolSpec {
     pub max_connections: u32,
     /// Minimum idle connections kept warm.
     pub min_connections: u32,
+    /// How this pool delivers session settings (`PoolConfig(settings_delivery=)`).
+    /// Never inferred: a transaction pooler is invisible to its clients, so
+    /// `connection` is only ever the operator's explicit promise that this
+    /// pool talks to Postgres directly.
+    pub settings_delivery: SettingsDelivery,
+    /// How many settings-bearing sessions currently hold a pinned connection
+    /// on this pool. Shared with the pool's `after_release` hook and with
+    /// every [`crate::session_settings::PinnedConnection`], and rebuilt pools
+    /// keep the same gauge.
+    pub pins: Arc<AtomicUsize>,
 }
 
 impl PoolSpec {
@@ -72,6 +83,9 @@ impl PoolSpec {
                         })
                     });
                 }
+                if self.settings_delivery == SettingsDelivery::Connection {
+                    pool_options = pool_options.after_release(release_guard(self.pins.clone()));
+                }
                 let pool = pool_options.connect(&self.url).await?;
                 Ok(BackendPool::Postgres(Arc::new(pool)))
             }
@@ -87,6 +101,53 @@ impl PoolSpec {
         }
         let url = self.url.to_ascii_lowercase();
         url.contains(":memory:") || url.contains("mode=memory")
+    }
+}
+
+/// The `after_release` safety net for a `connection`-delivery pool: a
+/// connection still carrying a session's settings never goes back into
+/// rotation.
+///
+/// Ferro's primary guarantee is upstream of this hook. A pinned connection
+/// lives in a slot whose owner discards it — detaching it from the pool
+/// synchronously — on every path other than a clean, reset-first release
+/// (`session_settings::PinnedConnection`). So a dirty connection reaching this
+/// hook means something bypassed that owner, and the right answer is not to
+/// reason about how: it is to refuse it.
+///
+/// **What it costs, plainly.** The hook runs on every connection this pool
+/// releases, but it only *asks the database anything* while at least one
+/// settings-bearing session holds a pin (`pins`). With no pin outstanding —
+/// every moment on a `transaction`-delivery pool, and every moment a
+/// `connection`-delivery pool is serving only settings-less work — it returns
+/// immediately and adds nothing. While a pin is outstanding, each release of
+/// some *other* connection pays one `SELECT current_setting(...)`.
+///
+/// Returning `Ok(false)` tells sqlx to close the connection instead of pooling
+/// it. The replacement it opens runs `after_connect` again, so pool-level
+/// state such as `search_path` comes back with it.
+type ReleaseFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, sqlx::Error>> + Send + 'a>>;
+
+fn release_guard(
+    pins: Arc<AtomicUsize>,
+) -> impl for<'a> Fn(&'a mut sqlx::PgConnection, sqlx::pool::PoolConnectionMetadata) -> ReleaseFuture<'a>
++ Send
++ Sync
++ 'static {
+    move |conn, _meta| {
+        let pins = pins.clone();
+        Box::pin(async move {
+            if pins.load(Ordering::SeqCst) == 0 {
+                return Ok(true);
+            }
+            let marker: String =
+                sqlx::query_scalar("SELECT coalesce(current_setting($1, true), '')")
+                    .bind(crate::session_settings::PIN_MARKER_KEY)
+                    .fetch_one(conn)
+                    .await?;
+            Ok(!crate::session_settings::pinned_marker_is_dirty(&marker))
+        })
     }
 }
 
@@ -133,6 +194,10 @@ pub struct EngineHandle {
     /// — the engine's only epoch boundary — clears the map. Shared across
     /// clones (like `pool`).
     catalog_cache: Arc<RwLock<HashMap<String, Arc<TableCatalog>>>>,
+    /// How this pool delivers session settings; see [`PoolSpec`].
+    settings_delivery: SettingsDelivery,
+    /// Settings-bearing sessions currently holding a pinned connection here.
+    pins: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Debug)]
@@ -307,6 +372,8 @@ impl EngineHandle {
     /// therefore support [`EngineHandle::refresh_pool`].
     pub async fn connect(spec: PoolSpec) -> Result<Self, sqlx::Error> {
         let backend = spec.backend;
+        let settings_delivery = spec.settings_delivery;
+        let pins = spec.pins.clone();
         let pool = spec.build().await?;
         Ok(Self {
             backend,
@@ -315,6 +382,8 @@ impl EngineHandle {
             identity_map_enabled: true,
             catalog_queries: Arc::new(AtomicU64::new(0)),
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
+            settings_delivery,
+            pins,
         })
     }
 
@@ -330,6 +399,8 @@ impl EngineHandle {
             identity_map_enabled: true,
             catalog_queries: Arc::new(AtomicU64::new(0)),
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
+            settings_delivery: SettingsDelivery::Transaction,
+            pins: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -345,6 +416,8 @@ impl EngineHandle {
             identity_map_enabled: true,
             catalog_queries: Arc::new(AtomicU64::new(0)),
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
+            settings_delivery: SettingsDelivery::Transaction,
+            pins: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -443,6 +516,34 @@ impl EngineHandle {
 
     pub fn backend(&self) -> Dialect {
         self.backend
+    }
+
+    /// How this connection's pool delivers session settings.
+    #[must_use]
+    pub fn settings_delivery(&self) -> SettingsDelivery {
+        self.settings_delivery
+    }
+
+    /// The pool's outstanding-pin gauge, shared with its `after_release` hook.
+    #[must_use]
+    pub fn pin_gauge(&self) -> Arc<AtomicUsize> {
+        self.pins.clone()
+    }
+
+    /// Check out a pool connection for a session to pin (`connection`
+    /// settings delivery).
+    ///
+    /// Deliberately not a transaction: the session applies its settings at
+    /// database-session scope on this connection and then runs its statements
+    /// bare. The connection is the session's until it closes, so this call is
+    /// also where a settings-bearing session waits when every pool connection
+    /// is already pinned — the mode's concurrency cap, surfacing as an
+    /// ordinary pool checkout.
+    ///
+    /// # Errors
+    /// The `sqlx::Error` from the checkout.
+    pub async fn acquire_pinned_connection(&self) -> Result<EngineConnection, sqlx::Error> {
+        self.acquire_nontx_connection().await
     }
 
     /// Maximum bind parameters one statement may carry on this backend.
@@ -1007,9 +1108,12 @@ mod tests {
     use super::EngineValue;
     use super::PoolSpec;
     use super::dialect_from_url;
+    use crate::session_settings::SettingsDelivery;
     use ferro_ddl_lowering::Dialect;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn classifies_sqlite_urls() {
@@ -1463,6 +1567,8 @@ mod tests {
             search_path: None,
             max_connections: 2,
             min_connections: 0,
+            settings_delivery: SettingsDelivery::Transaction,
+            pins: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1522,6 +1628,8 @@ mod tests {
             search_path: None,
             max_connections: 1,
             min_connections: 0,
+            settings_delivery: SettingsDelivery::Transaction,
+            pins: Arc::new(AtomicUsize::new(0)),
         };
         let engine = EngineHandle::connect(spec).await.unwrap();
         engine

@@ -148,13 +148,24 @@ class Session:
     async def close(self) -> None:
         """Close this session and release its runtime state.
 
+        Under ``settings_delivery="connection"`` this is also where the
+        connection the session pinned goes back to the pool — after Ferro
+        resets **exactly the settings keys this session set on it**, and
+        nothing else. (Never ``RESET ALL``: that would also wipe the
+        ``search_path`` the pool installs on every connection.) A session
+        under the default ``transaction`` delivery has nothing to release and
+        this costs no round trip.
+
         Safe to call from a different asyncio context than ``__aenter__``.
         Repeated calls are no-ops.
 
         Raises:
             RuntimeError: If the ambient session in this asyncio context does not
                 match this handle (same-context lifecycle misuse), or if
-                session-scoped transactions are still open.
+                session-scoped transactions are still open, or if resetting a
+                pinned connection failed — in which case the session is closed
+                regardless and the connection was discarded rather than
+                returned to the pool.
         """
         if self._close_lock is None:
             self._close_lock = asyncio.Lock()
@@ -165,21 +176,40 @@ class Session:
 
             self._assert_close_allowed()
 
+            releasing = None
             if self.session_id is not None:
-                session_id = self.session_id
-                _core_close_session(session_id)
+                # Rust takes the session out of its registry *here*, on the
+                # call itself, and rejects the close outright — before any
+                # awaitable exists — when transactions are still open. So an
+                # exception from this line leaves the handle exactly as it
+                # was: still open, still usable.
+                releasing = _core_close_session(self.session_id)
                 self.session_id = None
 
-            if self._token is None:
-                self._enter_context = None
-                self._enter_task = None
-                return
+            try:
+                if releasing is not None:
+                    # Awaits a round trip only under `connection` settings
+                    # delivery, where the pinned connection's settings are
+                    # reset before it goes back to the pool.
+                    await releasing
+            finally:
+                # Past that point the session is gone from the runtime
+                # whatever happens, so the ambient session is restored
+                # whatever happens: a failed reset must not leave the rest of
+                # this context scoped to a session that no longer exists.
+                self._detach_ambient()
 
-            token = self._token
-            self._token = None
+    def _detach_ambient(self) -> None:
+        """Stop being the ambient session for this asyncio context."""
+        if self._token is None:
             self._enter_context = None
             self._enter_task = None
-            self._restore_ambient_session(token)
+            return
+        token = self._token
+        self._token = None
+        self._enter_context = None
+        self._enter_task = None
+        self._restore_ambient_session(token)
 
     def _assert_close_allowed(self) -> None:
         if self._token is None:

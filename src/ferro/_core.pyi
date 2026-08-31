@@ -34,6 +34,7 @@ async def connect(
     identity_map: bool = True,
     migrate_updates: bool = False,
     migrate_destructive: bool = False,
+    settings_delivery: str = "transaction",
 ) -> None: ...
 async def create_tables(using: Optional[str] = None) -> None: ...
 async def migrate(
@@ -205,7 +206,7 @@ def open_session(
     settings: Optional[list[tuple[str, str]]] = None,
     declared: Optional[list[tuple[str, str]]] = None,
 ) -> tuple[str, str]: ...
-def close_session(session_id: str) -> None: ...
+async def close_session(session_id: str) -> None: ...
 async def set_session_config(
     session_id: str,
     connection_name: str,
