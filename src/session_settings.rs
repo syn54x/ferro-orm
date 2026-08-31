@@ -37,7 +37,7 @@
 //! `transaction()` is tenant-scoped.
 
 use crate::backend::{EngineBindValue, EngineConnection, EngineHandle};
-use crate::state::{TransactionConnection, session_state};
+use crate::state::{SessionState, TransactionConnection, TransactionHandle, session_state};
 use ferro_ddl_lowering::Dialect;
 use pyo3::PyResult;
 use pyo3::exceptions::PyRuntimeError;
@@ -150,7 +150,7 @@ pub fn ensure_postgres_for_settings(
 
 /// A session's effective settings, or an empty set for a sessionless route.
 ///
-/// The single read site for [`crate::state::SessionState::settings`], so
+/// The single read site for [`crate::state::SessionState::settings_snapshot`], so
 /// "which settings apply" has one answer for every delivery path.
 ///
 /// # Arguments
@@ -160,7 +160,7 @@ pub fn ensure_postgres_for_settings(
 /// `PyRuntimeError` when the session id is unknown.
 pub fn session_settings_for(session_id: Option<&str>) -> PyResult<Vec<SessionSetting>> {
     match session_id {
-        Some(id) => Ok(session_state(id)?.settings.clone()),
+        Some(id) => Ok(session_state(id)?.settings_snapshot()),
         None => Ok(Vec::new()),
     }
 }
@@ -183,9 +183,188 @@ pub fn settings_would_apply(backend: Dialect, session_id: Option<&str>) -> PyRes
         return Ok(false);
     }
     match session_id {
-        Some(id) => Ok(!session_state(id)?.settings.is_empty()),
+        Some(id) => Ok(!session_state(id)?.settings_snapshot().is_empty()),
         None => Ok(false),
     }
+}
+
+/// Whether a `set_config` mutation actually changes anything.
+///
+/// The gate for the whole downstream mutation: reapplying to open
+/// transactions and evicting the identity map are both skipped when this is
+/// `false`. Effective settings are already an ordered list (declaration
+/// order, `Session._merge_ambient_settings`), so a plain, order-sensitive
+/// equality check is the exact answer — anything that did not change the
+/// rendered `set_config` batch must not re-emit it.
+///
+/// # Arguments
+/// * `current` — The session's settings before the call.
+/// * `new` — The full proposed effective settings after the call (the
+///   session's prior settings merged with the one key/value that changed).
+#[must_use]
+pub fn settings_changed(current: &[SessionSetting], new: &[SessionSetting]) -> bool {
+    current != new
+}
+
+/// Merge one `(key, value)` into a session's current effective settings:
+/// replace an existing key's value in place, or append a new key at the end.
+/// The same update policy Python's `{**effective, key: value}` follows for
+/// `settings=` at open — performed here, on the Rust side, so that two
+/// concurrent `set_config` calls on the same session always merge against the
+/// session's actual last-committed settings rather than a Python-side mirror
+/// that a sibling task's own concurrent `set_config` could have made stale.
+/// `operations::set_session_config` calls this from inside the session's
+/// `settings_write_lock`, so the read (`current`) and the eventual write are
+/// one atomic step from the caller's perspective — two sibling-task
+/// `set_config` calls setting two different keys can never lose one of them
+/// to a lost-update race, because the second call's `current` always
+/// reflects the first call's already-committed merge.
+///
+/// # Arguments
+/// * `current` — The session's settings before this call, in declaration
+///   order.
+/// * `key` / `value` — The one setting `set_config` is applying.
+#[must_use]
+pub fn merge_setting(current: &[SessionSetting], key: &str, value: &str) -> Vec<SessionSetting> {
+    let mut merged = current.to_vec();
+    if let Some(existing) = merged.iter_mut().find(|(k, _)| k == key) {
+        existing.1 = value.to_string();
+    } else {
+        merged.push((key.to_string(), value.to_string()));
+    }
+    merged
+}
+
+/// Snapshot the distinct connections a session currently has an open
+/// transaction on, deduplicated by connection identity.
+///
+/// A session's nested `transaction()` savepoints all share their root's
+/// connection (`SET LOCAL` is transaction-scoped, not savepoint-scoped), so
+/// the same connection can appear under several transaction ids in
+/// [`SessionState::transaction_registry`].
+///
+/// Deliberately synchronous and side-effect-free — it only clones `Arc`
+/// handles into a `Vec` and returns. That is the whole fix for a real bug: a
+/// `for entry in session.transaction_registry.iter() { ... await ... }` loop
+/// holds that entry's `DashMap` shard guard for the entire loop body,
+/// including the `.await` and the database round trip beneath it — blocking
+/// any concurrent `tx_insert`/`tx_remove` on that shard for as long as the
+/// statement takes. Collecting first and dropping the iterator before any
+/// caller awaits removes the guard from the picture entirely.
+fn open_transaction_connections(session: &SessionState) -> Vec<TransactionConnection> {
+    // Address as `usize` rather than a raw pointer: a pointer held across an
+    // `.await` makes an enclosing future non-`Send`, which `future_into_py`
+    // requires (the pointer is never dereferenced — only compared). Moot for
+    // this function itself (it never awaits), but callers hold the
+    // `Vec<TransactionConnection>` this returns across their own awaits, so
+    // the type collected into must stay `Send`-friendly.
+    let mut seen: Vec<usize> = Vec::new();
+    let mut connections: Vec<TransactionConnection> = Vec::new();
+    for entry in session.transaction_registry.iter() {
+        let conn = entry.value().conn.clone();
+        let addr = std::sync::Arc::as_ptr(&conn) as usize;
+        if seen.contains(&addr) {
+            continue;
+        }
+        seen.push(addr);
+        connections.push(conn);
+    }
+    connections
+}
+
+/// Run one statement against each of `connections`, in order.
+///
+/// No `SessionState`/`DashMap` involvement at all: by the time this runs,
+/// [`open_transaction_connections`] has already collected and released
+/// whatever bookkeeping decided which connections to target, so this loop's
+/// `.await` points never contend with a session's transaction registry.
+///
+/// # Errors
+/// `PyRuntimeError` when the statement fails on any connection.
+async fn execute_on_connections(
+    connections: &[TransactionConnection],
+    sql: &str,
+    binds: &[EngineBindValue],
+) -> PyResult<()> {
+    for conn in connections {
+        conn.lock()
+            .await
+            .execute_sql_with_binds(sql, binds)
+            .await
+            .map_err(|e| crate::errors::map_db_error("Failed to apply session settings", e))?;
+    }
+    Ok(())
+}
+
+/// Deliver a session's just-changed effective settings to every transaction
+/// it currently has open — the eager half of the mid-transaction `set_config`
+/// contract (#411).
+///
+/// **Concurrency contract, stated precisely** (see `Session.set_config`'s
+/// docstring for the user-facing version): an operation or transaction
+/// already in flight when `set_config` runs completes under the scope it
+/// began with; anything that *starts* after `set_config`'s `await` returns —
+/// in any task — carries the new scope, because the settings swap
+/// happens-before that return. This function is what makes the *same-task,
+/// already-open* `transaction()` case keep up rather than lagging until that
+/// transaction's next `BEGIN` (there won't be one until it ends) — and there
+/// is no race to resolve there: the code that called `set_config` and the
+/// code about to run the transaction's next statement are sequential in the
+/// same task, by construction. A concurrent *sibling* task's already-open
+/// transaction is a different, smaller promise — "finishes under the scope
+/// it started with" — which is operation-atomicity working as intended, not
+/// a gap this function needs to close.
+///
+/// A session with no open transactions — the common case, `set_config`
+/// between transactions or before the first one — reapplies nothing here;
+/// the next `BEGIN` picks up the new settings through
+/// [`begin_transaction_with_settings`] like any other, so no second copy of
+/// the delivery logic exists for this path.
+///
+/// # Arguments
+/// * `session` — The session whose settings changed.
+/// * `settings` — The full new effective settings (never empty: `set_config`
+///   always adds or overwrites at least one key).
+///
+/// # Errors
+/// `PyRuntimeError` when the batch fails on any of the session's open
+/// transaction connections. Whatever the outcome, the settings swap and the
+/// identity-map eviction the caller performs before calling this have
+/// already committed (see `operations::set_session_config`) — a failure here
+/// never leaves the session's recorded scope and its identity map out of
+/// sync with each other; Postgres has by then aborted the transaction the
+/// failing statement ran on (a failed statement poisons the transaction
+/// until `ROLLBACK`), so that transaction cannot go on to leak an old-scope
+/// read either.
+pub async fn reapply_settings_to_open_transactions(
+    session: &SessionState,
+    settings: &[SessionSetting],
+) -> PyResult<()> {
+    let Some((sql, binds)) = render_set_config_batch(settings) else {
+        return Ok(());
+    };
+    let connections = open_transaction_connections(session);
+    for conn in &connections {
+        // Invariant, checked rather than merely trusted: `set_config` already
+        // requires the session's own connection to be Postgres
+        // (`ensure_postgres_for_settings`, enforced before this function is
+        // ever reached — see `operations::set_session_config`), and a
+        // session's open transactions can only ever be on that same
+        // connection (FF-D routing pins one connection per session), so
+        // every entry here is Postgres today by construction. A
+        // `debug_assert` — compiled out in release, per AGENTS.md I-3, which
+        // forbids ever panicking across the FFI boundary — means a future
+        // routing bug surfaces as this named invariant breaking under
+        // `cargo test`, rather than as a confusing "no such function:
+        // set_config" error from whichever backend it was sent to instead.
+        debug_assert_eq!(
+            conn.lock().await.dialect(),
+            Dialect::Postgres,
+            "reapply_settings_to_open_transactions dispatched a Postgres-only \
+             set_config batch to a non-Postgres connection"
+        );
+    }
+    execute_on_connections(&connections, &sql, &binds).await
 }
 
 /// `BEGIN` on `engine` with the route's session settings already applied.
@@ -771,5 +950,276 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    // ----------------------------------------------------------------
+    // Mid-transaction `set_config` (#411): the no-redundant-reapplication
+    // gate, and eager delivery to a session's open transactions.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn unchanged_settings_are_not_a_change() {
+        let current = vec![
+            setting("pinch.ledger_id", "acme"),
+            setting("app.role", "owner"),
+        ];
+        let same = current.clone();
+        assert!(
+            !settings_changed(&current, &same),
+            "identical settings must not be treated as a change — no reapplication, \
+             no identity-map eviction"
+        );
+    }
+
+    #[test]
+    fn a_new_value_for_an_existing_key_is_a_change() {
+        let current = vec![setting("pinch.ledger_id", "acme")];
+        let updated = vec![setting("pinch.ledger_id", "globex")];
+        assert!(settings_changed(&current, &updated));
+    }
+
+    #[test]
+    fn an_added_key_is_a_change() {
+        let current = vec![setting("pinch.ledger_id", "acme")];
+        let updated = vec![
+            setting("pinch.ledger_id", "acme"),
+            setting("app.role", "owner"),
+        ];
+        assert!(settings_changed(&current, &updated));
+    }
+
+    #[test]
+    fn empty_to_empty_is_not_a_change() {
+        assert!(!settings_changed(&[], &[]));
+    }
+
+    #[test]
+    fn merge_setting_replaces_an_existing_key_in_place() {
+        let current = vec![
+            setting("pinch.ledger_id", "acme"),
+            setting("app.role", "owner"),
+        ];
+        let merged = merge_setting(&current, "pinch.ledger_id", "globex");
+        assert_eq!(
+            merged,
+            vec![
+                setting("pinch.ledger_id", "globex"),
+                setting("app.role", "owner")
+            ],
+            "the existing key keeps its position; only its value changes"
+        );
+    }
+
+    #[test]
+    fn merge_setting_appends_a_new_key_at_the_end() {
+        let current = vec![setting("pinch.ledger_id", "acme")];
+        let merged = merge_setting(&current, "app.role", "owner");
+        assert_eq!(
+            merged,
+            vec![
+                setting("pinch.ledger_id", "acme"),
+                setting("app.role", "owner")
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_setting_on_empty_current_yields_one_entry() {
+        assert_eq!(
+            merge_setting(&[], "pinch.ledger_id", "acme"),
+            vec![setting("pinch.ledger_id", "acme")]
+        );
+    }
+
+    #[test]
+    fn merge_setting_is_the_basis_for_lost_update_safety() {
+        // Two "concurrent" merges computed from the SAME snapshot (simulating
+        // what would happen WITHOUT the settings_write_lock serializing the
+        // read): each only sees its own key, which is exactly the lost-update
+        // bug `operations::set_session_config` avoids by merging inside the
+        // lock against a freshly re-read snapshot rather than a caller-suppled
+        // one. This pins `merge_setting` itself is a pure, order-preserving
+        // single-key update — the concurrency safety property is asserted at
+        // the Python level (two sibling tasks, both keys present).
+        let base = vec![setting("pinch.ledger_id", "acme")];
+        let after_first = merge_setting(&base, "app.role", "owner");
+        let after_second = merge_setting(&after_first, "app.request_id", "r-1");
+        assert_eq!(
+            after_second,
+            vec![
+                setting("pinch.ledger_id", "acme"),
+                setting("app.role", "owner"),
+                setting("app.request_id", "r-1"),
+            ],
+            "sequential merges against the latest snapshot keep every key"
+        );
+    }
+
+    /// A file database of its own: two of these stand in for two genuinely
+    /// distinct pool connections without either seeing the other's writes —
+    /// an in-memory `:memory:` database lives inside one connection, and two
+    /// connections to the *same* file would fight over SQLite's single
+    /// writer lock the moment both are mid-transaction, which is a real
+    /// `sqlx::Error` this crate maps through `ferro.exceptions` (unavailable
+    /// to a bare `cargo test`, which has no Python interpreter with `ferro`
+    /// importable) — precisely the failure mode this test must not exercise.
+    async fn marker_engine() -> (EngineHandle, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "ferro_session_settings_reapply_{}.db",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("sqlite file pool");
+        let engine = EngineHandle::new_sqlite(pool);
+        engine
+            .execute_sql("CREATE TABLE marker (id INTEGER)")
+            .await
+            .expect("create table");
+        (engine, path)
+    }
+
+    #[tokio::test]
+    async fn open_transaction_connections_and_execute_dedupe_by_connection() {
+        let (engine_a, path_a) = marker_engine().await;
+        let (engine_b, path_b) = marker_engine().await;
+        let session_id = crate::state::register_session(Vec::new());
+        let session = crate::state::session_state(&session_id).expect("session registered");
+
+        let conn_a = engine_a
+            .begin_transaction_connection()
+            .await
+            .expect("begin transaction A");
+        let conn_b = engine_b
+            .begin_transaction_connection()
+            .await
+            .expect("begin transaction B");
+        let handle_a = TransactionHandle::root(conn_a, "default".to_string());
+        let handle_b = TransactionHandle::root(conn_b, "default".to_string());
+        // A savepoint on A shares A's connection — this is what dedup must
+        // collapse back down to one execution.
+        let nested_a = TransactionHandle::nested(
+            handle_a.conn.clone(),
+            "sp_1".to_string(),
+            "default".to_string(),
+        );
+        session
+            .transaction_registry
+            .insert("tx-a".to_string(), handle_a.clone());
+        session
+            .transaction_registry
+            .insert("tx-a-nested".to_string(), nested_a);
+        session
+            .transaction_registry
+            .insert("tx-b".to_string(), handle_b.clone());
+
+        // `open_transaction_connections` collects (and dedupes) synchronously,
+        // fully independent of `execute_on_connections`'s awaits — pinning
+        // that the two are separable is the point of the fix this test
+        // guards: the collection step must never hold a `DashMap` shard guard
+        // across the execution step's `.await`s.
+        let connections = open_transaction_connections(&session);
+        assert_eq!(
+            connections.len(),
+            2,
+            "two distinct connections, the shared savepoint collapsed"
+        );
+        execute_on_connections(&connections, "INSERT INTO marker (id) VALUES (1)", &[])
+            .await
+            .expect("statement runs on every distinct connection");
+
+        for handle in [&handle_a, &handle_b] {
+            let mut guard = handle.conn.lock().await;
+            let rows = guard
+                .fetch_all_sql_with_binds("SELECT id FROM marker", &[])
+                .await
+                .expect("read marker");
+            assert_eq!(
+                rows.len(),
+                1,
+                "each connection must see the statement exactly once, not once per \
+                 registry entry sharing it"
+            );
+        }
+
+        crate::state::unregister_session(&session_id);
+        drop(handle_a);
+        drop(handle_b);
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[tokio::test]
+    async fn reapply_settings_to_open_transactions_dispatches_the_rendered_batch() {
+        // `reapply_settings_to_open_transactions` is `render_set_config_batch`
+        // (already pinned above: the real Postgres `set_config(...)` SQL,
+        // parameter-bound) piped into `open_transaction_connections` +
+        // `execute_on_connections` (dedup pinned above). What is left to pin
+        // here is that the two are actually wired together — settings that
+        // render nothing dispatch nothing, so an open transaction that
+        // received no statement at all proves the "no batch, no dispatch"
+        // wiring without needing a Postgres-only statement to succeed
+        // against SQLite.
+        let (engine, path) = marker_engine().await;
+        let session_id = crate::state::register_session(Vec::new());
+        let session = crate::state::session_state(&session_id).expect("session registered");
+
+        let conn = engine
+            .begin_transaction_connection()
+            .await
+            .expect("begin transaction");
+        let handle = TransactionHandle::root(conn, "default".to_string());
+        session
+            .transaction_registry
+            .insert("tx".to_string(), handle.clone());
+
+        reapply_settings_to_open_transactions(&session, &[])
+            .await
+            .expect("no settings renders no batch, so there is nothing to dispatch");
+
+        let mut guard = handle.conn.lock().await;
+        let rows = guard
+            .fetch_all_sql_with_binds("SELECT id FROM marker", &[])
+            .await
+            .expect("read marker");
+        assert!(
+            rows.is_empty(),
+            "empty settings must not reach the connection at all"
+        );
+        drop(guard);
+
+        crate::state::unregister_session(&session_id);
+        drop(handle);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn reapply_with_no_open_transactions_is_a_silent_no_op() {
+        let session_id = crate::state::register_session(Vec::new());
+        let session = crate::state::session_state(&session_id).expect("session registered");
+
+        reapply_settings_to_open_transactions(&session, &[setting("pinch.ledger_id", "acme")])
+            .await
+            .expect("nothing to reapply to is not an error");
+
+        crate::state::unregister_session(&session_id);
+    }
+
+    #[tokio::test]
+    async fn settings_snapshot_reflects_replace_settings() {
+        let session_id = crate::state::register_session(vec![setting("a.one", "1")]);
+        let session = crate::state::session_state(&session_id).expect("session registered");
+
+        assert_eq!(session.settings_snapshot(), vec![setting("a.one", "1")]);
+
+        session.replace_settings(vec![setting("a.one", "2"), setting("b.two", "3")]);
+        assert_eq!(
+            session.settings_snapshot(),
+            vec![setting("a.one", "2"), setting("b.two", "3")]
+        );
+
+        crate::state::unregister_session(&session_id);
     }
 }
