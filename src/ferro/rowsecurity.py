@@ -54,6 +54,16 @@ _COMMAND_CLAUSES: dict[str, dict[str, bool]] = {
 #: The commands a policy may be scoped to (`FOR <command>`), in Rust's order.
 COMMANDS = tuple(_COMMAND_CLAUSES)
 
+#: A custom Postgres setting key: dotted identifiers, nothing else. Ferro's
+#: renderer already doubles single quotes when it inlines the key, but that
+#: escape is only sound while ``standard_conforming_strings`` is on — a server
+#: with it off reads backslashes in the literal. Constraining the key to
+#: identifier characters at class definition means no quote or backslash can
+#: reach the rendered policy in the first place; the doubling stays as defense
+#: in depth.
+_SETTING_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+\Z")
+_SETTING_KEY_SHAPE = "[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+"
+
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*\Z")
 _NAME_SHAPE = "[a-z][a-z0-9_]*"
 
@@ -157,11 +167,14 @@ class RowPolicy:
                 "Postgres setting holding the scope value, e.g. "
                 "setting='pinch.ledger_id'."
             )
-        if "." not in self.setting:
+        if not _SETTING_KEY_RE.match(self.setting):
             raise ValueError(
                 f"RowPolicy setting={self.setting!r} is not a custom Postgres "
-                "setting: the key must be namespaced with a dot (e.g. "
-                "'pinch.ledger_id'). Built-in settings are not tenancy scope."
+                "setting key: expected dotted identifiers (e.g. 'pinch.ledger_id') "
+                f"matching {_SETTING_KEY_SHAPE}. A key must be namespaced — "
+                "built-in settings are not tenancy scope — and may contain only "
+                "identifier characters, so it can never carry a quote into the "
+                "rendered policy."
             )
 
     def _validate_raw(self) -> None:
@@ -318,19 +331,34 @@ def compile_row_security(
         return None
 
     entries: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    # Keyed on the LIVE name, not the declared suffix: `rls_<table>_<name>` is
+    # truncated to Postgres's 63-byte limit, so two long, distinct suffixes can
+    # land on one identifier. Deduping the suffix would let that pair through
+    # and emit two CREATE POLICY statements with the same name — the second
+    # fails mid-create, which is precisely the half-policed table the per-table
+    # transaction exists to prevent. Catch it at class definition instead.
+    seen: dict[str, str] = {}
     for policy in declaration.policies:
         suffix = policy.resolved_name
-        if suffix in seen:
+        live_name = _ddl_row_policy_name(table_name, suffix)
+        collides_with = seen.get(live_name)
+        if collides_with == suffix:
             raise TypeError(
                 f"{model_name}.{FERRO_RLS} declares the duplicate row-policy name "
                 f"{suffix!r}; each name identifies a distinct policy and must be "
                 "unique per model."
             )
-        seen.add(suffix)
+        if collides_with is not None:
+            raise TypeError(
+                f"{model_name}.{FERRO_RLS} policies {collides_with!r} and {suffix!r} "
+                f"both resolve to the live policy name {live_name!r}: policy names "
+                "are truncated to PostgreSQL's 63-byte identifier limit, and these "
+                "two no longer differ once truncated. Shorten or rename one."
+            )
+        seen[live_name] = suffix
         entries.append(
             {
-                "name": _ddl_row_policy_name(table_name, suffix),
+                "name": live_name,
                 "command": policy.command,
                 "restrictive": policy.restrictive,
                 "expr": _policy_expr(model_name, policy, columns),

@@ -1022,15 +1022,38 @@ pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmis
 // statement (AGENTS.md § I-1).
 // ---------------------------------------------------------------------------
 
-/// Row policy name (`rls_<table>_<name>`) with the 63-char guard every other
-/// ferro artifact name carries. `rls_` is the ferro-owned prefix for policies,
-/// the way `ck_` is for checks and `fk_` is for foreign keys.
-pub fn row_policy_name(table_lower: &str, name: &str) -> String {
-    let raw = format!("rls_{table_lower}_{name}");
-    if raw.chars().count() > 63 {
-        return format!("{}_rls", raw.chars().take(59).collect::<String>());
+/// Postgres's identifier limit. `NAMEDATALEN - 1` — and it counts BYTES, not
+/// characters: the server truncates on the raw byte length.
+const NAMEDATALEN_BYTES: usize = 63;
+
+/// Truncate an identifier to Postgres's byte limit, keeping `suffix` on the end
+/// and never splitting a UTF-8 character.
+///
+/// Byte-accurate on purpose: a name of 63 multi-byte characters is well over
+/// the server's limit, so a character-counted guard would hand Postgres two
+/// long names it silently truncates to the SAME identifier. The existing
+/// `idx_`/`uq_`/`fk_`/`ck_` builders still count characters and are deliberately
+/// left alone — changing them would rename artifacts in every database ferro
+/// has ever created (I-1). `rls_` has no installed base, so it starts correct.
+fn truncate_identifier_bytes(raw: &str, suffix: &str) -> String {
+    if raw.len() <= NAMEDATALEN_BYTES {
+        return raw.to_string();
     }
-    raw
+    let mut end = NAMEDATALEN_BYTES - suffix.len();
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &raw[..end], suffix)
+}
+
+/// Row policy name (`rls_<table>_<name>`) with the 63-BYTE guard Postgres
+/// itself applies. `rls_` is the ferro-owned prefix for policies, the way `ck_`
+/// is for checks and `fk_` is for foreign keys.
+///
+/// Truncation makes distinct declarations collide, so the IR compiler dedups on
+/// the name this returns — never on the un-truncated suffix.
+pub fn row_policy_name(table_lower: &str, name: &str) -> String {
+    truncate_identifier_bytes(&format!("rls_{table_lower}_{name}"), "_rls")
 }
 
 /// Whether a live policy name follows the ferro row-policy convention — the
@@ -1260,13 +1283,7 @@ pub fn row_security_statements(
     if dialect == Dialect::Sqlite {
         return Ok(RowSecurityEmission {
             statements: Vec::new(),
-            warning: Some(format!(
-                "Table '{}' declares __ferro_rls__, but row-level security is a \
-                 PostgreSQL-only feature: the table is created without its policies \
-                 and rows are NOT filtered on SQLite. Run against PostgreSQL for \
-                 enforcement.",
-                model.table_name
-            )),
+            warning: Some(sqlite_row_security_warning(&model.table_name)),
         });
     }
     let mut statements = vec![render_enable_row_security(&model.table_name)];
@@ -1279,6 +1296,43 @@ pub fn row_security_statements(
     Ok(RowSecurityEmission {
         statements,
         warning: None,
+    })
+}
+
+/// The SQLite skip warning — one per table, single-sourced so the create path
+/// and the existing-table path say the same thing.
+fn sqlite_row_security_warning(table: &str) -> String {
+    format!(
+        "Table '{table}' declares __ferro_rls__, but row-level security is a \
+         PostgreSQL-only feature: the table is created without its policies and \
+         rows are NOT filtered on SQLite. Run against PostgreSQL for enforcement."
+    )
+}
+
+/// The warning for a model that declares row security whose table ALREADY
+/// exists, or `None` when there is nothing to say.
+///
+/// The create pass owns only missing tables (ADR-0010), so a declaration added
+/// to a live table emits no DDL — and silence there is the one failure mode
+/// this feature must never have. The author believes their rows are fenced; the
+/// database has no policy. Reconciliation on live tables is #413; until it
+/// lands, this fires on every connect so the gap is impossible to miss.
+///
+/// Single-sourced like [`extra_check_names_warning`]: callers emit it verbatim.
+pub fn row_security_existing_table_warning(
+    model: &ferro_schema_ir::SchemaModel,
+    dialect: Dialect,
+) -> Option<String> {
+    model.row_security.as_ref()?;
+    Some(match dialect {
+        Dialect::Sqlite => sqlite_row_security_warning(&model.table_name),
+        Dialect::Postgres => format!(
+            "Table '{}' declares __ferro_rls__, but the table already exists and the \
+             create pass never alters an existing table (ADR-0010). Its row-security \
+             flags and policies were NOT applied — rows are NOT filtered. Apply them \
+             with a reviewed migration, or drop and recreate the table in development.",
+            model.table_name
+        ),
     })
 }
 
@@ -3148,8 +3202,32 @@ mod tests {
     #[test]
     fn row_policy_name_truncates_above_63() {
         let name = row_policy_name("verylongtable", &"a".repeat(70));
-        assert_eq!(name.chars().count(), 63);
+        assert_eq!(name.len(), 63);
         assert!(name.ends_with("_rls"));
+    }
+
+    #[test]
+    fn row_policy_name_truncates_by_bytes_not_characters() {
+        // Postgres truncates identifiers at 63 BYTES. A character-counted guard
+        // would hand it a 63-char / 126-byte name it truncates itself — and two
+        // such names could collapse to one identifier server-side, silently.
+        let name = row_policy_name("t", &"é".repeat(80));
+        assert!(name.len() <= 63, "{} bytes: {name}", name.len());
+        assert!(name.ends_with("_rls"));
+        // Never split a multi-byte character.
+        assert!(std::str::from_utf8(name.as_bytes()).is_ok());
+        assert!(name.chars().count() < 63);
+    }
+
+    #[test]
+    fn row_policy_names_collide_once_truncated() {
+        // The property the IR compiler's dedup depends on: two distinct
+        // declarations CAN produce one live name, so deduping the declared
+        // suffix is not enough.
+        let a = row_policy_name("ledgerrow", &format!("{}_alpha", "x".repeat(60)));
+        let b = row_policy_name("ledgerrow", &format!("{}_beta", "x".repeat(60)));
+        assert_eq!(a, b, "truncation must be able to collide");
+        assert_eq!(a.len(), 63);
     }
 
     #[test]
@@ -3381,6 +3459,44 @@ mod tests {
             .expect("SQLite warns, never silently skips");
         assert!(warning.contains("ledgerrow"), "{warning}");
         assert!(warning.contains("PostgreSQL-only"), "{warning}");
+    }
+
+    #[test]
+    fn existing_table_warning_names_the_table_and_says_not_enforced() {
+        let mut model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![setting_policy(
+                "rls_ledgerrow_ledger_id",
+                "ledger_id",
+                "pinch.ledger_id",
+                ferro_schema_ir::RowPolicyCommand::All,
+                false,
+            )],
+        });
+        let warning = row_security_existing_table_warning(&model, Dialect::Postgres)
+            .expect("a declaration the create pass cannot apply must never be silent");
+        assert!(warning.contains("ledgerrow"), "{warning}");
+        assert!(warning.contains("NOT filtered"), "{warning}");
+        assert!(warning.contains("ADR-0010"), "{warning}");
+
+        // SQLite says the PostgreSQL-only thing instead — same sentence the
+        // create path emits, single-sourced.
+        let lite = row_security_existing_table_warning(&model, Dialect::Sqlite).unwrap();
+        assert_eq!(
+            lite,
+            row_security_statements(&model, Dialect::Sqlite)
+                .unwrap()
+                .warning
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn existing_table_warning_is_silent_without_a_declaration() {
+        let model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        assert!(row_security_existing_table_warning(&model, Dialect::Postgres).is_none());
+        assert!(row_security_existing_table_warning(&model, Dialect::Sqlite).is_none());
     }
 
     #[test]

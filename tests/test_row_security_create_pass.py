@@ -18,7 +18,7 @@ is deliberately absent here: the create pass owns only missing tables
 import datetime
 import json
 import uuid
-from typing import ClassVar
+from typing import Annotated, ClassVar
 
 import pytest
 
@@ -282,9 +282,76 @@ def test_a_policy_needs_an_expression():
         RowPolicy(name="p")
 
 
-def test_setting_keys_must_be_namespaced():
-    with pytest.raises(ValueError, match="namespaced with a dot"):
-        RowPolicy(column="ledger_id", setting="ledger_id")
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "ledger_id",  # not namespaced — a built-in GUC, not tenancy scope
+        "pinch.",  # empty second segment
+        ".ledger_id",  # empty namespace
+        "9pinch.ledger_id",  # namespace must start like an identifier
+        "pinch.ledger id",  # whitespace
+        "pinch.ledger'id",  # the quote that must never reach the SQL literal
+        "pinch.ledger\\id",  # nor the backslash, if standard_conforming_strings is off
+    ],
+)
+def test_setting_keys_must_be_dotted_identifiers(setting):
+    """The key is inlined into the policy body as a single-quoted literal.
+
+    Ferro doubles quotes when it renders, but that escape is only sound while
+    ``standard_conforming_strings`` is on. Constraining the key to identifier
+    characters here means nothing that needs escaping can reach the literal in
+    the first place; the doubling stays as defense in depth."""
+    with pytest.raises(ValueError, match="not a custom Postgres setting key"):
+        RowPolicy(column="ledger_id", setting=setting)
+
+
+def test_distinct_policy_names_that_truncate_together_are_rejected():
+    """``rls_<table>_<name>`` is cut to PostgreSQL's 63-byte identifier limit,
+    so two long, different names can land on one policy name. Deduping the
+    declared suffix would let that pair through and emit two CREATE POLICY
+    statements with the same name."""
+    long_a = "a" * 60 + "_alpha"
+    long_b = "a" * 60 + "_beta"
+    with pytest.raises(TypeError, match="both resolve to the live policy name"):
+
+        class Collide(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            ledger_id: uuid.UUID
+
+            __ferro_rls__: ClassVar = RowSecurity(
+                RowPolicy(name=long_a, column="ledger_id", setting=SETTING),
+                RowPolicy(name=long_b, column="ledger_id", setting=SETTING),
+            )
+
+
+def test_a_shorthand_over_a_forward_fk_revalidates_on_the_resolved_pass():
+    """A forward-referenced FK's shadow column only learns its real storage
+    when relationships resolve. The cast check re-runs there, so a target whose
+    PK turns out to be unsupported fails pointing at the declaration — and it
+    stays a TypeError, the class-definition contract, not an internal error."""
+    from ferro import BackRef, ForeignKey, Relation
+    from ferro.relations import resolve_relationships
+
+    class Doc(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        owner: Annotated["Owner", ForeignKey(related_name="docs")]
+
+        # Passes at class-body time: the shadow column is provisionally integer.
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(column="owner_id", setting="pinch.owner")
+        )
+
+    class Owner(Model):
+        id: datetime.datetime = Field(primary_key=True)
+        docs: Relation[list["Doc"]] = BackRef()
+
+    with pytest.raises(TypeError) as excinfo:
+        resolve_relationships()
+
+    message = str(excinfo.value)
+    assert "Doc.__ferro_rls__" in message
+    assert "owner_id" in message
+    assert "timestamptz" in message
 
 
 def test_using_on_a_for_insert_policy_is_rejected():
@@ -467,9 +534,15 @@ async def test_force_false_enables_without_forcing(db_url):
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_create_pass_leaves_an_existing_table_untouched(db_url):
-    """ADR-0010: the create pass owns only missing tables. Adding a declaration
-    to a table that already exists is the reconciliation pass's job (#413)."""
+async def test_create_pass_leaves_an_existing_table_untouched_but_warns(
+    db_url, recwarn
+):
+    """ADR-0010: the create pass owns only missing tables, so adding a
+    declaration to a live table emits nothing — but it must NOT do so quietly.
+
+    The author now believes their rows are fenced. Until reconciliation lands
+    (#413), the only thing standing between that belief and a silent data leak
+    is this warning, so it fires on every connect and names the table."""
 
     class LedgerRow(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -480,11 +553,27 @@ async def test_create_pass_leaves_an_existing_table_untouched(db_url):
     _rewind_registry()
 
     _define_ledger_row()
+    recwarn.clear()
     await connect(db_url, auto_migrate=True)
+
+    unenforced = [w for w in recwarn if "__ferro_rls__" in str(w.message)]
+    assert len(unenforced) == 1, [str(w.message) for w in recwarn]
+    message = str(unenforced[0].message)
+    assert "ledgerrow" in message
+    assert "NOT filtered" in message
+    assert "ADR-0010" in message
+
     async with engines.session():
         flags = await _pg_row_security_flags("ledgerrow")
         assert flags["relrowsecurity"] is False
         assert await _pg_policies("ledgerrow") == []
+
+    # And again on the NEXT connect — the gap does not go quiet after one
+    # boot, which is the whole point of warning rather than logging once.
+    reset_engine()
+    recwarn.clear()
+    await connect(db_url, auto_migrate=True)
+    assert len([w for w in recwarn if "__ferro_rls__" in str(w.message)]) == 1
 
 
 @pytest.mark.backend_matrix
@@ -519,7 +608,13 @@ def tenant_role():
 
 
 async def _grant(role: str, table: str, *, own_table: bool = False) -> None:
-    """Create the NOSUPERUSER role and give it just enough to run the queries."""
+    """Create the NOSUPERUSER role and give it just enough to run the queries.
+
+    Always call this INSIDE the ``try`` whose ``finally`` drops the role: the
+    role exists from the first statement on, so a later GRANT that fails would
+    otherwise leak it into the cluster and break every subsequent run (roles are
+    cluster-global; the per-test schema is not).
+    """
     schema = (await fetch_one("SELECT current_schema() AS s"))["s"]
     await execute(f'CREATE ROLE "{role}" NOSUPERUSER')
     await execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"')
@@ -529,7 +624,17 @@ async def _grant(role: str, table: str, *, own_table: bool = False) -> None:
         await execute(f'ALTER TABLE "{table}" OWNER TO "{role}"')
 
 
-async def _drop_tenant_role(role: str) -> None:
+async def _drop_tenant_role(role: str, *, owned_tables: tuple[str, ...] = ()) -> None:
+    """Drop the role, handing back anything it was made to own first.
+
+    ``owned_tables`` is explicit rather than leaning on ``DROP OWNED BY`` to
+    take the table with it: a test that transfers ownership should undo exactly
+    that transfer, so the teardown says what it does and a future reader is not
+    relying on a table disappearing as a side effect.
+    """
+    current = (await fetch_one("SELECT current_user AS u"))["u"]
+    for table in owned_tables:
+        await execute(f'ALTER TABLE "{table}" OWNER TO "{current}"')
     await execute(f'DROP OWNED BY "{role}"')
     await execute(f'DROP ROLE IF EXISTS "{role}"')
 
@@ -548,8 +653,8 @@ async def test_policy_filters_rows_for_a_non_superuser_role(db_url, tenant_role)
         await LedgerRow.create(ledger_id=LEDGER_A, label="a2")
         await LedgerRow.create(ledger_id=LEDGER_B, label="b1")
 
-        await _grant(tenant_role, "ledgerrow")
         try:
+            await _grant(tenant_role, "ledgerrow")
             # No setting at all: fail closed, and NOT an error.
             async with transaction() as tx:
                 await tx.execute(f'SET LOCAL ROLE "{tenant_role}"')
@@ -591,8 +696,8 @@ async def test_with_check_rejects_a_cross_tenant_insert(db_url, tenant_role):
     LedgerRow = _define_ledger_row()
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await _grant(tenant_role, "ledgerrow")
         try:
+            await _grant(tenant_role, "ledgerrow")
             async with transaction() as tx:
                 await tx.execute(f'SET LOCAL ROLE "{tenant_role}"')
                 await tx.execute(
@@ -620,8 +725,8 @@ async def test_force_binds_the_table_owner(db_url, tenant_role):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         await LedgerRow.create(ledger_id=LEDGER_A, label="a1")
-        await _grant(tenant_role, "ledgerrow", own_table=True)
         try:
+            await _grant(tenant_role, "ledgerrow", own_table=True)
             async with transaction() as tx:
                 await tx.execute(f'SET LOCAL ROLE "{tenant_role}"')
                 owner = await tx.fetch_one(
@@ -630,7 +735,10 @@ async def test_force_binds_the_table_owner(db_url, tenant_role):
                 assert owner["tableowner"] == tenant_role
                 assert await tx.fetch_all("SELECT label FROM ledgerrow") == []
         finally:
-            await _drop_tenant_role(tenant_role)
+            # This test moved ownership, so this test moves it back —
+            # rather than leaning on DROP OWNED BY to take the table with
+            # it as a side effect.
+            await _drop_tenant_role(tenant_role, owned_tables=("ledgerrow",))
 
 
 @pytest.mark.backend_matrix
@@ -652,9 +760,9 @@ async def test_command_scoped_and_restrictive_policies_compose(db_url, tenant_ro
             "INSERT INTO membership (doc_id, member) VALUES ($1, $2)", doc.id, "bob"
         )
 
-        await _grant(tenant_role, "doc")
-        await execute(f'GRANT SELECT ON membership TO "{tenant_role}"')
         try:
+            await _grant(tenant_role, "doc")
+            await execute(f'GRANT SELECT ON membership TO "{tenant_role}"')
             # Owner in scope: reads and writes.
             async with transaction() as tx:
                 await tx.execute(f'SET LOCAL ROLE "{tenant_role}"')
@@ -722,3 +830,75 @@ async def test_declared_policies_land_in_the_catalog_as_declared(db_url):
         # there, so the renderer must not offer one.
         assert policies["rls_doc_invitee_read"]["with_check"] is None
         assert policies["rls_doc_owner_all"]["with_check"] is not None
+
+
+# ---------------------------------------------------------------------------
+# A half-created policed table would be unrecoverable
+# ---------------------------------------------------------------------------
+
+
+def _define_broken_policy_model() -> type[Model]:
+    """A raw policy naming a table that does not exist — CREATE POLICY fails.
+
+    The realistic shape of this is not a typo: it is a raw ``using=`` reading
+    another ferro model's table that sorts later in FK-dependency order, so it
+    genuinely is not there yet when this table's policies go on.
+    """
+
+    class Fragile(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        ledger_id: uuid.UUID
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(column="ledger_id", setting=SETTING),
+            RowPolicy(
+                name="broken",
+                command="select",
+                using='"id" IN (SELECT doc_id FROM table_that_does_not_exist)',
+            ),
+        )
+
+    return Fragile
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_failed_policy_leaves_no_table_rather_than_a_locked_out_one(db_url):
+    """Creating a table is atomic, and for a policed table that is the whole
+    contract — not a nicety.
+
+    Flags land before policies, so a ``CREATE POLICY`` that fails partway would
+    otherwise leave a live table with row security ENABLED and FORCED and
+    **zero** policies: default-deny for every role including the owner. The
+    create pass could never repair it either, because it only ever touches
+    missing tables (ADR-0010). So the whole table rolls back instead.
+    """
+    _define_broken_policy_model()
+    await connect(db_url)
+
+    with pytest.raises(Exception) as excinfo:
+        await create_tables()
+    # The error names the statement, not just "connect failed".
+    message = str(excinfo.value)
+    assert "fragile" in message
+    assert "table_that_does_not_exist" in message
+
+    async with engines.session():
+        rows = await fetch_all(
+            "SELECT 1 AS present FROM pg_class "
+            "WHERE relname = 'fragile' AND relnamespace = current_schema()::regnamespace"
+        )
+        assert rows == [], "a failed policy must leave NO table behind"
+
+    # And the fix is just to fix the declaration: nothing needs cleaning up.
+    _rewind_registry()
+    LedgerRow = _define_ledger_row()
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        flags = await _pg_row_security_flags("ledgerrow")
+        assert flags["relrowsecurity"] is True
+        assert [p["policyname"] for p in await _pg_policies("ledgerrow")] == [
+            POLICY_NAME
+        ]
+        await LedgerRow.create(ledger_id=LEDGER_A, label="fine")

@@ -153,6 +153,14 @@ def resolve_relationships():
             continue
         try:
             compile_model_schema_ir(model_name, model_cls)
+        except TypeError:
+            # Declaration errors are the class-definition contract and surface
+            # unwrapped, exactly as the metaclass surfaces them on the first
+            # pass. A shadow FK column only learns its real storage here, so a
+            # `__ferro_rls__` shorthand over a forward-referenced FK is first
+            # provably wrong on THIS pass — and it must still read as the
+            # declaration error it is, not as an internal rebuild failure.
+            raise
         except Exception as exc:
             raise RuntimeError(
                 f"Ferro failed to rebuild the schema for model '{model_name}' "
