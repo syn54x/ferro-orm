@@ -65,6 +65,39 @@ pub fn emit_user_warning(message: &str) {
     });
 }
 
+/// Emits a Python `UserWarning` that the warning registry can never swallow.
+///
+/// `warnings.warn` records each (message, category, module, lineno) it has
+/// already shown and stays quiet the second time. That is right for advisory
+/// noise and wrong for a statement about the CURRENT connect: a declaration
+/// ferro did not apply is still not applied on the fourth boot, and a process
+/// that connects repeatedly would hear about it once and then be reassured by
+/// silence. `warn_explicit` with `registry=None` skips the bookkeeping
+/// entirely, so this warning fires every single time the condition holds.
+///
+/// Reserved for conditions where silence would be misread as safety.
+pub fn emit_user_warning_always(message: &str) {
+    let message = format!("ferro auto-migrate: {}", message);
+    Python::attach(|py| {
+        let _ = (|| -> PyResult<()> {
+            let warnings = py.import("warnings")?;
+            let kwargs = pyo3::types::PyDict::new(py);
+            kwargs.set_item("registry", py.None())?;
+            warnings.call_method(
+                "warn_explicit",
+                (
+                    message,
+                    py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                    "<ferro>",
+                    0,
+                ),
+                Some(&kwargs),
+            )?;
+            Ok(())
+        })();
+    });
+}
+
 /// Returns the current version of the Ferro core (`CARGO_PKG_VERSION`).
 #[pyfunction]
 fn version() -> String {
@@ -167,6 +200,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_addition, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_rebuild, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_drop, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_ddl_row_policy_name, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_rls_command_matrix, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_rls_shorthand_cast, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_plan_row_security, m)?)?;
     m.add_function(wrap_pyfunction!(
         introspect::_live_table_checks_for_test,
         m

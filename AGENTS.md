@@ -98,6 +98,33 @@ For a single model, every emitter must agree on:
     the byte-identical statements. Pinned by
     `tests/test_table_check_orphans.py`. See ADR-0013 (leftover warning +
     destructive ladder) and ADR-0014 (SQLite warn-skip).
+15. **Row policy names and DDL** — the live policy name
+    (`rls_<table>_<name>`; `name` defaults to the shorthand's column), the
+    column/setting shorthand's cast (from `resolve_column_storage`; `uuid`,
+    `text`/`varchar` and the integer families only), the rendered
+    `<col> = NULLIF(current_setting('<key>', true), '')::<cast>` expression,
+    and the full `ALTER TABLE … ENABLE/FORCE ROW LEVEL SECURITY` +
+    `CREATE POLICY` statements are decided by ONE family of functions in
+    `ferro_ddl_lowering`: `row_policy_name` / `is_ferro_row_policy_name` /
+    `row_policy_shorthand_cast` / `render_row_policy_setting_expr` /
+    `row_policy_clauses` / `render_create_row_policy` /
+    `render_enable_row_security` / `render_force_row_security` /
+    `row_security_statements`, over the command table
+    `ROW_POLICY_COMMANDS` / `row_policy_command_token` /
+    `row_policy_command_takes_using` / `row_policy_command_takes_with_check`.
+    The auto-migrate create pass consumes them through
+    `ferro_migrate::render_create_table`. The Python declaration surface
+    (`src/ferro/rowsecurity.py`) consumes the name, the cast, and the command
+    table over FFI (`_core._ddl_row_policy_name`, `_core._rls_shorthand_cast`,
+    `_core._rls_command_matrix`) rather than keeping its own copies, so a
+    declaration fails at class definition for exactly the columns and clauses
+    DDL would fail for. The Alembic autogenerate operation (#414) **will**
+    consume the whole emission over FFI (`_core._plan_row_security`; the seam
+    and its byte-parity with the create pass are already pinned by
+    `test_row_security_statement_parity_pin`). Pinned by
+    `tests/test_row_security_create_pass.py` and the ferro-ddl-lowering unit
+    pins. Postgres-only; SQLite gets one warning per table and no DDL
+    (ADR-0014 posture). See PRD #406.
 
 ### Why this invariant exists
 

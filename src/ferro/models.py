@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .checks import Check
     from .columns import ColumnSpec, RelationSpec, ReverseSpec
     from .query import Predicate, ProjectedQuery, RowSelector
+    from .rowsecurity import RowSecurity
     from .session import Session
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -217,6 +218,16 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     (ADR-0012, ADR-0014). For a single-column closed-domain CHECK use
     ``Field(db_check=True)`` instead.
 
+    **Row security:** declare a ``typing.ClassVar`` named ``__ferro_rls__`` as a
+    :class:`~ferro.rowsecurity.RowSecurity` container of
+    :class:`~ferro.rowsecurity.RowPolicy` objects, e.g.
+    ``RowSecurity(RowPolicy(column="ledger_id", setting="pinch.ledger_id"))``.
+    A table created with it on gets ``ENABLE``/``FORCE ROW LEVEL SECURITY`` and
+    its ``rls_<table>_<name>`` policies, so PostgreSQL — not application
+    discipline — decides which rows a query can see. Row-level security is a
+    Postgres-only schema object: on SQLite the model registers and the table is
+    created, with a warning and no policies.
+
     Examples:
         >>> class User(Model):
         ...     id: int | None = None
@@ -227,6 +238,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = ()
     #: Table-level CHECK constraints (ADR-0012); an empty tuple is a no-op.
     __ferro_checks__: ClassVar[tuple["Check", ...]] = ()
+    #: Row security declaration (PRD #406); ``None`` leaves the table unpoliced.
+    __ferro_rls__: ClassVar["RowSecurity | None"] = None
     __ferro_columns__: ClassVar[dict[str, "ColumnSpec"]] = {}
     #: The single PK field name, derived once at the compile choke point
     #: alongside ``__ferro_columns__``; ``None`` for a PK-less model.

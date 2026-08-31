@@ -1014,6 +1014,328 @@ pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmis
     }
 }
 
+// ---------------------------------------------------------------------------
+// Row security (PRD #406, #409): the single decision seam for `__ferro_rls__`.
+// Every emitter — the runtime create pass today, the Alembic autogenerate
+// operation (#414) and the reconciliation pass (#413) tomorrow — renders
+// policies through these functions and never re-derives a name, a cast, or a
+// statement (AGENTS.md § I-1).
+// ---------------------------------------------------------------------------
+
+/// Postgres's identifier limit. `NAMEDATALEN - 1` — and it counts BYTES, not
+/// characters: the server truncates on the raw byte length.
+const NAMEDATALEN_BYTES: usize = 63;
+
+/// Truncate an identifier to Postgres's byte limit, keeping `suffix` on the end
+/// and never splitting a UTF-8 character.
+///
+/// Byte-accurate on purpose: a name of 63 multi-byte characters is well over
+/// the server's limit, so a character-counted guard would hand Postgres two
+/// long names it silently truncates to the SAME identifier. The existing
+/// `idx_`/`uq_`/`fk_`/`ck_` builders still count characters and are deliberately
+/// left alone — changing them would rename artifacts in every database ferro
+/// has ever created (I-1). `rls_` has no installed base, so it starts correct.
+fn truncate_identifier_bytes(raw: &str, suffix: &str) -> String {
+    if raw.len() <= NAMEDATALEN_BYTES {
+        return raw.to_string();
+    }
+    let mut end = NAMEDATALEN_BYTES - suffix.len();
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &raw[..end], suffix)
+}
+
+/// Row policy name (`rls_<table>_<name>`) with the 63-BYTE guard Postgres
+/// itself applies. `rls_` is the ferro-owned prefix for policies, the way `ck_`
+/// is for checks and `fk_` is for foreign keys.
+///
+/// Truncation makes distinct declarations collide, so the IR compiler dedups on
+/// the name this returns — never on the un-truncated suffix.
+pub fn row_policy_name(table_lower: &str, name: &str) -> String {
+    truncate_identifier_bytes(&format!("rls_{table_lower}_{name}"), "_rls")
+}
+
+/// Whether a live policy name follows the ferro row-policy convention — the
+/// ownership test reconciliation (#413) will use; policies named any other way
+/// belong to the user and are never altered or dropped.
+pub fn is_ferro_row_policy_name(name: &str) -> bool {
+    name.starts_with("rls_")
+}
+
+/// The cast token the column/setting shorthand appends to
+/// `NULLIF(current_setting(...), '')`, or `None` when the column already stores
+/// text and no cast is needed.
+///
+/// The storage decision itself stays in [`resolve_column_storage`] (I-1); this
+/// function only maps its Postgres result onto the shorthand allowlist —
+/// `uuid`, `text`/`varchar`, and the integer families. Every other storage
+/// (native enums, timestamps, numerics, json, …) is an `Err`: those comparisons
+/// need an author's judgement about coercion, which is the raw `using=` form.
+pub fn row_policy_shorthand_cast(
+    col: &ferro_schema_ir::SchemaColumn,
+) -> Result<Option<String>, String> {
+    let storage = resolve_column_storage(col, Dialect::Postgres)?;
+    let canonical = match storage {
+        ResolvedStorage::Scalar(canonical) => canonical,
+        ResolvedStorage::PgEnum { type_name, .. } => {
+            return Err(format!(
+                "column '{}' stores the native enum type '{}', which the RowPolicy \
+                 column/setting shorthand does not support",
+                col.name, type_name
+            ));
+        }
+    };
+    match canonical {
+        CanonicalType::Uuid => Ok(Some("uuid".to_string())),
+        CanonicalType::Text | CanonicalType::Varchar(_) => Ok(None),
+        CanonicalType::SmallInt => Ok(Some("smallint".to_string())),
+        CanonicalType::Integer => Ok(Some("integer".to_string())),
+        CanonicalType::BigInt => Ok(Some("bigint".to_string())),
+        other => Err(format!(
+            "column '{}' stores '{}', which the RowPolicy column/setting shorthand \
+             does not support",
+            col.name,
+            canonical_to_db_type_token(other, Dialect::Postgres)
+        )),
+    }
+}
+
+/// The shorthand's rendered comparison:
+/// `"<col>" = NULLIF(current_setting('<key>', true), '')::<cast>`.
+///
+/// `NULLIF` is load-bearing. `current_setting(key, true)` returns NULL for a
+/// setting that was never set, but a setting that was set and then `RESET`
+/// reads back as the empty string — and `''::uuid` is an error, not a NULL. So
+/// without the `NULLIF` a fail-closed policy would turn into a hard error on
+/// every query for the whole recycled-connection case. With it, both shapes
+/// evaluate to `col = NULL` → NULL → no rows.
+pub fn render_row_policy_setting_expr(column: &str, setting: &str, cast: Option<&str>) -> String {
+    let cast_suffix = match cast {
+        Some(token) => format!("::{token}"),
+        None => String::new(),
+    };
+    format!(
+        "{} = NULLIF(current_setting('{}', true), ''){}",
+        quote_ident(column),
+        setting.replace('\'', "''"),
+        cast_suffix,
+    )
+}
+
+/// Every command a row policy may be scoped to. Adding a command here is the
+/// one edit that teaches both emitters and the Python declaration surface about
+/// it — the declaration reads this list over FFI rather than keeping its own.
+pub const ROW_POLICY_COMMANDS: [ferro_schema_ir::RowPolicyCommand; 5] = [
+    ferro_schema_ir::RowPolicyCommand::All,
+    ferro_schema_ir::RowPolicyCommand::Select,
+    ferro_schema_ir::RowPolicyCommand::Insert,
+    ferro_schema_ir::RowPolicyCommand::Update,
+    ferro_schema_ir::RowPolicyCommand::Delete,
+];
+
+/// The command's wire token — what `RowPolicy(command=...)` accepts and what
+/// `SchemaRowPolicy.command` serializes to. Pinned against serde by a unit test
+/// so it cannot drift from the IR.
+pub fn row_policy_command_token(command: ferro_schema_ir::RowPolicyCommand) -> &'static str {
+    match command {
+        ferro_schema_ir::RowPolicyCommand::All => "all",
+        ferro_schema_ir::RowPolicyCommand::Select => "select",
+        ferro_schema_ir::RowPolicyCommand::Insert => "insert",
+        ferro_schema_ir::RowPolicyCommand::Update => "update",
+        ferro_schema_ir::RowPolicyCommand::Delete => "delete",
+    }
+}
+
+fn row_policy_command_sql(command: ferro_schema_ir::RowPolicyCommand) -> &'static str {
+    match command {
+        ferro_schema_ir::RowPolicyCommand::All => "ALL",
+        ferro_schema_ir::RowPolicyCommand::Select => "SELECT",
+        ferro_schema_ir::RowPolicyCommand::Insert => "INSERT",
+        ferro_schema_ir::RowPolicyCommand::Update => "UPDATE",
+        ferro_schema_ir::RowPolicyCommand::Delete => "DELETE",
+    }
+}
+
+/// Whether Postgres accepts a `USING` clause for this command.
+/// `FOR INSERT` policies are write-only: they take `WITH CHECK` alone.
+pub fn row_policy_command_takes_using(command: ferro_schema_ir::RowPolicyCommand) -> bool {
+    !matches!(command, ferro_schema_ir::RowPolicyCommand::Insert)
+}
+
+/// Whether Postgres accepts a `WITH CHECK` clause for this command.
+/// `FOR SELECT` and `FOR DELETE` policies only read rows; they take `USING` alone.
+pub fn row_policy_command_takes_with_check(command: ferro_schema_ir::RowPolicyCommand) -> bool {
+    matches!(
+        command,
+        ferro_schema_ir::RowPolicyCommand::All
+            | ferro_schema_ir::RowPolicyCommand::Insert
+            | ferro_schema_ir::RowPolicyCommand::Update
+    )
+}
+
+/// The `(USING, WITH CHECK)` expressions one policy renders, already filtered
+/// to the clauses its command accepts.
+///
+/// The shorthand renders the SAME comparison into both clauses — reads and
+/// writes are scoped by one declaration — so a `FOR ALL` shorthand policy both
+/// hides other tenants' rows and rejects a write that would create one.
+pub fn row_policy_clauses(
+    model: &ferro_schema_ir::SchemaModel,
+    policy: &ferro_schema_ir::SchemaRowPolicy,
+) -> Result<(Option<String>, Option<String>), String> {
+    let (using, with_check) = match &policy.expr {
+        ferro_schema_ir::RowPolicyExpr::Setting { column, setting } => {
+            let col = model
+                .columns
+                .iter()
+                .find(|candidate| &candidate.name == column)
+                .ok_or_else(|| {
+                    format!(
+                        "row policy '{}' references column '{}', which table '{}' does not have",
+                        policy.name, column, model.table_name
+                    )
+                })?;
+            let cast = row_policy_shorthand_cast(col)?;
+            let rendered = render_row_policy_setting_expr(column, setting, cast.as_deref());
+            (Some(rendered.clone()), Some(rendered))
+        }
+        ferro_schema_ir::RowPolicyExpr::Raw { using, with_check } => {
+            (using.clone(), with_check.clone())
+        }
+    };
+    Ok((
+        using.filter(|_| row_policy_command_takes_using(policy.command)),
+        with_check.filter(|_| row_policy_command_takes_with_check(policy.command)),
+    ))
+}
+
+/// The full `CREATE POLICY` statement for one declared policy.
+///
+/// Shape: `CREATE POLICY "<name>" ON "<table>" [AS RESTRICTIVE] FOR <COMMAND>
+/// [USING (...)] [WITH CHECK (...)]`. `AS PERMISSIVE` is Postgres's default and
+/// stays implicit, so a permissive policy's catalog definition round-trips
+/// without a phantom diff.
+pub fn render_create_row_policy(
+    model: &ferro_schema_ir::SchemaModel,
+    policy: &ferro_schema_ir::SchemaRowPolicy,
+) -> Result<String, String> {
+    let (using, with_check) = row_policy_clauses(model, policy)?;
+    let mut statement = format!(
+        "CREATE POLICY {} ON {}",
+        quote_ident(&policy.name),
+        quote_ident(&model.table_name),
+    );
+    if policy.restrictive {
+        statement.push_str(" AS RESTRICTIVE");
+    }
+    statement.push_str(&format!(" FOR {}", row_policy_command_sql(policy.command)));
+    if let Some(expr) = using {
+        statement.push_str(&format!(" USING ({expr})"));
+    }
+    if let Some(expr) = with_check {
+        statement.push_str(&format!(" WITH CHECK ({expr})"));
+    }
+    Ok(statement)
+}
+
+/// `ALTER TABLE "<table>" ENABLE ROW LEVEL SECURITY`.
+pub fn render_enable_row_security(table: &str) -> String {
+    format!(
+        "ALTER TABLE {} ENABLE ROW LEVEL SECURITY",
+        quote_ident(table)
+    )
+}
+
+/// `ALTER TABLE "<table>" FORCE ROW LEVEL SECURITY`.
+pub fn render_force_row_security(table: &str) -> String {
+    format!(
+        "ALTER TABLE {} FORCE ROW LEVEL SECURITY",
+        quote_ident(table)
+    )
+}
+
+/// The row-security DDL for one freshly created table, or the SQLite skip.
+#[derive(Debug, Default)]
+pub struct RowSecurityEmission {
+    /// ENABLE, FORCE (when declared), then one CREATE POLICY per policy.
+    pub statements: Vec<String>,
+    /// The SQLite skip warning — one per table, never one per policy.
+    pub warning: Option<String>,
+}
+
+/// Every row-security statement a newly created table needs, in execution
+/// order: `ENABLE ROW LEVEL SECURITY`, `FORCE ROW LEVEL SECURITY` when the
+/// declaration asks for it, then one `CREATE POLICY` per declared policy in
+/// declaration order.
+///
+/// Postgres-only (the glossary's "Postgres-only schema object" posture,
+/// ADR-0014): on SQLite the model still registers and its table is still
+/// created; the row-security DDL is skipped with one loud warning naming the
+/// table, because SQLite has no row-level security to skip *to*.
+pub fn row_security_statements(
+    model: &ferro_schema_ir::SchemaModel,
+    dialect: Dialect,
+) -> Result<RowSecurityEmission, String> {
+    let Some(declaration) = model.row_security.as_ref() else {
+        return Ok(RowSecurityEmission::default());
+    };
+    if dialect == Dialect::Sqlite {
+        return Ok(RowSecurityEmission {
+            statements: Vec::new(),
+            warning: Some(sqlite_row_security_warning(&model.table_name)),
+        });
+    }
+    let mut statements = vec![render_enable_row_security(&model.table_name)];
+    if declaration.force {
+        statements.push(render_force_row_security(&model.table_name));
+    }
+    for policy in &declaration.policies {
+        statements.push(render_create_row_policy(model, policy)?);
+    }
+    Ok(RowSecurityEmission {
+        statements,
+        warning: None,
+    })
+}
+
+/// The SQLite skip warning — one per table, single-sourced so the create path
+/// and the existing-table path say the same thing.
+fn sqlite_row_security_warning(table: &str) -> String {
+    format!(
+        "Table '{table}' declares __ferro_rls__, but row-level security is a \
+         PostgreSQL-only feature: the table is created without its policies and \
+         rows are NOT filtered on SQLite. Run against PostgreSQL for enforcement."
+    )
+}
+
+/// The warning for a model that declares row security whose table ALREADY
+/// exists, or `None` when there is nothing to say.
+///
+/// The create pass owns only missing tables (ADR-0010), so a declaration added
+/// to a live table emits no DDL — and silence there is the one failure mode
+/// this feature must never have. The author believes their rows are fenced; the
+/// database has no policy. Reconciliation on live tables is #413; until it
+/// lands, this fires on every connect so the gap is impossible to miss.
+///
+/// Single-sourced like [`extra_check_names_warning`]: callers emit it verbatim.
+pub fn row_security_existing_table_warning(
+    model: &ferro_schema_ir::SchemaModel,
+    dialect: Dialect,
+) -> Option<String> {
+    model.row_security.as_ref()?;
+    Some(match dialect {
+        Dialect::Sqlite => sqlite_row_security_warning(&model.table_name),
+        Dialect::Postgres => format!(
+            "Table '{}' declares __ferro_rls__, but the table already exists and the \
+             create pass never alters an existing table (ADR-0010). Its row-security \
+             flags and policies were NOT applied — rows are NOT filtered. Apply them \
+             with a reviewed migration, or drop and recreate the table in development.",
+            model.table_name
+        ),
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CheckToken {
     Word(String),
@@ -1640,6 +1962,7 @@ mod tests {
             uniques: Vec::new(),
             checks,
             table_checks,
+            row_security: None,
         }
     }
 
@@ -2778,5 +3101,426 @@ mod tests {
             col < dbt && dbt < alembic,
             "tokens must appear in order: {w}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Row security (#409). These pins ARE the cross-emitter contract: the
+    // runtime create pass and (from #414) the Alembic operation both render
+    // through these functions, so a change here is a change to both doors.
+    // -----------------------------------------------------------------------
+
+    fn rls_model(columns: Vec<SchemaColumn>) -> ferro_schema_ir::SchemaModel {
+        ferro_schema_ir::SchemaModel {
+            model_name: "LedgerRow".to_string(),
+            table_name: "ledgerrow".to_string(),
+            columns,
+            foreign_keys: vec![],
+            indexes: vec![],
+            uniques: vec![],
+            checks: vec![],
+            table_checks: vec![],
+            row_security: None,
+        }
+    }
+
+    fn setting_policy(
+        name: &str,
+        column: &str,
+        setting: &str,
+        command: ferro_schema_ir::RowPolicyCommand,
+        restrictive: bool,
+    ) -> ferro_schema_ir::SchemaRowPolicy {
+        ferro_schema_ir::SchemaRowPolicy {
+            name: name.to_string(),
+            command,
+            restrictive,
+            expr: ferro_schema_ir::RowPolicyExpr::Setting {
+                column: column.to_string(),
+                setting: setting.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn row_policy_name_matches_the_ferro_owned_prefix() {
+        assert_eq!(
+            row_policy_name("ledgerrow", "ledger_id"),
+            "rls_ledgerrow_ledger_id"
+        );
+        assert!(is_ferro_row_policy_name("rls_ledgerrow_ledger_id"));
+        assert!(!is_ferro_row_policy_name("tenant_isolation"));
+    }
+
+    #[test]
+    fn row_policy_command_tokens_match_the_ir_wire_vocabulary() {
+        // The Python declaration surface accepts these tokens and the IR
+        // serializes them; if `row_policy_command_token` and serde ever
+        // disagreed, a declared command would not round-trip.
+        for command in ROW_POLICY_COMMANDS {
+            let serialized = serde_json::to_value(command).unwrap();
+            assert_eq!(
+                serialized,
+                serde_json::json!(row_policy_command_token(command))
+            );
+        }
+        assert_eq!(
+            ROW_POLICY_COMMANDS
+                .iter()
+                .map(|c| row_policy_command_token(*c))
+                .collect::<Vec<_>>(),
+            vec!["all", "select", "insert", "update", "delete"]
+        );
+    }
+
+    #[test]
+    fn row_policy_clause_table_matches_postgres_rules() {
+        // FOR INSERT is write-only (WITH CHECK alone); FOR SELECT / FOR DELETE
+        // read rows (USING alone); ALL and UPDATE take both. This IS the table
+        // the Python declaration reads over FFI — there is no second copy.
+        let table: Vec<(&str, bool, bool)> = ROW_POLICY_COMMANDS
+            .iter()
+            .map(|c| {
+                (
+                    row_policy_command_token(*c),
+                    row_policy_command_takes_using(*c),
+                    row_policy_command_takes_with_check(*c),
+                )
+            })
+            .collect();
+        assert_eq!(
+            table,
+            vec![
+                ("all", true, true),
+                ("select", true, false),
+                ("insert", false, true),
+                ("update", true, true),
+                ("delete", true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn row_policy_name_truncates_above_63() {
+        let name = row_policy_name("verylongtable", &"a".repeat(70));
+        assert_eq!(name.len(), 63);
+        assert!(name.ends_with("_rls"));
+    }
+
+    #[test]
+    fn row_policy_name_truncates_by_bytes_not_characters() {
+        // Postgres truncates identifiers at 63 BYTES. A character-counted guard
+        // would hand it a 63-char / 126-byte name it truncates itself — and two
+        // such names could collapse to one identifier server-side, silently.
+        let name = row_policy_name("t", &"é".repeat(80));
+        assert!(name.len() <= 63, "{} bytes: {name}", name.len());
+        assert!(name.ends_with("_rls"));
+        // Never split a multi-byte character.
+        assert!(std::str::from_utf8(name.as_bytes()).is_ok());
+        assert!(name.chars().count() < 63);
+    }
+
+    #[test]
+    fn row_policy_names_collide_once_truncated() {
+        // The property the IR compiler's dedup depends on: two distinct
+        // declarations CAN produce one live name, so deduping the declared
+        // suffix is not enough.
+        let a = row_policy_name("ledgerrow", &format!("{}_alpha", "x".repeat(60)));
+        let b = row_policy_name("ledgerrow", &format!("{}_beta", "x".repeat(60)));
+        assert_eq!(a, b, "truncation must be able to collide");
+        assert_eq!(a.len(), 63);
+    }
+
+    #[test]
+    fn shorthand_cast_allowlist_is_uuid_text_and_the_integer_families() {
+        let uuid = col_with_db_type("ledger_id", "uuid", None, None);
+        assert_eq!(
+            row_policy_shorthand_cast(&uuid).unwrap(),
+            Some("uuid".into())
+        );
+
+        let text = col_with_db_type("tenant", "string", None, None);
+        assert_eq!(row_policy_shorthand_cast(&text).unwrap(), None);
+
+        let varchar = col_with_db_type("tenant", "string", None, Some("varchar(40)"));
+        assert_eq!(row_policy_shorthand_cast(&varchar).unwrap(), None);
+
+        let int = col_with_db_type("tenant_id", "integer", None, None);
+        assert_eq!(
+            row_policy_shorthand_cast(&int).unwrap(),
+            Some("integer".into())
+        );
+        let big = col_with_db_type("tenant_id", "integer", None, Some("bigint"));
+        assert_eq!(
+            row_policy_shorthand_cast(&big).unwrap(),
+            Some("bigint".into())
+        );
+        let small = col_with_db_type("tenant_id", "integer", None, Some("smallint"));
+        assert_eq!(
+            row_policy_shorthand_cast(&small).unwrap(),
+            Some("smallint".into())
+        );
+    }
+
+    #[test]
+    fn shorthand_cast_rejects_every_other_storage() {
+        let ts = col_with_db_type("created_at", "datetime", None, None);
+        let err = row_policy_shorthand_cast(&ts).unwrap_err();
+        assert!(err.contains("created_at"), "{err}");
+        assert!(err.contains("timestamptz"), "{err}");
+        assert!(err.contains("does not support"), "{err}");
+
+        let flag = col_with_db_type("active", "boolean", None, None);
+        assert!(row_policy_shorthand_cast(&flag).is_err());
+
+        let native_enum = enum_col(
+            "role",
+            Some("role_enum"),
+            vec![serde_json::json!("admin"), serde_json::json!("user")],
+        );
+        let err = row_policy_shorthand_cast(&native_enum).unwrap_err();
+        assert!(err.contains("role_enum"), "{err}");
+    }
+
+    #[test]
+    fn shorthand_expr_wraps_current_setting_in_nullif() {
+        // The exact shape the PRD pins: a set-then-RESET GUC reads back as '',
+        // and NULLIF is what keeps `''::uuid` from erroring on every query.
+        assert_eq!(
+            render_row_policy_setting_expr("ledger_id", "pinch.ledger_id", Some("uuid")),
+            "\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid"
+        );
+        assert_eq!(
+            render_row_policy_setting_expr("tenant", "pinch.tenant", None),
+            "\"tenant\" = NULLIF(current_setting('pinch.tenant', true), '')"
+        );
+    }
+
+    #[test]
+    fn create_policy_renders_for_all_with_both_clauses() {
+        let model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        let policy = setting_policy(
+            "rls_ledgerrow_ledger_id",
+            "ledger_id",
+            "pinch.ledger_id",
+            ferro_schema_ir::RowPolicyCommand::All,
+            false,
+        );
+        assert_eq!(
+            render_create_row_policy(&model, &policy).unwrap(),
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL \
+             USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) \
+             WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        );
+    }
+
+    #[test]
+    fn create_policy_restrictive_renders_as_restrictive() {
+        let model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        let policy = setting_policy(
+            "rls_ledgerrow_ledger_id",
+            "ledger_id",
+            "pinch.ledger_id",
+            ferro_schema_ir::RowPolicyCommand::All,
+            true,
+        );
+        assert!(
+            render_create_row_policy(&model, &policy)
+                .unwrap()
+                .starts_with(
+                    "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" AS RESTRICTIVE FOR ALL "
+                )
+        );
+    }
+
+    #[test]
+    fn create_policy_drops_the_clause_its_command_cannot_take() {
+        // Postgres rejects WITH CHECK on SELECT/DELETE and USING on INSERT;
+        // the shorthand renders one expression and this decision filters it.
+        let model = rls_model(vec![col_with_db_type("tenant", "string", None, None)]);
+        let expr = "\"tenant\" = NULLIF(current_setting('pinch.tenant', true), '')";
+
+        for (command, expected) in [
+            (
+                ferro_schema_ir::RowPolicyCommand::Select,
+                format!(
+                    "CREATE POLICY \"rls_ledgerrow_tenant\" ON \"ledgerrow\" FOR SELECT USING ({expr})"
+                ),
+            ),
+            (
+                ferro_schema_ir::RowPolicyCommand::Delete,
+                format!(
+                    "CREATE POLICY \"rls_ledgerrow_tenant\" ON \"ledgerrow\" FOR DELETE USING ({expr})"
+                ),
+            ),
+            (
+                ferro_schema_ir::RowPolicyCommand::Insert,
+                format!(
+                    "CREATE POLICY \"rls_ledgerrow_tenant\" ON \"ledgerrow\" FOR INSERT WITH CHECK ({expr})"
+                ),
+            ),
+        ] {
+            let policy = setting_policy(
+                "rls_ledgerrow_tenant",
+                "tenant",
+                "pinch.tenant",
+                command,
+                false,
+            );
+            assert_eq!(render_create_row_policy(&model, &policy).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn create_policy_renders_raw_expressions_verbatim() {
+        let model = rls_model(vec![col_with_db_type("id", "uuid", None, None)]);
+        let policy = ferro_schema_ir::SchemaRowPolicy {
+            name: "rls_ledgerrow_invitee_read".to_string(),
+            command: ferro_schema_ir::RowPolicyCommand::Select,
+            restrictive: false,
+            expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                using: Some("id IN (SELECT row_id FROM membership)".to_string()),
+                with_check: None,
+            },
+        };
+        assert_eq!(
+            render_create_row_policy(&model, &policy).unwrap(),
+            "CREATE POLICY \"rls_ledgerrow_invitee_read\" ON \"ledgerrow\" FOR SELECT \
+             USING (id IN (SELECT row_id FROM membership))"
+        );
+    }
+
+    #[test]
+    fn row_security_statements_order_enable_force_then_policies() {
+        let mut model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![setting_policy(
+                "rls_ledgerrow_ledger_id",
+                "ledger_id",
+                "pinch.ledger_id",
+                ferro_schema_ir::RowPolicyCommand::All,
+                false,
+            )],
+        });
+        let emission = row_security_statements(&model, Dialect::Postgres).unwrap();
+        assert_eq!(
+            emission.statements[0],
+            "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY"
+        );
+        assert_eq!(
+            emission.statements[1],
+            "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY"
+        );
+        assert!(emission.statements[2].starts_with("CREATE POLICY"));
+        assert_eq!(emission.statements.len(), 3);
+        assert!(emission.warning.is_none());
+    }
+
+    #[test]
+    fn row_security_statements_omit_force_when_not_declared() {
+        let mut model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: false,
+            policies: vec![],
+        });
+        let emission = row_security_statements(&model, Dialect::Postgres).unwrap();
+        assert_eq!(
+            emission.statements,
+            vec!["ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY".to_string()]
+        );
+    }
+
+    #[test]
+    fn row_security_statements_are_one_warning_and_no_ddl_on_sqlite() {
+        let mut model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![
+                setting_policy(
+                    "rls_ledgerrow_ledger_id",
+                    "ledger_id",
+                    "pinch.ledger_id",
+                    ferro_schema_ir::RowPolicyCommand::All,
+                    false,
+                ),
+                setting_policy(
+                    "rls_ledgerrow_second",
+                    "ledger_id",
+                    "pinch.other",
+                    ferro_schema_ir::RowPolicyCommand::Select,
+                    false,
+                ),
+            ],
+        });
+        let emission = row_security_statements(&model, Dialect::Sqlite).unwrap();
+        assert!(emission.statements.is_empty());
+        let warning = emission
+            .warning
+            .expect("SQLite warns, never silently skips");
+        assert!(warning.contains("ledgerrow"), "{warning}");
+        assert!(warning.contains("PostgreSQL-only"), "{warning}");
+    }
+
+    #[test]
+    fn existing_table_warning_names_the_table_and_says_not_enforced() {
+        let mut model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![setting_policy(
+                "rls_ledgerrow_ledger_id",
+                "ledger_id",
+                "pinch.ledger_id",
+                ferro_schema_ir::RowPolicyCommand::All,
+                false,
+            )],
+        });
+        let warning = row_security_existing_table_warning(&model, Dialect::Postgres)
+            .expect("a declaration the create pass cannot apply must never be silent");
+        assert!(warning.contains("ledgerrow"), "{warning}");
+        assert!(warning.contains("NOT filtered"), "{warning}");
+        assert!(warning.contains("ADR-0010"), "{warning}");
+
+        // SQLite says the PostgreSQL-only thing instead — same sentence the
+        // create path emits, single-sourced.
+        let lite = row_security_existing_table_warning(&model, Dialect::Sqlite).unwrap();
+        assert_eq!(
+            lite,
+            row_security_statements(&model, Dialect::Sqlite)
+                .unwrap()
+                .warning
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn existing_table_warning_is_silent_without_a_declaration() {
+        let model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        assert!(row_security_existing_table_warning(&model, Dialect::Postgres).is_none());
+        assert!(row_security_existing_table_warning(&model, Dialect::Sqlite).is_none());
+    }
+
+    #[test]
+    fn row_security_statements_are_empty_without_a_declaration() {
+        let model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        let emission = row_security_statements(&model, Dialect::Postgres).unwrap();
+        assert!(emission.statements.is_empty());
+        assert!(emission.warning.is_none());
+    }
+
+    #[test]
+    fn row_security_statements_fail_loudly_on_an_unknown_column() {
+        let mut model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![setting_policy(
+                "rls_ledgerrow_missing",
+                "missing",
+                "pinch.ledger_id",
+                ferro_schema_ir::RowPolicyCommand::All,
+                false,
+            )],
+        });
+        let err = row_security_statements(&model, Dialect::Postgres).unwrap_err();
+        assert!(err.contains("missing"), "{err}");
     }
 }

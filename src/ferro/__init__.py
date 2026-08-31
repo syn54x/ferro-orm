@@ -44,6 +44,7 @@ from .fields import BackRef, Field, ManyToMany
 from .models import Model, evict_instance, transaction
 from .query import Relation, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
+from .rowsecurity import RowPolicy, RowSecurity
 from .session import Session, engines
 
 # Set up the Ferro logger
@@ -350,6 +351,8 @@ __all__ = [
     "varchar",
     "Field",
     "Check",
+    "RowSecurity",
+    "RowPolicy",
     "ForeignKey",
     "BackRef",
     "ManyToMany",
