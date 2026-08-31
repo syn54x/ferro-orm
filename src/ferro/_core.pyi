@@ -77,6 +77,7 @@ def _render_migration_sql_for_test(
     live_indexes_json: str = "",
     live_foreign_keys_json: str = "",
     live_checks_json: str = "",
+    live_row_security_json: str = "",
 ) -> tuple[list[str], list[str]]:
     """Test-only: render the auto-migrate diff for one table without a database.
 
@@ -87,7 +88,10 @@ def _render_migration_sql_for_test(
     with the LiveIndex shape (``name``, ``columns``, ``unique``);
     ``live_foreign_keys_json`` the LiveForeignKey shape (``name``, ``column``,
     ``to_table``, ``to_column``, ``on_delete``); ``live_checks_json`` the LiveCheck
-    shape (``name``, ``definition``, ``ferro_owned``).
+    shape (``name``, ``definition``, ``ferro_owned``); ``live_row_security_json``
+    the LiveRowSecurity shape (``enabled``, ``forced``, ``policies``, each with
+    ``name``, ``command``, ``restrictive``, ``using``, ``with_check``,
+    ``roles``, ``ferro_owned``).
     Returns ``(statements, warnings)``.
     """
     ...
@@ -98,6 +102,19 @@ async def _live_table_checks_for_test(
     """Test-only: read live CHECK constraints on ``table`` from the connected engine.
 
     Each dict has keys ``name``, ``definition``, and ``ferro_owned``.
+    """
+    ...
+
+async def _live_row_security_for_test(
+    table: str, using: str | None = None
+) -> dict[str, object]:
+    """Test-only: read ``table``'s live row-security state from the engine.
+
+    Returns ``{"enabled": bool, "forced": bool, "policies": [...]}``; each
+    policy dict has ``name``, ``command``, ``restrictive``, ``using``,
+    ``with_check`` (the catalog's own ``pg_get_expr`` text), ``roles``
+    (``pg_policy.polroles`` resolved to names, ``["public"]`` for the default)
+    and ``ferro_owned``.
     """
     ...
 
@@ -332,5 +349,31 @@ def _plan_row_security(model_ir_json: str, dialect: str = "postgres") -> str:
     ``CREATE POLICY`` statements a freshly created table needs, in execution
     order, plus the policy names. Byte-identical to what the create pass
     executes (I-1). On ``"sqlite"`` there are no statements and one warning.
+    """
+    ...
+
+def _plan_row_security_reconcile(
+    model_ir_json: str,
+    live_json: str,
+    dialect: str = "postgres",
+    destructive: bool = False,
+) -> str:
+    """The row-security reconciliation decision (#413) for one live table.
+
+    ``live_json`` is the LiveRowSecurity shape (``enabled``, ``forced``,
+    ``policies``). Returns JSON:
+    ``{"statements": [...], "missing": [...], "drifted": [...],
+    "unverifiable": [...], "extra": [...], "foreign": [...],
+    "warnings": [...]}`` — the Rust-rendered flag, ``CREATE POLICY``, rebuild
+    and (under ``destructive``) orphan-drop statements in execution order.
+    Byte-identical to what the reconciliation pass executes (I-1).
+    """
+    ...
+
+def _normalize_row_policy_expr(expr: str) -> str:
+    """One row-policy expression through ferro's canonical normalizer (#413).
+
+    Both ferro's rendered body and the catalog's ``pg_get_expr`` text go
+    through this one function; equal output means the same predicate.
     """
     ...

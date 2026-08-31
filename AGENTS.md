@@ -125,6 +125,43 @@ For a single model, every emitter must agree on:
     `tests/test_row_security_create_pass.py` and the ferro-ddl-lowering unit
     pins. Postgres-only; SQLite gets one warning per table and no DDL
     (ADR-0014 posture). See PRD #406.
+16. **Row-security reconciliation on a live table** — the whole decision for
+    one existing table (which declared policies are missing, which live ones
+    drifted, which raw bodies ferro cannot verify, which ferro-owned `rls_*`
+    policies are orphaned, which live policies are foreign, the one-way
+    `ENABLE`/`FORCE` statements, the `migrate_destructive` teardown, and every
+    warning) is decided by ONE function family in `ferro_ddl_lowering`, over
+    the same `LiveRowSecurity` / `LiveRowPolicy` input:
+    `plan_row_security_reconcile` — built from `missing_row_policy_names` /
+    `row_policy_drift` / `extra_row_policy_names` /
+    `missing_row_security_flag_statements` /
+    `excess_row_security_flag_statements` / `render_drop_row_policy` /
+    `row_policy_rebuild_statements`, the two ownership tests
+    (`is_default_row_policy_roles` for a policy's `TO` audience,
+    `ferro_manages_row_security` for whether ferro installed the table's row
+    security at all — the gate on every teardown and every dropped-declaration
+    warning), one normalizer (`normalize_row_policy_expr`), one catalog decoder
+    (`row_policy_command_from_catalog_code`), and the warning texts
+    (`dropped_row_security_warning`, `extra_row_policy_names_warning`,
+    `foreign_row_policy_warning`, `unverifiable_row_policy_warning`,
+    `row_policy_body_replaced_warning`, `row_security_teardown_warning`,
+    `row_security_migrator_warning`). The
+    auto-migrate reconciliation pass consumes it directly (`src/migrate.rs`,
+    after that table's column and data steps); the Alembic autogenerate
+    operation (#414) **will** consume it over FFI
+    (`_core._plan_row_security_reconcile`, whose byte-parity with the pass is
+    already pinned). Live state comes from `src/introspect.rs`
+    (`live_table_row_security`: `pg_class.relrowsecurity` /
+    `relforcerowsecurity` plus `pg_policy` — name, command, permissive,
+    both `pg_get_expr` bodies, and `polroles` resolved to role names — with
+    `ferro_owned` decided by `is_ferro_row_policy_name`). Pinned by
+    `tests/test_row_security_reconcile.py`,
+    `tests/test_row_security_rebuild.py`,
+    `tests/test_row_security_orphans.py` and the ferro-ddl-lowering unit pins
+    (which carry real `pg_get_expr` fixtures). Postgres-only: SQLite plans
+    nothing and keeps the create pass's single warning (ADR-0014). See
+    ADR-0019 (rebuild the bodies ferro writes, report the bodies you write;
+    flags are one-way) and PRD #406.
 
 ### Why this invariant exists
 

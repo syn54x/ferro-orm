@@ -195,3 +195,7 @@ _Avoid_: RLS rule, tenant filter, row filter
 **Row security declaration**:
 The table-level `RowSecurity(*policies, force=True)` ClassVar (`__ferro_rls__`) — the single owner of a model's row-security facts: its policies plus the table flags (`ENABLE`, `FORCE`). Ferro reconciles it one-way: flags and ferro-owned policies are created and rebuilt to match the model, never disabled or dropped outside `migrate_destructive`.
 _Avoid_: Policy tuple, RLS config, security metadata
+
+**Policy rebuild**:
+Drop-and-recreate of a ferro-owned row policy whose live catalog entry no longer matches the declaration — its command, its permissive/restrictive composition, which clauses it carries, or a body ferro itself rendered. Metadata-only: no row is read, validated, or rewritten. A body the *author* wrote (the raw `using=`/`with_check=` form) is never rebuilt on a textual difference — Postgres stores its own rewriting of raw SQL, so ferro reports the difference with both texts instead (ADR-0019).
+_Avoid_: Policy alter, policy sync, RLS drift repair

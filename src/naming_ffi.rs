@@ -339,3 +339,70 @@ pub fn _plan_row_security(model_ir_json: String, dialect: String) -> PyResult<St
     })
     .to_string())
 }
+
+/// The row-security **reconciliation** decision over FFI (#413): given one
+/// model's compiled SchemaIR and its live table's row-security state, return
+/// the Rust-rendered Postgres statements that bring the live table to the
+/// declaration, plus the names behind each part of the decision and the
+/// warnings ferro would emit.
+///
+/// `live_json` is a `LiveRowSecurity` object:
+/// `{"enabled": bool, "forced": bool, "policies": [{"name", "command",
+/// "restrictive", "using", "with_check", "ferro_owned"}]}` — `using` and
+/// `with_check` being the catalog's own `pg_get_expr` text.
+///
+/// This is the seam the Alembic autogenerate operation (#414) consumes so its
+/// generated revision executes byte-identical SQL to the auto-migrate
+/// reconciliation pass; neither side re-derives the diff or re-renders the SQL
+/// (AGENTS.md § I-1). `destructive` gates only the orphan drops — the
+/// auto-migrate ladder (ADR-0013); autogenerate passes it as the caller sees
+/// fit, since a generated revision is reviewed before it runs.
+#[pyfunction]
+#[pyo3(signature = (model_ir_json, live_json, dialect="postgres".to_string(), destructive=false))]
+pub fn _plan_row_security_reconcile(
+    model_ir_json: String,
+    live_json: String,
+    dialect: String,
+    destructive: bool,
+) -> PyResult<String> {
+    let dialect = match dialect.as_str() {
+        "postgres" => Dialect::Postgres,
+        "sqlite" => Dialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown dialect {other:?}; expected 'postgres' or 'sqlite'"
+            )));
+        }
+    };
+    let model: ferro_schema_ir::SchemaModel =
+        serde_json::from_str(&model_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
+        })?;
+    let live: ferro_ddl_lowering::LiveRowSecurity =
+        serde_json::from_str(&live_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid live row security: {e}"))
+        })?;
+    let plan =
+        ferro_ddl_lowering::plan_row_security_reconcile(&model, &live, dialect, destructive)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(serde_json::json!({
+        "statements": plan.statements,
+        "missing": plan.missing,
+        "drifted": plan.drifted,
+        "unverifiable": plan.unverifiable,
+        "extra": plan.extra,
+        "foreign": plan.foreign,
+        "warnings": plan.warnings,
+    })
+    .to_string())
+}
+
+/// One row-policy expression through ferro's normalizer, over FFI (#413).
+///
+/// Exposed so the drift comparison can be exercised — and pinned — against
+/// REAL `pg_get_expr` output from a live database, which is the only way to
+/// prove an unchanged declaration plans nothing.
+#[pyfunction]
+pub fn _normalize_row_policy_expr(expr: String) -> String {
+    ferro_ddl_lowering::normalize_row_policy_expr(&expr)
+}
