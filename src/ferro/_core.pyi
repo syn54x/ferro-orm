@@ -91,7 +91,7 @@ def _render_migration_sql_for_test(
     shape (``name``, ``definition``, ``ferro_owned``); ``live_row_security_json``
     the LiveRowSecurity shape (``enabled``, ``forced``, ``policies``, each with
     ``name``, ``command``, ``restrictive``, ``using``, ``with_check``,
-    ``ferro_owned``).
+    ``roles``, ``ferro_owned``).
     Returns ``(statements, warnings)``.
     """
     ...
@@ -112,7 +112,9 @@ async def _live_row_security_for_test(
 
     Returns ``{"enabled": bool, "forced": bool, "policies": [...]}``; each
     policy dict has ``name``, ``command``, ``restrictive``, ``using``,
-    ``with_check`` (the catalog's own ``pg_get_expr`` text) and ``ferro_owned``.
+    ``with_check`` (the catalog's own ``pg_get_expr`` text), ``roles``
+    (``pg_policy.polroles`` resolved to names, ``["public"]`` for the default)
+    and ``ferro_owned``.
     """
     ...
 

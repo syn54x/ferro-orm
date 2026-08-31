@@ -800,7 +800,15 @@ pub async fn live_table_row_security(
                pol.polcmd::text AS cmd,
                pol.polpermissive AS permissive,
                pg_get_expr(pol.polqual, pol.polrelid)::text AS using_expr,
-               pg_get_expr(pol.polwithcheck, pol.polrelid)::text AS with_check_expr
+               pg_get_expr(pol.polwithcheck, pol.polrelid)::text AS with_check_expr,
+               COALESCE((
+                   SELECT string_agg(role_name, ',' ORDER BY role_name)
+                   FROM (
+                       SELECT CASE WHEN oid = 0 THEN 'public'
+                                   ELSE pg_get_userbyid(oid)::text END AS role_name
+                       FROM unnest(pol.polroles) AS oid
+                   ) AS resolved
+               ), '') AS roles
         FROM pg_policy pol
         JOIN pg_class rel ON rel.oid = pol.polrelid
         JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
@@ -829,6 +837,17 @@ pub async fn live_table_row_security(
         let command = row_policy_command_from_catalog_code(&code)
             .map(str::to_string)
             .unwrap_or(code);
+        // `polroles` is an oid array; `{0}` is PUBLIC, which is what every
+        // policy ferro writes carries (its CREATE POLICY has no TO clause).
+        // Anything else is someone's ALTER POLICY … TO, and on a RESTRICTIVE
+        // policy that narrowing makes the table fail OPEN — so it travels with
+        // the policy and the drift decision reads it (#413).
+        let roles: Vec<String> = row_string(row, "roles")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|role| !role.is_empty())
+            .map(str::to_string)
+            .collect();
         policies.push(LiveRowPolicy {
             ferro_owned: is_ferro_row_policy_name(&name),
             name,
@@ -836,6 +855,7 @@ pub async fn live_table_row_security(
             restrictive: !row_bool(row, "permissive"),
             using: row_string(row, "using_expr"),
             with_check: row_string(row, "with_check_expr"),
+            roles,
         });
     }
 
@@ -894,6 +914,7 @@ pub fn _live_row_security_for_test(
                 row.set_item("restrictive", policy.restrictive)?;
                 row.set_item("using", policy.using)?;
                 row.set_item("with_check", policy.with_check)?;
+                row.set_item("roles", policy.roles)?;
                 row.set_item("ferro_owned", policy.ferro_owned)?;
                 policies.append(row)?;
             }

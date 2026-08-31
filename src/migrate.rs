@@ -558,7 +558,11 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
             && !connected_role_bypasses_row_security(&engine).await?
             && let Some(warning) = row_security_migrator_warning(&forced_tables)
         {
-            always_warnings.push(warning);
+            // Emitted HERE, not queued with the rest: it warns that the data
+            // steps below may see zero rows, and a warning that arrives after
+            // those steps have already run silently succeeded is no warning at
+            // all (#413 gate).
+            crate::emit_user_warning_always(&warning);
         }
     }
 

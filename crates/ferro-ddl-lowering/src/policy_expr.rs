@@ -27,11 +27,19 @@
 //! | `'x'::text`, `(title)::text` | `'x'`, `title` — the implicit text painting is dropped |
 //! | `"Ledger_id"` vs `ledger_id` | unquoted when the identifier needs no quotes |
 //! | `SELECT probe_uid() AS probe_uid` | `select probe_uid()` — the deparser names every select-list output |
-//! | `SELECT membership.doc_id … WHERE membership.member = …` | `select doc_id … where member = …` — the deparser qualifies column references inside sub-selects |
+//! | `SELECT membership.doc_id … WHERE membership.member = …` | `select doc_id … where member = …` — the deparser qualifies column references, so qualifiers are dropped everywhere |
 //! | newlines and indentation | single spaces |
 //!
 //! The last two rules trade a little precision for convergence, and the trade
 //! is stated rather than hidden (see [`super::normalize_row_policy_expr`]).
+//!
+//! Everything else is left alone on purpose. An operator ferro does not model
+//! keeps its parentheses ([`Precedence::Unknown`]), a cast on anything but a
+//! literal or a column reference stays significant ([`strip_text_casts`]), and
+//! an expression carrying a lexical construct this module cannot read is not
+//! canonicalized at all ([`is_safely_lexable`]). Each of those errs toward
+//! reporting a difference that is not one — which, for a raw body, is a
+//! warning and never DDL.
 
 /// One lexical unit of a policy expression.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,15 +58,29 @@ pub(crate) enum Token {
     Close,
 }
 
-/// Operator precedence, loosest first. Used only to decide whether a
-/// parenthesis can be dropped without changing grouping.
-fn precedence(token: &Token) -> Option<u8> {
+/// How tightly an operator binds — or that ferro has never heard of it.
+///
+/// `Unknown` is not "ignore this token"; it is the answer that KEEPS a
+/// parenthesis. Postgres ships hundreds of operators (`&`, `|`, `<<`, `@@`,
+/// `~~`, and every extension's own), and inventing a precedence for one would
+/// let `perm & (1 | 4)` normalize to `perm & 1 | 4` — a different expression.
+/// Erring toward "these parentheses matter" costs at most a false difference,
+/// and a false difference on a raw body is a report, never DDL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Precedence {
+    /// An operator ferro does not model. Never let go of its parentheses.
+    Unknown,
+    /// A modeled operator, loosest (`,`/`OR`) to tightest (`.`).
+    Known(u8),
+}
+
+fn precedence(token: &Token) -> Option<Precedence> {
     let text = match token {
         Token::Op(op) => op.as_str(),
         Token::Word(word) => word.as_str(),
         _ => return None,
     };
-    Some(match text {
+    let known = match text {
         // A comma is not an operator, but treating it as the loosest one keeps
         // `(1, 2)` from ever losing the parentheses that make it a list.
         "," => 0,
@@ -66,15 +88,20 @@ fn precedence(token: &Token) -> Option<u8> {
         "and" => 2,
         "not" => 3,
         "=" | "<>" | "!=" | "<" | ">" | "<=" | ">=" | "is" | "in" | "like" | "ilike"
-        | "between" | "similar" | "~" | "~*" | "!~" | "!~*" | "@>" | "<@" | "&&" | "?"
-        | "?|" | "?&" => 4,
-        "||" | "->" | "->>" | "#>" | "#>>" => 5,
+        | "between" | "similar" => 4,
+        "||" | "->" | "->>" => 5,
         "+" | "-" => 6,
         "*" | "/" | "%" => 7,
         "^" => 8,
         "::" => 9,
-        _ => return None,
-    })
+        // Field access binds tighter than anything and never groups.
+        "." => 10,
+        // A keyword ferro does not treat as an operator is not one.
+        _ if matches!(token, Token::Word(_)) => return None,
+        // Any other punctuation IS an operator — just not one ferro models.
+        _ => return Some(Precedence::Unknown),
+    };
+    Some(Precedence::Known(known))
 }
 
 /// Words that introduce a clause rather than call a function, so a `(` right
@@ -260,8 +287,43 @@ fn parse_group(tokens: &[Token], index: &mut usize) -> Vec<Node> {
     nodes
 }
 
-/// Drop `::text` casts — Postgres paints them onto string literals and onto
-/// `varchar` columns compared with text, and ferro never renders one itself.
+/// Whether a node is one of the two operands Postgres paints an implicit
+/// `::text` onto: a string literal (`''::text`) or a single column reference,
+/// bare or parenthesized (`(title)::text` for a `varchar` column).
+///
+/// Anything else — a function call, an operator result, a parenthesized
+/// expression — keeps its cast: `NULLIF(…)::text` is the author's, not the
+/// server's, and dropping it would equate two different predicates.
+fn takes_painted_text_cast(node: Option<&Node>) -> bool {
+    match node {
+        Some(Node::Leaf(Token::Literal(_))) => true,
+        Some(Node::Leaf(Token::Word(_))) | Some(Node::Leaf(Token::Quoted(_))) => true,
+        Some(Node::Group {
+            call: false,
+            children,
+        }) => {
+            children.len() == 1
+                && matches!(
+                    children[0],
+                    Node::Leaf(Token::Word(_)) | Node::Leaf(Token::Quoted(_))
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Drop the `::text` Postgres paints onto a comparison, and only that one.
+///
+/// The server adds `::text` to string literals (`''::text`) and to a `varchar`
+/// column compared with text (`(title)::text`) — neither of which ferro ever
+/// renders, so leaving them in would make the shorthand look drifted on every
+/// connect. A cast on anything else is the author's own and stays significant.
+///
+/// The one thing this cannot distinguish, stated because ferro acts on the
+/// answer: an author's explicit `col::text` on a bare column reference. The
+/// server renders its own painting the same way, so the two are the same text
+/// by the time they reach here. A raw body is report-only, so the cost is a
+/// missed report, never a wrong rebuild.
 fn strip_text_casts(nodes: Vec<Node>) -> Vec<Node> {
     let mut out: Vec<Node> = Vec::new();
     let mut i = 0usize;
@@ -269,6 +331,7 @@ fn strip_text_casts(nodes: Vec<Node>) -> Vec<Node> {
         if let Node::Leaf(Token::Op(op)) = &nodes[i]
             && op == "::"
             && matches!(nodes.get(i + 1), Some(Node::Leaf(Token::Word(word))) if word == "text")
+            && takes_painted_text_cast(out.last())
         {
             i += 2;
             continue;
@@ -286,8 +349,17 @@ fn strip_text_casts(nodes: Vec<Node>) -> Vec<Node> {
     out
 }
 
-/// Drop the relation qualifier from a column reference (`membership.doc_id` →
-/// `doc_id`). A qualified *function* name (`auth.uid()`) keeps its schema.
+/// Drop the relation qualifier from EVERY column reference, at every depth
+/// (`membership.doc_id` → `doc_id`). A qualified *function* name
+/// (`auth.uid()`) keeps its schema — the qualifier there selects the function.
+///
+/// The deparser adds the qualifier inside sub-selects, which is the case this
+/// exists for, but the rule is applied globally rather than only below a
+/// `SELECT`: a depth-scoped strip would have to model where a sub-select's
+/// namespace begins and ends, and getting that wrong is a silent wrong answer.
+/// The cost of going global is stated on
+/// [`super::normalize_row_policy_expr`]: swapping `a.id` for `b.id` does not
+/// read as drift.
 fn strip_column_qualifiers(nodes: Vec<Node>) -> Vec<Node> {
     let mut out: Vec<Node> = Vec::new();
     let mut i = 0usize;
@@ -367,14 +439,28 @@ fn strip_select_aliases(nodes: Vec<Node>) -> Vec<Node> {
 
 /// The loosest-binding operator at this level, or `None` when the group holds
 /// no operator at all (a bare column, a literal, a function call).
-fn loosest_precedence(nodes: &[Node]) -> Option<u8> {
-    nodes
+///
+/// One unmodeled operator anywhere at this level makes the whole level
+/// unmodeled: ferro cannot say how it groups, so its parentheses stay.
+fn loosest_precedence(nodes: &[Node]) -> Option<Precedence> {
+    let found: Vec<Precedence> = nodes
         .iter()
         .filter_map(|node| match node {
             Node::Leaf(token) => precedence(token),
             Node::Group { .. } => None,
         })
+        .collect();
+    if found.contains(&Precedence::Unknown) {
+        return Some(Precedence::Unknown);
+    }
+    found
+        .into_iter()
+        .filter_map(|prec| match prec {
+            Precedence::Known(rank) => Some(rank),
+            Precedence::Unknown => None,
+        })
         .min()
+        .map(Precedence::Known)
 }
 
 /// Whether a group's content forces it to keep its parentheses regardless of
@@ -423,7 +509,7 @@ fn drop_redundant_parens(nodes: Vec<Node>) -> Vec<Node> {
             out.push(node.clone());
             continue;
         }
-        let neighbor_precedence = [
+        let neighbors: Vec<Precedence> = [
             position.checked_sub(1).and_then(|prev| lowered.get(prev)),
             lowered.get(position + 1),
         ]
@@ -433,14 +519,30 @@ fn drop_redundant_parens(nodes: Vec<Node>) -> Vec<Node> {
             Node::Leaf(token) => precedence(token),
             Node::Group { .. } => None,
         })
-        .max();
+        .collect();
+        let neighbor_precedence = if neighbors.contains(&Precedence::Unknown) {
+            Some(Precedence::Unknown)
+        } else {
+            neighbors
+                .iter()
+                .filter_map(|prec| match prec {
+                    Precedence::Known(rank) => Some(*rank),
+                    Precedence::Unknown => None,
+                })
+                .max()
+                .map(Precedence::Known)
+        };
         let inner = loosest_precedence(children);
         let droppable = match (inner, neighbor_precedence) {
-            // Nothing beside it: the parens can only be decoration.
+            // Nothing beside it: the parens can only be decoration, whatever
+            // is inside — this is the wrapping pair the catalog always adds.
             (_, None) => true,
+            // An operator ferro does not model on either side: it cannot say
+            // how this groups, so the parentheses stay.
+            (Some(Precedence::Unknown), _) | (_, Some(Precedence::Unknown)) => false,
             // No operator inside: a call, a column, a literal — never grouped.
             (None, Some(_)) => true,
-            (Some(inner), Some(outer)) => inner > outer,
+            (Some(Precedence::Known(inner)), Some(Precedence::Known(outer))) => inner > outer,
         };
         if droppable {
             out.extend(children.iter().cloned());
@@ -608,8 +710,41 @@ fn array_literal_items(children: &[Node]) -> Option<Vec<Node>> {
     }
 }
 
+/// SQL lexical constructs [`tokenize`] would read wrongly, and the damage a
+/// mis-read does: an `E'\\)'` escape, a `$$ … )$$` dollar-quoted body, or a
+/// `-- )` comment all hide a `)` that [`parse`] would then treat as closing a
+/// group. The paren tree comes out reshaped, and a reshaped tree can normalize
+/// to something that accidentally equals another expression — a *false
+/// equality*, which for row security means a drifted policy read as unchanged.
+///
+/// Rather than grow a full SQL lexer for the escape hatch's escape hatch,
+/// [`canonicalize`] refuses to canonicalize an expression carrying one of
+/// these and compares it verbatim. Verbatim text almost never equals the
+/// catalog's own rendering, so the policy reads as *different*, which for a
+/// raw body is a report and never DDL. Ferro's shorthand contains none of
+/// these constructs, so nothing it renders is ever affected.
+fn is_safely_lexable(expr: &str) -> bool {
+    if expr.contains("--") || expr.contains("/*") || expr.contains('$') {
+        return false;
+    }
+    // An `E'…'` / `e'…'` string reads backslashes as escapes; a `\'` inside one
+    // does not end the literal the way `tokenize` assumes.
+    let chars: Vec<char> = expr.chars().collect();
+    !chars.windows(2).enumerate().any(|(index, pair)| {
+        (pair[0] == 'E' || pair[0] == 'e')
+            && pair[1] == '\''
+            && index
+                .checked_sub(1)
+                .and_then(|prev| chars.get(prev))
+                .is_none_or(|prev| !is_ident_continue(*prev))
+    })
+}
+
 /// Reduce one policy expression to its canonical form.
 pub(crate) fn canonicalize(expr: &str) -> String {
+    if !is_safely_lexable(expr) {
+        return expr.trim().to_string();
+    }
     let nodes = parse(&tokenize(expr));
     let nodes = canonicalize_operators(nodes);
     let nodes = rewrite_casts(nodes);

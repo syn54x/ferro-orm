@@ -517,3 +517,89 @@ async def test_a_rebuilt_policy_filters_by_the_new_setting(db_url):
         finally:
             await execute(f'DROP OWNED BY "{role}"')
             await execute(f'DROP ROLE IF EXISTS "{role}"')
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(db_url):
+    """``ALTER POLICY … TO admin_role`` is drift no expression comparison can
+    see — and on a RESTRICTIVE policy it makes the table fail **open**, because
+    a restrictive policy that does not apply to a role stops restricting it.
+
+    Ferro's ``CREATE POLICY`` never writes a ``TO`` clause, so PUBLIC is the
+    declared value and anything else is someone else's ALTER.
+    """
+    role = f"ferro_rls_{uuid.uuid4().hex[:12]}"
+    _define_ledger_row(restrictive=True)
+    await connect(db_url, auto_migrate=True)
+    try:
+        async with engines.session():
+            await execute(f'CREATE ROLE "{role}" NOSUPERUSER')
+            live = await _live_row_security_for_test("ledgerrow")
+            assert live["policies"][0]["roles"] == ["public"]
+
+            await execute(f'ALTER POLICY "{POLICY_NAME}" ON "ledgerrow" TO "{role}"')
+            narrowed = await _live_row_security_for_test("ledgerrow")
+            assert narrowed["policies"][0]["roles"] == [role]
+            # The body did not change at all — only the audience did.
+            assert narrowed["policies"][0]["using"] == live["policies"][0]["using"]
+            plan = json.loads(
+                _plan_row_security_reconcile(
+                    json.dumps(_model_ir()), json.dumps(narrowed)
+                )
+            )
+            assert plan["drifted"] == [POLICY_NAME]
+
+        reset_engine()
+        await connect(db_url, migrate_updates=True)
+        async with engines.session():
+            restored = await _live_row_security_for_test("ledgerrow")
+            assert restored["policies"][0]["roles"] == ["public"]
+            assert (await _pg_policies("ledgerrow"))[0]["permissive"] == "RESTRICTIVE"
+    finally:
+        reset_engine()
+        await connect(db_url)
+        async with engines.session():
+            await execute(f'DROP OWNED BY "{role}"')
+            await execute(f'DROP ROLE IF EXISTS "{role}"')
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_metadata_rebuild_reports_the_raw_body_it_replaced(db_url, recwarn):
+    """Connect one creates a raw policy. Connect two changes the command *and*
+    the body: the command is exact metadata so the policy rebuilds, and the
+    rebuild carries the declared body — overwriting a live body ferro had just
+    said it could not verify. Declaration-is-truth stands; silence does not."""
+    _define_raw_ledger_row('"id" BETWEEN 1 AND 5')
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        live = await _live_row_security_for_test("ledgerrow")
+        # Postgres stored BETWEEN as two comparisons — the stated limit.
+        assert ">=" in live["policies"][0]["using"]
+    _rewind_registry()
+
+    # A different command (exact drift → rebuild) AND a different body.
+    class LedgerRow(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        ledger_id: uuid.UUID
+        label: str
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(name="ledger_id", command="all", using='"id" BETWEEN 1 AND 9')
+        )
+
+    recwarn.clear()
+    await connect(db_url, migrate_updates=True)
+    replaced = [w for w in recwarn if "REPLACED its live raw body" in str(w.message)]
+    assert len(replaced) == 1, [str(w.message) for w in recwarn]
+    message = str(replaced[0].message)
+    assert "BETWEEN 1 AND 9" in message
+    assert "(id >= 1)" in message
+
+    async with engines.session():
+        policies = await _pg_policies("ledgerrow")
+        assert policies[0]["cmd"] == "ALL"
+        assert "9" in policies[0]["qual"]

@@ -299,3 +299,92 @@ async def test_a_foreign_policy_survives_migrate_destructive(db_url, recwarn):
     foreign = [w for w in recwarn if FOREIGN_NAME in str(w.message)]
     assert len(foreign) == 1, [str(w.message) for w in recwarn]
     assert "does not own" in str(foreign[0].message)
+
+
+# ---------------------------------------------------------------------------
+# Teardown reaches exactly as far as ferro's own footprint
+# ---------------------------------------------------------------------------
+
+
+def _define_plain_ledger_row() -> type[Model]:
+    """The same table, mapped by a model that declares no row security."""
+
+    class LedgerRow(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        ledger_id: uuid.UUID
+        label: str
+
+    return LedgerRow
+
+
+def test_hand_managed_row_security_is_never_torn_down():
+    """A DBA enabled RLS and wrote their own policies; the model maps the table
+    but declares nothing. ``migrate_destructive`` for an unrelated column must
+    not disable their fence — and the foreign-policy report in the same run
+    promises ferro never touches those policies, so tearing down the flag that
+    makes them apply would make that promise a lie."""
+    _define_plain_ledger_row()
+    live = _live(_foreign_policy())
+    for destructive in (False, True):
+        statements, warnings = _render(live, destructive=destructive)
+        assert statements == [], destructive
+        # The only thing said is the standing foreign-policy report.
+        assert len(warnings) == 1, (destructive, warnings)
+        assert FOREIGN_NAME in warnings[0]
+        assert "does not own" in warnings[0]
+        assert not any("no longer declares __ferro_rls__" in w for w in warnings)
+
+
+def test_ferro_managed_row_security_still_tears_down_completely():
+    """The other direction: a live ``rls_*`` policy IS ferro's signature on the
+    table, so a dropped declaration still warns on updates and still tears the
+    whole thing down on destructive."""
+    _define_plain_ledger_row()
+    live = _live(_declared_live_policy())
+
+    statements, warnings = _render(live)
+    assert statements == []
+    assert any("no longer declares __ferro_rls__" in w for w in warnings)
+
+    statements, warnings = _render(live, destructive=True)
+    assert statements == [
+        f'DROP POLICY "{POLICY_NAME}" ON "ledgerrow"',
+        'ALTER TABLE "ledgerrow" NO FORCE ROW LEVEL SECURITY',
+        'ALTER TABLE "ledgerrow" DISABLE ROW LEVEL SECURITY',
+    ]
+    assert any("tore down row security" in w for w in warnings)
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_hand_managed_rls_table_survives_migrate_destructive(db_url, recwarn):
+    LedgerRow = _define_plain_ledger_row()
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await LedgerRow.create(ledger_id=LEDGER_A, label="a1")
+        # Row security nobody asked ferro for.
+        await execute('ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY')
+        await execute('ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY')
+        await execute(
+            f'CREATE POLICY "{FOREIGN_NAME}" ON "ledgerrow" FOR ALL USING (true)'
+        )
+
+    reset_engine()
+    recwarn.clear()
+    await connect(db_url, migrate_destructive=True)
+    async with engines.session():
+        flags = await fetch_all(
+            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+            "WHERE oid = '\"ledgerrow\"'::regclass"
+        )
+        assert flags[0]["relrowsecurity"] is True
+        assert flags[0]["relforcerowsecurity"] is True
+        assert await _pg_policy_names("ledgerrow") == [FOREIGN_NAME]
+
+    accusations = [
+        w for w in recwarn if "no longer declares __ferro_rls__" in str(w.message)
+    ]
+    assert accusations == [], [str(w.message) for w in recwarn]
+    reports = [w for w in recwarn if "does not own" in str(w.message)]
+    assert len(reports) == 1, [str(w.message) for w in recwarn]
