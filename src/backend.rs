@@ -489,17 +489,29 @@ impl EngineHandle {
         }
     }
 
-    pub async fn execute_sql(&self, sql: &str) -> Result<u64, sqlx::Error> {
+    /// Acquire a pool connection for one statement with no caller-managed
+    /// transaction — the single seam every non-transactional `execute_*` /
+    /// `fetch_*` method below funnels through.
+    ///
+    /// Acquiring explicitly here (instead of handing sqlx `&Pool` to
+    /// `.execute()`/`.fetch_all()` as the executor, which acquires and
+    /// releases a connection internally) is behaviorally identical for one
+    /// statement, but it is what lets a future per-operation transaction wrap
+    /// (ticket #410) surround the statement — issuing `BEGIN`/settings SQL
+    /// before it and `COMMIT`/`ROLLBACK` after — by changing this one method
+    /// instead of every call site.
+    async fn acquire_nontx_connection(&self) -> Result<EngineConnection, sqlx::Error> {
         match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let result = sqlx::query(sql).execute(pool.as_ref()).await?;
-                Ok(result.rows_affected())
-            }
-            BackendPool::Postgres(pool) => {
-                let result = sqlx::query(sql).execute(pool.as_ref()).await?;
-                Ok(result.rows_affected())
-            }
+            BackendPool::Sqlite(pool) => Ok(EngineConnection::Sqlite(pool.acquire().await?)),
+            BackendPool::Postgres(pool) => Ok(EngineConnection::Postgres(pool.acquire().await?)),
         }
+    }
+
+    pub async fn execute_sql(&self, sql: &str) -> Result<u64, sqlx::Error> {
+        self.acquire_nontx_connection()
+            .await?
+            .execute_sql(sql)
+            .await
     }
 
     /// Execute without entering any connection's prepared-statement cache.
@@ -507,22 +519,10 @@ impl EngineHandle {
     /// statement against a schema that the very same migration is about to
     /// change would poison the connection it ran on.
     pub async fn execute_sql_unprepared(&self, sql: &str) -> Result<u64, sqlx::Error> {
-        match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let result = sqlx::query(sql)
-                    .persistent(false)
-                    .execute(pool.as_ref())
-                    .await?;
-                Ok(result.rows_affected())
-            }
-            BackendPool::Postgres(pool) => {
-                let result = sqlx::query(sql)
-                    .persistent(false)
-                    .execute(pool.as_ref())
-                    .await?;
-                Ok(result.rows_affected())
-            }
-        }
+        self.acquire_nontx_connection()
+            .await?
+            .execute_sql_unprepared(sql)
+            .await
     }
 
     /// Fetch without entering any connection's prepared-statement cache.
@@ -537,24 +537,10 @@ impl EngineHandle {
         sql: &str,
         values: &[EngineBindValue],
     ) -> Result<Vec<EngineRow>, sqlx::Error> {
-        match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql).persistent(false);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_engine_row).collect())
-            }
-            BackendPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql).persistent(false);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_pg_row).collect())
-            }
-        }
+        self.acquire_nontx_connection()
+            .await?
+            .fetch_all_sql_unprepared_with_binds(sql, values)
+            .await
     }
 
     pub async fn execute_sql_with_binds(
@@ -573,30 +559,10 @@ impl EngineHandle {
         sql: &str,
         values: &[EngineBindValue],
     ) -> Result<EngineExecuteResult, sqlx::Error> {
-        match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let result = query.execute(pool.as_ref()).await?;
-                Ok(EngineExecuteResult {
-                    rows_affected: result.rows_affected(),
-                    last_insert_id: Some(result.last_insert_rowid()),
-                })
-            }
-            BackendPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let result = query.execute(pool.as_ref()).await?;
-                Ok(EngineExecuteResult {
-                    rows_affected: result.rows_affected(),
-                    last_insert_id: None,
-                })
-            }
-        }
+        self.acquire_nontx_connection()
+            .await?
+            .execute_sql_with_binds_result(sql, values)
+            .await
     }
 
     pub async fn fetch_all_sql_with_binds(
@@ -604,24 +570,10 @@ impl EngineHandle {
         sql: &str,
         values: &[EngineBindValue],
     ) -> Result<Vec<EngineRow>, sqlx::Error> {
-        match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_engine_row).collect())
-            }
-            BackendPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_pg_row).collect())
-            }
-        }
+        self.acquire_nontx_connection()
+            .await?
+            .fetch_all_sql_with_binds(sql, values)
+            .await
     }
 
     pub async fn begin_transaction_connection(&self) -> Result<EngineConnection, sqlx::Error> {
@@ -665,6 +617,34 @@ impl EngineConnection {
                     .execute(&mut **conn)
                     .await?;
                 Ok(result.rows_affected())
+            }
+        }
+    }
+
+    /// Fetch without entering the connection's prepared-statement cache — the
+    /// transactional counterpart of
+    /// [`EngineHandle::fetch_all_sql_unprepared_with_binds`].
+    pub async fn fetch_all_sql_unprepared_with_binds(
+        &mut self,
+        sql: &str,
+        values: &[EngineBindValue],
+    ) -> Result<Vec<EngineRow>, sqlx::Error> {
+        match self {
+            EngineConnection::Sqlite(conn) => {
+                let mut query = sqlx::query(sql).persistent(false);
+                for value in values {
+                    query = bind_engine_value(query, value);
+                }
+                let rows = query.fetch_all(&mut **conn).await?;
+                Ok(rows.iter().map(materialize_engine_row).collect())
+            }
+            EngineConnection::Postgres(conn) => {
+                let mut query = sqlx::query(sql).persistent(false);
+                for value in values {
+                    query = bind_engine_value(query, value);
+                }
+                let rows = query.fetch_all(&mut **conn).await?;
+                Ok(rows.iter().map(materialize_pg_row).collect())
             }
         }
     }
@@ -1041,6 +1021,81 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    /// The non-transactional execution seam (`acquire_nontx_connection`)
+    /// acquires a connection explicitly and hands it back to callers to run
+    /// their own statement, rather than opening a transaction itself. This
+    /// pins that contract: a statement run through the seam autocommits with
+    /// no `BEGIN` wrapping it, exactly as `pool.as_ref()` execution did
+    /// before the refactor. Ticket #410 changes this deliberately; this test
+    /// guards against it changing by accident.
+    #[tokio::test]
+    async fn nontx_seam_autocommits_without_wrapping_transaction() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let engine = EngineHandle::new_sqlite(pool);
+
+        engine
+            .execute_sql("CREATE TABLE nontx_seam_autocommit (id integer primary key)")
+            .await
+            .unwrap();
+
+        // Run one statement directly through the seam and drop the
+        // connection it returns without ever issuing COMMIT.
+        let mut conn = engine.acquire_nontx_connection().await.unwrap();
+        conn.execute_sql("INSERT INTO nontx_seam_autocommit (id) VALUES (1)")
+            .await
+            .unwrap();
+        drop(conn);
+
+        // A fresh statement through the public API must see the insert: if
+        // the seam had implicitly wrapped it in an uncommitted transaction,
+        // this would come back empty.
+        let rows = engine
+            .fetch_all_sql_with_binds(
+                "SELECT id FROM nontx_seam_autocommit WHERE id = ?",
+                &[EngineBindValue::I64(1)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    /// Every seam call acquires a connection and must release it back to the
+    /// pool once its statement completes — it does not linger holding the
+    /// slot. A single-connection pool makes that concrete: two statements
+    /// issued one after another through the seam only succeed if the first
+    /// connection was actually returned.
+    #[tokio::test]
+    async fn nontx_seam_releases_connection_back_to_pool() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let engine = EngineHandle::new_sqlite(pool);
+
+        engine
+            .execute_sql("CREATE TABLE nontx_seam_release (id integer primary key)")
+            .await
+            .unwrap();
+        engine
+            .execute_sql_unprepared("INSERT INTO nontx_seam_release (id) VALUES (1)")
+            .await
+            .unwrap();
+        let rows = engine
+            .fetch_all_sql_unprepared_with_binds(
+                "SELECT id FROM nontx_seam_release WHERE id = ?",
+                &[EngineBindValue::I64(1)],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
     }
 
     #[tokio::test]
