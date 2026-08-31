@@ -3003,8 +3003,15 @@ pub fn fetch_filtered<'py>(
                     pk_for_decode,
                     &include_hops,
                 );
-                let hop_classes_py =
-                    hop_classes_py.expect("validated above: an instances plan carries hop_classes");
+                // Validated when the plan was parsed, so this is unreachable —
+                // but a panic here would unwind straight across the FFI
+                // boundary (AGENTS.md I-3) and past the scope's `finish`.
+                let hop_classes_py = hop_classes_py.ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "Query plan includes related rows but carries no hop classes to \
+                         hydrate them with",
+                    )
+                })?;
 
                 return Python::attach(|py| {
                     let results = pyo3::types::PyList::empty(py);
@@ -3161,9 +3168,13 @@ pub fn fetch_filtered<'py>(
                     // class's for traversed ones — so a projected enum column
                     // hydrates the same enum member as full hydration would
                     // (decode parity, FF-C C4), aliases included.
-                    let fields_spec = projected
-                        .as_ref()
-                        .expect("validated above: a record_cls pairs with a record plan");
+                    // Validated when the plan was parsed; an error rather than a
+                    // panic because panics cross the FFI boundary (I-3).
+                    let fields_spec = projected.as_ref().ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "Query plan builds records but projects no fields for them",
+                        )
+                    })?;
                     let record_enum_classes = record_enum_classes_for(
                         py,
                         cls,
@@ -4340,6 +4351,11 @@ fn get_raw_tx_conn(
 /// Honors `tx_id` (looked up in [`TRANSACTION_REGISTRY`]); falls back to a
 /// one-off pool connection when `tx_id` is `None`.
 ///
+/// `autocommit` skips the implicit per-operation transaction a settings-bearing
+/// session would otherwise wrap the statement in — for the statements Postgres
+/// refuses to run inside a transaction block at all. Such a statement is not
+/// tenant-scoped; see [`OperationScope::unwrapped`].
+///
 /// # Errors
 /// - [`PyRuntimeError`](pyo3::exceptions::PyRuntimeError) on engine/transaction
 ///   lookup failure or DB error.
@@ -4347,12 +4363,13 @@ fn get_raw_tx_conn(
 ///   not a supported primitive (the Python `_marshal` wrapper guarantees this
 ///   never trips in normal use).
 #[pyfunction]
-#[pyo3(signature = (sql, args, route))]
+#[pyo3(signature = (sql, args, route, autocommit=false))]
 pub fn raw_execute<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
+    autocommit: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -4374,14 +4391,22 @@ pub fn raw_execute<'py>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(Some(route_connection_name))?;
-        let scope = OperationScope::open(
-            &engine,
-            route_session_id.as_deref(),
-            tx_conn,
-            false,
-            "Raw SQL execute failed",
-        )
-        .await?;
+        // `autocommit=True` is the caller telling us this statement cannot run
+        // inside a transaction at all (`CREATE INDEX CONCURRENTLY`, `VACUUM`),
+        // so the implicit settings wrap is skipped rather than making the
+        // statement fail with 25001 the moment a session carries settings.
+        let scope = if autocommit {
+            OperationScope::unwrapped(tx_conn)
+        } else {
+            OperationScope::open(
+                &engine,
+                route_session_id.as_deref(),
+                tx_conn,
+                false,
+                "Raw SQL execute failed",
+            )
+            .await?
+        };
         let exec = Executor::new(scope.connection(), &engine);
 
         let outcome = async {

@@ -12,7 +12,7 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import connect, engines, transaction
+from ferro import PoolConfig, connect, engines, transaction
 
 TENANT_KEY = "myapp.tenant_id"
 ROLE_KEY = "myapp.role"
@@ -184,27 +184,35 @@ async def test_setting_does_not_survive_onto_a_settings_less_session(db_url):
     Inside the session you still see it everywhere, because every operation
     carries it — that is per-operation delivery (#410). What must never happen
     is the *next* user of that recycled connection seeing it.
+
+    A one-connection pool is what makes that a real assertion: on a bigger pool
+    the settings-less session could land on a connection the scoped one never
+    touched, and a dirty connection would hide behind a clean one. Here there is
+    only the one, and the backend pid is asserted to prove it.
     """
     from ferro.raw import fetch_one
 
-    await connect(db_url)
+    await connect(db_url, pool=PoolConfig(max_connections=1))
+
     async with engines.session(settings={TENANT_KEY: "acme"}) as session:
         async with transaction() as tx:
             assert await _current_setting(tx, TENANT_KEY) == "acme"
 
         row = await fetch_one(
-            "select current_setting($1, true) as v",
+            "select current_setting($1, true) as v, pg_backend_pid() as pid",
             TENANT_KEY,
             session=session,
         )
         assert row["v"] == "acme"
+        scoped_pid = row["pid"]
 
     async with engines.session() as plain:
         row = await fetch_one(
-            "select current_setting($1, true) as v",
+            "select current_setting($1, true) as v, pg_backend_pid() as pid",
             TENANT_KEY,
             session=plain,
         )
+        assert row["pid"] == scoped_pid, "the pool handed out a different connection"
         assert (row["v"] or "") == "", "a recycled connection kept the old scope"
 
 

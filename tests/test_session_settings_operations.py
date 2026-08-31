@@ -502,3 +502,109 @@ async def test_operations_on_an_inherited_sqlite_session_run_unwrapped(
             )
             await execute("INSERT INTO aux_marker (id, label) VALUES (1, 'ok')")
             assert await fetch_all("SELECT label FROM aux_marker") == [{"label": "ok"}]
+
+
+# ---------------------------------------------------------------------------
+# Cancellation: the wrap's connection is never handed to the next request.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_a_cancelled_operation_does_not_poison_the_pool(db_url, tenant_role):
+    """The leak this feature could have introduced, and does not.
+
+    Cancel a wrapped operation mid-statement — a client disconnecting, a
+    `wait_for` timing out — and its connection is still inside `BEGIN` with the
+    tenant's `SET LOCAL` scope live on it. Handed back to the pool, the next
+    request would run inside that transaction and under that scope. So the
+    connection is discarded instead and the pool opens a fresh one.
+
+    A one-connection pool is the whole point: the next session has no choice
+    but to use whatever came back.
+    """
+    await _seed_and_open_tenant_connection(db_url, tenant_role, max_connections=1)
+    try:
+        async with engines.session("tenant", settings={TENANT_KEY: ACME}):
+            with pytest.raises((asyncio.TimeoutError, asyncio.CancelledError)):
+                await asyncio.wait_for(fetch_all("SELECT pg_sleep(5)"), timeout=0.2)
+
+        # The next request gets a connection that is not mid-transaction, not
+        # scoped to the cancelled tenant, and answers normally.
+        async with engines.session("tenant"):
+            stale = await fetch_one("SELECT current_setting($1, true) AS v", TENANT_KEY)
+            assert (stale["v"] or "") == "", "the cancelled request's scope survived"
+            assert await _labels() == []
+
+        async with engines.session("tenant", settings={TENANT_KEY: OTHER}):
+            assert await _labels() == ["b1"]
+    finally:
+        async with engines.session():
+            await _drop_tenant_role(tenant_role)
+
+
+# ---------------------------------------------------------------------------
+# autocommit: the statements Postgres refuses to run inside a transaction.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_autocommit_runs_a_statement_that_cannot_be_wrapped(db_url):
+    """`CREATE INDEX CONCURRENTLY` is illegal inside a transaction block.
+
+    Without the opt-out, adding settings to a session would break this call
+    with a 25001 — code that works today, for exactly this feature's users.
+    """
+    await connect(db_url, auto_migrate=True)
+
+    async with engines.session(settings={TENANT_KEY: ACME}):
+        # The wrap is what it cannot survive.
+        with pytest.raises(Exception) as excinfo:
+            await execute(
+                "CREATE INDEX CONCURRENTLY idx_scopecontrolrow_wrapped "
+                "ON scopecontrolrow (label)"
+            )
+        assert "transaction" in str(excinfo.value).lower()
+
+        # Opted out, it runs.
+        await execute(
+            "CREATE INDEX CONCURRENTLY idx_scopecontrolrow_label "
+            "ON scopecontrolrow (label)",
+            autocommit=True,
+        )
+
+    async with engines.session():
+        indexes = await fetch_all(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'scopecontrolrow'"
+        )
+        assert "idx_scopecontrolrow_label" in {row["indexname"] for row in indexes}
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_an_autocommit_statement_is_not_tenant_scoped(db_url):
+    """Pinning the docstring's claim rather than asking anyone to trust it.
+
+    `autocommit=True` skips the wrap, and the wrap is what carries the
+    settings — so the row this writes records no tenant. That is the trade, and
+    it is why the opt-out is documented for maintenance DDL and not for data.
+    """
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await _add_tenant_default_column()
+
+    async with engines.session(settings={TENANT_KEY: ACME}):
+        await execute("INSERT INTO scopecontrolrow (label) VALUES ('wrapped')")
+        await execute(
+            "INSERT INTO scopecontrolrow (label) VALUES ('autocommit')",
+            autocommit=True,
+        )
+
+        rows = await fetch_all(
+            "SELECT label, tenant FROM scopecontrolrow ORDER BY label"
+        )
+        assert {row["label"]: row["tenant"] for row in rows} == {
+            "autocommit": None,
+            "wrapped": ACME,
+        }

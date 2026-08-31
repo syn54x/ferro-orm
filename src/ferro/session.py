@@ -267,8 +267,15 @@ class EngineManager:
         *operation*, not per statement, so an operation that issues several
         statements (a chunked `bulk_create`) sends all of them inside one
         transaction and stays all-or-nothing, exactly as it already did.
-        The cost, stated plainly: about two extra round-trips on an operation
-        that is not already inside a transaction.
+
+        The cost, stated plainly: about two extra round-trips per *operation*
+        that is not already inside a transaction — where one operation is one
+        call into Ferro's core, not one line of your code. A flow that saves a
+        row and then links it is two operations and pays twice; put such a flow
+        in a `transaction()` block and it pays once, for the block.
+        `ferro.raw.execute(..., autocommit=True)` opts a statement out of the
+        wrap entirely, for the few Postgres statements that cannot run inside a
+        transaction — and out of the scoping with it.
 
         A session without `settings` sends nothing extra at all — same
         statements, same connections, no wrap.

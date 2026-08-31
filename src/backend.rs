@@ -161,6 +161,36 @@ pub enum EngineConnection {
     Postgres(PoolConnection<Postgres>),
 }
 
+/// A connection the pool has given up on, on its way to being closed.
+///
+/// [`EngineConnection::detach`] produces one *synchronously*, which is the
+/// whole point: severing the pool's claim must not need an `await`, so a code
+/// path that cannot await — a `Drop` running after a cancelled operation — can
+/// still guarantee the connection is never handed to another caller. The
+/// close handshake ([`Self::close`]) is the part that needs a runtime; skipping
+/// it costs a polite goodbye, never a leaked connection, because the pool has
+/// already opened a replacement and dropping this value shuts the socket.
+pub enum DetachedConnection {
+    /// Detached SQLite connection.
+    Sqlite(sqlx::SqliteConnection),
+    /// Detached Postgres connection.
+    Postgres(sqlx::PgConnection),
+}
+
+impl DetachedConnection {
+    /// Say goodbye to the server properly.
+    ///
+    /// # Errors
+    /// The `sqlx::Error` from the close handshake. Callers are already on an
+    /// error or cancellation path — the connection is gone either way.
+    pub async fn close(self) -> Result<(), sqlx::Error> {
+        match self {
+            DetachedConnection::Sqlite(conn) => conn.close().await,
+            DetachedConnection::Postgres(conn) => conn.close().await,
+        }
+    }
+}
+
 /// Type tag carried by `EngineBindValue::Null` so the bind layer can emit a
 /// type-correct `NULL` parameter on backends that perform strict OID
 /// validation (notably PostgreSQL).
@@ -732,23 +762,34 @@ impl EngineConnection {
         Ok(())
     }
 
-    /// Take this connection out of its pool and close it.
+    /// Sever the pool's claim on this connection, synchronously.
     ///
-    /// For the connection whose state we can no longer vouch for: a failed
-    /// `ROLLBACK` may leave it idle-in-transaction, and sqlx only pings on
-    /// release, so dropping it would hand that state to the next checkout.
-    /// `detach` severs the pool's claim (the pool opens a fresh connection in
-    /// its place) and `close` says goodbye to the server properly.
+    /// For the connection whose state we can no longer vouch for: one whose
+    /// `ROLLBACK` failed, or one abandoned mid-statement when its operation was
+    /// cancelled. Either may be sitting idle-in-transaction, and sqlx only
+    /// pings on release, so simply dropping it would hand that state — an open
+    /// transaction, and with it another tenant's `SET LOCAL` scope — to the
+    /// next checkout. Detaching makes the pool open a fresh connection in its
+    /// place instead.
+    ///
+    /// No `await`: this is what a `Drop` can call. Await [`DetachedConnection::close`]
+    /// afterwards when there is a runtime to do it on.
+    #[must_use]
+    pub fn detach(self) -> DetachedConnection {
+        match self {
+            EngineConnection::Sqlite(conn) => DetachedConnection::Sqlite(conn.detach()),
+            EngineConnection::Postgres(conn) => DetachedConnection::Postgres(conn.detach()),
+        }
+    }
+
+    /// Take this connection out of its pool and close it — [`Self::detach`]
+    /// followed by the close handshake, for callers that can await.
     ///
     /// # Errors
     /// The `sqlx::Error` from the close handshake. Callers are already on an
     /// error path — the point is that the connection is gone either way.
     pub async fn detach_and_close(self) -> Result<(), sqlx::Error> {
-        use sqlx::Connection;
-        match self {
-            EngineConnection::Sqlite(conn) => conn.detach().close().await,
-            EngineConnection::Postgres(conn) => conn.detach().close().await,
-        }
+        self.detach().close().await
     }
 }
 

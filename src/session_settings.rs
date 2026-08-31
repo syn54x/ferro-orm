@@ -279,7 +279,9 @@ pub async fn begin_transaction_with_settings(
 pub struct OperationScope {
     /// The transaction this operation opened for itself, if it opened one.
     /// Owned outright — nothing else can reach it — so [`Self::finish`] can
-    /// take the connection back and close it when it has to.
+    /// take the connection back and close it when it has to. Taking it is also
+    /// how "this scope was closed deliberately" is recorded: still `Some` at
+    /// drop time means the operation was cancelled, and `Drop` discards it.
     owned: Option<Mutex<EngineConnection>>,
     /// The ambient `transaction()`'s connection, when the operation is inside
     /// one. Borrowed from the transaction registry; this scope never ends it.
@@ -333,6 +335,27 @@ impl OperationScope {
         })
     }
 
+    /// A scope that never opens a transaction of its own, whatever the session
+    /// carries — for a statement that Postgres refuses to run inside one
+    /// (`CREATE INDEX CONCURRENTLY`, `VACUUM`, pre-12 `ALTER TYPE ... ADD
+    /// VALUE`), reached through `ferro.raw.execute(..., autocommit=True)`.
+    ///
+    /// An ambient `transaction()` is still honoured: the caller asked for a
+    /// transaction explicitly, and Postgres refusing the statement inside it is
+    /// the right answer. What this skips is the *implicit* wrap, which the
+    /// caller never asked for. Such a statement is therefore not tenant-scoped
+    /// — it is maintenance DDL, not tenant data.
+    ///
+    /// # Arguments
+    /// * `ambient` — The open `transaction()`'s connection, when there is one.
+    #[must_use]
+    pub fn unwrapped(ambient: Option<TransactionConnection>) -> Self {
+        Self {
+            owned: None,
+            ambient,
+        }
+    }
+
     /// The connection this operation's statements must run on, or `None` to
     /// run them on the pool one statement at a time (the unwrapped path).
     #[must_use]
@@ -349,7 +372,9 @@ impl OperationScope {
     /// did not. A scope that opened nothing returns `outcome` untouched.
     ///
     /// Every operation runs its whole body as one `PyResult` precisely so that
-    /// there is exactly one path out of it, and this is on it.
+    /// there is exactly one path out of it, and this is on it. The path that is
+    /// *not* a value — the operation's future being dropped mid-flight because
+    /// the caller was cancelled — is [`Drop`]'s job.
     ///
     /// # Arguments
     /// * `outcome` — What the operation produced, error included.
@@ -357,8 +382,9 @@ impl OperationScope {
     /// # Errors
     /// The operation's own error, unchanged, when it failed; otherwise a
     /// `PyRuntimeError` when `COMMIT` fails.
-    pub async fn finish<T>(self, outcome: PyResult<T>) -> PyResult<T> {
-        let Some(owned) = self.owned else {
+    pub async fn finish<T>(mut self, outcome: PyResult<T>) -> PyResult<T> {
+        // Taking it is what tells `Drop` this scope was closed deliberately.
+        let Some(owned) = self.owned.take() else {
             return outcome;
         };
         let mut conn = owned.into_inner();
@@ -381,6 +407,39 @@ impl OperationScope {
                 }
                 Err(err)
             }
+        }
+    }
+}
+
+/// A scope dropped without [`OperationScope::finish`] discards its connection.
+///
+/// This is the cancellation path, and it is not a nicety. When the caller's
+/// asyncio task is cancelled — a client disconnects, `asyncio.wait_for` times
+/// out, a `TaskGroup` sibling fails — the operation's Rust future is dropped
+/// wherever it was suspended, so `finish` never runs. The connection it was
+/// holding is a pool connection, not an `sqlx::Transaction`, so nothing rolls
+/// it back on drop and the pool only pings before reuse: it would go back
+/// idle-in-transaction with the cancelled request's `SET LOCAL` scope still
+/// live, and the next checkout — another tenant's request — would run inside
+/// it. That is a cross-tenant read.
+///
+/// So the connection is *discarded*, never salvaged: [`EngineConnection::detach`]
+/// is synchronous, so severing the pool's claim always happens, right here,
+/// before anything else can get the connection. The close handshake is spawned
+/// when there is a runtime to spawn it on; without one the value simply drops
+/// and the socket shuts. Burning one connection is the correct price for a
+/// cancelled operation — and unlike "roll it back and reuse it", there is no
+/// window in which the poisoned connection is reachable.
+impl Drop for OperationScope {
+    fn drop(&mut self) {
+        let Some(owned) = self.owned.take() else {
+            return;
+        };
+        let detached = owned.into_inner().detach();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = detached.close().await;
+            });
         }
     }
 }
@@ -583,6 +642,75 @@ mod tests {
             marker_ids(&engine).await.is_empty(),
             "the wrap rolled back, so a statement that already succeeded is gone too"
         );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_operation_never_returns_its_connection_to_the_pool() {
+        // A file database, not `:memory:`: an in-memory SQLite database lives
+        // inside its connection, so discarding the connection would discard
+        // the data and the assertion would pass for the wrong reason.
+        let path = std::env::temp_dir().join(format!(
+            "ferro_scope_cancel_{}.db",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("sqlite file pool");
+        let engine = EngineHandle::new_sqlite(pool);
+        create_marker_table(&engine).await;
+
+        {
+            let scope = OperationScope::open(&engine, None, None, true, "test")
+                .await
+                .expect("scope opens");
+            scope
+                .connection()
+                .expect("an atomic operation gets a wrap")
+                .lock()
+                .await
+                .execute_sql("INSERT INTO marker (id) VALUES (1)")
+                .await
+                .expect("insert");
+            // Dropped without `finish`: exactly what happens when the caller's
+            // asyncio task is cancelled mid-operation.
+        }
+        // Let the spawned close run before the pool is asked for a connection.
+        tokio::task::yield_now().await;
+
+        // The pool's only connection was discarded, so this is a fresh one —
+        // if the poisoned one had been handed back, this read would be running
+        // inside the abandoned transaction and would see the uncommitted row.
+        assert!(
+            marker_ids(&engine).await.is_empty(),
+            "a cancelled operation's transaction was handed to the next checkout"
+        );
+
+        // And the fresh connection is not stuck mid-transaction: a write on it
+        // commits normally.
+        engine
+            .execute_sql("INSERT INTO marker (id) VALUES (2)")
+            .await
+            .expect("the replacement connection is usable");
+        assert_eq!(marker_ids(&engine).await, vec![2]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn an_autocommit_statement_opens_no_transaction() {
+        let engine = sqlite_engine().await;
+        let session_id = crate::state::register_session(vec![setting("pinch.ledger_id", "acme")]);
+
+        // Same session, same backend — `open` would wrap this on Postgres.
+        let scope = OperationScope::unwrapped(None);
+        assert!(
+            scope.connection().is_none(),
+            "an autocommit statement must reach the server outside any transaction"
+        );
+
+        crate::state::unregister_session(&session_id);
     }
 
     #[tokio::test]
