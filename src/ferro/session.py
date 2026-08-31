@@ -67,20 +67,20 @@ class Session:
     """A unit of work: one connection scope, one identity map, one settings set.
 
     `settings` are *session settings* — Postgres settings (GUCs) that Ferro
-    applies to every transaction this session opens, so queries inside them are
-    scoped without a per-query `where`:
+    applies to every operation this session runs, so queries are scoped without
+    a per-query `where`:
 
         async with engines.session(settings={"myapp.tenant_id": "acme"}):
-            async with transaction():
-                # Postgres sees myapp.tenant_id = 'acme' for every statement
-                # here, which is what a row-level-security policy reads back.
-                invoices = await Invoice.where(lambda invoice: invoice.paid).all()
+            # Postgres sees myapp.tenant_id = 'acme' for every statement this
+            # session sends, which is what a row-level-security policy reads
+            # back — inside a transaction() block or, as here, outside one.
+            invoices = await Invoice.where(lambda invoice: invoice.paid).all()
 
     They are validated when the `Session` is constructed and again when it is
     entered, which is when the effective set — this session's settings merged
     over anything it inherits from an enclosing session — is snapshotted. See
-    `EngineManager.session` for the full contract, including which operations
-    carry them today and how inherited settings behave off Postgres.
+    `EngineManager.session` for the full contract, including what an operation
+    outside a transaction sends and how inherited settings behave off Postgres.
     """
 
     connection_name: str | None = None
@@ -238,35 +238,47 @@ class EngineManager:
     ) -> Session:
         """Open a session on `name` (or the default connection).
 
-        Pass `settings` to give every transaction the session opens a set of
-        Postgres settings (GUCs) — the tenancy scope row-level-security policies
-        read:
+        Pass `settings` to give every operation in the session a set of Postgres
+        settings (GUCs) — the tenancy scope row-level-security policies read:
 
             async with engines.session(settings={"myapp.tenant_id": "acme"}):
-                async with transaction():
-                    open_invoices = await Invoice.where(
-                        lambda invoice: invoice.status == "open"
-                    ).all()
+                open_invoices = await Invoice.where(
+                    lambda invoice: invoice.status == "open"
+                ).all()
 
         Ferro sends them as one parameter-bound statement right after `BEGIN`,
         before any statement of yours:
 
             BEGIN
             SELECT set_config($1, $2, true)   -- 'myapp.tenant_id', 'acme'
+            SELECT "invoice".* FROM "invoice" WHERE "status" = $1
+            COMMIT
 
         `true` is Postgres' `is_local` flag, so the value dies with the
         transaction and a recycled pool connection can never leak one request's
         scope into the next. Nested savepoints inherit it; keys and values are
-        always bound parameters, never pasted into SQL. A session without
-        `settings` sends nothing extra at all.
+        always bound parameters, never pasted into SQL.
 
-        Every transaction Ferro opens carries them — the `transaction()` blocks
-        you write, and the one an operation opens for itself when there is no
-        ambient transaction. `bulk_create` self-wraps whenever the session has
-        settings, so a batch is scoped whether or not it was large enough to be
-        split into chunks. An operation that is a single statement outside any
-        transaction is not wrapped today, so it does not carry them yet;
-        wrapping those is the next slice of this feature.
+        Every operation in the session is scoped, whether or not you opened a
+        transaction. Inside a `transaction()` block the settings ride that
+        block's `BEGIN`. Outside one, the operation opens an implicit
+        transaction of its own — as above — so a plain `where().all()`,
+        `save()`, `get()` or raw query is scoped too. The wrap is per
+        *operation*, not per statement, so an operation that issues several
+        statements (a chunked `bulk_create`) sends all of them inside one
+        transaction and stays all-or-nothing, exactly as it already did.
+
+        The cost, stated plainly: about two extra round-trips per *operation*
+        that is not already inside a transaction — where one operation is one
+        call into Ferro's core, not one line of your code. A flow that saves a
+        row and then links it is two operations and pays twice; put such a flow
+        in a `transaction()` block and it pays once, for the block.
+        `ferro.raw.execute(..., autocommit=True)` opts a statement out of the
+        wrap entirely, for the few Postgres statements that cannot run inside a
+        transaction — and out of the scoping with it.
+
+        A session without `settings` sends nothing extra at all — same
+        statements, same connections, no wrap.
 
         Settings you declare here have to be honourable, so opening this session
         on a non-Postgres connection raises. Settings it merely *inherits* from

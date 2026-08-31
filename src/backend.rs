@@ -161,6 +161,36 @@ pub enum EngineConnection {
     Postgres(PoolConnection<Postgres>),
 }
 
+/// A connection the pool has given up on, on its way to being closed.
+///
+/// [`EngineConnection::detach`] produces one *synchronously*, which is the
+/// whole point: severing the pool's claim must not need an `await`, so a code
+/// path that cannot await — a `Drop` running after a cancelled operation — can
+/// still guarantee the connection is never handed to another caller. The
+/// close handshake ([`Self::close`]) is the part that needs a runtime; skipping
+/// it costs a polite goodbye, never a leaked connection, because the pool has
+/// already opened a replacement and dropping this value shuts the socket.
+pub enum DetachedConnection {
+    /// Detached SQLite connection.
+    Sqlite(sqlx::SqliteConnection),
+    /// Detached Postgres connection.
+    Postgres(sqlx::PgConnection),
+}
+
+impl DetachedConnection {
+    /// Say goodbye to the server properly.
+    ///
+    /// # Errors
+    /// The `sqlx::Error` from the close handshake. Callers are already on an
+    /// error or cancellation path — the connection is gone either way.
+    pub async fn close(self) -> Result<(), sqlx::Error> {
+        match self {
+            DetachedConnection::Sqlite(conn) => conn.close().await,
+            DetachedConnection::Postgres(conn) => conn.close().await,
+        }
+    }
+}
+
 /// Type tag carried by `EngineBindValue::Null` so the bind layer can emit a
 /// type-correct `NULL` parameter on backends that perform strict OID
 /// validation (notably PostgreSQL).
@@ -496,10 +526,16 @@ impl EngineHandle {
     /// Acquiring explicitly here (instead of handing sqlx `&Pool` to
     /// `.execute()`/`.fetch_all()` as the executor, which acquires and
     /// releases a connection internally) is behaviorally identical for one
-    /// statement, but it is what lets a future per-operation transaction wrap
-    /// (ticket #410) surround the statement — issuing `BEGIN`/settings SQL
-    /// before it and `COMMIT`/`ROLLBACK` after — by changing this one method
-    /// instead of every call site.
+    /// statement, and it is what proved every non-transactional statement
+    /// funnels through one place.
+    ///
+    /// The per-operation settings wrap (#410) ended up one level above this,
+    /// in `session_settings::OperationScope`, and this method is deliberately
+    /// unchanged by it: the wrap must cover a whole ORM operation, and a
+    /// statement-level seam cannot see where one operation ends and the next
+    /// begins. So an operation that needs a wrap never reaches here — it runs
+    /// on the transaction connection its scope opened — and everything that
+    /// does reach here is genuinely unwrapped work.
     async fn acquire_nontx_connection(&self) -> Result<EngineConnection, sqlx::Error> {
         match &self.pool_snapshot() {
             BackendPool::Sqlite(pool) => Ok(EngineConnection::Sqlite(pool.acquire().await?)),
@@ -726,23 +762,34 @@ impl EngineConnection {
         Ok(())
     }
 
-    /// Take this connection out of its pool and close it.
+    /// Sever the pool's claim on this connection, synchronously.
     ///
-    /// For the connection whose state we can no longer vouch for: a failed
-    /// `ROLLBACK` may leave it idle-in-transaction, and sqlx only pings on
-    /// release, so dropping it would hand that state to the next checkout.
-    /// `detach` severs the pool's claim (the pool opens a fresh connection in
-    /// its place) and `close` says goodbye to the server properly.
+    /// For the connection whose state we can no longer vouch for: one whose
+    /// `ROLLBACK` failed, or one abandoned mid-statement when its operation was
+    /// cancelled. Either may be sitting idle-in-transaction, and sqlx only
+    /// pings on release, so simply dropping it would hand that state — an open
+    /// transaction, and with it another tenant's `SET LOCAL` scope — to the
+    /// next checkout. Detaching makes the pool open a fresh connection in its
+    /// place instead.
+    ///
+    /// No `await`: this is what a `Drop` can call. Await [`DetachedConnection::close`]
+    /// afterwards when there is a runtime to do it on.
+    #[must_use]
+    pub fn detach(self) -> DetachedConnection {
+        match self {
+            EngineConnection::Sqlite(conn) => DetachedConnection::Sqlite(conn.detach()),
+            EngineConnection::Postgres(conn) => DetachedConnection::Postgres(conn.detach()),
+        }
+    }
+
+    /// Take this connection out of its pool and close it — [`Self::detach`]
+    /// followed by the close handshake, for callers that can await.
     ///
     /// # Errors
     /// The `sqlx::Error` from the close handshake. Callers are already on an
     /// error path — the point is that the connection is gone either way.
     pub async fn detach_and_close(self) -> Result<(), sqlx::Error> {
-        use sqlx::Connection;
-        match self {
-            EngineConnection::Sqlite(conn) => conn.detach().close().await,
-            EngineConnection::Postgres(conn) => conn.detach().close().await,
-        }
+        self.detach().close().await
     }
 }
 
@@ -1047,8 +1094,9 @@ mod tests {
     /// their own statement, rather than opening a transaction itself. This
     /// pins that contract: a statement run through the seam autocommits with
     /// no `BEGIN` wrapping it, exactly as `pool.as_ref()` execution did
-    /// before the refactor. Ticket #410 changes this deliberately; this test
-    /// guards against it changing by accident.
+    /// before the refactor — and it stayed that way through #410, which put
+    /// the settings wrap a level above the seam (per operation, not per
+    /// statement). Everything that reaches the seam is unwrapped work.
     #[tokio::test]
     async fn nontx_seam_autocommits_without_wrapping_transaction() {
         let pool = SqlitePoolOptions::new()
