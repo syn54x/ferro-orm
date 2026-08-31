@@ -29,6 +29,7 @@ nav = [
     { "Raw SQL" = "guide/raw-sql.md" },
     { "Connections & Databases" = "guide/connections.md" },
     { "Schema Migrations" = "guide/migrations.md" },
+    { "Using with Postgres RLS" = "guide/row-level-security.md" },
   ] },
   { "How-To" = [
     { "Upgrade Guide" = "howto/upgrade-guide.md" },
