@@ -4,6 +4,7 @@
 //! and the Identity Map used for object tracking.
 
 use crate::backend::{EngineConnection, EngineHandle};
+use crate::session_settings::SessionSetting;
 use dashmap::DashMap;
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use once_cell::sync::Lazy;
@@ -495,6 +496,10 @@ pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> = Lazy
 pub struct SessionState {
     /// Transactions opened within this session (isolated from global registry).
     pub transaction_registry: DashMap<String, TransactionHandle>,
+    /// Effective session settings, snapshotted at open in declaration order
+    /// (see [`crate::session_settings`]). Empty for the vast majority of
+    /// sessions, which then pay nothing for the feature.
+    pub settings: Vec<SessionSetting>,
     /// Session-local identity map — the *only* identity map (FF-D D2:
     /// sessionless operations cache nothing); values are `weakref.ref`
     /// objects (FF-D D1).
@@ -507,10 +512,11 @@ pub struct SessionState {
 }
 
 impl SessionState {
-    /// Allocate empty session state.
-    pub fn new() -> Self {
+    /// Allocate session state carrying `settings` (empty for a plain session).
+    pub fn new(settings: Vec<SessionSetting>) -> Self {
         Self {
             transaction_registry: DashMap::new(),
+            settings,
             identity_map: DashMap::new(),
             identity_ops: AtomicUsize::new(0),
         }
@@ -522,11 +528,15 @@ pub static SESSION_REGISTRY: Lazy<DashMap<String, Arc<SessionState>>> = Lazy::ne
 
 /// Register a new session.
 ///
+/// # Arguments
+/// * `settings` — Effective session settings in declaration order; empty for a
+///   session that declares none.
+///
 /// # Returns
 /// Opaque session UUID string for subsequent operations.
-pub fn register_session() -> String {
+pub fn register_session(settings: Vec<SessionSetting>) -> String {
     let session_id = uuid::Uuid::new_v4().to_string();
-    SESSION_REGISTRY.insert(session_id.clone(), Arc::new(SessionState::new()));
+    SESSION_REGISTRY.insert(session_id.clone(), Arc::new(SessionState::new(settings)));
     session_id
 }
 
@@ -694,7 +704,7 @@ mod session_close_tests {
 
     #[tokio::test]
     async fn close_guard_uses_transaction_registry_emptiness() {
-        let session_id = register_session();
+        let session_id = register_session(Vec::new());
 
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
