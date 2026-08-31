@@ -255,10 +255,20 @@ class Session:
                 tenant = await resolve_tenant_from_auth_header(request)
                 await ferro.current_session().set_config("myapp.tenant_id", tenant)
 
-        The new value reaches the very next statement this session sends —
-        including the next statement inside an already-open `transaction()`
-        block, which gets it immediately rather than waiting for that
-        transaction to end and a new one to begin:
+        **When the new value takes effect, precisely.** Any operation or
+        `transaction()` STARTED after `set_config` returns sees the new value
+        — this holds for any task, not just the one that called `set_config`,
+        because the change is committed before `set_config`'s `await`
+        returns. An operation or transaction already in flight *when*
+        `set_config` runs keeps running under the scope it started with —
+        that is the existing per-operation-atomicity guarantee, working as
+        intended, not something `set_config` reaches back into. The one place
+        that needs (and gets) special handling is a `transaction()` block
+        already open in the SAME task that calls `set_config` — there, the
+        very next statement in that same transaction sees the new value
+        immediately, rather than waiting for the transaction to end and a new
+        one to begin (there is no race to resolve here: the two are
+        sequential code in one task, by construction):
 
             async with engines.session() as session:
                 async with transaction():
@@ -266,9 +276,11 @@ class Session:
                     # this SELECT, in the SAME transaction, already sees it
                     rows = await Invoice.where(lambda invoice: invoice.paid).all()
 
-        `set_config` also evicts this session's identity map: an instance
-        `get()`-ed under the old scope is never handed back under the new one —
-        the next `get()` for that primary key refetches instead.
+        `set_config` also evicts this session's identity map on a real change:
+        an instance `get()`-ed under the old scope is never handed back under
+        the new one — the next `get()` for that primary key refetches instead.
+        A call that doesn't actually change the value (the key already holds
+        it) is a true no-op: no database round trip, no identity-map eviction.
 
         Validation matches `engines.session(settings=...)` exactly (see there
         for the full rationale): `key` and `value` must be `str`, and `key` must
@@ -283,28 +295,44 @@ class Session:
                 session, so there has to be one), or this session's connection
                 is not Postgres — `set_config` is a declaration, exactly like
                 `settings=` at open, so it has to be honourable rather than a
-                silent no-op on a backend with no GUCs.
+                silent no-op on a backend with no GUCs. On the rare failure
+                while delivering the change into an already-open transaction,
+                this session's recorded settings and identity map have
+                already committed the change regardless (see the Ferro source
+                for the exact sequencing) — the affected transaction cannot go
+                on to leak an old-scope read, because Postgres aborts a
+                transaction after a failed statement until it is rolled back.
             TypeError: `key` or `value` is not a `str`.
             ValueError: `key` is not a dotted custom setting name.
         """
         if self.session_id is None:
             raise RuntimeError(_SET_CONFIG_NOT_OPEN_MESSAGE)
-        # `connection_name` is resolved by `__aenter__` alongside `session_id`
-        # (see there), so a live `session_id` guarantees a resolved connection.
-        assert self.connection_name is not None
+        if self.connection_name is None:
+            # `connection_name` is resolved by `__aenter__` alongside
+            # `session_id` (see there), so a live `session_id` should make
+            # this unreachable. Raised rather than asserted (`assert` strips
+            # under `-O`) because this is a Ferro lifecycle invariant, not an
+            # ordinary user mistake.
+            raise RuntimeError(_SET_CONFIG_NOT_OPEN_MESSAGE)
 
         validated = _validated_settings({key: value})
         ((validated_key, validated_value),) = validated.items()
 
-        new_effective = {**self.effective_settings, validated_key: validated_value}
-        await _core_set_session_config(
+        # Only the one validated pair is sent — Rust merges it against the
+        # session's own last-committed settings, inside a lock that
+        # serializes the read and the write together, so two sibling tasks
+        # setting different keys concurrently can never lose one to a
+        # stale-mirror race (see `operations::set_session_config`). The
+        # mirror below is always assigned from what Rust actually committed,
+        # never computed here — both when this call changed something and
+        # when it was a no-op.
+        committed = await _core_set_session_config(
             self.session_id,
             self.connection_name,
-            list(new_effective.items()),
+            validated_key,
+            validated_value,
         )
-        # Only committed once the core call succeeds — a rejected mutation
-        # (non-Postgres connection) must leave this session's scope untouched.
-        self.effective_settings = new_effective
+        self.effective_settings = dict(committed)
 
     def query(self, model_cls):
         from .query import Query

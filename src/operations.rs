@@ -9,7 +9,7 @@ use crate::backend::{
 use crate::query::{JoinPlan, QueryPlan};
 use crate::session_settings::{
     OperationScope, SessionSetting, begin_transaction_with_settings, ensure_postgres_for_settings,
-    reapply_settings_to_open_transactions, settings_changed,
+    merge_setting, reapply_settings_to_open_transactions, settings_changed,
 };
 use crate::state::{
     Dialect, TRANSACTION_REGISTRY, TransactionConnection, TransactionHandle, connection_for_route,
@@ -1935,12 +1935,18 @@ pub fn close_session(session_id: String) -> PyResult<()> {
 
 /// Mutate a live session's effective settings (`Session.set_config`, #411).
 ///
-/// `effective_settings` is the FULL new effective set — the session's prior
-/// settings merged with the one key/value `Session.set_config` just
-/// validated — computed on the Python side (`Session._merge_ambient_settings`
-/// is already the one place that merge happens). Passing the merged whole
-/// rather than just the changed pair makes the no-op check exact: a call that
-/// changes nothing does nothing at all, not even a round trip.
+/// `key`/`value` is the ONE validated pair `Session.set_config` is applying —
+/// not the merged whole. The merge (`merge_setting`) happens in here, inside
+/// the serialized section below, against the session's own last-committed
+/// settings (`session.settings_snapshot()`), never against a Python-side
+/// mirror. That is load-bearing, not a style choice: two sibling tasks
+/// calling `set_config` with two different keys at the same time would each
+/// see the SAME stale mirror if the merge happened on the Python side, and
+/// whichever call's wholesale replacement landed second would silently drop
+/// the other's key. Merging server-side against a freshly re-read snapshot,
+/// under a lock that serializes the read and the write together, makes that
+/// race impossible: the second call's snapshot already reflects the first
+/// call's committed merge.
 ///
 /// A session's own connection must be Postgres for this to succeed,
 /// regardless of what the session declared (or didn't) at open —
@@ -1950,60 +1956,98 @@ pub fn close_session(session_id: String) -> PyResult<()> {
 /// session only *inherited* is different and never reaches this function at
 /// all — nothing here changes how inherited settings behave.
 ///
-/// On a real change this does three things, in order, all inside one
-/// serialized sequence so two concurrent `set_config` calls on the same
-/// session cannot interleave: swap the session's stored settings, reapply the
-/// new batch to every transaction the session currently has open (so the very
-/// next statement in an already-open `transaction()` sees it), then evict the
-/// session's identity map (instances loaded under the old scope must not be
-/// served under the new one). The very next operation this session runs —
-/// transactional or not — reads the new settings too, because every `BEGIN`
-/// re-reads them (`session_settings_for`); nothing further is needed for that
-/// path.
+/// # The core sequence, and why the order is load-bearing
+///
+/// On a real change, in this exact order, all under `settings_write_lock`:
+///
+/// 1. **Swap** — `session.replace_settings(new)`. This is the commit point:
+///    once it returns, the session's recorded scope IS `new`, unconditionally.
+/// 2. **Evict** — `identity_map_clear`, immediately after the swap, with NO
+///    `.await` in between. Both steps are synchronous (the identity map only
+///    needs the GIL, not I/O), so there is no point between them where an
+///    `asyncio` task cancellation — dropping this future wherever it is
+///    suspended — could land: a future can only be dropped mid-flight at an
+///    `.await` point, and this pair has none. So the swap and the eviction
+///    are, in effect, one atomic step: nothing can ever observe a committed
+///    scope change with a not-yet-evicted identity map.
+/// 3. **Reapply** — deliver the new settings to the session's currently open
+///    transactions (`reapply_settings_to_open_transactions`), which DOES
+///    await (it is a database round trip). If this fails or the caller's
+///    task is cancelled here, the scope swap and the identity-map eviction
+///    already happened at steps 1–2 and are not rolled back — see that
+///    function's docs for why an old-scope read still cannot leak through
+///    the one transaction the failure or cancellation affects.
+///
+/// A no-op call (the merged value equals what the session already had) skips
+/// all three steps — no swap, no eviction, no reapply, not even a round trip.
+///
+/// The very next OPERATION this session runs — transactional or not — reads
+/// the new settings too, because every `BEGIN` re-reads them
+/// (`session_settings_for`); nothing here needs to touch that path. What this
+/// function's step 3 adds on top is delivery into a transaction that is
+/// ALREADY open in the SAME task that called `set_config` — see
+/// `reapply_settings_to_open_transactions`'s docs for the precise
+/// same-task/cross-task concurrency contract.
 ///
 /// Args:
 ///     session_id (str): Id returned by `open_session`.
 ///     connection_name (str): The session's own resolved connection.
-///     effective_settings (list[tuple[str, str]]): Full new effective
-///         settings, in declaration order.
+///     key (str): The validated setting key `Session.set_config` is applying.
+///     value (str): The validated setting value.
 ///
 /// Returns:
-///     bool: `True` when the settings actually changed (and were reapplied
-///         and the identity map evicted); `False` when `effective_settings`
-///         equals what the session already had — a true no-op.
+///     list[tuple[str, str]]: The session's committed effective settings
+///         after this call — the caller's new mirror, whether or not this
+///         particular call changed anything (an unchanged call returns the
+///         same list it already had).
 ///
 /// # Errors
 /// `PyRuntimeError` when the session's connection is not Postgres, the
 /// session id is unknown, or reapplying to one of the session's open
-/// transactions fails.
+/// transactions fails (in which case the settings swap and identity-map
+/// eviction have already committed regardless — see above).
 #[pyfunction]
 pub fn set_session_config(
     py: Python<'_>,
     session_id: String,
     connection_name: String,
-    effective_settings: Vec<SessionSetting>,
+    key: String,
+    value: String,
 ) -> PyResult<Bound<'_, PyAny>> {
     let engine = engine_for_connection(Some(connection_name.clone()))?;
-    ensure_postgres_for_settings(engine.backend(), &connection_name, &effective_settings)?;
+    ensure_postgres_for_settings(
+        engine.backend(),
+        &connection_name,
+        &[(key.clone(), value.clone())],
+    )?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let session = session_state(&session_id)?;
-        // Serializes the whole sequence below against any other `set_config`
-        // on this session — see `SessionState::lock_settings_for_mutation`.
+        // Serializes this whole sequence — including the read below — against
+        // any other `set_config` on this session (see the lost-update note
+        // above and `SessionState::lock_settings_for_mutation`).
         let _serialize = session.lock_settings_for_mutation().await;
 
         let current = session.settings_snapshot();
-        if !settings_changed(&current, &effective_settings) {
-            return Ok(false);
+        let new_effective = merge_setting(&current, &key, &value);
+        if !settings_changed(&current, &new_effective) {
+            return Ok(current);
         }
-        session.replace_settings(effective_settings.clone());
 
-        reapply_settings_to_open_transactions(&session, &effective_settings).await?;
-
-        // Re-acquire the GIL before accessing identity map (async context has
-        // no GIL) — the same pattern `rollback_transaction` uses.
+        // 1. Swap — the commit point.
+        session.replace_settings(new_effective.clone());
+        // 2. Evict, with no `.await` between this and the swap above (see the
+        // doc comment): re-acquire the GIL before touching the identity map
+        // (async context has no GIL) — the same pattern `rollback_transaction`
+        // uses.
         pyo3::Python::attach(|_py| identity_map_clear(Some(&session_id)))?;
-        Ok(true)
+
+        // 3. Reapply — the only step that awaits. A failure here does not
+        // roll back steps 1–2; see this function's docs and
+        // `reapply_settings_to_open_transactions`'s for why that is sound.
+        reapply_settings_to_open_transactions(&session, &new_effective).await?;
+
+        Ok(new_effective)
     })
 }
 

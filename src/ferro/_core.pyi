@@ -209,8 +209,9 @@ def close_session(session_id: str) -> None: ...
 async def set_session_config(
     session_id: str,
     connection_name: str,
-    effective_settings: list[tuple[str, str]],
-) -> bool: ...
+    key: str,
+    value: str,
+) -> list[tuple[str, str]]: ...
 async def raw_execute(
     sql: str,
     args: list[Any],

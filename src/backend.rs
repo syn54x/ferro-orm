@@ -630,6 +630,17 @@ impl EngineHandle {
 
 #[allow(dead_code)]
 impl EngineConnection {
+    /// This connection's dialect — which pool variant it was checked out
+    /// from, not a query against the server. Used by callers that must
+    /// refuse to send dialect-specific SQL (e.g. Postgres `set_config`) down
+    /// a connection they did not resolve the dialect for themselves.
+    pub fn dialect(&self) -> Dialect {
+        match self {
+            EngineConnection::Sqlite(_) => Dialect::Sqlite,
+            EngineConnection::Postgres(_) => Dialect::Postgres,
+        }
+    }
+
     pub async fn execute_sql(&mut self, sql: &str) -> Result<u64, sqlx::Error> {
         self.execute_sql_with_binds(sql, &[]).await
     }
