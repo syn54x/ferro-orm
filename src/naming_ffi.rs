@@ -248,6 +248,30 @@ pub fn _ddl_row_policy_name(table: String, name: String) -> String {
     ferro_ddl_lowering::row_policy_name(&table, &name)
 }
 
+/// The row-policy command table over FFI: every command a policy may be scoped
+/// to, and which clauses Postgres accepts for it, as a JSON array of
+/// `{"command": "all", "using": true, "with_check": true}`.
+///
+/// The Python declaration surface (`ferro.rowsecurity`) reads this once at
+/// import instead of keeping its own copy: the command allowlist and the
+/// USING / WITH CHECK rules are decided in `ferro-ddl-lowering` alone, so a
+/// command added there cannot drift out of the declaration's validation
+/// (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _rls_command_matrix() -> String {
+    let rows: Vec<serde_json::Value> = ferro_ddl_lowering::ROW_POLICY_COMMANDS
+        .iter()
+        .map(|command| {
+            serde_json::json!({
+                "command": ferro_ddl_lowering::row_policy_command_token(*command),
+                "using": ferro_ddl_lowering::row_policy_command_takes_using(*command),
+                "with_check": ferro_ddl_lowering::row_policy_command_takes_with_check(*command),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows).to_string()
+}
+
 /// The column/setting shorthand's cast decision for one IR column, as a JSON
 /// object: `{"supported": true, "cast": "uuid" | null}` for a column the
 /// shorthand can render, `{"supported": false, "reason": "..."}` otherwise.

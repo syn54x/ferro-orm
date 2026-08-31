@@ -167,6 +167,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_rebuild, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_drop, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_row_policy_name, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_rls_command_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_rls_shorthand_cast, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_row_security, m)?)?;
     m.add_function(wrap_pyfunction!(

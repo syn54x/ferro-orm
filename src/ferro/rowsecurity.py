@@ -39,18 +39,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from ._core import _ddl_row_policy_name, _rls_shorthand_cast
+from ._core import _ddl_row_policy_name, _rls_command_matrix, _rls_shorthand_cast
 
 FERRO_RLS = "__ferro_rls__"
 
-#: The commands a policy may be scoped to (`FOR <command>`).
-COMMANDS = ("all", "select", "insert", "update", "delete")
+#: Which clauses Postgres accepts per command, read once from the shared
+#: lowering layer. There is no second copy of this table here on purpose: the
+#: renderer filters clauses with the same decision, so a command added in
+#: ``ferro-ddl-lowering`` cannot drift out of the validation below (I-1).
+_COMMAND_CLAUSES: dict[str, dict[str, bool]] = {
+    row["command"]: row for row in json.loads(_rls_command_matrix())
+}
 
-#: Commands whose policies Postgres reads rows through (`USING`).
-_TAKES_USING = frozenset({"all", "select", "update", "delete"})
-
-#: Commands whose policies Postgres validates new rows through (`WITH CHECK`).
-_TAKES_WITH_CHECK = frozenset({"all", "insert", "update"})
+#: The commands a policy may be scoped to (`FOR <command>`), in Rust's order.
+COMMANDS = tuple(_COMMAND_CLAUSES)
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*\Z")
 _NAME_SHAPE = "[a-z][a-z0-9_]*"
@@ -176,14 +178,17 @@ class RowPolicy:
                 "expression has no column to name it after (e.g. "
                 "RowPolicy(name='invitee_read', command='select', using='...'))."
             )
-        if self.using is not None and self.command not in _TAKES_USING:
+        if self.using is not None and not _COMMAND_CLAUSES[self.command]["using"]:
             raise TypeError(
                 f"RowPolicy(name={self.name!r}, command={self.command!r}) declares "
                 "using=, but Postgres accepts USING only on policies that read "
                 "existing rows. A FOR INSERT policy validates new rows: use "
                 "with_check= instead."
             )
-        if self.with_check is not None and self.command not in _TAKES_WITH_CHECK:
+        if (
+            self.with_check is not None
+            and not _COMMAND_CLAUSES[self.command]["with_check"]
+        ):
             raise TypeError(
                 f"RowPolicy(name={self.name!r}, command={self.command!r}) declares "
                 "with_check=, but Postgres accepts WITH CHECK only on policies that "

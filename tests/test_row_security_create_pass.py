@@ -33,7 +33,12 @@ from ferro import (
     engines,
     reset_engine,
 )
-from ferro._core import _plan_row_security, _render_create_table_sql_for_test
+from ferro.rowsecurity import COMMANDS
+from ferro._core import (
+    _plan_row_security,
+    _render_create_table_sql_for_test,
+    _rls_command_matrix,
+)
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all, fetch_one
 
@@ -199,6 +204,72 @@ def test_unknown_command_is_rejected():
 def test_every_supported_command_is_accepted(command):
     kwargs = {"with_check": "true"} if command == "insert" else {"using": "true"}
     assert RowPolicy(name="p", command=command, **kwargs).command == command
+
+
+def test_the_command_allowlist_comes_from_the_shared_lowering_layer():
+    """``COMMANDS`` is not a Python-side copy — it is Rust's table, read once.
+
+    A command added in ``ferro-ddl-lowering`` therefore becomes declarable with
+    no Python edit, and cannot drift out of the clause validation below.
+    """
+    assert COMMANDS == ("all", "select", "insert", "update", "delete")
+    assert [row["command"] for row in json.loads(_rls_command_matrix())] == list(
+        COMMANDS
+    )
+
+
+@pytest.mark.parametrize("command", ["all", "select", "insert", "update", "delete"])
+def test_declaration_validation_agrees_with_what_the_renderer_emits(command):
+    """The accept/reject matrix the declaration enforces is the same one the
+    renderer filters clauses with — derived here from the rendered SQL, not
+    restated. If the two ever diverged, a declaration ferro accepted would emit
+    a clause Postgres rejects (or silently drop one the author asked for)."""
+
+    class Scoped(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        ledger_id: uuid.UUID
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(
+                name="scoped", column="ledger_id", setting=SETTING, command=command
+            )
+        )
+
+    model_ir = next(
+        model
+        for model in compile_registry_schema_ir()["payload"]["models"]
+        if model["table_name"] == "scoped"
+    )
+    rendered = json.loads(_plan_row_security(json.dumps(model_ir)))["statements"][-1]
+    emits_using = " USING (" in rendered
+    emits_with_check = " WITH CHECK (" in rendered
+
+    # What the declaration surface believes, straight from the FFI table.
+    declared = {row["command"]: row for row in json.loads(_rls_command_matrix())}[
+        command
+    ]
+    assert declared["using"] is emits_using
+    assert declared["with_check"] is emits_with_check
+
+    # And the raw form's validation follows that same table in both directions.
+    if emits_using:
+        assert RowPolicy(name="p", command=command, using="true").using == "true"
+    else:
+        with pytest.raises(TypeError, match="use with_check= instead"):
+            RowPolicy(name="p", command=command, using="true", with_check="true")
+    if emits_with_check:
+        assert (
+            RowPolicy(
+                name="p",
+                command=command,
+                with_check="true",
+                **({} if command == "insert" else {"using": "true"}),
+            ).with_check
+            == "true"
+        )
+    else:
+        with pytest.raises(TypeError, match="use using= instead"):
+            RowPolicy(name="p", command=command, using="true", with_check="true")
 
 
 def test_shorthand_and_raw_forms_do_not_mix():

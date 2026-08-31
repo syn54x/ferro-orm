@@ -1100,6 +1100,30 @@ pub fn render_row_policy_setting_expr(column: &str, setting: &str, cast: Option<
     )
 }
 
+/// Every command a row policy may be scoped to. Adding a command here is the
+/// one edit that teaches both emitters and the Python declaration surface about
+/// it — the declaration reads this list over FFI rather than keeping its own.
+pub const ROW_POLICY_COMMANDS: [ferro_schema_ir::RowPolicyCommand; 5] = [
+    ferro_schema_ir::RowPolicyCommand::All,
+    ferro_schema_ir::RowPolicyCommand::Select,
+    ferro_schema_ir::RowPolicyCommand::Insert,
+    ferro_schema_ir::RowPolicyCommand::Update,
+    ferro_schema_ir::RowPolicyCommand::Delete,
+];
+
+/// The command's wire token — what `RowPolicy(command=...)` accepts and what
+/// `SchemaRowPolicy.command` serializes to. Pinned against serde by a unit test
+/// so it cannot drift from the IR.
+pub fn row_policy_command_token(command: ferro_schema_ir::RowPolicyCommand) -> &'static str {
+    match command {
+        ferro_schema_ir::RowPolicyCommand::All => "all",
+        ferro_schema_ir::RowPolicyCommand::Select => "select",
+        ferro_schema_ir::RowPolicyCommand::Insert => "insert",
+        ferro_schema_ir::RowPolicyCommand::Update => "update",
+        ferro_schema_ir::RowPolicyCommand::Delete => "delete",
+    }
+}
+
 fn row_policy_command_sql(command: ferro_schema_ir::RowPolicyCommand) -> &'static str {
     match command {
         ferro_schema_ir::RowPolicyCommand::All => "ALL",
@@ -3071,6 +3095,54 @@ mod tests {
         );
         assert!(is_ferro_row_policy_name("rls_ledgerrow_ledger_id"));
         assert!(!is_ferro_row_policy_name("tenant_isolation"));
+    }
+
+    #[test]
+    fn row_policy_command_tokens_match_the_ir_wire_vocabulary() {
+        // The Python declaration surface accepts these tokens and the IR
+        // serializes them; if `row_policy_command_token` and serde ever
+        // disagreed, a declared command would not round-trip.
+        for command in ROW_POLICY_COMMANDS {
+            let serialized = serde_json::to_value(command).unwrap();
+            assert_eq!(
+                serialized,
+                serde_json::json!(row_policy_command_token(command))
+            );
+        }
+        assert_eq!(
+            ROW_POLICY_COMMANDS
+                .iter()
+                .map(|c| row_policy_command_token(*c))
+                .collect::<Vec<_>>(),
+            vec!["all", "select", "insert", "update", "delete"]
+        );
+    }
+
+    #[test]
+    fn row_policy_clause_table_matches_postgres_rules() {
+        // FOR INSERT is write-only (WITH CHECK alone); FOR SELECT / FOR DELETE
+        // read rows (USING alone); ALL and UPDATE take both. This IS the table
+        // the Python declaration reads over FFI — there is no second copy.
+        let table: Vec<(&str, bool, bool)> = ROW_POLICY_COMMANDS
+            .iter()
+            .map(|c| {
+                (
+                    row_policy_command_token(*c),
+                    row_policy_command_takes_using(*c),
+                    row_policy_command_takes_with_check(*c),
+                )
+            })
+            .collect();
+        assert_eq!(
+            table,
+            vec![
+                ("all", true, true),
+                ("select", true, false),
+                ("insert", false, true),
+                ("update", true, true),
+                ("delete", true, false),
+            ]
+        );
     }
 
     #[test]

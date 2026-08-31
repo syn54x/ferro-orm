@@ -297,6 +297,17 @@ def _ddl_row_policy_name(table: str, name: str) -> str:
     """Canonical row-policy name (``rls_<table>_<name>``), 63-char guarded."""
     ...
 
+def _rls_command_matrix() -> str:
+    """Every row-policy command and the clauses Postgres accepts for it.
+
+    Returns JSON: ``[{"command": "all", "using": true, "with_check": true}, …]``.
+    ``ferro.rowsecurity`` reads this at import instead of keeping its own copy,
+    so the command allowlist and the USING / WITH CHECK rules are decided in
+    ``ferro-ddl-lowering`` alone (I-1) — the same decision the renderer filters
+    clauses with.
+    """
+    ...
+
 def _rls_shorthand_cast(column_ir_json: str) -> str:
     """The column/setting shorthand's cast decision for one IR column.
 
