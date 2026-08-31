@@ -68,6 +68,7 @@ pub(crate) fn order_models_for_migration(
 /// Returns a `PyErr` if the SQL execution fails.
 pub async fn internal_create_tables(
     engine: Arc<EngineHandle>,
+    reconciliation_follows: bool,
 ) -> PyResult<std::collections::HashSet<String>> {
     // The runtime CREATE TABLE path is emitted from the Python-compiled SchemaIR
     // via the shared `ferro_migrate` emitter (issue #153). The modelset must have
@@ -101,10 +102,16 @@ pub async fn internal_create_tables(
                 model.table_name
             ));
             // A declaration the create pass cannot act on must never pass in
-            // silence: the author believes the table is policed. Single-sourced
-            // wording so the reconciliation pass (#413) has one place to change.
-            if let Some(warning) =
-                ferro_ddl_lowering::row_security_existing_table_warning(model, dialect)
+            // silence: the author believes the table is policed. When the
+            // reconciliation pass runs next it APPLIES the declaration to this
+            // very table (#413), so warning here would cry wolf about a gap
+            // that is about to be closed — the warning is for the connect that
+            // does not reconcile (plain `auto_migrate=True`). On SQLite the
+            // reconciliation pass emits no row-security DDL at all (ADR-0014),
+            // so the warning always stands there.
+            if (!reconciliation_follows || dialect != Dialect::Postgres)
+                && let Some(warning) =
+                    ferro_ddl_lowering::row_security_existing_table_warning(model, dialect)
             {
                 crate::emit_user_warning_always(&warning);
             }
@@ -206,10 +213,16 @@ async fn create_one_table(
             )
         }),
         Err(err) => {
+            // A connection whose ROLLBACK failed may be stuck
+            // idle-in-transaction, and sqlx only pings on release — handing it
+            // back to the pool would serve that state to the next checkout.
+            // Same disposal `begin_transaction_with_settings` performs (#416).
             if let Err(rollback_err) = conn.rollback().await {
                 crate::log_debug(format!(
-                    "⚠️ Ferro Engine: rollback after failed creation of '{table}' also failed: {rollback_err}"
+                    "⚠️ Ferro Engine: rollback after failed creation of '{table}' also failed: \
+                     {rollback_err} — discarding the connection"
                 ));
+                let _ = conn.detach_and_close().await;
             }
             Err(err)
         }
@@ -274,7 +287,11 @@ pub fn register_model_schema(
 pub fn create_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
-        internal_create_tables(engine).await.map(|_existing| ())
+        // `create_tables()` is the create pass on its own — nothing reconciles
+        // an existing table afterwards, so a declaration on one is reported.
+        internal_create_tables(engine, false)
+            .await
+            .map(|_existing| ())
     })
 }
 

@@ -13,9 +13,10 @@
 
 use crate::backend::EngineHandle;
 use ferro_ddl_lowering::{
-    Dialect, ResolvedStorage, extra_check_names, extra_check_names_warning, extra_enum_labels,
-    extra_enum_labels_warning, information_schema_to_db_type_token, missing_enum_labels,
-    render_pg_enum_add_value, resolve_column_storage,
+    Dialect, LiveRowSecurity, ResolvedStorage, extra_check_names, extra_check_names_warning,
+    extra_enum_labels, extra_enum_labels_warning, information_schema_to_db_type_token,
+    missing_enum_labels, plan_row_security_reconcile, render_pg_enum_add_value,
+    resolve_column_storage, row_security_migrator_warning,
 };
 use ferro_migrate::{
     MigrationOp, emit_sql_with_ir, plan_check_drops, plan_check_rebuilds, plan_from_ir,
@@ -26,9 +27,9 @@ use ferro_schema_ir::{
     SchemaModel, SchemaUnique,
 };
 use crate::introspect::{
-    LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, live_enum_type_labels, live_table_checks,
-    live_table_columns, live_table_foreign_keys, live_table_indexes, quote_ident,
-    sqlite_indexes_covering_column,
+    LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
+    live_enum_type_labels, live_table_checks, live_table_columns, live_table_foreign_keys,
+    live_table_indexes, live_table_row_security, quote_ident, sqlite_indexes_covering_column,
 };
 use crate::schema::{internal_create_tables, order_models_for_migration};
 use crate::state::{MODEL_REGISTRY, engine_for_connection};
@@ -242,6 +243,12 @@ pub struct MigrationPlan {
     pub drop_columns: Vec<String>,
     /// Human-readable notes emitted as Python `UserWarning`s.
     pub warnings: Vec<String>,
+    /// Notes emitted with `emit_user_warning_always` — the warning registry
+    /// can never swallow them. Row security lives here: a table whose rows are
+    /// not fenced the way the model says is still not fenced on the fourth
+    /// boot, and a process that connects repeatedly must not be reassured by
+    /// silence.
+    pub always_warnings: Vec<String>,
 }
 
 impl MigrationPlan {
@@ -250,6 +257,7 @@ impl MigrationPlan {
             statements: Vec::new(),
             drop_columns: Vec::new(),
             warnings: Vec::new(),
+            always_warnings: Vec::new(),
         }
     }
 
@@ -272,6 +280,7 @@ pub fn plan_table_migration(
     live_indexes: &[LiveIndex],
     live_foreign_keys: &[LiveForeignKey],
     live_checks: &[LiveCheck],
+    live_row_security: &LiveRowSecurity,
     backend: Dialect,
     opts: MigrateOptions,
 ) -> PyResult<MigrationPlan> {
@@ -383,6 +392,25 @@ pub fn plan_table_migration(
 
     plan.statements = emission.statements;
     plan.warnings = emission.warnings;
+
+    // Row security lands LAST for this table (#413; PRD #406 user story 20).
+    // Every column change and every data-shaped step above has already run, so
+    // the migrator's own DML saw the rows it had to touch before any policy
+    // starts filtering them. The whole decision — flags, additions, rebuilds,
+    // orphan drops, and every warning — is one call into the lowering layer,
+    // the same one the Alembic operation consumes over FFI (AGENTS.md § I-1).
+    if let Some(model) = new_ir
+        .payload
+        .models
+        .iter()
+        .find(|model| model.table_name == table_lower)
+    {
+        let rs_plan =
+            plan_row_security_reconcile(model, live_row_security, backend, opts.destructive)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        plan.statements.extend(rs_plan.statements);
+        plan.always_warnings.extend(rs_plan.warnings);
+    }
     Ok(plan)
 }
 
@@ -472,7 +500,7 @@ async fn execute_drop_column(
 /// Returns a `PyErr` if introspection, DDL execution, or the pool refresh
 /// fails, or if the diff contains a change that cannot be applied safely.
 pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult<()> {
-    let tables_before_create = internal_create_tables(engine.clone()).await?;
+    let tables_before_create = internal_create_tables(engine.clone(), opts.updates).await?;
     if !opts.updates {
         return Ok(());
     }
@@ -494,6 +522,10 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
     let backend = engine.backend();
 
     let mut warnings = Vec::new();
+    // Row-security notes go here instead: they describe whether THIS connect
+    // left rows fenced, so the warning registry must never quiet them down
+    // after the first boot.
+    let mut always_warnings: Vec<String> = Vec::new();
     let mut ddl_ran = false;
 
     // Label addition (ADR-0011): reconcile ferro-owned enum types before any
@@ -505,6 +537,29 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
     // can reference it.
     if backend == Dialect::Postgres {
         ddl_ran |= add_missing_enum_labels(&engine, &modelset, &mut warnings).await?;
+        // The migrator warning (#413; PRD #406 user story 19) is asked once,
+        // before any table is touched: is the role running this migration
+        // itself subject to the FORCE policies it is about to maintain? A
+        // superuser or BYPASSRLS role is exempt and hears nothing.
+        let forced_tables: Vec<String> = modelset
+            .payload
+            .models
+            .iter()
+            .filter(|model| {
+                model
+                    .row_security
+                    .as_ref()
+                    .is_some_and(|declaration| declaration.force)
+                    && tables_before_create.contains(&model.table_name)
+            })
+            .map(|model| model.table_name.clone())
+            .collect();
+        if !forced_tables.is_empty()
+            && !connected_role_bypasses_row_security(&engine).await?
+            && let Some(warning) = row_security_migrator_warning(&forced_tables)
+        {
+            always_warnings.push(warning);
+        }
     }
 
     for (_name, model) in order_models_for_migration(schemas, &modelset) {
@@ -523,6 +578,7 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
         let live_indexes = live_table_indexes(&engine, &table_lower).await?;
         let live_foreign_keys = live_table_foreign_keys(&engine, &table_lower).await?;
         let live_checks = live_table_checks(&engine, &table_lower).await?;
+        let live_row_security = live_table_row_security(&engine, &table_lower).await?;
 
         let Some(declared) = declared_envelope_for(&modelset, &table_lower) else { continue };
         let mut plan = plan_table_migration(
@@ -532,11 +588,13 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
             &live_indexes,
             &live_foreign_keys,
             &live_checks,
+            &live_row_security,
             backend,
             opts,
         )?;
         if plan.is_empty() {
             warnings.append(&mut plan.warnings);
+            always_warnings.append(&mut plan.always_warnings);
             continue;
         }
 
@@ -592,12 +650,17 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
                     ddl_ran = true;
                 }
                 Err(err) => {
+                    // Same disposal the create pass and settings delivery
+                    // perform (#416): a connection whose ROLLBACK failed may be
+                    // idle-in-transaction, and sqlx only pings on release, so
+                    // it is discarded rather than returned to the pool.
                     if let Err(rollback_err) = conn.rollback().await {
                         crate::log_debug(format!(
                             "⚠️ Ferro Engine: rollback after failed migration of '{}' also \
-                             failed: {}",
+                             failed: {} — discarding the connection",
                             table_lower, rollback_err
                         ));
+                        let _ = conn.detach_and_close().await;
                     }
                     return Err(err);
                 }
@@ -621,6 +684,7 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
             }
         }
         warnings.append(&mut plan.warnings);
+        always_warnings.append(&mut plan.always_warnings);
 
         crate::log_debug(format!(
             "✅ Ferro Engine: Table '{}' migrated ({} statement(s), {} column(s) dropped)",
@@ -641,6 +705,9 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
 
     for warning in &warnings {
         crate::emit_user_warning(warning);
+    }
+    for warning in &always_warnings {
+        crate::emit_user_warning_always(warning);
     }
 
     Ok(())
@@ -739,7 +806,7 @@ pub fn migrate(
 /// unrecognized, or the diff contains an unsafe change.
 #[pyfunction]
 #[pyo3(name = "_render_migration_sql_for_test")]
-#[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new(), live_foreign_keys_json=String::new(), live_checks_json=String::new()))]
+#[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new(), live_foreign_keys_json=String::new(), live_checks_json=String::new(), live_row_security_json=String::new()))]
 pub fn _render_migration_sql_for_test(
     name: String,
     schema_ir_json: String,
@@ -750,6 +817,7 @@ pub fn _render_migration_sql_for_test(
     live_indexes_json: String,
     live_foreign_keys_json: String,
     live_checks_json: String,
+    live_row_security_json: String,
 ) -> PyResult<(Vec<String>, Vec<String>)> {
     let backend = match dialect.as_str() {
         "postgres" => Dialect::Postgres,
@@ -793,6 +861,17 @@ pub fn _render_migration_sql_for_test(
         })?
     };
 
+    let live_row_security: LiveRowSecurity = if live_row_security_json.is_empty() {
+        LiveRowSecurity::default()
+    } else {
+        serde_json::from_str(&live_row_security_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid live-row-security JSON: {}",
+                e
+            ))
+        })?
+    };
+
     let table_lower = name;
     let opts = MigrateOptions::laddered(updates, destructive);
     let plan = plan_table_migration(
@@ -802,6 +881,7 @@ pub fn _render_migration_sql_for_test(
         &live_indexes,
         &live_foreign_keys,
         &live_checks,
+        &live_row_security,
         backend,
         opts,
     )?;
@@ -814,5 +894,7 @@ pub fn _render_migration_sql_for_test(
             quote_ident(col_name)
         ));
     }
-    Ok((statements, plan.warnings))
+    let mut warnings = plan.warnings;
+    warnings.extend(plan.always_warnings);
+    Ok((statements, warnings))
 }

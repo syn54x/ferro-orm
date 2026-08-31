@@ -10,9 +10,9 @@ created ``NOSUPERUSER`` role: superusers bypass RLS unconditionally (``FORCE``
 included) and the matrix connects as one, so a green test under ``postgres``
 would prove nothing.
 
-Reconciliation of live tables — drift, orphans, the one-way flags — is #413 and
-is deliberately absent here: the create pass owns only missing tables
-(ADR-0010).
+Reconciliation of live tables — drift, orphans, the one-way flags — is
+deliberately absent here: the create pass owns only missing tables (ADR-0010).
+It lives in ``test_row_security_reconcile.py`` / ``_rebuild.py`` / ``_orphans.py``.
 """
 
 import datetime
@@ -540,9 +540,10 @@ async def test_create_pass_leaves_an_existing_table_untouched_but_warns(
     """ADR-0010: the create pass owns only missing tables, so adding a
     declaration to a live table emits nothing — but it must NOT do so quietly.
 
-    The author now believes their rows are fenced. Until reconciliation lands
-    (#413), the only thing standing between that belief and a silent data leak
-    is this warning, so it fires on every connect and names the table."""
+    The author now believes their rows are fenced. ``migrate_updates`` applies
+    the declaration (#413) and this warning stays quiet there; on a connect that
+    does NOT reconcile, it is the only thing standing between that belief and a
+    silent data leak, so it fires every time and names the table."""
 
     class LedgerRow(Model):
         id: int | None = Field(default=None, primary_key=True)

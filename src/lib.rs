@@ -205,7 +205,16 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_rls_shorthand_cast, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_row_security, m)?)?;
     m.add_function(wrap_pyfunction!(
+        naming_ffi::_plan_row_security_reconcile,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_normalize_row_policy_expr, m)?)?;
+    m.add_function(wrap_pyfunction!(
         introspect::_live_table_checks_for_test,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        introspect::_live_row_security_for_test,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

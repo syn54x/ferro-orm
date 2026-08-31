@@ -7,6 +7,10 @@
 
 use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue};
 use crate::state::Dialect;
+use ferro_ddl_lowering::{
+    LiveRowPolicy, LiveRowSecurity, is_ferro_row_policy_name,
+    row_policy_command_from_catalog_code,
+};
 use pyo3::prelude::*;
 
 fn serde_default_true() -> bool {
@@ -754,6 +758,146 @@ pub fn _live_table_checks_for_test(
                 row.set_item("ferro_owned", check.ferro_owned)?;
                 out.append(row)?;
             }
+            Ok(out.into_any().unbind())
+        })
+    })
+}
+
+
+/// Read a live table's whole row-security state: the two `pg_class` flags and
+/// every policy on it, ferro-owned or not (#413).
+///
+/// SQLite has no row-level security, so it reports the "off, no policies"
+/// state — reconciliation then plans nothing there (ADR-0014), and the
+/// create-pass warning remains the only thing said about the declaration.
+pub async fn live_table_row_security(
+    engine: &EngineHandle,
+    table: &str,
+) -> PyResult<LiveRowSecurity> {
+    if engine.backend() != Dialect::Postgres {
+        return Ok(LiveRowSecurity::default());
+    }
+    let flags_sql = r#"
+        SELECT rel.relrowsecurity AS enabled,
+               rel.relforcerowsecurity AS forced
+        FROM pg_class rel
+        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+        WHERE nsp.nspname = current_schema()
+          AND rel.relname = $1
+        "#;
+    let flag_rows = engine
+        .fetch_all_sql_unprepared_with_binds(flags_sql, &[EngineBindValue::String(table.to_string())])
+        .await
+        .map_err(|e| introspection_error("pg_class", table, e))?;
+    let Some(flags) = flag_rows.first() else {
+        // The table is gone — the caller's own "vanished between passes"
+        // handling applies; report the empty state rather than guessing.
+        return Ok(LiveRowSecurity::default());
+    };
+
+    let policies_sql = r#"
+        SELECT pol.polname::text AS name,
+               pol.polcmd::text AS cmd,
+               pol.polpermissive AS permissive,
+               pg_get_expr(pol.polqual, pol.polrelid)::text AS using_expr,
+               pg_get_expr(pol.polwithcheck, pol.polrelid)::text AS with_check_expr
+        FROM pg_policy pol
+        JOIN pg_class rel ON rel.oid = pol.polrelid
+        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+        WHERE nsp.nspname = current_schema()
+          AND rel.relname = $1
+        ORDER BY pol.polname
+        "#;
+    let policy_rows = engine
+        .fetch_all_sql_unprepared_with_binds(
+            policies_sql,
+            &[EngineBindValue::String(table.to_string())],
+        )
+        .await
+        .map_err(|e| introspection_error("pg_policy", table, e))?;
+
+    let mut policies = Vec::new();
+    for row in &policy_rows {
+        let Some(name) = row_string(row, "name") else {
+            continue;
+        };
+        let code = row_string(row, "cmd").unwrap_or_default();
+        // An unknown `polcmd` would be a Postgres version teaching policies a
+        // command ferro has never heard of. Reporting it verbatim keeps the
+        // drift decision honest: it will not match any declared command, so
+        // the policy reads as drifted rather than as an accidental match.
+        let command = row_policy_command_from_catalog_code(&code)
+            .map(str::to_string)
+            .unwrap_or(code);
+        policies.push(LiveRowPolicy {
+            ferro_owned: is_ferro_row_policy_name(&name),
+            name,
+            command,
+            restrictive: !row_bool(row, "permissive"),
+            using: row_string(row, "using_expr"),
+            with_check: row_string(row, "with_check_expr"),
+        });
+    }
+
+    Ok(LiveRowSecurity {
+        enabled: row_bool(flags, "enabled"),
+        forced: row_bool(flags, "forced"),
+        policies,
+    })
+}
+
+/// Whether the connected role is exempt from row-level security — a superuser
+/// or a `BYPASSRLS` role (#413).
+///
+/// This is the question behind the migrator warning: a role that is *not*
+/// exempt is filtered by the very policies the migration is installing, so its
+/// own backfill can see zero rows and report success.
+pub async fn connected_role_bypasses_row_security(engine: &EngineHandle) -> PyResult<bool> {
+    if engine.backend() != Dialect::Postgres {
+        return Ok(true);
+    }
+    let sql = "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user";
+    let rows = engine
+        .fetch_all_sql_unprepared(sql)
+        .await
+        .map_err(|e| introspection_error("pg_roles", "*", e))?;
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    Ok(row_bool(row, "rolsuper") || row_bool(row, "rolbypassrls"))
+}
+
+/// Test-only: read `table`'s live row-security state from the connected engine.
+///
+/// Returns a dict with `enabled`, `forced`, and `policies` (each a dict of
+/// `name`, `command`, `restrictive`, `using`, `with_check`, `ferro_owned`).
+#[pyfunction]
+#[pyo3(name = "_live_row_security_for_test")]
+#[pyo3(signature = (table, using=None))]
+pub fn _live_row_security_for_test(
+    py: Python<'_>,
+    table: String,
+    using: Option<String>,
+) -> PyResult<Bound<'_, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = crate::state::engine_for_connection(using)?;
+        let live = live_table_row_security(&engine, &table).await?;
+        Python::attach(|py| {
+            let out = pyo3::types::PyDict::new(py);
+            out.set_item("enabled", live.enabled)?;
+            out.set_item("forced", live.forced)?;
+            let policies = pyo3::types::PyList::empty(py);
+            for policy in live.policies {
+                let row = pyo3::types::PyDict::new(py);
+                row.set_item("name", policy.name)?;
+                row.set_item("command", policy.command)?;
+                row.set_item("restrictive", policy.restrictive)?;
+                row.set_item("using", policy.using)?;
+                row.set_item("with_check", policy.with_check)?;
+                row.set_item("ferro_owned", policy.ferro_owned)?;
+                policies.append(row)?;
+            }
+            out.set_item("policies", policies)?;
             Ok(out.into_any().unbind())
         })
     })

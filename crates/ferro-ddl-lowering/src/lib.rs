@@ -3,6 +3,8 @@
 //! Type tokens, constraint naming, and column-definition helpers used by
 //! `ferro-migrate` and (eventually) the runtime schema emitter.
 
+mod policy_expr;
+
 use ferro_schema_ir::SchemaColumn;
 use sea_query::{ColumnDef, ForeignKeyAction};
 
@@ -1016,10 +1018,10 @@ pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmis
 
 // ---------------------------------------------------------------------------
 // Row security (PRD #406, #409): the single decision seam for `__ferro_rls__`.
-// Every emitter — the runtime create pass today, the Alembic autogenerate
-// operation (#414) and the reconciliation pass (#413) tomorrow — renders
-// policies through these functions and never re-derives a name, a cast, or a
-// statement (AGENTS.md § I-1).
+// Every emitter — the runtime create pass and the reconciliation pass today,
+// the Alembic autogenerate operation (#414) tomorrow — renders policies
+// through these functions and never re-derives a name, a cast, or a statement
+// (AGENTS.md § I-1).
 // ---------------------------------------------------------------------------
 
 /// Postgres's identifier limit. `NAMEDATALEN - 1` — and it counts BYTES, not
@@ -1057,8 +1059,8 @@ pub fn row_policy_name(table_lower: &str, name: &str) -> String {
 }
 
 /// Whether a live policy name follows the ferro row-policy convention — the
-/// ownership test reconciliation (#413) will use; policies named any other way
-/// belong to the user and are never altered or dropped.
+/// ownership test reconciliation uses; policies named any other way belong to
+/// the user and are never altered or dropped.
 pub fn is_ferro_row_policy_name(name: &str) -> bool {
     name.starts_with("rls_")
 }
@@ -1255,6 +1257,23 @@ pub fn render_force_row_security(table: &str) -> String {
     )
 }
 
+/// `ALTER TABLE "<table>" DISABLE ROW LEVEL SECURITY`. Teardown only — the
+/// reconciliation pass never emits this outside `migrate_destructive` (#413).
+pub fn render_disable_row_security(table: &str) -> String {
+    format!(
+        "ALTER TABLE {} DISABLE ROW LEVEL SECURITY",
+        quote_ident(table)
+    )
+}
+
+/// `ALTER TABLE "<table>" NO FORCE ROW LEVEL SECURITY`. Teardown only.
+pub fn render_no_force_row_security(table: &str) -> String {
+    format!(
+        "ALTER TABLE {} NO FORCE ROW LEVEL SECURITY",
+        quote_ident(table)
+    )
+}
+
 /// The row-security DDL for one freshly created table, or the SQLite skip.
 #[derive(Debug, Default)]
 pub struct RowSecurityEmission {
@@ -1315,8 +1334,13 @@ fn sqlite_row_security_warning(table: &str) -> String {
 /// The create pass owns only missing tables (ADR-0010), so a declaration added
 /// to a live table emits no DDL — and silence there is the one failure mode
 /// this feature must never have. The author believes their rows are fenced; the
-/// database has no policy. Reconciliation on live tables is #413; until it
-/// lands, this fires on every connect so the gap is impossible to miss.
+/// database has no policy.
+///
+/// `migrate_updates` closes that gap ([`plan_row_security_reconcile`]), so the
+/// caller emits this ONLY on a connect that does not reconcile — plain
+/// `auto_migrate=True`, a bare `create_tables()`, or SQLite, where there is no
+/// row-level security to reconcile to (ADR-0014). On those paths it fires on
+/// every connect so the gap is impossible to miss.
 ///
 /// Single-sourced like [`extra_check_names_warning`]: callers emit it verbatim.
 pub fn row_security_existing_table_warning(
@@ -1329,11 +1353,591 @@ pub fn row_security_existing_table_warning(
         Dialect::Postgres => format!(
             "Table '{}' declares __ferro_rls__, but the table already exists and the \
              create pass never alters an existing table (ADR-0010). Its row-security \
-             flags and policies were NOT applied — rows are NOT filtered. Apply them \
-             with a reviewed migration, or drop and recreate the table in development.",
+             flags and policies were NOT applied — rows are NOT filtered. Connect with \
+             migrate_updates=True to reconcile them, or apply them with a reviewed \
+             migration.",
             model.table_name
         ),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Row-security reconciliation (PRD #406, #413): bringing a LIVE table to its
+// declared row security. Everything the reconciliation pass and the Alembic
+// autogenerate operation decide about a live table lives here (AGENTS.md I-1).
+// ---------------------------------------------------------------------------
+
+/// One live policy as `pg_policy` reports it.
+///
+/// `using` / `with_check` are the catalog's own rendering
+/// (`pg_get_expr(polqual, polrelid)`), not ferro's — Postgres re-spells what it
+/// was given, and [`normalize_row_policy_expr`] is what makes the two
+/// comparable. `ferro_owned` is [`is_ferro_row_policy_name`] applied to `name`:
+/// a policy ferro does not own is never altered or dropped, only reported.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct LiveRowPolicy {
+    /// Live policy name (`pg_policy.polname`).
+    pub name: String,
+    /// Command token in ferro's vocabulary: `all`, `select`, `insert`,
+    /// `update`, `delete` (from `pg_policy.polcmd` via
+    /// [`row_policy_command_from_catalog_code`]).
+    pub command: String,
+    /// `true` when the policy is `AS RESTRICTIVE` (`polpermissive` is false).
+    #[serde(default)]
+    pub restrictive: bool,
+    /// `pg_get_expr(polqual, polrelid)`, absent for a write-only policy.
+    #[serde(default)]
+    pub using: Option<String>,
+    /// `pg_get_expr(polwithcheck, polrelid)`, absent for a read-only policy.
+    #[serde(default)]
+    pub with_check: Option<String>,
+    /// Whether the name follows ferro's `rls_` convention.
+    #[serde(default)]
+    pub ferro_owned: bool,
+}
+
+/// A live table's whole row-security state: the two `pg_class` flags plus its
+/// policies, ferro-owned and foreign alike.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct LiveRowSecurity {
+    /// `pg_class.relrowsecurity`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `pg_class.relforcerowsecurity`.
+    #[serde(default)]
+    pub forced: bool,
+    /// Every policy on the table, in catalog order.
+    #[serde(default)]
+    pub policies: Vec<LiveRowPolicy>,
+}
+
+/// Map `pg_policy.polcmd` to ferro's command vocabulary. The one place the
+/// catalog's single-letter codes are decoded.
+pub fn row_policy_command_from_catalog_code(code: &str) -> Option<&'static str> {
+    match code {
+        "*" => Some("all"),
+        "r" => Some("select"),
+        "a" => Some("insert"),
+        "w" => Some("update"),
+        "d" => Some("delete"),
+        _ => None,
+    }
+}
+
+/// Reduce a row-policy expression to a canonical form, so Postgres's own
+/// re-spelling of a body is never mistaken for drift.
+///
+/// Ferro writes
+/// `"ledger_id" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid`;
+/// the catalog hands back
+/// `(ledger_id = (NULLIF(current_setting('pinch.ledger_id'::text, true), ''::text))::uuid)`.
+/// Both reduce to the same string here, so an unchanged declaration plans
+/// nothing (ADR-0015's pattern: canonical render vs catalog, both through one
+/// normalizer).
+///
+/// What it equates: wrapping and precedence-redundant parentheses, identifier
+/// quoting and case, the `::text` the server paints onto text comparisons,
+/// `CAST(x AS t)` versus `x::t`, `!=` versus `<>`, `IN (…)` versus
+/// `= ANY (ARRAY[…])`, the output alias the deparser gives every select-list
+/// item, the relation qualifier it gives every column inside a sub-select, and
+/// all whitespace.
+///
+/// What it does **not** equate, stated because ferro acts on the answer: a
+/// rewrite that changes the expression's structure — `BETWEEN a AND b` is
+/// stored as `(x >= a) AND (x <= b)` — reads as a difference. Ferro never
+/// rebuilds a raw policy on a bare textual difference for exactly this reason
+/// (see [`row_policy_drift`]); it reports it. Two blind spots go the other way
+/// and are equally deliberate: dropping select-list aliases and column
+/// qualifiers means renaming an alias, or swapping `a.id` for `b.id` inside a
+/// sub-select, does not read as drift.
+pub fn normalize_row_policy_expr(expr: &str) -> String {
+    policy_expr::canonicalize(expr)
+}
+
+fn normalize_optional_expr(expr: Option<&str>) -> Option<String> {
+    expr.map(normalize_row_policy_expr)
+}
+
+/// What reconciliation should do about one declared policy that exists live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowPolicyDrift {
+    /// The live policy already matches the declaration.
+    None,
+    /// Something ferro decides exactly differs — the command, permissive
+    /// versus restrictive, which clauses exist, or the body of a policy ferro
+    /// itself renders (the column/setting shorthand). Rebuild it.
+    Rebuild,
+    /// A **raw** policy's body differs textually from the declaration. Ferro
+    /// cannot tell an edited expression from the server's own re-spelling of
+    /// an unedited one, so it changes nothing and says so.
+    Unverifiable,
+}
+
+/// Compare one declared policy against its live counterpart.
+///
+/// The rule in one line: **ferro rebuilds the bodies it writes and reports the
+/// bodies you write.** The shorthand is ferro's own rendering, and the exact
+/// text Postgres stores for it is pinned by tests, so a difference there is
+/// real drift. A raw `using=`/`with_check=` is author SQL that the server
+/// re-spells; rebuilding on a textual difference would mean re-issuing
+/// `DROP POLICY` + `CREATE POLICY` on every connect forever for a policy
+/// nobody changed (ADR-0015 rejected that shape for checks, and taking an
+/// exclusive lock every boot is worse than the difference). So a raw body that
+/// no longer matches is reported with both texts and left alone.
+///
+/// `command`, `restrictive`, and which clauses exist are decided exactly for
+/// both forms — those are ferro's own metadata, not the server's rendering.
+pub fn row_policy_drift(
+    model: &ferro_schema_ir::SchemaModel,
+    policy: &ferro_schema_ir::SchemaRowPolicy,
+    live: &LiveRowPolicy,
+) -> Result<RowPolicyDrift, String> {
+    if live.restrictive != policy.restrictive
+        || live.command != row_policy_command_token(policy.command)
+    {
+        return Ok(RowPolicyDrift::Rebuild);
+    }
+    let (using, with_check) = row_policy_clauses(model, policy)?;
+    // Clause *presence* is exact for both forms: a declaration that stopped
+    // asking for WITH CHECK is drift no matter how the body is spelled.
+    if using.is_some() != live.using.is_some() || with_check.is_some() != live.with_check.is_some()
+    {
+        return Ok(RowPolicyDrift::Rebuild);
+    }
+    let bodies_match = normalize_optional_expr(using.as_deref())
+        == normalize_optional_expr(live.using.as_deref())
+        && normalize_optional_expr(with_check.as_deref())
+            == normalize_optional_expr(live.with_check.as_deref());
+    if bodies_match {
+        return Ok(RowPolicyDrift::None);
+    }
+    Ok(match policy.expr {
+        ferro_schema_ir::RowPolicyExpr::Setting { .. } => RowPolicyDrift::Rebuild,
+        ferro_schema_ir::RowPolicyExpr::Raw { .. } => RowPolicyDrift::Unverifiable,
+    })
+}
+
+/// Declared policy names with no live policy of that name — the additions
+/// (`missing_check_names`'s shape).
+pub fn missing_row_policy_names(
+    model: &ferro_schema_ir::SchemaModel,
+    live: &LiveRowSecurity,
+) -> Vec<String> {
+    declared_row_policy_names(model)
+        .into_iter()
+        .filter(|name| !live.policies.iter().any(|policy| &policy.name == name))
+        .collect()
+}
+
+/// Every policy name the model declares, in declaration order.
+pub fn declared_row_policy_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String> {
+    model
+        .row_security
+        .as_ref()
+        .map(|declaration| {
+            declaration
+                .policies
+                .iter()
+                .map(|policy| policy.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `DROP POLICY "<name>" ON "<table>"`.
+pub fn render_drop_row_policy(table: &str, name: &str) -> String {
+    format!("DROP POLICY {} ON {}", quote_ident(name), quote_ident(table))
+}
+
+/// The DROP + CREATE one drifted policy is rebuilt with, or `None` when the
+/// model does not declare `name`.
+///
+/// Metadata-only: a policy rebuild rewrites the catalog entry and never reads,
+/// validates, or rewrites a row — unlike a CHECK rebuild, which revalidates
+/// the table.
+pub fn row_policy_rebuild_statements(
+    model: &ferro_schema_ir::SchemaModel,
+    name: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(policy) = declared_row_policy(model, name) else {
+        return Ok(None);
+    };
+    Ok(Some(vec![
+        render_drop_row_policy(&model.table_name, name),
+        render_create_row_policy(model, policy)?,
+    ]))
+}
+
+fn declared_row_policy<'a>(
+    model: &'a ferro_schema_ir::SchemaModel,
+    name: &str,
+) -> Option<&'a ferro_schema_ir::SchemaRowPolicy> {
+    model
+        .row_security
+        .as_ref()?
+        .policies
+        .iter()
+        .find(|policy| policy.name == name)
+}
+
+/// Live ferro-owned policy names the model no longer declares, in live order
+/// (the `extra_check_names` shape). Set-difference only: callers pass
+/// already-filtered ferro-owned names.
+pub fn extra_row_policy_names(
+    declared_names: &[String],
+    live_ferro_owned_names: &[String],
+) -> Vec<String> {
+    live_ferro_owned_names
+        .iter()
+        .filter(|name| !declared_names.contains(name))
+        .cloned()
+        .collect()
+}
+
+/// The orphaned-policy warning for one table, or `None` when nothing is extra.
+///
+/// Stricter in tone than the leftover-CHECK warning it mirrors: a leftover
+/// CHECK rejects rows the model now allows, while a leftover policy may be the
+/// only thing standing between two tenants — so ferro never drops one outside
+/// `migrate_destructive` (ADR-0013's ladder).
+pub fn extra_row_policy_names_warning(table: &str, extra: &[String]) -> Option<String> {
+    if extra.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = extra.iter().map(|name| format!("'{name}'")).collect();
+    Some(format!(
+        "Table '{table}' has row policy/policies {} that the model no longer \
+         declares. They are still filtering rows. Ferro leaves them in place \
+         unless you pass migrate_destructive=True — dropping a policy removes \
+         protection, so it is never automatic.",
+        listed.join(", "),
+    ))
+}
+
+/// The warning for live policies ferro does not own (their names do not start
+/// with `rls_`). Ferro never alters or drops one — but it never pretends the
+/// table is only what the model declares, either.
+pub fn foreign_row_policy_warning(table: &str, foreign: &[String]) -> Option<String> {
+    if foreign.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = foreign.iter().map(|name| format!("'{name}'")).collect();
+    Some(format!(
+        "Table '{table}' carries row policy/policies {} that ferro does not own \
+         (their names do not start with 'rls_'). They still filter rows and \
+         compose with the declared policies. Ferro never alters or drops them.",
+        listed.join(", "),
+    ))
+}
+
+/// The report for a raw policy whose live body no longer normalizes to the
+/// declared one. Both texts are printed because the author is the only one who
+/// can tell an edit from the server's re-spelling.
+pub fn unverifiable_row_policy_warning(
+    table: &str,
+    name: &str,
+    declared: &str,
+    live: &str,
+) -> String {
+    format!(
+        "Row policy '{name}' on table '{table}' is declared with a raw \
+         using=/with_check= expression whose live definition no longer matches \
+         the declaration as ferro reads it.\n  declared: {declared}\n  live:     \
+         {live}\nPostgres stores its own rewriting of raw SQL, so ferro cannot \
+         tell an edited expression from a re-spelled one and does NOT rebuild \
+         it. If you changed the declaration, apply it with a reviewed migration \
+         (or drop the policy and reconnect, and ferro will create it from the \
+         declaration)."
+    )
+}
+
+/// The `ENABLE` / `FORCE ROW LEVEL SECURITY` statements a live table is
+/// missing. One-way by construction: this function can only ever turn a flag
+/// on. Turning row security off is `migrate_destructive` territory.
+pub fn missing_row_security_flag_statements(
+    model: &ferro_schema_ir::SchemaModel,
+    live: &LiveRowSecurity,
+) -> Vec<String> {
+    let Some(declaration) = model.row_security.as_ref() else {
+        return Vec::new();
+    };
+    let mut statements = Vec::new();
+    if !live.enabled {
+        statements.push(render_enable_row_security(&model.table_name));
+    }
+    if declaration.force && !live.forced {
+        statements.push(render_force_row_security(&model.table_name));
+    }
+    statements
+}
+
+/// The warning for a live table whose row security is on but whose model no
+/// longer asks for it — the whole declaration removed, or just `force=False`.
+///
+/// Ferro never turns a flag off on `migrate_updates`: a table that stops
+/// filtering rows because someone deleted a ClassVar is the failure this
+/// feature exists to prevent. So the flags stay and this fires on **every**
+/// connect until the author either restores the declaration or tears it down
+/// with `migrate_destructive`.
+pub fn dropped_row_security_warning(
+    model: &ferro_schema_ir::SchemaModel,
+    live: &LiveRowSecurity,
+) -> Option<String> {
+    let table = &model.table_name;
+    match model.row_security.as_ref() {
+        None if live.enabled => Some(format!(
+            "Table '{table}' has row-level security enabled in the database, but \
+             the model no longer declares __ferro_rls__. Ferro never disables row \
+             security on migrate_updates — the table keeps filtering rows, and any \
+             ferro-owned policy keeps applying. Restore the declaration, or tear it \
+             down with migrate_destructive=True."
+        )),
+        Some(declaration) if !declaration.force && live.forced => Some(format!(
+            "Table '{table}' has FORCE ROW LEVEL SECURITY set in the database, but \
+             the model declares force=False. Ferro never clears the flag on \
+             migrate_updates — the table owner stays bound by the policies. Clear it \
+             with migrate_destructive=True if that is what you want."
+        )),
+        _ => None,
+    }
+}
+
+/// The flag statements that undo row security a live table carries but the
+/// model no longer asks for. `migrate_destructive` ONLY — this is the one
+/// function in the family that can turn protection off (#413).
+pub fn excess_row_security_flag_statements(
+    model: &ferro_schema_ir::SchemaModel,
+    live: &LiveRowSecurity,
+) -> Vec<String> {
+    let table = &model.table_name;
+    match model.row_security.as_ref() {
+        None => {
+            let mut statements = Vec::new();
+            if live.forced {
+                statements.push(render_no_force_row_security(table));
+            }
+            if live.enabled {
+                statements.push(render_disable_row_security(table));
+            }
+            statements
+        }
+        Some(declaration) if !declaration.force && live.forced => {
+            vec![render_no_force_row_security(table)]
+        }
+        Some(_) => Vec::new(),
+    }
+}
+
+/// What `migrate_destructive` just took away, or `None` when it took nothing.
+///
+/// Ferro says this out loud rather than logging it: the run that removes row
+/// security is the run whose output someone will read when they later wonder
+/// why a table stopped filtering.
+pub fn row_security_teardown_warning(
+    table: &str,
+    dropped_policies: &[String],
+    flag_statements: &[String],
+) -> Option<String> {
+    if dropped_policies.is_empty() && flag_statements.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !dropped_policies.is_empty() {
+        let listed: Vec<String> = dropped_policies
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect();
+        parts.push(format!("dropped row policy/policies {}", listed.join(", ")));
+    }
+    for statement in flag_statements {
+        if statement.contains("NO FORCE") {
+            parts.push("cleared FORCE ROW LEVEL SECURITY".to_string());
+        } else if statement.contains("DISABLE") {
+            parts.push("disabled ROW LEVEL SECURITY".to_string());
+        }
+    }
+    Some(format!(
+        "migrate_destructive tore down row security on table '{table}': {}. \
+         Rows on this table are no longer filtered by the artifacts ferro \
+         owned.",
+        parts.join("; "),
+    ))
+}
+
+/// The connect-time warning for a migrating role that its own DML may be
+/// filtered, or `None` when there is nothing to warn about.
+///
+/// `forced_tables` are the live tables this pass will bring under
+/// `FORCE ROW LEVEL SECURITY`. Callers only pass them when the connected role
+/// is neither a superuser nor `BYPASSRLS` — those roles are exempt and get no
+/// warning.
+pub fn row_security_migrator_warning(forced_tables: &[String]) -> Option<String> {
+    if forced_tables.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = forced_tables
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect();
+    Some(format!(
+        "The connected role is neither a superuser nor BYPASSRLS, and this \
+         migration touches table(s) {} with FORCE ROW LEVEL SECURITY. Row policies \
+         apply to the migrating role too, so a backfill or data step can silently \
+         see and update zero rows. Migrate as a role with BYPASSRLS if this pass \
+         moves data.",
+        listed.join(", "),
+    ))
+}
+
+/// Everything reconciliation decides for one live table's row security.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RowSecurityReconcilePlan {
+    /// Declared policies with no live policy of that name.
+    pub missing: Vec<String>,
+    /// Live policies rebuilt to match the declaration.
+    pub drifted: Vec<String>,
+    /// Raw policies whose body differs but which ferro will not rewrite.
+    pub unverifiable: Vec<String>,
+    /// Live ferro-owned policies the model no longer declares.
+    pub extra: Vec<String>,
+    /// Live policies ferro does not own; never touched.
+    pub foreign: Vec<String>,
+    /// DDL in execution order: flags, additions, rebuilds, then (only under
+    /// `destructive`) orphan drops.
+    pub statements: Vec<String>,
+    /// Warnings the caller emits verbatim.
+    pub warnings: Vec<String>,
+}
+
+/// The row-security reconciliation decision for ONE live table — the single
+/// seam the auto-migrate reconciliation pass and the Alembic autogenerate
+/// operation both consume (AGENTS.md § I-1).
+///
+/// Order is the execution order: `ENABLE`/`FORCE` first (so a policy is never
+/// created onto an unenforced table), then `CREATE POLICY` for what is
+/// missing, then `DROP`+`CREATE` for what drifted, then — under
+/// `destructive` only — `DROP POLICY` for ferro-owned orphans and, last, the
+/// `NO FORCE` / `DISABLE` teardown (policies go before the flag that made them
+/// matter).
+///
+/// Postgres-only (ADR-0014): SQLite has no row-level security, so this returns
+/// an empty plan and the create pass's one warning per table stands alone.
+pub fn plan_row_security_reconcile(
+    model: &ferro_schema_ir::SchemaModel,
+    live: &LiveRowSecurity,
+    dialect: Dialect,
+    destructive: bool,
+) -> Result<RowSecurityReconcilePlan, String> {
+    let mut plan = RowSecurityReconcilePlan::default();
+    if dialect != Dialect::Postgres {
+        return Ok(plan);
+    }
+    let table = model.table_name.as_str();
+
+    // Under `migrate_updates` a declaration the model dropped is reported and
+    // nothing else; under `migrate_destructive` it is torn down and the
+    // teardown is reported (below). Warning about a flag on the very run that
+    // clears it would be telling the author to do what ferro just did.
+    if !destructive
+        && let Some(warning) = dropped_row_security_warning(model, live)
+    {
+        plan.warnings.push(warning);
+    }
+
+    plan.foreign = live
+        .policies
+        .iter()
+        .filter(|policy| !policy.ferro_owned)
+        .map(|policy| policy.name.clone())
+        .collect();
+    if let Some(warning) = foreign_row_policy_warning(table, &plan.foreign) {
+        plan.warnings.push(warning);
+    }
+
+    plan.statements
+        .extend(missing_row_security_flag_statements(model, live));
+
+    plan.missing = missing_row_policy_names(model, live);
+    for name in &plan.missing {
+        let policy = declared_row_policy(model, name)
+            .ok_or_else(|| format!("row policy '{name}' vanished from table '{table}'"))?;
+        plan.statements.push(render_create_row_policy(model, policy)?);
+    }
+
+    for policy in model
+        .row_security
+        .as_ref()
+        .map(|declaration| declaration.policies.as_slice())
+        .unwrap_or_default()
+    {
+        let Some(live_policy) = live
+            .policies
+            .iter()
+            .find(|candidate| candidate.name == policy.name)
+        else {
+            continue;
+        };
+        match row_policy_drift(model, policy, live_policy)? {
+            RowPolicyDrift::None => {}
+            RowPolicyDrift::Rebuild => {
+                plan.drifted.push(policy.name.clone());
+                plan.statements
+                    .push(render_drop_row_policy(table, &policy.name));
+                plan.statements.push(render_create_row_policy(model, policy)?);
+            }
+            RowPolicyDrift::Unverifiable => {
+                let (using, with_check) = row_policy_clauses(model, policy)?;
+                plan.unverifiable.push(policy.name.clone());
+                plan.warnings.push(unverifiable_row_policy_warning(
+                    table,
+                    &policy.name,
+                    &describe_clauses(using.as_deref(), with_check.as_deref()),
+                    &describe_clauses(
+                        live_policy.using.as_deref(),
+                        live_policy.with_check.as_deref(),
+                    ),
+                ));
+            }
+        }
+    }
+
+    let live_ferro_owned: Vec<String> = live
+        .policies
+        .iter()
+        .filter(|policy| policy.ferro_owned)
+        .map(|policy| policy.name.clone())
+        .collect();
+    plan.extra = extra_row_policy_names(&declared_row_policy_names(model), &live_ferro_owned);
+    if destructive {
+        for name in &plan.extra {
+            plan.statements.push(render_drop_row_policy(table, name));
+        }
+        let flag_statements = excess_row_security_flag_statements(model, live);
+        plan.statements.extend(flag_statements.iter().cloned());
+        if let Some(warning) = row_security_teardown_warning(table, &plan.extra, &flag_statements) {
+            plan.warnings.push(warning);
+        }
+    } else if let Some(warning) = extra_row_policy_names_warning(table, &plan.extra) {
+        plan.warnings.push(warning);
+    }
+
+    Ok(plan)
+}
+
+/// Render a policy's clauses for a human — the shape used in warnings.
+fn describe_clauses(using: Option<&str>, with_check: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(expr) = using {
+        parts.push(format!("USING ({expr})"));
+    }
+    if let Some(expr) = with_check {
+        parts.push(format!("WITH CHECK ({expr})"));
+    }
+    if parts.is_empty() {
+        "<no clauses>".to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3523,4 +4127,519 @@ mod tests {
         let err = row_security_statements(&model, Dialect::Postgres).unwrap_err();
         assert!(err.contains("missing"), "{err}");
     }
+
+    // -----------------------------------------------------------------------
+    // Row-security reconciliation (#413)
+    // -----------------------------------------------------------------------
+
+    /// Every string in this block is REAL `pg_get_expr(polqual, polrelid)`
+    /// output, captured from PostgreSQL 18 after creating the policy ferro
+    /// renders. They are the fixtures that keep an unchanged declaration from
+    /// planning a phantom rebuild: if a future normalizer change stops
+    /// equating them, this test fails instead of the database taking an
+    /// exclusive lock on every connect.
+    mod catalog_fixtures {
+        /// `RowPolicy(column="ledger_id", setting="pinch.ledger_id")` on a
+        /// `uuid` column.
+        pub const UUID_SHORTHAND_LIVE: &str =
+            "(ledger_id = (NULLIF(current_setting('pinch.ledger_id'::text, true), ''::text))::uuid)";
+        pub const UUID_SHORTHAND_DECLARED: &str =
+            "\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid";
+
+        /// The same shorthand on a `text` column — no cast at all, and the
+        /// catalog paints `::text` onto the empty-string literal.
+        pub const TEXT_SHORTHAND_LIVE: &str =
+            "(owner = NULLIF(current_setting('pinch.member'::text, true), ''::text))";
+        pub const TEXT_SHORTHAND_DECLARED: &str =
+            "\"owner\" = NULLIF(current_setting('pinch.member', true), '')";
+
+        /// On a `varchar(40)` column Postgres renders the implicit widening
+        /// as `(title)::text` — parens and a cast ferro never wrote.
+        pub const VARCHAR_SHORTHAND_LIVE: &str =
+            "((title)::text = NULLIF(current_setting('pinch.title'::text, true), ''::text))";
+        pub const VARCHAR_SHORTHAND_DECLARED: &str =
+            "\"title\" = NULLIF(current_setting('pinch.title', true), '')";
+
+        /// `integer` column.
+        pub const INTEGER_SHORTHAND_LIVE: &str =
+            "(n = (NULLIF(current_setting('pinch.n'::text, true), ''::text))::integer)";
+        pub const INTEGER_SHORTHAND_DECLARED: &str =
+            "\"n\" = NULLIF(current_setting('pinch.n', true), '')::integer";
+
+        /// A raw membership sub-select: the deparser qualifies every column
+        /// with its relation and re-wraps the WHERE clause.
+        pub const RAW_SUBQUERY_LIVE: &str = "(id IN ( SELECT membership.doc_id\n   FROM membership\n  WHERE (membership.member = NULLIF(current_setting('pinch.member'::text, true), ''::text))))";
+        pub const RAW_SUBQUERY_DECLARED: &str = "\"id\" IN (SELECT doc_id FROM membership WHERE member = NULLIF(current_setting('pinch.member', true), ''))";
+
+        /// The documented function-based recipe: the deparser names the
+        /// scalar sub-select's output column.
+        pub const RAW_FUNCTION_LIVE: &str = "(owner = ( SELECT probe_uid() AS probe_uid))";
+        pub const RAW_FUNCTION_DECLARED: &str = "\"owner\" = (SELECT probe_uid())";
+
+        /// A boolean composition: each operand gets its own parens.
+        pub const RAW_BOOLEAN_LIVE: &str = "((owner IS NOT NULL) AND (n > 0))";
+        pub const RAW_BOOLEAN_DECLARED: &str = "\"owner\" IS NOT NULL AND \"n\" > 0";
+
+        /// The JSON-claims recipe.
+        pub const RAW_JSON_LIVE: &str = "((ledger_id)::text = ((NULLIF(current_setting('pinch.claims'::text, true), ''::text))::json ->> 'ledger'::text))";
+        pub const RAW_JSON_DECLARED: &str = "\"ledger_id\"::text = (NULLIF(current_setting('pinch.claims', true), '')::json ->> 'ledger')";
+
+        /// An `IN` list is stored as an array quantifier.
+        pub const RAW_IN_LIST_LIVE: &str = "(n = ANY (ARRAY[1, 2]))";
+        pub const RAW_IN_LIST_DECLARED: &str = "\"n\" IN (1, 2)";
+
+        /// `CAST(x AS t)` is stored as `(x)::t`, and `!=` as `<>`.
+        pub const RAW_CAST_LIVE: &str = "((ledger_id)::text <> owner)";
+        pub const RAW_CAST_DECLARED: &str = "CAST(\"ledger_id\" AS text) != \"owner\"";
+    }
+
+    fn assert_same_expr(declared: &str, live: &str) {
+        assert_eq!(
+            normalize_row_policy_expr(declared),
+            normalize_row_policy_expr(live),
+            "declared {declared:?} and live {live:?} are the same predicate"
+        );
+    }
+
+    #[test]
+    fn shorthand_bodies_survive_the_catalog_round_trip() {
+        use catalog_fixtures::*;
+        assert_same_expr(UUID_SHORTHAND_DECLARED, UUID_SHORTHAND_LIVE);
+        assert_same_expr(TEXT_SHORTHAND_DECLARED, TEXT_SHORTHAND_LIVE);
+        assert_same_expr(VARCHAR_SHORTHAND_DECLARED, VARCHAR_SHORTHAND_LIVE);
+        assert_same_expr(INTEGER_SHORTHAND_DECLARED, INTEGER_SHORTHAND_LIVE);
+    }
+
+    #[test]
+    fn raw_bodies_the_docs_recommend_survive_the_catalog_round_trip() {
+        use catalog_fixtures::*;
+        assert_same_expr(RAW_SUBQUERY_DECLARED, RAW_SUBQUERY_LIVE);
+        assert_same_expr(RAW_FUNCTION_DECLARED, RAW_FUNCTION_LIVE);
+        assert_same_expr(RAW_BOOLEAN_DECLARED, RAW_BOOLEAN_LIVE);
+        assert_same_expr(RAW_JSON_DECLARED, RAW_JSON_LIVE);
+        assert_same_expr(RAW_IN_LIST_DECLARED, RAW_IN_LIST_LIVE);
+        assert_same_expr(RAW_CAST_DECLARED, RAW_CAST_LIVE);
+    }
+
+    #[test]
+    fn a_real_change_is_still_a_difference() {
+        // A different setting key, a different column, a flipped operator and
+        // a flipped boolean connective all read as different predicates.
+        assert_ne!(
+            normalize_row_policy_expr(catalog_fixtures::UUID_SHORTHAND_LIVE),
+            normalize_row_policy_expr(
+                "\"ledger_id\" = NULLIF(current_setting('other.key', true), '')::uuid"
+            )
+        );
+        assert_ne!(
+            normalize_row_policy_expr(catalog_fixtures::UUID_SHORTHAND_LIVE),
+            normalize_row_policy_expr(
+                "\"tenant_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid"
+            )
+        );
+        assert_ne!(
+            normalize_row_policy_expr("\"owner\" IS NOT NULL AND \"n\" > 0"),
+            normalize_row_policy_expr("\"owner\" IS NOT NULL OR \"n\" > 0")
+        );
+    }
+
+    #[test]
+    fn parentheses_that_change_grouping_are_kept() {
+        // Dropping these parens would silently equate two different
+        // predicates, so the normalizer keeps them.
+        assert_ne!(
+            normalize_row_policy_expr("(a OR b) AND c"),
+            normalize_row_policy_expr("a OR (b AND c)")
+        );
+        // …and the ones that cannot change grouping go, on both sides.
+        assert_eq!(
+            normalize_row_policy_expr("((a > 1) AND (b < 2))"),
+            normalize_row_policy_expr("a > 1 AND b < 2")
+        );
+    }
+
+    #[test]
+    fn the_normalizers_stated_limits_are_pinned() {
+        // Stated in `normalize_row_policy_expr`: a structural rewrite is a
+        // difference (BETWEEN is stored as two comparisons), which is exactly
+        // why a raw body is reported and never rebuilt.
+        assert_ne!(
+            normalize_row_policy_expr("\"n\" BETWEEN 1 AND 5"),
+            normalize_row_policy_expr("((n >= 1) AND (n <= 5))")
+        );
+        // …and select-list aliases and column qualifiers are dropped, so a
+        // change confined to one of those does not read as drift.
+        assert_eq!(
+            normalize_row_policy_expr("(SELECT uid() AS a)"),
+            normalize_row_policy_expr("(SELECT uid() AS b)")
+        );
+    }
+
+    fn reconcile_model() -> ferro_schema_ir::SchemaModel {
+        rls_model(vec![
+            col_with_db_type("ledger_id", "uuid", None, None),
+            col_with_db_type("n", "integer", None, None),
+        ])
+    }
+
+    fn ledger_model_with(policy: ferro_schema_ir::SchemaRowPolicy) -> ferro_schema_ir::SchemaModel {
+        let mut model = reconcile_model();
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![policy],
+        });
+        model
+    }
+
+    fn shorthand_policy() -> ferro_schema_ir::SchemaRowPolicy {
+        setting_policy(
+            "rls_ledgerrow_ledger_id",
+            "ledger_id",
+            "pinch.ledger_id",
+            ferro_schema_ir::RowPolicyCommand::All,
+            false,
+        )
+    }
+
+    fn live_shorthand_policy() -> LiveRowPolicy {
+        LiveRowPolicy {
+            name: "rls_ledgerrow_ledger_id".to_string(),
+            command: "all".to_string(),
+            restrictive: false,
+            using: Some(catalog_fixtures::UUID_SHORTHAND_LIVE.to_string()),
+            with_check: Some(catalog_fixtures::UUID_SHORTHAND_LIVE.to_string()),
+            ferro_owned: true,
+        }
+    }
+
+    #[test]
+    fn an_unchanged_declaration_plans_nothing() {
+        let model = ledger_model_with(shorthand_policy());
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![live_shorthand_policy()],
+        };
+        let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
+        assert_eq!(plan, RowSecurityReconcilePlan::default());
+    }
+
+    #[test]
+    fn a_missing_policy_and_the_flags_are_planned_in_execution_order() {
+        let model = ledger_model_with(shorthand_policy());
+        let plan = plan_row_security_reconcile(
+            &model,
+            &LiveRowSecurity::default(),
+            Dialect::Postgres,
+            false,
+        )
+        .unwrap();
+        assert_eq!(plan.missing, vec!["rls_ledgerrow_ledger_id".to_string()]);
+        assert_eq!(
+            plan.statements,
+            vec![
+                "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY".to_string(),
+                "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY".to_string(),
+                render_create_row_policy(&model, &shorthand_policy()).unwrap(),
+            ]
+        );
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_drifted_shorthand_body_is_dropped_and_recreated() {
+        let model = ledger_model_with(shorthand_policy());
+        let mut live_policy = live_shorthand_policy();
+        live_policy.using = Some(
+            "(ledger_id = (NULLIF(current_setting('old.key'::text, true), ''::text))::uuid)"
+                .to_string(),
+        );
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![live_policy],
+        };
+        let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
+        assert_eq!(plan.drifted, vec!["rls_ledgerrow_ledger_id".to_string()]);
+        assert_eq!(
+            plan.statements,
+            vec![
+                "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"".to_string(),
+                render_create_row_policy(&model, &shorthand_policy()).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn command_and_restrictive_drift_rebuild_for_both_forms() {
+        let model = ledger_model_with(shorthand_policy());
+        let mut live_policy = live_shorthand_policy();
+        live_policy.command = "select".to_string();
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![live_policy.clone()],
+        };
+        assert_eq!(
+            row_policy_drift(&model, &shorthand_policy(), &live_policy).unwrap(),
+            RowPolicyDrift::Rebuild
+        );
+        assert_eq!(
+            plan_row_security_reconcile(&model, &live, Dialect::Postgres, false)
+                .unwrap()
+                .drifted,
+            vec!["rls_ledgerrow_ledger_id".to_string()]
+        );
+
+        let mut restrictive_live = live_shorthand_policy();
+        restrictive_live.restrictive = true;
+        assert_eq!(
+            row_policy_drift(&model, &shorthand_policy(), &restrictive_live).unwrap(),
+            RowPolicyDrift::Rebuild
+        );
+    }
+
+    #[test]
+    fn a_raw_body_difference_is_reported_and_never_rebuilt() {
+        let raw = ferro_schema_ir::SchemaRowPolicy {
+            name: "rls_ledgerrow_invitee".to_string(),
+            command: ferro_schema_ir::RowPolicyCommand::Select,
+            restrictive: false,
+            expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                using: Some("\"n\" BETWEEN 1 AND 5".to_string()),
+                with_check: None,
+            },
+        };
+        let model = ledger_model_with(raw.clone());
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![LiveRowPolicy {
+                name: "rls_ledgerrow_invitee".to_string(),
+                command: "select".to_string(),
+                restrictive: false,
+                using: Some("((n >= 1) AND (n <= 5))".to_string()),
+                with_check: None,
+                ferro_owned: true,
+            }],
+        };
+        let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
+        assert!(plan.statements.is_empty(), "{:?}", plan.statements);
+        assert_eq!(plan.unverifiable, vec!["rls_ledgerrow_invitee".to_string()]);
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(plan.warnings[0].contains("rls_ledgerrow_invitee"));
+        assert!(plan.warnings[0].contains("does NOT rebuild"));
+    }
+
+    #[test]
+    fn flags_are_turned_on_but_never_off() {
+        // Declared force, live only enabled: FORCE is added.
+        let model = ledger_model_with(shorthand_policy());
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: false,
+            policies: vec![live_shorthand_policy()],
+        };
+        assert_eq!(
+            missing_row_security_flag_statements(&model, &live),
+            vec!["ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY".to_string()]
+        );
+
+        // Declaration removed entirely: nothing is emitted, and the warning
+        // fires so the gap is never silent.
+        let mut undeclared = reconcile_model();
+        undeclared.row_security = None;
+        let live_on = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![live_shorthand_policy()],
+        };
+        let plan =
+            plan_row_security_reconcile(&undeclared, &live_on, Dialect::Postgres, false).unwrap();
+        assert!(plan.statements.is_empty());
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("no longer declares __ferro_rls__"))
+        );
+        assert!(missing_row_security_flag_statements(&undeclared, &live_on).is_empty());
+
+        // force=False against a live FORCE: still no DDL, still a warning.
+        let mut unforced = reconcile_model();
+        unforced.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: false,
+            policies: vec![shorthand_policy()],
+        });
+        assert!(missing_row_security_flag_statements(&unforced, &live_on).is_empty());
+        assert!(
+            dropped_row_security_warning(&unforced, &live_on)
+                .unwrap()
+                .contains("force=False")
+        );
+    }
+
+    #[test]
+    fn orphans_warn_on_updates_and_drop_only_when_destructive() {
+        let mut model = reconcile_model();
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![],
+        });
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![LiveRowPolicy {
+                name: "rls_ledgerrow_gone".to_string(),
+                command: "all".to_string(),
+                restrictive: false,
+                using: Some("(true)".to_string()),
+                with_check: None,
+                ferro_owned: true,
+            }],
+        };
+        let updates = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
+        assert_eq!(updates.extra, vec!["rls_ledgerrow_gone".to_string()]);
+        assert!(updates.statements.is_empty());
+        assert!(
+            updates.warnings.iter().any(|warning| warning
+                .contains("no longer\n         declares")
+                || warning.contains("no longer declares"))
+        );
+
+        let destructive =
+            plan_row_security_reconcile(&model, &live, Dialect::Postgres, true).unwrap();
+        assert_eq!(
+            destructive.statements,
+            vec!["DROP POLICY \"rls_ledgerrow_gone\" ON \"ledgerrow\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn destructive_teardown_drops_the_policies_then_the_flags() {
+        let mut undeclared = reconcile_model();
+        undeclared.row_security = None;
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![live_shorthand_policy()],
+        };
+        let plan =
+            plan_row_security_reconcile(&undeclared, &live, Dialect::Postgres, true).unwrap();
+        assert_eq!(
+            plan.statements,
+            vec![
+                "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"".to_string(),
+                "ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY".to_string(),
+                "ALTER TABLE \"ledgerrow\" DISABLE ROW LEVEL SECURITY".to_string(),
+            ]
+        );
+        // The run that removes protection says what it removed, and does not
+        // also tell the author to run migrate_destructive.
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(plan.warnings[0].contains("tore down row security"));
+        assert!(plan.warnings[0].contains("disabled ROW LEVEL SECURITY"));
+        assert!(!plan.warnings[0].contains("Restore the declaration"));
+    }
+
+    #[test]
+    fn destructive_clears_only_force_when_the_declaration_asks_for_force_false() {
+        let mut unforced = reconcile_model();
+        unforced.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: false,
+            policies: vec![shorthand_policy()],
+        });
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![live_shorthand_policy()],
+        };
+        let plan = plan_row_security_reconcile(&unforced, &live, Dialect::Postgres, true).unwrap();
+        assert_eq!(
+            plan.statements,
+            vec!["ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_foreign_policy_is_warned_about_and_never_touched() {
+        let model = ledger_model_with(shorthand_policy());
+        let live = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![
+                live_shorthand_policy(),
+                LiveRowPolicy {
+                    name: "handwritten_admin".to_string(),
+                    command: "all".to_string(),
+                    restrictive: false,
+                    using: Some("(true)".to_string()),
+                    with_check: None,
+                    ferro_owned: false,
+                },
+            ],
+        };
+        let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, true).unwrap();
+        assert_eq!(plan.foreign, vec!["handwritten_admin".to_string()]);
+        assert!(plan.extra.is_empty());
+        assert!(plan.statements.is_empty(), "{:?}", plan.statements);
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("handwritten_admin"))
+        );
+    }
+
+    #[test]
+    fn sqlite_reconciliation_emits_nothing_at_all() {
+        let model = ledger_model_with(shorthand_policy());
+        let plan =
+            plan_row_security_reconcile(&model, &LiveRowSecurity::default(), Dialect::Sqlite, true)
+                .unwrap();
+        assert_eq!(plan, RowSecurityReconcilePlan::default());
+    }
+
+    #[test]
+    fn catalog_command_codes_decode_to_the_declaration_vocabulary() {
+        assert_eq!(row_policy_command_from_catalog_code("*"), Some("all"));
+        assert_eq!(row_policy_command_from_catalog_code("r"), Some("select"));
+        assert_eq!(row_policy_command_from_catalog_code("a"), Some("insert"));
+        assert_eq!(row_policy_command_from_catalog_code("w"), Some("update"));
+        assert_eq!(row_policy_command_from_catalog_code("d"), Some("delete"));
+        assert_eq!(row_policy_command_from_catalog_code("x"), None);
+        // Every code maps onto a command the renderer knows.
+        for command in ROW_POLICY_COMMANDS {
+            let token = row_policy_command_token(command);
+            assert!(
+                ["*", "r", "a", "w", "d"]
+                    .iter()
+                    .any(|code| row_policy_command_from_catalog_code(code) == Some(token)),
+                "{token} has no catalog code"
+            );
+        }
+    }
+
+    #[test]
+    fn a_policy_rebuild_is_a_drop_and_a_create() {
+        let model = ledger_model_with(shorthand_policy());
+        let statements = row_policy_rebuild_statements(&model, "rls_ledgerrow_ledger_id")
+            .unwrap()
+            .expect("declared");
+        assert_eq!(
+            statements[0],
+            "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\""
+        );
+        assert!(statements[1].starts_with("CREATE POLICY"));
+        assert!(row_policy_rebuild_statements(&model, "rls_ledgerrow_nope")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn the_migrator_warning_names_the_forced_tables() {
+        assert!(row_security_migrator_warning(&[]).is_none());
+        let warning = row_security_migrator_warning(&["ledgerrow".to_string()]).unwrap();
+        assert!(warning.contains("'ledgerrow'"));
+        assert!(warning.contains("BYPASSRLS"));
+    }
+
 }
