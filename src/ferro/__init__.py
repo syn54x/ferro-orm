@@ -7,7 +7,7 @@ to provide a seamless, high-performance database experience.
 
 import logging
 import threading
-from typing import Any
+from typing import Any, Literal
 
 from . import _deprecations as _deprecations  # noqa: F401 — enable deprecation visibility
 
@@ -187,12 +187,103 @@ def _push_registration_to_rust(
 
 
 class PoolConfig(BaseModel):
-    """Connection pool settings for a named Ferro connection."""
+    """Connection pool settings for a named Ferro connection.
+
+    ``settings_delivery`` chooses how sessions on this connection get their
+    session settings (the Postgres GUCs row-level-security policies read) onto
+    the database. The two modes send different SQL for the very same session:
+
+        async with engines.session(settings={"myapp.tenant_id": "acme"}):
+            invoices = await Invoice.where(lambda invoice: invoice.paid).all()
+
+    ``"transaction"`` (the default) wraps the query in a transaction of its own
+    and scopes the value to it::
+
+        BEGIN
+        SELECT set_config($1, $2, true)    -- 'myapp.tenant_id', 'acme'
+        SELECT "invoice".* FROM "invoice" WHERE "paid"
+        COMMIT
+
+    ``"connection"`` sets the value once, on a connection it keeps for the
+    session, and then sends your statements bare::
+
+        SELECT set_config($1, $2, false), set_config($3, $4, false)
+        -- 'myapp.tenant_id', 'acme', 'ferro.pinned_keys', 'myapp.tenant_id'
+        SELECT "invoice".* FROM "invoice" WHERE "paid"
+        ...                                -- every later query, no wrap
+        SELECT set_config($1, NULL, false), set_config($2, NULL, false)
+        -- at session close: exactly the keys above, reset
+
+    The difference that matters is ``true`` vs ``false`` — Postgres'
+    ``is_local`` flag. ``true`` makes the value die with the transaction, which
+    is why the default is safe even behind a transaction pooler like PgBouncer,
+    where consecutive statements can land on different backends. ``false``
+    makes it live for the whole database session, which is only safe if that
+    session belongs to one Ferro session and nobody else — hence the pinned
+    connection.
+
+    So ``settings_delivery="connection"`` is a promise about your deployment:
+    **this pool talks to Postgres directly.** Ferro never guesses it. A pooler
+    is invisible to its clients, and guessing wrong means one tenant's value
+    answering another tenant's query.
+
+    What you get for the promise: no per-operation wrap at all, so a
+    settings-bearing session costs one extra round trip for its whole life
+    instead of about two per operation outside ``transaction()``.
+
+    What it costs, and there are four costs worth knowing before you opt in.
+
+    **One connection per scoped session.** A settings-bearing session holds a
+    pool connection from its first operation until it closes, so **no more
+    settings-bearing sessions can run at once than the pool has
+    connections**. Number ``max_connections`` + 1's first query waits for a
+    connection, exactly like any other pool checkout. Size the pool for peak
+    concurrent scoped sessions.
+
+    **One session, one connection, therefore one thing at a time.** Everything
+    a pinned session does is serialized: two sibling tasks sharing the session
+    run one after the other, and while a ``transaction()`` block is open a
+    sibling task's operation waits for it rather than running inside it.
+    That is the honest meaning of a session that owns a single connection —
+    the same fact as the cap above, seen from inside one session. Operations
+    in the same task *inside* a ``transaction()`` block are unaffected; they
+    already own the block.
+
+    **A marker check on release while anyone is pinned.** The pool verifies
+    that a connection coming back is not still carrying a session's settings.
+    While no session is pinned this costs nothing at all. While *any* session
+    on the pool is pinned, every connection release on that pool performs one
+    marker check — including releases by settings-less sessions and by
+    sessionless operations.
+
+    **Schema changes wait for scoped sessions.** ``connect(migrate_updates=…)``
+    and ``migrate()`` refresh the pool afterwards, and a refresh cannot finish
+    until every connection comes back — including the pinned ones. Migrating
+    while long-lived tenant sessions are open therefore blocks until they
+    close; Ferro warns, naming how many it is waiting on. Run schema changes
+    before opening tenant-scoped sessions.
+
+    Sessions *without* settings never pin: same statements, same connections,
+    no wrap, no serialization.
+
+    Two smaller behaviours worth knowing:
+
+    * A session that opens with no ``settings`` and gains them later via
+      ``set_config`` has nothing pinned yet, so it pins on its **next
+      operation** and applies the values then.
+    * Closing a session resets its keys to the value the connection *started*
+      with. For an ordinary custom setting that is the empty string, which is
+      what fail-closed policies rely on. If an operator has set a default with
+      ``ALTER ROLE ... SET myapp.tenant_id = ...`` or ``ALTER DATABASE ... SET
+      ...``, resetting brings that value *back* rather than clearing it — so
+      never configure a tenancy key as a role or database default.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     max_connections: int = PydanticField(default=5, ge=1)
     min_connections: int = PydanticField(default=0, ge=0)
+    settings_delivery: Literal["transaction", "connection"] = "transaction"
 
     @model_validator(mode="after")
     def validate(self) -> "PoolConfig":
@@ -222,7 +313,9 @@ async def connect(
             unless ``migrate_updates`` / ``migrate_destructive`` are also set.
         name: Optional connection name. Omitted connections register as "default".
         default: If True, make this named connection the default for unqualified operations.
-        pool: Optional per-connection pool configuration.
+        pool: Optional per-connection pool configuration, including
+            ``settings_delivery`` — how sessions on this connection deliver
+            their session settings (see ``PoolConfig``).
         identity_map: If True (default), sessions opened on this connection keep an identity
             map so the same primary key maps to a single Python instance within a session.
             Identity maps are session-scoped: operations outside a session never cache or
@@ -288,6 +381,7 @@ async def connect(
         default=default,
         max_connections=pool_config.max_connections,
         min_connections=pool_config.min_connections,
+        settings_delivery=pool_config.settings_delivery,
         identity_map=identity_map,
         migrate_updates=migrate_updates,
         migrate_destructive=migrate_destructive,

@@ -4,17 +4,19 @@
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
 use crate::backend::{
-    EngineBindValue, EngineConnection, EngineHandle, EngineRow, EngineValue, NullKind, TableCatalog,
+    EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind, TableCatalog,
 };
 use crate::query::{JoinPlan, QueryPlan};
 use crate::session_settings::{
-    OperationScope, SessionSetting, begin_transaction_with_settings, ensure_postgres_for_settings,
-    merge_setting, reapply_settings_to_open_transactions, settings_changed,
+    OperationScope, SessionSetting, begin_on_pinned, begin_transaction_with_settings,
+    deliver_changed_settings, discard_connection_slot, ensure_postgres_for_settings,
+    hold_pinned_connection, merge_setting, pinned_session, release_pinned_connection,
+    settings_changed,
 };
 use crate::state::{
-    Dialect, TRANSACTION_REGISTRY, TransactionConnection, TransactionHandle, connection_for_route,
-    engine_for_connection, ensure_session_idle_for_close, register_session, session_state,
-    unregister_session,
+    ConnectionSlot, Dialect, TRANSACTION_REGISTRY, TransactionConnection, TransactionHandle,
+    connection_for_route, engine_for_connection, ensure_session_idle_for_close, register_session,
+    session_state, unregister_session,
 };
 use dashmap::DashMap;
 use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoinHop, QueryValueExpr};
@@ -28,7 +30,6 @@ use sea_query::{
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 fn active_connection_for_route(using: Option<String>) -> PyResult<(String, Arc<EngineHandle>)> {
     connection_for_route(using)
@@ -1379,13 +1380,13 @@ fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
 enum Executor<'a> {
     /// A live transaction's dedicated connection — the ambient
     /// `transaction()`'s, or the one the operation opened for itself.
-    Tx(&'a Mutex<EngineConnection>),
+    Tx(&'a ConnectionSlot),
     /// The routed engine's pool.
     Pool(&'a EngineHandle),
 }
 
 impl<'a> Executor<'a> {
-    fn new(tx_conn: Option<&'a Mutex<EngineConnection>>, engine: &'a EngineHandle) -> Self {
+    fn new(tx_conn: Option<&'a ConnectionSlot>, engine: &'a EngineHandle) -> Self {
         match tx_conn {
             Some(tx) => Executor::Tx(tx),
             None => Executor::Pool(engine),
@@ -1399,8 +1400,8 @@ impl<'a> Executor<'a> {
     ) -> Result<Vec<EngineRow>, sqlx::Error> {
         match self {
             Executor::Tx(tx) => {
-                let mut conn = tx.lock().await;
-                conn.fetch_all_sql_with_binds(sql, binds).await
+                let mut guard = tx.lock().await;
+                guard.live()?.fetch_all_sql_with_binds(sql, binds).await
             }
             Executor::Pool(engine) => engine.fetch_all_sql_with_binds(sql, binds).await,
         }
@@ -1409,8 +1410,8 @@ impl<'a> Executor<'a> {
     async fn execute(&self, sql: &str, binds: &[EngineBindValue]) -> Result<u64, sqlx::Error> {
         match self {
             Executor::Tx(tx) => {
-                let mut conn = tx.lock().await;
-                conn.execute_sql_with_binds(sql, binds).await
+                let mut guard = tx.lock().await;
+                guard.live()?.execute_sql_with_binds(sql, binds).await
             }
             Executor::Pool(engine) => engine.execute_sql_with_binds(sql, binds).await,
         }
@@ -1423,8 +1424,11 @@ impl<'a> Executor<'a> {
     ) -> Result<crate::backend::EngineExecuteResult, sqlx::Error> {
         match self {
             Executor::Tx(tx) => {
-                let mut conn = tx.lock().await;
-                conn.execute_sql_with_binds_result(sql, binds).await
+                let mut guard = tx.lock().await;
+                guard
+                    .live()?
+                    .execute_sql_with_binds_result(sql, binds)
+                    .await
             }
             Executor::Pool(engine) => engine.execute_sql_with_binds_result(sql, binds).await,
         }
@@ -1433,7 +1437,7 @@ impl<'a> Executor<'a> {
 
 async fn execute_statement_with_optional_tx(
     engine: &EngineHandle,
-    tx_conn: Option<&Mutex<EngineConnection>>,
+    tx_conn: Option<&ConnectionSlot>,
     sql: &str,
     bind_values: &[SeaValue],
 ) -> Result<u64, sqlx::Error> {
@@ -1447,8 +1451,8 @@ async fn execute_transaction_sql(
     tx_conn: &TransactionConnection,
     sql: &str,
 ) -> Result<u64, sqlx::Error> {
-    let mut conn = tx_conn.lock().await;
-    conn.execute_sql(sql).await
+    let mut guard = tx_conn.lock().await;
+    guard.live()?.execute_sql(sql).await
 }
 
 #[cfg(test)]
@@ -1742,22 +1746,38 @@ pub fn begin_transaction(
             )?;
         } else {
             let (connection_name, engine, _, _) = route_engine(r)?;
-            // Settings delivery (`transaction` mode): the shared seam applies
-            // the session's set_config batch before any user statement can run
-            // in this transaction. Nested savepoints need nothing — SET LOCAL
-            // is transaction-scoped.
-            let conn = begin_transaction_with_settings(
-                &engine,
-                r.session_id.as_deref(),
-                "Failed to BEGIN",
-            )
-            .await?;
+            let handle = match pinned_session(&engine, r.session_id.as_deref())? {
+                // `connection` delivery: the session already owns a
+                // connection carrying its settings at database-session
+                // scope, so this transaction opens on that very connection
+                // and re-applies nothing. The handle shares the pin's slot,
+                // so COMMIT/ROLLBACK end the transaction without returning
+                // the connection — it stays the session's until close.
+                Some(session_id) => {
+                    // The claim is taken before `BEGIN` and released when the
+                    // handle is dropped by COMMIT/ROLLBACK, so a sibling
+                    // task's operation waits for the block instead of landing
+                    // inside it.
+                    let (pin, hold) = hold_pinned_connection(&engine, &session_id).await?;
+                    begin_on_pinned(&pin, "Failed to BEGIN").await?;
+                    TransactionHandle::on_pinned(pin.shared_slot(), connection_name, hold)
+                }
+                // Settings delivery (`transaction` mode): the shared seam
+                // applies the session's set_config batch before any user
+                // statement can run in this transaction. Nested savepoints
+                // need nothing — SET LOCAL is transaction-scoped.
+                None => {
+                    let conn = begin_transaction_with_settings(
+                        &engine,
+                        r.session_id.as_deref(),
+                        "Failed to BEGIN",
+                    )
+                    .await?;
+                    TransactionHandle::root(conn, connection_name)
+                }
+            };
 
-            tx_insert(
-                r.session_id.as_deref(),
-                tx_id.clone(),
-                TransactionHandle::root(conn, connection_name),
-            )?;
+            tx_insert(r.session_id.as_deref(), tx_id.clone(), handle)?;
         }
 
         Ok(tx_id)
@@ -1786,21 +1806,40 @@ pub fn commit_transaction(
         let tx_handle = tx_remove(session_id.as_deref(), &tx_id)?
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?;
 
-        if let Some(savepoint_name) = tx_handle.savepoint_name {
-            execute_transaction_sql(
-                &tx_handle.conn,
-                &format!("RELEASE SAVEPOINT {savepoint_name}"),
-            )
+        let (sql, context) = match &tx_handle.savepoint_name {
+            Some(savepoint_name) => (
+                format!("RELEASE SAVEPOINT {savepoint_name}"),
+                "Failed to RELEASE SAVEPOINT",
+            ),
+            None => ("COMMIT".to_string(), "Failed to COMMIT"),
+        };
+
+        execute_transaction_sql(&tx_handle.conn, &sql)
             .await
-            .map_err(|e| crate::errors::map_db_error("Failed to RELEASE SAVEPOINT", e))?;
-        } else {
-            execute_transaction_sql(&tx_handle.conn, "COMMIT")
-                .await
-                .map_err(|e| crate::errors::map_db_error("Failed to COMMIT", e))?;
-        }
+            .map_err(|e| {
+                discard_pinned_transaction(&tx_handle);
+                crate::errors::map_db_error(context, e)
+            })?;
 
         Ok(())
     })
+}
+
+/// Give up on a session's pinned connection when ending a transaction on it
+/// failed.
+///
+/// A pinned connection outlives its transaction — that is the whole point of
+/// `connection` settings delivery — so a failed `COMMIT`/`ROLLBACK` is not a
+/// local problem here the way it is for a pool connection that is about to be
+/// dropped anyway. The connection may be sitting in an aborted or still-open
+/// transaction, and everything the session does afterwards, its own close
+/// reset included, would fail with it. So it is discarded and the session's
+/// next operation pins a fresh one. Transactions on pool connections
+/// (`transaction` delivery) keep the behaviour they have always had.
+fn discard_pinned_transaction(tx_handle: &TransactionHandle) {
+    if tx_handle.pin_hold.is_some() {
+        discard_connection_slot(&tx_handle.conn);
+    }
 }
 
 /// Return the connection name a transaction was opened on.
@@ -1847,23 +1886,26 @@ pub fn rollback_transaction(
         let tx_handle = tx_remove(session_id.as_deref(), &tx_id)?
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?;
 
-        if let Some(savepoint_name) = tx_handle.savepoint_name {
-            execute_transaction_sql(
-                &tx_handle.conn,
-                &format!("ROLLBACK TO SAVEPOINT {savepoint_name}"),
-            )
-            .await
-            .map_err(|e| crate::errors::map_db_error("Failed to ROLLBACK TO SAVEPOINT", e))?;
-            execute_transaction_sql(
-                &tx_handle.conn,
-                &format!("RELEASE SAVEPOINT {savepoint_name}"),
-            )
-            .await
-            .map_err(|e| crate::errors::map_db_error("Failed to RELEASE SAVEPOINT", e))?;
-        } else {
-            execute_transaction_sql(&tx_handle.conn, "ROLLBACK")
+        let steps: Vec<(String, &str)> = match &tx_handle.savepoint_name {
+            Some(savepoint_name) => vec![
+                (
+                    format!("ROLLBACK TO SAVEPOINT {savepoint_name}"),
+                    "Failed to ROLLBACK TO SAVEPOINT",
+                ),
+                (
+                    format!("RELEASE SAVEPOINT {savepoint_name}"),
+                    "Failed to RELEASE SAVEPOINT",
+                ),
+            ],
+            None => vec![("ROLLBACK".to_string(), "Failed to ROLLBACK")],
+        };
+        for (sql, context) in &steps {
+            execute_transaction_sql(&tx_handle.conn, sql)
                 .await
-                .map_err(|e| crate::errors::map_db_error("Failed to ROLLBACK", e))?;
+                .map_err(|e| {
+                    discard_pinned_transaction(&tx_handle);
+                    crate::errors::map_db_error(context, e)
+                })?;
         }
 
         // Re-acquire the GIL before accessing identity map (async context has no GIL).
@@ -1911,7 +1953,22 @@ pub fn open_session(
     Ok((session_id, connection_name))
 }
 
-/// Close a session after all transactions have exited.
+/// Close a session after all transactions have exited, releasing the
+/// connection it pinned (if it pinned one).
+///
+/// A session under `transaction` settings delivery holds nothing to release,
+/// and this awaits no round trip for it. A session under `connection`
+/// delivery holds one pool connection carrying its settings at
+/// database-session scope; closing resets **exactly the keys it set** and
+/// hands the connection back. Never `RESET ALL`: that would also wipe
+/// pool-level state such as the `search_path` Ferro's `after_connect` hook
+/// installs, so every later query on that connection would resolve tables in
+/// the wrong schema.
+///
+/// The session leaves the registry *before* the reset is attempted. That
+/// ordering is what makes a cancelled close safe: the pin is then owned by
+/// this call's own stack, so dropping the future discards the connection
+/// rather than stranding one no session can ever reclaim.
 ///
 /// Args:
 ///     session_id (str): Id returned by `open_session`.
@@ -1920,17 +1977,23 @@ pub fn open_session(
 ///     None
 ///
 /// # Errors
-/// `PyRuntimeError` when transactions are still active or the session is unknown.
+/// `PyRuntimeError` when transactions are still active, when the session is
+/// unknown, or when the reset fails — in which case the session is closed
+/// regardless and its connection has been discarded rather than pooled.
 #[pyfunction]
-pub fn close_session(session_id: String) -> PyResult<()> {
+pub fn close_session(py: Python<'_>, session_id: String) -> PyResult<Bound<'_, PyAny>> {
     ensure_session_idle_for_close(&session_id)?;
-    if !unregister_session(&session_id) {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Session '{}' is not active",
-            session_id
-        )));
-    }
-    Ok(())
+    let session = unregister_session(&session_id).ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Session '{}' is not active", session_id))
+    })?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let pin = session.pinned.lock().await.take();
+        match pin {
+            Some(pin) => release_pinned_connection(pin).await,
+            None => Ok(()),
+        }
+    })
 }
 
 /// Mutate a live session's effective settings (`Session.set_config`, #411).
@@ -2045,7 +2108,7 @@ pub fn set_session_config(
         // 3. Reapply — the only step that awaits. A failure here does not
         // roll back steps 1–2; see this function's docs and
         // `reapply_settings_to_open_transactions`'s for why that is sound.
-        reapply_settings_to_open_transactions(&session, &new_effective).await?;
+        deliver_changed_settings(&engine, &session, &new_effective).await?;
 
         Ok(new_effective)
     })
@@ -4515,7 +4578,7 @@ pub fn raw_execute<'py>(
         // so the implicit settings wrap is skipped rather than making the
         // statement fail with 25001 the moment a session carries settings.
         let scope = if autocommit {
-            OperationScope::unwrapped(tx_conn)
+            OperationScope::unwrapped(&engine, route_session_id.as_deref(), tx_conn).await?
         } else {
             OperationScope::open(
                 &engine,
@@ -7928,10 +7991,9 @@ mod save_mode_sql_tests {
 mod executor_tests {
     use super::Executor;
     use crate::backend::{EngineBindValue, EngineHandle};
-    use crate::state::TransactionConnection;
+    use crate::state::{ConnectionSlot, TransactionConnection};
     use sqlx::sqlite::SqlitePoolOptions;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     /// max_connections(1): one shared in-memory database, and any query the
     /// executor wrongly routed to the pool while the tx holds the only
@@ -7988,7 +8050,7 @@ mod executor_tests {
             .begin_transaction_connection()
             .await
             .expect("begin transaction connection");
-        let tx: TransactionConnection = Arc::new(Mutex::new(conn));
+        let tx: TransactionConnection = Arc::new(ConnectionSlot::new(conn));
         let exec = Executor::new(Some(&tx), &engine);
         exec.execute(
             "INSERT INTO t (v) VALUES (?)",
@@ -7999,7 +8061,7 @@ mod executor_tests {
         let rows = exec.fetch_all("SELECT v FROM t", &[]).await.unwrap();
         assert_eq!(rows.len(), 1, "tx must see its own uncommitted write");
 
-        tx.lock().await.rollback().await.unwrap();
+        tx.lock().await.live().unwrap().rollback().await.unwrap();
         drop(tx);
 
         let rows = Executor::new(None, &engine)

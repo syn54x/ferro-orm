@@ -5,6 +5,7 @@
 
 use crate::backend::{EngineHandle, PoolSpec, dialect_from_url};
 use crate::migrate::{MigrateOptions, internal_migrate};
+use crate::session_settings::SettingsDelivery;
 use crate::state::{
     CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, Dialect, ENGINE, SESSION_REGISTRY,
     TRANSACTION_REGISTRY, connection_for_route,
@@ -158,6 +159,7 @@ async fn connect_engine_handle(
     search_path: Option<String>,
     max_connections: u32,
     min_connections: u32,
+    settings_delivery: SettingsDelivery,
 ) -> Result<EngineHandle, sqlx::Error> {
     EngineHandle::connect(PoolSpec {
         backend,
@@ -165,6 +167,8 @@ async fn connect_engine_handle(
         search_path,
         max_connections,
         min_connections,
+        settings_delivery,
+        pins: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     })
     .await
 }
@@ -184,6 +188,9 @@ async fn connect_engine_handle(
 ///         back); SQLite applies statements one at a time.
 ///     migrate_destructive (bool): If True, also drops live columns that no
 ///         longer exist on the model. Implies `migrate_updates`.
+///     settings_delivery (str): How sessions on this connection deliver their
+///         session settings — `"transaction"` (the default) or `"connection"`.
+///         See `ferro.PoolConfig`; the mode is never inferred from the URL.
 ///
 /// # Errors
 /// Returns a `PyErr` if the connection fails or if auto-migration fails.
@@ -192,7 +199,7 @@ async fn connect_engine_handle(
 /// `reset_engine()` first or pass a distinct `name` to register an additional
 /// connection.
 #[pyfunction]
-#[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0, identity_map=true, migrate_updates=false, migrate_destructive=false))]
+#[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0, identity_map=true, migrate_updates=false, migrate_destructive=false, settings_delivery="transaction".to_string()))]
 #[allow(clippy::too_many_arguments)]
 pub fn connect(
     py: Python<'_>,
@@ -205,7 +212,9 @@ pub fn connect(
     identity_map: bool,
     migrate_updates: bool,
     migrate_destructive: bool,
+    settings_delivery: String,
 ) -> PyResult<Bound<'_, PyAny>> {
+    let settings_delivery = SettingsDelivery::parse(&settings_delivery)?;
     let (connection_url, search_path) = split_search_path(&url);
     let redacted_url = redact_connection_url(&connection_url);
     let backend = dialect_from_url(&connection_url).map_err(|e| {
@@ -249,6 +258,7 @@ pub fn connect(
             search_path.clone(),
             max_connections,
             min_connections,
+            settings_delivery,
         )
         .await
         .map_err(|e| {
@@ -391,9 +401,16 @@ mod tests {
 
     #[tokio::test]
     async fn connect_engine_handle_uses_typed_sqlite_backend() {
-        let engine = connect_engine_handle("sqlite::memory:", Dialect::Sqlite, None, 5, 0)
-            .await
-            .unwrap();
+        let engine = connect_engine_handle(
+            "sqlite::memory:",
+            Dialect::Sqlite,
+            None,
+            5,
+            0,
+            crate::session_settings::SettingsDelivery::Transaction,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(engine.backend(), Dialect::Sqlite);
         assert!(engine.sqlite_pool().is_some());
@@ -402,9 +419,16 @@ mod tests {
 
     #[tokio::test]
     async fn connect_engine_handle_supports_sqlite_runtime_execution() {
-        let engine = connect_engine_handle("sqlite::memory:", Dialect::Sqlite, None, 5, 0)
-            .await
-            .unwrap();
+        let engine = connect_engine_handle(
+            "sqlite::memory:",
+            Dialect::Sqlite,
+            None,
+            5,
+            0,
+            crate::session_settings::SettingsDelivery::Transaction,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(engine.backend(), Dialect::Sqlite);
         assert!(engine.sqlite_pool().is_some());
