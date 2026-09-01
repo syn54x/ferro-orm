@@ -239,3 +239,196 @@ pub fn _render_table_check_body(predicate_json: String) -> PyResult<String> {
         })?;
     Ok(ferro_ddl_lowering::render_check_expr(&predicate))
 }
+
+/// Canonical row-policy name (`rls_<table>_<name>`) — the shared builder the
+/// IR compiler stamps onto every `SchemaRowPolicy.name`, so no emitter ever
+/// re-derives it (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _ddl_row_policy_name(table: String, name: String) -> String {
+    ferro_ddl_lowering::row_policy_name(&table, &name)
+}
+
+/// The row-policy command table over FFI: every command a policy may be scoped
+/// to, and which clauses Postgres accepts for it, as a JSON array of
+/// `{"command": "all", "using": true, "with_check": true}`.
+///
+/// The Python declaration surface (`ferro.rowsecurity`) reads this once at
+/// import instead of keeping its own copy: the command allowlist and the
+/// USING / WITH CHECK rules are decided in `ferro-ddl-lowering` alone, so a
+/// command added there cannot drift out of the declaration's validation
+/// (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _rls_command_matrix() -> String {
+    let rows: Vec<serde_json::Value> = ferro_ddl_lowering::ROW_POLICY_COMMANDS
+        .iter()
+        .map(|command| {
+            serde_json::json!({
+                "command": ferro_ddl_lowering::row_policy_command_token(*command),
+                "using": ferro_ddl_lowering::row_policy_command_takes_using(*command),
+                "with_check": ferro_ddl_lowering::row_policy_command_takes_with_check(*command),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows).to_string()
+}
+
+/// The column/setting shorthand's cast decision for one IR column, as a JSON
+/// object: `{"supported": true, "cast": "uuid" | null}` for a column the
+/// shorthand can render, `{"supported": false, "reason": "..."}` otherwise.
+///
+/// The IR compiler calls this at class-definition time so an unsupported column
+/// type fails where the model is written, and the emitters call
+/// `row_policy_shorthand_cast` for the same decision at render time — one
+/// function, two doors (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _rls_shorthand_cast(column_ir_json: String) -> PyResult<String> {
+    let col: ferro_schema_ir::SchemaColumn =
+        serde_json::from_str(&column_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR column: {e}"))
+        })?;
+    let payload = match ferro_ddl_lowering::row_policy_shorthand_cast(&col) {
+        Ok(cast) => serde_json::json!({ "supported": true, "cast": cast }),
+        Err(reason) => serde_json::json!({ "supported": false, "reason": reason }),
+    };
+    Ok(payload.to_string())
+}
+
+/// The row-security create decision over FFI (PRD #406): given one model's
+/// compiled SchemaIR, return the Rust-rendered Postgres statements a freshly
+/// created table needs — `ENABLE`, `FORCE` when declared, then one
+/// `CREATE POLICY` per policy in declaration order — plus the policy names.
+///
+/// This is the seam the Alembic autogenerate operation (#414) consumes so its
+/// generated revision executes byte-identical SQL to the auto-migrate create
+/// pass; neither side re-derives the diff or re-renders the SQL. Postgres-only
+/// (ADR-0014): on SQLite the same function returns no statements and one
+/// warning naming the table.
+#[pyfunction]
+#[pyo3(signature = (model_ir_json, dialect="postgres".to_string()))]
+pub fn _plan_row_security(model_ir_json: String, dialect: String) -> PyResult<String> {
+    let dialect = match dialect.as_str() {
+        "postgres" => Dialect::Postgres,
+        "sqlite" => Dialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown dialect {other:?}; expected 'postgres' or 'sqlite'"
+            )));
+        }
+    };
+    let model: ferro_schema_ir::SchemaModel =
+        serde_json::from_str(&model_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
+        })?;
+    let emission = ferro_ddl_lowering::row_security_statements(&model, dialect)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let names: Vec<String> = model
+        .row_security
+        .as_ref()
+        .map(|declaration| {
+            declaration
+                .policies
+                .iter()
+                .map(|policy| policy.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(serde_json::json!({
+        "statements": emission.statements,
+        "names": names,
+        "warning": emission.warning,
+    })
+    .to_string())
+}
+
+/// The row-security **reconciliation** decision over FFI (#413): given one
+/// model's compiled SchemaIR and its live table's row-security state, return
+/// the Rust-rendered Postgres statements that bring the live table to the
+/// declaration, plus the names behind each part of the decision and the
+/// warnings ferro would emit.
+///
+/// `live_json` is a `LiveRowSecurity` object:
+/// `{"enabled": bool, "forced": bool, "policies": [{"name", "command",
+/// "restrictive", "using", "with_check", "ferro_owned"}]}` — `using` and
+/// `with_check` being the catalog's own `pg_get_expr` text.
+///
+/// This is the seam the Alembic autogenerate operation (#414) consumes so its
+/// generated revision executes byte-identical SQL to the auto-migrate
+/// reconciliation pass; neither side re-derives the diff or re-renders the SQL
+/// (AGENTS.md § I-1). `destructive` gates only the orphan drops — the
+/// auto-migrate ladder (ADR-0013); autogenerate passes it as the caller sees
+/// fit, since a generated revision is reviewed before it runs.
+#[pyfunction]
+#[pyo3(signature = (model_ir_json, live_json, dialect="postgres".to_string(), destructive=false))]
+pub fn _plan_row_security_reconcile(
+    model_ir_json: String,
+    live_json: String,
+    dialect: String,
+    destructive: bool,
+) -> PyResult<String> {
+    let dialect = match dialect.as_str() {
+        "postgres" => Dialect::Postgres,
+        "sqlite" => Dialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown dialect {other:?}; expected 'postgres' or 'sqlite'"
+            )));
+        }
+    };
+    let model: ferro_schema_ir::SchemaModel =
+        serde_json::from_str(&model_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
+        })?;
+    let live: ferro_ddl_lowering::LiveRowSecurity =
+        serde_json::from_str(&live_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid live row security: {e}"))
+        })?;
+    let plan =
+        ferro_ddl_lowering::plan_row_security_reconcile(&model, &live, dialect, destructive)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(serde_json::json!({
+        "statements": plan.statements,
+        "missing": plan.missing,
+        "drifted": plan.drifted,
+        "unverifiable": plan.unverifiable,
+        "extra": plan.extra,
+        "foreign": plan.foreign,
+        "warnings": plan.warnings,
+    })
+    .to_string())
+}
+
+/// One row-policy expression through ferro's normalizer, over FFI (#413).
+///
+/// Exposed so the drift comparison can be exercised — and pinned — against
+/// REAL `pg_get_expr` output from a live database, which is the only way to
+/// prove an unchanged declaration plans nothing.
+#[pyfunction]
+pub fn _normalize_row_policy_expr(expr: String) -> String {
+    ferro_ddl_lowering::normalize_row_policy_expr(&expr)
+}
+
+/// Decode one `pg_policy.polcmd` catalog code into ferro's command vocabulary
+/// (`"all"`, `"select"`, `"insert"`, `"update"`, `"delete"`), or `None` for a
+/// code ferro does not recognize.
+///
+/// The Alembic autogenerate comparator introspects `pg_policy` directly (it
+/// has no `EngineHandle` to call `live_table_row_security` through) and needs
+/// this exact decode to build the `LiveRowPolicy` payload
+/// `_plan_row_security_reconcile` expects — the same table
+/// `src/introspect.rs`'s `live_table_row_security` uses, over FFI, so the two
+/// introspection paths cannot drift apart (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _row_policy_command_from_catalog_code(code: String) -> Option<String> {
+    ferro_ddl_lowering::row_policy_command_from_catalog_code(&code).map(str::to_string)
+}
+
+/// Whether a live policy name follows ferro's `rls_` ownership convention.
+///
+/// The Alembic autogenerate comparator's own `pg_policy` introspection needs
+/// this to fill in `LiveRowPolicy.ferro_owned` — the same test
+/// `src/introspect.rs`'s `live_table_row_security` applies, over FFI
+/// (AGENTS.md § I-1).
+#[pyfunction]
+pub fn _is_ferro_row_policy_name(name: String) -> bool {
+    ferro_ddl_lowering::is_ferro_row_policy_name(&name)
+}

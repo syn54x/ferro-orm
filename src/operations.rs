@@ -7,10 +7,16 @@ use crate::backend::{
     EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind, TableCatalog,
 };
 use crate::query::{JoinPlan, QueryPlan};
+use crate::session_settings::{
+    OperationScope, SessionSetting, begin_on_pinned, begin_transaction_with_settings,
+    deliver_changed_settings, discard_connection_slot, ensure_postgres_for_settings,
+    hold_pinned_connection, merge_setting, pinned_session, release_pinned_connection,
+    settings_changed,
+};
 use crate::state::{
-    Dialect, TRANSACTION_REGISTRY, TransactionConnection, TransactionHandle, connection_for_route,
-    engine_for_connection, ensure_session_idle_for_close, register_session, session_state,
-    unregister_session,
+    ConnectionSlot, Dialect, TRANSACTION_REGISTRY, TransactionConnection, TransactionHandle,
+    connection_for_route, engine_for_connection, ensure_session_idle_for_close, register_session,
+    session_state, unregister_session,
 };
 use dashmap::DashMap;
 use ferro_schema_ir::{Materialization, QueryIrPayload, QueryJoinHop, QueryValueExpr};
@@ -1357,24 +1363,30 @@ fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
         .collect()
 }
 
-/// One execution route for an operation: the open transaction's connection,
-/// or the routed engine's pool (FF-G G2).
+/// One execution route for an operation: a transaction's dedicated
+/// connection, or the routed engine's pool (FF-G G2).
 ///
 /// Replaces the per-site `match tx_conn { Some(..) => .., None => .. }`
 /// mirror arms. Each method holds the transaction mutex for exactly one
 /// engine call — the same guard scope as the arms it replaces — so a query
 /// can never migrate off its transaction. Methods return raw `sqlx::Error`;
 /// call sites keep their own `map_db_error` context labels.
+///
+/// The connection comes from the operation's [`OperationScope`], which is the
+/// one place that decides whether it belongs to the user's `transaction()`
+/// block, to an implicit transaction opened for a settings-bearing session, or
+/// to nobody (the pool).
 #[derive(Clone, Copy)]
 enum Executor<'a> {
-    /// A live transaction's dedicated connection.
-    Tx(&'a TransactionConnection),
+    /// A live transaction's dedicated connection — the ambient
+    /// `transaction()`'s, or the one the operation opened for itself.
+    Tx(&'a ConnectionSlot),
     /// The routed engine's pool.
     Pool(&'a EngineHandle),
 }
 
 impl<'a> Executor<'a> {
-    fn new(tx_conn: Option<&'a TransactionConnection>, engine: &'a EngineHandle) -> Self {
+    fn new(tx_conn: Option<&'a ConnectionSlot>, engine: &'a EngineHandle) -> Self {
         match tx_conn {
             Some(tx) => Executor::Tx(tx),
             None => Executor::Pool(engine),
@@ -1388,8 +1400,8 @@ impl<'a> Executor<'a> {
     ) -> Result<Vec<EngineRow>, sqlx::Error> {
         match self {
             Executor::Tx(tx) => {
-                let mut conn = tx.lock().await;
-                conn.fetch_all_sql_with_binds(sql, binds).await
+                let mut guard = tx.lock().await;
+                guard.live()?.fetch_all_sql_with_binds(sql, binds).await
             }
             Executor::Pool(engine) => engine.fetch_all_sql_with_binds(sql, binds).await,
         }
@@ -1398,8 +1410,8 @@ impl<'a> Executor<'a> {
     async fn execute(&self, sql: &str, binds: &[EngineBindValue]) -> Result<u64, sqlx::Error> {
         match self {
             Executor::Tx(tx) => {
-                let mut conn = tx.lock().await;
-                conn.execute_sql_with_binds(sql, binds).await
+                let mut guard = tx.lock().await;
+                guard.live()?.execute_sql_with_binds(sql, binds).await
             }
             Executor::Pool(engine) => engine.execute_sql_with_binds(sql, binds).await,
         }
@@ -1412,8 +1424,11 @@ impl<'a> Executor<'a> {
     ) -> Result<crate::backend::EngineExecuteResult, sqlx::Error> {
         match self {
             Executor::Tx(tx) => {
-                let mut conn = tx.lock().await;
-                conn.execute_sql_with_binds_result(sql, binds).await
+                let mut guard = tx.lock().await;
+                guard
+                    .live()?
+                    .execute_sql_with_binds_result(sql, binds)
+                    .await
             }
             Executor::Pool(engine) => engine.execute_sql_with_binds_result(sql, binds).await,
         }
@@ -1422,7 +1437,7 @@ impl<'a> Executor<'a> {
 
 async fn execute_statement_with_optional_tx(
     engine: &EngineHandle,
-    tx_conn: Option<&TransactionConnection>,
+    tx_conn: Option<&ConnectionSlot>,
     sql: &str,
     bind_values: &[SeaValue],
 ) -> Result<u64, sqlx::Error> {
@@ -1436,8 +1451,8 @@ async fn execute_transaction_sql(
     tx_conn: &TransactionConnection,
     sql: &str,
 ) -> Result<u64, sqlx::Error> {
-    let mut conn = tx_conn.lock().await;
-    conn.execute_sql(sql).await
+    let mut guard = tx_conn.lock().await;
+    guard.live()?.execute_sql(sql).await
 }
 
 #[cfg(test)]
@@ -1686,6 +1701,11 @@ fn backend_column_value_expr(
 /// Root transactions call `BEGIN` on a fresh pool connection. Nested transactions require
 /// `parent_tx_id` and issue `SAVEPOINT` on the parent's connection.
 ///
+/// When the route's session carries session settings, the root `BEGIN` is
+/// immediately followed by one parameter-bound `set_config` batch (see
+/// [`crate::session_settings`]) so every statement in the transaction — nested
+/// savepoints included — runs with the session's settings applied.
+///
 /// Args:
 ///     route (RouteHandle): Resolved route (FF-D D3); `route.tx_id` is the
 ///         *parent* transaction for nested savepoints, or `None` to open a
@@ -1695,8 +1715,9 @@ fn backend_column_value_expr(
 ///     str: Opaque transaction id for `commit_transaction` / `rollback_transaction`.
 ///
 /// # Errors
-/// `PyRuntimeError` when the parent transaction id is unknown, or on
-/// BEGIN/SAVEPOINT failure.
+/// `PyRuntimeError` when the parent transaction id is unknown, when a
+/// settings-bearing session routes a root transaction to a non-Postgres
+/// connection, or on BEGIN/SAVEPOINT/settings-batch failure.
 #[pyfunction]
 #[pyo3(signature = (route))]
 pub fn begin_transaction(
@@ -1725,16 +1746,38 @@ pub fn begin_transaction(
             )?;
         } else {
             let (connection_name, engine, _, _) = route_engine(r)?;
-            let conn = engine
-                .begin_transaction_connection()
-                .await
-                .map_err(|e| crate::errors::map_db_error("Failed to BEGIN", e))?;
+            let handle = match pinned_session(&engine, r.session_id.as_deref())? {
+                // `connection` delivery: the session already owns a
+                // connection carrying its settings at database-session
+                // scope, so this transaction opens on that very connection
+                // and re-applies nothing. The handle shares the pin's slot,
+                // so COMMIT/ROLLBACK end the transaction without returning
+                // the connection — it stays the session's until close.
+                Some(session_id) => {
+                    // The claim is taken before `BEGIN` and released when the
+                    // handle is dropped by COMMIT/ROLLBACK, so a sibling
+                    // task's operation waits for the block instead of landing
+                    // inside it.
+                    let (pin, hold) = hold_pinned_connection(&engine, &session_id).await?;
+                    begin_on_pinned(&pin, "Failed to BEGIN").await?;
+                    TransactionHandle::on_pinned(pin.shared_slot(), connection_name, hold)
+                }
+                // Settings delivery (`transaction` mode): the shared seam
+                // applies the session's set_config batch before any user
+                // statement can run in this transaction. Nested savepoints
+                // need nothing — SET LOCAL is transaction-scoped.
+                None => {
+                    let conn = begin_transaction_with_settings(
+                        &engine,
+                        r.session_id.as_deref(),
+                        "Failed to BEGIN",
+                    )
+                    .await?;
+                    TransactionHandle::root(conn, connection_name)
+                }
+            };
 
-            tx_insert(
-                r.session_id.as_deref(),
-                tx_id.clone(),
-                TransactionHandle::root(conn, connection_name),
-            )?;
+            tx_insert(r.session_id.as_deref(), tx_id.clone(), handle)?;
         }
 
         Ok(tx_id)
@@ -1763,21 +1806,40 @@ pub fn commit_transaction(
         let tx_handle = tx_remove(session_id.as_deref(), &tx_id)?
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?;
 
-        if let Some(savepoint_name) = tx_handle.savepoint_name {
-            execute_transaction_sql(
-                &tx_handle.conn,
-                &format!("RELEASE SAVEPOINT {savepoint_name}"),
-            )
+        let (sql, context) = match &tx_handle.savepoint_name {
+            Some(savepoint_name) => (
+                format!("RELEASE SAVEPOINT {savepoint_name}"),
+                "Failed to RELEASE SAVEPOINT",
+            ),
+            None => ("COMMIT".to_string(), "Failed to COMMIT"),
+        };
+
+        execute_transaction_sql(&tx_handle.conn, &sql)
             .await
-            .map_err(|e| crate::errors::map_db_error("Failed to RELEASE SAVEPOINT", e))?;
-        } else {
-            execute_transaction_sql(&tx_handle.conn, "COMMIT")
-                .await
-                .map_err(|e| crate::errors::map_db_error("Failed to COMMIT", e))?;
-        }
+            .map_err(|e| {
+                discard_pinned_transaction(&tx_handle);
+                crate::errors::map_db_error(context, e)
+            })?;
 
         Ok(())
     })
+}
+
+/// Give up on a session's pinned connection when ending a transaction on it
+/// failed.
+///
+/// A pinned connection outlives its transaction — that is the whole point of
+/// `connection` settings delivery — so a failed `COMMIT`/`ROLLBACK` is not a
+/// local problem here the way it is for a pool connection that is about to be
+/// dropped anyway. The connection may be sitting in an aborted or still-open
+/// transaction, and everything the session does afterwards, its own close
+/// reset included, would fail with it. So it is discarded and the session's
+/// next operation pins a fresh one. Transactions on pool connections
+/// (`transaction` delivery) keep the behaviour they have always had.
+fn discard_pinned_transaction(tx_handle: &TransactionHandle) {
+    if tx_handle.pin_hold.is_some() {
+        discard_connection_slot(&tx_handle.conn);
+    }
 }
 
 /// Return the connection name a transaction was opened on.
@@ -1824,23 +1886,26 @@ pub fn rollback_transaction(
         let tx_handle = tx_remove(session_id.as_deref(), &tx_id)?
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?;
 
-        if let Some(savepoint_name) = tx_handle.savepoint_name {
-            execute_transaction_sql(
-                &tx_handle.conn,
-                &format!("ROLLBACK TO SAVEPOINT {savepoint_name}"),
-            )
-            .await
-            .map_err(|e| crate::errors::map_db_error("Failed to ROLLBACK TO SAVEPOINT", e))?;
-            execute_transaction_sql(
-                &tx_handle.conn,
-                &format!("RELEASE SAVEPOINT {savepoint_name}"),
-            )
-            .await
-            .map_err(|e| crate::errors::map_db_error("Failed to RELEASE SAVEPOINT", e))?;
-        } else {
-            execute_transaction_sql(&tx_handle.conn, "ROLLBACK")
+        let steps: Vec<(String, &str)> = match &tx_handle.savepoint_name {
+            Some(savepoint_name) => vec![
+                (
+                    format!("ROLLBACK TO SAVEPOINT {savepoint_name}"),
+                    "Failed to ROLLBACK TO SAVEPOINT",
+                ),
+                (
+                    format!("RELEASE SAVEPOINT {savepoint_name}"),
+                    "Failed to RELEASE SAVEPOINT",
+                ),
+            ],
+            None => vec![("ROLLBACK".to_string(), "Failed to ROLLBACK")],
+        };
+        for (sql, context) in &steps {
+            execute_transaction_sql(&tx_handle.conn, sql)
                 .await
-                .map_err(|e| crate::errors::map_db_error("Failed to ROLLBACK", e))?;
+                .map_err(|e| {
+                    discard_pinned_transaction(&tx_handle);
+                    crate::errors::map_db_error(context, e)
+                })?;
         }
 
         // Re-acquire the GIL before accessing identity map (async context has no GIL).
@@ -1853,21 +1918,57 @@ pub fn rollback_transaction(
 ///
 /// Args:
 ///     using (str | None): Connection to bind; defaults to the selected default connection.
+///     settings (list[tuple[str, str]] | None): Effective session settings in
+///         declaration order — this session's own settings merged over those it
+///         inherited from an enclosing session. Python has already validated and
+///         merged them (see `ferro.session.Session`). Stored on the session and
+///         applied at every Postgres `BEGIN` it opens.
+///     declared (list[tuple[str, str]] | None): The subset this session declared
+///         itself. Only these are a promise the backend must be able to keep;
+///         inherited settings lie inert on a non-Postgres connection so that
+///         ordinary multi-database nesting keeps working.
 ///
 /// Returns:
 ///     tuple[str, str]: `(session_id, connection_name)`.
 ///
 /// # Errors
-/// Same routing errors as [`crate::state::connection_for_route`].
+/// Same routing errors as [`crate::state::connection_for_route`], plus
+/// `PyRuntimeError` when `declared` is non-empty and the resolved connection is
+/// not Postgres — a tenancy scope the author asked for and the backend cannot
+/// apply fails at open rather than silently no-opping.
 #[pyfunction]
-#[pyo3(signature = (using=None))]
-pub fn open_session(using: Option<String>) -> PyResult<(String, String)> {
-    let (connection_name, _) = active_connection_for_route(using)?;
-    let session_id = register_session();
+#[pyo3(signature = (using=None, settings=None, declared=None))]
+pub fn open_session(
+    using: Option<String>,
+    settings: Option<Vec<SessionSetting>>,
+    declared: Option<Vec<SessionSetting>>,
+) -> PyResult<(String, String)> {
+    let (connection_name, engine) = active_connection_for_route(using)?;
+    ensure_postgres_for_settings(
+        engine.backend(),
+        &connection_name,
+        &declared.unwrap_or_default(),
+    )?;
+    let session_id = register_session(settings.unwrap_or_default());
     Ok((session_id, connection_name))
 }
 
-/// Close a session after all transactions have exited.
+/// Close a session after all transactions have exited, releasing the
+/// connection it pinned (if it pinned one).
+///
+/// A session under `transaction` settings delivery holds nothing to release,
+/// and this awaits no round trip for it. A session under `connection`
+/// delivery holds one pool connection carrying its settings at
+/// database-session scope; closing resets **exactly the keys it set** and
+/// hands the connection back. Never `RESET ALL`: that would also wipe
+/// pool-level state such as the `search_path` Ferro's `after_connect` hook
+/// installs, so every later query on that connection would resolve tables in
+/// the wrong schema.
+///
+/// The session leaves the registry *before* the reset is attempted. That
+/// ordering is what makes a cancelled close safe: the pin is then owned by
+/// this call's own stack, so dropping the future discards the connection
+/// rather than stranding one no session can ever reclaim.
 ///
 /// Args:
 ///     session_id (str): Id returned by `open_session`.
@@ -1876,17 +1977,141 @@ pub fn open_session(using: Option<String>) -> PyResult<(String, String)> {
 ///     None
 ///
 /// # Errors
-/// `PyRuntimeError` when transactions are still active or the session is unknown.
+/// `PyRuntimeError` when transactions are still active, when the session is
+/// unknown, or when the reset fails — in which case the session is closed
+/// regardless and its connection has been discarded rather than pooled.
 #[pyfunction]
-pub fn close_session(session_id: String) -> PyResult<()> {
+pub fn close_session(py: Python<'_>, session_id: String) -> PyResult<Bound<'_, PyAny>> {
     ensure_session_idle_for_close(&session_id)?;
-    if !unregister_session(&session_id) {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Session '{}' is not active",
-            session_id
-        )));
-    }
-    Ok(())
+    let session = unregister_session(&session_id).ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Session '{}' is not active", session_id))
+    })?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let pin = session.pinned.lock().await.take();
+        match pin {
+            Some(pin) => release_pinned_connection(pin).await,
+            None => Ok(()),
+        }
+    })
+}
+
+/// Mutate a live session's effective settings (`Session.set_config`, #411).
+///
+/// `key`/`value` is the ONE validated pair `Session.set_config` is applying —
+/// not the merged whole. The merge (`merge_setting`) happens in here, inside
+/// the serialized section below, against the session's own last-committed
+/// settings (`session.settings_snapshot()`), never against a Python-side
+/// mirror. That is load-bearing, not a style choice: two sibling tasks
+/// calling `set_config` with two different keys at the same time would each
+/// see the SAME stale mirror if the merge happened on the Python side, and
+/// whichever call's wholesale replacement landed second would silently drop
+/// the other's key. Merging server-side against a freshly re-read snapshot,
+/// under a lock that serializes the read and the write together, makes that
+/// race impossible: the second call's snapshot already reflects the first
+/// call's committed merge.
+///
+/// A session's own connection must be Postgres for this to succeed,
+/// regardless of what the session declared (or didn't) at open —
+/// `set_config` is a declaration-equivalent act (PRD #406 / #408's second
+/// amendment): a value the caller explicitly asked to set has to be
+/// honoured, the same promise `open_session` makes for `settings=`. A value a
+/// session only *inherited* is different and never reaches this function at
+/// all — nothing here changes how inherited settings behave.
+///
+/// # The core sequence, and why the order is load-bearing
+///
+/// On a real change, in this exact order, all under `settings_write_lock`:
+///
+/// 1. **Swap** — `session.replace_settings(new)`. This is the commit point:
+///    once it returns, the session's recorded scope IS `new`, unconditionally.
+/// 2. **Evict** — `identity_map_clear`, immediately after the swap, with NO
+///    `.await` in between. Both steps are synchronous (the identity map only
+///    needs the GIL, not I/O), so there is no point between them where an
+///    `asyncio` task cancellation — dropping this future wherever it is
+///    suspended — could land: a future can only be dropped mid-flight at an
+///    `.await` point, and this pair has none. So the swap and the eviction
+///    are, in effect, one atomic step: nothing can ever observe a committed
+///    scope change with a not-yet-evicted identity map.
+/// 3. **Reapply** — deliver the new settings to the session's currently open
+///    transactions (`reapply_settings_to_open_transactions`), which DOES
+///    await (it is a database round trip). If this fails or the caller's
+///    task is cancelled here, the scope swap and the identity-map eviction
+///    already happened at steps 1–2 and are not rolled back — see that
+///    function's docs for why an old-scope read still cannot leak through
+///    the one transaction the failure or cancellation affects.
+///
+/// A no-op call (the merged value equals what the session already had) skips
+/// all three steps — no swap, no eviction, no reapply, not even a round trip.
+///
+/// The very next OPERATION this session runs — transactional or not — reads
+/// the new settings too, because every `BEGIN` re-reads them
+/// (`session_settings_for`); nothing here needs to touch that path. What this
+/// function's step 3 adds on top is delivery into a transaction that is
+/// ALREADY open in the SAME task that called `set_config` — see
+/// `reapply_settings_to_open_transactions`'s docs for the precise
+/// same-task/cross-task concurrency contract.
+///
+/// Args:
+///     session_id (str): Id returned by `open_session`.
+///     connection_name (str): The session's own resolved connection.
+///     key (str): The validated setting key `Session.set_config` is applying.
+///     value (str): The validated setting value.
+///
+/// Returns:
+///     list[tuple[str, str]]: The session's committed effective settings
+///         after this call — the caller's new mirror, whether or not this
+///         particular call changed anything (an unchanged call returns the
+///         same list it already had).
+///
+/// # Errors
+/// `PyRuntimeError` when the session's connection is not Postgres, the
+/// session id is unknown, or reapplying to one of the session's open
+/// transactions fails (in which case the settings swap and identity-map
+/// eviction have already committed regardless — see above).
+#[pyfunction]
+pub fn set_session_config(
+    py: Python<'_>,
+    session_id: String,
+    connection_name: String,
+    key: String,
+    value: String,
+) -> PyResult<Bound<'_, PyAny>> {
+    let engine = engine_for_connection(Some(connection_name.clone()))?;
+    ensure_postgres_for_settings(
+        engine.backend(),
+        &connection_name,
+        &[(key.clone(), value.clone())],
+    )?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let session = session_state(&session_id)?;
+        // Serializes this whole sequence — including the read below — against
+        // any other `set_config` on this session (see the lost-update note
+        // above and `SessionState::lock_settings_for_mutation`).
+        let _serialize = session.lock_settings_for_mutation().await;
+
+        let current = session.settings_snapshot();
+        let new_effective = merge_setting(&current, &key, &value);
+        if !settings_changed(&current, &new_effective) {
+            return Ok(current);
+        }
+
+        // 1. Swap — the commit point.
+        session.replace_settings(new_effective.clone());
+        // 2. Evict, with no `.await` between this and the swap above (see the
+        // doc comment): re-acquire the GIL before touching the identity map
+        // (async context has no GIL) — the same pattern `rollback_transaction`
+        // uses.
+        pyo3::Python::attach(|_py| identity_map_clear(Some(&session_id)))?;
+
+        // 3. Reapply — the only step that awaits. A failure here does not
+        // roll back steps 1–2; see this function's docs and
+        // `reapply_settings_to_open_transactions`'s for why that is sound.
+        deliver_changed_settings(&engine, &session, &new_effective).await?;
+
+        Ok(new_effective)
+    })
 }
 
 /// Fetches all records for a given model class.
@@ -1915,86 +2140,103 @@ pub fn fetch_all<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
-        let session_id = r.session_id.clone();
-        let use_identity_map = engine.is_identity_map_enabled();
 
-        let schema = crate::state::registered_model(&name)?;
-        let table_name = schema.table_name.clone();
-        // ... same sql generation ...
-        let (sql, pk_col, schema_for_decode) = {
-            let pk = schema.meta.pk_col.clone();
-            let mut stmt = Query::select();
-            stmt.column((Alias::new(&table_name), sea_query::Asterisk));
-            let s = sea_query_to_string_for_backend!(stmt.from(Alias::new(&table_name)), backend);
-            (s, pk, schema.clone())
-        };
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Fetch failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        let rows = exec
-            .fetch_all(&sql, &[])
-            .await
-            .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-        let parsed_data = typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref());
+        let outcome = async {
+            let session_id = r.session_id.clone();
+            let use_identity_map = engine.is_identity_map_enabled();
 
-        Python::attach(|py| {
-            let results = pyo3::types::PyList::empty(py);
-            let cls = cls_py.bind(py);
+            let schema = crate::state::registered_model(&name)?;
+            let table_name = schema.table_name.clone();
+            // ... same sql generation ...
+            let (sql, pk_col, schema_for_decode) = {
+                let pk = schema.meta.pk_col.clone();
+                let mut stmt = Query::select();
+                stmt.column((Alias::new(&table_name), sea_query::Asterisk));
+                let s =
+                    sea_query_to_string_for_backend!(stmt.from(Alias::new(&table_name)), backend);
+                (s, pk, schema.clone())
+            };
 
-            let mut py_col_names = HashMap::new();
-            if let Some(first_row) = parsed_data.first() {
-                for (col_name, _) in &first_row.1 {
-                    py_col_names.insert(
-                        col_name.clone(),
-                        pyo3::types::PyString::new(py, col_name).unbind(),
-                    );
+            let rows = exec
+                .fetch_all(&sql, &[])
+                .await
+                .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
+            let parsed_data =
+                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_col.as_deref());
+
+            Python::attach(|py| {
+                let results = pyo3::types::PyList::empty(py);
+                let cls = cls_py.bind(py);
+
+                let mut py_col_names = HashMap::new();
+                if let Some(first_row) = parsed_data.first() {
+                    for (col_name, _) in &first_row.1 {
+                        py_col_names.insert(
+                            col_name.clone(),
+                            pyo3::types::PyString::new(py, col_name).unbind(),
+                        );
+                    }
                 }
-            }
-            let enum_classes = crate::hydration::enum_classes_for(py, cls);
+                let enum_classes = crate::hydration::enum_classes_for(py, cls);
 
-            for (row_pk_val, fields) in parsed_data {
-                if use_identity_map
-                    && let Some(ref pk_val) = row_pk_val
-                    && let Some(existing_obj) = identity_map_get(
-                        py,
-                        session_id.as_deref(),
-                        &(connection_name.clone(), name.clone(), pk_val.clone()),
-                    )?
-                {
-                    let existing = existing_obj.bind(py);
-                    crate::hydration::refresh_model_instance(
+                for (row_pk_val, fields) in parsed_data {
+                    if use_identity_map
+                        && let Some(ref pk_val) = row_pk_val
+                        && let Some(existing_obj) = identity_map_get(
+                            py,
+                            session_id.as_deref(),
+                            &(connection_name.clone(), name.clone(), pk_val.clone()),
+                        )?
+                    {
+                        let existing = existing_obj.bind(py);
+                        crate::hydration::refresh_model_instance(
+                            py,
+                            cls,
+                            existing,
+                            fields,
+                            &py_col_names,
+                            &enum_classes,
+                        )?;
+                        results.append(existing)?;
+                        continue;
+                    }
+
+                    let instance = crate::hydration::hydrate_model_instance(
                         py,
                         cls,
-                        existing,
+                        &connection_name,
                         fields,
                         &py_col_names,
                         &enum_classes,
                     )?;
-                    results.append(existing)?;
-                    continue;
+
+                    if use_identity_map && let Some(pk_val) = row_pk_val {
+                        identity_map_insert(
+                            py,
+                            session_id.as_deref(),
+                            (connection_name.clone(), name.clone(), pk_val),
+                            &instance,
+                        )?;
+                    }
+
+                    results.append(instance)?;
                 }
+                Ok(results.into_any().unbind())
+            })
+        }
+        .await;
 
-                let instance = crate::hydration::hydrate_model_instance(
-                    py,
-                    cls,
-                    &connection_name,
-                    fields,
-                    &py_col_names,
-                    &enum_classes,
-                )?;
-
-                if use_identity_map && let Some(pk_val) = row_pk_val {
-                    identity_map_insert(
-                        py,
-                        session_id.as_deref(),
-                        (connection_name.clone(), name.clone(), pk_val),
-                        &instance,
-                    )?;
-                }
-
-                results.append(instance)?;
-            }
-            Ok(results.into_any().unbind())
-        })
+        scope.finish(outcome).await
     })
 }
 
@@ -2029,97 +2271,111 @@ pub fn fetch_one<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
-        let session_id = r.session_id.clone();
-        let use_identity_map = engine.is_identity_map_enabled();
 
-        let schema = crate::state::registered_model(&name)?;
-        let table_name = schema.table_name.clone();
-        // ... sql logic ...
-        let (sql, bind_values, _pk_col_name, schema_for_decode) = {
-            let pk_name = schema
-                .meta
-                .pk_col
-                .clone()
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
-            let mut stmt = Query::select();
-            stmt.column((Alias::new(&table_name), sea_query::Asterisk));
-            let no_enum_udt = HashMap::new();
-            let no_uuid = HashSet::new();
-            let no_ts: HashMap<String, String> = HashMap::new();
-            let pk_expr = schema_value_expr(
-                &schema,
-                &table_name,
-                &pk_name,
-                &serde_json::Value::String(pk_val.clone()),
-                &no_enum_udt,
-                &no_uuid,
-                &no_ts,
-                backend,
-            )?;
-            let (s, values) = sea_query_build_for_backend!(
-                stmt.from(Alias::new(&table_name))
-                    .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)),
-                backend
-            );
-            (s, values, pk_name, schema.clone())
-        };
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Fetch failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-        let rows = exec
-            .fetch_all(&sql, &engine_bind_values)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-        let parsed_row = typed_rows_to_parsed_data(rows, &schema_for_decode, None)
-            .into_iter()
-            .next()
-            .map(|(_, fields)| fields);
+        let outcome = async {
+            let session_id = r.session_id.clone();
+            let use_identity_map = engine.is_identity_map_enabled();
 
-        match parsed_row {
-            Some(fields) => Python::attach(|py| {
-                let cls = cls_py.bind(py);
-                let py_col_names = HashMap::new();
-                let enum_classes = crate::hydration::enum_classes_for(py, cls);
+            let schema = crate::state::registered_model(&name)?;
+            let table_name = schema.table_name.clone();
+            // ... sql logic ...
+            let (sql, bind_values, _pk_col_name, schema_for_decode) = {
+                let pk_name =
+                    schema.meta.pk_col.clone().ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("No primary key")
+                    })?;
+                let mut stmt = Query::select();
+                stmt.column((Alias::new(&table_name), sea_query::Asterisk));
+                let no_enum_udt = HashMap::new();
+                let no_uuid = HashSet::new();
+                let no_ts: HashMap<String, String> = HashMap::new();
+                let pk_expr = schema_value_expr(
+                    &schema,
+                    &table_name,
+                    &pk_name,
+                    &serde_json::Value::String(pk_val.clone()),
+                    &no_enum_udt,
+                    &no_uuid,
+                    &no_ts,
+                    backend,
+                )?;
+                let (s, values) = sea_query_build_for_backend!(
+                    stmt.from(Alias::new(&table_name))
+                        .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)),
+                    backend
+                );
+                (s, values, pk_name, schema.clone())
+            };
 
-                if use_identity_map
-                    && let Some(existing_obj) = identity_map_get(
-                        py,
-                        session_id.as_deref(),
-                        &(connection_name.clone(), name.clone(), pk_val.clone()),
-                    )?
-                {
-                    let existing = existing_obj.bind(py);
-                    crate::hydration::refresh_model_instance(
+            let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+            let rows = exec
+                .fetch_all(&sql, &engine_bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
+            let parsed_row = typed_rows_to_parsed_data(rows, &schema_for_decode, None)
+                .into_iter()
+                .next()
+                .map(|(_, fields)| fields);
+
+            match parsed_row {
+                Some(fields) => Python::attach(|py| {
+                    let cls = cls_py.bind(py);
+                    let py_col_names = HashMap::new();
+                    let enum_classes = crate::hydration::enum_classes_for(py, cls);
+
+                    if use_identity_map
+                        && let Some(existing_obj) = identity_map_get(
+                            py,
+                            session_id.as_deref(),
+                            &(connection_name.clone(), name.clone(), pk_val.clone()),
+                        )?
+                    {
+                        let existing = existing_obj.bind(py);
+                        crate::hydration::refresh_model_instance(
+                            py,
+                            cls,
+                            existing,
+                            fields,
+                            &py_col_names,
+                            &enum_classes,
+                        )?;
+                        return Ok(existing.clone().unbind());
+                    }
+
+                    let instance = crate::hydration::hydrate_model_instance(
                         py,
                         cls,
-                        existing,
+                        &connection_name,
                         fields,
                         &py_col_names,
                         &enum_classes,
                     )?;
-                    return Ok(existing.clone().unbind());
-                }
-
-                let instance = crate::hydration::hydrate_model_instance(
-                    py,
-                    cls,
-                    &connection_name,
-                    fields,
-                    &py_col_names,
-                    &enum_classes,
-                )?;
-                if use_identity_map {
-                    identity_map_insert(
-                        py,
-                        session_id.as_deref(),
-                        (connection_name.clone(), name.clone(), pk_val),
-                        &instance,
-                    )?;
-                }
-                Ok(instance.into_any().unbind())
-            }),
-            None => Python::attach(|py| Ok(py.None())),
+                    if use_identity_map {
+                        identity_map_insert(
+                            py,
+                            session_id.as_deref(),
+                            (connection_name.clone(), name.clone(), pk_val),
+                            &instance,
+                        )?;
+                    }
+                    Ok(instance.into_any().unbind())
+                }),
+                None => Python::attach(|py| Ok(py.None())),
+            }
         }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -2314,54 +2570,68 @@ pub fn save_record<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
-        let schema = crate::state::registered_model(&name)?;
-        let table_name = schema.table_name.clone();
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Save failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        let pk_col = schema.meta.pk_col.clone();
-        let pk_is_auto = schema.meta.pk_autoincrement;
+        let outcome = async {
+            let schema = crate::state::registered_model(&name)?;
+            let table_name = schema.table_name.clone();
 
-        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
-        let TableCatalog {
-            enum_udt,
-            uuid_columns,
-            ts_cast,
-        } = &*catalog;
-        let (sql, bind_values, needs_postgres_returning) = build_save_sql(
-            &schema,
-            &table_name,
-            &bind_inputs,
-            pk_col.as_deref(),
-            pk_is_auto,
-            mode,
-            backend,
-            enum_udt,
-            uuid_columns,
-            ts_cast,
-        )?;
+            let pk_col = schema.meta.pk_col.clone();
+            let pk_is_auto = schema.meta.pk_autoincrement;
 
-        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-        if needs_postgres_returning {
-            let rows = exec
-                .fetch_all(&sql, &engine_bind_values)
-                .await
-                .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-            // FF-G G4a: return the RETURNING value as decoded. A
-            // non-positive id is a legitimate PK (sequence MINVALUE
-            // <= 0); only a missing row / non-integer PK maps to None.
-            let id = rows
-                .first()
-                .and_then(|row| row.values.first())
-                .and_then(|(_, value)| value.as_i64());
-            Ok(id)
-        } else {
-            let exec_res = exec
-                .execute_result(&sql, &engine_bind_values)
-                .await
-                .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-            Ok(exec_res.last_insert_id)
+            let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
+            let TableCatalog {
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+            } = &*catalog;
+            let (sql, bind_values, needs_postgres_returning) = build_save_sql(
+                &schema,
+                &table_name,
+                &bind_inputs,
+                pk_col.as_deref(),
+                pk_is_auto,
+                mode,
+                backend,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+            )?;
+
+            let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+            if needs_postgres_returning {
+                let rows = exec
+                    .fetch_all(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+                // FF-G G4a: return the RETURNING value as decoded. A
+                // non-positive id is a legitimate PK (sequence MINVALUE
+                // <= 0); only a missing row / non-integer PK maps to None.
+                let id = rows
+                    .first()
+                    .and_then(|row| row.values.first())
+                    .and_then(|(_, value)| value.as_i64());
+                Ok(id)
+            } else {
+                let exec_res = exec
+                    .execute_result(&sql, &engine_bind_values)
+                    .await
+                    .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+                Ok(exec_res.last_insert_id)
+            }
         }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -2394,57 +2664,71 @@ pub fn update_record<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
-        let schema = crate::state::registered_model(&name)?;
-        let table_name = schema.table_name.clone();
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Update failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        let pk_col = schema.meta.pk_col.clone();
+        let outcome = async {
+            let schema = crate::state::registered_model(&name)?;
+            let table_name = schema.table_name.clone();
 
-        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
-        let TableCatalog {
-            enum_udt,
-            uuid_columns,
-            ts_cast,
-        } = &*catalog;
+            let pk_col = schema.meta.pk_col.clone();
 
-        let plan = build_update_by_pk_sql(
-            &schema,
-            &table_name,
-            &bind_inputs,
-            pk_col.as_deref(),
-            backend,
-            enum_udt,
-            uuid_columns,
-            ts_cast,
-        )?;
+            let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
+            let TableCatalog {
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+            } = &*catalog;
 
-        match plan {
-            UpdateByPkSql::Update(sql, bind_values) => {
-                let rows_affected = execute_statement_with_optional_tx(
-                    &engine,
-                    tx_conn.as_ref(),
-                    &sql,
-                    &bind_values.0,
-                )
-                .await
-                .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
-                Ok(rows_affected)
-            }
-            UpdateByPkSql::ExistenceCheck(sql, bind_values) => {
-                let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-                let rows = exec
-                    .fetch_all(&sql, &engine_bind_values)
+            let plan = build_update_by_pk_sql(
+                &schema,
+                &table_name,
+                &bind_inputs,
+                pk_col.as_deref(),
+                backend,
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+            )?;
+
+            match plan {
+                UpdateByPkSql::Update(sql, bind_values) => {
+                    let rows_affected = execute_statement_with_optional_tx(
+                        &engine,
+                        scope.connection(),
+                        &sql,
+                        &bind_values.0,
+                    )
                     .await
                     .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
-                let count = rows
-                    .first()
-                    .and_then(|row| row.values.first())
-                    .and_then(|(_, value)| value.as_i64())
-                    .unwrap_or(0);
-                Ok(count.max(0) as u64)
+                    Ok(rows_affected)
+                }
+                UpdateByPkSql::ExistenceCheck(sql, bind_values) => {
+                    let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+                    let rows = exec
+                        .fetch_all(&sql, &engine_bind_values)
+                        .await
+                        .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
+                    let count = rows
+                        .first()
+                        .and_then(|row| row.values.first())
+                        .and_then(|(_, value)| value.as_i64())
+                        .unwrap_or(0);
+                    Ok(count.max(0) as u64)
+                }
             }
         }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -2483,7 +2767,6 @@ pub fn save_bulk_records<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
         let schema = crate::state::registered_model(&name)?;
         let table_name = schema.table_name.clone();
@@ -2494,13 +2777,6 @@ pub fn save_bulk_records<'py>(
 
         let pk_col = schema.meta.pk_col.clone();
         let pk_is_auto = schema.meta.pk_autoincrement;
-
-        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
-        let TableCatalog {
-            enum_udt,
-            uuid_columns,
-            ts_cast,
-        } = &*catalog;
 
         // Columns come from the first row's order (skip a null auto-pk).
         let mut column_names: Vec<String> = Vec::new();
@@ -2518,85 +2794,101 @@ pub fn save_bulk_records<'py>(
         let rows_per_stmt =
             bulk_insert_rows_per_statement(engine.max_bind_params(), column_names.len());
 
-        let mut statements: Vec<(String, sea_query::Values)> = Vec::new();
-        for chunk in record_inputs.chunks(rows_per_stmt) {
-            let mut insert_stmt = InsertStatement::new()
-                .into_table(Alias::new(&table_name))
-                .to_owned();
-            insert_stmt.columns(column_names.iter().map(|c| Alias::new(c)));
+        // A chunked batch must stay all-or-nothing: the single statement it
+        // replaces was atomic, and chunking must not regress that (#298). So
+        // this is the one operation that asks for the wrap on its own account,
+        // in a session with no settings to deliver. A settings-bearing session
+        // wraps it either way — otherwise whether a `bulk_create` was
+        // tenant-scoped would depend on whether the batch happened to be big
+        // enough to chunk, and tenancy must not be a function of input size.
+        //
+        // The chunk arithmetic needs no round-trip, so deciding it here keeps
+        // every statement the batch sends — the catalog probe included —
+        // inside the wrap.
+        let atomic_required = record_inputs.len() > rows_per_stmt;
 
-            let null_input = BindInput::Json(serde_json::Value::Null);
-            for row in chunk {
-                let lookup: std::collections::HashMap<&str, &BindInput> =
-                    row.iter().map(|(k, v)| (k.as_str(), v)).collect();
-                let mut row_values = Vec::with_capacity(column_names.len());
-                for col in &column_names {
-                    let input = lookup.get(col.as_str()).copied().unwrap_or(&null_input);
-                    row_values.push(bind_input_to_expr(
-                        &schema,
-                        &table_name,
-                        col,
-                        input,
-                        enum_udt,
-                        uuid_columns,
-                        ts_cast,
-                        backend,
-                    )?);
-                }
-                insert_stmt.values(row_values).map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Statement build failed: {}",
-                        e
-                    ))
-                })?;
-            }
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            atomic_required,
+            &format!("Bulk save failed for '{}'", name),
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-            let (s, values) = sea_query_build_for_backend!(insert_stmt, backend);
-            statements.push((s, values));
-        }
+        let outcome = async {
+            let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
+            let TableCatalog {
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+            } = &*catalog;
 
-        // A bare multi-statement call opens its own transaction: the single
-        // statement it replaces was atomic, and chunking must not regress
-        // that. With an ambient transaction (or a single statement) the
-        // existing execution path already gives the right boundary.
-        let own_tx: Option<TransactionConnection> = if tx_conn.is_none() && statements.len() > 1 {
-            let conn = engine.begin_transaction_connection().await.map_err(|e| {
-                crate::errors::map_db_error(&format!("Bulk save failed for '{}'", name), e)
-            })?;
-            Some(Arc::new(tokio::sync::Mutex::new(conn)))
-        } else {
-            None
-        };
-        let exec_conn = tx_conn.as_ref().or(own_tx.as_ref());
+            let mut statements: Vec<(String, sea_query::Values)> = Vec::new();
+            for chunk in record_inputs.chunks(rows_per_stmt) {
+                let mut insert_stmt = InsertStatement::new()
+                    .into_table(Alias::new(&table_name))
+                    .to_owned();
+                insert_stmt.columns(column_names.iter().map(|c| Alias::new(c)));
 
-        let mut rows_affected: u64 = 0;
-        for (sql, bind_values) in &statements {
-            let executed =
-                execute_statement_with_optional_tx(&engine, exec_conn, sql, &bind_values.0).await;
-            match executed {
-                Ok(n) => rows_affected += n,
-                Err(e) => {
-                    if let Some(own_tx) = &own_tx {
-                        // Surface the insert failure even if ROLLBACK also
-                        // fails — a dead connection aborts the transaction
-                        // server-side, so the root cause is the honest error.
-                        let _ = execute_transaction_sql(own_tx, "ROLLBACK").await;
+                let null_input = BindInput::Json(serde_json::Value::Null);
+                for row in chunk {
+                    let lookup: std::collections::HashMap<&str, &BindInput> =
+                        row.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                    let mut row_values = Vec::with_capacity(column_names.len());
+                    for col in &column_names {
+                        let input = lookup.get(col.as_str()).copied().unwrap_or(&null_input);
+                        row_values.push(bind_input_to_expr(
+                            &schema,
+                            &table_name,
+                            col,
+                            input,
+                            enum_udt,
+                            uuid_columns,
+                            ts_cast,
+                            backend,
+                        )?);
                     }
-                    return Err(crate::errors::map_db_error(
-                        &format!("Bulk save failed for '{}'", name),
-                        e,
-                    ));
+                    insert_stmt.values(row_values).map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "Statement build failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+
+                let (s, values) = sea_query_build_for_backend!(insert_stmt, backend);
+                statements.push((s, values));
+            }
+
+            let mut rows_affected: u64 = 0;
+            for (sql, bind_values) in &statements {
+                let executed = execute_statement_with_optional_tx(
+                    &engine,
+                    scope.connection(),
+                    sql,
+                    &bind_values.0,
+                )
+                .await;
+                match executed {
+                    // The scope rolls the whole batch back on the way out, so
+                    // a chunk that fails takes every earlier chunk with it.
+                    Ok(n) => rows_affected += n,
+                    Err(e) => {
+                        return Err(crate::errors::map_db_error(
+                            &format!("Bulk save failed for '{}'", name),
+                            e,
+                        ));
+                    }
                 }
             }
-        }
 
-        if let Some(own_tx) = &own_tx {
-            execute_transaction_sql(own_tx, "COMMIT")
-                .await
-                .map_err(|e| crate::errors::map_db_error("Failed to COMMIT", e))?;
+            Ok(rows_affected)
         }
+        .await;
 
-        Ok(rows_affected)
+        scope.finish(outcome).await
     })
 }
 
@@ -2743,344 +3035,373 @@ pub fn fetch_filtered<'py>(
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
-        let use_identity_map = engine.is_identity_map_enabled();
 
-        let schema = crate::state::registered_model(&name)?;
-        let table_name = schema.table_name.clone();
-        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
-        plan.postgres_enum_udt = catalog.enum_udt.clone();
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Fetch failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        // Relation-traversal JOINs (#270): the M2M association table (when
-        // present) is reserved so a relation alias can never collide with it.
-        // The join plan is built up front so each hop table's registration +
-        // enum catalog can be resolved before conditions bind (#270 critical).
-        let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
-        let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
-        let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
-        populate_hop_bind_context(&mut plan, &join_plan, &engine, exec, backend).await?;
-        // Included hops (#286): resolved after the bind context, so every
-        // include-edge table's registration is already in place.
-        let include_hops = match &include_paths {
-            Some(paths) => resolve_include_hops(paths, &join_plan, &plan)?,
-            None => Vec::new(),
-        };
-        // ...
-        let (sql, bind_values, pk_col, schema_for_decode) = {
-            let pk = schema.meta.pk_col.clone();
+        let outcome = async {
+            let use_identity_map = engine.is_identity_map_enabled();
 
-            let mut select = Query::select();
-            apply_select_list(&mut select, &table_name, projected.as_deref(), &join_plan)?;
-            apply_include_select_list(&mut select, &include_hops);
-            select.from(Alias::new(&table_name));
+            let schema = crate::state::registered_model(&name)?;
+            let table_name = schema.table_name.clone();
+            let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
+            plan.postgres_enum_udt = catalog.enum_udt.clone();
 
-            if let Some(m2m) = &plan.m2m {
-                let join_table = Alias::new(&m2m.join_table);
-                let source_col = Alias::new(&m2m.source_col);
-                let target_col = Alias::new(&m2m.target_col);
-                let pk_name = pk.as_ref().ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("No primary key for M2M join")
+            // Relation-traversal JOINs (#270): the M2M association table (when
+            // present) is reserved so a relation alias can never collide with it.
+            // The join plan is built up front so each hop table's registration +
+            // enum catalog can be resolved before conditions bind (#270 critical).
+            let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
+            let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
+            let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
+            populate_hop_bind_context(&mut plan, &join_plan, &engine, exec, backend).await?;
+            // Included hops (#286): resolved after the bind context, so every
+            // include-edge table's registration is already in place.
+            let include_hops = match &include_paths {
+                Some(paths) => resolve_include_hops(paths, &join_plan, &plan)?,
+                None => Vec::new(),
+            };
+            // ...
+            let (sql, bind_values, pk_col, schema_for_decode) = {
+                let pk = schema.meta.pk_col.clone();
+
+                let mut select = Query::select();
+                apply_select_list(&mut select, &table_name, projected.as_deref(), &join_plan)?;
+                apply_include_select_list(&mut select, &include_hops);
+                select.from(Alias::new(&table_name));
+
+                if let Some(m2m) = &plan.m2m {
+                    let join_table = Alias::new(&m2m.join_table);
+                    let source_col = Alias::new(&m2m.source_col);
+                    let target_col = Alias::new(&m2m.target_col);
+                    let pk_name = pk.as_ref().ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("No primary key for M2M join")
+                    })?;
+
+                    select.inner_join(
+                        join_table.clone(),
+                        Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
+                            .equals((join_table.clone(), target_col.clone())),
+                    );
+                    select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
+                        plan.value_rhs_simple_expr_for_backend(
+                            &m2m.source_col,
+                            &m2m.source_id,
+                            true,
+                            backend,
+                        ),
+                    ));
+                }
+
+                apply_relation_joins(&mut select, &join_plan)?;
+
+                // WHERE columns are qualified by their relation-path alias (root leaf ->
+                // root table, path leaf -> its JOIN alias). A path with no matching join
+                // entry is a loud error, never a silently unqualified column.
+                let mut condition =
+                    query_condition_with_joins(&plan, backend, &table_name, &join_plan)?;
+                if let Some(after) = plan
+                    .after_condition(backend, &table_name, &join_plan)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?
+                {
+                    condition = condition.add(after);
+                }
+                if let Some(before) = plan
+                    .before_condition(backend, &table_name, &join_plan)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?
+                {
+                    condition = condition.add(before);
+                }
+                select.cond_where(condition);
+                // ORDER BY terms are qualified the same way as WHERE leaves: an empty
+                // path qualifies by the root table, a relation path by its JOIN alias
+                // (#271). A path with no matching join entry is a loud error — the
+                // Python builder always registers the join for an order_by path, so
+                // this is defense-in-depth, never reachable in normal use. On a
+                // record plan the term resolves output field names FIRST (#295):
+                // a matching name renders as the bare result-column alias.
+                // `before` inverts direction and first↔last (`native` stays
+                // `native`) so LIMIT n fetches the adjacent previous page (#395).
+                let order_by = plan
+                    .order_by_for_select()
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                for order in &order_by {
+                    let col = match projected.as_deref() {
+                        Some(fields) => {
+                            record_order_by_expr(order, fields, &table_name, &join_plan)?
+                        }
+                        None => crate::query::qualify_column_with_joins(
+                            &table_name,
+                            &join_plan,
+                            &order.column,
+                            &order.path,
+                        )
+                        .map_err(pyo3::exceptions::PyValueError::new_err)?,
+                    };
+                    apply_order_by_term(&mut select, col.into(), order)?;
+                }
+                if let Some(limit) = plan.limit.flatten() {
+                    select.limit(limit);
+                }
+                if let Some(offset) = plan.offset.flatten() {
+                    select.offset(offset);
+                }
+                let (s, values) = sea_query_build_for_backend!(select, backend);
+                (s, values, pk, schema.clone())
+            };
+
+            let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+            let rows = exec
+                .fetch_all(&sql, &engine_bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
+            // A record plan skips PK extraction entirely: projected records carry
+            // no persistence identity and never enter the identity map (ADR-0007)
+            // — the projection may not even include the PK column. Decode itself
+            // runs through the owning model's codec plan either way (the root's,
+            // or a hop registration's for a traversed field, #293), so a
+            // projected datetime/uuid/enum/decimal column decodes identically to
+            // full hydration on both backends.
+            let pk_for_decode = if projected.is_some() {
+                None
+            } else {
+                pk_col.as_deref()
+            };
+
+            if include_paths.is_some() {
+                // Instances path (#286): decode root + hops (each against its own
+                // model's codec plan), then hydrate the populated graph — every
+                // node through the full identity-map protocol.
+                let parsed_data = instances_rows_to_parsed_data(
+                    rows,
+                    &schema_for_decode,
+                    pk_for_decode,
+                    &include_hops,
+                );
+                // Validated when the plan was parsed, so this is unreachable —
+                // but a panic here would unwind straight across the FFI
+                // boundary (AGENTS.md I-3) and past the scope's `finish`.
+                let hop_classes_py = hop_classes_py.ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "Query plan includes related rows but carries no hop classes to \
+                         hydrate them with",
+                    )
                 })?;
 
-                select.inner_join(
-                    join_table.clone(),
-                    Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
-                        .equals((join_table.clone(), target_col.clone())),
-                );
-                select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
-                    plan.value_rhs_simple_expr_for_backend(
-                        &m2m.source_col,
-                        &m2m.source_id,
-                        true,
-                        backend,
-                    ),
-                ));
-            }
+                return Python::attach(|py| {
+                    let results = pyo3::types::PyList::empty(py);
+                    let cls = cls_py.bind(py);
+                    let hop_classes = hop_classes_py.bind(py);
 
-            apply_relation_joins(&mut select, &join_plan)?;
+                    // Per-hop Python context, resolved once per fetch (not per
+                    // row): class, registry identity, enum catalog, interned
+                    // column names.
+                    struct HopPyCtx<'py> {
+                        cls: Bound<'py, PyAny>,
+                        identity: String,
+                        enum_classes: HashMap<String, Bound<'py, PyAny>>,
+                        py_col_names: HashMap<String, Py<pyo3::types::PyString>>,
+                    }
+                    let mut hop_ctx: Vec<HopPyCtx<'_>> = Vec::with_capacity(include_hops.len());
+                    for (i, hop) in include_hops.iter().enumerate() {
+                        let hop_cls =
+                            hop_classes.get_item(hop.table.as_str())?.ok_or_else(|| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "fetch_filtered(): hop_classes has no model class \
+                                     for included table {:?}.",
+                                    hop.table
+                                ))
+                            })?;
+                        let identity = crate::state::model_identity(&hop_cls)?;
+                        let enum_classes = crate::hydration::enum_classes_for(py, &hop_cls);
+                        let mut py_col_names = HashMap::new();
+                        if let Some((_, first_hops)) = parsed_data.first() {
+                            for (col_name, _) in &first_hops[i].1 {
+                                py_col_names.insert(
+                                    col_name.clone(),
+                                    pyo3::types::PyString::new(py, col_name).unbind(),
+                                );
+                            }
+                        }
+                        hop_ctx.push(HopPyCtx {
+                            cls: hop_cls,
+                            identity,
+                            enum_classes,
+                            py_col_names,
+                        });
+                    }
 
-            // WHERE columns are qualified by their relation-path alias (root leaf ->
-            // root table, path leaf -> its JOIN alias). A path with no matching join
-            // entry is a loud error, never a silently unqualified column.
-            let mut condition =
-                query_condition_with_joins(&plan, backend, &table_name, &join_plan)?;
-            if let Some(after) = plan
-                .after_condition(backend, &table_name, &join_plan)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?
-            {
-                condition = condition.add(after);
-            }
-            if let Some(before) = plan
-                .before_condition(backend, &table_name, &join_plan)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?
-            {
-                condition = condition.add(before);
-            }
-            select.cond_where(condition);
-            // ORDER BY terms are qualified the same way as WHERE leaves: an empty
-            // path qualifies by the root table, a relation path by its JOIN alias
-            // (#271). A path with no matching join entry is a loud error — the
-            // Python builder always registers the join for an order_by path, so
-            // this is defense-in-depth, never reachable in normal use. On a
-            // record plan the term resolves output field names FIRST (#295):
-            // a matching name renders as the bare result-column alias.
-            // `before` inverts direction and first↔last (`native` stays
-            // `native`) so LIMIT n fetches the adjacent previous page (#395).
-            let order_by = plan
-                .order_by_for_select()
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
-            for order in &order_by {
-                let col = match projected.as_deref() {
-                    Some(fields) => record_order_by_expr(order, fields, &table_name, &join_plan)?,
-                    None => crate::query::qualify_column_with_joins(
-                        &table_name,
-                        &join_plan,
-                        &order.column,
-                        &order.path,
-                    )
-                    .map_err(pyo3::exceptions::PyValueError::new_err)?,
-                };
-                apply_order_by_term(&mut select, col.into(), order)?;
-            }
-            if let Some(limit) = plan.limit.flatten() {
-                select.limit(limit);
-            }
-            if let Some(offset) = plan.offset.flatten() {
-                select.offset(offset);
-            }
-            let (s, values) = sea_query_build_for_backend!(select, backend);
-            (s, values, pk, schema.clone())
-        };
-
-        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-        let rows = exec
-            .fetch_all(&sql, &engine_bind_values)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Fetch failed", e))?;
-        // A record plan skips PK extraction entirely: projected records carry
-        // no persistence identity and never enter the identity map (ADR-0007)
-        // — the projection may not even include the PK column. Decode itself
-        // runs through the owning model's codec plan either way (the root's,
-        // or a hop registration's for a traversed field, #293), so a
-        // projected datetime/uuid/enum/decimal column decodes identically to
-        // full hydration on both backends.
-        let pk_for_decode = if projected.is_some() {
-            None
-        } else {
-            pk_col.as_deref()
-        };
-
-        if include_paths.is_some() {
-            // Instances path (#286): decode root + hops (each against its own
-            // model's codec plan), then hydrate the populated graph — every
-            // node through the full identity-map protocol.
-            let parsed_data = instances_rows_to_parsed_data(
-                rows,
-                &schema_for_decode,
-                pk_for_decode,
-                &include_hops,
-            );
-            let hop_classes_py =
-                hop_classes_py.expect("validated above: an instances plan carries hop_classes");
-
-            return Python::attach(|py| {
-                let results = pyo3::types::PyList::empty(py);
-                let cls = cls_py.bind(py);
-                let hop_classes = hop_classes_py.bind(py);
-
-                // Per-hop Python context, resolved once per fetch (not per
-                // row): class, registry identity, enum catalog, interned
-                // column names.
-                struct HopPyCtx<'py> {
-                    cls: Bound<'py, PyAny>,
-                    identity: String,
-                    enum_classes: HashMap<String, Bound<'py, PyAny>>,
-                    py_col_names: HashMap<String, Py<pyo3::types::PyString>>,
-                }
-                let mut hop_ctx: Vec<HopPyCtx<'_>> = Vec::with_capacity(include_hops.len());
-                for (i, hop) in include_hops.iter().enumerate() {
-                    let hop_cls = hop_classes.get_item(hop.table.as_str())?.ok_or_else(|| {
-                        pyo3::exceptions::PyValueError::new_err(format!(
-                            "fetch_filtered(): hop_classes has no model class \
-                                 for included table {:?}.",
-                            hop.table
-                        ))
-                    })?;
-                    let identity = crate::state::model_identity(&hop_cls)?;
-                    let enum_classes = crate::hydration::enum_classes_for(py, &hop_cls);
                     let mut py_col_names = HashMap::new();
-                    if let Some((_, first_hops)) = parsed_data.first() {
-                        for (col_name, _) in &first_hops[i].1 {
+                    if let Some((first_root, _)) = parsed_data.first() {
+                        for (col_name, _) in &first_root.1 {
                             py_col_names.insert(
                                 col_name.clone(),
                                 pyo3::types::PyString::new(py, col_name).unbind(),
                             );
                         }
                     }
-                    hop_ctx.push(HopPyCtx {
-                        cls: hop_cls,
-                        identity,
-                        enum_classes,
-                        py_col_names,
-                    });
-                }
+                    let enum_classes = crate::hydration::enum_classes_for(py, cls);
+
+                    for ((root_pk, root_fields), hop_rows) in parsed_data {
+                        let root_obj = materialize_model_row(
+                            py,
+                            cls,
+                            &connection_name,
+                            &name,
+                            session_id.as_deref(),
+                            use_identity_map,
+                            root_pk,
+                            root_fields,
+                            &py_col_names,
+                            &enum_classes,
+                        )?;
+
+                        // Walk the hops parent-before-child, tracking this row's
+                        // materialized node per path. A populated-`None` (or a
+                        // parent skipped under one) ends its chain: deeper hops
+                        // have nothing to attach to.
+                        let mut populated: HashMap<&[String], Option<Bound<'_, PyAny>>> =
+                            HashMap::new();
+                        for ((hop, ctx), (hop_pk, hop_fields)) in
+                            include_hops.iter().zip(&hop_ctx).zip(hop_rows)
+                        {
+                            let parent = if hop.parent_path.is_empty() {
+                                Some(root_obj.clone())
+                            } else {
+                                match populated.get(hop.parent_path.as_slice()) {
+                                    Some(Some(obj)) => Some(obj.clone()),
+                                    _ => None,
+                                }
+                            };
+                            let Some(parent) = parent else { continue };
+                            if hop_pk.is_none() {
+                                // The LEFT join matched no row ⟺ the FK is NULL:
+                                // populate `None` (truthful to the declared
+                                // `| None` type), root row retained.
+                                crate::hydration::set_populated_relation(
+                                    py,
+                                    &parent,
+                                    &hop.relation,
+                                    None,
+                                )?;
+                                populated.insert(hop.path.as_slice(), None);
+                                continue;
+                            }
+                            let instance = materialize_model_row(
+                                py,
+                                &ctx.cls,
+                                &connection_name,
+                                &ctx.identity,
+                                session_id.as_deref(),
+                                use_identity_map,
+                                hop_pk,
+                                hop_fields,
+                                &ctx.py_col_names,
+                                &ctx.enum_classes,
+                            )?;
+                            crate::hydration::set_populated_relation(
+                                py,
+                                &parent,
+                                &hop.relation,
+                                Some(&instance),
+                            )?;
+                            populated.insert(hop.path.as_slice(), Some(instance));
+                        }
+
+                        results.append(root_obj)?;
+                    }
+                    Ok(results.into_any().unbind())
+                });
+            }
+
+            let parsed_data = if let Some(fields) = &projected {
+                record_rows_to_parsed_data(rows, fields, &schema_for_decode, &plan, &join_plan)?
+            } else {
+                typed_rows_to_parsed_data(rows, &schema_for_decode, pk_for_decode)
+            };
+
+            Python::attach(|py| {
+                let results = pyo3::types::PyList::empty(py);
+                let cls = cls_py.bind(py);
 
                 let mut py_col_names = HashMap::new();
-                if let Some((first_root, _)) = parsed_data.first() {
-                    for (col_name, _) in &first_root.1 {
+                if let Some(first_row) = parsed_data.first() {
+                    for (col_name, _) in &first_row.1 {
                         py_col_names.insert(
                             col_name.clone(),
                             pyo3::types::PyString::new(py, col_name).unbind(),
                         );
                     }
                 }
+
+                if let Some(record_cls) = record_cls_py {
+                    // Record path (#279): direct-to-dict record construction,
+                    // deliberately bypassing the identity map — no lookup, no
+                    // insert, no refresh of live instances. The enum catalog is
+                    // built per OUTPUT field name from each source column's
+                    // OWNING model (#293) — the root's for plain fields, the hop
+                    // class's for traversed ones — so a projected enum column
+                    // hydrates the same enum member as full hydration would
+                    // (decode parity, FF-C C4), aliases included.
+                    // Validated when the plan was parsed; an error rather than a
+                    // panic because panics cross the FFI boundary (I-3).
+                    let fields_spec = projected.as_ref().ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "Query plan builds records but projects no fields for them",
+                        )
+                    })?;
+                    let record_enum_classes = record_enum_classes_for(
+                        py,
+                        cls,
+                        fields_spec,
+                        hop_classes_py.as_ref(),
+                        &join_plan,
+                    )?;
+                    let record_cls = record_cls.bind(py);
+                    for (_, fields) in parsed_data {
+                        let record = crate::hydration::hydrate_record_instance(
+                            py,
+                            record_cls,
+                            fields,
+                            &py_col_names,
+                            &record_enum_classes,
+                        )?;
+                        results.append(record)?;
+                    }
+                    return Ok(results.into_any().unbind());
+                }
+
+                // The MODEL's enum catalog for full hydration (FF-C C4).
                 let enum_classes = crate::hydration::enum_classes_for(py, cls);
 
-                for ((root_pk, root_fields), hop_rows) in parsed_data {
-                    let root_obj = materialize_model_row(
+                for (row_pk_val, fields) in parsed_data {
+                    let instance = materialize_model_row(
                         py,
                         cls,
                         &connection_name,
                         &name,
                         session_id.as_deref(),
                         use_identity_map,
-                        root_pk,
-                        root_fields,
+                        row_pk_val,
+                        fields,
                         &py_col_names,
                         &enum_classes,
                     )?;
-
-                    // Walk the hops parent-before-child, tracking this row's
-                    // materialized node per path. A populated-`None` (or a
-                    // parent skipped under one) ends its chain: deeper hops
-                    // have nothing to attach to.
-                    let mut populated: HashMap<&[String], Option<Bound<'_, PyAny>>> =
-                        HashMap::new();
-                    for ((hop, ctx), (hop_pk, hop_fields)) in
-                        include_hops.iter().zip(&hop_ctx).zip(hop_rows)
-                    {
-                        let parent = if hop.parent_path.is_empty() {
-                            Some(root_obj.clone())
-                        } else {
-                            match populated.get(hop.parent_path.as_slice()) {
-                                Some(Some(obj)) => Some(obj.clone()),
-                                _ => None,
-                            }
-                        };
-                        let Some(parent) = parent else { continue };
-                        if hop_pk.is_none() {
-                            // The LEFT join matched no row ⟺ the FK is NULL:
-                            // populate `None` (truthful to the declared
-                            // `| None` type), root row retained.
-                            crate::hydration::set_populated_relation(
-                                py,
-                                &parent,
-                                &hop.relation,
-                                None,
-                            )?;
-                            populated.insert(hop.path.as_slice(), None);
-                            continue;
-                        }
-                        let instance = materialize_model_row(
-                            py,
-                            &ctx.cls,
-                            &connection_name,
-                            &ctx.identity,
-                            session_id.as_deref(),
-                            use_identity_map,
-                            hop_pk,
-                            hop_fields,
-                            &ctx.py_col_names,
-                            &ctx.enum_classes,
-                        )?;
-                        crate::hydration::set_populated_relation(
-                            py,
-                            &parent,
-                            &hop.relation,
-                            Some(&instance),
-                        )?;
-                        populated.insert(hop.path.as_slice(), Some(instance));
-                    }
-
-                    results.append(root_obj)?;
+                    results.append(instance)?;
                 }
                 Ok(results.into_any().unbind())
-            });
+            })
         }
+        .await;
 
-        let parsed_data = if let Some(fields) = &projected {
-            record_rows_to_parsed_data(rows, fields, &schema_for_decode, &plan, &join_plan)?
-        } else {
-            typed_rows_to_parsed_data(rows, &schema_for_decode, pk_for_decode)
-        };
-
-        Python::attach(|py| {
-            let results = pyo3::types::PyList::empty(py);
-            let cls = cls_py.bind(py);
-
-            let mut py_col_names = HashMap::new();
-            if let Some(first_row) = parsed_data.first() {
-                for (col_name, _) in &first_row.1 {
-                    py_col_names.insert(
-                        col_name.clone(),
-                        pyo3::types::PyString::new(py, col_name).unbind(),
-                    );
-                }
-            }
-
-            if let Some(record_cls) = record_cls_py {
-                // Record path (#279): direct-to-dict record construction,
-                // deliberately bypassing the identity map — no lookup, no
-                // insert, no refresh of live instances. The enum catalog is
-                // built per OUTPUT field name from each source column's
-                // OWNING model (#293) — the root's for plain fields, the hop
-                // class's for traversed ones — so a projected enum column
-                // hydrates the same enum member as full hydration would
-                // (decode parity, FF-C C4), aliases included.
-                let fields_spec = projected
-                    .as_ref()
-                    .expect("validated above: a record_cls pairs with a record plan");
-                let record_enum_classes = record_enum_classes_for(
-                    py,
-                    cls,
-                    fields_spec,
-                    hop_classes_py.as_ref(),
-                    &join_plan,
-                )?;
-                let record_cls = record_cls.bind(py);
-                for (_, fields) in parsed_data {
-                    let record = crate::hydration::hydrate_record_instance(
-                        py,
-                        record_cls,
-                        fields,
-                        &py_col_names,
-                        &record_enum_classes,
-                    )?;
-                    results.append(record)?;
-                }
-                return Ok(results.into_any().unbind());
-            }
-
-            // The MODEL's enum catalog for full hydration (FF-C C4).
-            let enum_classes = crate::hydration::enum_classes_for(py, cls);
-
-            for (row_pk_val, fields) in parsed_data {
-                let instance = materialize_model_row(
-                    py,
-                    cls,
-                    &connection_name,
-                    &name,
-                    session_id.as_deref(),
-                    use_identity_map,
-                    row_pk_val,
-                    fields,
-                    &py_col_names,
-                    &enum_classes,
-                )?;
-                results.append(instance)?;
-            }
-            Ok(results.into_any().unbind())
-        })
+        scope.finish(outcome).await
     })
 }
 
@@ -3116,82 +3437,95 @@ pub fn count_filtered(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
-        let schema = crate::state::registered_model(&name)?;
-        let table_name = schema.table_name.clone();
-        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, exec, backend)
-            .await?
-            .enum_udt
-            .clone();
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Count failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        // Relation-traversal JOINs render into the COUNT the same as the SELECT
-        // (#270). Plain COUNT(*), no DISTINCT: forward-FK hops are many-to-one and
-        // never multiply root rows, so count() equals the matching root-row count.
-        // Build the plan up front and resolve each hop table's registration +
-        // enum catalog before conditions bind (#270 critical).
-        let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
-        let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
-        let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
-        populate_hop_bind_context(&mut plan, &join_plan, &engine, exec, backend).await?;
-        // ... sql ...
-        let (sql, bind_values) = {
-            let mut select = Query::select();
-            select.expr(Expr::cust("COUNT(*)"));
+        let outcome = async {
+            let schema = crate::state::registered_model(&name)?;
+            let table_name = schema.table_name.clone();
+            plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, exec, backend)
+                .await?
+                .enum_udt
+                .clone();
 
-            if let Some(m2m) = &plan.m2m {
-                let join_table = Alias::new(&m2m.join_table);
-                let source_col = Alias::new(&m2m.source_col);
-                let target_col = Alias::new(&m2m.target_col);
+            // Relation-traversal JOINs render into the COUNT the same as the SELECT
+            // (#270). Plain COUNT(*), no DISTINCT: forward-FK hops are many-to-one and
+            // never multiply root rows, so count() equals the matching root-row count.
+            // Build the plan up front and resolve each hop table's registration +
+            // enum catalog before conditions bind (#270 critical).
+            let m2m_join_table = plan.m2m.as_ref().map(|m2m| m2m.join_table.clone());
+            let reserved: Vec<&str> = m2m_join_table.as_deref().into_iter().collect();
+            let join_plan = query_join_plan(&plan, &table_name, &reserved)?;
+            populate_hop_bind_context(&mut plan, &join_plan, &engine, exec, backend).await?;
+            // ... sql ...
+            let (sql, bind_values) = {
+                let mut select = Query::select();
+                select.expr(Expr::cust("COUNT(*)"));
 
-                // We need the PK name of the target table to join
-                let pk_name =
-                    schema.meta.pk_col.clone().ok_or_else(|| {
+                if let Some(m2m) = &plan.m2m {
+                    let join_table = Alias::new(&m2m.join_table);
+                    let source_col = Alias::new(&m2m.source_col);
+                    let target_col = Alias::new(&m2m.target_col);
+
+                    // We need the PK name of the target table to join
+                    let pk_name = schema.meta.pk_col.clone().ok_or_else(|| {
                         pyo3::exceptions::PyRuntimeError::new_err("No primary key")
                     })?;
 
-                select.from(Alias::new(&table_name));
-                select.inner_join(
-                    join_table.clone(),
-                    Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
-                        .equals((join_table.clone(), target_col.clone())),
-                );
-                select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
-                    plan.value_rhs_simple_expr_for_backend(
-                        &m2m.source_col,
-                        &m2m.source_id,
-                        true,
-                        backend,
-                    ),
-                ));
-            } else {
-                select.from(Alias::new(&table_name));
-            }
+                    select.from(Alias::new(&table_name));
+                    select.inner_join(
+                        join_table.clone(),
+                        Expr::col((Alias::new(&table_name), Alias::new(pk_name)))
+                            .equals((join_table.clone(), target_col.clone())),
+                    );
+                    select.and_where(Expr::col((join_table.clone(), source_col.clone())).eq(
+                        plan.value_rhs_simple_expr_for_backend(
+                            &m2m.source_col,
+                            &m2m.source_id,
+                            true,
+                            backend,
+                        ),
+                    ));
+                } else {
+                    select.from(Alias::new(&table_name));
+                }
 
-            apply_relation_joins(&mut select, &join_plan)?;
+                apply_relation_joins(&mut select, &join_plan)?;
 
-            // WHERE columns qualified by their relation-path alias (see fetch_filtered).
-            select.cond_where(query_condition_with_joins(
-                &plan,
-                backend,
-                &table_name,
-                &join_plan,
-            )?);
-            sea_query_build_for_backend!(select, backend)
-        };
+                // WHERE columns qualified by their relation-path alias (see fetch_filtered).
+                select.cond_where(query_condition_with_joins(
+                    &plan,
+                    backend,
+                    &table_name,
+                    &join_plan,
+                )?);
+                sea_query_build_for_backend!(select, backend)
+            };
 
-        let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-        let rows = exec
-            .fetch_all(&sql, &engine_bind_values)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
-        let count = rows
-            .first()
-            .and_then(|row| row.values.first())
-            .and_then(|(_, value)| value.as_i64())
-            .unwrap_or(0);
+            let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+            let rows = exec
+                .fetch_all(&sql, &engine_bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Count failed", e))?;
+            let count = rows
+                .first()
+                .and_then(|row| row.values.first())
+                .and_then(|(_, value)| value.as_i64())
+                .unwrap_or(0);
 
-        Ok(count)
+            Ok(count)
+        }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -3267,42 +3601,55 @@ pub fn delete_record(
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
 
-        let schema = crate::state::registered_model(&name)?;
-        let table_name = schema.table_name.clone();
-        // ... sql ...
-        let (sql, bind_values) = {
-            let pk_name = schema
-                .meta
-                .pk_col
-                .clone()
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No primary key"))?;
-            let no_enum_udt = HashMap::new();
-            let no_uuid = HashSet::new();
-            let no_ts: HashMap<String, String> = HashMap::new();
-            let pk_expr = schema_value_expr(
-                &schema,
-                &table_name,
-                &pk_name,
-                &serde_json::Value::String(pk_val),
-                &no_enum_udt,
-                &no_uuid,
-                &no_ts,
-                backend,
-            )?;
-            let (s, values) = sea_query_build_for_backend!(
-                Query::delete()
-                    .from_table(Alias::new(&table_name))
-                    .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)),
-                backend
-            );
-            (s, values)
-        };
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Delete failed",
+        )
+        .await?;
 
-        execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Delete failed", e))?;
+        let outcome = async {
+            let schema = crate::state::registered_model(&name)?;
+            let table_name = schema.table_name.clone();
+            // ... sql ...
+            let (sql, bind_values) = {
+                let pk_name =
+                    schema.meta.pk_col.clone().ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("No primary key")
+                    })?;
+                let no_enum_udt = HashMap::new();
+                let no_uuid = HashSet::new();
+                let no_ts: HashMap<String, String> = HashMap::new();
+                let pk_expr = schema_value_expr(
+                    &schema,
+                    &table_name,
+                    &pk_name,
+                    &serde_json::Value::String(pk_val),
+                    &no_enum_udt,
+                    &no_uuid,
+                    &no_ts,
+                    backend,
+                )?;
+                let (s, values) = sea_query_build_for_backend!(
+                    Query::delete()
+                        .from_table(Alias::new(&table_name))
+                        .and_where(Expr::col(Alias::new(&pk_name)).eq(pk_expr)),
+                    backend
+                );
+                (s, values)
+            };
 
-        Ok(true)
+            execute_statement_with_optional_tx(&engine, scope.connection(), &sql, &bind_values.0)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Delete failed", e))?;
+
+            Ok(true)
+        }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -3338,42 +3685,59 @@ pub fn delete_filtered(
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
-        let table_name = crate::state::registered_model(&name)?.table_name.clone();
-        plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, exec, backend)
-            .await?
-            .enum_udt
-            .clone();
-        // ... sql ...
-        let (sql, bind_values) = {
-            let mut delete = Query::delete();
-            // Qualified by the root table alias (#269): both dialects accept
-            // `table.column` in `DELETE ... WHERE`, and uniform qualification across
-            // every walker avoids retrofitting the mutating paths when joins reach
-            // them later.
-            delete
-                .from_table(Alias::new(&table_name))
-                .cond_where(query_condition_for_backend(
-                    &plan,
-                    backend,
-                    Some(&table_name),
-                )?);
-            sea_query_build_for_backend!(delete, backend)
-        };
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Delete failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        let rows_affected =
-            execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
-                .await
-                .map_err(|e| crate::errors::map_db_error("Delete failed", e))?;
+        let outcome = async {
+            let table_name = crate::state::registered_model(&name)?.table_name.clone();
+            plan.postgres_enum_udt = postgres_table_catalog(&table_name, &engine, exec, backend)
+                .await?
+                .enum_udt
+                .clone();
+            // ... sql ...
+            let (sql, bind_values) =
+                {
+                    let mut delete = Query::delete();
+                    // Qualified by the root table alias (#269): both dialects accept
+                    // `table.column` in `DELETE ... WHERE`, and uniform qualification across
+                    // every walker avoids retrofitting the mutating paths when joins reach
+                    // them later.
+                    delete.from_table(Alias::new(&table_name)).cond_where(
+                        query_condition_for_backend(&plan, backend, Some(&table_name))?,
+                    );
+                    sea_query_build_for_backend!(delete, backend)
+                };
 
-        // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
-        // Re-acquire the GIL before accessing identity map (async context has no GIL).
-        if engine.is_identity_map_enabled() {
-            pyo3::Python::attach(|_py| identity_map_retain_model(session_id.as_deref(), &name))?;
+            let rows_affected = execute_statement_with_optional_tx(
+                &engine,
+                scope.connection(),
+                &sql,
+                &bind_values.0,
+            )
+            .await
+            .map_err(|e| crate::errors::map_db_error("Delete failed", e))?;
+
+            // After bulk delete, we MUST clear the Identity Map for this model to avoid stale objects
+            // Re-acquire the GIL before accessing identity map (async context has no GIL).
+            if engine.is_identity_map_enabled() {
+                pyo3::Python::attach(|_py| {
+                    identity_map_retain_model(session_id.as_deref(), &name)
+                })?;
+            }
+
+            Ok(rows_affected)
         }
+        .await;
 
-        Ok(rows_affected)
+        scope.finish(outcome).await
     })
 }
 
@@ -3414,61 +3778,81 @@ pub fn update_filtered<'py>(
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
 
-        let schema = crate::state::registered_model(&name)?;
-        let table_name = schema.table_name.clone();
-        let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
-        let TableCatalog {
-            enum_udt,
-            uuid_columns,
-            ts_cast,
-        } = &*catalog;
-        plan.postgres_enum_udt = enum_udt.clone();
-        // ... sql ...
-        let (sql, bind_values) = {
-            // Qualified by the root table alias (#269) — same rationale as
-            // `delete_filtered` above. SET columns stay bare: SQL forbids
-            // qualified column names on the left of `SET` assignments.
-            let mut update = UpdateStatement::new()
-                .table(Alias::new(&table_name))
-                .cond_where(query_condition_for_backend(
-                    &plan,
-                    backend,
-                    Some(&table_name),
-                )?)
-                .to_owned();
-            for assignment in &plan.set_assignments {
-                let key = &assignment.column;
-                update.value(
-                    Alias::new(key),
-                    set_value_to_expr(
-                        &schema,
-                        &table_name,
-                        key,
-                        &assignment.value,
-                        enum_udt,
-                        uuid_columns,
-                        ts_cast,
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Update failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
+
+        let outcome = async {
+            let schema = crate::state::registered_model(&name)?;
+            let table_name = schema.table_name.clone();
+            let catalog = postgres_table_catalog(&table_name, &engine, exec, backend).await?;
+            let TableCatalog {
+                enum_udt,
+                uuid_columns,
+                ts_cast,
+            } = &*catalog;
+            plan.postgres_enum_udt = enum_udt.clone();
+            // ... sql ...
+            let (sql, bind_values) = {
+                // Qualified by the root table alias (#269) — same rationale as
+                // `delete_filtered` above. SET columns stay bare: SQL forbids
+                // qualified column names on the left of `SET` assignments.
+                let mut update = UpdateStatement::new()
+                    .table(Alias::new(&table_name))
+                    .cond_where(query_condition_for_backend(
+                        &plan,
                         backend,
-                    )?,
-                );
+                        Some(&table_name),
+                    )?)
+                    .to_owned();
+                for assignment in &plan.set_assignments {
+                    let key = &assignment.column;
+                    update.value(
+                        Alias::new(key),
+                        set_value_to_expr(
+                            &schema,
+                            &table_name,
+                            key,
+                            &assignment.value,
+                            enum_udt,
+                            uuid_columns,
+                            ts_cast,
+                            backend,
+                        )?,
+                    );
+                }
+                sea_query_build_for_backend!(update, backend)
+            };
+
+            let rows_affected = execute_statement_with_optional_tx(
+                &engine,
+                scope.connection(),
+                &sql,
+                &bind_values.0,
+            )
+            .await
+            .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
+
+            // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
+            // Re-acquire the GIL before accessing identity map (async context has no GIL).
+            if engine.is_identity_map_enabled() {
+                pyo3::Python::attach(|_py| {
+                    identity_map_retain_model(session_id.as_deref(), &name)
+                })?;
             }
-            sea_query_build_for_backend!(update, backend)
-        };
 
-        let rows_affected =
-            execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
-                .await
-                .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
-
-        // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
-        // Re-acquire the GIL before accessing identity map (async context has no GIL).
-        if engine.is_identity_map_enabled() {
-            pyo3::Python::attach(|_py| identity_map_retain_model(session_id.as_deref(), &name))?;
+            Ok(rows_affected)
         }
+        .await;
 
-        Ok(rows_affected)
+        scope.finish(outcome).await
     })
 }
 
@@ -3510,36 +3894,56 @@ pub fn add_m2m_links<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
-        let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
-        let uuid_columns = &catalog.uuid_columns;
 
-        let (sql, bind_values) = {
-            let mut insert = InsertStatement::new()
-                .into_table(Alias::new(&join_table))
-                .columns(vec![Alias::new(&source_col), Alias::new(&target_col)])
-                .to_owned();
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Add M2M links failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-            for t_id in t_ids {
-                insert
-                    .values(vec![
-                        backend_column_value_expr(&source_col, s_id.clone(), uuid_columns, backend),
-                        backend_column_value_expr(&target_col, t_id, uuid_columns, backend),
-                    ])
-                    .map_err(|e| {
-                        pyo3::exceptions::PyValueError::new_err(format!(
-                            "invalid M2M INSERT values: {e}"
-                        ))
-                    })?;
-            }
-            sea_query_build_for_backend!(insert, backend)
-        };
+        let outcome = async {
+            let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
+            let uuid_columns = &catalog.uuid_columns;
 
-        execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Add M2M links failed", e))?;
+            let (sql, bind_values) = {
+                let mut insert = InsertStatement::new()
+                    .into_table(Alias::new(&join_table))
+                    .columns(vec![Alias::new(&source_col), Alias::new(&target_col)])
+                    .to_owned();
 
-        Ok(())
+                for t_id in t_ids {
+                    insert
+                        .values(vec![
+                            backend_column_value_expr(
+                                &source_col,
+                                s_id.clone(),
+                                uuid_columns,
+                                backend,
+                            ),
+                            backend_column_value_expr(&target_col, t_id, uuid_columns, backend),
+                        ])
+                        .map_err(|e| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "invalid M2M INSERT values: {e}"
+                            ))
+                        })?;
+                }
+                sea_query_build_for_backend!(insert, backend)
+            };
+
+            execute_statement_with_optional_tx(&engine, scope.connection(), &sql, &bind_values.0)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Add M2M links failed", e))?;
+
+            Ok(())
+        }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -3581,39 +3985,55 @@ pub fn remove_m2m_links<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
-        let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
-        let uuid_columns = &catalog.uuid_columns;
 
-        let (sql, bind_values) = sea_query_build_for_backend!(
-            Query::delete()
-                .from_table(Alias::new(&join_table))
-                .and_where(
-                    Expr::col(Alias::new(&source_col)).eq(backend_column_value_expr(
-                        &source_col,
-                        s_id,
-                        uuid_columns,
-                        backend
-                    ))
-                )
-                .and_where(
-                    Expr::col(Alias::new(&target_col)).is_in(
-                        t_ids
-                            .into_iter()
-                            .map(|t_id| {
-                                backend_column_value_expr(&target_col, t_id, uuid_columns, backend)
-                            })
-                            .collect::<Vec<_>>()
-                    )
-                ),
-            backend
-        );
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Remove M2M links failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Remove M2M links failed", e))?;
+        let outcome = async {
+            let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
+            let uuid_columns = &catalog.uuid_columns;
 
-        Ok(())
+            let (sql, bind_values) =
+                sea_query_build_for_backend!(
+                    Query::delete()
+                        .from_table(Alias::new(&join_table))
+                        .and_where(Expr::col(Alias::new(&source_col)).eq(
+                            backend_column_value_expr(&source_col, s_id, uuid_columns, backend)
+                        ))
+                        .and_where(
+                            Expr::col(Alias::new(&target_col)).is_in(
+                                t_ids
+                                    .into_iter()
+                                    .map(|t_id| {
+                                        backend_column_value_expr(
+                                            &target_col,
+                                            t_id,
+                                            uuid_columns,
+                                            backend,
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                            )
+                        ),
+                    backend
+                );
+
+            execute_statement_with_optional_tx(&engine, scope.connection(), &sql, &bind_values.0)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Remove M2M links failed", e))?;
+
+            Ok(())
+        }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -3646,29 +4066,40 @@ pub fn clear_m2m_links<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
-        let exec = Executor::new(tx_conn.as_ref(), &engine);
-        let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
-        let uuid_columns = &catalog.uuid_columns;
 
-        let (sql, bind_values) = sea_query_build_for_backend!(
-            Query::delete()
-                .from_table(Alias::new(&join_table))
-                .and_where(
-                    Expr::col(Alias::new(&source_col)).eq(backend_column_value_expr(
-                        &source_col,
-                        s_id,
-                        uuid_columns,
-                        backend
-                    ))
-                ),
-            backend
-        );
+        let scope = OperationScope::open(
+            &engine,
+            r.session_id.as_deref(),
+            tx_conn,
+            false,
+            "Clear M2M links failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        execute_statement_with_optional_tx(&engine, tx_conn.as_ref(), &sql, &bind_values.0)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Clear M2M links failed", e))?;
+        let outcome = async {
+            let catalog = postgres_table_catalog(&join_table, &engine, exec, backend).await?;
+            let uuid_columns = &catalog.uuid_columns;
 
-        Ok(())
+            let (sql, bind_values) =
+                sea_query_build_for_backend!(
+                    Query::delete()
+                        .from_table(Alias::new(&join_table))
+                        .and_where(Expr::col(Alias::new(&source_col)).eq(
+                            backend_column_value_expr(&source_col, s_id, uuid_columns, backend)
+                        )),
+                    backend
+                );
+
+            execute_statement_with_optional_tx(&engine, scope.connection(), &sql, &bind_values.0)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Clear M2M links failed", e))?;
+
+            Ok(())
+        }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -4102,6 +4533,11 @@ fn get_raw_tx_conn(
 /// Honors `tx_id` (looked up in [`TRANSACTION_REGISTRY`]); falls back to a
 /// one-off pool connection when `tx_id` is `None`.
 ///
+/// `autocommit` skips the implicit per-operation transaction a settings-bearing
+/// session would otherwise wrap the statement in — for the statements Postgres
+/// refuses to run inside a transaction block at all. Such a statement is not
+/// tenant-scoped; see [`OperationScope::unwrapped`].
+///
 /// # Errors
 /// - [`PyRuntimeError`](pyo3::exceptions::PyRuntimeError) on engine/transaction
 ///   lookup failure or DB error.
@@ -4109,12 +4545,13 @@ fn get_raw_tx_conn(
 ///   not a supported primitive (the Python `_marshal` wrapper guarantees this
 ///   never trips in normal use).
 #[pyfunction]
-#[pyo3(signature = (sql, args, route))]
+#[pyo3(signature = (sql, args, route, autocommit=false))]
 pub fn raw_execute<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
+    autocommit: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -4135,20 +4572,36 @@ pub fn raw_execute<'py>(
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let pool_engine;
-        let exec = match &tx_conn {
-            Some(tx) => Executor::Tx(tx),
-            None => {
-                pool_engine = engine_for_connection(Some(route_connection_name))?;
-                Executor::Pool(&pool_engine)
-            }
+        let engine = engine_for_connection(Some(route_connection_name))?;
+        // `autocommit=True` is the caller telling us this statement cannot run
+        // inside a transaction at all (`CREATE INDEX CONCURRENTLY`, `VACUUM`),
+        // so the implicit settings wrap is skipped rather than making the
+        // statement fail with 25001 the moment a session carries settings.
+        let scope = if autocommit {
+            OperationScope::unwrapped(&engine, route_session_id.as_deref(), tx_conn).await?
+        } else {
+            OperationScope::open(
+                &engine,
+                route_session_id.as_deref(),
+                tx_conn,
+                false,
+                "Raw SQL execute failed",
+            )
+            .await?
         };
-        let rows_affected = exec
-            .execute(&sql, &bind_values)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Raw SQL execute failed", e))?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        Ok(rows_affected as i64)
+        let outcome = async {
+            let rows_affected = exec
+                .execute(&sql, &bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Raw SQL execute failed", e))?;
+
+            Ok(rows_affected as i64)
+        }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -4180,26 +4633,34 @@ pub fn raw_fetch_all<'py>(
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let pool_engine;
-        let exec = match &tx_conn {
-            Some(tx) => Executor::Tx(tx),
-            None => {
-                pool_engine = engine_for_connection(Some(route_connection_name))?;
-                Executor::Pool(&pool_engine)
-            }
-        };
-        let rows = exec
-            .fetch_all(&sql, &bind_values)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_all failed", e))?;
+        let engine = engine_for_connection(Some(route_connection_name))?;
+        let scope = OperationScope::open(
+            &engine,
+            route_session_id.as_deref(),
+            tx_conn,
+            false,
+            "Raw SQL fetch_all failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        Python::attach(|py| {
-            let out = pyo3::types::PyList::empty(py);
-            for row in rows {
-                out.append(engine_row_to_pydict(py, row)?)?;
-            }
-            Ok(out.into_any().unbind())
-        })
+        let outcome = async {
+            let rows = exec
+                .fetch_all(&sql, &bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_all failed", e))?;
+
+            Python::attach(|py| {
+                let out = pyo3::types::PyList::empty(py);
+                for row in rows {
+                    out.append(engine_row_to_pydict(py, row)?)?;
+                }
+                Ok(out.into_any().unbind())
+            })
+        }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -4240,23 +4701,31 @@ pub fn raw_fetch_one<'py>(
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let pool_engine;
-        let exec = match &tx_conn {
-            Some(tx) => Executor::Tx(tx),
-            None => {
-                pool_engine = engine_for_connection(Some(route_connection_name))?;
-                Executor::Pool(&pool_engine)
-            }
-        };
-        let rows = exec
-            .fetch_all(&sql, &bind_values)
-            .await
-            .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_one failed", e))?;
+        let engine = engine_for_connection(Some(route_connection_name))?;
+        let scope = OperationScope::open(
+            &engine,
+            route_session_id.as_deref(),
+            tx_conn,
+            false,
+            "Raw SQL fetch_one failed",
+        )
+        .await?;
+        let exec = Executor::new(scope.connection(), &engine);
 
-        Python::attach(|py| match rows.into_iter().next() {
-            Some(row) => Ok(engine_row_to_pydict(py, row)?.into_any().unbind()),
-            None => Ok(py.None()),
-        })
+        let outcome = async {
+            let rows = exec
+                .fetch_all(&sql, &bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Raw SQL fetch_one failed", e))?;
+
+            Python::attach(|py| match rows.into_iter().next() {
+                Some(row) => Ok(engine_row_to_pydict(py, row)?.into_any().unbind()),
+                None => Ok(py.None()),
+            })
+        }
+        .await;
+
+        scope.finish(outcome).await
     })
 }
 
@@ -7522,10 +7991,9 @@ mod save_mode_sql_tests {
 mod executor_tests {
     use super::Executor;
     use crate::backend::{EngineBindValue, EngineHandle};
-    use crate::state::TransactionConnection;
+    use crate::state::{ConnectionSlot, TransactionConnection};
     use sqlx::sqlite::SqlitePoolOptions;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     /// max_connections(1): one shared in-memory database, and any query the
     /// executor wrongly routed to the pool while the tx holds the only
@@ -7582,7 +8050,7 @@ mod executor_tests {
             .begin_transaction_connection()
             .await
             .expect("begin transaction connection");
-        let tx: TransactionConnection = Arc::new(Mutex::new(conn));
+        let tx: TransactionConnection = Arc::new(ConnectionSlot::new(conn));
         let exec = Executor::new(Some(&tx), &engine);
         exec.execute(
             "INSERT INTO t (v) VALUES (?)",
@@ -7593,7 +8061,7 @@ mod executor_tests {
         let rows = exec.fetch_all("SELECT v FROM t", &[]).await.unwrap();
         assert_eq!(rows.len(), 1, "tx must see its own uncommitted write");
 
-        tx.lock().await.rollback().await.unwrap();
+        tx.lock().await.live().unwrap().rollback().await.unwrap();
         drop(tx);
 
         let rows = Executor::new(None, &engine)

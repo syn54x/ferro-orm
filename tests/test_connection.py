@@ -519,6 +519,7 @@ async def test_connect_passes_pool_config_to_core(monkeypatch):
                 "default": False,
                 "max_connections": 3,
                 "min_connections": 1,
+                "settings_delivery": "transaction",
                 "identity_map": True,
                 "migrate_updates": False,
                 "migrate_destructive": False,

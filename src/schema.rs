@@ -68,6 +68,7 @@ pub(crate) fn order_models_for_migration(
 /// Returns a `PyErr` if the SQL execution fails.
 pub async fn internal_create_tables(
     engine: Arc<EngineHandle>,
+    reconciliation_follows: bool,
 ) -> PyResult<std::collections::HashSet<String>> {
     // The runtime CREATE TABLE path is emitted from the Python-compiled SchemaIR
     // via the shared `ferro_migrate` emitter (issue #153). The modelset must have
@@ -100,6 +101,20 @@ pub async fn internal_create_tables(
                 "Ferro Engine: Table '{}' already exists — left to the reconciliation pass",
                 model.table_name
             ));
+            // A declaration the create pass cannot act on must never pass in
+            // silence: the author believes the table is policed. When the
+            // reconciliation pass runs next it APPLIES the declaration to this
+            // very table (#413), so warning here would cry wolf about a gap
+            // that is about to be closed — the warning is for the connect that
+            // does not reconcile (plain `auto_migrate=True`). On SQLite the
+            // reconciliation pass emits no row-security DDL at all (ADR-0014),
+            // so the warning always stands there.
+            if (!reconciliation_follows || dialect != Dialect::Postgres)
+                && let Some(warning) =
+                    ferro_ddl_lowering::row_security_existing_table_warning(model, dialect)
+            {
+                crate::emit_user_warning_always(&warning);
+            }
             continue;
         }
         let emission = ferro_migrate::render_create_table(model, dialect).map_err(|err| {
@@ -109,30 +124,7 @@ pub async fn internal_create_tables(
             ))
         })?;
 
-        for pre_sql in &emission.pre_create_sqls {
-            engine.execute_sql_unprepared(pre_sql).await.map_err(|e| {
-                crate::errors::map_db_error(
-                    &format!("SQL Execution failed for '{}' enum type", model.table_name),
-                    e,
-                )
-            })?;
-        }
-
-        engine.execute_sql(&emission.create_sql).await.map_err(|e| {
-            crate::errors::map_db_error(
-                &format!("SQL Execution failed for '{}' table", model.table_name),
-                e,
-            )
-        })?;
-
-        for post_sql in &emission.post_create_sqls {
-            engine.execute_sql(post_sql).await.map_err(|e| {
-                crate::errors::map_db_error(
-                    &format!("SQL Execution failed for '{}' index", model.table_name),
-                    e,
-                )
-            })?;
-        }
+        create_one_table(&engine, model, &emission, dialect).await?;
 
         for warning in &emission.warnings {
             crate::emit_user_warning(warning);
@@ -142,6 +134,109 @@ pub async fn internal_create_tables(
     }
 
     Ok(existing_tables)
+}
+
+/// Execute one model's whole create emission — enum guards, `CREATE TABLE`, and
+/// every post-create artifact (indexes, checks, row-security flags and
+/// policies) — as ONE unit.
+///
+/// On Postgres this is a single transaction, mirroring the reconciliation
+/// pass's per-table transaction (FF-G G3): a table ends fully created or not
+/// created at all. That is not a nicety for row security, it is the whole
+/// contract. `ENABLE`/`FORCE ROW LEVEL SECURITY` land before the policies, so a
+/// `CREATE POLICY` that fails halfway would otherwise leave a live table with
+/// row security forced on and **zero** policies — default-deny for every role
+/// including the owner — that the create pass can never repair, because it only
+/// ever touches missing tables (ADR-0010). Rolling the table back instead
+/// leaves the database exactly as it was and the connect fails loudly, naming
+/// the statement.
+///
+/// SQLite keeps statement-at-a-time execution, matching the reconciliation
+/// pass; it emits no row-security DDL at all, so the lockout shape cannot occur
+/// there.
+async fn create_one_table(
+    engine: &Arc<EngineHandle>,
+    model: &ferro_schema_ir::SchemaModel,
+    emission: &ferro_migrate::CreateTableEmission,
+    dialect: Dialect,
+) -> PyResult<()> {
+    let table = model.table_name.as_str();
+    if dialect != Dialect::Postgres {
+        for pre_sql in &emission.pre_create_sqls {
+            engine
+                .execute_sql_unprepared(pre_sql)
+                .await
+                .map_err(|e| create_step_error(table, "enum type", pre_sql, e))?;
+        }
+        engine
+            .execute_sql(&emission.create_sql)
+            .await
+            .map_err(|e| create_step_error(table, "table", &emission.create_sql, e))?;
+        for post_sql in &emission.post_create_sqls {
+            engine
+                .execute_sql(post_sql)
+                .await
+                .map_err(|e| create_step_error(table, "artifact", post_sql, e))?;
+        }
+        return Ok(());
+    }
+
+    let mut conn = engine.begin_transaction_connection().await.map_err(|e| {
+        crate::errors::map_db_error(
+            &format!("Auto-migrate failed to open a transaction to create table '{table}'"),
+            e,
+        )
+    })?;
+    let table_result: PyResult<()> = async {
+        for pre_sql in &emission.pre_create_sqls {
+            conn.execute_sql_unprepared(pre_sql)
+                .await
+                .map_err(|e| create_step_error(table, "enum type", pre_sql, e))?;
+        }
+        conn.execute_sql(&emission.create_sql)
+            .await
+            .map_err(|e| create_step_error(table, "table", &emission.create_sql, e))?;
+        for post_sql in &emission.post_create_sqls {
+            conn.execute_sql(post_sql)
+                .await
+                .map_err(|e| create_step_error(table, "artifact", post_sql, e))?;
+        }
+        Ok(())
+    }
+    .await;
+
+    match table_result {
+        Ok(()) => conn.commit().await.map_err(|e| {
+            crate::errors::map_db_error(
+                &format!("Auto-migrate failed to commit the creation of table '{table}'"),
+                e,
+            )
+        }),
+        Err(err) => {
+            // A connection whose ROLLBACK failed may be stuck
+            // idle-in-transaction, and sqlx only pings on release — handing it
+            // back to the pool would serve that state to the next checkout.
+            // Same disposal `begin_transaction_with_settings` performs (#416).
+            if let Err(rollback_err) = conn.rollback().await {
+                crate::log_debug(format!(
+                    "⚠️ Ferro Engine: rollback after failed creation of '{table}' also failed: \
+                     {rollback_err} — discarding the connection"
+                ));
+                let _ = conn.detach_and_close().await;
+            }
+            Err(err)
+        }
+    }
+}
+
+/// One create-step failure, naming the table and the exact statement — the
+/// difference between "connect failed" and "connect failed, here is the policy
+/// you mistyped".
+fn create_step_error(table: &str, step: &str, sql: &str, err: sqlx::Error) -> pyo3::PyErr {
+    crate::errors::map_db_error(
+        &format!("SQL Execution failed for '{table}' {step} (statement: {sql})"),
+        err,
+    )
 }
 
 /// Legacy per-model Rust registration from a SchemaIR column slice.
@@ -192,7 +287,11 @@ pub fn register_model_schema(
 pub fn create_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
-        internal_create_tables(engine).await.map(|_existing| ())
+        // `create_tables()` is the create pass on its own — nothing reconciles
+        // an existing table afterwards, so a declaration on one is reported.
+        internal_create_tables(engine, false)
+            .await
+            .map(|_existing| ())
     })
 }
 
@@ -470,6 +569,7 @@ mod tests {
             uniques: vec![],
             checks: vec![],
             table_checks: vec![],
+            row_security: None,
         }
     }
 

@@ -3,6 +3,7 @@
 //! [`EngineHandle`] is the per-connection runtime entry point. All SQL execution flows through
 //! it so pool refresh, identity-map policy, and shadow-runtime hooks stay centralized.
 
+use crate::session_settings::SettingsDelivery;
 use ferro_ddl_lowering::Dialect;
 use sqlx::ColumnIndex;
 use sqlx::pool::PoolConnection;
@@ -11,7 +12,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Column, Connection, PgPool, Postgres, Row, Sqlite, SqlitePool, ValueRef};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Infer the SQL dialect / backend from a connection-URL scheme.
@@ -41,6 +42,16 @@ pub struct PoolSpec {
     pub max_connections: u32,
     /// Minimum idle connections kept warm.
     pub min_connections: u32,
+    /// How this pool delivers session settings (`PoolConfig(settings_delivery=)`).
+    /// Never inferred: a transaction pooler is invisible to its clients, so
+    /// `connection` is only ever the operator's explicit promise that this
+    /// pool talks to Postgres directly.
+    pub settings_delivery: SettingsDelivery,
+    /// How many settings-bearing sessions currently hold a pinned connection
+    /// on this pool. Shared with the pool's `after_release` hook and with
+    /// every [`crate::session_settings::PinnedConnection`], and rebuilt pools
+    /// keep the same gauge.
+    pub pins: Arc<AtomicUsize>,
 }
 
 impl PoolSpec {
@@ -72,6 +83,9 @@ impl PoolSpec {
                         })
                     });
                 }
+                if self.settings_delivery == SettingsDelivery::Connection {
+                    pool_options = pool_options.after_release(release_guard(self.pins.clone()));
+                }
                 let pool = pool_options.connect(&self.url).await?;
                 Ok(BackendPool::Postgres(Arc::new(pool)))
             }
@@ -87,6 +101,55 @@ impl PoolSpec {
         }
         let url = self.url.to_ascii_lowercase();
         url.contains(":memory:") || url.contains("mode=memory")
+    }
+}
+
+/// The `after_release` safety net for a `connection`-delivery pool: a
+/// connection still carrying a session's settings never goes back into
+/// rotation.
+///
+/// Ferro's primary guarantee is upstream of this hook. A pinned connection
+/// lives in a slot whose owner discards it — detaching it from the pool
+/// synchronously — on every path other than a clean, reset-first release
+/// (`session_settings::PinnedConnection`). So a dirty connection reaching this
+/// hook means something bypassed that owner, and the right answer is not to
+/// reason about how: it is to refuse it.
+///
+/// **What it costs, plainly.** The hook runs on every connection this pool
+/// releases. With no pin outstanding — every moment on a
+/// `transaction`-delivery pool, and every moment a `connection`-delivery pool
+/// is serving only settings-less work — it reads one atomic and returns,
+/// adding nothing. But while *any* session on this pool holds a pin, every
+/// connection release pool-wide pays one `SELECT current_setting(...)`,
+/// including releases by settings-less sessions and by sessionless
+/// operations. That cost is stated where the mode is documented
+/// (`ferro.PoolConfig`) rather than buried here.
+///
+/// Returning `Ok(false)` tells sqlx to close the connection instead of pooling
+/// it. The replacement it opens runs `after_connect` again, so pool-level
+/// state such as `search_path` comes back with it.
+type ReleaseFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, sqlx::Error>> + Send + 'a>>;
+
+fn release_guard(
+    pins: Arc<AtomicUsize>,
+) -> impl for<'a> Fn(&'a mut sqlx::PgConnection, sqlx::pool::PoolConnectionMetadata) -> ReleaseFuture<'a>
++ Send
++ Sync
++ 'static {
+    move |conn, _meta| {
+        let pins = pins.clone();
+        Box::pin(async move {
+            if pins.load(Ordering::SeqCst) == 0 {
+                return Ok(true);
+            }
+            let marker: String =
+                sqlx::query_scalar("SELECT coalesce(current_setting($1, true), '')")
+                    .bind(crate::session_settings::PIN_MARKER_KEY)
+                    .fetch_one(conn)
+                    .await?;
+            Ok(!crate::session_settings::pinned_marker_is_dirty(&marker))
+        })
     }
 }
 
@@ -133,6 +196,10 @@ pub struct EngineHandle {
     /// — the engine's only epoch boundary — clears the map. Shared across
     /// clones (like `pool`).
     catalog_cache: Arc<RwLock<HashMap<String, Arc<TableCatalog>>>>,
+    /// How this pool delivers session settings; see [`PoolSpec`].
+    settings_delivery: SettingsDelivery,
+    /// Settings-bearing sessions currently holding a pinned connection here.
+    pins: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Debug)]
@@ -159,6 +226,36 @@ pub enum EngineConnection {
     Sqlite(PoolConnection<Sqlite>),
     /// Postgres pool connection.
     Postgres(PoolConnection<Postgres>),
+}
+
+/// A connection the pool has given up on, on its way to being closed.
+///
+/// [`EngineConnection::detach`] produces one *synchronously*, which is the
+/// whole point: severing the pool's claim must not need an `await`, so a code
+/// path that cannot await — a `Drop` running after a cancelled operation — can
+/// still guarantee the connection is never handed to another caller. The
+/// close handshake ([`Self::close`]) is the part that needs a runtime; skipping
+/// it costs a polite goodbye, never a leaked connection, because the pool has
+/// already opened a replacement and dropping this value shuts the socket.
+pub enum DetachedConnection {
+    /// Detached SQLite connection.
+    Sqlite(sqlx::SqliteConnection),
+    /// Detached Postgres connection.
+    Postgres(sqlx::PgConnection),
+}
+
+impl DetachedConnection {
+    /// Say goodbye to the server properly.
+    ///
+    /// # Errors
+    /// The `sqlx::Error` from the close handshake. Callers are already on an
+    /// error or cancellation path — the connection is gone either way.
+    pub async fn close(self) -> Result<(), sqlx::Error> {
+        match self {
+            DetachedConnection::Sqlite(conn) => conn.close().await,
+            DetachedConnection::Postgres(conn) => conn.close().await,
+        }
+    }
 }
 
 /// Type tag carried by `EngineBindValue::Null` so the bind layer can emit a
@@ -277,6 +374,8 @@ impl EngineHandle {
     /// therefore support [`EngineHandle::refresh_pool`].
     pub async fn connect(spec: PoolSpec) -> Result<Self, sqlx::Error> {
         let backend = spec.backend;
+        let settings_delivery = spec.settings_delivery;
+        let pins = spec.pins.clone();
         let pool = spec.build().await?;
         Ok(Self {
             backend,
@@ -285,6 +384,8 @@ impl EngineHandle {
             identity_map_enabled: true,
             catalog_queries: Arc::new(AtomicU64::new(0)),
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
+            settings_delivery,
+            pins,
         })
     }
 
@@ -300,6 +401,8 @@ impl EngineHandle {
             identity_map_enabled: true,
             catalog_queries: Arc::new(AtomicU64::new(0)),
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
+            settings_delivery: SettingsDelivery::Transaction,
+            pins: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -315,6 +418,8 @@ impl EngineHandle {
             identity_map_enabled: true,
             catalog_queries: Arc::new(AtomicU64::new(0)),
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
+            settings_delivery: SettingsDelivery::Transaction,
+            pins: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -366,8 +471,35 @@ impl EngineHandle {
         // After the swap, so a concurrent operation cannot re-populate the
         // cache from the old pool between clear and swap.
         self.clear_catalog_cache();
+        self.warn_if_pins_block_refresh();
         old_pool.close().await;
         Ok(())
+    }
+
+    /// Warn before a pool refresh waits on connections a pinned session owns.
+    ///
+    /// Closing the old pool waits for every connection to come back, and a
+    /// session under `connection` settings delivery holds one until it closes
+    /// — which may be for the length of a request, or longer. So a schema
+    /// change in one task can sit behind a tenant-scoped session in another,
+    /// with nothing on screen to say why. This says why.
+    ///
+    /// A warning rather than an error: waiting is correct (a refreshed pool
+    /// must not leave stale connections behind), and the operator, not Ferro,
+    /// decides whether to run migrations against a live tenant workload.
+    fn warn_if_pins_block_refresh(&self) {
+        let pinned = self.pins.load(Ordering::SeqCst);
+        if pinned == 0 {
+            return;
+        }
+        crate::emit_user_warning_always(&format!(
+            "refreshing the connection pool while {pinned} settings-bearing session(s) \
+             hold a pinned connection (settings_delivery=\"connection\"). Closing the \
+             old pool waits for those connections, and they are not released until \
+             those sessions close — so this will block until they do. Run schema \
+             changes before opening tenant-scoped sessions, or on a connection \
+             configured for the default `transaction` delivery."
+        ));
     }
 
     /// Acquire every pool connection and clear its statement cache. Holding
@@ -413,6 +545,34 @@ impl EngineHandle {
 
     pub fn backend(&self) -> Dialect {
         self.backend
+    }
+
+    /// How this connection's pool delivers session settings.
+    #[must_use]
+    pub fn settings_delivery(&self) -> SettingsDelivery {
+        self.settings_delivery
+    }
+
+    /// The pool's outstanding-pin gauge, shared with its `after_release` hook.
+    #[must_use]
+    pub fn pin_gauge(&self) -> Arc<AtomicUsize> {
+        self.pins.clone()
+    }
+
+    /// Check out a pool connection for a session to pin (`connection`
+    /// settings delivery).
+    ///
+    /// Deliberately not a transaction: the session applies its settings at
+    /// database-session scope on this connection and then runs its statements
+    /// bare. The connection is the session's until it closes, so this call is
+    /// also where a settings-bearing session waits when every pool connection
+    /// is already pinned — the mode's concurrency cap, surfacing as an
+    /// ordinary pool checkout.
+    ///
+    /// # Errors
+    /// The `sqlx::Error` from the checkout.
+    pub async fn acquire_pinned_connection(&self) -> Result<EngineConnection, sqlx::Error> {
+        self.acquire_nontx_connection().await
     }
 
     /// Maximum bind parameters one statement may carry on this backend.
@@ -489,17 +649,35 @@ impl EngineHandle {
         }
     }
 
-    pub async fn execute_sql(&self, sql: &str) -> Result<u64, sqlx::Error> {
+    /// Acquire a pool connection for one statement with no caller-managed
+    /// transaction — the single seam every non-transactional `execute_*` /
+    /// `fetch_*` method below funnels through.
+    ///
+    /// Acquiring explicitly here (instead of handing sqlx `&Pool` to
+    /// `.execute()`/`.fetch_all()` as the executor, which acquires and
+    /// releases a connection internally) is behaviorally identical for one
+    /// statement, and it is what proved every non-transactional statement
+    /// funnels through one place.
+    ///
+    /// The per-operation settings wrap (#410) ended up one level above this,
+    /// in `session_settings::OperationScope`, and this method is deliberately
+    /// unchanged by it: the wrap must cover a whole ORM operation, and a
+    /// statement-level seam cannot see where one operation ends and the next
+    /// begins. So an operation that needs a wrap never reaches here — it runs
+    /// on the transaction connection its scope opened — and everything that
+    /// does reach here is genuinely unwrapped work.
+    async fn acquire_nontx_connection(&self) -> Result<EngineConnection, sqlx::Error> {
         match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let result = sqlx::query(sql).execute(pool.as_ref()).await?;
-                Ok(result.rows_affected())
-            }
-            BackendPool::Postgres(pool) => {
-                let result = sqlx::query(sql).execute(pool.as_ref()).await?;
-                Ok(result.rows_affected())
-            }
+            BackendPool::Sqlite(pool) => Ok(EngineConnection::Sqlite(pool.acquire().await?)),
+            BackendPool::Postgres(pool) => Ok(EngineConnection::Postgres(pool.acquire().await?)),
         }
+    }
+
+    pub async fn execute_sql(&self, sql: &str) -> Result<u64, sqlx::Error> {
+        self.acquire_nontx_connection()
+            .await?
+            .execute_sql(sql)
+            .await
     }
 
     /// Execute without entering any connection's prepared-statement cache.
@@ -507,22 +685,10 @@ impl EngineHandle {
     /// statement against a schema that the very same migration is about to
     /// change would poison the connection it ran on.
     pub async fn execute_sql_unprepared(&self, sql: &str) -> Result<u64, sqlx::Error> {
-        match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let result = sqlx::query(sql)
-                    .persistent(false)
-                    .execute(pool.as_ref())
-                    .await?;
-                Ok(result.rows_affected())
-            }
-            BackendPool::Postgres(pool) => {
-                let result = sqlx::query(sql)
-                    .persistent(false)
-                    .execute(pool.as_ref())
-                    .await?;
-                Ok(result.rows_affected())
-            }
-        }
+        self.acquire_nontx_connection()
+            .await?
+            .execute_sql_unprepared(sql)
+            .await
     }
 
     /// Fetch without entering any connection's prepared-statement cache.
@@ -537,24 +703,10 @@ impl EngineHandle {
         sql: &str,
         values: &[EngineBindValue],
     ) -> Result<Vec<EngineRow>, sqlx::Error> {
-        match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql).persistent(false);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_engine_row).collect())
-            }
-            BackendPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql).persistent(false);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_pg_row).collect())
-            }
-        }
+        self.acquire_nontx_connection()
+            .await?
+            .fetch_all_sql_unprepared_with_binds(sql, values)
+            .await
     }
 
     pub async fn execute_sql_with_binds(
@@ -573,30 +725,10 @@ impl EngineHandle {
         sql: &str,
         values: &[EngineBindValue],
     ) -> Result<EngineExecuteResult, sqlx::Error> {
-        match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let result = query.execute(pool.as_ref()).await?;
-                Ok(EngineExecuteResult {
-                    rows_affected: result.rows_affected(),
-                    last_insert_id: Some(result.last_insert_rowid()),
-                })
-            }
-            BackendPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let result = query.execute(pool.as_ref()).await?;
-                Ok(EngineExecuteResult {
-                    rows_affected: result.rows_affected(),
-                    last_insert_id: None,
-                })
-            }
-        }
+        self.acquire_nontx_connection()
+            .await?
+            .execute_sql_with_binds_result(sql, values)
+            .await
     }
 
     pub async fn fetch_all_sql_with_binds(
@@ -604,24 +736,10 @@ impl EngineHandle {
         sql: &str,
         values: &[EngineBindValue],
     ) -> Result<Vec<EngineRow>, sqlx::Error> {
-        match &self.pool_snapshot() {
-            BackendPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_engine_row).collect())
-            }
-            BackendPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let rows = query.fetch_all(pool.as_ref()).await?;
-                Ok(rows.iter().map(materialize_pg_row).collect())
-            }
-        }
+        self.acquire_nontx_connection()
+            .await?
+            .fetch_all_sql_with_binds(sql, values)
+            .await
     }
 
     pub async fn begin_transaction_connection(&self) -> Result<EngineConnection, sqlx::Error> {
@@ -642,6 +760,17 @@ impl EngineHandle {
 
 #[allow(dead_code)]
 impl EngineConnection {
+    /// This connection's dialect — which pool variant it was checked out
+    /// from, not a query against the server. Used by callers that must
+    /// refuse to send dialect-specific SQL (e.g. Postgres `set_config`) down
+    /// a connection they did not resolve the dialect for themselves.
+    pub fn dialect(&self) -> Dialect {
+        match self {
+            EngineConnection::Sqlite(_) => Dialect::Sqlite,
+            EngineConnection::Postgres(_) => Dialect::Postgres,
+        }
+    }
+
     pub async fn execute_sql(&mut self, sql: &str) -> Result<u64, sqlx::Error> {
         self.execute_sql_with_binds(sql, &[]).await
     }
@@ -665,6 +794,34 @@ impl EngineConnection {
                     .execute(&mut **conn)
                     .await?;
                 Ok(result.rows_affected())
+            }
+        }
+    }
+
+    /// Fetch without entering the connection's prepared-statement cache — the
+    /// transactional counterpart of
+    /// [`EngineHandle::fetch_all_sql_unprepared_with_binds`].
+    pub async fn fetch_all_sql_unprepared_with_binds(
+        &mut self,
+        sql: &str,
+        values: &[EngineBindValue],
+    ) -> Result<Vec<EngineRow>, sqlx::Error> {
+        match self {
+            EngineConnection::Sqlite(conn) => {
+                let mut query = sqlx::query(sql).persistent(false);
+                for value in values {
+                    query = bind_engine_value(query, value);
+                }
+                let rows = query.fetch_all(&mut **conn).await?;
+                Ok(rows.iter().map(materialize_engine_row).collect())
+            }
+            EngineConnection::Postgres(conn) => {
+                let mut query = sqlx::query(sql).persistent(false);
+                for value in values {
+                    query = bind_engine_value(query, value);
+                }
+                let rows = query.fetch_all(&mut **conn).await?;
+                Ok(rows.iter().map(materialize_pg_row).collect())
             }
         }
     }
@@ -744,6 +901,36 @@ impl EngineConnection {
     pub async fn rollback(&mut self) -> Result<(), sqlx::Error> {
         self.execute_sql("ROLLBACK").await?;
         Ok(())
+    }
+
+    /// Sever the pool's claim on this connection, synchronously.
+    ///
+    /// For the connection whose state we can no longer vouch for: one whose
+    /// `ROLLBACK` failed, or one abandoned mid-statement when its operation was
+    /// cancelled. Either may be sitting idle-in-transaction, and sqlx only
+    /// pings on release, so simply dropping it would hand that state — an open
+    /// transaction, and with it another tenant's `SET LOCAL` scope — to the
+    /// next checkout. Detaching makes the pool open a fresh connection in its
+    /// place instead.
+    ///
+    /// No `await`: this is what a `Drop` can call. Await [`DetachedConnection::close`]
+    /// afterwards when there is a runtime to do it on.
+    #[must_use]
+    pub fn detach(self) -> DetachedConnection {
+        match self {
+            EngineConnection::Sqlite(conn) => DetachedConnection::Sqlite(conn.detach()),
+            EngineConnection::Postgres(conn) => DetachedConnection::Postgres(conn.detach()),
+        }
+    }
+
+    /// Take this connection out of its pool and close it — [`Self::detach`]
+    /// followed by the close handshake, for callers that can await.
+    ///
+    /// # Errors
+    /// The `sqlx::Error` from the close handshake. Callers are already on an
+    /// error path — the point is that the connection is gone either way.
+    pub async fn detach_and_close(self) -> Result<(), sqlx::Error> {
+        self.detach().close().await
     }
 }
 
@@ -950,9 +1137,12 @@ mod tests {
     use super::EngineValue;
     use super::PoolSpec;
     use super::dialect_from_url;
+    use crate::session_settings::SettingsDelivery;
     use ferro_ddl_lowering::Dialect;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn classifies_sqlite_urls() {
@@ -1041,6 +1231,82 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    /// The non-transactional execution seam (`acquire_nontx_connection`)
+    /// acquires a connection explicitly and hands it back to callers to run
+    /// their own statement, rather than opening a transaction itself. This
+    /// pins that contract: a statement run through the seam autocommits with
+    /// no `BEGIN` wrapping it, exactly as `pool.as_ref()` execution did
+    /// before the refactor — and it stayed that way through #410, which put
+    /// the settings wrap a level above the seam (per operation, not per
+    /// statement). Everything that reaches the seam is unwrapped work.
+    #[tokio::test]
+    async fn nontx_seam_autocommits_without_wrapping_transaction() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let engine = EngineHandle::new_sqlite(pool);
+
+        engine
+            .execute_sql("CREATE TABLE nontx_seam_autocommit (id integer primary key)")
+            .await
+            .unwrap();
+
+        // Run one statement directly through the seam and drop the
+        // connection it returns without ever issuing COMMIT.
+        let mut conn = engine.acquire_nontx_connection().await.unwrap();
+        conn.execute_sql("INSERT INTO nontx_seam_autocommit (id) VALUES (1)")
+            .await
+            .unwrap();
+        drop(conn);
+
+        // A fresh statement through the public API must see the insert: if
+        // the seam had implicitly wrapped it in an uncommitted transaction,
+        // this would come back empty.
+        let rows = engine
+            .fetch_all_sql_with_binds(
+                "SELECT id FROM nontx_seam_autocommit WHERE id = ?",
+                &[EngineBindValue::I64(1)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    /// Every seam call acquires a connection and must release it back to the
+    /// pool once its statement completes — it does not linger holding the
+    /// slot. A single-connection pool makes that concrete: two statements
+    /// issued one after another through the seam only succeed if the first
+    /// connection was actually returned.
+    #[tokio::test]
+    async fn nontx_seam_releases_connection_back_to_pool() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let engine = EngineHandle::new_sqlite(pool);
+
+        engine
+            .execute_sql("CREATE TABLE nontx_seam_release (id integer primary key)")
+            .await
+            .unwrap();
+        engine
+            .execute_sql_unprepared("INSERT INTO nontx_seam_release (id) VALUES (1)")
+            .await
+            .unwrap();
+        let rows = engine
+            .fetch_all_sql_unprepared_with_binds(
+                "SELECT id FROM nontx_seam_release WHERE id = ?",
+                &[EngineBindValue::I64(1)],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
     }
 
     #[tokio::test]
@@ -1330,6 +1596,8 @@ mod tests {
             search_path: None,
             max_connections: 2,
             min_connections: 0,
+            settings_delivery: SettingsDelivery::Transaction,
+            pins: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1389,6 +1657,8 @@ mod tests {
             search_path: None,
             max_connections: 1,
             min_connections: 0,
+            settings_delivery: SettingsDelivery::Transaction,
+            pins: Arc::new(AtomicUsize::new(0)),
         };
         let engine = EngineHandle::connect(spec).await.unwrap();
         engine

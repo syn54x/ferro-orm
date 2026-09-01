@@ -74,7 +74,11 @@ def _transaction_or_using(using: str | None, session: Any | None) -> RouteHandle
 
 
 async def execute(
-    sql: str, *args: Any, using: str | None = None, session: Any | None = None
+    sql: str,
+    *args: Any,
+    using: str | None = None,
+    session: Any | None = None,
+    autocommit: bool = False,
 ) -> int:
     """Run a raw SQL statement, returning rows affected.
 
@@ -83,11 +87,34 @@ async def execute(
     Two consecutive top-level ``execute`` calls outside a transaction may use
     different pool connections — wrap in ``transaction()`` if you need
     connection affinity (e.g. ``SET LOCAL``, advisory locks, ``LISTEN/NOTIFY``).
+
+    Args:
+        autocommit: Run the statement outside any transaction Ferro would open
+            for it. A few Postgres statements refuse to run inside a
+            transaction block — ``CREATE INDEX CONCURRENTLY``, ``VACUUM``,
+            ``ALTER TYPE ... ADD VALUE`` before PG 12 — and in a session that
+            carries settings, Ferro otherwise wraps every operation in one, so
+            they would fail with ``25001``. Set this for those statements::
+
+                async with engines.session(settings={"myapp.tenant_id": "acme"}):
+                    await execute(
+                        "CREATE INDEX CONCURRENTLY idx_invoice_status "
+                        "ON invoice (status)",
+                        autocommit=True,
+                    )
+
+            Plainly: an ``autocommit`` statement is **not** tenant-scoped. It
+            carries none of the session's settings, so a row-security policy
+            reading ``current_setting(...)`` sees nothing during it. That is the
+            right trade for maintenance DDL, which is not tenant data; do not
+            use it for statements that read or write rows a policy governs.
+            Inside an explicit ``transaction()`` block it changes nothing — you
+            asked for a transaction, and Postgres will reject the statement.
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
     route = _transaction_or_using(using, session)
-    return await _raw_execute(sql, marshalled, route)
+    return await _raw_execute(sql, marshalled, route, autocommit)
 
 
 async def fetch_all(

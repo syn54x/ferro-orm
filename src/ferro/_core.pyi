@@ -34,6 +34,7 @@ async def connect(
     identity_map: bool = True,
     migrate_updates: bool = False,
     migrate_destructive: bool = False,
+    settings_delivery: str = "transaction",
 ) -> None: ...
 async def create_tables(using: Optional[str] = None) -> None: ...
 async def migrate(
@@ -77,6 +78,7 @@ def _render_migration_sql_for_test(
     live_indexes_json: str = "",
     live_foreign_keys_json: str = "",
     live_checks_json: str = "",
+    live_row_security_json: str = "",
 ) -> tuple[list[str], list[str]]:
     """Test-only: render the auto-migrate diff for one table without a database.
 
@@ -87,7 +89,10 @@ def _render_migration_sql_for_test(
     with the LiveIndex shape (``name``, ``columns``, ``unique``);
     ``live_foreign_keys_json`` the LiveForeignKey shape (``name``, ``column``,
     ``to_table``, ``to_column``, ``on_delete``); ``live_checks_json`` the LiveCheck
-    shape (``name``, ``definition``, ``ferro_owned``).
+    shape (``name``, ``definition``, ``ferro_owned``); ``live_row_security_json``
+    the LiveRowSecurity shape (``enabled``, ``forced``, ``policies``, each with
+    ``name``, ``command``, ``restrictive``, ``using``, ``with_check``,
+    ``roles``, ``ferro_owned``).
     Returns ``(statements, warnings)``.
     """
     ...
@@ -98,6 +103,19 @@ async def _live_table_checks_for_test(
     """Test-only: read live CHECK constraints on ``table`` from the connected engine.
 
     Each dict has keys ``name``, ``definition``, and ``ferro_owned``.
+    """
+    ...
+
+async def _live_row_security_for_test(
+    table: str, using: str | None = None
+) -> dict[str, object]:
+    """Test-only: read ``table``'s live row-security state from the engine.
+
+    Returns ``{"enabled": bool, "forced": bool, "policies": [...]}``; each
+    policy dict has ``name``, ``command``, ``restrictive``, ``using``,
+    ``with_check`` (the catalog's own ``pg_get_expr`` text), ``roles``
+    (``pg_policy.polroles`` resolved to names, ``["public"]`` for the default)
+    and ``ferro_owned``.
     """
     ...
 
@@ -177,14 +195,29 @@ async def clear_m2m_links(
 ) -> None: ...
 async def begin_transaction(route: RouteHandle) -> str: ...
 async def commit_transaction(tx_id: str, session_id: Optional[str] = None) -> None: ...
-def transaction_connection_name(tx_id: str, session_id: Optional[str] = None) -> str: ...
-async def rollback_transaction(tx_id: str, session_id: Optional[str] = None) -> None: ...
-def open_session(using: Optional[str] = None) -> tuple[str, str]: ...
-def close_session(session_id: str) -> None: ...
+def transaction_connection_name(
+    tx_id: str, session_id: Optional[str] = None
+) -> str: ...
+async def rollback_transaction(
+    tx_id: str, session_id: Optional[str] = None
+) -> None: ...
+def open_session(
+    using: Optional[str] = None,
+    settings: Optional[list[tuple[str, str]]] = None,
+    declared: Optional[list[tuple[str, str]]] = None,
+) -> tuple[str, str]: ...
+async def close_session(session_id: str) -> None: ...
+async def set_session_config(
+    session_id: str,
+    connection_name: str,
+    key: str,
+    value: str,
+) -> list[tuple[str, str]]: ...
 async def raw_execute(
     sql: str,
     args: list[Any],
     route: RouteHandle,
+    autocommit: bool = False,
 ) -> int: ...
 async def raw_fetch_all(
     sql: str,
@@ -221,10 +254,8 @@ def _ddl_single_unique_name(table: str, column: str) -> str: ...
 def _ddl_composite_index_name(table: str, columns: list[str]) -> str: ...
 def _ddl_composite_unique_name(table: str, columns: list[str]) -> str: ...
 def _ddl_check_constraint_name(table: str, column: str) -> str: ...
-
 def _ddl_table_check_constraint_name(table: str, suffix: str) -> str: ...
 def _ddl_fk_name(table: str, column: str, to_table: str) -> str: ...
-
 def _resolve_storage_type(column_ir_json: str, dialect: str) -> str:
     """Resolve one SchemaIR column's storage decision via ferro-ddl-lowering.
 
@@ -254,9 +285,7 @@ def _plan_enum_label_addition(
     """
     ...
 
-def _plan_check_addition(
-    table: str, model_ir_json: str, live_names: list[str]
-) -> str:
+def _plan_check_addition(table: str, model_ir_json: str, live_names: list[str]) -> str:
     """The check-addition decision (ADR-0013) for one table.
 
     Returns JSON: ``{"statements": [...], "names": [...]}`` — the Rust-rendered
@@ -291,4 +320,82 @@ def _plan_check_drop(
     There is no destructive gate here: running autogenerate is itself the
     request for a diff.
     """
+    ...
+
+def _ddl_row_policy_name(table: str, name: str) -> str:
+    """Canonical row-policy name (``rls_<table>_<name>``), 63-char guarded."""
+    ...
+
+def _rls_command_matrix() -> str:
+    """Every row-policy command and the clauses Postgres accepts for it.
+
+    Returns JSON: ``[{"command": "all", "using": true, "with_check": true}, …]``.
+    ``ferro.rowsecurity`` reads this at import instead of keeping its own copy,
+    so the command allowlist and the USING / WITH CHECK rules are decided in
+    ``ferro-ddl-lowering`` alone (I-1) — the same decision the renderer filters
+    clauses with.
+    """
+    ...
+
+def _rls_shorthand_cast(column_ir_json: str) -> str:
+    """The column/setting shorthand's cast decision for one IR column.
+
+    Returns JSON: ``{"supported": true, "cast": "uuid" | null}`` for a column
+    the shorthand can render (``null`` = the column already stores text, so no
+    cast), or ``{"supported": false, "reason": "..."}``. The emitters render
+    with the same decision, so class definition fails for exactly the columns
+    DDL would fail for (I-1).
+    """
+    ...
+
+def _plan_row_security(model_ir_json: str, dialect: str = "postgres") -> str:
+    """The row-security create decision (PRD #406) for one model.
+
+    Returns JSON: ``{"statements": [...], "names": [...], "warning": str|None}``
+    — the Rust-rendered ``ENABLE``/``FORCE ROW LEVEL SECURITY`` and
+    ``CREATE POLICY`` statements a freshly created table needs, in execution
+    order, plus the policy names. Byte-identical to what the create pass
+    executes (I-1). On ``"sqlite"`` there are no statements and one warning.
+    """
+    ...
+
+def _plan_row_security_reconcile(
+    model_ir_json: str,
+    live_json: str,
+    dialect: str = "postgres",
+    destructive: bool = False,
+) -> str:
+    """The row-security reconciliation decision (#413) for one live table.
+
+    ``live_json`` is the LiveRowSecurity shape (``enabled``, ``forced``,
+    ``policies``). Returns JSON:
+    ``{"statements": [...], "missing": [...], "drifted": [...],
+    "unverifiable": [...], "extra": [...], "foreign": [...],
+    "warnings": [...]}`` — the Rust-rendered flag, ``CREATE POLICY``, rebuild
+    and (under ``destructive``) orphan-drop statements in execution order.
+    Byte-identical to what the reconciliation pass executes (I-1).
+    """
+    ...
+
+def _normalize_row_policy_expr(expr: str) -> str:
+    """One row-policy expression through ferro's canonical normalizer (#413).
+
+    Both ferro's rendered body and the catalog's ``pg_get_expr`` text go
+    through this one function; equal output means the same predicate.
+    """
+    ...
+
+def _row_policy_command_from_catalog_code(code: str) -> str | None:
+    """Decode one ``pg_policy.polcmd`` code into ferro's command vocabulary.
+
+    ``None`` for a code ferro does not recognize. The Alembic autogenerate
+    comparator's own ``pg_policy`` introspection uses this to build the
+    ``LiveRowPolicy`` payload ``_plan_row_security_reconcile`` expects —
+    the same decode ``src/introspect.rs``'s ``live_table_row_security`` uses
+    (AGENTS.md § I-1).
+    """
+    ...
+
+def _is_ferro_row_policy_name(name: str) -> bool:
+    """Whether a live policy name follows ferro's ``rls_`` ownership prefix."""
     ...

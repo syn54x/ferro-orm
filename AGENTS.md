@@ -98,6 +98,89 @@ For a single model, every emitter must agree on:
     the byte-identical statements. Pinned by
     `tests/test_table_check_orphans.py`. See ADR-0013 (leftover warning +
     destructive ladder) and ADR-0014 (SQLite warn-skip).
+15. **Row policy names and DDL** — the live policy name
+    (`rls_<table>_<name>`; `name` defaults to the shorthand's column), the
+    column/setting shorthand's cast (from `resolve_column_storage`; `uuid`,
+    `text`/`varchar` and the integer families only), the rendered
+    `<col> = NULLIF(current_setting('<key>', true), '')::<cast>` expression,
+    and the full `ALTER TABLE … ENABLE/FORCE ROW LEVEL SECURITY` +
+    `CREATE POLICY` statements are decided by ONE family of functions in
+    `ferro_ddl_lowering`: `row_policy_name` / `is_ferro_row_policy_name` /
+    `row_policy_shorthand_cast` / `render_row_policy_setting_expr` /
+    `row_policy_clauses` / `render_create_row_policy` /
+    `render_enable_row_security` / `render_force_row_security` /
+    `row_security_statements`, over the command table
+    `ROW_POLICY_COMMANDS` / `row_policy_command_token` /
+    `row_policy_command_takes_using` / `row_policy_command_takes_with_check`.
+    The auto-migrate create pass consumes them through
+    `ferro_migrate::render_create_table`. The Python declaration surface
+    (`src/ferro/rowsecurity.py`) consumes the name, the cast, and the command
+    table over FFI (`_core._ddl_row_policy_name`, `_core._rls_shorthand_cast`,
+    `_core._rls_command_matrix`) rather than keeping its own copies, so a
+    declaration fails at class definition for exactly the columns and clauses
+    DDL would fail for. The Alembic autogenerate operation
+    (`FerroRowSecurityOp` in `src/ferro/migrations/alembic.py`) consumes the
+    whole emission over FFI (`_core._plan_row_security`, for a table this
+    same revision creates — the seam and its byte-parity with the create pass
+    are pinned by `test_row_security_statement_parity_pin`). Pinned by
+    `tests/test_row_security_create_pass.py` and the ferro-ddl-lowering unit
+    pins. Postgres-only; SQLite gets one warning per table and no DDL
+    (ADR-0014 posture). See PRD #406.
+16. **Row-security reconciliation on a live table** — the whole decision for
+    one existing table (which declared policies are missing, which live ones
+    drifted, which raw bodies ferro cannot verify, which ferro-owned `rls_*`
+    policies are orphaned, which live policies are foreign, the one-way
+    `ENABLE`/`FORCE` statements, the `migrate_destructive` teardown, and every
+    warning) is decided by ONE function family in `ferro_ddl_lowering`, over
+    the same `LiveRowSecurity` / `LiveRowPolicy` input:
+    `plan_row_security_reconcile` — built from `missing_row_policy_names` /
+    `row_policy_drift` / `extra_row_policy_names` /
+    `missing_row_security_flag_statements` /
+    `excess_row_security_flag_statements` / `render_drop_row_policy` /
+    `row_policy_rebuild_statements`, the two ownership tests
+    (`is_default_row_policy_roles` for a policy's `TO` audience,
+    `ferro_manages_row_security` for whether ferro installed the table's row
+    security at all — the gate on every teardown and every dropped-declaration
+    warning), one normalizer (`normalize_row_policy_expr`), one catalog decoder
+    (`row_policy_command_from_catalog_code`), and the warning texts
+    (`dropped_row_security_warning`, `extra_row_policy_names_warning`,
+    `foreign_row_policy_warning`, `unverifiable_row_policy_warning`,
+    `row_policy_body_replaced_warning`, `row_security_teardown_warning`,
+    `row_security_migrator_warning`). The
+    auto-migrate reconciliation pass consumes it directly (`src/migrate.rs`,
+    after that table's column and data steps); the Alembic autogenerate
+    operation (`FerroRowSecurityOp` / `FerroRowSecurityDropOp` in
+    `src/ferro/migrations/alembic.py`) consumes it over FFI
+    (`_core._plan_row_security_reconcile`, called once non-destructive and
+    once destructive per live table — the destructive call's statements are
+    the non-destructive call's as an exact prefix, so the comparator slices
+    the tail to isolate the orphan/teardown-only statements without
+    re-deriving anything; whose byte-parity with the pass is pinned). Live
+    state comes from `src/introspect.rs` for the runtime pass
+    (`live_table_row_security`: `pg_class.relrowsecurity` /
+    `relforcerowsecurity` plus `pg_policy` — name, command, permissive, both
+    `pg_get_expr` bodies, and `polroles` resolved to role names — with
+    `ferro_owned` decided by `is_ferro_row_policy_name`) and from the
+    comparator's own equivalent `pg_class`/`pg_policy` query for the Alembic
+    side (`_live_row_security_by_table` in `src/ferro/migrations/alembic.py`,
+    the same shape `_live_check_names_by_table` uses) — the command decode
+    and the ownership test are the same two functions over FFI
+    (`_core._row_policy_command_from_catalog_code`,
+    `_core._is_ferro_row_policy_name`), never a second copy. Pinned by
+    `tests/test_row_security_reconcile.py`,
+    `tests/test_row_security_rebuild.py`,
+    `tests/test_row_security_orphans.py` and the ferro-ddl-lowering unit pins
+    (which carry real `pg_get_expr` fixtures). Postgres-only: SQLite plans
+    nothing and keeps the create pass's single warning (ADR-0014). Two
+    reported categories never become an autogenerate op, on purpose and
+    silently: a **foreign** policy (never altered on any migration door) and
+    an **unverifiable** raw body (ADR-0019: ferro cannot tell an edit from
+    Postgres's own re-spelling, so it changes nothing and only warns on
+    `migrate_updates`) — the checks family has no comment-op precedent for
+    either shape, so autogenerate stays silent and the runtime's own
+    connect-time warnings remain the only word on them. See ADR-0019
+    (rebuild the bodies ferro writes, report the bodies you write; flags are
+    one-way) and PRD #406.
 
 ### Why this invariant exists
 

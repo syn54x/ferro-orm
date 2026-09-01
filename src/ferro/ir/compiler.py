@@ -30,6 +30,7 @@ from ..columns import (
 from ..composite_indexes import drop_overlap_with_uniques, normalized_composite_indexes
 from ..composite_uniques import normalized_composite_uniques
 from ..registry import REGISTRY, ir_fingerprint
+from ..rowsecurity import RowSecurity, _declared_row_security, compile_row_security
 
 _IR_VERSION = 1
 
@@ -142,6 +143,7 @@ def compile_schema_ir_payload(
     composite_uniques: Sequence[Sequence[str]] = (),
     composite_indexes: Sequence[Sequence[str]] = (),
     table_checks: Sequence[TableCheckSpec] = (),
+    row_security: RowSecurity | None = None,
 ) -> dict[str, Any]:
     """Compile column specs into a SchemaIR payload object (locked shape).
 
@@ -153,6 +155,9 @@ def compile_schema_ir_payload(
         composite_indexes: Validated composite-index column groups.
         table_checks: Compiled ``__ferro_checks__`` table checks, in declaration
             order (see :func:`ferro.checks.compile_table_checks`).
+        row_security: The model's declared ``__ferro_rls__``, validated and
+            lowered here against this pass's column IR (see
+            :func:`ferro.rowsecurity.compile_row_security`).
 
     Returns:
         A SchemaIR payload object ready to be wrapped in an IR envelope.
@@ -257,6 +262,16 @@ def compile_schema_ir_payload(
     )
     if table_check_entries:
         model_payload["table_checks"] = table_check_entries
+    # Same absent-not-empty rule for the row-security declaration: a model
+    # without ``__ferro_rls__`` keeps a byte-identical envelope and fingerprint.
+    row_security_entry = compile_row_security(
+        model_name,
+        resolved_table_name,
+        row_security,
+        {entry["name"]: entry for entry in column_entries},
+    )
+    if row_security_entry is not None:
+        model_payload["row_security"] = row_security_entry
     return {"dialect_agnostic": True, "models": [model_payload]}
 
 
@@ -278,6 +293,7 @@ def _compile_and_persist_model_envelope(
     composite_uniques: Sequence[Sequence[str]] = (),
     composite_indexes: Sequence[Sequence[str]] = (),
     table_checks: Sequence[TableCheckSpec] = (),
+    row_security: RowSecurity | None = None,
 ) -> dict[str, Any]:
     """Compile one model or join table to SchemaIR and persist its envelope.
 
@@ -293,6 +309,7 @@ def _compile_and_persist_model_envelope(
         composite_uniques=composite_uniques,
         composite_indexes=composite_indexes,
         table_checks=table_checks,
+        row_security=row_security,
     )
     envelope = wrap_schema_ir(payload)
     _persist_schema_ir_envelope(model_name, envelope)
@@ -364,6 +381,10 @@ def compile_model_schema_ir(
     # published ones), so a predicate can reference a shadow FK column at class
     # definition and the resolved second pass re-lowers against fresh specs.
     table_checks = compile_table_checks(model_cls, model_name, specs)
+    # Row security lowers against the same fresh column IR for the same reason:
+    # a shorthand policy's column type is validated on every compile pass, so a
+    # declaration can never outlive the column it scopes on.
+    row_security = _declared_row_security(model_cls)
     envelope = _compile_and_persist_model_envelope(
         model_name,
         tuple(specs.values()),
@@ -371,6 +392,7 @@ def compile_model_schema_ir(
         composite_uniques=uniques,
         composite_indexes=indexes,
         table_checks=table_checks,
+        row_security=row_security,
     )
     # Publish specs onto the class only after compile + persist succeed, so a
     # composite-validation or persist failure leaves the prior specs in place

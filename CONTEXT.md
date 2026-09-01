@@ -175,3 +175,27 @@ _Avoid_: table-level check, multi-column check, composite check, row check
 **Check predicate**:
 The lambda body of a table check — a ferro predicate over that model's own columns (or a forward-FK null test on the relation or its shadow `*_id`), with literal values only. Relation traversal, existence tests, and aggregates are not check predicates.
 _Avoid_: check SQL, constraint expression, check body
+
+**Session settings**:
+Key/value Postgres settings (GUCs) belonging to a ferro `Session`, applied by ferro to whichever database connection runs each of the session's statements. The unit of tenancy scope for Row-Level Security.
+_Avoid_: Session variables, Postgres session state, connection settings
+
+**Settings delivery**:
+How session settings reach the database: `transaction` (default — `SET LOCAL` inside every transaction, implicit ones included; safe behind any pooler) or `connection` (opt-in — `SET` once on a pinned connection, reset on close; direct-Postgres only). Delivery is the mechanism; session settings are the values.
+_Avoid_: Pooler mode, GUC mode, SET mode
+
+**Operation atomicity**:
+Every ferro operation is atomic: it issues one statement, or — when it must issue several — runs them inside the ambient transaction when one exists and self-wraps in its own transaction when none does (the `bulk_create` chunking contract, #298). Settings delivery rides this invariant; it never creates a new atomicity boundary.
+_Avoid_: Implicit transaction, auto-commit batching, per-statement autocommit
+
+**Row policy**:
+One named row-visibility rule on a model, enforced by Postgres as a `rls_<table>_<name>` policy. Declared as a column/setting shorthand (rendered with `NULLIF` and the column spec's cast) or a raw expression; scoped to a command; permissive (OR) or restrictive (AND).
+_Avoid_: RLS rule, tenant filter, row filter
+
+**Row security declaration**:
+The table-level `RowSecurity(*policies, force=True)` ClassVar (`__ferro_rls__`) — the single owner of a model's row-security facts: its policies plus the table flags (`ENABLE`, `FORCE`). Ferro reconciles it one-way: flags and ferro-owned policies are created and rebuilt to match the model, never disabled or dropped outside `migrate_destructive`.
+_Avoid_: Policy tuple, RLS config, security metadata
+
+**Policy rebuild**:
+Drop-and-recreate of a ferro-owned row policy whose live catalog entry no longer matches the declaration — its command, its permissive/restrictive composition, which clauses it carries, or a body ferro itself rendered. Metadata-only: no row is read, validated, or rewritten. A body the *author* wrote (the raw `using=`/`with_check=` form) is never rebuilt on a textual difference — Postgres stores its own rewriting of raw SQL, so ferro reports the difference with both texts instead (ADR-0019).
+_Avoid_: Policy alter, policy sync, RLS drift repair

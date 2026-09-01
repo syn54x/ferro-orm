@@ -4,6 +4,7 @@
 //! and the Identity Map used for object tracking.
 
 use crate::backend::{EngineConnection, EngineHandle};
+use crate::session_settings::SessionSetting;
 use dashmap::DashMap;
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use once_cell::sync::Lazy;
@@ -11,7 +12,7 @@ use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
@@ -438,11 +439,198 @@ pub struct TransactionHandle {
     pub savepoint_name: Option<String>,
     /// Connection name the transaction was opened on (for routing and identity map keys).
     pub connection_name: String,
+    /// This block's exclusive claim on a session's pinned connection
+    /// (`connection` settings delivery), held from `BEGIN` until the handle
+    /// is removed from the registry and dropped by `COMMIT`/`ROLLBACK`.
+    ///
+    /// That span is the point: while a `transaction()` block is open on a
+    /// pinned session, a sibling task's operation must wait rather than land
+    /// its statements *inside* the block — where the block's `COMMIT` would
+    /// commit them early, and its `ROLLBACK` would throw them away.
+    /// Operations in the same task *inside* the block ride the ambient
+    /// transaction and take no claim of their own, so they are reentrant by
+    /// construction.
+    ///
+    /// `Arc` only because [`TransactionHandle`] is `Clone` and a
+    /// `MutexGuard` is not; the claim is released when the last clone goes,
+    /// which is the handle the commit path took ownership of. `None` for
+    /// every root transaction on a pool connection, and for every nested
+    /// savepoint (its root holds the claim).
+    pub pin_hold: Option<Arc<crate::session_settings::PinHold>>,
 }
 
-/// Async mutex wrapper around a checked-out [`EngineConnection`].
-pub type TransactionConnection = Arc<Mutex<EngineConnection>>;
+/// One checked-out connection, and the tombstone that says it must never be
+/// used or pooled again.
+///
+/// Every route an operation's statements can run on is one of these: the
+/// connection an explicit `transaction()` block holds, the implicit
+/// transaction `transaction` settings delivery opens around a lone operation,
+/// and the connection a session pins under `connection` delivery.
+///
+/// # Why the connection lives inside an `Option`
+///
+/// It is what makes *discarding* expressible from a synchronous `Drop`. A
+/// connection whose state Ferro can no longer vouch for — one abandoned
+/// mid-statement by a cancelled task, one whose `ROLLBACK` failed, one still
+/// carrying a session's settings — must never go back to the pool, and the
+/// only way to sever the pool's claim is [`EngineConnection::detach`], which
+/// consumes the connection. Taking it out of the slot is how a `Drop` gets to
+/// own it.
+///
+/// # Why there is also a tombstone
+///
+/// Taking it out needs the lock, and a `Drop` cannot wait for one. In the rare
+/// case where the lock is held by a statement still in flight, [`Self::discard`]
+/// sets `discarded` — which needs no lock — and leaves the taking to whoever
+/// can do it: a spawned task, or, failing even that, this slot's own `Drop`,
+/// which has exclusive access by definition and needs no runtime at all.
+///
+/// So there is no path, on a runtime or off one, by which a slot that has been
+/// discarded hands its connection back to the pool. A discarded slot is a loud
+/// error at the next use ([`SlotGuard::live`]), never a silent reuse.
+pub struct ConnectionSlot {
+    conn: Mutex<Option<EngineConnection>>,
+    discarded: AtomicBool,
+}
 
+/// A [`ConnectionSlot`] shared between the transaction registry, a session's
+/// pin, and the operations running on it.
+pub type TransactionConnection = Arc<ConnectionSlot>;
+
+pub(crate) const DISCARDED_CONNECTION_MSG: &str =
+    "This connection is no longer available to this route: it was either \
+     released back to the pool (its session closed) or discarded because \
+     Ferro could not vouch for its state (a cancelled operation, or a failed \
+     ROLLBACK). Ferro never reuses either.";
+
+impl ConnectionSlot {
+    /// Put a freshly checked-out connection in a slot.
+    #[must_use]
+    pub fn new(conn: EngineConnection) -> Self {
+        Self {
+            conn: Mutex::new(Some(conn)),
+            discarded: AtomicBool::new(false),
+        }
+    }
+
+    /// Lock the slot for the duration of one statement.
+    pub async fn lock(&self) -> SlotGuard<'_> {
+        SlotGuard {
+            slot: self,
+            guard: self.conn.lock().await,
+        }
+    }
+
+    /// Lock the slot without waiting — for the synchronous discard paths.
+    pub fn try_lock(&self) -> Option<SlotGuard<'_>> {
+        self.conn
+            .try_lock()
+            .ok()
+            .map(|guard| SlotGuard { slot: self, guard })
+    }
+
+    /// Whether this slot has been given up on.
+    #[must_use]
+    pub fn is_discarded(&self) -> bool {
+        self.discarded.load(Ordering::SeqCst)
+    }
+
+    /// Give up on this slot's connection: it will never be used or pooled
+    /// again, whether or not the caller can take it out right now.
+    ///
+    /// Lock-free on purpose — a `Drop` can always do this much.
+    pub fn tombstone(&self) {
+        self.discarded.store(true, Ordering::SeqCst);
+    }
+
+    /// Take the connection out of a slot the caller owns outright — the
+    /// implicit transaction an operation opened for itself, which nothing
+    /// else can reach. No lock is needed for exclusive access.
+    #[must_use]
+    pub fn take_owned(&mut self) -> Option<EngineConnection> {
+        self.conn.get_mut().take()
+    }
+}
+
+/// A slot dropped while tombstoned discards its connection.
+///
+/// The backstop for the one case [`crate::session_settings`]'s discard path
+/// cannot finish itself: the lock was held, and there was no runtime to spawn
+/// the take onto. `Drop` has exclusive access, so it needs neither.
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        if !self.is_discarded() {
+            return;
+        }
+        let taken = self.conn.get_mut().take();
+        discard_connection(taken);
+    }
+}
+
+/// One locked slot.
+pub struct SlotGuard<'a> {
+    slot: &'a ConnectionSlot,
+    guard: tokio::sync::MutexGuard<'a, Option<EngineConnection>>,
+}
+
+impl SlotGuard<'_> {
+    /// The connection to run a statement on, or a loud error when this slot no
+    /// longer has one to give.
+    ///
+    /// The single read seam for [`ConnectionSlot`], so "this connection is
+    /// gone" has one message and one shape wherever a statement is issued.
+    ///
+    /// # Errors
+    /// `sqlx::Error::Protocol` carrying [`DISCARDED_CONNECTION_MSG`].
+    pub fn live(&mut self) -> Result<&mut EngineConnection, sqlx::Error> {
+        if self.slot.is_discarded() {
+            return Err(sqlx::Error::Protocol(DISCARDED_CONNECTION_MSG.to_string()));
+        }
+        self.guard
+            .as_mut()
+            .ok_or_else(|| sqlx::Error::Protocol(DISCARDED_CONNECTION_MSG.to_string()))
+    }
+
+    /// Whether the slot still holds a connection.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.guard.is_none()
+    }
+
+    /// Take the connection out to hand it back to the pool. Only ever called
+    /// after Ferro has put the connection back the way it found it.
+    #[must_use]
+    pub fn release(&mut self) -> Option<EngineConnection> {
+        self.guard.take()
+    }
+
+    /// Take the connection out to throw it away, tombstoning the slot first so
+    /// that nothing can use it in the meantime.
+    #[must_use]
+    pub fn discard(&mut self) -> Option<EngineConnection> {
+        self.slot.tombstone();
+        self.guard.take()
+    }
+}
+
+/// Sever the pool's claim on a connection and close it in the background.
+///
+/// [`EngineConnection::detach`] is synchronous, which is the whole point: the
+/// pool loses its claim right here, before anything else can be handed the
+/// connection, and opens a replacement. The close handshake is spawned when
+/// there is a runtime to spawn it on; without one the value simply drops and
+/// the socket shuts.
+pub fn discard_connection(conn: Option<EngineConnection>) {
+    let Some(conn) = conn else {
+        return;
+    };
+    let detached = conn.detach();
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            let _ = detached.close().await;
+        });
+    }
+}
 impl TransactionHandle {
     /// Create a root transaction handle after `BEGIN`.
     ///
@@ -451,9 +639,36 @@ impl TransactionHandle {
     /// * `connection_name` — Registered Ferro connection name.
     pub fn root(conn: EngineConnection, connection_name: String) -> Self {
         Self {
-            conn: Arc::new(Mutex::new(conn)),
+            conn: Arc::new(ConnectionSlot::new(conn)),
             savepoint_name: None,
             connection_name,
+            pin_hold: None,
+        }
+    }
+
+    /// Create a root transaction handle for a `BEGIN` issued on a connection
+    /// the session already owns — its pinned connection under `connection`
+    /// settings delivery.
+    ///
+    /// Unlike [`Self::root`], the slot is *shared* with the session's pin, so
+    /// ending this transaction (`COMMIT`/`ROLLBACK`) returns nothing to the
+    /// pool: the session keeps the connection until it closes.
+    ///
+    /// # Arguments
+    /// * `conn` — The session's pinned connection slot.
+    /// * `connection_name` — Registered Ferro connection name.
+    /// * `hold` — The block's claim on the pinned connection, held until the
+    ///   handle is dropped by `COMMIT`/`ROLLBACK`.
+    pub fn on_pinned(
+        conn: TransactionConnection,
+        connection_name: String,
+        hold: crate::session_settings::PinHold,
+    ) -> Self {
+        Self {
+            conn,
+            savepoint_name: None,
+            connection_name,
+            pin_hold: Some(Arc::new(hold)),
         }
     }
 
@@ -472,6 +687,10 @@ impl TransactionHandle {
             conn,
             savepoint_name: Some(savepoint_name),
             connection_name,
+            // The root holds the claim for the whole nest; `SET LOCAL` and
+            // connection ownership are transaction-scoped, not
+            // savepoint-scoped.
+            pin_hold: None,
         }
     }
 }
@@ -495,6 +714,19 @@ pub static TRANSACTION_REGISTRY: Lazy<DashMap<String, TransactionHandle>> = Lazy
 pub struct SessionState {
     /// Transactions opened within this session (isolated from global registry).
     pub transaction_registry: DashMap<String, TransactionHandle>,
+    /// Effective session settings, snapshotted at open in declaration order
+    /// (see [`crate::session_settings`]) and mutable thereafter through
+    /// `Session.set_config` (#411). Empty for the vast majority of sessions,
+    /// which then pay nothing for the feature. A plain `RwLock` rather than
+    /// `DashMap`'s per-key sharding: this is one value read on every
+    /// operation and written rarely, not a keyed collection.
+    settings: RwLock<Vec<SessionSetting>>,
+    /// Serializes a `set_config` mutation's whole sequence — compare, swap,
+    /// reapply to open transactions, evict the identity map — so two
+    /// concurrent `set_config` calls on the same session (from sibling tasks
+    /// sharing it) cannot interleave their reapplication out of order. Reads
+    /// of `settings` never take this; only a mutation does.
+    settings_write_lock: Mutex<()>,
     /// Session-local identity map — the *only* identity map (FF-D D2:
     /// sessionless operations cache nothing); values are `weakref.ref`
     /// objects (FF-D D1).
@@ -504,16 +736,60 @@ pub struct SessionState {
     pub identity_map: DashMap<(String, String, String), Py<PyAny>>,
     /// Amortized-sweep op counter for `identity_map`.
     pub identity_ops: AtomicUsize,
+    /// The pool connection this session pinned under `connection` settings
+    /// delivery, and the keys it applied on it (see
+    /// [`crate::session_settings::PinnedConnection`]).
+    ///
+    /// `None` for every session on a `transaction`-delivery pool, every
+    /// settings-less session, and any session whose pinned connection was
+    /// discarded — the next operation pins a fresh one. The async mutex is
+    /// held only across the pin decision itself, so two sibling tasks racing
+    /// a session's *first* operation cannot pin two connections.
+    pub pinned: Mutex<Option<Arc<crate::session_settings::PinnedConnection>>>,
 }
 
 impl SessionState {
-    /// Allocate empty session state.
-    pub fn new() -> Self {
+    /// Allocate session state carrying `settings` (empty for a plain session).
+    pub fn new(settings: Vec<SessionSetting>) -> Self {
         Self {
             transaction_registry: DashMap::new(),
+            settings: RwLock::new(settings),
+            settings_write_lock: Mutex::new(()),
             identity_map: DashMap::new(),
             identity_ops: AtomicUsize::new(0),
+            pinned: Mutex::new(None),
         }
+    }
+
+    /// Snapshot the session's current effective settings, in declaration
+    /// order. Poisoning is recovered rather than propagated, matching
+    /// `EngineHandle::pool_snapshot` — the value itself is always valid
+    /// (writers only ever replace it wholesale), and panicking here would
+    /// cross the FFI boundary (AGENTS.md § I-3).
+    pub fn settings_snapshot(&self) -> Vec<SessionSetting> {
+        match self.settings.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Replace the session's effective settings wholesale. Callers that need
+    /// "did this actually change" must snapshot and compare themselves
+    /// first — [`crate::session_settings::settings_changed`] is the shared
+    /// answer to that question, kept out of this setter so it stays a pure
+    /// unconditional write.
+    pub fn replace_settings(&self, new: Vec<SessionSetting>) {
+        let mut guard = match self.settings.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = new;
+    }
+
+    /// Serialize one `set_config` mutation's sequence against any other on
+    /// this session. See [`Self::settings_write_lock`].
+    pub async fn lock_settings_for_mutation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.settings_write_lock.lock().await
     }
 }
 
@@ -522,11 +798,15 @@ pub static SESSION_REGISTRY: Lazy<DashMap<String, Arc<SessionState>>> = Lazy::ne
 
 /// Register a new session.
 ///
+/// # Arguments
+/// * `settings` — Effective session settings in declaration order; empty for a
+///   session that declares none.
+///
 /// # Returns
 /// Opaque session UUID string for subsequent operations.
-pub fn register_session() -> String {
+pub fn register_session(settings: Vec<SessionSetting>) -> String {
     let session_id = uuid::Uuid::new_v4().to_string();
-    SESSION_REGISTRY.insert(session_id.clone(), Arc::new(SessionState::new()));
+    SESSION_REGISTRY.insert(session_id.clone(), Arc::new(SessionState::new(settings)));
     session_id
 }
 
@@ -536,9 +816,13 @@ pub fn register_session() -> String {
 /// * `session_id` — Id returned by [`register_session`].
 ///
 /// # Returns
-/// `true` when the session existed and was removed.
-pub fn unregister_session(session_id: &str) -> bool {
-    SESSION_REGISTRY.remove(session_id).is_some()
+/// The removed session's state, or `None` when the id was not registered.
+/// Callers that need the state after removal — the close path, which has to
+/// release a pinned connection *after* the session is gone from the registry
+/// so a cancelled close cannot strand it — take it from here rather than
+/// re-reading a registry the session is no longer in.
+pub fn unregister_session(session_id: &str) -> Option<Arc<SessionState>> {
+    SESSION_REGISTRY.remove(session_id).map(|(_, state)| state)
 }
 
 /// Look up active session state.
@@ -694,7 +978,7 @@ mod session_close_tests {
 
     #[tokio::test]
     async fn close_guard_uses_transaction_registry_emptiness() {
-        let session_id = register_session();
+        let session_id = register_session(Vec::new());
 
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -732,7 +1016,7 @@ mod session_close_tests {
                 .transaction_registry
                 .is_empty()
         );
-        assert!(unregister_session(&session_id));
+        assert!(unregister_session(&session_id).is_some());
     }
 }
 
@@ -802,6 +1086,7 @@ mod install_registration_tests {
             uniques: vec![],
             checks: vec![],
             table_checks: vec![],
+            row_security: None,
         }
     }
 
