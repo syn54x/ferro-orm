@@ -316,9 +316,10 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
 # request for a diff; parity is in the decision, not the gate. The generated
 # ops render inside `op.get_context().autocommit_block()` so the revision is
 # legal on every supported Postgres version and the label is committed before
-# any table op that references it; label additions are inserted ahead of the
-# revision's table ops for the same reason. Extra live labels render as a
-# comment (warn-never-act): removal is reviewed-migration territory.
+# any table op that references it. I-12: this comparator is before-tables —
+# ``priority=FIRST`` and insert at the front of the ops list — so new labels
+# exist before a column this same revision may add. Extra live labels render as
+# a comment (warn-never-act): removal is reviewed-migration territory.
 # ---------------------------------------------------------------------------
 
 try:
@@ -362,7 +363,7 @@ if _alembic_comparators is not None:
             # the same warn-never-act contract that governs upgrades.
             return AddEnumLabelsOp(self.type_name, [], [])
 
-    @_alembic_comparators.dispatch_for("schema")
+    @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.FIRST)
     def _compare_enum_labels(autogen_context, upgrade_ops, schemas) -> None:
         if autogen_context.dialect.name != "postgresql":
             return
@@ -432,9 +433,9 @@ if _alembic_comparators is not None:
     # There is no ``migrate_updates`` / ``migrate_destructive`` gate here —
     # running autogenerate is itself the request for a diff. The destructive
     # flag is connect-time safety only (ADR-0013 / ADR-0011: parity is the
-    # SQL, not the flag). Additions then rebuilds then leftover drops are
-    # appended after the revision's table ops so a CHECK over a newly added
-    # column lands after its ADD COLUMN. Postgres-only, like the
+    # SQL, not the flag). I-12: this comparator is after-tables —
+    # ``priority=LAST`` then append — so a CHECK over a newly added column
+    # lands after its ADD COLUMN (#423). Postgres-only, like the
     # reconciliation pass: on SQLite, adding, rebuilding, or dropping a table
     # constraint needs a full table rebuild, which is Alembic's batch-mode
     # door (ADR-0014).
@@ -501,7 +502,7 @@ if _alembic_comparators is not None:
                 checks.append((row.name, row.definition or ""))
         return live
 
-    @_alembic_comparators.dispatch_for("schema")
+    @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.LAST)
     def _compare_check_constraints(autogen_context, upgrade_ops, schemas) -> None:
         if autogen_context.dialect.name != "postgresql":
             return
@@ -950,17 +951,17 @@ if _alembic_comparators is not None:
             # declaration or was ferro's to begin with.
             return FerroRowSecurityDropOp(self.table_name, [], self.names)
 
-    # `priority=LAST`: unlike the check/enum comparators above (which only
-    # ever touch a table already live — a table this SAME revision creates
-    # rides its own `create_table` op's inline constraints, no separate op
-    # needed), this comparator's new-table branch appends a real op that
-    # must run AFTER that table exists. Alembic's own table-creation
-    # comparator is merged into `autogen_context.comparators` per-instance
+    # I-12: after-tables, same ``LAST`` bucket as the check comparator
+    # (checks register first, then this — so ADD CONSTRAINT precedes CREATE
+    # POLICY). A table this SAME revision creates has no SA policy construct,
+    # so this comparator appends a real op that must run AFTER that table
+    # exists. Alembic's own table-creation comparator is merged into
+    # `autogen_context.comparators` per-instance
     # (`Plugin.populate_autogenerate_priority_dispatch`), AFTER whatever a
     # module already registered directly on the global dispatcher at import
-    # time — so a same-priority (`MEDIUM`, the default) registration here
-    # would run and append to `upgrade_ops.ops` BEFORE `create_table` is
-    # even in the list. Running last guarantees it is there to append after.
+    # time — so a default-``MEDIUM`` registration here would run and append
+    # to `upgrade_ops.ops` BEFORE `create_table` is even in the list. LAST
+    # puts it after table ops. Default MEDIUM is an I-12 violation.
     @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.LAST)
     def _compare_row_security(autogen_context, upgrade_ops, schemas) -> None:
         if autogen_context.dialect.name != "postgresql":
