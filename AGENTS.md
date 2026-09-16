@@ -484,7 +484,8 @@ same-revision pin is required for every after-tables family.
 Pinned by the row-security comparator's LAST registration and
 `test_new_declaration_on_a_brand_new_table_lands_after_create_table`, and
 by `test_autogenerate_adds_a_column_before_the_check_that_references_it`
-(#423). Architecture review: I-19 in #427. See PRD #429.
+(#423). Architecture review: I-19 in #427. See PRD #429 and
+`docs/solutions/patterns/alembic-comparator-slot.md`.
 
 ---
 
