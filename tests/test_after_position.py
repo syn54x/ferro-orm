@@ -274,7 +274,9 @@ async def test_after_none_continues_through_null_bucket(db_url):
 
         last_pinned = ordered[2]
         assert last_pinned.pinned_at is not None
-        into_unpinned = await _pinch().after((last_pinned.pinned_at, last_pinned.id)).all()
+        into_unpinned = (
+            await _pinch().after((last_pinned.pinned_at, last_pinned.id)).all()
+        )
         assert [row.id for row in into_unpinned] == [4, 5, 6]
 
         from_null = await _pinch().after((None, 4)).all()
@@ -294,3 +296,20 @@ async def test_after_non_null_includes_later_null_bucket(db_url):
         await _seed_pinch_convos()
         mid_pinned = await _pinch().after((datetime(2026, 3, 1, tzinfo=UTC), 1)).all()
         assert [row.id for row in mid_pinned] == [2, 3, 4, 5, 6]
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_after_pre_save_datetime_is_exclusive_next_page_on_sqlite(db_url):
+    """I-13: cursor uses the datetime that was saved, not the hydrated attr."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        t1 = datetime(2026, 1, 1, tzinfo=UTC)
+        t2 = datetime(2026, 2, 1, tzinfo=UTC)
+        t3 = datetime(2026, 3, 1, tzinfo=UTC)
+        await AfterPageItem(id=1, updated_at=t1, name="a").save()
+        await AfterPageItem(id=2, updated_at=t2, name="b").save()
+        await AfterPageItem(id=3, updated_at=t3, name="c").save()
+
+        page = await _ordered(AfterPageItem).after((t2, 2)).limit(2).all()
+        assert [row.id for row in page] == [3]

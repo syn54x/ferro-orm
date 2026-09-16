@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from enum import Enum
 
@@ -8,8 +8,13 @@ import pytest
 
 import ferro
 from ferro import Model, connect
+from ferro._bind_payload import (
+    canonicalize_wire_scalar,
+    save_bind_payload,
+    update_bind_payload,
+)
 from ferro.query import Query, QueryNode
-from ferro.query.nodes import FieldProxy, _serialize_query_value
+from ferro.query.nodes import FieldProxy
 from ferro.query.wire import compile_query
 from pydantic import Field
 from pydantic_core import to_json
@@ -21,14 +26,16 @@ class QueryStatus(str, Enum):
     ACTIVE = "active"
 
 
-def test_serialize_query_value_normalizes_non_json_native_values():
+def test_canonicalize_wire_scalar_normalizes_non_json_native_values():
     uid = uuid.uuid4()
     happened_at = datetime(2026, 4, 24, 18, 30, tzinfo=UTC)
+    clock = time(18, 30, 15)
     payload = {
         "id": uid,
         "price": Decimal("12.50"),
         "happened_at": happened_at,
         "day": date(2026, 4, 24),
+        "clock": clock,
         "status": QueryStatus.ACTIVE,
         "nested": {
             "ids": [uid],
@@ -37,17 +44,70 @@ def test_serialize_query_value_normalizes_non_json_native_values():
         },
     }
 
-    serialized = _serialize_query_value(payload)
+    serialized = canonicalize_wire_scalar(payload)
 
     assert serialized["id"] == str(uid)
     assert serialized["price"] == "12.50"
     assert serialized["happened_at"] == json.loads(to_json(happened_at))
     assert serialized["day"] == "2026-04-24"
+    assert serialized["clock"] == json.loads(to_json(clock))
     assert serialized["status"] == QueryStatus.ACTIVE
     assert serialized["nested"]["ids"] == [str(uid)]
     assert serialized["nested"]["amounts"] == ["1.25"]
     assert serialized["nested"]["unique_ids"] == [str(uid)]
     json.dumps(serialized)
+
+
+def test_canonicalize_wire_scalar_rejects_unknown_isoformat_objects():
+    class Stamp:
+        def isoformat(self) -> str:
+            return "not-a-datetime"
+
+    with pytest.raises(TypeError, match="isoformat"):
+        canonicalize_wire_scalar(Stamp())
+
+
+def test_canonicalize_wire_scalar_matches_save_bind_payload():
+    happened_at = datetime(2026, 4, 24, 18, 30, tzinfo=UTC)
+    day = date(2026, 4, 24)
+    clock = time(18, 30, 15)
+    price = Decimal("12.50")
+    uid = uuid.uuid4()
+
+    class WireScalarRow(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        happened_at: datetime
+        day: date
+        clock: time
+        price: Decimal
+        uid: uuid.UUID
+
+    row = WireScalarRow(
+        happened_at=happened_at,
+        day=day,
+        clock=clock,
+        price=price,
+        uid=uid,
+    )
+    dumped = save_bind_payload(row)
+    updated = update_bind_payload(
+        {
+            "happened_at": happened_at,
+            "day": day,
+            "clock": clock,
+            "price": price,
+            "uid": uid,
+        }
+    )
+    for name, value in (
+        ("happened_at", happened_at),
+        ("day", day),
+        ("clock", clock),
+        ("price", price),
+        ("uid", uid),
+    ):
+        assert canonicalize_wire_scalar(value) == dumped[name]
+        assert updated[name] == dumped[name]
 
 
 def test_to_wire_json_serializes_m2m_context_without_mutating_query_state():

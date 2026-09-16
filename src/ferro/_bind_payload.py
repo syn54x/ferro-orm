@@ -9,6 +9,10 @@ exactly as pydantic's JSON mode produces it. This replaces the ``model_dump_json
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
 from typing import Any, Mapping
 
 from pydantic_core import to_json
@@ -30,6 +34,34 @@ def _bytes_field_names(instance: Any) -> set[str]:
         for name in type(instance).model_fields
         if isinstance(getattr(instance, name, None), (bytes, bytearray))
     }
+
+
+def canonicalize_wire_scalar(value: Any) -> Any:
+    """Canonical JSON form for query and ``update()`` literals (I-13).
+
+    ``datetime`` / ``date`` / ``time`` / UUID / Decimal go through pydantic
+    ``to_json`` so they match ``save_bind_payload``. Containers recurse.
+    Bytes, ``Enum``, int, str, bool, and ``None`` are unchanged. Any other
+    object with ``isoformat`` raises — no silent ``datetime.isoformat()``
+    spelling (``…+00:00`` vs ``…Z`` on SQLite TEXT).
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return value
+    if isinstance(value, Enum):
+        return value
+    if isinstance(value, (datetime, date, time, uuid.UUID, Decimal)):
+        return json.loads(to_json(value))
+    if isinstance(value, (list, tuple, set)):
+        return [canonicalize_wire_scalar(item) for item in value]
+    if isinstance(value, dict):
+        return {key: canonicalize_wire_scalar(item) for key, item in value.items()}
+    if hasattr(value, "isoformat"):
+        raise TypeError(
+            f"{type(value).__name__} is not a query/update literal; "
+            "datetime, date, and time are canonicalized. "
+            "Other isoformat objects are rejected."
+        )
+    return value
 
 
 def save_bind_payload(instance: Any) -> dict[str, Any]:
@@ -194,11 +226,11 @@ def apply_save_exclude(
 def update_bind_payload(fields: Mapping[str, Any]) -> dict[str, Any]:
     """Column->value map for ``Query.update(**fields)``.
 
-    Non-bytes values are canonicalized exactly as ``to_json`` does today; bytes
-    values are overlaid raw.
+    Non-bytes values go through ``canonicalize_wire_scalar`` then dict-level
+    ``to_json`` (enums still stringify on this door). Bytes are overlaid raw.
     """
     non_bytes = {
-        key: value
+        key: canonicalize_wire_scalar(value)
         for key, value in fields.items()
         if not isinstance(value, (bytes, bytearray))
     }

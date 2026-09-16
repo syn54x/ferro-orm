@@ -4,7 +4,10 @@
 a sibling of `limit`/`offset` on the QueryIR payload — not a `where()`
 predicate the query writes for itself. A position is the ordered tuple of
 the query's order-key values; `position_of(row)` reads it; `after(row)` is
-sugar. Cursor encoding is the caller's.
+sugar. Cursor encoding is the caller's. Position-slot literals for
+`datetime`, `date`, `time`, UUID, and Decimal use the same canonical JSON as
+`save_bind_payload`; SQLite stores those columns as text and keyset equality
+is a byte compare.
 
 The bound is exclusive. `after` + `offset`, or `after` + `before`, is a
 build-time error (`count()` already drops paging). Order keys are root or
