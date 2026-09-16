@@ -25,7 +25,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 
-from .._bind_payload import update_bind_payload
+from .._bind_payload import canonicalize_wire_scalar, update_bind_payload
 from ..state import resolve_compile_connection_name
 from .nodes import (
     BinaryValueExpr,
@@ -40,7 +40,6 @@ from .nodes import (
     _aggregate_source_family,
     _json_column_shape,
     _query_value_kind,
-    _serialize_query_value,
     now,
     validate_query_column,
 )
@@ -595,7 +594,9 @@ def _column_family(model_cls: type, column: str) -> str:
     return _aggregate_source_family(spec)
 
 
-def _column_ref_value(model_cls: type, target: str, value: FieldProxy) -> ColumnRefValueExpr:
+def _column_ref_value(
+    model_cls: type, target: str, value: FieldProxy
+) -> ColumnRefValueExpr:
     if value.path:
         raise TypeError(
             f"update() cannot assign a traversed column "
@@ -809,7 +810,7 @@ def _after_query_values(position: tuple[Any, ...]) -> tuple[QueryValue, ...]:
     """Typed query-value nodes for one position bound (same shape as WHERE leaves)."""
     values: list[QueryValue] = []
     for item in position:
-        serialized = _serialize_query_value(item)
+        serialized = canonicalize_wire_scalar(item)
         values.append(QueryValue(kind=_query_value_kind(serialized), value=serialized))
     return tuple(values)
 
@@ -1030,6 +1031,6 @@ def to_wire_json(payload: QueryIrPayload) -> str:
         {
             "ir_kind": "query",
             "ir_version": _IR_VERSION,
-            "payload": _serialize_query_value(payload.to_ir_dict()),
+            "payload": canonicalize_wire_scalar(payload.to_ir_dict()),
         }
     )

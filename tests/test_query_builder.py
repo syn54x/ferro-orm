@@ -14,7 +14,7 @@ from ferro._bind_payload import (
     update_bind_payload,
 )
 from ferro.query import Query, QueryNode
-from ferro.query.nodes import FieldProxy, _serialize_query_value
+from ferro.query.nodes import FieldProxy
 from ferro.query.wire import compile_query
 from pydantic import Field
 from pydantic_core import to_json
@@ -26,7 +26,7 @@ class QueryStatus(str, Enum):
     ACTIVE = "active"
 
 
-def test_serialize_query_value_normalizes_non_json_native_values():
+def test_canonicalize_wire_scalar_normalizes_non_json_native_values():
     uid = uuid.uuid4()
     happened_at = datetime(2026, 4, 24, 18, 30, tzinfo=UTC)
     clock = time(18, 30, 15)
@@ -44,7 +44,7 @@ def test_serialize_query_value_normalizes_non_json_native_values():
         },
     }
 
-    serialized = _serialize_query_value(payload)
+    serialized = canonicalize_wire_scalar(payload)
 
     assert serialized["id"] == str(uid)
     assert serialized["price"] == "12.50"
@@ -58,13 +58,13 @@ def test_serialize_query_value_normalizes_non_json_native_values():
     json.dumps(serialized)
 
 
-def test_serialize_query_value_rejects_unknown_isoformat_objects():
+def test_canonicalize_wire_scalar_rejects_unknown_isoformat_objects():
     class Stamp:
         def isoformat(self) -> str:
             return "not-a-datetime"
 
     with pytest.raises(TypeError, match="isoformat"):
-        _serialize_query_value(Stamp())
+        canonicalize_wire_scalar(Stamp())
 
 
 def test_canonicalize_wire_scalar_matches_save_bind_payload():

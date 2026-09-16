@@ -203,7 +203,7 @@ class QueryNode:
                 ]
             return serialized_exists
         if not self.is_compound:
-            serialized = _serialize_query_value(self.value)
+            serialized = canonicalize_wire_scalar(self.value)
             return {
                 "node_kind": "leaf",
                 "column": self.column,
@@ -252,11 +252,6 @@ class QueryNode:
         return (
             f"QueryNode(left={self.left!r}, op={self.operator!r}, right={self.right!r})"
         )
-
-
-def _serialize_query_value(value: Any) -> Any:
-    """Normalize Python values into JSON-friendly query payloads (I-13)."""
-    return canonicalize_wire_scalar(value)
 
 
 @dataclass(frozen=True)
