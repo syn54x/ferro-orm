@@ -1,15 +1,12 @@
 """Define query AST nodes and field proxies for fluent filtering"""
 
 import difflib
-import json
-import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar, get_origin
 
-from pydantic_core import to_json
+from .._bind_payload import canonicalize_wire_scalar
 
 TField = TypeVar("TField")
 TModel = TypeVar("TModel")
@@ -258,24 +255,8 @@ class QueryNode:
 
 
 def _serialize_query_value(value: Any) -> Any:
-    """Normalize Python values into JSON-friendly query payloads.
-
-    Datetimes use pydantic JSON mode (the same canonical form as
-    ``save_bind_payload``): UTC is ``...Z``, not ``datetime.isoformat()``'s
-    ``...+00:00``. SQLite stores INSERT text in that form; ``after()`` prefix
-    equality is a TEXT compare there and must match the stored bytes.
-    """
-    if isinstance(value, datetime):
-        return json.loads(to_json(value))
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    if isinstance(value, (Decimal, uuid.UUID)):
-        return str(value)
-    if isinstance(value, (list, tuple, set)):
-        return [_serialize_query_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _serialize_query_value(item) for key, item in value.items()}
-    return value
+    """Normalize Python values into JSON-friendly query payloads (I-13)."""
+    return canonicalize_wire_scalar(value)
 
 
 @dataclass(frozen=True)

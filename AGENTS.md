@@ -455,6 +455,43 @@ communicated, not what gets built.
 
 ---
 
+## I-13: Query and update literals match save() for datetime/date/time/UUID/Decimal
+
+A developer pages a chat transcript with `after()` on a UTC datetime order
+key:
+
+```python
+pinned_at = datetime(2026, 3, 1, 15, 0, tzinfo=UTC)
+await Message(id=2, pinned_at=pinned_at, ...).save()
+page = await (
+    Message.order_by(lambda m: m.pinned_at)
+    .order_by(lambda m: m.id)
+    .after((pinned_at, 2))
+    .all()
+)
+```
+
+SQLite stores that timestamp as **text**. `save()` writes pydantic JSON
+(`2026-03-01T15:00:00Z`). `datetime.isoformat()` writes `…+00:00`. Those are
+the same instant to a human and to Postgres `timestamptz`; to SQLite they
+are different strings, so keyset prefix equality misses and the next page
+can skip the cursor row.
+
+Query and `update()` literals for `datetime`, `date`, `time`, UUID, and
+Decimal canonicalize through one function (`canonicalize_wire_scalar`) whose
+output for a given value is pinned against `save_bind_payload`. `save()`
+remains instance `model_dump` (field serializers stay on that door). A
+second datetime/UUID/Decimal cascade — including `datetime.isoformat()` or a
+“mirrors save_bind_payload” comment — is an I-13 violation. Enums on the
+query wire are out of scope for this invariant.
+
+Pinned by helper-vs-save unit equality for those five types and by a SQLite
+`save` then `after((original_python_datetime, pk))` paging test.
+Architecture review: I-22 in #428. See PRD #430 and
+`docs/solutions/patterns/wire-scalar-canonicalization.md`.
+
+---
+
 ## Agent skills
 
 ### Issue tracker

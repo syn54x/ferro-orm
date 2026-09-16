@@ -6,7 +6,8 @@ related_files:
   - src/query.rs
   - src/ferro/query/builder.py
   - src/ferro/query/wire.py
-related_issues: [393, 394, 395, 396]
+  - src/ferro/_bind_payload.py
+related_issues: [393, 394, 395, 396, 428, 430]
 captured: 2026-08-30
 ---
 
@@ -20,4 +21,10 @@ One function owns the compare tree: `exclusive_stepwise_compare` in `src/query.r
 
 Python validates the wedge at `after()` / `before()` / `position_of()` (root or traversed columns, PK included; `None` legal in every non-PK slot) and `compile_query` is the only assembler that puts `after` / `before` on the fetch payload as typed `kind`/`value` nodes, including `kind: "null"`. Count omits the keys; mutations reject them. Column nullability is not consulted — a `left_join`'d NOT NULL related column may still be NULL when the relation is missing. Do not invent a second expander: path-carrying `order_by` terms already go through `qualify_column_with_joins`.
 
-Datetime slots go through `_serialize_query_value` → pydantic JSON mode (`…Z` for UTC), the same bytes `save()` writes. `datetime.isoformat()` emits `…+00:00`; on SQLite that is a different TEXT value, so the prefix-equality arm of the stepwise compare never matches.
+Datetime slots go through `canonicalize_wire_scalar` (I-13) → pydantic JSON
+mode (`…Z` for UTC), the same bytes `save()` writes. `datetime.isoformat()`
+emits `…+00:00`; on SQLite that is a different TEXT value, so the
+prefix-equality arm of the stepwise compare never matches. Query and
+`update()` literals for `datetime` / `date` / `time` / UUID / Decimal share
+that helper; `save()` stays `model_dump`. Objects with `.isoformat()` that
+are not those temporal types raise.
