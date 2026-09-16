@@ -73,6 +73,16 @@ def _define_reconcile_without_check() -> type[Model]:
     return Reconcile
 
 
+def _define_reconcile_without_right() -> type[Model]:
+    """Live table missing ``right`` — the #423 same-revision shape."""
+
+    class Reconcile(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        left: str | None = None
+
+    return Reconcile
+
+
 def _define_reconcile_with_check() -> type[Model]:
     class Reconcile(Model):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
@@ -512,3 +522,31 @@ async def test_autogenerate_is_empty_once_the_check_is_reconciled(
     code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
     assert "ADD CONSTRAINT" not in code, code
     assert SIDE_CHECK_NAME not in code, code
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_autogenerate_adds_a_column_before_the_check_that_references_it(
+    db_url, postgres_base_url, db_schema_name
+):
+    """#423 / I-12: a CHECK over a newly added column must land after ADD COLUMN.
+
+    The live table is missing ``right``. The new model adds that column and a
+    table check over it. Rendered upgrade order is the seam: ``op.add_column``
+    before the ADD CONSTRAINT SQL (same shape as the RLS create-table-then-policy
+    pin).
+    """
+    Reconcile = _define_reconcile_without_right()
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await Reconcile.create(left="a")
+    _rewind_registry()
+
+    _define_reconcile_with_check()
+    await connect(db_url)  # no auto-migrate: the database stays drifted
+
+    code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
+    assert "op.add_column(" in code, code
+    assert SIDE_CHECK_ADD in code, code
+    assert code.index("op.add_column(") < code.index(SIDE_CHECK_ADD), code
