@@ -455,6 +455,39 @@ communicated, not what gets built.
 
 ---
 
+## I-12: Ferro Alembic comparators declare their slot relative to table ops
+
+Every ferro schema comparator states its position relative to Alembic's own
+table ops (`create_table` / `ModifyTableOps`) as part of its interface — not
+as a comment.
+
+A generated revision that adds a column and a table check over it must emit
+`ADD COLUMN` before `ADD CONSTRAINT`:
+
+```python
+class Card(Model):
+    flavor: str | None = None  # new this revision
+    __ferro_checks__ = (Check("flavor_set", lambda card: card.flavor != None),)
+```
+
+Default `MEDIUM` does not do that: Ferro's import-time registration runs
+before Alembic injects its table comparator into the same bucket, so check
+ops `extend` the list while it still has no table ops (#423).
+
+After-tables families (`ADD CONSTRAINT` over a new column, `CREATE POLICY`
+on a new table) register at `priority=LAST`. Before-tables families (enum
+label addition) register at `priority=FIRST` and insert at the front of the
+ops list. Default `MEDIUM` is an I-12 violation for ferro schema
+comparators. Alembic's own table comparator may remain `MEDIUM`. A
+same-revision pin is required for every after-tables family.
+
+Pinned by the row-security comparator's LAST registration and
+`test_new_declaration_on_a_brand_new_table_lands_after_create_table`, and
+by `test_autogenerate_adds_a_column_before_the_check_that_references_it`
+(#423). Architecture review: I-19 in #427. See PRD #429.
+
+---
+
 ## Agent skills
 
 ### Issue tracker
