@@ -140,12 +140,13 @@ longer a data leak.
 
 `RowPolicy(column=..., setting=...)` compares one column to one session
 setting and renders the `NULLIF(current_setting(...), '')::<cast>` expression
-above for both `USING` and `WITH CHECK`. The cast is derived from the
-column's own storage type — `uuid`, `text`/`varchar`, and the integer
-families are supported; anything else (`timestamptz`, `jsonb`, ...) is a
-class-definition-time error naming the raw form as the way out. The policy's
-live name defaults to the column name (`rls_invoice_tenant_id` above); pass
-`name=` to choose your own.
+above for both `USING` and `WITH CHECK`. The cast comes from the column's
+own storage type. `uuid`, `text`/`varchar`, and the integer families are
+supported. Anything else (`timestamptz`, `jsonb`, ...) is a
+class-definition-time error that names the raw form as the way out.
+
+The policy's live name defaults to the column name
+(`rls_invoice_tenant_id` above). Pass `name=` to choose your own.
 
 ### Multiple policies: composing permissive and restrictive
 

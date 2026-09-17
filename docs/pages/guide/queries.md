@@ -166,7 +166,11 @@ For a row where `amount` is `NULL`, `amount > 100` is unknown, `NOT unknown` is 
 
 ## Ordering, Limit & Offset
 
-Sort with `.order_by(field, direction, *, nulls=...)` (direction defaults to ascending; pass `"desc"` to reverse) and slice with `.limit()` / `.offset()`. Omitted `nulls=` means `NULL`s sort last on every backend; pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for each dialect's default placement. `field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time.
+Sort with `.order_by(field, direction, *, nulls=...)` and slice with `.limit()` / `.offset()`. Direction defaults to ascending; pass `"desc"` to reverse.
+
+Omitted `nulls=` means `NULL`s sort last on every backend. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for each dialect's default placement.
+
+`field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time.
 
 A pinned-first list is the usual reason to care — put unpinned cards (`pinned_at IS NULL`) after pinned ones, then break ties by recency:
 
@@ -812,7 +816,11 @@ Projection traversal is ordinary traversal (ADR-0006): it renders an INNER join 
 
 ### Projections compose like any other query
 
-`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, `after()`/`before()`, and `first()` all work unchanged; on a plain projection `count()` and `exists()` are unaffected — they measure the same matching rows a full query would. (On an *aggregate* projection they raise with guidance instead — see [Aggregations & Grouped Queries](aggregations.md#the-loud-limits).) `position_of` on a `Row` requires every order key in the projection; otherwise pass a tuple.
+`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, `after()`/`before()`, and `first()` all work unchanged.
+
+On a plain projection, `count()` and `exists()` are unaffected: they measure the same matching rows a full query would. On an *aggregate* projection they raise with guidance instead (see [Aggregations & Grouped Queries](aggregations.md#the-loud-limits)).
+
+`position_of` on a `Row` requires every order key in the projection. Otherwise pass a tuple.
 
 ```python
 --8<-- "docs/examples/partial_selects.py:compose"
