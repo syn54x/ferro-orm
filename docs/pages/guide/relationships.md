@@ -1,6 +1,6 @@
 # Relationships
 
-Ferro connects models with foreign keys, zero-boilerplate reverse lookups, and automatically managed join tables.
+Ferro connects models with foreign keys, reverse lookups, and join tables the ORM creates.
 
 ## Overview
 

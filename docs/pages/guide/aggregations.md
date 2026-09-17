@@ -1,6 +1,6 @@
 # Aggregations & Grouped Queries
 
-Ferro aggregates with five methods on the columns themselves — `count()`, `sum()`, `avg()`, `min()`, `max()` — inside the same `select()` lambda that projects columns. There is no `group_by()` chainer anywhere in the API, and you will not miss it: **the record shape is the grouping**. Bare fields are the keys; aggregate fields are the measures.
+Ferro aggregates with five methods on the columns themselves — `count()`, `sum()`, `avg()`, `min()`, `max()` — inside the same `select()` lambda that projects columns. There is no `group_by()` chainer: **the record shape is the grouping**. Bare fields are the keys; aggregate fields are the measures.
 
 The examples on this page use this schema:
 

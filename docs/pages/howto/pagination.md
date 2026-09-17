@@ -1,6 +1,6 @@
 # Pagination
 
-Ferro supports the two standard pagination strategies: offset pagination with `limit()` / `offset()`, and keyset (cursor) pagination with a `where` filter on the sort key. This page shows both and when to pick each.
+Ferro supports the two standard pagination strategies: offset pagination with `limit()` / `offset()`, and keyset (cursor) pagination with a `where` filter on the sort key.
 
 ## Offset Pagination
 

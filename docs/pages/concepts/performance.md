@@ -1,6 +1,6 @@
 # Performance
 
-Ferro moves SQL generation, parameter binding, and row hydration out of Python and into compiled Rust, with the GIL released during database I/O. This page is honest about where that helps, where it doesn't, and how to get the most out of it.
+Ferro moves SQL generation, parameter binding, and row hydration out of Python and into compiled Rust, with the GIL released during database I/O. That helps some workloads and not others.
 
 ## Where the Rust Core Pays Off
 

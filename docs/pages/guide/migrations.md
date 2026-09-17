@@ -1,6 +1,6 @@
 # Schema Migrations
 
-Ferro offers a ladder of schema-management options: zero-config auto-migration for development, opt-in schema updates for fast iteration, and an Alembic bridge for production.
+Schema management is a ladder: auto-create tables in development, opt-in column updates while the schema is moving, and Alembic for production.
 
 ## Three Ways to Manage Schema
 

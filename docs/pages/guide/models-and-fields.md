@@ -1,6 +1,6 @@
 # Models & Fields
 
-Models are the central building blocks of Ferro. They define your schema in plain Python type hints, validate data with Pydantic, and are mapped to database tables by the Rust engine.
+Models define your schema in plain Python type hints, validate data with Pydantic, and map to database tables in the Rust engine.
 
 ## Defining a Model
 
@@ -18,7 +18,7 @@ Inherit from `ferro.Model` and declare fields with standard type annotations:
     --8<-- "docs/examples/quickstart_annotated.py:models"
     ```
 
-Every Ferro model is a full [Pydantic](https://docs.pydantic.dev/latest/) `BaseModel`, so validation, serialization (`model_dump()`, `model_dump_json()`), and `model_config` all work as you'd expect.
+Every Ferro model is a full [Pydantic](https://docs.pydantic.dev/latest/) `BaseModel`, so validation, serialization (`model_dump()`, `model_dump_json()`), and `model_config` all work.
 
 ## Declaration Styles
 

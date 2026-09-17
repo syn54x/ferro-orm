@@ -25,7 +25,7 @@ connection is handed to a different client between transactions. Two of your
 requests can share one server backend seconds apart:
 
 ```
-tenant A → pgbouncer → server conn 7: SET pinch.ledger_id = 'A'
+tenant A → pgbouncer → server conn 7: SET app.tenant_id = 'A'
 tenant B → pgbouncer → server conn 7: SELECT ... FROM invoice
                                        -- sees tenant A's policy scope
 ```
@@ -126,14 +126,14 @@ with row-level security switched on and the policy in place:
 ```sql
 ALTER TABLE "invoice" ENABLE ROW LEVEL SECURITY
 ALTER TABLE "invoice" FORCE ROW LEVEL SECURITY
-CREATE POLICY "rls_invoice_ledger_id" ON "invoice" FOR ALL
-  USING      ("ledger_id" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)
-  WITH CHECK ("ledger_id" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)
+CREATE POLICY "rls_invoice_tenant_id" ON "invoice" FOR ALL
+  USING      ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
 ```
 
 From here the database decides which rows a query can see — a connection
-whose `pinch.ledger_id` setting is unset sees no rows, and one that carries a
-ledger id sees only that ledger's rows. A forgotten `where` filter is no
+whose `app.tenant_id` setting is unset sees no rows, and one that carries a
+tenant id sees only that tenant's rows. A forgotten `where` filter is no
 longer a data leak.
 
 ### The shorthand
@@ -144,7 +144,7 @@ above for both `USING` and `WITH CHECK`. The cast is derived from the
 column's own storage type — `uuid`, `text`/`varchar`, and the integer
 families are supported; anything else (`timestamptz`, `jsonb`, ...) is a
 class-definition-time error naming the raw form as the way out. The policy's
-live name defaults to the column name (`rls_invoice_ledger_id` above); pass
+live name defaults to the column name (`rls_invoice_tenant_id` above); pass
 `name=` to choose your own.
 
 ### Multiple policies: composing permissive and restrictive
@@ -194,7 +194,7 @@ and every other command requires `using=`.
 ### Opening a session with settings=
 
 ```python
-async with ferro.engines.session(settings={"pinch.ledger_id": "acme"}):
+async with ferro.engines.session(settings={"app.tenant_id": "acme"}):
     open_invoices = await Invoice.where(
         lambda invoice: invoice.total > 0
     ).all()
@@ -210,7 +210,7 @@ instead of once per operation.
 
 Settings are validated eagerly, before any connection is touched: values must
 be `str` (Postgres settings are text), keys must contain a dot
-(`"pinch.ledger_id"`, never `"timezone"` or another built-in — this is a
+(`"app.tenant_id"`, never `"timezone"` or another built-in — this is a
 tenancy API, not a general connection-mutation one), and values are always
 bound parameters, never interpolated into SQL.
 
@@ -227,7 +227,7 @@ async with ferro.engines.session() as session:      # tenant not known yet
 
 async def handle_request(request) -> None:
     tenant = await resolve_tenant_from_auth_header(request)
-    await ferro.current_session().set_config("pinch.ledger_id", tenant)
+    await ferro.current_session().set_config("app.tenant_id", tenant)
     # every query for the rest of this request is scoped to `tenant`
 ```
 
@@ -240,22 +240,22 @@ needs the session threaded through its signature.
 A nested session's effective settings are the parent's, shallow-merged with
 its own (the child wins per key), snapshotted the moment it opens — there is
 no live propagation back to the parent, and a settings-less nested session
-simply inherits everything:
+inherits everything:
 
 ```python
-async with ferro.engines.session(settings={"pinch.ledger_id": "acme", "pinch.role": "owner"}):
-    async with ferro.engines.session(settings={"pinch.role": "auditor"}):
-        ...  # sees ledger_id=acme (inherited), role=auditor (overridden)
+async with ferro.engines.session(settings={"app.tenant_id": "acme", "app.role": "owner"}):
+    async with ferro.engines.session(settings={"app.role": "auditor"}):
+        ...  # sees tenant_id=acme (inherited), role=auditor (overridden)
 ```
 
 Settings follow the **session**, not the connection route: nest a session on
 a different named connection and it inherits the outer scope there too —
 
 ```python
-async with ferro.engines.session("primary", settings={"pinch.ledger_id": "acme"}):
+async with ferro.engines.session("primary", settings={"app.tenant_id": "acme"}):
     async with ferro.engines.session("secondary"):
         async with ferro.transaction(using="secondary") as tx:
-            ...  # sees pinch.ledger_id = 'acme' here too
+            ...  # sees app.tenant_id = 'acme' here too
 ```
 
 — which is the only way to reach a second Postgres connection with the outer
@@ -271,7 +271,7 @@ have to be honourable on that connection: opening a settings-bearing session
 against a non-Postgres connection raises immediately, rather than silently
 scoping nothing. **Inherited** settings are treated differently — a nested
 session (or an operation an inherited-settings session runs) against a
-non-Postgres connection never raises. It simply cannot apply what it inherited
+non-Postgres connection never raises. It cannot apply what it inherited
 there: opening the session and running its operations both work, unwrapped
 and unscoped, because there is nothing on that backend to `set_config` in the
 first place.
@@ -328,7 +328,7 @@ with the same wrapper if you hand-write the comparison yourself.
 
 `force=True` (the default on `RowSecurity`) binds the table's **owner** too —
 without it, a deployment that connects as the table owner (the common
-single-role setup) gets policies that are simply never consulted, because
+single-role setup) gets policies that are never consulted, because
 Postgres exempts owners from `RLS` unless `FORCE` is set.
 
 Once `FORCE` is on, any connection that legitimately needs to see every row —
@@ -399,52 +399,82 @@ session **before** any route handler runs, so tenancy scoping is automatic at
 the app level and an unscoped route is the explicit exception, never the
 default.
 
-### Litestar (recommended)
+### Litestar
 
-Litestar's `AbstractMiddleware`, placed **after** authentication in the stack,
-reads the tenant from the auth-populated `scope["user"]` and wraps the
-downstream call in a settings-bearing session:
+Litestar middleware, placed **after** authentication in the stack, reads the
+tenant from the auth-populated `scope["user"]` and wraps the downstream call
+in a settings-bearing session. Litestar 2.15 introduced `ASGIMiddleware`;
+`AbstractMiddleware` remains valid on every 2.x release. Register
+`ASGIMiddleware` as an instance and `AbstractMiddleware` as the class.
+Path and `exclude_opt_key` opt-out, and the `Provide` warning below, apply
+to both.
 
-!!! note "`AbstractMiddleware` vs `ASGIMiddleware`"
-    The snippet below targets `AbstractMiddleware`, valid on every Litestar
-    2.x release. Litestar 2.15 introduced `ASGIMiddleware` as the newer,
-    recommended base; `AbstractMiddleware` still works but is the legacy
-    path going forward. The `exclude=`/`exclude_opt_key` shape and the
-    `Provide` warning below apply to both.
+=== "ASGIMiddleware"
 
-```python
-from litestar.middleware import AbstractMiddleware
-from litestar.types import ASGIApp, Receive, Scope, Send
+    ```python
+    from litestar import Litestar, get
+    from litestar.enums import ScopeType
+    from litestar.middleware import ASGIMiddleware
+    from litestar.types import ASGIApp, Receive, Scope, Send
 
-import ferro
-
-
-class TenantScopingMiddleware(AbstractMiddleware):
-    scopes = {"http"}
-    # Per-route opt-out for the rare unscoped endpoint (health checks, ...).
-    exclude = ["/health", "/metrics"]
-    exclude_opt_key = "skip_tenant_scope"
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        user = scope["user"]  # populated by an earlier auth middleware/guard
-        async with ferro.engines.session(
-            settings={"pinch.ledger_id": str(user.ledger_id)}
-        ):
-            await self.app(scope, receive, send)
-```
-
-Register it app-wide, and opt individual routes out explicitly:
-
-```python
-from litestar import Litestar, get
-
-app = Litestar(route_handlers=[...], middleware=[TenantScopingMiddleware])
+    import ferro
 
 
-@get("/health", opt={"skip_tenant_scope": True})
-async def health() -> dict:
-    return {"status": "ok"}
-```
+    class TenantScopingMiddleware(ASGIMiddleware):
+        scopes = (ScopeType.HTTP,)
+        # Per-route opt-out for the rare unscoped endpoint (health checks, ...).
+        exclude_path_pattern = ("/health", "/metrics")
+        exclude_opt_key = "skip_tenant_scope"
+
+        async def handle(
+            self, scope: Scope, receive: Receive, send: Send, next_app: ASGIApp
+        ) -> None:
+            user = scope["user"]  # populated by an earlier auth middleware/guard
+            async with ferro.engines.session(
+                settings={"app.tenant_id": str(user.tenant_id)}
+            ):
+                await next_app(scope, receive, send)
+
+
+    app = Litestar(route_handlers=[...], middleware=[TenantScopingMiddleware()])
+
+
+    @get("/health", opt={"skip_tenant_scope": True})
+    async def health() -> dict:
+        return {"status": "ok"}
+    ```
+
+=== "AbstractMiddleware"
+
+    ```python
+    from litestar import Litestar, get
+    from litestar.middleware import AbstractMiddleware
+    from litestar.types import Receive, Scope, Send
+
+    import ferro
+
+
+    class TenantScopingMiddleware(AbstractMiddleware):
+        scopes = {"http"}
+        # Per-route opt-out for the rare unscoped endpoint (health checks, ...).
+        exclude = ["/health", "/metrics"]
+        exclude_opt_key = "skip_tenant_scope"
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            user = scope["user"]  # populated by an earlier auth middleware/guard
+            async with ferro.engines.session(
+                settings={"app.tenant_id": str(user.tenant_id)}
+            ):
+                await self.app(scope, receive, send)
+
+
+    app = Litestar(route_handlers=[...], middleware=[TenantScopingMiddleware])
+
+
+    @get("/health", opt={"skip_tenant_scope": True})
+    async def health() -> dict:
+        return {"status": "ok"}
+    ```
 
 !!! warning "`Provide` dependency injection cannot do run-always scoping"
     Litestar's `Provide` only evaluates a dependency when a handler's own
@@ -459,19 +489,35 @@ If the tenant isn't resolvable until deeper in the request (a guard or a
 dependency that itself needs to run first), open the session bare in the
 middleware and resolve mid-request with the deferred pattern:
 
+=== "ASGIMiddleware"
+
+    ```python
+    class TenantScopingMiddleware(ASGIMiddleware):
+        scopes = (ScopeType.HTTP,)
+
+        async def handle(
+            self, scope: Scope, receive: Receive, send: Send, next_app: ASGIApp
+        ) -> None:
+            async with ferro.engines.session():
+                await next_app(scope, receive, send)
+    ```
+
+=== "AbstractMiddleware"
+
+    ```python
+    class TenantScopingMiddleware(AbstractMiddleware):
+        scopes = {"http"}
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            async with ferro.engines.session():
+                await self.app(scope, receive, send)
+    ```
+
 ```python
-class TenantScopingMiddleware(AbstractMiddleware):
-    scopes = {"http"}
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        async with ferro.engines.session():
-            await self.app(scope, receive, send)
-
-
 # in a guard or dependency further down the stack:
 async def resolve_tenant(request) -> None:
     tenant = await resolve_tenant_from_auth_header(request)
-    await ferro.current_session().set_config("pinch.ledger_id", tenant)
+    await ferro.current_session().set_config("app.tenant_id", tenant)
 ```
 
 ### FastAPI
@@ -486,7 +532,7 @@ import ferro
 
 async def tenant_session(request: Request):
     async with ferro.engines.session(
-        settings={"pinch.ledger_id": str(request.state.user.ledger_id)}
+        settings={"app.tenant_id": str(request.state.user.tenant_id)}
     ):
         yield
 
@@ -517,7 +563,7 @@ class TenantScopingASGIMiddleware:
             return await self.app(scope, receive, send)
 
         user = scope.get("user")
-        settings = {"pinch.ledger_id": str(user.ledger_id)} if user else {}
+        settings = {"app.tenant_id": str(user.tenant_id)} if user else {}
         async with ferro.engines.session(settings=settings):
             await self.app(scope, receive, send)
 ```
@@ -582,7 +628,7 @@ exactly the keys it touched to whatever value the connection *started* with.
 For an ordinary custom setting with no server-side default, that's the empty
 string — which is what the [NULLIF contract](#the-nullif-contract) relies on.
 If an operator has configured a startup value with `ALTER ROLE ... SET
-pinch.ledger_id = ...` or `ALTER DATABASE ... SET ...`, closing the session
+app.tenant_id = ...` or `ALTER DATABASE ... SET ...`, closing the session
 restores *that* value instead of clearing it. Never configure a tenancy key as
 a role or database default.
 

@@ -1,6 +1,6 @@
 # Queries
 
-Ferro provides a fluent, type-safe API for building queries in Python and executing them on the Rust engine. All values are parameterized — user input is never concatenated into SQL.
+Ferro builds queries in Python and executes them on the Rust engine. All values are parameterized — user input is never concatenated into SQL.
 
 The examples on this page use this model:
 
@@ -220,7 +220,7 @@ On unbounded `before()`, `first()` and `all()[0]` disagree: `first()` is `limit(
 
 The same chainers work when an order key is a related column (`order_by(lambda t: t.account.label)`) or the query is a projected record: pass a tuple of the order-key values. `position_of` on a model instance requires those relations populated; `position_of` on a `Row` requires every order key to be in the projection.
 
-For robust pagination patterns, see [Pagination](../howto/pagination.md).
+For pagination patterns, see [Pagination](../howto/pagination.md).
 
 ## Executing Queries
 
@@ -345,7 +345,7 @@ The relation path is the join's identity. Reference the same path in two `where(
 That is what lets a traversal filter compose cleanly with plain root-column clauses — the motivating query pairs one `account` join with a root-column filter, ordering, and a limit, all in a single statement:
 
 ```python
---8<-- "docs/examples/traversal.py:pinch"
+--8<-- "docs/examples/traversal.py:composed"
 ```
 
 ### Comparing to a related instance

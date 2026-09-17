@@ -1,6 +1,6 @@
 # Next Steps
 
-You've finished the [Quickstart](quickstart.md) and have a working Ferro app. Here's where to go next, based on what you're building.
+You've finished the [Quickstart](quickstart.md) and have a working Ferro app. Pick a path from what you're building.
 
 ## Learn by Use Case
 
@@ -53,4 +53,4 @@ Recipes for things most applications need:
 - **[GitHub Issues](https://github.com/syn54x/ferro-orm/issues)** — report bugs or request features
 - **[GitHub](https://github.com/syn54x/ferro-orm)** — star the repo to follow releases
 
-The best way to learn from here is to build something real — a blog, a ticket tracker, an inventory API — and reach for the guides above as questions come up.
+Build something real and reach for the guides above as questions come up.
