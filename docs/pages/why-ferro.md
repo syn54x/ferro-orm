@@ -2,12 +2,7 @@
 
 ## The Problem
 
-Python ORMs are convenient, but they come with a performance tax. Traditional ORMs like SQLAlchemy, Django ORM, and Tortoise spend significant CPU time in Python code:
-
-- **SQL generation** — building query strings, escaping values, assembling JOINs
-- **Row parsing** — converting database rows into Python objects
-- **Object instantiation** — calling `__init__`, running validators, populating attributes
-- **GIL contention** — all of the above happens while holding the Global Interpreter Lock
+Python ORMs are convenient, but they come with a performance tax. Traditional ORMs like SQLAlchemy, Django ORM, and Tortoise spend significant CPU time in Python on SQL generation (query strings, escaping, JOINs), row parsing (turning database rows into objects), and object instantiation (`__init__`, validators, attributes). All of that happens while holding the Global Interpreter Lock.
 
 For simple CRUD this overhead is acceptable. But when you process thousands of rows per request, run high-concurrency workloads, or care about tail latency in services, the Python tax becomes the bottleneck.
 
@@ -17,10 +12,7 @@ Ferro moves the expensive parts out of Python and into a Rust engine, connected 
 
 ### Rust Core
 
-- **SQL generation**: Sea-Query builds parameterized SQL in Rust
-- **Row hydration**: SQLx executes queries and parses rows GIL-free
-- **Minimal copying**: data flows from database → Rust → Python with zero-copy intent
-- **Bundled drivers**: SQLite and PostgreSQL support is compiled into the engine — no separate driver packages
+Sea-Query builds parameterized SQL in Rust. SQLx executes queries and parses rows GIL-free. Data flows from the database through Rust into Python with zero-copy intent. SQLite and PostgreSQL support is compiled into the engine, so there are no separate driver packages.
 
 When you call `User.where(lambda t: t.age >= 18).all()`, Python only builds a small filter AST. SQL generation, execution, and row parsing all happen in Rust; Python receives hydrated `User` objects at the end.
 
