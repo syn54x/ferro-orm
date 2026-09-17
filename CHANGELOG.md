@@ -1,6 +1,45 @@
 # CHANGELOG
 
 
+## v0.21.0 (2026-09-17)
+
+### Bug Fixes
+
+- **alembic**: Emit check constraints after table ops
+  ([#431](https://github.com/syn54x/ferro-orm/pull/431),
+  [`fca2434`](https://github.com/syn54x/ferro-orm/commit/fca2434884cd3189096cc9503411cb7ffd1a5551))
+
+- **query**: Canonicalize datetime/UUID/Decimal literals against save()
+  ([#432](https://github.com/syn54x/ferro-orm/pull/432),
+  [`23c4031`](https://github.com/syn54x/ferro-orm/commit/23c40319be8d590f00c54eea3efc9e02876f4b87))
+
+- **query**: Session-aware merge dialect and recipe-column kwargs
+  ([#385](https://github.com/syn54x/ferro-orm/pull/385),
+  [`961e1d8`](https://github.com/syn54x/ferro-orm/commit/961e1d8411044a5e1667d9962d7a7cf3c08cef56))
+
+### Features
+
+- Postgres Row-Level Security — session settings + declarative row policies (PRD #406)
+  ([#426](https://github.com/syn54x/ferro-orm/pull/426),
+  [`c5d72f8`](https://github.com/syn54x/ferro-orm/commit/c5d72f831cb61e458d9f307fcd0745f1dfc03b4e))
+
+- **migrate**: Accept JSON object/array literals on NOT NULL column adds
+  ([#374](https://github.com/syn54x/ferro-orm/pull/374),
+  [`aa55c16`](https://github.com/syn54x/ferro-orm/commit/aa55c16c2bbb79f470b93a134bd83df9ad540d2e))
+
+- **query**: Position paging after()/before() from order_by
+  ([#404](https://github.com/syn54x/ferro-orm/pull/404),
+  [`de92b42`](https://github.com/syn54x/ferro-orm/commit/de92b424112eda30504c5ab75e8ebd64a7e239da))
+
+- **query**: Value expressions in update recipes
+  ([#384](https://github.com/syn54x/ferro-orm/pull/384),
+  [`dc6087a`](https://github.com/syn54x/ferro-orm/commit/dc6087a3e249e754d4cce43bbe34b5f478f0df69))
+
+- **save**: Partial persist with only= and exclude=
+  ([#391](https://github.com/syn54x/ferro-orm/pull/391),
+  [`e5e4692`](https://github.com/syn54x/ferro-orm/commit/e5e469232911e89886881732810ca52cbef5b0ab))
+
+
 ## v0.20.0 (2026-08-29)
 
 ### Chores
