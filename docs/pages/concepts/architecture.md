@@ -1,6 +1,6 @@
 # Architecture
 
-Ferro is a Python ORM with a Rust core. You write Pydantic models and async Python; SQL generation, database I/O, and row hydration happen in compiled Rust. This page explains how the pieces fit together and what actually happens when you run a query.
+Ferro is a Python ORM with a Rust core. You write Pydantic models and async Python; SQL generation, database I/O, and row hydration happen in compiled Rust.
 
 ## Overview
 
@@ -84,7 +84,7 @@ graph TB
     Session -.->|scopes| IdentityMap
 ```
 
-The shortest way to hold the whole design in your head:
+In short:
 
 ```text
 Python owns the model authoring surface.
@@ -115,7 +115,7 @@ The FFI boundary is built on [PyO3](https://pyo3.rs) with `pyo3-async-runtimes` 
 - **QueryIR** (`ir_kind: "query"`) — emitted per operation from the query builder as `{ir_kind, ir_version, payload}`. Rust deserializes the envelope, plans SQL, and binds parameters through the shared codec registry.
 - **Rows** travel back as typed values that Rust hydrates into Python objects via the hydration ABI (direct `__dict__` population with required Pydantic slots initialized).
 
-Crucially, the GIL is released while Rust waits on the database. An awaited Ferro query does not block other Python coroutines or threads.
+The GIL is released while Rust waits on the database. An awaited Ferro query does not block other Python coroutines or threads.
 
 ### The Rust Engine
 
@@ -126,7 +126,7 @@ The engine owns everything between the IR envelope and the database:
 - **SQL generation** via [Sea-Query](https://github.com/SeaQL/sea-query), which lowers each operation through the dialect-specific builder (SQLite or PostgreSQL) with safely bound parameters.
 - **Connection pooling and execution** via [SQLx](https://github.com/launchbadge/sqlx) typed pools — a real SQLite pool or a real PostgreSQL pool, not a generic abstraction pretending to be both.
 - **Hydration ABI** — decoding database values into Python-compatible shapes and constructing instances without calling Pydantic `__init__`, while initializing `__pydantic_fields_set__`, `__pydantic_extra__`, and `__pydantic_private__`.
-- **Session-scoped identity map** — a per-session cache ensuring one row maps to one Python instance within the active session. See [Identity Map](identity-map.md).
+- **Session-scoped identity map** — a per-session cache so one row maps to one Python instance within the active session. See [Identity Map](identity-map.md).
 
 ## Life of a Query
 
@@ -226,7 +226,7 @@ Consequences:
 
 ## Trade-offs
 
-This design buys speed and type fidelity, but it is honest to name what it costs:
+What this design costs:
 
 - **Compiled wheel dependency.** Ferro ships a compiled extension module. Prebuilt wheels cover common platforms; anything else means building from source with a Rust toolchain.
 - **Debugging crosses a language boundary.** A stack trace stops at the FFI. Ferro works to surface clear Python exceptions, but stepping a debugger *into* SQL generation or hydration is not possible the way it is with a pure-Python ORM.

@@ -1,6 +1,6 @@
 # Migrating from SQLAlchemy
 
-Ferro's model-centric API replaces SQLAlchemy's session/statement split: models are Pydantic classes, queries hang off the model, and there is no session to manage. This page maps each SQLAlchemy concept to its Ferro equivalent.
+Ferro's model-centric API replaces SQLAlchemy's session/statement split: models are Pydantic classes, queries hang off the model, and there is no session to manage. Each section below maps a SQLAlchemy concept to its Ferro equivalent.
 
 ## Quick Comparison
 

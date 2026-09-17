@@ -1,6 +1,6 @@
 # Type Safety
 
-Ferro is built on Pydantic V2 and Python's type system. Models validate at runtime, queries return precisely typed results, and the Rust boundary ships with type stubs — so both your IDE and your type checker understand Ferro code.
+Ferro is built on Pydantic V2 and Python's type system. Models validate at runtime, queries return typed results, and the Rust boundary ships with type stubs, so both your IDE and your type checker understand Ferro code.
 
 ## Pydantic at the Core
 

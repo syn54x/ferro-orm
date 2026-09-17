@@ -221,7 +221,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     **Row security:** declare a ``typing.ClassVar`` named ``__ferro_rls__`` as a
     :class:`~ferro.rowsecurity.RowSecurity` container of
     :class:`~ferro.rowsecurity.RowPolicy` objects, e.g.
-    ``RowSecurity(RowPolicy(column="ledger_id", setting="pinch.ledger_id"))``.
+    ``RowSecurity(RowPolicy(column="tenant_id", setting="app.tenant_id"))``.
     A table created with it on gets ``ENABLE``/``FORCE ROW LEVEL SECURITY`` and
     its ``rls_<table>_<name>`` policies, so PostgreSQL — not application
     discipline — decides which rows a query can see. Row-level security is a

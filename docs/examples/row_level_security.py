@@ -18,11 +18,11 @@ from ferro import Field, Model, RowPolicy, RowSecurity, connect, engines
 # --8<-- [start:models]
 class Invoice(Model):
     id: int | None = Field(default=None, primary_key=True)
-    ledger_id: uuid.UUID
+    tenant_id: uuid.UUID
     total: int
 
     __ferro_rls__: ClassVar = RowSecurity(
-        RowPolicy(column="ledger_id", setting="pinch.ledger_id")
+        RowPolicy(column="tenant_id", setting="app.tenant_id")
     )
 
 
@@ -32,22 +32,22 @@ class Invoice(Model):
 # --8<-- [start:multi_policy]
 class Doc(Model):
     id: int | None = Field(default=None, primary_key=True)
-    ledger_id: uuid.UUID
+    tenant_id: uuid.UUID
     owner: str
     title: str
 
     __ferro_rls__: ClassVar = RowSecurity(
-        # RESTRICTIVE: AND-composes with everything below. No ledger scope,
+        # RESTRICTIVE: AND-composes with everything below. No tenant scope,
         # no rows — whoever you are.
         RowPolicy(
-            name="tenant", column="ledger_id", setting="pinch.ledger_id",
+            name="tenant", column="tenant_id", setting="app.tenant_id",
             restrictive=True,
         ),
         # Permissive, unscoped by command: the owner reads and writes.
         RowPolicy(
             name="owner_all",
-            using="\"owner\" = NULLIF(current_setting('pinch.member', true), '')",
-            with_check="\"owner\" = NULLIF(current_setting('pinch.member', true), '')",
+            using="\"owner\" = NULLIF(current_setting('app.current_user', true), '')",
+            with_check="\"owner\" = NULLIF(current_setting('app.current_user', true), '')",
         ),
         # Permissive, SELECT-only: an invited member reads and nothing more.
         RowPolicy(
@@ -55,7 +55,7 @@ class Doc(Model):
             command="select",
             using=(
                 '"id" IN (SELECT doc_id FROM membership WHERE member = '
-                "NULLIF(current_setting('pinch.member', true), ''))"
+                "NULLIF(current_setting('app.current_user', true), ''))"
             ),
         ),
     )
@@ -77,7 +77,7 @@ async def main() -> None:
     assert any("doc" in message.lower() for message in skip_warnings)
 
     async with engines.session():
-        await Invoice.create(ledger_id=uuid.uuid4(), total=100)
+        await Invoice.create(tenant_id=uuid.uuid4(), total=100)
         assert len(await Invoice.all()) == 1
 
     print("row_level_security example ran successfully")

@@ -1,6 +1,6 @@
 # Testing
 
-Ferro applications are easy to test: connect to a fresh in-memory SQLite database per test, run your code, and reset the engine on teardown. This page shows the standard pytest setup, a factory pattern for test data, and how to isolate tests against a real PostgreSQL database.
+Connect to a fresh in-memory SQLite database per test, run your code, and reset the engine on teardown. The rest of this page is the pytest fixture, a factory for test data, and how to isolate tests against a real PostgreSQL database.
 
 ## Test Setup
 

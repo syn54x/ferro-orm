@@ -33,9 +33,9 @@ A Ferro model is a Pydantic model — annotated fields become columns, and defau
 --8<-- "docs/examples/quickstart.py:connect"
 ```
 
-`connect()` takes a database URL. `sqlite::memory:` gives you a throwaway in-memory database — perfect for this tutorial and for tests. For a file-backed database use `sqlite:app.db?mode=rwc` (`rwc` = read/write/create), or a `postgres://...` URL for PostgreSQL.
+`connect()` takes a database URL. `sqlite::memory:` is a throwaway in-memory database, useful for this tutorial and for tests. For a file-backed database use `sqlite:app.db?mode=rwc` (`rwc` = read/write/create), or a `postgres://...` URL for PostgreSQL.
 
-`auto_migrate=True` creates tables for every registered model on connect. It's great for development; for production schemas, use [Alembic migrations](../guide/migrations.md).
+`auto_migrate=True` creates tables for every registered model on connect. Use it in development; for production schemas, use [Alembic migrations](../guide/migrations.md).
 
 ## Create Data
 

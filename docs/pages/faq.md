@@ -10,7 +10,7 @@ Ferro is an async Python ORM with a Rust core. Models are Pydantic V2 `BaseModel
 
 Ferro is pre-1.0. The core feature set — models, queries, relationships, transactions, named multi-database connections, raw SQL, auto-migration, and the Alembic bridge — is implemented and tested against both SQLite and PostgreSQL on every change. But pre-1.0 means what it says: APIs may still shift between minor versions, the community is small, and you'll find fewer battle scars documented than for SQLAlchemy or Django ORM.
 
-A reasonable posture: well suited to new projects and services where you control the upgrade cadence and have good test coverage; pin your version, read the [changelog](changelog.md) before upgrading, and report what you hit.
+Well suited to new projects and services where you control the upgrade cadence and have good test coverage. Pin your version, read the [changelog](changelog.md) before upgrading, and report what you hit.
 
 ### What license is Ferro under?
 

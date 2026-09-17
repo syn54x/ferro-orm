@@ -45,7 +45,7 @@ Ferro is built on `sqlx-core` and `pyo3-async-runtimes`:
 
 ## What You Give Up
 
-Ferro is not the right choice for every project. Be honest with yourself about these trade-offs:
+Ferro is not the right choice for every project. The trade-offs:
 
 - **Python 3.13+ only.** Ferro targets modern Python and does not support older interpreters.
 - **Async-only API.** There is no synchronous interface. If your application is sync (e.g., classic Flask or scripts without an event loop), Ferro is a poor fit.
@@ -86,4 +86,4 @@ Choose something else when:
 - You rely on features Ferro hasn't shipped yet — check the [Roadmap](roadmap.md) before committing
 - You need **maximum query flexibility** for deeply complex SQL — SQLAlchemy Core is hard to beat
 
-Migrating from SQLAlchemy? There's a [dedicated guide](howto/migrate-from-sqlalchemy.md). Otherwise, the best way to evaluate Ferro is the [Quickstart Tutorial](getting-started/quickstart.md) — it takes about 10 minutes.
+Migrating from SQLAlchemy? There's a [dedicated guide](howto/migrate-from-sqlalchemy.md). Otherwise start with the [Quickstart Tutorial](getting-started/quickstart.md) (about 10 minutes).

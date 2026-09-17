@@ -2,27 +2,27 @@
 
 A model says once who is allowed to see its rows::
 
-    class LedgerRow(Model):
+    class Invoice(Model):
         id: int | None = Field(default=None, primary_key=True)
-        ledger_id: UUID
+        tenant_id: UUID
         amount: float
 
         __ferro_rls__: ClassVar = RowSecurity(
-            RowPolicy(column="ledger_id", setting="pinch.ledger_id")
+            RowPolicy(column="tenant_id", setting="app.tenant_id")
         )
 
 and ferro creates the table with row-level security switched on and the
 matching policy::
 
-    ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY
-    ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY
-    CREATE POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow" FOR ALL
-      USING ("ledger_id" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)
-      WITH CHECK ("ledger_id" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)
+    ALTER TABLE "invoice" ENABLE ROW LEVEL SECURITY
+    ALTER TABLE "invoice" FORCE ROW LEVEL SECURITY
+    CREATE POLICY "rls_invoice_tenant_id" ON "invoice" FOR ALL
+      USING ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+      WITH CHECK ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
 
 From then on the database itself decides which rows a query can see: a
-connection whose ``pinch.ledger_id`` setting is unset sees **no** rows, and one
-that carries a ledger id sees only that ledger's rows — a forgotten ``where``
+connection whose ``app.tenant_id`` setting is unset sees **no** rows, and one
+that carries a tenant id sees only that tenant's rows — a forgotten ``where``
 filter is no longer a data leak.
 
 This module owns the declaration surface and the validation that runs at class
@@ -74,9 +74,9 @@ class RowPolicy:
 
     Two forms. The **shorthand** compares a column to a session setting::
 
-        RowPolicy(column="ledger_id", setting="pinch.ledger_id")
+        RowPolicy(column="tenant_id", setting="app.tenant_id")
 
-    which renders ``"ledger_id" = NULLIF(current_setting('pinch.ledger_id',
+    which renders ``"tenant_id" = NULLIF(current_setting('app.tenant_id',
     true), '')::uuid`` for both ``USING`` and ``WITH CHECK``. The cast comes
     from the column's own storage type; ``uuid``, ``text``/``varchar`` and the
     integer families are supported, and anything else is a class-definition
@@ -88,7 +88,7 @@ class RowPolicy:
         RowPolicy(
             name="invitee_read",
             command="select",
-            using="id IN (SELECT ledger_id FROM membership WHERE ...)",
+            using="id IN (SELECT doc_id FROM membership WHERE ...)",
         )
 
     Args:
@@ -106,8 +106,8 @@ class RowPolicy:
             may be written.
 
     Examples:
-        >>> RowPolicy(column="ledger_id", setting="pinch.ledger_id")
-        RowPolicy(name='ledger_id', command='all')
+        >>> RowPolicy(column="tenant_id", setting="app.tenant_id")
+        RowPolicy(name='tenant_id', command='all')
         >>> RowPolicy(name="owner_all", command="update", using="true")
         RowPolicy(name='owner_all', command='update')
     """
@@ -134,7 +134,7 @@ class RowPolicy:
         if not shorthand and not raw:
             raise TypeError(
                 "RowPolicy needs an expression: either the shorthand "
-                "(column='ledger_id', setting='pinch.ledger_id') or the raw form "
+                "(column='tenant_id', setting='app.tenant_id') or the raw form "
                 "(name='...', using='<sql>')."
             )
         if shorthand:
@@ -165,12 +165,12 @@ class RowPolicy:
             raise TypeError(
                 f"RowPolicy(column={self.column!r}) needs setting= to name the "
                 "Postgres setting holding the scope value, e.g. "
-                "setting='pinch.ledger_id'."
+                "setting='app.tenant_id'."
             )
         if not _SETTING_KEY_RE.match(self.setting):
             raise ValueError(
                 f"RowPolicy setting={self.setting!r} is not a custom Postgres "
-                "setting key: expected dotted identifiers (e.g. 'pinch.ledger_id') "
+                "setting key: expected dotted identifiers (e.g. 'app.tenant_id') "
                 f"matching {_SETTING_KEY_SHAPE}. A key must be namespaced — "
                 "built-in settings are not tenancy scope — and may contain only "
                 "identifier characters, so it can never carry a quote into the "
@@ -258,7 +258,7 @@ class RowSecurity:
     policies that are never consulted.
 
     Examples:
-        >>> RowSecurity(RowPolicy(column="ledger_id", setting="pinch.ledger_id"))
+        >>> RowSecurity(RowPolicy(column="tenant_id", setting="app.tenant_id"))
         RowSecurity(policies=1, force=True)
     """
 
@@ -276,7 +276,7 @@ class RowSecurity:
             if not isinstance(policy, RowPolicy):
                 raise TypeError(
                     f"RowSecurity()[{index}] must be a RowPolicy object (e.g. "
-                    "RowPolicy(column='ledger_id', setting='pinch.ledger_id')), not "
+                    "RowPolicy(column='tenant_id', setting='app.tenant_id')), not "
                     f"{type(policy).__name__}"
                 )
 
@@ -292,8 +292,8 @@ def _declared_row_security(model_cls: type[Any]) -> RowSecurity | None:
     if not isinstance(raw, RowSecurity):
         raise TypeError(
             f"{model_cls.__qualname__}.{FERRO_RLS} must be a RowSecurity object "
-            "(e.g. RowSecurity(RowPolicy(column='ledger_id', "
-            f"setting='pinch.ledger_id'))), not {type(raw).__name__}"
+            "(e.g. RowSecurity(RowPolicy(column='tenant_id', "
+            f"setting='app.tenant_id'))), not {type(raw).__name__}"
         )
     return raw
 

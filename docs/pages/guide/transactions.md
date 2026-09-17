@@ -50,7 +50,7 @@ You can also pass an explicit session handle (`transaction(session=my_session)`)
 --8<-- "docs/examples/transactions.py:handle"
 ```
 
-The handle becomes invalid when the block exits — calling it afterwards raises `RuntimeError`. If you don't need it, simply write `async with transaction():` and the handle is discarded. The top-level `ferro.execute` / `fetch_all` / `fetch_one` functions also automatically join the active transaction — see [Raw SQL](raw-sql.md#raw-sql-in-transactions).
+The handle becomes invalid when the block exits — calling it afterwards raises `RuntimeError`. If you don't need it, write `async with transaction():` and the handle is discarded. The top-level `ferro.execute` / `fetch_all` / `fetch_one` functions also automatically join the active transaction — see [Raw SQL](raw-sql.md#raw-sql-in-transactions).
 
 ## Nesting Behavior
 

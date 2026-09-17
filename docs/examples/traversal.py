@@ -166,7 +166,7 @@ async def main() -> None:
         # --8<-- [end:basic]
         assert {r.id for r in rows} == {1, 2, 3, 4}
 
-        # --8<-- [start:pinch]
+        # --8<-- [start:composed]
         top = await (
             Transaction.where(
                 lambda transaction: transaction.account.ledger_id == ledger_a.id
@@ -176,7 +176,7 @@ async def main() -> None:
             .limit(2)
             .all()
         )
-        # --8<-- [end:pinch]
+        # --8<-- [end:composed]
         assert [r.amount for r in top] == [40, 30]
 
         # --8<-- [start:multi-hop]
