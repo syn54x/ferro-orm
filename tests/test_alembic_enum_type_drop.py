@@ -773,6 +773,50 @@ async def test_sqlite_autogenerate_renders_no_type_drop(db_url, tmp_path):
     assert INTRODUCED_COLOR_TYPE in upgrade_code, upgrade_code
 
 
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_sqlite_add_column_of_a_new_enum_renders_no_type_statement(
+    db_url, tmp_path
+):
+    """The one shape that renders a ``CREATE TYPE`` on Postgres — an existing
+    table gaining a column of a brand-new enum, no ``create_table`` — renders
+    neither the creation nor the drop on SQLite, where enums store as text
+    (#439). The create_table shape above cannot tell: its creation is inline
+    on Postgres too."""
+    from alembic.autogenerate import produce_migrations, render_python_code
+    from alembic.migration import MigrationContext
+
+    from ferro.migrations import get_metadata, render_item
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'autogen.db'}")
+    live = sa.MetaData()
+    sa.Table(
+        "card",
+        live,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("title", sa.String, nullable=True),
+    )
+    live.create_all(engine)
+
+    _define_titled_card(with_color=True)
+    await connect(db_url)
+    try:
+        with engine.connect() as conn:
+            ctx = MigrationContext.configure(conn, opts={"render_item": render_item})
+            script = produce_migrations(ctx, get_metadata())
+        upgrade_code = render_python_code(script.upgrade_ops, render_item=render_item)
+        downgrade_code = render_python_code(
+            script.downgrade_ops, render_item=render_item
+        )
+    finally:
+        engine.dispose()
+
+    assert "op.add_column('card'" in upgrade_code, upgrade_code
+    assert "op.create_table(" not in upgrade_code, upgrade_code
+    assert "CREATE TYPE" not in upgrade_code, upgrade_code
+    assert "DROP TYPE" not in downgrade_code, downgrade_code
+
+
 # ---------------------------------------------------------------------------
 # The op pair: symmetric, and the diff tuples ``compare_metadata`` reports
 # ---------------------------------------------------------------------------

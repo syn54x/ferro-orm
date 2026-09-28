@@ -43,7 +43,39 @@ def _project_render_item(
 
 
 def test_render_item_is_an_alembic_render_item_fn() -> None:
+    """The static contract, checked by ``ty`` on the assignment below and on
+    the two helpers above; the runtime assertions pin the annotation text so
+    a plain ``pytest`` run also fails if it regresses to ``str | bool`` or
+    to an untyped context parameter (#446)."""
     hook: RenderItemFn = render_item
-    assert hook is render_item
-    assert _project_render_item is not None
-    assert _env_py_configure is not None
+    annotations = hook.__annotations__
+    assert annotations["return"] == "str | Literal[False]"
+    assert annotations["autogen_context"] == "AutogenContext"
+    assert annotations["type_"] is str
+    assert annotations["obj"] is Any
+
+
+def test_ferro_migrations_imports_without_alembic_installed() -> None:
+    """``AutogenContext`` is imported under ``TYPE_CHECKING`` only: Alembic
+    stays an optional dependency of ``ferro.migrations`` (#446). Run in a
+    subprocess with Alembic made unimportable, so this process's imports
+    cannot mask a regression."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys\n"
+        "class _Block:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'alembic' or name.startswith('alembic.'):\n"
+        "            raise ImportError(name)\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, _Block())\n"
+        "import ferro.migrations\n"
+        "print(ferro.migrations.render_item.__name__)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "render_item"
