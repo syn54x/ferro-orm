@@ -570,20 +570,27 @@ if _alembic_comparators is not None:
         ``CREATE TYPE``, ahead of the table ops (#439). Reverses to
         :class:`FerroEnumTypeDropOp` either way. A type the revision merely
         reuses gets no carrier; its columns are rewritten instead (see
-        ``_reuse_enum_type_on_created_tables``)."""
+        ``_reuse_enum_type_on_created_tables``).
+
+        The op pair is symmetric: each carries both statements, so reversing
+        twice gives back the same op, and each ``to_diff_tuple`` is
+        ``(tag, type_name, <statement this op executes>, <its reverse's>)``
+        — the shape ``alembic.autogenerate.compare_metadata`` reports."""
 
         def __init__(
-            self,
-            type_name: str,
-            drop_statement: str,
-            create_statement: "str | None" = None,
+            self, type_name: str, create_statement: "str | None", drop_statement: str
         ) -> None:
             self.type_name = type_name
-            self.drop_statement = drop_statement
             self.create_statement = create_statement
+            self.drop_statement = drop_statement
 
         def to_diff_tuple(self):
-            return ("ferro_enum_type_introduced", self.type_name, self.create_statement)
+            return (
+                "ferro_enum_type_introduced",
+                self.type_name,
+                self.create_statement,
+                self.drop_statement,
+            )
 
         def reverse(self) -> "FerroEnumTypeDropOp":
             return FerroEnumTypeDropOp(
@@ -594,25 +601,26 @@ if _alembic_comparators is not None:
         """The *type drop* (CONTEXT.md): a plain ``op.execute`` of the
         Rust-rendered ``DROP TYPE`` for one enum type the revision being
         reversed introduced — a generated revision does not import ferro to
-        run. Carries the create statement (if any) so reversing twice gives
-        back the same introduced op."""
+        run. Symmetric with :class:`FerroEnumTypeIntroducedOp` (see there)."""
 
         def __init__(
-            self,
-            type_name: str,
-            statement: str,
-            create_statement: "str | None" = None,
+            self, type_name: str, drop_statement: str, create_statement: "str | None"
         ) -> None:
             self.type_name = type_name
-            self.statement = statement
+            self.drop_statement = drop_statement
             self.create_statement = create_statement
 
         def to_diff_tuple(self):
-            return ("ferro_enum_type_drop", self.type_name, self.statement)
+            return (
+                "ferro_enum_type_drop",
+                self.type_name,
+                self.drop_statement,
+                self.create_statement,
+            )
 
         def reverse(self) -> "FerroEnumTypeIntroducedOp":
             return FerroEnumTypeIntroducedOp(
-                self.type_name, self.statement, self.create_statement
+                self.type_name, self.create_statement, self.drop_statement
             )
 
     def _revision_added_columns(
@@ -784,7 +792,7 @@ if _alembic_comparators is not None:
         )
         upgrade_ops.ops[:0] = [
             FerroEnumTypeIntroducedOp(
-                v["name"], v["drop_statement"], v["create_statement"]
+                v["name"], v["create_statement"], v["drop_statement"]
             )
             for v in verdicts
             if v["provenance"] == "introduced"
@@ -1035,7 +1043,7 @@ if _alembic_comparators is not None:
 
     @_alembic_renderers.dispatch_for(FerroEnumTypeDropOp)
     def _render_enum_type_drop(autogen_context, op: FerroEnumTypeDropOp) -> list[str]:
-        return [_render_execute(op.statement)]
+        return [_render_execute(op.drop_statement)]
 
     @_alembic_renderers.dispatch_for(AddEnumLabelsOp)
     def _render_add_enum_labels(autogen_context, op: AddEnumLabelsOp) -> list[str]:

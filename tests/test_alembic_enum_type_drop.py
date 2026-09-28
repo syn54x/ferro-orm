@@ -774,6 +774,41 @@ async def test_sqlite_autogenerate_renders_no_type_drop(db_url, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The op pair: symmetric, and the diff tuples ``compare_metadata`` reports
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.parametrize("create_statement", [None, CREATE_COLOR_SQL])
+def test_enum_type_op_pair_is_symmetric_and_its_diff_tuples_are_pinned(
+    create_statement,
+):
+    """Both ops carry both statements, reversing twice is the identity, and
+    each diff tuple is ``(tag, type_name, <statement this op executes>,
+    <its reverse's>)`` — ``None`` for an inline-created type's creation."""
+    from ferro.migrations.alembic import FerroEnumTypeDropOp, FerroEnumTypeIntroducedOp
+
+    introduced = FerroEnumTypeIntroducedOp(
+        "categorycolor", create_statement, DROP_COLOR_SQL
+    )
+    drop = introduced.reverse()
+    assert isinstance(drop, FerroEnumTypeDropOp)
+    assert introduced.to_diff_tuple() == (
+        "ferro_enum_type_introduced",
+        "categorycolor",
+        create_statement,
+        DROP_COLOR_SQL,
+    )
+    assert drop.to_diff_tuple() == (
+        "ferro_enum_type_drop",
+        "categorycolor",
+        DROP_COLOR_SQL,
+        create_statement,
+    )
+    assert drop.reverse().to_diff_tuple() == introduced.to_diff_tuple()
+
+
+# ---------------------------------------------------------------------------
 # ``render_item``: the one rendering SQLAlchemy's repr cannot do
 # ---------------------------------------------------------------------------
 
