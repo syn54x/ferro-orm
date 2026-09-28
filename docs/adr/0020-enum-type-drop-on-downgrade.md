@@ -36,7 +36,8 @@ the same revision makes, the same posture ADR-0013 takes for autogenerate:
 a generated revision is reviewed before it runs, so running autogenerate is
 itself the request for the full diff.
 
-The decision (`ferro_ddl_lowering::enum_types_introduced_by_revision`) and the
+The decision (`ferro_ddl_lowering::enum_type_provenance`, the `Introduced`
+verdict) and the
 rendered statement (`render_pg_enum_drop_type`) live in the Rust core; the
 Alembic comparator consumes both over FFI (`_core._plan_enum_type_drop`)
 and executes the statement verbatim, and a generated revision does not
@@ -48,6 +49,9 @@ there is no type to drop.
 
 Decision by owner (2026-09-28), review panel on #441 (finding F4 chose the
 revision-only rule over a live-catalog exclusion).
+
+The upgrade side of the same decision — a type the revision does *not*
+introduce is one it must not create either — is ADR-0021 (#443).
 
 Rejected alternatives:
 
@@ -89,7 +93,10 @@ Rejected alternatives:
   catalog read is unchanged and stays byte-parallel with the runtime pass.
 - A pre-existing orphan type that this revision's `create_table` adopts is
   dropped by the downgrade. Nothing used it, and on that database the
-  upgrade cannot run until the orphan is removed anyway (#443).
+  upgrade cannot run until the orphan is removed anyway: the type is the
+  revision's by provenance, so its column keeps the inline-creating
+  `sa.Enum` and collides with the leftover. (#443 is the other shape — a
+  type a *declared surviving column* uses — and ADR-0021 fixes that one.)
 - A type a table outside ferro's metadata still uses (a hand-made table
   sharing a ferro type name) makes the downgrade fail with a dependency
   error rather than silently keeping the type; the revision is then edited

@@ -47,7 +47,7 @@ with that comment and still ran first.
 | Enum label addition | Before-tables | `FIRST` and insert at `ops[:0]` |
 | Check add / rebuild / drop | After-tables | `LAST` then append |
 | Row security | After-tables | `LAST` then append |
-| Enum type drop (#438, ADR-0020) | Downgrade-after-tables | `LAST` and insert at `ops[:0]` |
+| Enum type provenance (#438/#443, ADR-0020/0021) | Downgrade-after-tables; also rewrites `create_table` columns in place | `LAST` and insert at `ops[:0]` |
 
 Two `LAST` families keep registration order in the Alembic adapter: checks,
 then row security. The enum type drop family inserts at the front, so its

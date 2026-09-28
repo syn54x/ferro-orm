@@ -316,25 +316,30 @@ def test_label_addition_statement_parity_pin():
     assert plan["extra_labels"] == ["legacy"]
 
 
-def test_enum_type_drop_statement_parity_pin():
-    """Cross-language golden pin for the type-drop decision (AGENTS.md § I-1
-    item 17; ADR-0020; #438).
+def test_enum_type_provenance_parity_pin():
+    """Cross-language golden pin for the type-provenance decision (AGENTS.md
+    § I-1 item 17; ADR-0020, ADR-0021; #438, #443).
 
     The FFI returns the Rust-rendered ``DROP TYPE`` statement byte-for-byte —
     the same literal is pinned in ferro-ddl-lowering's unit tests, and the
     Alembic comparator renders it verbatim into ``downgrade()``. The decision
-    is pinned alongside: a type is the revision's to drop when every column
-    declaring it is one the revision adds. ``categorycolor`` (created table
-    plus ``add_column``), ``cardsize`` (created table) and ``memberkind``
-    (``add_column`` only) drop; ``ledgerrole`` keeps a pre-existing column
-    on ``member`` and ``accountkind`` keeps one of its two columns.
+    is pinned alongside, one verdict per touched type: a type is the
+    revision's (``introduced``: created inline on upgrade, dropped on
+    downgrade) when every column declaring it is one the revision adds; a
+    type with an added column but a surviving one too is ``reused`` (its
+    created-table columns render ``create_type=False``, no drop).
+    ``categorycolor`` (created table plus ``add_column``), ``cardsize``
+    (created table) and ``memberkind`` (``add_column`` only) are introduced;
+    ``ledgerrole`` keeps a pre-existing column on ``member`` and
+    ``accountkind`` keeps one of its two columns, so both are reused. A type
+    with no added column is absent.
     """
     import json
 
-    from ferro._core import _plan_enum_type_drop
+    from ferro._core import _plan_enum_type_provenance
 
     plan = json.loads(
-        _plan_enum_type_drop(
+        _plan_enum_type_provenance(
             json.dumps(
                 {
                     "categorycolor": [["category", "color"], ["card", "color"]],
@@ -342,6 +347,7 @@ def test_enum_type_drop_statement_parity_pin():
                     "ledgerrole": [["ledger", "role"], ["member", "role"]],
                     "memberkind": [["member", "kind"]],
                     "accountkind": [["account", "kind"], ["account", "legacy_kind"]],
+                    "untouched": [["ledger", "status"]],
                 }
             ),
             json.dumps(
@@ -356,9 +362,22 @@ def test_enum_type_drop_statement_parity_pin():
             ),
         )
     )
-    assert plan["type_names"] == ["cardsize", "categorycolor", "memberkind"]
-    assert plan["statements"] == [
-        'DROP TYPE "cardsize"',
-        'DROP TYPE "categorycolor"',
-        'DROP TYPE "memberkind"',
+    assert plan == [
+        {"name": "accountkind", "provenance": "reused", "drop_statement": None},
+        {
+            "name": "cardsize",
+            "provenance": "introduced",
+            "drop_statement": 'DROP TYPE "cardsize"',
+        },
+        {
+            "name": "categorycolor",
+            "provenance": "introduced",
+            "drop_statement": 'DROP TYPE "categorycolor"',
+        },
+        {"name": "ledgerrole", "provenance": "reused", "drop_statement": None},
+        {
+            "name": "memberkind",
+            "provenance": "introduced",
+            "drop_statement": 'DROP TYPE "memberkind"',
+        },
     ]

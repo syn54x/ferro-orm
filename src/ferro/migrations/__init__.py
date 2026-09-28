@@ -1,3 +1,3 @@
-from .alembic import get_metadata
+from .alembic import get_metadata, render_item
 
-__all__ = ["get_metadata"]
+__all__ = ["get_metadata", "render_item"]
