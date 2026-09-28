@@ -530,3 +530,126 @@ async def test_autogenerate_is_empty_once_the_body_matches(
     code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
     assert "DROP CONSTRAINT" not in code, code
     assert SIDE_CHECK_NAME not in code, code
+
+
+# ---------------------------------------------------------------------------
+# Associative chains (#437): a >=3-term `|` / `&` check is one n-ary
+# BoolExpr to Postgres and pg_get_constraintdef prints it flat. That grouping
+# is catalog noise, not drift: no rebuild on connect, nothing in autogenerate.
+# ---------------------------------------------------------------------------
+
+SIDES_CHECK_NAME = "ck_sides_at_least_one_side"
+
+
+def _define_sides(*, op: str) -> type[Model]:
+    if op == "or":
+        check = Check(
+            "at_least_one_side",
+            lambda sides: (
+                (sides.a != None)  # noqa: E711
+                | (sides.b != None)  # noqa: E711
+                | (sides.c != None)  # noqa: E711
+                | (sides.d != None)  # noqa: E711
+            ),
+        )
+    else:
+        check = Check(
+            "at_least_one_side",
+            lambda sides: (
+                (sides.a != None)  # noqa: E711
+                & (sides.b != None)  # noqa: E711
+                & (sides.c != None)  # noqa: E711
+                & (sides.d != None)  # noqa: E711
+            ),
+        )
+
+    class Sides(Model):
+        __ferro_checks__: ClassVar[tuple[Check, ...]] = (check,)
+
+        id: int | None = Field(default=None, primary_key=True)
+        a: str | None = None
+        b: str | None = None
+        c: str | None = None
+        d: str | None = None
+
+    return Sides
+
+
+async def _pg_constraint_oid(table: str, name: str) -> str:
+    rows = await fetch_all(
+        "SELECT oid::text AS oid FROM pg_constraint "
+        f"WHERE conrelid = '\"{table}\"'::regclass AND conname = '{name}'"
+    )
+    assert rows, f"constraint {name} missing on {table}"
+    return rows[0]["oid"]
+
+
+@pytest.mark.parametrize("op", ["or", "and"])
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_four_term_chain_is_not_rebuilt_on_every_connect(db_url, recwarn, op):
+    """Real ``pg_get_constraintdef`` for a four-term chain: flat n-ary in the
+    catalog, left-nested in ferro's rendering. Same predicate, so the second
+    ``migrate_updates`` boot keeps the very same constraint (same oid)."""
+    _define_sides(op=op)
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        catalog = await _pg_constraintdef("sides", SIDES_CHECK_NAME)
+        first_oid = await _pg_constraint_oid("sides", SIDES_CHECK_NAME)
+    predicate = json.dumps(_model_ir("sides")["table_checks"][0]["predicate"])
+    canonical = _render_table_check_body(predicate)
+    keyword = op.upper()
+    assert catalog.count(keyword) == 3 and canonical.count(keyword) == 3
+    assert catalog.count("(") < canonical.count("(") + 2, (
+        "the pin requires Postgres to have flattened the chain"
+    )
+
+    _rewind_registry()
+    _define_sides(op=op)
+    await connect(db_url, migrate_updates=True)
+    assert not [w for w in recwarn if "ck_sides" in str(w.message)]
+    async with engines.session():
+        assert await _pg_constraint_oid("sides", SIDES_CHECK_NAME) == first_oid, (
+            "the same predicate must not be rebuilt on connect"
+        )
+        assert await _pg_constraintdef("sides", SIDES_CHECK_NAME) == catalog
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_autogenerate_is_empty_for_a_four_term_chain(
+    db_url, postgres_base_url, db_schema_name
+):
+    _define_sides(op="or")
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    _define_sides(op="or")
+    await connect(db_url)
+
+    code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
+    assert "DROP CONSTRAINT" not in code, code
+    assert SIDES_CHECK_NAME not in code, code
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_changing_a_chain_term_still_rebuilds(db_url):
+    """Flattening must not hide a real change: OR chain -> AND chain is drift."""
+    Sides = _define_sides(op="or")
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await Sides.create(a="x", b="x", c="x", d="x")
+    _rewind_registry()
+
+    Sides = _define_sides(op="and")
+    await connect(db_url, migrate_updates=True)
+    async with engines.session():
+        definition = await _pg_constraintdef("sides", SIDES_CHECK_NAME)
+        assert "AND" in definition and "OR" not in definition
+        with pytest.raises(CheckViolationError) as excinfo:
+            await Sides.create(a="x", b=None, c="x", d="x")
+        assert excinfo.value.constraint == SIDES_CHECK_NAME
