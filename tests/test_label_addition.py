@@ -9,6 +9,7 @@ import pytest
 import ferro
 from ferro import Model, connect, engines, reset_engine
 from ferro.raw import execute, fetch_all
+from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
 
 pytestmark = [pytest.mark.backend_matrix, pytest.mark.postgres_only]
 
@@ -284,35 +285,6 @@ async def test_second_boot_is_a_noop(db_url, clean_registry, recwarn):
 # Alembic comparator (#333): the second consumer of the label-addition
 # decision (AGENTS.md § I-1) — autogenerate sees the same drift.
 # ---------------------------------------------------------------------------
-
-
-def _autogen_upgrade_code(postgres_base_url, db_schema_name):
-    """Run real autogenerate against the live per-test schema and render the
-    upgrade code, mirroring test_cross_emitter_parity.py's connection dance."""
-    import sqlalchemy as sa
-    from alembic.autogenerate import produce_migrations, render_python_code
-    from alembic.migration import MigrationContext
-
-    from ferro.migrations import get_metadata
-
-    metadata = get_metadata()
-    for scheme in ("postgresql://", "postgres://"):
-        if postgres_base_url.startswith(scheme):
-            sync_url = "postgresql+psycopg://" + postgres_base_url[len(scheme) :]
-            break
-    else:
-        sync_url = postgres_base_url
-    engine = sa.create_engine(sync_url)
-    try:
-        with engine.connect() as conn:
-            conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
-            ctx = MigrationContext.configure(
-                conn, opts={"compare_type": True, "compare_server_default": True}
-            )
-            script = produce_migrations(ctx, metadata)
-        return render_python_code(script.upgrade_ops)
-    finally:
-        engine.dispose()
 
 
 @pytest.mark.asyncio
