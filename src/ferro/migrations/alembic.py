@@ -386,8 +386,25 @@ try:
 except ImportError:  # pragma: no cover - alembic optional at import time
     _alembic_comparators = None
 
-
 if _alembic_comparators is not None:
+    # Every statement a ferro op executes is rendered by the Rust core and
+    # written into the revision through ``op.execute``. A plain string there
+    # is wrapped in ``sqlalchemy.text()``, which parses ``:word`` as a bind
+    # parameter — so an enum label such as ``':admin'`` failed the upgrade
+    # with "A value is required for bind parameter" (#449) — and whose
+    # backslash escape cannot express every literal either (``':smile:'``
+    # escapes to ``\:smile:``, which ``text()`` never unescapes). The
+    # statement is therefore rendered as ``sa.DDL(...)``: a DDL construct is
+    # never bind-parsed, runs in offline ``--sql`` mode like any other op,
+    # and has one rule, ``%`` is a formatting character and is written
+    # ``%%``, which is total and reversed before execution. The SQL Postgres
+    # runs is byte-identical to what the runtime executes (AGENTS.md § I-1);
+    # the revision file differs from it only by that doubling. Pinned by
+    # ``tests/test_alembic_render_execute.py`` against a live Postgres.
+    def _render_execute(statement: str) -> str:
+        """The one rendering of ``op.execute(...)`` for a Rust-rendered
+        statement: ``op.execute(sa.DDL('<statement>'))`` with ``%`` doubled."""
+        return f"op.execute(sa.DDL({statement.replace('%', '%%')!r}))"
 
     class AddEnumLabelsOp(_MigrateOperation):
         """Autogenerate carrier for one ferro-owned enum type's label drift.
@@ -998,15 +1015,15 @@ if _alembic_comparators is not None:
                 f"op.drop_constraint({name!r}, {op.table_name!r}, type_='check')"
                 for name in reversed(op.names)
             ]
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(FerroCheckRebuildOp)
     def _render_check_rebuilds(autogen_context, op: FerroCheckRebuildOp) -> list[str]:
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(FerroCheckDropOp)
     def _render_check_drops(autogen_context, op: FerroCheckDropOp) -> list[str]:
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(FerroEnumTypeIntroducedOp)
     def _render_enum_type_introduced(
@@ -1014,11 +1031,11 @@ if _alembic_comparators is not None:
     ) -> list[str]:
         if op.create_statement is None:
             return []
-        return [f"op.execute({op.create_statement!r})"]
+        return [_render_execute(op.create_statement)]
 
     @_alembic_renderers.dispatch_for(FerroEnumTypeDropOp)
     def _render_enum_type_drop(autogen_context, op: FerroEnumTypeDropOp) -> list[str]:
-        return [f"op.execute({op.statement!r})"]
+        return [_render_execute(op.statement)]
 
     @_alembic_renderers.dispatch_for(AddEnumLabelsOp)
     def _render_add_enum_labels(autogen_context, op: AddEnumLabelsOp) -> list[str]:
@@ -1047,7 +1064,7 @@ if _alembic_comparators is not None:
             # inside the autocommit block, and the pre-indented body made
             # the file an IndentationError (#447).
             lines.append("with op.get_context().autocommit_block():")
-            lines.extend(f"op.execute({stmt!r})" for stmt in op.statements)
+            lines.extend(_render_execute(stmt) for stmt in op.statements)
             lines.append("")
         return lines
 
@@ -1491,10 +1508,10 @@ if _alembic_comparators is not None:
 
     @_alembic_renderers.dispatch_for(FerroRowSecurityOp)
     def _render_row_security(autogen_context, op: FerroRowSecurityOp) -> list[str]:
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(FerroRowSecurityDropOp)
     def _render_row_security_drops(
         autogen_context, op: FerroRowSecurityDropOp
     ) -> list[str]:
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
