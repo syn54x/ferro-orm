@@ -160,6 +160,10 @@ _Avoid_: Enum value, variant, choice
 The reconciliation-pass operation appending model-declared labels missing from a live ferro-owned enum type. Append-only and metadata-only: rows are never touched, and labels the database has but the model lacks are warned about loudly and never removed — removal and rename are reviewed-migration territory.
 _Avoid_: Enum sync, label reconciliation, enum evolution
 
+**Type drop**:
+The reverse of the enum type creation a generated revision's `create_table` performs implicitly: the `DROP TYPE` the revision's `downgrade()` emits, after its last `drop_table`, for each native enum type declared only by tables that revision creates and not already live. Alembic core has no operation for either direction; ferro's bridge supplies the drop so a downgrade leaves no type behind.
+_Avoid_: Enum cleanup, type teardown, cascade drop
+
 **Constraint rebuild**:
 Drop-and-recreate of a ferro-owned constraint whose live definition no longer matches the declared model — a foreign key's `on_delete`, its target, its columns, or a table check's predicate. Metadata-only: rows are never touched. On a backend that cannot alter constraints, ferro warns loudly and skips; it never diverges silently.
 _Avoid_: Constraint alter, FK patch, in-place constraint update

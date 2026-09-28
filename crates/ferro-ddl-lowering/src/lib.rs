@@ -5,6 +5,8 @@
 
 mod policy_expr;
 
+use std::collections::BTreeMap;
+
 use ferro_schema_ir::SchemaColumn;
 use sea_query::{ColumnDef, ForeignKeyAction};
 
@@ -555,6 +557,39 @@ pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
         quote_ident(type_name),
         label.replace('\'', "''"),
     )
+}
+
+/// The type-drop decision for a generated revision (#438): which named enum
+/// types a set of table creations brings into being. `users` maps each
+/// declared type name to the tables that declare a column of it; a type is
+/// created *with* `created_tables` when every one of its users is among them
+/// and the type is not already live (SQLAlchemy emits `CREATE TYPE` inline
+/// with `create_table` only for a type that does not exist yet). Those are
+/// exactly the types the reverse of that creation must drop, after its last
+/// `DROP TABLE`. Sorted by type name so the rendered revision is stable. The
+/// Alembic autogenerate comparator consumes this mechanically over FFI
+/// (AGENTS.md § I-1); it never re-derives the set.
+pub fn enum_types_created_with_tables(
+    users: &BTreeMap<String, Vec<String>>,
+    created_tables: &[String],
+    live_types: &[String],
+) -> Vec<String> {
+    users
+        .iter()
+        .filter(|(type_name, tables)| {
+            !tables.is_empty()
+                && tables.iter().all(|table| created_tables.contains(table))
+                && !live_types.contains(type_name)
+        })
+        .map(|(type_name, _)| type_name.clone())
+        .collect()
+}
+
+/// One `DROP TYPE` for a native Postgres enum type this revision created.
+/// Always-quoted like [`render_pg_enum_create_type`]'s `CREATE TYPE`, so the
+/// drop names the same object whatever the case of the type name.
+pub fn render_pg_enum_drop_type(type_name: &str) -> String {
+    format!("DROP TYPE {}", quote_ident(type_name))
 }
 
 /// Detect a refused conversion from a live column to a resolved storage
@@ -3702,6 +3737,43 @@ mod tests {
             render_pg_enum_add_value("od'd", "it's"),
             "ALTER TYPE \"od'd\" ADD VALUE IF NOT EXISTS 'it''s'"
         );
+    }
+
+    #[test]
+    fn enum_types_created_with_tables_keeps_shared_and_live_types() {
+        let mut users = BTreeMap::new();
+        users.insert(
+            "categorycolor".to_string(),
+            vec!["card".to_string(), "category".to_string()],
+        );
+        users.insert("cardsize".to_string(), vec!["card".to_string()]);
+        users.insert(
+            "ledgerrole".to_string(),
+            vec!["ledger".to_string(), "member".to_string()],
+        );
+        users.insert("accountkind".to_string(), vec!["account".to_string()]);
+        let created = vec![
+            "card".to_string(),
+            "category".to_string(),
+            "account".to_string(),
+        ];
+        let live = vec!["accountkind".to_string()];
+        // `ledgerrole` has a surviving user (`ledger`); `accountkind` is
+        // already live; the rest are this revision's, sorted by name.
+        assert_eq!(
+            enum_types_created_with_tables(&users, &created, &live),
+            vec!["cardsize", "categorycolor"]
+        );
+        assert!(enum_types_created_with_tables(&users, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn render_pg_enum_drop_type_is_pinned_and_quotes() {
+        assert_eq!(
+            render_pg_enum_drop_type("categorycolor"),
+            "DROP TYPE \"categorycolor\""
+        );
+        assert_eq!(render_pg_enum_drop_type("Odd\"Name"), "DROP TYPE \"Odd\"\"Name\"");
     }
 
     #[test]

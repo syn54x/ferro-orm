@@ -314,3 +314,36 @@ def test_label_addition_statement_parity_pin():
     )
     assert plan["statements"] == ["ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"]
     assert plan["extra_labels"] == ["legacy"]
+
+
+def test_enum_type_drop_statement_parity_pin():
+    """Cross-language golden pin for the type-drop decision (AGENTS.md § I-1
+    item 17; #438).
+
+    The FFI returns the Rust-rendered ``DROP TYPE`` statement byte-for-byte —
+    the same literal is pinned in ferro-ddl-lowering's unit tests, and the
+    Alembic comparator renders it verbatim into ``downgrade()``. The decision
+    is pinned alongside: a type is this revision's to drop only when every
+    table declaring it is one the revision creates and the type is not
+    already live.
+    """
+    import json
+
+    from ferro._core import _plan_enum_type_drop
+
+    plan = json.loads(
+        _plan_enum_type_drop(
+            json.dumps(
+                {
+                    "categorycolor": ["card", "category"],
+                    "cardsize": ["card"],
+                    "ledgerrole": ["ledger", "member"],
+                    "accountkind": ["account"],
+                }
+            ),
+            ["card", "category", "account"],
+            ["accountkind"],
+        )
+    )
+    assert plan["type_names"] == ["cardsize", "categorycolor"]
+    assert plan["statements"] == ['DROP TYPE "cardsize"', 'DROP TYPE "categorycolor"']

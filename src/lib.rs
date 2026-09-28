@@ -198,6 +198,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_render_check_body, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_render_table_check_body, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_enum_label_addition, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_plan_enum_type_drop, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_addition, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_rebuild, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_drop, m)?)?;

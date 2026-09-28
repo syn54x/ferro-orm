@@ -181,6 +181,22 @@ For a single model, every emitter must agree on:
     connect-time warnings remain the only word on them. See ADR-0019
     (rebuild the bodies ferro writes, report the bodies you write; flags are
     one-way) and PRD #406.
+17. **Enum type drop on downgrade** — the type-drop decision (which declared
+    native enum types a generated revision's `create_table` ops bring into
+    being: declared only by tables the revision creates, and not already
+    live) and the rendered `DROP TYPE` are decided by ONE pair of functions:
+    `ferro_ddl_lowering::enum_types_created_with_tables` /
+    `render_pg_enum_drop_type`. SQLAlchemy creates the type inline with
+    `create_table` and Alembic has no op for it, so the rendered
+    `downgrade()` never dropped it (#438). The Alembic autogenerate
+    comparator (`FerroEnumTypeOp` in `src/ferro/migrations/alembic.py`)
+    consumes the decision over FFI (`_core._plan_enum_type_drop`) and
+    renders nothing on upgrade and the byte-identical statement on
+    downgrade, after the last `drop_table`. A type a surviving table still
+    uses is never proposed. Pinned by `tests/test_alembic_enum_type_drop.py`,
+    `test_enum_type_drop_statement_parity_pin` and the ferro-ddl-lowering
+    unit pins. Postgres-only (SQLite enums store as text). Ownership is by
+    derivation, as for label addition (ADR-0011).
 
 ### Why this invariant exists
 
@@ -477,7 +493,11 @@ ops `extend` the list while it still has no table ops (#423).
 After-tables families (`ADD CONSTRAINT` over a new column, `CREATE POLICY`
 on a new table) register at `priority=LAST`. Before-tables families (enum
 label addition) register at `priority=FIRST` and insert at the front of the
-ops list. Default `MEDIUM` is an I-12 violation for ferro schema
+ops list. A downgrade-after-tables family (enum type drop, #438) reads the
+revision's `create_table` ops, so it registers at `priority=LAST`, but
+inserts at the front of the ops list: `UpgradeOps.reverse()` reverses order,
+so an op ahead of every `create_table` lands behind every `drop_table` in
+the downgrade. Default `MEDIUM` is an I-12 violation for ferro schema
 comparators. Alembic's own table comparator may remain `MEDIUM`. A
 same-revision pin is required for every after-tables family.
 

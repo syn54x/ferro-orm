@@ -14,6 +14,7 @@ from .._core import (
     _plan_check_drop,
     _plan_check_rebuild,
     _plan_enum_label_addition,
+    _plan_enum_type_drop,
     _plan_row_security,
     _plan_row_security_reconcile,
     _render_check_body,
@@ -325,6 +326,7 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
 try:
     from alembic.autogenerate import comparators as _alembic_comparators
     from alembic.autogenerate import renderers as _alembic_renderers
+    from alembic.operations.ops import CreateTableOp as _CreateTableOp
     from alembic.operations.ops import MigrateOperation as _MigrateOperation
     from alembic.util import DispatchPriority as _AlembicDispatchPriority
 except ImportError:  # pragma: no cover - alembic optional at import time
@@ -363,6 +365,29 @@ if _alembic_comparators is not None:
             # the same warn-never-act contract that governs upgrades.
             return AddEnumLabelsOp(self.type_name, [], [])
 
+    def _live_enum_labels_by_type(connection) -> dict[str, list[str]]:
+        """Every native enum type in the connection's schema with its labels
+        in enum sort order — the same catalog read the reconciliation pass
+        takes. A type with no labels yet is still a live type (an empty
+        list), so both enum comparators see it: label addition fills it, and
+        the type-drop decision knows this revision did not create it."""
+        rows = connection.execute(
+            sa.text(
+                "SELECT t.typname AS type_name, e.enumlabel AS label "
+                "FROM pg_type t "
+                "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "LEFT JOIN pg_enum e ON e.enumtypid = t.oid "
+                "WHERE t.typtype = 'e' AND n.nspname = current_schema() "
+                "ORDER BY t.typname, e.enumsortorder"
+            )
+        ).fetchall()
+        live: dict[str, list[str]] = {}
+        for row in rows:
+            labels = live.setdefault(row.type_name, [])
+            if row.label is not None:
+                labels.append(row.label)
+        return live
+
     @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.FIRST)
     def _compare_enum_labels(autogen_context, upgrade_ops, schemas) -> None:
         if autogen_context.dialect.name != "postgresql":
@@ -381,21 +406,7 @@ if _alembic_comparators is not None:
         if not declared:
             return
 
-        # Live labels per type in enum sort order — the same catalog read the
-        # reconciliation pass takes, scoped to the connection's schema.
-        rows = autogen_context.connection.execute(
-            sa.text(
-                "SELECT t.typname AS type_name, e.enumlabel AS label "
-                "FROM pg_type t "
-                "JOIN pg_namespace n ON n.oid = t.typnamespace "
-                "JOIN pg_enum e ON e.enumtypid = t.oid "
-                "WHERE n.nspname = current_schema() "
-                "ORDER BY t.typname, e.enumsortorder"
-            )
-        ).fetchall()
-        live: dict[str, list[str]] = {}
-        for row in rows:
-            live.setdefault(row.type_name, []).append(row.label)
+        live = _live_enum_labels_by_type(autogen_context.connection)
 
         # A live type with no model-derived counterpart is user-owned; a
         # declared type absent live belongs to table-creation ops. Insert
@@ -414,6 +425,100 @@ if _alembic_comparators is not None:
                     AddEnumLabelsOp(type_name, plan["statements"], plan["extra_labels"])
                 )
         upgrade_ops.ops[:0] = drifted
+
+    # -----------------------------------------------------------------------
+    # Enum type drop on downgrade (#438; AGENTS.md § I-1 item 17).
+    #
+    # A revision's `create_table` creates each named enum type as a SQLAlchemy
+    # side effect of the column's `sa.Enum` — there is no Alembic op for it,
+    # so `UpgradeOps.reverse()` has nothing to invert and the rendered
+    # `downgrade()` is a bare `op.drop_table` carrying no column objects:
+    # SQLAlchemy's `after_drop` hook, the only thing that would emit
+    # `DROP TYPE`, never fires. The types survive `alembic downgrade` and the
+    # next upgrade fails with `DuplicateObject` (alembic#278 upstream).
+    #
+    # This comparator turns the type creation into a real op. The decision
+    # (which declared types this revision's table creations bring into
+    # being: declared only by tables the revision creates, and not already
+    # live) and the rendered `DROP TYPE` come from the Rust core over FFI
+    # (`_plan_enum_type_drop`). The op renders nothing on upgrade —
+    # SQLAlchemy already emits `CREATE TYPE` inline — and the statement on
+    # downgrade. A type a surviving table still uses is never proposed. The
+    # drop is the exact reverse of a creation this same revision makes, so no
+    # destructive gate applies; ownership is by derivation (ADR-0011), the
+    # same rule label addition uses.
+    #
+    # I-12: this family reads the revision's `CreateTableOp`s, so it runs
+    # AFTER tables (`priority=LAST`) — but it inserts at the FRONT of the
+    # upgrade list. `UpgradeOps.reverse()` reverses order, so an op ahead of
+    # every `create_table` lands behind every `drop_table` in the downgrade,
+    # the only place `DROP TYPE` is legal. Front insertion also makes its
+    # registration order among the LAST families immaterial.
+    # -----------------------------------------------------------------------
+
+    class FerroEnumTypeOp(_MigrateOperation):
+        """Autogenerate carrier for one named enum type a revision's
+        ``create_table`` ops bring into being.
+
+        Renders nothing on the creating side (SQLAlchemy emits ``CREATE
+        TYPE`` inline with ``create_table``) and a plain ``op.execute`` of
+        the Rust-rendered ``DROP TYPE`` on the reverse — a generated revision
+        does not import ferro to run.
+        """
+
+        def __init__(
+            self,
+            type_name: str,
+            statements: list[str],
+            reverse_statements: list[str],
+        ) -> None:
+            self.type_name = type_name
+            self.statements = statements
+            self.reverse_statements = reverse_statements
+
+        def to_diff_tuple(self):
+            return ("ferro_enum_type", self.type_name, tuple(self.statements))
+
+        def reverse(self) -> "FerroEnumTypeOp":
+            return FerroEnumTypeOp(
+                self.type_name, self.reverse_statements, self.statements
+            )
+
+    @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.LAST)
+    def _compare_enum_types(autogen_context, upgrade_ops, schemas) -> None:
+        if autogen_context.dialect.name != "postgresql":
+            return
+        metadata = autogen_context.metadata
+        if metadata is None:
+            return
+
+        created = [
+            op.table_name for op in upgrade_ops.ops if isinstance(op, _CreateTableOp)
+        ]
+        if not created:
+            return
+
+        # Every declared native enum type with the tables that declare a
+        # column of it — the same `sa.Enum` mapping `_compare_enum_labels`
+        # reads, keyed the other way round.
+        users: dict[str, list[str]] = {}
+        for table in metadata.tables.values():
+            for column in table.columns:
+                if isinstance(column.type, sa.Enum) and column.type.name:
+                    tables = users.setdefault(str(column.type.name), [])
+                    if table.name not in tables:
+                        tables.append(table.name)
+        if not users:
+            return
+
+        live = _live_enum_labels_by_type(autogen_context.connection)
+        plan = json.loads(
+            _plan_enum_type_drop(json.dumps(users), created, sorted(live))
+        )
+        upgrade_ops.ops[:0] = [
+            FerroEnumTypeOp(type_name, [], [statement])
+            for type_name, statement in zip(plan["type_names"], plan["statements"])
+        ]
 
     # -----------------------------------------------------------------------
     # Check-addition / check-rebuild / leftover-drop comparator (ADR-0013,
@@ -648,6 +753,10 @@ if _alembic_comparators is not None:
 
     @_alembic_renderers.dispatch_for(FerroCheckDropOp)
     def _render_check_drops(autogen_context, op: FerroCheckDropOp) -> list[str]:
+        return [f"op.execute({stmt!r})" for stmt in op.statements]
+
+    @_alembic_renderers.dispatch_for(FerroEnumTypeOp)
+    def _render_enum_type(autogen_context, op: FerroEnumTypeOp) -> list[str]:
         return [f"op.execute({stmt!r})" for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(AddEnumLabelsOp)
