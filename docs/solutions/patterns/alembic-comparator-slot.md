@@ -7,7 +7,7 @@ related_files:
   - src/ferro/migrations/alembic.py
   - tests/test_table_check_reconcile.py
   - tests/test_row_security_alembic.py
-related_issues: [423, 427, 429]
+related_issues: [423, 427, 429, 438]
 related_prs: [431]
 captured: 2026-09-15
 ---
@@ -47,9 +47,24 @@ with that comment and still ran first.
 | Enum label addition | Before-tables | `FIRST` and insert at `ops[:0]` |
 | Check add / rebuild / drop | After-tables | `LAST` then append |
 | Row security | After-tables | `LAST` then append |
+| Enum type drop (#438, ADR-0020) | Downgrade-after-tables | `LAST` and insert at `ops[:0]` |
 
 Two `LAST` families keep registration order in the Alembic adapter: checks,
-then row security.
+then row security. The enum type drop family inserts at the front, so its
+registration order among them is immaterial.
+
+## The downgrade slot is the upgrade slot mirrored
+
+`UpgradeOps.reverse()` reverses each op *and* the list. An op appended after
+every `create_table` lands before every `drop_table` in `downgrade()`; an op
+inserted ahead of every `create_table` lands after every `drop_table`.
+
+The enum type drop op needs the second placement: `DROP TYPE` is only legal
+once no column uses the type, and it renders nothing on the upgrade side
+(SQLAlchemy emits `CREATE TYPE` inline with `create_table`). It still has to
+run at `LAST`, because it reads the revision's `CreateTableOp`s and
+`AddColumnOp`s to decide which types the revision introduces. `LAST` says when the comparator runs;
+`ops[:0]` says where its op renders. They are separate choices.
 
 ## When to apply
 

@@ -5,6 +5,8 @@
 
 mod policy_expr;
 
+use std::collections::BTreeMap;
+
 use ferro_schema_ir::SchemaColumn;
 use sea_query::{ColumnDef, ForeignKeyAction};
 
@@ -555,6 +557,50 @@ pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
         quote_ident(type_name),
         label.replace('\'', "''"),
     )
+}
+
+/// The type-drop decision for a generated revision (#438, ADR-0020): which
+/// named enum types the revision itself introduces, and so which types its
+/// `downgrade()` must drop after its last `DROP TABLE` / `DROP COLUMN`.
+///
+/// Example: a revision creates `category(color categorycolor)` and adds a
+/// `color categorycolor` column to the existing `card`. Every column that
+/// uses `categorycolor` is one this revision adds, so the type is the
+/// revision's: the downgrade drops the column and the table, and must then
+/// drop the type, or the next upgrade fails with "type already exists".
+///
+/// The rule: a type is dropped when **every** column declaring it is one
+/// the revision adds — a column of a table the revision creates, or a
+/// column an `add_column` in the revision adds — and there is at least one
+/// such column. A type with any column the downgrade leaves standing (a
+/// pre-existing column on a surviving table, including one `include_object`
+/// hides from the revision) is kept. The decision is made from the revision
+/// alone, never from the live catalog, so the rendered file means the same
+/// thing on every database it runs against (ADR-0020).
+///
+/// `declaring_columns` maps each declared type name to the `(table, column)`
+/// pairs that declare it; `added_columns` lists the `(table, column)` pairs
+/// the revision adds. Sorted by type name so the rendered revision is
+/// stable. The Alembic autogenerate comparator consumes this mechanically
+/// over FFI (AGENTS.md § I-1 item 17); it never re-derives the set.
+pub fn enum_types_introduced_by_revision(
+    declaring_columns: &BTreeMap<String, Vec<(String, String)>>,
+    added_columns: &[(String, String)],
+) -> Vec<String> {
+    declaring_columns
+        .iter()
+        .filter(|(_, columns)| {
+            !columns.is_empty() && columns.iter().all(|c| added_columns.contains(c))
+        })
+        .map(|(type_name, _)| type_name.clone())
+        .collect()
+}
+
+/// One `DROP TYPE` for a native Postgres enum type this revision created.
+/// Always-quoted like [`render_pg_enum_create_type`]'s `CREATE TYPE`, so the
+/// drop names the same object whatever the case of the type name.
+pub fn render_pg_enum_drop_type(type_name: &str) -> String {
+    format!("DROP TYPE {}", quote_ident(type_name))
 }
 
 /// Detect a refused conversion from a live column to a resolved storage
@@ -3826,6 +3872,54 @@ mod tests {
             render_pg_enum_add_value("od'd", "it's"),
             "ALTER TYPE \"od'd\" ADD VALUE IF NOT EXISTS 'it''s'"
         );
+    }
+
+    #[test]
+    fn enum_types_introduced_by_revision_needs_every_declaring_column_added() {
+        let col = |t: &str, c: &str| (t.to_string(), c.to_string());
+        let mut declaring = BTreeMap::new();
+        // Created table + add_column on an existing table: every column is new.
+        declaring.insert(
+            "categorycolor".to_string(),
+            vec![col("category", "color"), col("card", "color")],
+        );
+        // Only a created table.
+        declaring.insert("cardsize".to_string(), vec![col("card", "size")]);
+        // Created table + a pre-existing column on a surviving table.
+        declaring.insert(
+            "ledgerrole".to_string(),
+            vec![col("ledger", "role"), col("member", "role")],
+        );
+        // add_column only, no create_table at all.
+        declaring.insert("memberkind".to_string(), vec![col("member", "kind")]);
+        // Two columns of one type on one table: one added, one pre-existing.
+        declaring.insert(
+            "accountkind".to_string(),
+            vec![col("account", "kind"), col("account", "legacy_kind")],
+        );
+        let added = vec![
+            col("category", "color"),
+            col("card", "color"),
+            col("card", "size"),
+            col("ledger", "role"),
+            col("member", "kind"),
+            col("account", "kind"),
+        ];
+        assert_eq!(
+            enum_types_introduced_by_revision(&declaring, &added),
+            vec!["cardsize", "categorycolor", "memberkind"]
+        );
+        assert!(enum_types_introduced_by_revision(&declaring, &[]).is_empty());
+        assert!(enum_types_introduced_by_revision(&BTreeMap::new(), &added).is_empty());
+    }
+
+    #[test]
+    fn render_pg_enum_drop_type_is_pinned_and_quotes() {
+        assert_eq!(
+            render_pg_enum_drop_type("categorycolor"),
+            "DROP TYPE \"categorycolor\""
+        );
+        assert_eq!(render_pg_enum_drop_type("Odd\"Name"), "DROP TYPE \"Odd\"\"Name\"");
     }
 
     #[test]

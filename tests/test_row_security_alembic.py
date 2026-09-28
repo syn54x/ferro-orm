@@ -181,7 +181,9 @@ def _sync_url(postgres_base_url: str) -> str:
     return postgres_base_url
 
 
-def _produce_migration_script(postgres_base_url: str, db_schema_name: str):
+def _produce_migration_script(
+    postgres_base_url: str, db_schema_name: str, *, extra_opts: dict | None = None
+):
     from alembic.autogenerate import produce_migrations
     from alembic.migration import MigrationContext
 
@@ -192,9 +194,8 @@ def _produce_migration_script(postgres_base_url: str, db_schema_name: str):
     try:
         with engine.connect() as conn:
             conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
-            ctx = MigrationContext.configure(
-                conn, opts={"compare_type": True, "compare_server_default": True}
-            )
+            opts = {"compare_type": True, "compare_server_default": True}
+            ctx = MigrationContext.configure(conn, opts={**opts, **(extra_opts or {})})
             return produce_migrations(ctx, metadata)
     finally:
         engine.dispose()
@@ -208,11 +209,13 @@ def _autogen_upgrade_code(postgres_base_url: str, db_schema_name: str) -> str:
 
 
 def _autogen_upgrade_and_downgrade_code(
-    postgres_base_url: str, db_schema_name: str
+    postgres_base_url: str, db_schema_name: str, *, extra_opts: dict | None = None
 ) -> tuple[str, str]:
     from alembic.autogenerate import render_python_code
 
-    script = _produce_migration_script(postgres_base_url, db_schema_name)
+    script = _produce_migration_script(
+        postgres_base_url, db_schema_name, extra_opts=extra_opts
+    )
     return (
         render_python_code(script.upgrade_ops),
         render_python_code(script.downgrade_ops),

@@ -314,3 +314,51 @@ def test_label_addition_statement_parity_pin():
     )
     assert plan["statements"] == ["ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"]
     assert plan["extra_labels"] == ["legacy"]
+
+
+def test_enum_type_drop_statement_parity_pin():
+    """Cross-language golden pin for the type-drop decision (AGENTS.md § I-1
+    item 17; ADR-0020; #438).
+
+    The FFI returns the Rust-rendered ``DROP TYPE`` statement byte-for-byte —
+    the same literal is pinned in ferro-ddl-lowering's unit tests, and the
+    Alembic comparator renders it verbatim into ``downgrade()``. The decision
+    is pinned alongside: a type is the revision's to drop when every column
+    declaring it is one the revision adds. ``categorycolor`` (created table
+    plus ``add_column``), ``cardsize`` (created table) and ``memberkind``
+    (``add_column`` only) drop; ``ledgerrole`` keeps a pre-existing column
+    on ``member`` and ``accountkind`` keeps one of its two columns.
+    """
+    import json
+
+    from ferro._core import _plan_enum_type_drop
+
+    plan = json.loads(
+        _plan_enum_type_drop(
+            json.dumps(
+                {
+                    "categorycolor": [["category", "color"], ["card", "color"]],
+                    "cardsize": [["card", "size"]],
+                    "ledgerrole": [["ledger", "role"], ["member", "role"]],
+                    "memberkind": [["member", "kind"]],
+                    "accountkind": [["account", "kind"], ["account", "legacy_kind"]],
+                }
+            ),
+            json.dumps(
+                [
+                    ["category", "color"],
+                    ["card", "color"],
+                    ["card", "size"],
+                    ["ledger", "role"],
+                    ["member", "kind"],
+                    ["account", "kind"],
+                ]
+            ),
+        )
+    )
+    assert plan["type_names"] == ["cardsize", "categorycolor", "memberkind"]
+    assert plan["statements"] == [
+        'DROP TYPE "cardsize"',
+        'DROP TYPE "categorycolor"',
+        'DROP TYPE "memberkind"',
+    ]
