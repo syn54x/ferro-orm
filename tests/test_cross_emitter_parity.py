@@ -323,15 +323,16 @@ def test_enum_type_provenance_parity_pin():
     The FFI returns the Rust-rendered ``DROP TYPE`` statement byte-for-byte —
     the same literal is pinned in ferro-ddl-lowering's unit tests, and the
     Alembic comparator renders it verbatim into ``downgrade()``. The decision
-    is pinned alongside, both halves from one call: a type is the revision's
-    (``introduced``: created inline on upgrade, dropped on downgrade) when
-    every column declaring it is one the revision adds; a type with an added
-    column but a surviving one too is ``reused`` (its created-table columns
-    render ``create_type=False``). ``categorycolor`` (created table plus
-    ``add_column``), ``cardsize`` (created table) and ``memberkind``
-    (``add_column`` only) are introduced; ``ledgerrole`` keeps a pre-existing
-    column on ``member`` and ``accountkind`` keeps one of its two columns, so
-    both are reused. A type with no added column is neither.
+    is pinned alongside, one verdict per touched type: a type is the
+    revision's (``introduced``: created inline on upgrade, dropped on
+    downgrade) when every column declaring it is one the revision adds; a
+    type with an added column but a surviving one too is ``reused`` (its
+    created-table columns render ``create_type=False``, no drop).
+    ``categorycolor`` (created table plus ``add_column``), ``cardsize``
+    (created table) and ``memberkind`` (``add_column`` only) are introduced;
+    ``ledgerrole`` keeps a pre-existing column on ``member`` and
+    ``accountkind`` keeps one of its two columns, so both are reused. A type
+    with no added column is absent.
     """
     import json
 
@@ -361,10 +362,22 @@ def test_enum_type_provenance_parity_pin():
             ),
         )
     )
-    assert plan["introduced"] == ["cardsize", "categorycolor", "memberkind"]
-    assert plan["reused"] == ["accountkind", "ledgerrole"]
-    assert plan["drop_statements"] == [
-        'DROP TYPE "cardsize"',
-        'DROP TYPE "categorycolor"',
-        'DROP TYPE "memberkind"',
+    assert plan == [
+        {"name": "accountkind", "provenance": "reused", "drop_statement": None},
+        {
+            "name": "cardsize",
+            "provenance": "introduced",
+            "drop_statement": 'DROP TYPE "cardsize"',
+        },
+        {
+            "name": "categorycolor",
+            "provenance": "introduced",
+            "drop_statement": 'DROP TYPE "categorycolor"',
+        },
+        {"name": "ledgerrole", "provenance": "reused", "drop_statement": None},
+        {
+            "name": "memberkind",
+            "provenance": "introduced",
+            "drop_statement": 'DROP TYPE "memberkind"',
+        },
     ]

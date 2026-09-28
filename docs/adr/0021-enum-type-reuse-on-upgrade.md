@@ -44,12 +44,12 @@ including one `include_object` hides from the revision, or a column the
 revision drops — is **reused**: it already lives on every database the
 revision can run against, because the revision that added the surviving
 column created it. The revision's `create_table` columns of a reused type
-render `create_type=False`, and no `DROP TYPE` is rendered. The two sets
-come from one FFI call over the same inputs
-(`_core._plan_enum_type_provenance`:
-`ferro_ddl_lowering::enum_types_introduced_by_revision` and its exact
-complement `enum_types_reused_by_revision`), so the upgrade and the
-downgrade can never disagree about whose type it is. `add_column` is left
+render `create_type=False`, and no `DROP TYPE` is rendered. Both verdicts
+come from one decision over the same inputs
+(`ferro_ddl_lowering::enum_type_provenance`, one `Introduced | Reused`
+per touched type, consumed over FFI as `_core._plan_enum_type_provenance`),
+so the upgrade and the downgrade can never disagree about whose type it
+is. `add_column` is left
 alone: Alembic's `add_column` never creates a type, so there is nothing to
 suppress.
 

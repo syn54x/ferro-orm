@@ -165,7 +165,7 @@ The reverse of the enum type creation a generated revision's `create_table` perf
 _Avoid_: Enum cleanup, type teardown, cascade drop
 
 **Type reuse**:
-A generated revision's use of a native enum type it does not introduce — a column the revision adds declares it, but so does a column the downgrade leaves standing or puts back — so the type already lives on every database the revision can run against. The revision's `create_table` columns of that type render as `postgresql.ENUM(..., create_type=False)` (through the bridge's `render_item` hook, since SQLAlchemy's `repr` omits the flag) and no `DROP TYPE` is emitted. The exact complement of the type-drop decision over the same inputs, decided from the revision alone (ADR-0021).
+A generated revision's use of a native enum type it does not introduce — a column the revision adds declares it, but so does a column the downgrade leaves standing or puts back — so the type already lives on every database the revision can run against. The revision's `create_table` columns of that type render as `postgresql.ENUM(..., create_type=False)` (through the bridge's `render_item` hook, since SQLAlchemy's `repr` omits the flag) and no `DROP TYPE` is emitted. The other verdict of the one type-provenance decision that also decides the type drop, made from the revision alone (ADR-0021).
 _Avoid_: Shared type, existing type, live-type exclusion
 
 **Constraint rebuild**:

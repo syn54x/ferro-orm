@@ -186,15 +186,15 @@ For a single model, every emitter must agree on:
     type is one the revision adds: a created table's column or an
     `add_column`) and which it merely *reuses* (an added column declares
     it, but so does a column the downgrade leaves standing or puts back),
-    and the rendered `DROP TYPE`, are decided by ONE trio of functions:
-    `ferro_ddl_lowering::enum_types_introduced_by_revision` /
-    `enum_types_reused_by_revision` / `render_pg_enum_drop_type`.
+    and the rendered `DROP TYPE`, are decided by ONE pair of functions:
+    `ferro_ddl_lowering::enum_type_provenance` (one `Introduced | Reused`
+    verdict per touched type) / `render_pg_enum_drop_type`.
     SQLAlchemy creates the type inline with `create_table`, unconditionally,
     and Alembic has no op for it, so the rendered `downgrade()` never
     dropped it (#438) and a `create_table` reusing a live type re-issued
     `CREATE TYPE` and failed with `DuplicateObject` (#443). The Alembic
     autogenerate comparator (`FerroEnumTypeIntroducedOp` / `FerroEnumTypeDropOp`
-    in `src/ferro/migrations/alembic.py`) consumes both halves over FFI
+    in `src/ferro/migrations/alembic.py`) consumes the verdicts over FFI
     (`_core._plan_enum_type_provenance`): an introduced type keeps its
     inline creation and gets the byte-identical `DROP TYPE` on downgrade,
     after the last `drop_table` / `drop_column`; a reused type gets no drop

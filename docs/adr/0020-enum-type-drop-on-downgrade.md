@@ -36,7 +36,8 @@ the same revision makes, the same posture ADR-0013 takes for autogenerate:
 a generated revision is reviewed before it runs, so running autogenerate is
 itself the request for the full diff.
 
-The decision (`ferro_ddl_lowering::enum_types_introduced_by_revision`) and the
+The decision (`ferro_ddl_lowering::enum_type_provenance`, the `Introduced`
+verdict) and the
 rendered statement (`render_pg_enum_drop_type`) live in the Rust core; the
 Alembic comparator consumes both over FFI (`_core._plan_enum_type_drop`)
 and executes the statement verbatim, and a generated revision does not

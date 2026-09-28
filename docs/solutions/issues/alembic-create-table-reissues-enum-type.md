@@ -61,9 +61,10 @@ Two things made the fix non-obvious:
 
 The provenance decision that already drives the downgrade (#438,
 ADR-0020) has an exact complement: a type with an added column that is
-*not* introduced is **reused**. `enum_types_reused_by_revision` in
-ferro-ddl-lowering returns it; `_plan_enum_type_provenance` returns both
-halves over FFI. The comparator replaces each `create_table` column of a
+*not* introduced is **reused**. `enum_type_provenance` in
+ferro-ddl-lowering returns one `Introduced | Reused` verdict per touched
+type; `_plan_enum_type_provenance` carries it over FFI with the drop
+statement attached. The comparator replaces each `create_table` column of a
 reused type with a copy carrying `column.type.adapt(postgresql.ENUM,
 create_type=False)`, and the bridge's `render_item` hook (wired in
 `env.py`) renders the flag Alembic cannot. Before rewriting, the comparator

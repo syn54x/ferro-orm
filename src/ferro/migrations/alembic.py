@@ -703,15 +703,18 @@ if _alembic_comparators is not None:
         if not declaring:
             return
 
-        plan = json.loads(
+        verdicts = json.loads(
             _plan_enum_type_provenance(json.dumps(declaring), json.dumps(sorted(added)))
         )
         _reuse_enum_type_on_created_tables(
-            autogen_context, upgrade_ops, set(plan["reused"])
+            autogen_context,
+            upgrade_ops,
+            {v["name"] for v in verdicts if v["provenance"] == "reused"},
         )
         upgrade_ops.ops[:0] = [
-            FerroEnumTypeIntroducedOp(type_name, statement)
-            for type_name, statement in zip(plan["introduced"], plan["drop_statements"])
+            FerroEnumTypeIntroducedOp(v["name"], v["drop_statement"])
+            for v in verdicts
+            if v["provenance"] == "introduced"
         ]
 
     # -----------------------------------------------------------------------

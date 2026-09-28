@@ -111,21 +111,19 @@ pub fn _plan_enum_label_addition(
 /// each named enum type with the `(table, column)` pairs that declare it (a
 /// JSON object of arrays) and the `(table, column)` pairs this revision adds
 /// (a JSON array: every column of a created table, plus every `add_column`),
-/// return both halves of one decision, each sorted by type name:
+/// return one verdict per touched type, sorted by name:
+/// `[{"name", "provenance": "introduced" | "reused", "drop_statement"}]`.
 ///
-/// - `introduced`: the types the revision brings into being (every declaring
-///   column is one it adds) — created inline by SQLAlchemy's `create_table`
-///   on upgrade, and dropped on downgrade by the Rust-rendered `DROP TYPE`
-///   in `drop_statements` (index-aligned with `introduced`).
-/// - `reused`: the types with an added column and a surviving one — already
-///   live on every database the revision can run against, so the revision's
-///   `create_table` columns must render `create_type=False` (#443) and the
-///   downgrade must leave the type alone.
+/// An `introduced` type (every declaring column is one the revision adds) is
+/// created inline by SQLAlchemy's `create_table` on upgrade and carries the
+/// Rust-rendered `DROP TYPE` its `downgrade()` executes verbatim after the
+/// last `drop_table` / `drop_column`. A `reused` type (an added column and a
+/// surviving one) already lives wherever the revision can run: its
+/// `drop_statement` is null, the revision's `create_table` columns must
+/// render `create_type=False` (#443), and the downgrade leaves it alone.
 ///
 /// The Alembic autogenerate comparator consumes this instead of re-deriving
-/// either set or re-rendering the SQL (AGENTS.md § I-1 item 17): the
-/// generated `downgrade()` executes the drop statements verbatim after its
-/// last `drop_table` / `drop_column`.
+/// a verdict or re-rendering the SQL (AGENTS.md § I-1 item 17).
 #[pyfunction]
 pub fn _plan_enum_type_provenance(declaring_json: String, added_json: String) -> PyResult<String> {
     let declaring: std::collections::BTreeMap<String, Vec<(String, String)>> =
@@ -135,18 +133,23 @@ pub fn _plan_enum_type_provenance(declaring_json: String, added_json: String) ->
     let added: Vec<(String, String)> = serde_json::from_str(&added_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid enum added columns: {e}"))
     })?;
-    let introduced = ferro_ddl_lowering::enum_types_introduced_by_revision(&declaring, &added);
-    let reused = ferro_ddl_lowering::enum_types_reused_by_revision(&declaring, &added);
-    let drop_statements: Vec<String> = introduced
-        .iter()
-        .map(|name| ferro_ddl_lowering::render_pg_enum_drop_type(name))
-        .collect();
-    Ok(serde_json::json!({
-        "introduced": introduced,
-        "reused": reused,
-        "drop_statements": drop_statements,
-    })
-    .to_string())
+    let verdicts: Vec<serde_json::Value> =
+        ferro_ddl_lowering::enum_type_provenance(&declaring, &added)
+            .into_iter()
+            .map(|(name, provenance)| match provenance {
+                ferro_ddl_lowering::EnumTypeProvenance::Introduced => serde_json::json!({
+                    "name": name,
+                    "provenance": "introduced",
+                    "drop_statement": ferro_ddl_lowering::render_pg_enum_drop_type(&name),
+                }),
+                ferro_ddl_lowering::EnumTypeProvenance::Reused => serde_json::json!({
+                    "name": name,
+                    "provenance": "reused",
+                    "drop_statement": serde_json::Value::Null,
+                }),
+            })
+            .collect();
+    Ok(serde_json::Value::Array(verdicts).to_string())
 }
 
 /// The check-addition decision over FFI (ADR-0013): given one model's compiled
