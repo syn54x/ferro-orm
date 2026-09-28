@@ -910,7 +910,7 @@ pub struct CheckRebuildEmission {
 }
 
 /// Canonicalize a CHECK definition so catalog wrapping, identifier quotes,
-/// and whitespace are not drift (ADR-0015).
+/// whitespace, and associative grouping are not drift (ADR-0015).
 ///
 /// Both ferro's rendered CHECK body and a live catalog definition
 /// (`pg_get_constraintdef`, SQLite's `CHECK (…)` fragment) pass through this
@@ -918,10 +918,16 @@ pub struct CheckRebuildEmission {
 /// that enclose the whole expression are unwrapped; simple identifiers are
 /// compared unquoted. Postgres also paints `::type` casts onto literals and
 /// may rewrite `IN (…)` as `= ANY (ARRAY[…])` — those are the same predicate.
+///
+/// A chain of one associative connective is compared flat (#437): ferro
+/// renders `a | b | c` left-nested as `((a) OR (b)) OR (c)`, while Postgres
+/// parses that into one n-ary `BoolExpr` and `pg_get_constraintdef` prints
+/// `(a) OR (b) OR (c)`. Same predicate, so both normalize to the flat form
+/// (see [`flatten_associative_chains`]).
 pub fn normalize_check_definition(definition: &str) -> String {
-    let tokens = unwrap_outer_parens(strip_pg_in_any(strip_type_casts(strip_leading_check(
-        tokenize_check_sql(definition),
-    ))));
+    let tokens = flatten_associative_chains(unwrap_outer_parens(strip_pg_in_any(
+        strip_type_casts(strip_leading_check(tokenize_check_sql(definition))),
+    )));
     render_check_tokens(&tokens)
 }
 
@@ -2330,6 +2336,124 @@ fn strip_pg_in_any(tokens: Vec<CheckToken>) -> Vec<CheckToken> {
         out.push(tokens[i].clone());
         i += 1;
     }
+    out
+}
+
+/// A parenthesis tree over check tokens: the shape the associative-chain
+/// pass works on. Leaves are the tokens outside any nested group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CheckNode {
+    Leaf(CheckToken),
+    Group(Vec<CheckNode>),
+}
+
+fn parse_check_groups(tokens: &[CheckToken]) -> Vec<CheckNode> {
+    fn parse(tokens: &[CheckToken], pos: &mut usize) -> Vec<CheckNode> {
+        let mut nodes = Vec::new();
+        while *pos < tokens.len() {
+            match &tokens[*pos] {
+                CheckToken::Punct('(') => {
+                    *pos += 1;
+                    nodes.push(CheckNode::Group(parse(tokens, pos)));
+                }
+                CheckToken::Punct(')') => {
+                    *pos += 1;
+                    return nodes;
+                }
+                token => {
+                    nodes.push(CheckNode::Leaf(token.clone()));
+                    *pos += 1;
+                }
+            }
+        }
+        nodes
+    }
+    let mut pos = 0usize;
+    parse(tokens, &mut pos)
+}
+
+fn flatten_check_groups(nodes: &[CheckNode], out: &mut Vec<CheckToken>) {
+    for node in nodes {
+        match node {
+            CheckNode::Leaf(token) => out.push(token.clone()),
+            CheckNode::Group(children) => {
+                out.push(CheckToken::Punct('('));
+                flatten_check_groups(children, out);
+                out.push(CheckToken::Punct(')'));
+            }
+        }
+    }
+}
+
+fn is_connective(node: &CheckNode, connective: &str) -> bool {
+    matches!(node, CheckNode::Leaf(CheckToken::Word(word)) if word.eq_ignore_ascii_case(connective))
+}
+
+/// The one boolean connective (`AND` / `OR`) joining this sequence's
+/// operands, or `None` when the sequence is not a chain of exactly one
+/// connective (a bare operand, or a mix — which SQL precedence already
+/// groups, so a mix never occurs at one level of a parsed tree).
+fn chain_connective(nodes: &[CheckNode]) -> Option<&'static str> {
+    let has_and = nodes.iter().any(|node| is_connective(node, "AND"));
+    let has_or = nodes.iter().any(|node| is_connective(node, "OR"));
+    match (has_and, has_or) {
+        (true, false) => Some("AND"),
+        (false, true) => Some("OR"),
+        _ => None,
+    }
+}
+
+/// Whether the group at `idx` is an operand of the chain around it: an
+/// operand sits at the start of the sequence or right after a connective,
+/// and at the end or right before one. A group after `NOT`, after a function
+/// name, after `IN`, or after a comparison operator is that construct's
+/// argument, not a chain operand, and keeps its parentheses.
+fn is_chain_operand(nodes: &[CheckNode], idx: usize, connective: &str) -> bool {
+    let before_ok = idx == 0 || is_connective(&nodes[idx - 1], connective);
+    let after_ok = idx + 1 == nodes.len() || is_connective(&nodes[idx + 1], connective);
+    before_ok && after_ok
+}
+
+/// Splice every parenthesized operand that is itself a chain of the same
+/// connective into the enclosing chain, bottom-up, so
+/// `((a) OR (b)) OR (c)`, `(a) OR ((b) OR (c))` and `(a) OR (b) OR (c)` all
+/// become the last form. `AND` inside `OR` (and vice versa) keeps its
+/// parentheses: precedence grouping is the predicate, not noise.
+fn flatten_chain_nodes(nodes: Vec<CheckNode>) -> Vec<CheckNode> {
+    let nodes: Vec<CheckNode> = nodes
+        .into_iter()
+        .map(|node| match node {
+            CheckNode::Group(children) => CheckNode::Group(flatten_chain_nodes(children)),
+            leaf => leaf,
+        })
+        .collect();
+    let Some(connective) = chain_connective(&nodes) else {
+        return nodes;
+    };
+    let mut out = Vec::with_capacity(nodes.len());
+    for idx in 0..nodes.len() {
+        let splice = match &nodes[idx] {
+            CheckNode::Group(children) => {
+                chain_connective(children) == Some(connective)
+                    && is_chain_operand(&nodes, idx, connective)
+            }
+            CheckNode::Leaf(_) => false,
+        };
+        match &nodes[idx] {
+            CheckNode::Group(children) if splice => out.extend(children.iter().cloned()),
+            node => out.push(node.clone()),
+        }
+    }
+    out
+}
+
+/// Token-level entry for the associative-chain pass (see
+/// [`flatten_chain_nodes`]). Runs after [`unwrap_outer_parens`], so the
+/// top-level sequence is itself a candidate chain.
+fn flatten_associative_chains(tokens: Vec<CheckToken>) -> Vec<CheckToken> {
+    let nodes = flatten_chain_nodes(parse_check_groups(&tokens));
+    let mut out = Vec::with_capacity(tokens.len());
+    flatten_check_groups(&nodes, &mut out);
     out
 }
 
@@ -5213,4 +5337,305 @@ mod tests {
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
     }
 
+    // -----------------------------------------------------------------------
+    // Associative chains (#437): Postgres parses a left-nested OR/AND chain
+    // into one n-ary BoolExpr and pg_get_constraintdef prints it flat, so a
+    // >=3-term check ferro created must normalize equal to its own catalog.
+    // Fixtures are real pg_get_constraintdef output (PG 16).
+    // -----------------------------------------------------------------------
+
+    fn is_not_null(column: &str) -> ferro_schema_ir::CheckExpr {
+        ferro_schema_ir::CheckExpr::IsNotNull {
+            column: column.to_string(),
+        }
+    }
+
+    /// `column > 0`, the comparison operand the mixed-shape pins are built from.
+    fn gt0(column: &str) -> ferro_schema_ir::CheckExpr {
+        ferro_schema_ir::CheckExpr::Cmp {
+            column: column.to_string(),
+            op: ferro_schema_ir::CheckCmpOp::Gt,
+            other: ferro_schema_ir::CheckOperand::Literal {
+                token: "0".to_string(),
+            },
+        }
+    }
+
+    /// `a | b | c | d` in a Check lambda: left-nested, as Python folds it.
+    fn left_chain(
+        columns: &[&str],
+        join: fn(
+            Box<ferro_schema_ir::CheckExpr>,
+            Box<ferro_schema_ir::CheckExpr>,
+        ) -> ferro_schema_ir::CheckExpr,
+    ) -> ferro_schema_ir::CheckExpr {
+        let mut iter = columns.iter();
+        let mut acc = is_not_null(iter.next().expect("at least one column"));
+        for column in iter {
+            acc = join(Box::new(acc), Box::new(is_not_null(column)));
+        }
+        acc
+    }
+
+    fn or(
+        l: Box<ferro_schema_ir::CheckExpr>,
+        r: Box<ferro_schema_ir::CheckExpr>,
+    ) -> ferro_schema_ir::CheckExpr {
+        ferro_schema_ir::CheckExpr::Or { left: l, right: r }
+    }
+
+    fn and(
+        l: Box<ferro_schema_ir::CheckExpr>,
+        r: Box<ferro_schema_ir::CheckExpr>,
+    ) -> ferro_schema_ir::CheckExpr {
+        ferro_schema_ir::CheckExpr::And { left: l, right: r }
+    }
+
+    fn n_ary_pin(rendered: &str, catalog: &str) {
+        assert_ne!(
+            rendered, catalog,
+            "the pin is only meaningful if the raw strings differ"
+        );
+        assert_eq!(
+            normalize_check_definition(catalog),
+            normalize_check_definition(rendered),
+            "an associative chain's grouping is not a predicate change\n rendered: {rendered}\n catalog:  {catalog}"
+        );
+    }
+
+    #[test]
+    fn three_term_or_chain_normalizes_equal_to_catalog() {
+        let rendered = render_check_expr(&left_chain(&["a", "b", "c"], or));
+        assert_eq!(
+            rendered,
+            "((\"a\" IS NOT NULL) OR (\"b\" IS NOT NULL)) OR (\"c\" IS NOT NULL)"
+        );
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) OR (b IS NOT NULL) OR (c IS NOT NULL)))",
+        );
+    }
+
+    #[test]
+    fn four_term_or_chain_normalizes_equal_to_catalog() {
+        let rendered = render_check_expr(&left_chain(&["a", "b", "c", "d"], or));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) OR (b IS NOT NULL) OR (c IS NOT NULL) OR (d IS NOT NULL)))",
+        );
+    }
+
+    #[test]
+    fn five_and_eight_term_chains_normalize_equal_to_catalog() {
+        // The pass is recursive over the whole tree, so chain length is
+        // unbounded. Real pg_get_constraintdef output for both lengths.
+        let rendered = render_check_expr(&left_chain(&["a", "b", "c", "d", "e"], or));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) OR (b IS NOT NULL) OR (c IS NOT NULL) OR (d IS NOT NULL) OR (e IS NOT NULL)))",
+        );
+        let rendered =
+            render_check_expr(&left_chain(&["a", "b", "c", "d", "e", "f", "g", "h"], and));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) AND (b IS NOT NULL) AND (c IS NOT NULL) AND (d IS NOT NULL) \
+             AND (e IS NOT NULL) AND (f IS NOT NULL) AND (g IS NOT NULL) AND (h IS NOT NULL)))",
+        );
+    }
+
+    #[test]
+    fn three_term_and_chain_normalizes_equal_to_catalog() {
+        let rendered = render_check_expr(&left_chain(&["a", "b", "c"], and));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) AND (b IS NOT NULL) AND (c IS NOT NULL)))",
+        );
+    }
+
+    #[test]
+    fn four_term_and_chain_normalizes_equal_to_catalog() {
+        let rendered = render_check_expr(&left_chain(&["a", "b", "c", "d"], and));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) AND (b IS NOT NULL) AND (c IS NOT NULL) AND (d IS NOT NULL)))",
+        );
+    }
+
+    #[test]
+    fn right_nested_or_chain_is_the_same_predicate_as_flat() {
+        // `a | (b | c)`: Postgres keeps the right side nested in the catalog
+        // (only the left spine folds). Associativity says it is the same check.
+        let rendered = render_check_expr(&or(
+            Box::new(is_not_null("a")),
+            Box::new(or(Box::new(is_not_null("b")), Box::new(is_not_null("c")))),
+        ));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) OR ((b IS NOT NULL) OR (c IS NOT NULL))))",
+        );
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) OR (b IS NOT NULL) OR (c IS NOT NULL)))",
+        );
+    }
+
+    #[test]
+    fn mixed_chains_keep_their_precedence_grouping() {
+        // ((a > 0) OR (b > 0) OR (d > 0)) AND (c > 0): the OR spine folds, the AND does not absorb it.
+        let rendered = render_check_expr(&and(
+            Box::new(or(
+                Box::new(or(Box::new(gt0("a")), Box::new(gt0("b")))),
+                Box::new(gt0("d")),
+            )),
+            Box::new(gt0("c")),
+        ));
+        n_ary_pin(
+            &rendered,
+            "CHECK ((((a > 0) OR (b > 0) OR (d > 0)) AND (c > 0)))",
+        );
+        // And the two mixed shapes must NOT collapse into each other.
+        let or_of_and = render_check_expr(&or(
+            Box::new(and(Box::new(gt0("a")), Box::new(gt0("b")))),
+            Box::new(gt0("c")),
+        ));
+        let and_of_or = render_check_expr(&and(
+            Box::new(or(Box::new(gt0("a")), Box::new(gt0("b")))),
+            Box::new(gt0("c")),
+        ));
+        assert_ne!(
+            normalize_check_definition(&or_of_and),
+            normalize_check_definition(&and_of_or)
+        );
+        assert_eq!(
+            normalize_check_definition("CHECK ((((a > 0) AND (b > 0)) OR (c > 0)))"),
+            normalize_check_definition(&or_of_and)
+        );
+        assert_eq!(
+            normalize_check_definition("CHECK ((((a > 0) OR (b > 0)) AND (c > 0)))"),
+            normalize_check_definition(&and_of_or)
+        );
+    }
+
+    #[test]
+    fn not_over_a_chain_normalizes_equal_to_catalog() {
+        use ferro_schema_ir::CheckExpr;
+        let rendered = render_check_expr(&CheckExpr::Not {
+            child: Box::new(or(
+                Box::new(or(Box::new(gt0("a")), Box::new(gt0("b")))),
+                Box::new(gt0("c")),
+            )),
+        });
+        n_ary_pin(&rendered, "CHECK ((NOT ((a > 0) OR (b > 0) OR (c > 0))))");
+    }
+
+    #[test]
+    fn a_dropped_term_in_a_chain_is_still_drift() {
+        let three = render_check_expr(&left_chain(&["a", "b", "c"], or));
+        assert_ne!(
+            normalize_check_definition("CHECK (((a IS NOT NULL) OR (b IS NOT NULL)))"),
+            normalize_check_definition(&three),
+        );
+        // Same terms, other operator: drift.
+        assert_ne!(
+            normalize_check_definition(
+                "CHECK (((a IS NOT NULL) AND (b IS NOT NULL) AND (c IS NOT NULL)))"
+            ),
+            normalize_check_definition(&three),
+        );
+    }
+
+    #[test]
+    fn not_and_in_operands_inside_a_chain_normalize_equal_to_catalog() {
+        use ferro_schema_ir::CheckExpr;
+        // (NOT (a > 0)) | (b > 0) | (c > 0)
+        let rendered = render_check_expr(&or(
+            Box::new(or(
+                Box::new(CheckExpr::Not {
+                    child: Box::new(gt0("a")),
+                }),
+                Box::new(gt0("b")),
+            )),
+            Box::new(gt0("c")),
+        ));
+        n_ary_pin(&rendered, "CHECK (((NOT (a > 0)) OR (b > 0) OR (c > 0)))");
+        // (k IN ('x', 'y')) | (a > 0) | (b > 0)
+        let rendered = render_check_expr(&or(
+            Box::new(or(
+                Box::new(CheckExpr::In {
+                    column: "k".to_string(),
+                    values: vec!["'x'".to_string(), "'y'".to_string()],
+                }),
+                Box::new(gt0("a")),
+            )),
+            Box::new(gt0("b")),
+        ));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((k = ANY (ARRAY['x'::text, 'y'::text])) OR (a > 0) OR (b > 0)))",
+        );
+    }
+
+    #[test]
+    fn nested_mixed_chains_normalize_equal_to_catalog_and_keep_precedence() {
+        use ferro_schema_ir::CheckExpr;
+        let k_null = || CheckExpr::IsNull {
+            column: "k".to_string(),
+        };
+        // ((a > 0) & (b > 0)) | ((c > 0) & (d > 0)) | (k IS NULL)
+        let rendered = render_check_expr(&or(
+            Box::new(or(
+                Box::new(and(Box::new(gt0("a")), Box::new(gt0("b")))),
+                Box::new(and(Box::new(gt0("c")), Box::new(gt0("d")))),
+            )),
+            Box::new(k_null()),
+        ));
+        n_ary_pin(
+            &rendered,
+            "CHECK ((((a > 0) AND (b > 0)) OR ((c > 0) AND (d > 0)) OR (k IS NULL)))",
+        );
+        // ((a > 0) | (b > 0)) & ((c > 0) | (d > 0)) & (k IS NULL)
+        let rendered = render_check_expr(&and(
+            Box::new(and(
+                Box::new(or(Box::new(gt0("a")), Box::new(gt0("b")))),
+                Box::new(or(Box::new(gt0("c")), Box::new(gt0("d")))),
+            )),
+            Box::new(k_null()),
+        ));
+        n_ary_pin(
+            &rendered,
+            "CHECK ((((a > 0) OR (b > 0)) AND ((c > 0) OR (d > 0)) AND (k IS NULL)))",
+        );
+        // NOT ((a > 0) | (b > 0) | (c > 0)) & (d > 0): the NOT keeps its group.
+        let rendered = render_check_expr(&and(
+            Box::new(CheckExpr::Not {
+                child: Box::new(or(
+                    Box::new(or(Box::new(gt0("a")), Box::new(gt0("b")))),
+                    Box::new(gt0("c")),
+                )),
+            }),
+            Box::new(gt0("d")),
+        ));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((NOT ((a > 0) OR (b > 0) OR (c > 0))) AND (d > 0)))",
+        );
+        assert_eq!(
+            normalize_check_definition(&rendered),
+            "(NOT((a >0) OR(b >0) OR(c >0))) AND(d >0)",
+            "the NOT operand must stay grouped"
+        );
+    }
+
+    #[test]
+    fn two_term_shapes_are_unchanged_by_the_chain_pass() {
+        let two = render_check_expr(&left_chain(&["a", "b"], or));
+        assert_eq!(
+            normalize_check_definition(&two),
+            "(a IS NOT NULL) OR(b IS NOT NULL)"
+        );
+        assert_eq!(
+            normalize_check_definition("CHECK ((NOT (NOT (a > 0))))"),
+            "NOT(NOT(a >0))"
+        );
+    }
 }
