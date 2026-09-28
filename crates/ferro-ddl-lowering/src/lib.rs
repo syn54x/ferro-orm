@@ -483,8 +483,10 @@ pub fn resolve_column_storage(
 /// The idempotent `CREATE TYPE ... AS ENUM` guard for a native Postgres enum.
 /// Same DO-block pattern as [`render_db_check`]: it only *adds when absent*
 /// (schema-scoped via `current_schema()`), so a second boot against an
-/// already-migrated schema is a no-op. `DROP TYPE`/label cleanup is explicitly
-/// out of scope — emission is additive; removals belong in reviewed migrations.
+/// already-migrated schema is a no-op. The runtime create pass never drops a
+/// type or removes a label: emission there is additive, and removals belong
+/// in reviewed migrations — which is where [`render_pg_enum_drop_type`] is
+/// consumed (a generated revision's `downgrade()`, ADR-0020).
 pub fn render_pg_enum_create_type(type_name: &str, labels: &[String]) -> String {
     let rendered_labels: Vec<String> = labels
         .iter()
