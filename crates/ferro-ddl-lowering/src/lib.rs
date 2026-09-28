@@ -564,7 +564,9 @@ pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
 /// How a generated revision brings a native enum type it introduces into
 /// being (#439). SQLAlchemy creates a named enum type inline with
 /// `create_table` and nowhere else: an `add_column` of the type runs against
-/// a type that does not exist and fails with `UndefinedObject`.
+/// a type that does not exist and fails with `UndefinedObject`. CONTEXT.md's
+/// *Type creation* names the `Statement` mode only — the statement ferro
+/// renders — not the inline creation SQLAlchemy performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnumTypeCreation {
     /// At least one column of the type is on a table the revision creates,

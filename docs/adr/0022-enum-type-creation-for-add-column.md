@@ -56,14 +56,22 @@ reused type (ADR-0021) renders neither.
 guarded `DO $$ ... IF NOT EXISTS ... CREATE TYPE ... END $$` block — not a
 bare `CREATE TYPE` and not `sa.Enum(...).create(...)`. AGENTS.md I-1 item
 17 forbids a second renderer for the same artifact, and this is the only
-form the runtime executes. The guard is a consequence, not a goal: on a
+form the runtime executes. The guard is a consequence, not a goal. On a
 database that already carries the type (the #438 orphan residue from a
-downgrade on an older ferro) the statement is a no-op and the `add_column`
-adopts the live type with whatever labels it holds, where the
-`create_table` shape (ADR-0020) fails with `DuplicateObject` on that one
-database until the orphan is removed by hand. Both are the same rule —
-the type is the revision's by provenance, decided from the revision alone
-— rendered through the one statement each side has.
+downgrade on an older ferro) the statement is a no-op, where the
+`create_table` shape (ADR-0020) fails with `DuplicateObject` until the
+orphan is removed by hand. Both are the same rule — the type is the
+revision's by provenance, decided from the revision alone — rendered
+through the one statement each side has. What the `add_column` then
+binds to depends on where the orphan is. On the **generating** database
+the orphan is live, so label addition (ADR-0011) sees it like any other
+live type and the same revision renders `ALTER TYPE ... ADD VALUE` for
+every declared label it lacks, in its autocommit block beside the no-op
+creation, ahead of the table ops. On a **different** database that
+carries an orphan the generating one did not, nothing in the revision
+knows, and the `add_column` adopts the live label set as it stands; that
+is the revision-only rule's trade-off, and the next autogenerate against
+that database renders the missing labels.
 
 **Slot (I-12).** The creation is a before-tables statement: it must precede
 every `add_column`, and its reverse must follow every `drop_column`. The
@@ -72,9 +80,12 @@ column ops) and still inserts at the front of the ops list, so the op that
 renders nothing for an inline-created type and the op that renders the
 creation are one carrier (`FerroEnumTypeIntroducedOp`) in one place, and
 `UpgradeOps.reverse()` puts the drop after the last `drop_table` /
-`drop_column` as before. Label additions share the front of the revision;
-a type created in this revision has no label diff to render, and the two
-never name the same type.
+`drop_column` as before. Label additions share the front of the revision.
+A type absent from the generating database has no label diff, so the two
+families name the same type only when the generating database carries an
+orphan of it (above), and then both statements are correct in either
+order: the creation is a no-op against the live orphan, and the labels
+are appended to it.
 
 **Decided from the revision alone**, never from the live catalog, for the
 reason ADR-0020 gives. Postgres-only: SQLite stores enums as text and

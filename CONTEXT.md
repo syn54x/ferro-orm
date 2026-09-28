@@ -161,7 +161,7 @@ The reconciliation-pass operation appending model-declared labels missing from a
 _Avoid_: Enum sync, label reconciliation, enum evolution
 
 **Type drop**:
-The reverse of the enum type creation a generated revision's `create_table` performs implicitly: the `DROP TYPE` the revision's `downgrade()` emits, after its last `drop_table` and `drop_column`, for each native enum type the revision introduces — every column declaring it is one the revision adds, and none is one the downgrade puts back. Decided from the revision alone, never from the live catalog; the type is the revision's by provenance, not derivation (ADR-0020). Alembic core has no operation for either direction; ferro's bridge supplies the drop so a downgrade leaves no type behind.
+The reverse of a generated revision's creation of a native enum type — inline with `create_table`, or by *Type creation* when only `add_column`s carry it: the `DROP TYPE` the revision's `downgrade()` emits, after its last `drop_table` and `drop_column`, for each native enum type the revision introduces — every column declaring it is one the revision adds, and none is one the downgrade puts back. Decided from the revision alone, never from the live catalog; the type is the revision's by provenance, not derivation (ADR-0020). Alembic core has no operation for either direction; ferro's bridge supplies the drop, and the creation for the `add_column`-only shape, so a downgrade leaves no type behind and an upgrade finds every type it needs.
 _Avoid_: Enum cleanup, type teardown, cascade drop
 
 **Type creation**:

@@ -522,21 +522,29 @@ ops `extend` the list while it still has no table ops (#423).
 After-tables families (`ADD CONSTRAINT` over a new column, `CREATE POLICY`
 on a new table) register at `priority=LAST`. Before-tables families (enum
 label addition) register at `priority=FIRST` and insert at the front of the
-ops list. A downgrade-after-tables family (enum type drop, #438) reads the
-revision's `create_table` and `add_column` ops, so it registers at
-`priority=LAST`, but
-inserts at the front of the ops list: `UpgradeOps.reverse()` reverses order,
-so an op ahead of every `create_table` lands behind every `drop_table` in
-the downgrade. Default `MEDIUM` is an I-12 violation for ferro schema
-comparators. Alembic's own table comparator may remain `MEDIUM`. A
-same-revision pin is required for every after-tables family.
+ops list. The enum type provenance family (#438, #439) is before-tables on
+upgrade (the `CREATE TYPE` for a type only `add_column`s carry must precede
+those `add_column`s) and after-tables on downgrade (`DROP TYPE` is only
+legal after every `drop_table` / `drop_column`); it reads the revision's
+`create_table` and `add_column` ops to decide, so it registers at
+`priority=LAST`, but inserts at the front of the ops list, and the one
+placement serves both sides: `UpgradeOps.reverse()` reverses order, so an
+op ahead of every `create_table` lands behind every `drop_table` in the
+downgrade. The priority says when a comparator runs; the insertion point
+says where its op renders. Default `MEDIUM` is an I-12 violation for
+ferro schema comparators. Alembic's own table comparator may remain
+`MEDIUM`. A same-revision pin is required for every after-tables family
+and for the before-tables upgrade statement.
 
 Pinned by the row-security comparator's LAST registration and
 `test_new_declaration_on_a_brand_new_table_lands_after_create_table`, and
 by `test_autogenerate_adds_a_column_before_the_check_that_references_it`
-(#423), and for the downgrade-after-tables slot by
+(#423), for the downgrade-after-tables slot by
 `test_a_type_shared_by_two_new_tables_drops_once_after_both_tables`
-(#438). Architecture review: I-19 in #427. See PRD #429 and
+(#438), and for the before-tables type creation by
+`test_a_type_introduced_by_add_column_alone_is_created_and_dropped` and
+`test_a_type_created_by_statement_lands_before_tables_beside_label_additions`
+(#439). Architecture review: I-19 in #427. See PRD #429 and
 `docs/solutions/patterns/alembic-comparator-slot.md`.
 
 ---

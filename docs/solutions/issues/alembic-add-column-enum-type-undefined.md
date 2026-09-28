@@ -45,10 +45,9 @@ LINE 1: ALTER TABLE card ADD COLUMN color categorycolor
 ## Why
 
 SQLAlchemy creates a named enum type as a side effect of `create_table`
-(the `sa.Enum` type's `before_create` event on the table) and nowhere
-else. Alembic's `add_column` compiles a bare `ALTER TABLE ... ADD COLUMN
-... categorycolor` and never fires that event, so nothing creates the
-type. The provenance decision (ADR-0020) already knew the type was the
+(the `sa.Enum` type's `before_create` event on the table). Alembic's
+`add_column` compiles a bare `ALTER TABLE ... ADD COLUMN ... categorycolor`
+and never fires that event, so nothing creates the type. The provenance decision (ADR-0020) already knew the type was the
 revision's — every column declaring it is one the revision adds — which
 is why the downgrade dropped it. The upgrade side of that same verdict was
 missing for this one shape; ADR-0021 had recorded it as "Alembic's gap".
@@ -77,9 +76,15 @@ reverse is the unchanged `DROP TYPE`. See ADR-0022.
   a rendered statement compares against `repr(statement)`, and a label
   inside a `DO $$ ... $$` block appears as `\'rust\'` in the file.
 - A pre-existing orphan type (the #438 residue) makes the guarded
-  statement a no-op: the `add_column` adopts the live type with whatever
-  labels it holds. The `create_table` shape still collides with an orphan
-  (ADR-0020's consequence); both follow from "decided from the revision
-  alone".
+  statement a no-op. On the generating database the orphan is live, so
+  label addition (ADR-0011) renders `ADD VALUE` for its missing labels in
+  the same revision; on a database the generating one did not see, the
+  `add_column` adopts the live label set as it stands and the next
+  autogenerate there renders the additions. The `create_table` shape
+  still collides with an orphan (ADR-0020's consequence); both follow
+  from "decided from the revision alone".
+- `alter_column` from `str` to a new `StrEnum` is the same shape with no
+  "added" column, so it gets no verdict; ferro refuses that conversion
+  (`refused_conversion`) and it is out of #439's scope.
 - The auto-migrate side needed nothing: its create pass already executes
   the same statement before an added enum column.
