@@ -149,7 +149,7 @@ The `migrate_updates` step that alters existing schema objects — tables and fe
 _Avoid_: Update pass, schema sync, drift repair
 
 **Ferro-owned artifact**:
-A schema object ferro may reconcile to match the declared model. Indexes and constraints are ferro-owned by naming (`idx_`, `uq_`, `fk_`, `ck_`); native enum types are ferro-owned by derivation — the type's name matches the name ferro derives from the model. A generated revision owns an enum type a third way, by provenance: it introduces every column of the type, so its downgrade drops the type (see *Type drop*). Artifacts owned none of these ways belong to the user and are never altered or dropped.
+A schema object ferro may reconcile to match the declared model. Indexes and constraints are ferro-owned by naming (`idx_`, `uq_`, `fk_`, `ck_`); native enum types are ferro-owned by derivation — the type's name matches the name ferro derives from the model. A generated revision owns an enum type a third way, by provenance: it introduces every column of the type, so its downgrade drops the type (see *Type drop*); a type it adds a column of but does not introduce is one it reuses, never creates (see *Type reuse*). Artifacts owned none of these ways belong to the user and are never altered or dropped.
 _Avoid_: Managed index, system constraint, internal index
 
 **Enum label**:
@@ -163,6 +163,10 @@ _Avoid_: Enum sync, label reconciliation, enum evolution
 **Type drop**:
 The reverse of the enum type creation a generated revision's `create_table` performs implicitly: the `DROP TYPE` the revision's `downgrade()` emits, after its last `drop_table` and `drop_column`, for each native enum type the revision introduces — every column declaring it is one the revision adds, and none is one the downgrade puts back. Decided from the revision alone, never from the live catalog; the type is the revision's by provenance, not derivation (ADR-0020). Alembic core has no operation for either direction; ferro's bridge supplies the drop so a downgrade leaves no type behind.
 _Avoid_: Enum cleanup, type teardown, cascade drop
+
+**Type reuse**:
+A generated revision's use of a native enum type it does not introduce — a column the revision adds declares it, but so does a column the downgrade leaves standing or puts back — so the type already lives on every database the revision can run against. The revision's `create_table` columns of that type render as `postgresql.ENUM(..., create_type=False)` (through the bridge's `render_item` hook, since SQLAlchemy's `repr` omits the flag) and no `DROP TYPE` is emitted. The exact complement of the type-drop decision over the same inputs, decided from the revision alone (ADR-0021).
+_Avoid_: Shared type, existing type, live-type exclusion
 
 **Constraint rebuild**:
 Drop-and-recreate of a ferro-owned constraint whose live definition no longer matches the declared model — a foreign key's `on_delete`, its target, its columns, or a table check's predicate. Metadata-only: rows are never touched. On a backend that cannot alter constraints, ferro warns loudly and skips; it never diverges silently.

@@ -181,30 +181,39 @@ For a single model, every emitter must agree on:
     connect-time warnings remain the only word on them. See ADR-0019
     (rebuild the bodies ferro writes, report the bodies you write; flags are
     one-way) and PRD #406.
-17. **Enum type drop on downgrade** — the type-drop decision (which declared
-    native enum types a generated revision introduces: every column
-    declaring the type is one the revision adds, a created table's column
-    or an `add_column`) and the rendered `DROP TYPE` are decided by ONE
-    pair of functions: `ferro_ddl_lowering::enum_types_introduced_by_revision`
-    / `render_pg_enum_drop_type`. SQLAlchemy creates the type inline with
-    `create_table` and Alembic has no op for it, so the rendered
-    `downgrade()` never dropped it (#438). The Alembic autogenerate
-    comparator (`FerroEnumTypeIntroducedOp` / `FerroEnumTypeDropOp` in
-    `src/ferro/migrations/alembic.py`)
-    consumes the decision over FFI (`_core._plan_enum_type_drop`) and
-    renders nothing on upgrade and the byte-identical statement on
-    downgrade, after the last `drop_table` / `drop_column`. The decision is
-    made from the revision alone, never from the live catalog, so the file
-    means the same thing on every database it runs against. A type with a
-    column the downgrade leaves standing or puts back (a pre-existing
-    column on a surviving table, including one `include_object` hides, or
-    a column the revision drops) is kept.
+17. **Enum type provenance** — the decision of which declared native enum
+    types a generated revision *introduces* (every column declaring the
+    type is one the revision adds: a created table's column or an
+    `add_column`) and which it merely *reuses* (an added column declares
+    it, but so does a column the downgrade leaves standing or puts back),
+    and the rendered `DROP TYPE`, are decided by ONE trio of functions:
+    `ferro_ddl_lowering::enum_types_introduced_by_revision` /
+    `enum_types_reused_by_revision` / `render_pg_enum_drop_type`.
+    SQLAlchemy creates the type inline with `create_table`, unconditionally,
+    and Alembic has no op for it, so the rendered `downgrade()` never
+    dropped it (#438) and a `create_table` reusing a live type re-issued
+    `CREATE TYPE` and failed with `DuplicateObject` (#443). The Alembic
+    autogenerate comparator (`FerroEnumTypeIntroducedOp` / `FerroEnumTypeDropOp`
+    in `src/ferro/migrations/alembic.py`) consumes both halves over FFI
+    (`_core._plan_enum_type_provenance`): an introduced type keeps its
+    inline creation and gets the byte-identical `DROP TYPE` on downgrade,
+    after the last `drop_table` / `drop_column`; a reused type gets no drop
+    and every `create_table` column of it rewritten to
+    `postgresql.ENUM(..., create_type=False)` (`add_column` never creates a
+    type, so it is left alone). SQLAlchemy's `repr` omits that flag, so it
+    is rendered by the bridge's `render_item` hook
+    (`ferro.migrations.render_item`, wired in `env.py`); a revision that
+    needs it in a context that lacks it is refused at autogenerate with the
+    line to add, never written with an upgrade that fails later. The
+    decision is made from the revision alone, never from the live catalog,
+    so the file means the same thing on every database it runs against.
     Pinned by `tests/test_alembic_enum_type_drop.py`,
-    `test_enum_type_drop_statement_parity_pin` and the ferro-ddl-lowering
-    unit pins. Postgres-only (SQLite enums store as text); Alembic-only by
-    construction (auto-migrate has no downgrade door), so the single-source
-    rule applies but there is no second emitter to compare. Ownership is by
-    provenance (ADR-0020).
+    `test_enum_type_provenance_parity_pin` and the ferro-ddl-lowering unit
+    pins. Postgres-only (SQLite enums store as text); Alembic-only by
+    construction (auto-migrate has no downgrade door, and its create pass
+    guards `CREATE TYPE` with a catalog check), so the single-source rule
+    applies but there is no second emitter to compare. Ownership is by
+    provenance (ADR-0020); the upgrade side mirrors it (ADR-0021).
 
 ### Why this invariant exists
 

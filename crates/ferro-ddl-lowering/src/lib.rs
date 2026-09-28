@@ -598,6 +598,41 @@ pub fn enum_types_introduced_by_revision(
         .collect()
 }
 
+/// The mirror half of [`enum_types_introduced_by_revision`] (#443, ADR-0021):
+/// which named enum types a generated revision *reuses* — a column the
+/// revision adds declares the type, but so does a column the revision leaves
+/// standing (or puts back on downgrade), so the type already lives on every
+/// database the revision can run against and the revision must not create
+/// it.
+///
+/// Example: `category(color categorycolor)` lives; the revision creates
+/// `card(color categorycolor)`. `card.color` is added, `category.color` is
+/// not, so `categorycolor` is reused: the revision's `create_table` renders
+/// that column as `postgresql.ENUM(..., create_type=False)` instead of
+/// re-issuing SQLAlchemy's inline `CREATE TYPE`, and the downgrade leaves the
+/// type alone.
+///
+/// The rule is the exact complement over the same inputs: a type with **at
+/// least one** added column that is **not** introduced. A type with no added
+/// column is neither (the revision does not touch it). Decided from the
+/// revision alone, never from the live catalog, so the rendered file means
+/// the same thing everywhere (ADR-0020). Sorted by type name. The Alembic
+/// autogenerate comparator consumes this mechanically over FFI (AGENTS.md
+/// § I-1 item 17); it never re-derives the set.
+pub fn enum_types_reused_by_revision(
+    declaring_columns: &BTreeMap<String, Vec<(String, String)>>,
+    added_columns: &[(String, String)],
+) -> Vec<String> {
+    declaring_columns
+        .iter()
+        .filter(|(_, columns)| {
+            columns.iter().any(|c| added_columns.contains(c))
+                && !columns.iter().all(|c| added_columns.contains(c))
+        })
+        .map(|(type_name, _)| type_name.clone())
+        .collect()
+}
+
 /// One `DROP TYPE` for a native Postgres enum type this revision created.
 /// Always-quoted like [`render_pg_enum_create_type`]'s `CREATE TYPE`, so the
 /// drop names the same object whatever the case of the type name.
@@ -3913,6 +3948,41 @@ mod tests {
         );
         assert!(enum_types_introduced_by_revision(&declaring, &[]).is_empty());
         assert!(enum_types_introduced_by_revision(&BTreeMap::new(), &added).is_empty());
+    }
+
+    #[test]
+    fn enum_types_reused_by_revision_is_the_complement_with_an_added_column() {
+        let col = |t: &str, c: &str| (t.to_string(), c.to_string());
+        let mut declaring = BTreeMap::new();
+        // Every column new: introduced, not reused.
+        declaring.insert("cardsize".to_string(), vec![col("card", "size")]);
+        // Created table + a pre-existing column on a surviving table: reused.
+        declaring.insert(
+            "categorycolor".to_string(),
+            vec![col("category", "color"), col("card", "color")],
+        );
+        // Two columns of one existing table, one added: reused.
+        declaring.insert(
+            "accountkind".to_string(),
+            vec![col("account", "kind"), col("account", "legacy_kind")],
+        );
+        // No added column at all: untouched — neither set.
+        declaring.insert("ledgerrole".to_string(), vec![col("ledger", "role")]);
+        let added = vec![
+            col("card", "size"),
+            col("card", "color"),
+            col("account", "kind"),
+        ];
+        assert_eq!(
+            enum_types_reused_by_revision(&declaring, &added),
+            vec!["accountkind".to_string(), "categorycolor".to_string()]
+        );
+        assert_eq!(
+            enum_types_introduced_by_revision(&declaring, &added),
+            vec!["cardsize".to_string()]
+        );
+        assert!(enum_types_reused_by_revision(&declaring, &[]).is_empty());
+        assert!(enum_types_reused_by_revision(&BTreeMap::new(), &added).is_empty());
     }
 
     #[test]
