@@ -5256,6 +5256,17 @@ mod tests {
         }
     }
 
+    /// `column > 0`, the comparison operand the mixed-shape pins are built from.
+    fn gt0(column: &str) -> ferro_schema_ir::CheckExpr {
+        ferro_schema_ir::CheckExpr::Cmp {
+            column: column.to_string(),
+            op: ferro_schema_ir::CheckCmpOp::Gt,
+            other: ferro_schema_ir::CheckOperand::Literal {
+                token: "0".to_string(),
+            },
+        }
+    }
+
     /// `a | b | c | d` in a Check lambda: left-nested, as Python folds it.
     fn left_chain(
         columns: &[&str],
@@ -5376,14 +5387,6 @@ mod tests {
 
     #[test]
     fn mixed_chains_keep_their_precedence_grouping() {
-        use ferro_schema_ir::{CheckCmpOp, CheckExpr, CheckOperand};
-        let gt0 = |c: &str| CheckExpr::Cmp {
-            column: c.to_string(),
-            op: CheckCmpOp::Gt,
-            other: CheckOperand::Literal {
-                token: "0".to_string(),
-            },
-        };
         // ((a > 0) OR (b > 0) OR (d > 0)) AND (c > 0): the OR spine folds, the AND does not absorb it.
         let rendered = render_check_expr(&and(
             Box::new(or(
@@ -5421,14 +5424,7 @@ mod tests {
 
     #[test]
     fn not_over_a_chain_normalizes_equal_to_catalog() {
-        use ferro_schema_ir::{CheckCmpOp, CheckExpr, CheckOperand};
-        let gt0 = |c: &str| CheckExpr::Cmp {
-            column: c.to_string(),
-            op: CheckCmpOp::Gt,
-            other: CheckOperand::Literal {
-                token: "0".to_string(),
-            },
-        };
+        use ferro_schema_ir::CheckExpr;
         let rendered = render_check_expr(&CheckExpr::Not {
             child: Box::new(or(
                 Box::new(or(Box::new(gt0("a")), Box::new(gt0("b")))),
@@ -5456,14 +5452,7 @@ mod tests {
 
     #[test]
     fn not_and_in_operands_inside_a_chain_normalize_equal_to_catalog() {
-        use ferro_schema_ir::{CheckCmpOp, CheckExpr, CheckOperand};
-        let gt0 = |c: &str| CheckExpr::Cmp {
-            column: c.to_string(),
-            op: CheckCmpOp::Gt,
-            other: CheckOperand::Literal {
-                token: "0".to_string(),
-            },
-        };
+        use ferro_schema_ir::CheckExpr;
         // (NOT (a > 0)) | (b > 0) | (c > 0)
         let rendered = render_check_expr(&or(
             Box::new(or(
@@ -5494,14 +5483,7 @@ mod tests {
 
     #[test]
     fn nested_mixed_chains_normalize_equal_to_catalog_and_keep_precedence() {
-        use ferro_schema_ir::{CheckCmpOp, CheckExpr, CheckOperand};
-        let gt0 = |c: &str| CheckExpr::Cmp {
-            column: c.to_string(),
-            op: CheckCmpOp::Gt,
-            other: CheckOperand::Literal {
-                token: "0".to_string(),
-            },
-        };
+        use ferro_schema_ir::CheckExpr;
         let k_null = || CheckExpr::IsNull {
             column: "k".to_string(),
         };
