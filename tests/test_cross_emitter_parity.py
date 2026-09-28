@@ -320,17 +320,20 @@ def test_enum_type_provenance_parity_pin():
     """Cross-language golden pin for the type-provenance decision (AGENTS.md
     § I-1 item 17; ADR-0020, ADR-0021; #438, #443).
 
-    The FFI returns the Rust-rendered ``DROP TYPE`` statement byte-for-byte —
-    the same literal is pinned in ferro-ddl-lowering's unit tests, and the
-    Alembic comparator renders it verbatim into ``downgrade()``. The decision
+    The FFI returns the Rust-rendered ``DROP TYPE`` — and, for a type only
+    ``add_column`` introduces, the guarded ``CREATE TYPE`` the auto-migrate
+    create pass executes (#439) — byte-for-byte: the same literals are
+    pinned in ferro-ddl-lowering's unit tests, and the Alembic comparator
+    renders them verbatim into ``downgrade()`` / ``upgrade()``. The decision
     is pinned alongside, one verdict per touched type: a type is the
-    revision's (``introduced``: created inline on upgrade, dropped on
-    downgrade) when every column declaring it is one the revision adds; a
-    type with an added column but a surviving one too is ``reused`` (its
-    created-table columns render ``create_type=False``, no drop).
-    ``categorycolor`` (created table plus ``add_column``), ``cardsize``
-    (created table) and ``memberkind`` (``add_column`` only) are introduced;
-    ``ledgerrole`` keeps a pre-existing column on ``member`` and
+    revision's (``introduced``: created on upgrade, dropped on downgrade)
+    when every column declaring it is one the revision adds; a type with an
+    added column but a surviving one too is ``reused`` (its created-table
+    columns render ``create_type=False``, no drop, no create).
+    ``categorycolor`` (created table plus ``add_column``) and ``cardsize``
+    (created table) are introduced and created inline by ``create_table``;
+    ``memberkind`` (``add_column`` only) is introduced and created by
+    statement; ``ledgerrole`` keeps a pre-existing column on ``member`` and
     ``accountkind`` keeps one of its two columns, so both are reused. A type
     with no added column is absent.
     """
@@ -360,24 +363,56 @@ def test_enum_type_provenance_parity_pin():
                     ["account", "kind"],
                 ]
             ),
+            # The revision creates `category` and `card`; every other
+            # table survives.
+            json.dumps([["category", "color"], ["card", "color"], ["card", "size"]]),
+            json.dumps(
+                {
+                    "categorycolor": ["rust", "amber"],
+                    "cardsize": ["small", "large"],
+                    "ledgerrole": ["owner", "guest"],
+                    "memberkind": ["person", "org"],
+                    "accountkind": ["asset", "liability"],
+                    "untouched": ["open", "closed"],
+                }
+            ),
         )
     )
     assert plan == [
-        {"name": "accountkind", "provenance": "reused", "drop_statement": None},
+        {
+            "name": "accountkind",
+            "provenance": "reused",
+            "create_statement": None,
+            "drop_statement": None,
+        },
         {
             "name": "cardsize",
             "provenance": "introduced",
+            "create_statement": None,
             "drop_statement": 'DROP TYPE "cardsize"',
         },
         {
             "name": "categorycolor",
             "provenance": "introduced",
+            "create_statement": None,
             "drop_statement": 'DROP TYPE "categorycolor"',
         },
-        {"name": "ledgerrole", "provenance": "reused", "drop_statement": None},
+        {
+            "name": "ledgerrole",
+            "provenance": "reused",
+            "create_statement": None,
+            "drop_statement": None,
+        },
         {
             "name": "memberkind",
             "provenance": "introduced",
+            "create_statement": (
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t "
+                "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "WHERE t.typname = 'memberkind' AND n.nspname = current_schema()) "
+                "THEN CREATE TYPE \"memberkind\" AS ENUM ('person', 'org'); "
+                "END IF; END $$"
+            ),
             "drop_statement": 'DROP TYPE "memberkind"',
         },
     ]

@@ -107,25 +107,36 @@ pub fn _plan_enum_label_addition(
     .to_string()
 }
 
-/// The enum type provenance decision over FFI (ADR-0020, ADR-0021): given
-/// each named enum type with the `(table, column)` pairs that declare it (a
-/// JSON object of arrays) and the `(table, column)` pairs this revision adds
-/// (a JSON array: every column of a created table, plus every `add_column`),
-/// return one verdict per touched type, sorted by name:
-/// `[{"name", "provenance": "introduced" | "reused", "drop_statement"}]`.
+/// The type-provenance decision for one generated Alembic revision
+/// (ADR-0020, ADR-0021, ADR-0022; AGENTS.md § I-1 item 17). `declaring_json`
+/// maps each declared native enum type name to the `[table, column]` pairs
+/// that declare it (the model's columns plus the columns the revision drops,
+/// which its downgrade restores); `added_json` lists the `[table, column]`
+/// pairs the revision adds; `inline_created_json` the subset of those on
+/// tables the revision creates; `labels_json` maps each declared type name to
+/// its labels in declaration order. Returns a JSON list of verdicts keyed by
+/// type name, one per touched type:
 ///
-/// An `introduced` type (every declaring column is one the revision adds) is
-/// created inline by SQLAlchemy's `create_table` on upgrade and carries the
-/// Rust-rendered `DROP TYPE` its `downgrade()` executes verbatim after the
-/// last `drop_table` / `drop_column`. A `reused` type (an added column and a
-/// surviving one) already lives wherever the revision can run: its
-/// `drop_statement` is null, the revision's `create_table` columns must
-/// render `create_type=False` (#443), and the downgrade leaves it alone.
+/// - `introduced`: every declaring column is one the revision adds. The
+///   downgrade must execute `drop_statement` (the Rust-rendered `DROP TYPE`)
+///   after its last `drop_table` / `drop_column`. `create_statement` is the
+///   Rust-rendered guarded `CREATE TYPE` the upgrade must execute ahead of
+///   its table operations when no `create_table` of the revision creates the
+///   type inline (`add_column` only, #439), else null.
+/// - `reused`: an added column and a surviving one. The type already lives
+///   wherever the revision can run: both statements are null, the revision's
+///   `create_table` columns must render `create_type=False` (#443), and the
+///   downgrade leaves it alone.
 ///
 /// The Alembic autogenerate comparator consumes this instead of re-deriving
-/// a verdict or re-rendering the SQL (AGENTS.md § I-1 item 17).
+/// a verdict or re-rendering the SQL.
 #[pyfunction]
-pub fn _plan_enum_type_provenance(declaring_json: String, added_json: String) -> PyResult<String> {
+pub fn _plan_enum_type_provenance(
+    declaring_json: String,
+    added_json: String,
+    inline_created_json: String,
+    labels_json: String,
+) -> PyResult<String> {
     let declaring: std::collections::BTreeMap<String, Vec<(String, String)>> =
         serde_json::from_str(&declaring_json).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid enum declaring columns: {e}"))
@@ -133,22 +144,50 @@ pub fn _plan_enum_type_provenance(declaring_json: String, added_json: String) ->
     let added: Vec<(String, String)> = serde_json::from_str(&added_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid enum added columns: {e}"))
     })?;
-    let verdicts: Vec<serde_json::Value> =
-        ferro_ddl_lowering::enum_type_provenance(&declaring, &added)
-            .into_iter()
-            .map(|(name, provenance)| match provenance {
-                ferro_ddl_lowering::EnumTypeProvenance::Introduced => serde_json::json!({
+    let inline_created: Vec<(String, String)> = serde_json::from_str(&inline_created_json)
+        .map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid enum inline-created columns: {e}"
+            ))
+        })?;
+    let labels: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_str(&labels_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid enum labels: {e}"))
+        })?;
+    let verdicts = ferro_ddl_lowering::enum_type_provenance(&declaring, &added, &inline_created)
+        .into_iter()
+        .map(|(name, provenance)| match provenance {
+            ferro_ddl_lowering::EnumTypeProvenance::Introduced { creation } => {
+                let create_statement = match creation {
+                    ferro_ddl_lowering::EnumTypeCreation::Inline => None,
+                    ferro_ddl_lowering::EnumTypeCreation::Statement => {
+                        let type_labels = labels.get(&name).ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "Enum type {name:?} is introduced by add_column alone but \
+                                 its declared labels were not supplied"
+                            ))
+                        })?;
+                        Some(ferro_ddl_lowering::render_pg_enum_create_type(
+                            &name,
+                            type_labels,
+                        ))
+                    }
+                };
+                Ok(serde_json::json!({
                     "name": name,
                     "provenance": "introduced",
+                    "create_statement": create_statement,
                     "drop_statement": ferro_ddl_lowering::render_pg_enum_drop_type(&name),
-                }),
-                ferro_ddl_lowering::EnumTypeProvenance::Reused => serde_json::json!({
-                    "name": name,
-                    "provenance": "reused",
-                    "drop_statement": serde_json::Value::Null,
-                }),
-            })
-            .collect();
+                }))
+            }
+            ferro_ddl_lowering::EnumTypeProvenance::Reused => Ok(serde_json::json!({
+                "name": name,
+                "provenance": "reused",
+                "create_statement": serde_json::Value::Null,
+                "drop_statement": serde_json::Value::Null,
+            })),
+        })
+        .collect::<PyResult<Vec<serde_json::Value>>>()?;
     Ok(serde_json::Value::Array(verdicts).to_string())
 }
 

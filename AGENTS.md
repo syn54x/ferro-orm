@@ -184,21 +184,31 @@ For a single model, every emitter must agree on:
 17. **Enum type provenance** — the decision of which declared native enum
     types a generated revision *introduces* (every column declaring the
     type is one the revision adds: a created table's column or an
-    `add_column`) and which it merely *reuses* (an added column declares
-    it, but so does a column the downgrade leaves standing or puts back),
-    and the rendered `DROP TYPE`, are decided by ONE pair of functions:
-    `ferro_ddl_lowering::enum_type_provenance` (one `Introduced | Reused`
-    verdict per touched type) / `render_pg_enum_drop_type`.
+    `add_column`), how an introduced type comes into being (`Inline`: a
+    `create_table` of the revision carries it and SQLAlchemy creates it
+    with the table; `Statement`: every column of it is an `add_column`, so
+    the revision must execute the `CREATE TYPE` itself, #439), and which
+    types it merely *reuses* (an added column declares it, but so does a
+    column the downgrade leaves standing or puts back), together with the
+    rendered `CREATE TYPE` and `DROP TYPE`, are decided by ONE trio of
+    functions: `ferro_ddl_lowering::enum_type_provenance` (one
+    `Introduced { creation } | Reused` verdict per touched type) /
+    `render_pg_enum_create_type` (the runtime create pass's guarded
+    statement; never a second renderer) / `render_pg_enum_drop_type`.
     SQLAlchemy creates the type inline with `create_table`, unconditionally,
-    and Alembic has no op for it, so the rendered `downgrade()` never
-    dropped it (#438) and a `create_table` reusing a live type re-issued
-    `CREATE TYPE` and failed with `DuplicateObject` (#443). The Alembic
-    autogenerate comparator (`FerroEnumTypeIntroducedOp` / `FerroEnumTypeDropOp`
-    in `src/ferro/migrations/alembic.py`) consumes the verdicts over FFI
-    (`_core._plan_enum_type_provenance`): an introduced type keeps its
-    inline creation and gets the byte-identical `DROP TYPE` on downgrade,
-    after the last `drop_table` / `drop_column`; a reused type gets no drop
-    and every `create_table` column of it rewritten to
+    and nowhere else, and Alembic has no op for it, so the rendered
+    `downgrade()` never dropped it (#438), a `create_table` reusing a live
+    type re-issued `CREATE TYPE` and failed with `DuplicateObject` (#443),
+    and an `add_column` of a new type failed with `UndefinedObject` (#439).
+    The Alembic autogenerate comparator (`FerroEnumTypeIntroducedOp` /
+    `FerroEnumTypeDropOp` in `src/ferro/migrations/alembic.py`) consumes
+    the verdicts over FFI (`_core._plan_enum_type_provenance`, which carries
+    `create_statement` and `drop_statement`): an introduced type keeps its
+    inline creation, or gets the byte-identical guarded `CREATE TYPE`
+    ahead of every table op when only `add_column`s carry it, and gets the
+    byte-identical `DROP TYPE` on downgrade, after the last `drop_table` /
+    `drop_column`; a reused type gets neither and every `create_table`
+    column of it rewritten to
     `postgresql.ENUM(..., create_type=False)` (`add_column` never creates a
     type, so it is left alone). SQLAlchemy's `repr` omits that flag, so it
     is rendered by the bridge's `render_item` hook
@@ -211,9 +221,11 @@ For a single model, every emitter must agree on:
     `test_enum_type_provenance_parity_pin` and the ferro-ddl-lowering unit
     pins. Postgres-only (SQLite enums store as text); Alembic-only by
     construction (auto-migrate has no downgrade door, and its create pass
-    guards `CREATE TYPE` with a catalog check), so the single-source rule
-    applies but there is no second emitter to compare. Ownership is by
-    provenance (ADR-0020); the upgrade side mirrors it (ADR-0021).
+    executes the same guarded `CREATE TYPE` itself), so the single-source
+    rule applies and the create statement is the one artifact with a
+    runtime twin to pin against. Ownership is by provenance (ADR-0020);
+    the upgrade side mirrors it (ADR-0021) and completes it for the
+    `add_column`-only shape (ADR-0022).
 
 ### Why this invariant exists
 

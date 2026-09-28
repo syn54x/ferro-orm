@@ -94,7 +94,10 @@ Rejected alternatives:
   next enum revision until `env.py` changed — and changes the rendered
   upgrade for the common case that already works. The reuse rule only
   touches the case that fails today. The `add_column`-only introduction
-  remains Alembic's gap.
+  was left as Alembic's gap here and is closed by ADR-0022 (#439) in the
+  narrow form this alternative argued against: ferro creates only the type
+  nothing else creates, with the runtime's guarded statement, and no
+  `render_item` is involved.
 - **Injecting `render_item` from the comparator** (wrapping
   `autogen_context.opts["render_item"]` at comparison time): the seam
   exists, but it rewrites the project's configuration behind its back, and
