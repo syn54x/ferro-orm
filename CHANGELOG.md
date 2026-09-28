@@ -1,6 +1,39 @@
 # CHANGELOG
 
 
+## v0.21.1 (2026-09-28)
+
+### Bug Fixes
+
+- **alembic**: Drop enum types in the downgrade of the create_table that made them
+  ([#441](https://github.com/syn54x/ferro-orm/pull/441),
+  [`5c86b7f`](https://github.com/syn54x/ferro-orm/commit/5c86b7fef03828443fd61852caa3705849e3150f))
+
+- **alembic**: Render create_type=False for enum types a revision reuses
+  ([#445](https://github.com/syn54x/ferro-orm/pull/445),
+  [`6776d0b`](https://github.com/syn54x/ferro-orm/commit/6776d0b7b13499d85666280a623f91fbf2df6387))
+
+- **checks**: Compare associative OR/AND chains flat in the drift normalizer
+  ([#442](https://github.com/syn54x/ferro-orm/pull/442),
+  [`4df72a2`](https://github.com/syn54x/ferro-orm/commit/4df72a2d37b456d79ba1fc9cfa6b5ba2a0c6f194))
+
+### Documentation
+
+- Replace Pinch RLS examples and humanize guide prose
+  ([#433](https://github.com/syn54x/ferro-orm/pull/433),
+  [`4471d75`](https://github.com/syn54x/ferro-orm/commit/4471d7510f7bf6b642f13e5f768ac723bbdb2288))
+
+- Unpack dense Why Ferro, query, and RLS prose
+  ([#434](https://github.com/syn54x/ferro-orm/pull/434),
+  [`1af08af`](https://github.com/syn54x/ferro-orm/commit/1af08af1288d670139fa5f0beab19bf7b19d8c8c))
+
+### Refactoring
+
+- **alembic**: Enum type drop cleanups from the #441 review panel
+  ([#444](https://github.com/syn54x/ferro-orm/pull/444),
+  [`ae6b6d3`](https://github.com/syn54x/ferro-orm/commit/ae6b6d387d40727a79cb0f8a96c5151daffa1dbb))
+
+
 ## v0.21.0 (2026-09-17)
 
 ### Bug Fixes
