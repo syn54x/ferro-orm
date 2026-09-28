@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass, field
 from typing import Any, Dict
 
 try:
@@ -369,6 +370,43 @@ if _alembic_comparators is not None:
             # the same warn-never-act contract that governs upgrades.
             return AddEnumLabelsOp(self.type_name, [], [])
 
+    def _enum_type_name(column) -> str | None:
+        """The named native enum type a column carries, else ``None``. The
+        one test for "is this a native-enum column, and which type" — read
+        for the model's declared columns and for the reflected columns a
+        revision drops, so both sides classify a column the same way."""
+        if isinstance(column.type, sa.Enum) and column.type.name:
+            return str(column.type.name)
+        return None
+
+    @dataclass
+    class _DeclaredEnumType:
+        """One named native enum type as the model metadata declares it: its
+        labels (from the first column seen, matching label addition's
+        original walk) and every ``(table, column)`` that carries it. Built
+        and filled by `_declared_enum_types`; a fresh object per call."""
+
+        labels: list[str]
+        columns: list[tuple[str, str]] = field(default_factory=list)
+
+    def _declared_enum_types(metadata) -> dict[str, "_DeclaredEnumType"]:
+        """Every declared native enum type — the named ``sa.Enum`` types the
+        bridge maps from the shared storage decision
+        (`_sa_type_from_ir_column`) — keyed by type name. The one walk both
+        enum comparators read: label addition takes the labels, type drop
+        takes the columns."""
+        declared: dict[str, _DeclaredEnumType] = {}
+        for table in metadata.tables.values():
+            for column in table.columns:
+                type_name = _enum_type_name(column)
+                if type_name is None:
+                    continue
+                entry = declared.setdefault(
+                    type_name, _DeclaredEnumType(list(column.type.enums))
+                )
+                entry.columns.append((table.name, column.name))
+        return declared
+
     def _live_enum_labels_by_type(connection) -> dict[str, list[str]]:
         """Live labels per native enum type in enum sort order, scoped to the
         connection's schema — the same catalog read the reconciliation pass
@@ -398,13 +436,10 @@ if _alembic_comparators is not None:
         if metadata is None:
             return
 
-        # Declared native enum types: the named sa.Enum types the bridge maps
-        # from the shared storage decision (`_sa_type_from_ir_column`).
-        declared: dict[str, list[str]] = {}
-        for table in metadata.tables.values():
-            for column in table.columns:
-                if isinstance(column.type, sa.Enum) and column.type.name:
-                    declared.setdefault(str(column.type.name), list(column.type.enums))
+        declared = {
+            name: enum_type.labels
+            for name, enum_type in _declared_enum_types(metadata).items()
+        }
         if not declared:
             return
 
@@ -429,71 +464,51 @@ if _alembic_comparators is not None:
         upgrade_ops.ops[:0] = drifted
 
     # -----------------------------------------------------------------------
-    # Enum type drop on downgrade (#438; AGENTS.md § I-1 item 17; ADR-0020).
+    # Enum type drop on downgrade (#438; AGENTS.md § I-1 item 17). ADR-0020
+    # carries the rationale and the rule; the slot is in
+    # docs/solutions/patterns/alembic-comparator-slot.md. Two facts the code
+    # cannot say for itself:
     #
-    # A revision's `create_table` creates each named enum type as a SQLAlchemy
-    # side effect of the column's `sa.Enum` — there is no Alembic op for it,
-    # so `UpgradeOps.reverse()` has nothing to invert and the rendered
-    # `downgrade()` is a bare `op.drop_table` carrying no column objects:
-    # SQLAlchemy's `after_drop` hook, the only thing that would emit
-    # `DROP TYPE`, never fires. The types survive `alembic downgrade` and the
-    # next upgrade fails with `DuplicateObject` (alembic#278 upstream).
-    #
-    # This comparator turns the type creation into a real op. The decision
-    # (which declared types the revision introduces: every column declaring
-    # the type is one the revision adds — a created table's column or an
-    # `add_column`) and the rendered `DROP TYPE` come from the Rust core
-    # over FFI (`_plan_enum_type_drop`). It is decided from the revision
-    # alone, never from the live catalog, so the rendered file means the
-    # same thing on every database it runs against (ADR-0020). A type with
-    # a column the downgrade leaves standing — a pre-existing column on a
-    # surviving table, including one `include_object` hides — is kept. The
-    # op renders nothing on upgrade (SQLAlchemy already emits `CREATE TYPE`
-    # inline) and the statement on downgrade. The drop is the exact reverse
-    # of the creation, so no destructive gate applies.
-    #
-    # I-12: this family reads the revision's `CreateTableOp`s and
-    # `AddColumnOp`s, so it runs AFTER tables (`priority=LAST`) — but it
-    # inserts at the FRONT of the upgrade list. `UpgradeOps.reverse()`
-    # reverses order, so an op ahead of every table op lands behind every
-    # `drop_table` and `drop_column` in the downgrade, the only place
-    # `DROP TYPE` is legal. Front insertion also makes its registration
-    # order among the LAST families immaterial.
+    # 1. Alembic has no op for the `CREATE TYPE` that `create_table` performs
+    #    (SQLAlchemy emits it inline), so the introduced-side carrier renders
+    #    nothing; only its reverse, the type drop, renders a statement.
+    # 2. I-12: the comparator reads the revision's table and column ops, so
+    #    it runs at `priority=LAST`, but it inserts at the FRONT of the ops
+    #    list: `UpgradeOps.reverse()` reverses the list, and `DROP TYPE` is
+    #    only legal after every `drop_table` / `drop_column`.
     # -----------------------------------------------------------------------
 
-    class FerroEnumTypeOp(_MigrateOperation):
-        """Autogenerate carrier for one named enum type a revision
-        introduces (every column of it is one the revision adds).
+    class FerroEnumTypeIntroducedOp(_MigrateOperation):
+        """The creating side of a *type drop*: one named enum type this
+        revision introduces (every column of it is one the revision adds).
+        Renders nothing — SQLAlchemy emits ``CREATE TYPE`` inline with
+        ``create_table`` — and reverses to :class:`FerroEnumTypeDropOp`."""
 
-        Renders nothing on the creating side (SQLAlchemy emits ``CREATE
-        TYPE`` inline with ``create_table``) and a plain ``op.execute`` of
-        the Rust-rendered ``DROP TYPE`` on the reverse — a generated revision
-        does not import ferro to run.
-        """
-
-        def __init__(
-            self,
-            type_name: str,
-            statements: list[str],
-            reverse_statements: list[str],
-        ) -> None:
+        def __init__(self, type_name: str, drop_statement: str) -> None:
             self.type_name = type_name
-            self.statements = statements
-            self.reverse_statements = reverse_statements
+            self.drop_statement = drop_statement
 
         def to_diff_tuple(self):
-            return ("ferro_enum_type", self.type_name, tuple(self.statements))
+            return ("ferro_enum_type_introduced", self.type_name)
 
-        def reverse(self) -> "FerroEnumTypeOp":
-            return FerroEnumTypeOp(
-                self.type_name, self.reverse_statements, self.statements
-            )
+        def reverse(self) -> "FerroEnumTypeDropOp":
+            return FerroEnumTypeDropOp(self.type_name, self.drop_statement)
 
-    def _enum_column_key(table_name: str, column) -> tuple[str, tuple[str, str]] | None:
-        """``(type name, (table, column))`` for a native-enum column, else None."""
-        if isinstance(column.type, sa.Enum) and column.type.name:
-            return str(column.type.name), (table_name, column.name)
-        return None
+    class FerroEnumTypeDropOp(_MigrateOperation):
+        """The *type drop* (CONTEXT.md): a plain ``op.execute`` of the
+        Rust-rendered ``DROP TYPE`` for one enum type the revision being
+        reversed introduced — a generated revision does not import ferro to
+        run."""
+
+        def __init__(self, type_name: str, statement: str) -> None:
+            self.type_name = type_name
+            self.statement = statement
+
+        def to_diff_tuple(self):
+            return ("ferro_enum_type_drop", self.type_name, self.statement)
+
+        def reverse(self) -> "FerroEnumTypeIntroducedOp":
+            return FerroEnumTypeIntroducedOp(self.type_name, self.statement)
 
     def _revision_added_columns(upgrade_ops, metadata) -> set[tuple[str, str]]:
         """Every ``(table, column)`` this revision adds: each column of a
@@ -537,9 +552,9 @@ if _alembic_comparators is not None:
             else:
                 continue
             for table_name, column in columns:
-                key = _enum_column_key(table_name, column)
-                if key is not None:
-                    restored.setdefault(key[0], []).append(key[1])
+                type_name = _enum_type_name(column)
+                if type_name is not None:
+                    restored.setdefault(type_name, []).append((table_name, column.name))
         return restored
 
     @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.LAST)
@@ -559,16 +574,13 @@ if _alembic_comparators is not None:
             return
 
         # Every native enum type with the columns that use it once the
-        # downgrade has run: the model's declared columns (the same `sa.Enum`
-        # mapping `_compare_enum_labels` reads, keyed by column instead of
-        # label) plus the columns this revision drops, which the downgrade
-        # restores before the type drop would run.
-        declaring: dict[str, list[tuple[str, str]]] = {}
-        for table in metadata.tables.values():
-            for column in table.columns:
-                key = _enum_column_key(table.name, column)
-                if key is not None:
-                    declaring.setdefault(key[0], []).append(key[1])
+        # downgrade has run: the model's declared columns plus the columns
+        # this revision drops, which the downgrade restores before the type
+        # drop would run.
+        declaring: dict[str, list[tuple[str, str]]] = {
+            name: list(enum_type.columns)
+            for name, enum_type in _declared_enum_types(metadata).items()
+        }
         for type_name, columns in _revision_restored_enum_columns(upgrade_ops).items():
             declaring.setdefault(type_name, []).extend(columns)
         if not declaring:
@@ -578,7 +590,7 @@ if _alembic_comparators is not None:
             _plan_enum_type_drop(json.dumps(declaring), json.dumps(sorted(added)))
         )
         upgrade_ops.ops[:0] = [
-            FerroEnumTypeOp(type_name, [], [statement])
+            FerroEnumTypeIntroducedOp(type_name, statement)
             for type_name, statement in zip(plan["type_names"], plan["statements"])
         ]
 
@@ -817,9 +829,13 @@ if _alembic_comparators is not None:
     def _render_check_drops(autogen_context, op: FerroCheckDropOp) -> list[str]:
         return [f"op.execute({stmt!r})" for stmt in op.statements]
 
-    @_alembic_renderers.dispatch_for(FerroEnumTypeOp)
-    def _render_enum_type(autogen_context, op: FerroEnumTypeOp) -> list[str]:
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+    @_alembic_renderers.dispatch_for(FerroEnumTypeIntroducedOp)
+    def _render_enum_type_introduced(autogen_context, op) -> list[str]:
+        return []
+
+    @_alembic_renderers.dispatch_for(FerroEnumTypeDropOp)
+    def _render_enum_type_drop(autogen_context, op: FerroEnumTypeDropOp) -> list[str]:
+        return [f"op.execute({op.statement!r})"]
 
     @_alembic_renderers.dispatch_for(AddEnumLabelsOp)
     def _render_add_enum_labels(autogen_context, op: AddEnumLabelsOp) -> list[str]:

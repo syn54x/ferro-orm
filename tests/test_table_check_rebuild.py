@@ -33,6 +33,7 @@ from ferro._core import (
 )
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
+from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
 
 SIDE_CHECK_NAME = "ck_rebuild_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -463,33 +464,6 @@ async def test_sqlite_rebuild_warns_with_the_constraint_name_and_rewrites_nothin
 # ---------------------------------------------------------------------------
 # Alembic autogenerate
 # ---------------------------------------------------------------------------
-
-
-def _autogen_upgrade_code(postgres_base_url, db_schema_name) -> str:
-    import sqlalchemy as sa
-    from alembic.autogenerate import produce_migrations, render_python_code
-    from alembic.migration import MigrationContext
-
-    from ferro.migrations import get_metadata
-
-    metadata = get_metadata()
-    for scheme in ("postgresql://", "postgres://"):
-        if postgres_base_url.startswith(scheme):
-            sync_url = "postgresql+psycopg://" + postgres_base_url[len(scheme) :]
-            break
-    else:
-        sync_url = postgres_base_url
-    engine = sa.create_engine(sync_url)
-    try:
-        with engine.connect() as conn:
-            conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
-            ctx = MigrationContext.configure(
-                conn, opts={"compare_type": True, "compare_server_default": True}
-            )
-            script = produce_migrations(ctx, metadata)
-        return render_python_code(script.upgrade_ops)
-    finally:
-        engine.dispose()
 
 
 @pytest.mark.backend_matrix

@@ -189,7 +189,8 @@ For a single model, every emitter must agree on:
     / `render_pg_enum_drop_type`. SQLAlchemy creates the type inline with
     `create_table` and Alembic has no op for it, so the rendered
     `downgrade()` never dropped it (#438). The Alembic autogenerate
-    comparator (`FerroEnumTypeOp` in `src/ferro/migrations/alembic.py`)
+    comparator (`FerroEnumTypeIntroducedOp` / `FerroEnumTypeDropOp` in
+    `src/ferro/migrations/alembic.py`)
     consumes the decision over FFI (`_core._plan_enum_type_drop`) and
     renders nothing on upgrade and the byte-identical statement on
     downgrade, after the last `drop_table` / `drop_column`. The decision is

@@ -24,7 +24,6 @@ import uuid
 from typing import ClassVar
 
 import pytest
-import sqlalchemy as sa
 
 from ferro import (
     Field,
@@ -39,6 +38,13 @@ from ferro import (
 from ferro._core import _plan_row_security_reconcile, _render_migration_sql_for_test
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all, fetch_one
+from tests._alembic_harness import (
+    assert_statement_in_code as _assert_statement_in_code,
+    autogen_upgrade_and_downgrade_code as _autogen_upgrade_and_downgrade_code,
+    autogen_upgrade_code as _autogen_upgrade_code,
+    produce_migration_script as _produce_migration_script,
+    run_generated_code as _run_generated_code,
+)
 
 LEDGER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 
@@ -166,98 +172,6 @@ def _render(live_row_security: dict, *, destructive: bool = False) -> list[str]:
         json.dumps(live_row_security),
     )
     return statements
-
-
-# ---------------------------------------------------------------------------
-# Live autogenerate plumbing (mirrors tests/test_table_check_reconcile.py's
-# "Alembic autogenerate" sections)
-# ---------------------------------------------------------------------------
-
-
-def _sync_url(postgres_base_url: str) -> str:
-    for scheme in ("postgresql://", "postgres://"):
-        if postgres_base_url.startswith(scheme):
-            return "postgresql+psycopg://" + postgres_base_url[len(scheme) :]
-    return postgres_base_url
-
-
-def _produce_migration_script(
-    postgres_base_url: str, db_schema_name: str, *, extra_opts: dict | None = None
-):
-    from alembic.autogenerate import produce_migrations
-    from alembic.migration import MigrationContext
-
-    from ferro.migrations import get_metadata
-
-    metadata = get_metadata()
-    engine = sa.create_engine(_sync_url(postgres_base_url))
-    try:
-        with engine.connect() as conn:
-            conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
-            opts = {"compare_type": True, "compare_server_default": True}
-            ctx = MigrationContext.configure(conn, opts={**opts, **(extra_opts or {})})
-            return produce_migrations(ctx, metadata)
-    finally:
-        engine.dispose()
-
-
-def _autogen_upgrade_code(postgres_base_url: str, db_schema_name: str) -> str:
-    from alembic.autogenerate import render_python_code
-
-    script = _produce_migration_script(postgres_base_url, db_schema_name)
-    return render_python_code(script.upgrade_ops)
-
-
-def _autogen_upgrade_and_downgrade_code(
-    postgres_base_url: str, db_schema_name: str, *, extra_opts: dict | None = None
-) -> tuple[str, str]:
-    from alembic.autogenerate import render_python_code
-
-    script = _produce_migration_script(
-        postgres_base_url, db_schema_name, extra_opts=extra_opts
-    )
-    return (
-        render_python_code(script.upgrade_ops),
-        render_python_code(script.downgrade_ops),
-    )
-
-
-def _run_generated_code(code: str, postgres_base_url: str, db_schema_name: str) -> None:
-    """Execute one side (upgrade or downgrade) of a generated revision's code
-    against the live database, exactly as a real revision module's own
-    ``upgrade()``/``downgrade()`` would — no temp file needed since
-    ``render_python_code`` returns bare, already-runnable statements bound to
-    a plain ``Operations`` instance (the checks/enum family's ops only ever
-    render ``op.execute``/``op.drop_constraint`` calls, both real
-    ``Operations`` methods)."""
-    from alembic.migration import MigrationContext
-    from alembic.operations import Operations
-
-    # `render_python_code` returns its lines pre-indented for splicing into a
-    # revision module's `def upgrade():` body (or `downgrade`'s) — exactly
-    # the shape the script.py.mako template expects. Reproduce that shape
-    # literally instead of dedenting: a wrapper function, then call it.
-    module = f"def _ferro_generated():\n{code}\n"
-    engine = sa.create_engine(_sync_url(postgres_base_url))
-    try:
-        with engine.connect() as conn:
-            conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
-            op = Operations(MigrationContext.configure(conn))
-            namespace: dict = {"op": op, "sa": sa}
-            exec(compile(module, "<generated-revision>", "exec"), namespace)
-            namespace["_ferro_generated"]()
-            conn.commit()
-    finally:
-        engine.dispose()
-
-
-def _assert_statement_in_code(statement: str, code: str) -> None:
-    """``render_python_code`` embeds every statement as a Python string
-    literal (``op.execute('...')``); comparing against ``repr(statement)``
-    (rather than the raw SQL) is what makes this survive statements that
-    themselves contain single-quoted SQL literals, e.g. the shorthand's
-    ``current_setting('pinch.ledger_id', true)``."""
-    assert repr(statement) in code, (statement, code)
 
 
 async def _pg_flags(table: str) -> dict:

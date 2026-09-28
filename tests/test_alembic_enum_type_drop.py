@@ -19,6 +19,7 @@ from the live catalog (ADR-0020).
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 import pytest
 import sqlalchemy as sa
@@ -26,11 +27,12 @@ import sqlalchemy as sa
 from ferro import Field, Model, clear_registry, connect, reset_engine
 from ferro.raw import execute
 from ferro.session import engines
-from tests.test_row_security_alembic import (
-    _assert_statement_in_code,
-    _autogen_upgrade_and_downgrade_code,
-    _run_generated_code,
-    _sync_url,
+from tests._alembic_harness import (
+    assert_statement_in_code as _assert_statement_in_code,
+    autogen_upgrade_and_downgrade_code as _autogen_upgrade_and_downgrade_code,
+    produce_migration_script,
+    run_generated_code as _run_generated_code,
+    sync_url as _sync_url,
 )
 
 DROP_COLOR_SQL = 'DROP TYPE "categorycolor"'
@@ -422,12 +424,39 @@ async def test_a_revision_that_creates_no_table_proposes_no_type_drop(
     _define_category()
     await connect(db_url, auto_migrate=True)
 
+    script = produce_migration_script(postgres_base_url, db_schema_name)
+    assert script.upgrade_ops.is_empty(), script.upgrade_ops.ops
+    assert script.downgrade_ops.is_empty(), script.downgrade_ops.ops
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_mixed_case_type_name_round_trips_quoted(
+    db_url, postgres_base_url, db_schema_name
+):
+    """A ``Literal`` field with an explicit mixed-case ``enum_type_name``
+    creates ``"CategoryColor"`` (SQLAlchemy quotes it); the rendered drop
+    is always-quoted too, so it names the same object end to end."""
+
+    class Swatch(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        color: Literal["rust", "amber"] | None = Field(
+            default=None, json_schema_extra={"enum_type_name": "CategoryColor"}
+        )
+
+    await connect(db_url)
+
     upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
         postgres_base_url, db_schema_name
     )
-    assert "pass" in upgrade_code, upgrade_code
-    assert "pass" in downgrade_code, downgrade_code
-    assert "DROP TYPE" not in downgrade_code, downgrade_code
+    assert "name='CategoryColor'" in upgrade_code, upgrade_code
+    _assert_statement_in_code('DROP TYPE "CategoryColor"', downgrade_code)
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == ["CategoryColor"]
+    _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == []
 
 
 # ---------------------------------------------------------------------------

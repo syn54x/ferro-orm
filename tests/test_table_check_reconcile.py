@@ -30,6 +30,7 @@ from ferro import (
 from ferro._core import _plan_check_addition, _render_migration_sql_for_test
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
+from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
 
 SIDE_CHECK_NAME = "ck_reconcile_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -449,35 +450,6 @@ async def test_a_table_created_in_this_run_is_not_reconciled_again(db_url, recwa
 # ---------------------------------------------------------------------------
 # Alembic autogenerate (the reviewed-migration door)
 # ---------------------------------------------------------------------------
-
-
-def _autogen_upgrade_code(postgres_base_url, db_schema_name) -> str:
-    """Run real autogenerate against the live per-test schema and render the
-    upgrade code (mirrors tests/test_label_addition.py's connection dance)."""
-    import sqlalchemy as sa
-    from alembic.autogenerate import produce_migrations, render_python_code
-    from alembic.migration import MigrationContext
-
-    from ferro.migrations import get_metadata
-
-    metadata = get_metadata()
-    for scheme in ("postgresql://", "postgres://"):
-        if postgres_base_url.startswith(scheme):
-            sync_url = "postgresql+psycopg://" + postgres_base_url[len(scheme) :]
-            break
-    else:
-        sync_url = postgres_base_url
-    engine = sa.create_engine(sync_url)
-    try:
-        with engine.connect() as conn:
-            conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
-            ctx = MigrationContext.configure(
-                conn, opts={"compare_type": True, "compare_server_default": True}
-            )
-            script = produce_migrations(ctx, metadata)
-        return render_python_code(script.upgrade_ops)
-    finally:
-        engine.dispose()
 
 
 @pytest.mark.backend_matrix
