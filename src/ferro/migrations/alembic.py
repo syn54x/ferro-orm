@@ -1,11 +1,14 @@
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Literal
 
 try:
     import sqlalchemy as sa
 except ImportError:
     sa = None
+
+if TYPE_CHECKING:
+    from alembic.autogenerate.api import AutogenContext
 
 from .._annotation_utils import _VARCHAR_RE
 from .._core import (
@@ -303,7 +306,9 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
     return None
 
 
-def render_item(type_: str, obj: Any, autogen_context: Any) -> "str | bool":
+def render_item(
+    type_: str, obj: Any, autogen_context: "AutogenContext"
+) -> "str | Literal[False]":
     """Alembic ``render_item`` hook for ferro's bridge — wire it in ``env.py``::
 
         from ferro.migrations import get_metadata, render_item
@@ -326,7 +331,10 @@ def render_item(type_: str, obj: Any, autogen_context: Any) -> "str | bool":
     ``from sqlalchemy.dialects import postgresql`` import the revision needs.
 
     Everything else returns ``False`` so Alembic's own renderers keep their
-    say. A project with its own ``render_item`` composes this one the same
+    say. The signature is Alembic's ``RenderItemFn`` exactly —
+    ``(str, Any, AutogenContext) -> str | Literal[False]`` — so the
+    ``env.py`` line above passes a static type check as written (#446).
+    A project with its own ``render_item`` composes this one the same
     way: call it first, fall through on ``False``. The comparator checks at
     autogenerate time that a revision needing this rendering runs in a
     context that performs it, and refuses with the line to add otherwise —
