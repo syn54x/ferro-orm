@@ -5321,6 +5321,24 @@ mod tests {
     }
 
     #[test]
+    fn five_and_eight_term_chains_normalize_equal_to_catalog() {
+        // The pass is recursive over the whole tree, so chain length is
+        // unbounded. Real pg_get_constraintdef output for both lengths.
+        let rendered = render_check_expr(&left_chain(&["a", "b", "c", "d", "e"], or));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) OR (b IS NOT NULL) OR (c IS NOT NULL) OR (d IS NOT NULL) OR (e IS NOT NULL)))",
+        );
+        let rendered =
+            render_check_expr(&left_chain(&["a", "b", "c", "d", "e", "f", "g", "h"], and));
+        n_ary_pin(
+            &rendered,
+            "CHECK (((a IS NOT NULL) AND (b IS NOT NULL) AND (c IS NOT NULL) AND (d IS NOT NULL) \
+             AND (e IS NOT NULL) AND (f IS NOT NULL) AND (g IS NOT NULL) AND (h IS NOT NULL)))",
+        );
+    }
+
+    #[test]
     fn three_term_and_chain_normalizes_equal_to_catalog() {
         let rendered = render_check_expr(&left_chain(&["a", "b", "c"], and));
         n_ary_pin(
