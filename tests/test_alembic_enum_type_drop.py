@@ -684,6 +684,60 @@ async def test_a_mixed_case_type_name_round_trips_quoted(
     assert _live_enum_types(postgres_base_url, db_schema_name) == []
 
 
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_type_created_by_statement_lands_before_tables_beside_label_additions(
+    db_url, postgres_base_url, db_schema_name
+):
+    """The two before-tables enum families share the front of the revision:
+    ``cardsize`` lives with a stale label set and gains ``large`` (label
+    addition, ADR-0011) while ``card`` gains ``color`` of the brand-new
+    ``categorycolor`` (type creation, ADR-0022). Both land ahead of the
+    ``add_column``, and the upgrade runs."""
+    from ferro.raw import execute
+    from ferro.session import engines
+
+    class Card(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str | None = None
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await execute("CREATE TYPE \"cardsize\" AS ENUM ('small')")
+        await execute('ALTER TABLE "card" ADD COLUMN "size" "cardsize"')
+    _rewind_registry()
+
+    class Card(Model):  # type: ignore[no-redef]  # noqa: F811
+        id: int | None = Field(default=None, primary_key=True)
+        title: str | None = None
+        size: CardSize | None = None
+        color: CategoryColor | None = None
+
+    await connect(db_url)
+
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    add_column_at = upgrade_code.index("op.add_column('card'")
+    assert upgrade_code.index(repr(CREATE_COLOR_SQL)) < add_column_at, upgrade_code
+    # The renderer repr-quotes the statement; assert on its stable substrings.
+    add_value_at = upgrade_code.index("ADD VALUE IF NOT EXISTS")
+    assert add_value_at < add_column_at, upgrade_code
+    assert "large" in upgrade_code[add_value_at:add_column_at], upgrade_code
+    assert "autocommit_block" in upgrade_code, upgrade_code
+    # `cardsize` survives on a column the revision never added; `categorycolor`
+    # is the revision's and is dropped after the column.
+    _assert_statement_in_code(DROP_COLOR_SQL, downgrade_code)
+    assert 'DROP TYPE "cardsize"' not in downgrade_code, downgrade_code
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == [
+        "cardsize",
+        "categorycolor",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # SQLite: enums store as text; there is no type to drop
 # ---------------------------------------------------------------------------

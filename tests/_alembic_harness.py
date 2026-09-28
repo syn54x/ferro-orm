@@ -91,7 +91,11 @@ def run_generated_code(code: str, postgres_base_url: str, db_schema_name: str) -
     ``render_python_code`` returns bare, already-runnable statements bound to
     a plain ``Operations`` instance (the checks/enum family's ops only ever
     render ``op.execute``/``op.drop_constraint`` calls, both real
-    ``Operations`` methods)."""
+    ``Operations`` methods). The code runs inside the context's own
+    ``begin_transaction()``, as ``env.py``'s ``run_migrations()`` does: that
+    is the transaction an ``autocommit_block()`` (label addition, #447)
+    commits before switching the connection to AUTOCOMMIT and re-opens
+    after."""
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
     from sqlalchemy.dialects import postgresql
@@ -109,12 +113,15 @@ def run_generated_code(code: str, postgres_base_url: str, db_schema_name: str) -
     engine = sa.create_engine(sync_url(postgres_base_url))
     try:
         with engine.connect() as conn:
-            conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
-            op = Operations(MigrationContext.configure(conn))
+            ctx = MigrationContext.configure(conn)
+            op = Operations(ctx)
             namespace: dict = {"op": op, "sa": sa, "postgresql": postgresql}
             exec(compile(module, "<generated-revision>", "exec"), namespace)
-            namespace["_ferro_generated"]()
-            conn.commit()
+            with ctx.begin_transaction():
+                # Session-level, so it survives the commit an autocommit
+                # block performs mid-revision.
+                conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
+                namespace["_ferro_generated"]()
     finally:
         engine.dispose()
 

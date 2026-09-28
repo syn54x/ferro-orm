@@ -1035,8 +1035,20 @@ if _alembic_comparators is not None:
             # Outside the migration transaction: ALTER TYPE ... ADD VALUE is
             # non-transactional before PG12, and the label must be committed
             # before any table op below can reference it.
+            #
+            # Alembic renders each op's lines through Mako's PythonPrinter,
+            # which tracks block structure itself: a line ending in ':'
+            # indents everything after it, and only a blank line closes the
+            # block again (the same shape Alembic's own batch renderer
+            # emits for `with op.batch_alter_table(...) as batch_op:`). The
+            # body lines therefore carry no indentation of their own, and
+            # the trailing blank line is what puts the next op back at the
+            # function's level — without it every op after this one rendered
+            # inside the autocommit block, and the pre-indented body made
+            # the file an IndentationError (#447).
             lines.append("with op.get_context().autocommit_block():")
-            lines.extend(f"    op.execute({stmt!r})" for stmt in op.statements)
+            lines.extend(f"op.execute({stmt!r})" for stmt in op.statements)
+            lines.append("")
         return lines
 
     # -----------------------------------------------------------------------
