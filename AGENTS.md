@@ -195,8 +195,9 @@ For a single model, every emitter must agree on:
     downgrade, after the last `drop_table` / `drop_column`. The decision is
     made from the revision alone, never from the live catalog, so the file
     means the same thing on every database it runs against. A type with a
-    column the downgrade leaves standing (a pre-existing column on a
-    surviving table, including one `include_object` hides) is kept.
+    column the downgrade leaves standing or puts back (a pre-existing
+    column on a surviving table, including one `include_object` hides, or
+    a column the revision drops) is kept.
     Pinned by `tests/test_alembic_enum_type_drop.py`,
     `test_enum_type_drop_statement_parity_pin` and the ferro-ddl-lowering
     unit pins. Postgres-only (SQLite enums store as text); Alembic-only by

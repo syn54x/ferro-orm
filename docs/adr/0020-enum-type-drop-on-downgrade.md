@@ -15,9 +15,9 @@ declaring it is one the revision adds — a column of a table its
 `create_table` creates, or a column its `add_column` adds — so this
 revision is what brings the type into being, and the downgrade, which
 drops those columns and tables first, is what removes its last use. A type
-with any column the downgrade leaves standing (a pre-existing column on a
-surviving table, including a table `include_object` hides from the
-revision) is kept. ADR-0011's derivation ownership (the type's name matches
+with any column the downgrade leaves standing or puts back (a pre-existing
+column on a surviving table, including a table `include_object` hides from
+the revision, or a column the revision drops) is kept. ADR-0011's derivation ownership (the type's name matches
 the one ferro derives from the model) is not what decides this, and
 ADR-0011's additive-only argument ("the worst misattribution appends a
 label") does not stretch to cover a drop. ADR-0011 stands as written; it
@@ -97,3 +97,8 @@ Rejected alternatives:
 - The comparator reads `CreateTableOp`s and `AddColumnOp`s (inside
   `ModifyTableOps`); an `add_column`-only revision that introduces a type
   drops it on downgrade too.
+- A column the revision drops is one the downgrade restores, so it counts
+  as a surviving user: the comparator reads the reverse of each
+  `DropColumnOp` / `DropTableOp` (Alembic builds them from the reflected
+  live column, enum type included) and adds those columns to the declaring
+  set. Moving an enum column from one table to a new one keeps the type.

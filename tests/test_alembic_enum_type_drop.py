@@ -287,7 +287,7 @@ async def test_a_type_a_surviving_table_still_uses_is_kept(
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_a_live_type_shared_with_a_table_include_object_hides_is_kept(
+async def test_a_type_shared_with_a_table_include_object_hides_is_kept(
     db_url, postgres_base_url, db_schema_name
 ):
     """``category`` lives and declares ``categorycolor``; this revision
@@ -318,6 +318,35 @@ async def test_a_live_type_shared_with_a_table_include_object_hides_is_kept(
     assert "'category'" not in upgrade_code, upgrade_code
     assert repr(DROP_COLOR_SQL) not in downgrade_code, downgrade_code
     _assert_statement_in_code(DROP_SIZE_SQL, downgrade_code)
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_type_on_a_column_the_downgrade_restores_is_kept(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Moving the column: ``card.color`` lives; this revision removes it and
+    creates ``category(color)``. The only *declared* column of
+    ``categorycolor`` is one the revision adds, but the downgrade puts
+    ``card.color`` back before any type drop could run, so that restored
+    column still uses the type. The revision's own ``drop_column`` is what
+    tells the decision so; no ``DROP TYPE`` is rendered."""
+    _define_titled_card(with_color=True)
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    _define_titled_card(with_color=False)
+    _define_category()
+    await connect(db_url)
+
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    assert "op.create_table('category'" in upgrade_code, upgrade_code
+    assert "op.drop_column('card', 'color')" in upgrade_code, upgrade_code
+    assert "op.add_column('card'" in downgrade_code, downgrade_code
+    assert repr(DROP_COLOR_SQL) not in downgrade_code, downgrade_code
 
 
 @pytest.mark.backend_matrix

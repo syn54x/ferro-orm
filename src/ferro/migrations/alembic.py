@@ -328,6 +328,8 @@ try:
     from alembic.autogenerate import renderers as _alembic_renderers
     from alembic.operations.ops import AddColumnOp as _AddColumnOp
     from alembic.operations.ops import CreateTableOp as _CreateTableOp
+    from alembic.operations.ops import DropColumnOp as _DropColumnOp
+    from alembic.operations.ops import DropTableOp as _DropTableOp
     from alembic.operations.ops import MigrateOperation as _MigrateOperation
     from alembic.operations.ops import ModifyTableOps as _ModifyTableOps
     from alembic.util import DispatchPriority as _AlembicDispatchPriority
@@ -487,6 +489,12 @@ if _alembic_comparators is not None:
                 self.type_name, self.reverse_statements, self.statements
             )
 
+    def _enum_column_key(table_name: str, column) -> tuple[str, tuple[str, str]] | None:
+        """``(type name, (table, column))`` for a native-enum column, else None."""
+        if isinstance(column.type, sa.Enum) and column.type.name:
+            return str(column.type.name), (table_name, column.name)
+        return None
+
     def _revision_added_columns(upgrade_ops, metadata) -> set[tuple[str, str]]:
         """Every ``(table, column)`` this revision adds: each column of a
         table its ``create_table`` ops create, plus each ``add_column`` in
@@ -505,6 +513,35 @@ if _alembic_comparators is not None:
                 added.add((op.table_name, op.column.name))
         return added
 
+    def _revision_restored_enum_columns(
+        upgrade_ops,
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Every native-enum ``(table, column)`` this revision drops — and so
+        its downgrade puts back — keyed by type name. Alembic builds each
+        ``drop_column`` / ``drop_table`` from the reflected live column, so
+        the reverse carries the column's enum type. A restored column uses
+        the type after the downgrade exactly like a column the revision
+        never touched."""
+        restored: dict[str, list[tuple[str, str]]] = {}
+        for op in upgrade_ops.ops:
+            if isinstance(op, _DropTableOp):
+                columns = [(op.table_name, c) for c in op.to_table().columns]
+            elif isinstance(op, _ModifyTableOps):
+                columns = [
+                    (op.table_name, inner.to_column())
+                    for inner in op.ops
+                    if isinstance(inner, _DropColumnOp)
+                ]
+            elif isinstance(op, _DropColumnOp):
+                columns = [(op.table_name, op.to_column())]
+            else:
+                continue
+            for table_name, column in columns:
+                key = _enum_column_key(table_name, column)
+                if key is not None:
+                    restored.setdefault(key[0], []).append(key[1])
+        return restored
+
     @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.LAST)
     def _compare_enum_types(autogen_context, upgrade_ops, schemas) -> None:
         """Propose a ``DROP TYPE`` on downgrade for each native enum type
@@ -521,16 +558,19 @@ if _alembic_comparators is not None:
         if not added:
             return
 
-        # Every declared native enum type with the columns that declare it —
-        # the same `sa.Enum` mapping `_compare_enum_labels` reads, keyed by
-        # column instead of label.
+        # Every native enum type with the columns that use it once the
+        # downgrade has run: the model's declared columns (the same `sa.Enum`
+        # mapping `_compare_enum_labels` reads, keyed by column instead of
+        # label) plus the columns this revision drops, which the downgrade
+        # restores before the type drop would run.
         declaring: dict[str, list[tuple[str, str]]] = {}
         for table in metadata.tables.values():
             for column in table.columns:
-                if isinstance(column.type, sa.Enum) and column.type.name:
-                    declaring.setdefault(str(column.type.name), []).append(
-                        (table.name, column.name)
-                    )
+                key = _enum_column_key(table.name, column)
+                if key is not None:
+                    declaring.setdefault(key[0], []).append(key[1])
+        for type_name, columns in _revision_restored_enum_columns(upgrade_ops).items():
+            declaring.setdefault(type_name, []).extend(columns)
         if not declaring:
             return
 
