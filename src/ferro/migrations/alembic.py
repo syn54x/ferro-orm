@@ -1,5 +1,6 @@
 import json
-from typing import Any, Dict, NamedTuple
+from dataclasses import dataclass, field
+from typing import Any, Dict
 
 try:
     import sqlalchemy as sa
@@ -369,12 +370,24 @@ if _alembic_comparators is not None:
             # the same warn-never-act contract that governs upgrades.
             return AddEnumLabelsOp(self.type_name, [], [])
 
-    class _DeclaredEnumType(NamedTuple):
+    def _enum_type_name(column) -> str | None:
+        """The named native enum type a column carries, else ``None``. The
+        one test for "is this a native-enum column, and which type" — read
+        for the model's declared columns and for the reflected columns a
+        revision drops, so both sides classify a column the same way."""
+        if isinstance(column.type, sa.Enum) and column.type.name:
+            return str(column.type.name)
+        return None
+
+    @dataclass
+    class _DeclaredEnumType:
         """One named native enum type as the model metadata declares it: its
-        labels, and every ``(table, column)`` that carries it."""
+        labels (from the first column seen, matching label addition's
+        original walk) and every ``(table, column)`` that carries it. Built
+        and filled by `_declared_enum_types`; a fresh object per call."""
 
         labels: list[str]
-        columns: list[tuple[str, str]]
+        columns: list[tuple[str, str]] = field(default_factory=list)
 
     def _declared_enum_types(metadata) -> dict[str, "_DeclaredEnumType"]:
         """Every declared native enum type — the named ``sa.Enum`` types the
@@ -385,12 +398,13 @@ if _alembic_comparators is not None:
         declared: dict[str, _DeclaredEnumType] = {}
         for table in metadata.tables.values():
             for column in table.columns:
-                if isinstance(column.type, sa.Enum) and column.type.name:
-                    entry = declared.setdefault(
-                        str(column.type.name),
-                        _DeclaredEnumType(list(column.type.enums), []),
-                    )
-                    entry.columns.append((table.name, column.name))
+                type_name = _enum_type_name(column)
+                if type_name is None:
+                    continue
+                entry = declared.setdefault(
+                    type_name, _DeclaredEnumType(list(column.type.enums))
+                )
+                entry.columns.append((table.name, column.name))
         return declared
 
     def _live_enum_labels_by_type(connection) -> dict[str, list[str]]:
@@ -496,12 +510,6 @@ if _alembic_comparators is not None:
         def reverse(self) -> "FerroEnumTypeIntroducedOp":
             return FerroEnumTypeIntroducedOp(self.type_name, self.statement)
 
-    def _enum_column_key(table_name: str, column) -> tuple[str, tuple[str, str]] | None:
-        """``(type name, (table, column))`` for a native-enum column, else None."""
-        if isinstance(column.type, sa.Enum) and column.type.name:
-            return str(column.type.name), (table_name, column.name)
-        return None
-
     def _revision_added_columns(upgrade_ops, metadata) -> set[tuple[str, str]]:
         """Every ``(table, column)`` this revision adds: each column of a
         table its ``create_table`` ops create, plus each ``add_column`` in
@@ -544,9 +552,9 @@ if _alembic_comparators is not None:
             else:
                 continue
             for table_name, column in columns:
-                key = _enum_column_key(table_name, column)
-                if key is not None:
-                    restored.setdefault(key[0], []).append(key[1])
+                type_name = _enum_type_name(column)
+                if type_name is not None:
+                    restored.setdefault(type_name, []).append((table_name, column.name))
         return restored
 
     @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.LAST)
