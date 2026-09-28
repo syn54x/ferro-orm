@@ -560,41 +560,37 @@ pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
 }
 
 /// The type-drop decision for a generated revision (#438, ADR-0020): which
-/// named enum types a set of table creations brings into being, and so
-/// which types the revision's `downgrade()` must drop after its last
-/// `DROP TABLE`.
+/// named enum types the revision itself introduces, and so which types its
+/// `downgrade()` must drop after its last `DROP TABLE` / `DROP COLUMN`.
 ///
 /// Example: a revision creates `category(color categorycolor)` and adds a
-/// `color categorycolor` column to the existing `card`. `categorycolor`
-/// does not exist yet, so the `create_table` creates it. The downgrade
-/// drops the column and the table, and must then drop the type, or the
-/// next upgrade fails with "type already exists".
+/// `color categorycolor` column to the existing `card`. Every column that
+/// uses `categorycolor` is one this revision adds, so the type is the
+/// revision's: the downgrade drops the column and the table, and must then
+/// drop the type, or the next upgrade fails with "type already exists".
 ///
-/// The rule: a type is dropped when it is **not live** at generation time
-/// **and at least one** table declaring it is in `created_tables`. A type
-/// that is not live cannot be used by any existing column, so once the
-/// downgrade puts the database back in that state, nothing uses it. The
-/// only users a not-live type can have outside `created_tables` are
-/// columns this same revision adds (`add_column` on an existing table),
-/// and the downgrade drops those too. A live type is never this
-/// revision's: it existed before the revision ran, and any table still
-/// using it (including one `include_object` hides from the revision) keeps
-/// it.
+/// The rule: a type is dropped when **every** column declaring it is one
+/// the revision adds — a column of a table the revision creates, or a
+/// column an `add_column` in the revision adds — and there is at least one
+/// such column. A type with any column the downgrade leaves standing (a
+/// pre-existing column on a surviving table, including one `include_object`
+/// hides from the revision) is kept. The decision is made from the revision
+/// alone, never from the live catalog, so the rendered file means the same
+/// thing on every database it runs against (ADR-0020).
 ///
-/// `users` maps each declared type name to the tables that declare a
-/// column of it. Sorted by type name so the rendered revision is stable.
-/// The Alembic autogenerate comparator consumes this mechanically over
-/// FFI (AGENTS.md § I-1 item 17); it never re-derives the set.
-pub fn enum_types_created_with_tables(
-    users: &BTreeMap<String, Vec<String>>,
-    created_tables: &[String],
-    live_types: &[String],
+/// `declaring_columns` maps each declared type name to the `(table, column)`
+/// pairs that declare it; `added_columns` lists the `(table, column)` pairs
+/// the revision adds. Sorted by type name so the rendered revision is
+/// stable. The Alembic autogenerate comparator consumes this mechanically
+/// over FFI (AGENTS.md § I-1 item 17); it never re-derives the set.
+pub fn enum_types_introduced_by_revision(
+    declaring_columns: &BTreeMap<String, Vec<(String, String)>>,
+    added_columns: &[(String, String)],
 ) -> Vec<String> {
-    users
+    declaring_columns
         .iter()
-        .filter(|(type_name, tables)| {
-            !live_types.contains(type_name)
-                && tables.iter().any(|table| created_tables.contains(table))
+        .filter(|(_, columns)| {
+            !columns.is_empty() && columns.iter().all(|c| added_columns.contains(c))
         })
         .map(|(type_name, _)| type_name.clone())
         .collect()
@@ -3755,35 +3751,42 @@ mod tests {
     }
 
     #[test]
-    fn enum_types_created_with_tables_needs_one_created_user_and_not_live() {
-        let mut users = BTreeMap::new();
-        users.insert(
+    fn enum_types_introduced_by_revision_needs_every_declaring_column_added() {
+        let col = |t: &str, c: &str| (t.to_string(), c.to_string());
+        let mut declaring = BTreeMap::new();
+        // Created table + add_column on an existing table: every column is new.
+        declaring.insert(
             "categorycolor".to_string(),
-            vec!["card".to_string(), "category".to_string()],
+            vec![col("category", "color"), col("card", "color")],
         );
-        users.insert("cardsize".to_string(), vec!["card".to_string()]);
-        users.insert(
+        // Only a created table.
+        declaring.insert("cardsize".to_string(), vec![col("card", "size")]);
+        // Created table + a pre-existing column on a surviving table.
+        declaring.insert(
             "ledgerrole".to_string(),
-            vec!["ledger".to_string(), "member".to_string()],
+            vec![col("ledger", "role"), col("member", "role")],
         );
-        users.insert("memberkind".to_string(), vec!["member".to_string()]);
-        users.insert("accountkind".to_string(), vec!["account".to_string()]);
-        let created = vec![
-            "card".to_string(),
-            "category".to_string(),
-            "ledger".to_string(),
-            "account".to_string(),
+        // add_column only, no create_table at all.
+        declaring.insert("memberkind".to_string(), vec![col("member", "kind")]);
+        // Two columns of one type on one table: one added, one pre-existing.
+        declaring.insert(
+            "accountkind".to_string(),
+            vec![col("account", "kind"), col("account", "legacy_kind")],
+        );
+        let added = vec![
+            col("category", "color"),
+            col("card", "color"),
+            col("card", "size"),
+            col("ledger", "role"),
+            col("member", "kind"),
+            col("account", "kind"),
         ];
-        let live = vec!["accountkind".to_string()];
-        // `ledgerrole` is partly created (`ledger` is created, `member` is
-        // not) and not live, so `member` can only be using it through a
-        // column this revision adds: it drops. `memberkind` has no created
-        // user and `accountkind` is already live, so neither drops. Sorted.
         assert_eq!(
-            enum_types_created_with_tables(&users, &created, &live),
-            vec!["cardsize", "categorycolor", "ledgerrole"]
+            enum_types_introduced_by_revision(&declaring, &added),
+            vec!["cardsize", "categorycolor", "memberkind"]
         );
-        assert!(enum_types_created_with_tables(&users, &[], &[]).is_empty());
+        assert!(enum_types_introduced_by_revision(&declaring, &[]).is_empty());
+        assert!(enum_types_introduced_by_revision(&BTreeMap::new(), &added).is_empty());
     }
 
     #[test]

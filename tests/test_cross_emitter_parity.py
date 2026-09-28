@@ -323,10 +323,11 @@ def test_enum_type_drop_statement_parity_pin():
     The FFI returns the Rust-rendered ``DROP TYPE`` statement byte-for-byte —
     the same literal is pinned in ferro-ddl-lowering's unit tests, and the
     Alembic comparator renders it verbatim into ``downgrade()``. The decision
-    is pinned alongside: a type is this revision's to drop when it is not
-    already live and at least one table declaring it is one the revision
-    creates. ``ledgerrole`` is partly created (``member`` is not) and still
-    drops; ``memberkind`` has no created user and ``accountkind`` is live.
+    is pinned alongside: a type is the revision's to drop when every column
+    declaring it is one the revision adds. ``categorycolor`` (created table
+    plus ``add_column``), ``cardsize`` (created table) and ``memberkind``
+    (``add_column`` only) drop; ``ledgerrole`` keeps a pre-existing column
+    on ``member`` and ``accountkind`` keeps one of its two columns.
     """
     import json
 
@@ -336,20 +337,28 @@ def test_enum_type_drop_statement_parity_pin():
         _plan_enum_type_drop(
             json.dumps(
                 {
-                    "categorycolor": ["card", "category"],
-                    "cardsize": ["card"],
-                    "ledgerrole": ["ledger", "member"],
-                    "memberkind": ["member"],
-                    "accountkind": ["account"],
+                    "categorycolor": [["category", "color"], ["card", "color"]],
+                    "cardsize": [["card", "size"]],
+                    "ledgerrole": [["ledger", "role"], ["member", "role"]],
+                    "memberkind": [["member", "kind"]],
+                    "accountkind": [["account", "kind"], ["account", "legacy_kind"]],
                 }
             ),
-            ["card", "category", "ledger", "account"],
-            ["accountkind"],
+            json.dumps(
+                [
+                    ["category", "color"],
+                    ["card", "color"],
+                    ["card", "size"],
+                    ["ledger", "role"],
+                    ["member", "kind"],
+                    ["account", "kind"],
+                ]
+            ),
         )
     )
-    assert plan["type_names"] == ["cardsize", "categorycolor", "ledgerrole"]
+    assert plan["type_names"] == ["cardsize", "categorycolor", "memberkind"]
     assert plan["statements"] == [
         'DROP TYPE "cardsize"',
         'DROP TYPE "categorycolor"',
-        'DROP TYPE "ledgerrole"',
+        'DROP TYPE "memberkind"',
     ]

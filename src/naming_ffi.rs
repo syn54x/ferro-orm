@@ -108,28 +108,27 @@ pub fn _plan_enum_label_addition(
 }
 
 /// The type-drop decision over FFI (#438, ADR-0020): given every declared
-/// named enum type with the tables that declare a column of it (a JSON
-/// object), the tables this revision's `create_table` ops bring into being,
-/// and the enum types already live, return the type names the revision
-/// creates (not live, and declared by at least one created table) and the
-/// Rust-rendered `DROP TYPE` statement for each, sorted by type name.
+/// named enum type with the `(table, column)` pairs that declare it (a JSON
+/// object of arrays) and the `(table, column)` pairs this revision adds (a
+/// JSON array: every column of a created table, plus every `add_column`),
+/// return the type names the revision introduces (every declaring column is
+/// one it adds) and the Rust-rendered `DROP TYPE` statement for each,
+/// sorted by type name.
 ///
 /// The Alembic autogenerate comparator consumes this instead of re-deriving
 /// the set or re-rendering the SQL (AGENTS.md § I-1): the generated
 /// `downgrade()` executes these statements verbatim after its last
-/// `drop_table`.
+/// `drop_table` / `drop_column`.
 #[pyfunction]
-pub fn _plan_enum_type_drop(
-    users_json: String,
-    created_tables: Vec<String>,
-    live_types: Vec<String>,
-) -> PyResult<String> {
-    let users: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_str(&users_json)
-        .map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid enum type users: {e}"))
+pub fn _plan_enum_type_drop(declaring_json: String, added_json: String) -> PyResult<String> {
+    let declaring: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        serde_json::from_str(&declaring_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid enum declaring columns: {e}"))
         })?;
-    let type_names =
-        ferro_ddl_lowering::enum_types_created_with_tables(&users, &created_tables, &live_types);
+    let added: Vec<(String, String)> = serde_json::from_str(&added_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid enum added columns: {e}"))
+    })?;
+    let type_names = ferro_ddl_lowering::enum_types_introduced_by_revision(&declaring, &added);
     let statements: Vec<String> = type_names
         .iter()
         .map(|name| ferro_ddl_lowering::render_pg_enum_drop_type(name))

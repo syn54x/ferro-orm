@@ -182,25 +182,27 @@ For a single model, every emitter must agree on:
     (rebuild the bodies ferro writes, report the bodies you write; flags are
     one-way) and PRD #406.
 17. **Enum type drop on downgrade** — the type-drop decision (which declared
-    native enum types a generated revision's `create_table` ops bring into
-    being: not live at generation time, and declared by at least one table
-    the revision creates) and the rendered `DROP TYPE` are decided by ONE
-    pair of functions: `ferro_ddl_lowering::enum_types_created_with_tables` /
-    `render_pg_enum_drop_type`. SQLAlchemy creates the type inline with
+    native enum types a generated revision introduces: every column
+    declaring the type is one the revision adds, a created table's column
+    or an `add_column`) and the rendered `DROP TYPE` are decided by ONE
+    pair of functions: `ferro_ddl_lowering::enum_types_introduced_by_revision`
+    / `render_pg_enum_drop_type`. SQLAlchemy creates the type inline with
     `create_table` and Alembic has no op for it, so the rendered
     `downgrade()` never dropped it (#438). The Alembic autogenerate
     comparator (`FerroEnumTypeOp` in `src/ferro/migrations/alembic.py`)
-    consumes the decision over FFI (`_core._plan_enum_type_drop`), with its
-    own live read of enum type names, and renders nothing on upgrade and the
-    byte-identical statement on downgrade, after the last `drop_table`. A
-    not-live type's only users outside the created tables are columns the
-    same revision adds, which the downgrade drops first; a table the
-    revision leaves standing can only use a live type, which is excluded.
+    consumes the decision over FFI (`_core._plan_enum_type_drop`) and
+    renders nothing on upgrade and the byte-identical statement on
+    downgrade, after the last `drop_table` / `drop_column`. The decision is
+    made from the revision alone, never from the live catalog, so the file
+    means the same thing on every database it runs against. A type with a
+    column the downgrade leaves standing (a pre-existing column on a
+    surviving table, including one `include_object` hides) is kept.
     Pinned by `tests/test_alembic_enum_type_drop.py`,
     `test_enum_type_drop_statement_parity_pin` and the ferro-ddl-lowering
-    unit pins. Postgres-only (SQLite enums store as text). Ownership is by
-    provenance: the type is this revision's because its `create_table`
-    brings it into being (ADR-0020).
+    unit pins. Postgres-only (SQLite enums store as text); Alembic-only by
+    construction (auto-migrate has no downgrade door), so the single-source
+    rule applies but there is no second emitter to compare. Ownership is by
+    provenance (ADR-0020).
 
 ### Why this invariant exists
 
@@ -498,7 +500,8 @@ After-tables families (`ADD CONSTRAINT` over a new column, `CREATE POLICY`
 on a new table) register at `priority=LAST`. Before-tables families (enum
 label addition) register at `priority=FIRST` and insert at the front of the
 ops list. A downgrade-after-tables family (enum type drop, #438) reads the
-revision's `create_table` ops, so it registers at `priority=LAST`, but
+revision's `create_table` and `add_column` ops, so it registers at
+`priority=LAST`, but
 inserts at the front of the ops list: `UpgradeOps.reverse()` reverses order,
 so an op ahead of every `create_table` lands behind every `drop_table` in
 the downgrade. Default `MEDIUM` is an I-12 violation for ferro schema

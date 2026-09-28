@@ -9,9 +9,11 @@ no column objects, so nothing ever emits ``DROP TYPE``: the types survive
 Ferro's comparator turns the type creation into a real op. It renders
 nothing on upgrade (SQLAlchemy already emits ``CREATE TYPE`` inline) and
 ``DROP TYPE`` on downgrade, placed after the last ``drop_table``. The
-decision (which types this revision's table creations bring into being) and
-the rendered statement come from the Rust core over FFI
-(``_plan_enum_type_drop``).
+decision (which types the revision introduces: every column declaring the
+type is one the revision adds, a created table's column or an
+``add_column``) and the rendered statement come from the Rust core over FFI
+(``_plan_enum_type_drop``). It is decided from the revision alone, never
+from the live catalog (ADR-0020).
 """
 
 from __future__ import annotations
@@ -246,9 +248,9 @@ async def test_a_type_a_surviving_table_still_uses_is_kept(
     """``category`` already lives (an earlier revision or auto-migrate created
     it); this revision adds ``card`` sharing ``categorycolor`` plus its own
     ``cardsize``. The downgrade drops ``cardsize`` only — ``categorycolor``
-    still has a column on a table this downgrade leaves standing. It is kept
-    because it was already live when the revision was generated (ADR-0020):
-    a table the downgrade leaves standing can only use a live type.
+    still has a column on a table this downgrade leaves standing:
+    ``category.color`` is declared and not one this revision adds, so the
+    type is not the revision's (ADR-0020).
 
     The generated *upgrade* is not executed here: SQLAlchemy's
     ``create_table`` re-issues ``CREATE TYPE`` for the already-live
@@ -292,13 +294,10 @@ async def test_a_live_type_shared_with_a_table_include_object_hides_is_kept(
     creates ``card``, which declares it too, while the project's
     ``include_object`` leaves ``category`` out of the revision entirely.
 
-    ``categorycolor`` has a created user (``card``), so the users map alone
-    would claim it. What keeps it is the live check: the type existed when
-    the revision was generated, so ``card``'s ``create_table`` did not bring
-    it into being. An excluded table can only be using a type that is
-    already live, which is why the live check, not the users map, protects
-    it. Running this downgrade drops ``card`` and leaves ``categorycolor``
-    for ``category``."""
+    ``category.color`` is still a declared column the revision does not add,
+    so the type is not the revision's: hiding a table from the revision does
+    not hide its columns from the decision. Running this downgrade drops
+    ``card`` and leaves ``categorycolor`` for ``category``."""
     _define_category()
     await connect(db_url, auto_migrate=True)
     _rewind_registry()
@@ -324,13 +323,19 @@ async def test_a_live_type_shared_with_a_table_include_object_hides_is_kept(
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_a_type_that_already_exists_live_is_not_dropped(
+async def test_a_pre_existing_orphan_type_is_dropped_with_the_table_that_adopts_it(
     db_url, postgres_base_url, db_schema_name
 ):
-    """The downgrade reverses exactly what the upgrade creates. A type that
-    is already live when the revision is generated is not created by this
-    revision's ``create_table`` (SQLAlchemy would refuse to recreate it), so
-    the downgrade must not claim it either."""
+    """The decision is made from the revision alone (ADR-0020). Here the dev
+    database already holds an orphaned ``categorycolor`` (the residue an
+    older broken downgrade leaves) and this revision creates ``category``,
+    the only declared user. The rendered downgrade drops the type anyway:
+    on every database the revision can run against, its ``create_table`` is
+    what created the type, and a file that omitted the drop because of one
+    developer's local catalog would be incomplete everywhere else.
+
+    The upgrade is not executed: on this database SQLAlchemy re-issues
+    ``CREATE TYPE`` for the live type and Postgres refuses (#443)."""
     await connect(db_url)
     async with engines.session():
         await execute("CREATE TYPE \"categorycolor\" AS ENUM ('rust', 'amber')")
@@ -343,7 +348,39 @@ async def test_a_type_that_already_exists_live_is_not_dropped(
         postgres_base_url, db_schema_name
     )
     assert "op.create_table('category'" in upgrade_code, upgrade_code
-    assert repr(DROP_COLOR_SQL) not in downgrade_code, downgrade_code
+    _assert_statement_in_code(DROP_COLOR_SQL, downgrade_code)
+    assert downgrade_code.index("op.drop_table('category')") < downgrade_code.index(
+        repr(DROP_COLOR_SQL)
+    )
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_type_introduced_by_add_column_alone_is_dropped(
+    db_url, postgres_base_url, db_schema_name
+):
+    """No ``create_table`` at all: the existing ``card`` gains ``color``. The
+    only column of ``categorycolor`` is one this revision adds, so the
+    downgrade drops the type after ``drop_column``. Whether the upgrade's
+    ``add_column`` creates the type on its own is Alembic's business (a
+    sibling of #443); the downgrade's half is right either way."""
+    _define_titled_card(with_color=False)
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    _define_titled_card(with_color=True)
+    await connect(db_url)
+
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    assert "op.create_table(" not in upgrade_code, upgrade_code
+    assert "op.add_column('card'" in upgrade_code, upgrade_code
+    _assert_statement_in_code(DROP_COLOR_SQL, downgrade_code)
+    assert downgrade_code.index("op.drop_column('card'") < downgrade_code.index(
+        repr(DROP_COLOR_SQL)
+    )
 
 
 @pytest.mark.backend_matrix

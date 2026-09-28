@@ -62,8 +62,8 @@ inserted ahead of every `create_table` lands after every `drop_table`.
 The enum type drop op needs the second placement: `DROP TYPE` is only legal
 once no column uses the type, and it renders nothing on the upgrade side
 (SQLAlchemy emits `CREATE TYPE` inline with `create_table`). It still has to
-run at `LAST`, because it reads the revision's `CreateTableOp`s to decide
-which types the revision creates. `LAST` says when the comparator runs;
+run at `LAST`, because it reads the revision's `CreateTableOp`s and
+`AddColumnOp`s to decide which types the revision introduces. `LAST` says when the comparator runs;
 `ops[:0]` says where its op renders. They are separate choices.
 
 ## When to apply
