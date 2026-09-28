@@ -192,9 +192,10 @@ async def test_a_type_a_surviving_table_still_uses_is_kept(
 
     The generated *upgrade* is not executed here: SQLAlchemy's
     ``create_table`` re-issues ``CREATE TYPE`` for the already-live
-    ``categorycolor`` and Postgres refuses (the upstream limitation reviewers
-    hand-edit with ``create_type=False``; not this issue's). The live state
-    the downgrade runs against comes from auto-migrate instead."""
+    ``categorycolor`` and Postgres refuses (#443; the upstream limitation
+    reviewers hand-edit with ``create_type=False``). The live state the
+    downgrade runs against comes from auto-migrate instead; once #443 lands
+    this test should execute the upgrade it renders."""
     _define_category()
     await connect(db_url, auto_migrate=True)
     _rewind_registry()
