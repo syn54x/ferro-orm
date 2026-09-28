@@ -366,27 +366,39 @@ if _alembic_comparators is not None:
             return AddEnumLabelsOp(self.type_name, [], [])
 
     def _live_enum_labels_by_type(connection) -> dict[str, list[str]]:
-        """Every native enum type in the connection's schema with its labels
-        in enum sort order — the same catalog read the reconciliation pass
-        takes. A type with no labels yet is still a live type (an empty
-        list), so both enum comparators see it: label addition fills it, and
-        the type-drop decision knows this revision did not create it."""
+        """Live labels per native enum type in enum sort order, scoped to the
+        connection's schema — the same catalog read the reconciliation pass
+        takes (``live_enum_type_labels`` in ``src/introspect.rs``), so label
+        addition sees the same live state on both doors (AGENTS.md § I-1
+        item 11)."""
         rows = connection.execute(
             sa.text(
                 "SELECT t.typname AS type_name, e.enumlabel AS label "
                 "FROM pg_type t "
                 "JOIN pg_namespace n ON n.oid = t.typnamespace "
-                "LEFT JOIN pg_enum e ON e.enumtypid = t.oid "
-                "WHERE t.typtype = 'e' AND n.nspname = current_schema() "
+                "JOIN pg_enum e ON e.enumtypid = t.oid "
+                "WHERE n.nspname = current_schema() "
                 "ORDER BY t.typname, e.enumsortorder"
             )
         ).fetchall()
         live: dict[str, list[str]] = {}
         for row in rows:
-            labels = live.setdefault(row.type_name, [])
-            if row.label is not None:
-                labels.append(row.label)
+            live.setdefault(row.type_name, []).append(row.label)
         return live
+
+    def _live_enum_type_names(connection) -> list[str]:
+        """Every native enum type in the connection's schema, labels or not,
+        sorted by name. The type-drop decision's live input: a type that
+        exists at generation time was not created by this revision."""
+        rows = connection.execute(
+            sa.text(
+                "SELECT t.typname FROM pg_type t "
+                "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "WHERE t.typtype = 'e' AND n.nspname = current_schema() "
+                "ORDER BY t.typname"
+            )
+        ).fetchall()
+        return [row[0] for row in rows]
 
     @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.FIRST)
     def _compare_enum_labels(autogen_context, upgrade_ops, schemas) -> None:
@@ -439,14 +451,16 @@ if _alembic_comparators is not None:
     #
     # This comparator turns the type creation into a real op. The decision
     # (which declared types this revision's table creations bring into
-    # being: declared only by tables the revision creates, and not already
-    # live) and the rendered `DROP TYPE` come from the Rust core over FFI
-    # (`_plan_enum_type_drop`). The op renders nothing on upgrade —
-    # SQLAlchemy already emits `CREATE TYPE` inline — and the statement on
-    # downgrade. A type a surviving table still uses is never proposed. The
-    # drop is the exact reverse of a creation this same revision makes, so no
-    # destructive gate applies; ownership is by derivation (ADR-0011), the
-    # same rule label addition uses.
+    # being: not live at generation time, and declared by at least one table
+    # the revision creates) and the rendered `DROP TYPE` come from the Rust
+    # core over FFI (`_plan_enum_type_drop`). A not-live type can have no
+    # user the downgrade leaves standing: its only other users are columns
+    # this revision adds, and the downgrade drops those too. The op renders
+    # nothing on upgrade — SQLAlchemy already emits `CREATE TYPE` inline —
+    # and the statement on downgrade. Ownership is by provenance: the type is
+    # this revision's because its `create_table` brings it into being
+    # (ADR-0020). The drop is the exact reverse of that creation, so no
+    # destructive gate applies.
     #
     # I-12: this family reads the revision's `CreateTableOp`s, so it runs
     # AFTER tables (`priority=LAST`) — but it inserts at the FRONT of the
@@ -486,6 +500,11 @@ if _alembic_comparators is not None:
 
     @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.LAST)
     def _compare_enum_types(autogen_context, upgrade_ops, schemas) -> None:
+        """Propose a ``DROP TYPE`` on downgrade for each native enum type
+        that is not live and is declared by at least one table this
+        revision's ``create_table`` ops create (ADR-0020). Every other user
+        of such a type is a column this revision adds, which the downgrade
+        drops first."""
         if autogen_context.dialect.name != "postgresql":
             return
         metadata = autogen_context.metadata
@@ -511,10 +530,10 @@ if _alembic_comparators is not None:
         if not users:
             return
 
-        live = _live_enum_labels_by_type(autogen_context.connection)
-        plan = json.loads(
-            _plan_enum_type_drop(json.dumps(users), created, sorted(live))
-        )
+        # A live type is never this revision's; that check, not `users`, is
+        # also what keeps a type a table hidden by `include_object` uses.
+        live = _live_enum_type_names(autogen_context.connection)
+        plan = json.loads(_plan_enum_type_drop(json.dumps(users), created, live))
         upgrade_ops.ops[:0] = [
             FerroEnumTypeOp(type_name, [], [statement])
             for type_name, statement in zip(plan["type_names"], plan["statements"])

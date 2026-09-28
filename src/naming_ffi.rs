@@ -107,10 +107,11 @@ pub fn _plan_enum_label_addition(
     .to_string()
 }
 
-/// The type-drop decision over FFI (#438): given every declared named enum
-/// type with the tables that declare a column of it (a JSON object), the
-/// tables this revision's `create_table` ops bring into being, and the enum
-/// types already live, return the type names the revision creates and the
+/// The type-drop decision over FFI (#438, ADR-0020): given every declared
+/// named enum type with the tables that declare a column of it (a JSON
+/// object), the tables this revision's `create_table` ops bring into being,
+/// and the enum types already live, return the type names the revision
+/// creates (not live, and declared by at least one created table) and the
 /// Rust-rendered `DROP TYPE` statement for each, sorted by type name.
 ///
 /// The Alembic autogenerate comparator consumes this instead of re-deriving

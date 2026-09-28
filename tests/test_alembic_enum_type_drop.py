@@ -85,6 +85,24 @@ def _define_card(*, with_color: bool = True) -> type[Model]:
     return Card
 
 
+def _define_titled_card(*, with_color: bool) -> type[Model]:
+    """A ``card`` with no enum column, or the same table plus ``color``."""
+    if with_color:
+
+        class Card(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            title: str | None = None
+            color: CategoryColor | None = None
+
+        return Card
+
+    class Card(Model):  # type: ignore[no-redef]
+        id: int | None = Field(default=None, primary_key=True)
+        title: str | None = None
+
+    return Card
+
+
 def _live_enum_types(postgres_base_url: str, schema: str) -> list[str]:
     engine = sa.create_engine(_sync_url(postgres_base_url))
     try:
@@ -174,6 +192,46 @@ async def test_a_type_shared_by_two_new_tables_drops_once_after_both_tables(
     assert _live_enum_types(postgres_base_url, db_schema_name) == []
 
 
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_type_shared_by_a_new_table_and_an_added_column_is_dropped(
+    db_url, postgres_base_url, db_schema_name
+):
+    """``card`` already lives without the enum column. This revision creates
+    ``category(color)`` and adds ``color`` to ``card``: one new type, used by
+    a created table and by a column this same revision adds. The downgrade
+    drops that column and that table, so nothing uses the type afterwards —
+    it must drop too, or the next upgrade fails with ``DuplicateObject``
+    (the #438 symptom in its mixed shape)."""
+    _define_titled_card(with_color=False)
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    _define_titled_card(with_color=True)
+    _define_category()
+    await connect(db_url)
+
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    assert "op.create_table('category'" in upgrade_code, upgrade_code
+    assert "op.add_column('card'" in upgrade_code, upgrade_code
+    _assert_statement_in_code(DROP_COLOR_SQL, downgrade_code)
+    drop_type_at = downgrade_code.index(repr(DROP_COLOR_SQL))
+    assert downgrade_code.index("op.drop_table('category')") < drop_type_at
+    assert downgrade_code.index("op.drop_column('card'") < drop_type_at
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == ["categorycolor"]
+
+    _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == []
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == ["categorycolor"]
+
+
 # ---------------------------------------------------------------------------
 # Not this revision's to drop
 # ---------------------------------------------------------------------------
@@ -188,7 +246,9 @@ async def test_a_type_a_surviving_table_still_uses_is_kept(
     """``category`` already lives (an earlier revision or auto-migrate created
     it); this revision adds ``card`` sharing ``categorycolor`` plus its own
     ``cardsize``. The downgrade drops ``cardsize`` only — ``categorycolor``
-    still has a column on a table this downgrade leaves standing.
+    still has a column on a table this downgrade leaves standing. It is kept
+    because it was already live when the revision was generated (ADR-0020):
+    a table the downgrade leaves standing can only use a live type.
 
     The generated *upgrade* is not executed here: SQLAlchemy's
     ``create_table`` re-issues ``CREATE TYPE`` for the already-live
@@ -220,6 +280,45 @@ async def test_a_type_a_surviving_table_still_uses_is_kept(
     ]
     _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
     assert _live_enum_types(postgres_base_url, db_schema_name) == ["categorycolor"]
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_live_type_shared_with_a_table_include_object_hides_is_kept(
+    db_url, postgres_base_url, db_schema_name
+):
+    """``category`` lives and declares ``categorycolor``; this revision
+    creates ``card``, which declares it too, while the project's
+    ``include_object`` leaves ``category`` out of the revision entirely.
+
+    ``categorycolor`` has a created user (``card``), so the users map alone
+    would claim it. What keeps it is the live check: the type existed when
+    the revision was generated, so ``card``'s ``create_table`` did not bring
+    it into being. An excluded table can only be using a type that is
+    already live, which is why the live check, not the users map, protects
+    it. Running this downgrade drops ``card`` and leaves ``categorycolor``
+    for ``category``."""
+    _define_category()
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    _define_category()
+    _define_card()
+    await connect(db_url)
+
+    def include_object(obj, name, type_, reflected, compare_to):
+        return not (type_ == "table" and name == "category")
+
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url,
+        db_schema_name,
+        extra_opts={"include_object": include_object},
+    )
+    assert "op.create_table('card'" in upgrade_code, upgrade_code
+    assert "'category'" not in upgrade_code, upgrade_code
+    assert repr(DROP_COLOR_SQL) not in downgrade_code, downgrade_code
+    _assert_statement_in_code(DROP_SIZE_SQL, downgrade_code)
 
 
 @pytest.mark.backend_matrix

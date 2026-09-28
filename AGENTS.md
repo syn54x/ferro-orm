@@ -183,20 +183,24 @@ For a single model, every emitter must agree on:
     one-way) and PRD #406.
 17. **Enum type drop on downgrade** — the type-drop decision (which declared
     native enum types a generated revision's `create_table` ops bring into
-    being: declared only by tables the revision creates, and not already
-    live) and the rendered `DROP TYPE` are decided by ONE pair of functions:
-    `ferro_ddl_lowering::enum_types_created_with_tables` /
+    being: not live at generation time, and declared by at least one table
+    the revision creates) and the rendered `DROP TYPE` are decided by ONE
+    pair of functions: `ferro_ddl_lowering::enum_types_created_with_tables` /
     `render_pg_enum_drop_type`. SQLAlchemy creates the type inline with
     `create_table` and Alembic has no op for it, so the rendered
     `downgrade()` never dropped it (#438). The Alembic autogenerate
     comparator (`FerroEnumTypeOp` in `src/ferro/migrations/alembic.py`)
-    consumes the decision over FFI (`_core._plan_enum_type_drop`) and
-    renders nothing on upgrade and the byte-identical statement on
-    downgrade, after the last `drop_table`. A type a surviving table still
-    uses is never proposed. Pinned by `tests/test_alembic_enum_type_drop.py`,
+    consumes the decision over FFI (`_core._plan_enum_type_drop`), with its
+    own live read of enum type names, and renders nothing on upgrade and the
+    byte-identical statement on downgrade, after the last `drop_table`. A
+    not-live type's only users outside the created tables are columns the
+    same revision adds, which the downgrade drops first; a table the
+    revision leaves standing can only use a live type, which is excluded.
+    Pinned by `tests/test_alembic_enum_type_drop.py`,
     `test_enum_type_drop_statement_parity_pin` and the ferro-ddl-lowering
     unit pins. Postgres-only (SQLite enums store as text). Ownership is by
-    derivation, as for label addition (ADR-0011).
+    provenance: the type is this revision's because its `create_table`
+    brings it into being (ADR-0020).
 
 ### Why this invariant exists
 
@@ -504,7 +508,9 @@ same-revision pin is required for every after-tables family.
 Pinned by the row-security comparator's LAST registration and
 `test_new_declaration_on_a_brand_new_table_lands_after_create_table`, and
 by `test_autogenerate_adds_a_column_before_the_check_that_references_it`
-(#423). Architecture review: I-19 in #427. See PRD #429 and
+(#423), and for the downgrade-after-tables slot by
+`test_a_type_shared_by_two_new_tables_drops_once_after_both_tables`
+(#438). Architecture review: I-19 in #427. See PRD #429 and
 `docs/solutions/patterns/alembic-comparator-slot.md`.
 
 ---

@@ -559,16 +559,32 @@ pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
     )
 }
 
-/// The type-drop decision for a generated revision (#438): which named enum
-/// types a set of table creations brings into being. `users` maps each
-/// declared type name to the tables that declare a column of it; a type is
-/// created *with* `created_tables` when every one of its users is among them
-/// and the type is not already live (SQLAlchemy emits `CREATE TYPE` inline
-/// with `create_table` only for a type that does not exist yet). Those are
-/// exactly the types the reverse of that creation must drop, after its last
-/// `DROP TABLE`. Sorted by type name so the rendered revision is stable. The
-/// Alembic autogenerate comparator consumes this mechanically over FFI
-/// (AGENTS.md § I-1); it never re-derives the set.
+/// The type-drop decision for a generated revision (#438, ADR-0020): which
+/// named enum types a set of table creations brings into being, and so
+/// which types the revision's `downgrade()` must drop after its last
+/// `DROP TABLE`.
+///
+/// Example: a revision creates `category(color categorycolor)` and adds a
+/// `color categorycolor` column to the existing `card`. `categorycolor`
+/// does not exist yet, so the `create_table` creates it. The downgrade
+/// drops the column and the table, and must then drop the type, or the
+/// next upgrade fails with "type already exists".
+///
+/// The rule: a type is dropped when it is **not live** at generation time
+/// **and at least one** table declaring it is in `created_tables`. A type
+/// that is not live cannot be used by any existing column, so once the
+/// downgrade puts the database back in that state, nothing uses it. The
+/// only users a not-live type can have outside `created_tables` are
+/// columns this same revision adds (`add_column` on an existing table),
+/// and the downgrade drops those too. A live type is never this
+/// revision's: it existed before the revision ran, and any table still
+/// using it (including one `include_object` hides from the revision) keeps
+/// it.
+///
+/// `users` maps each declared type name to the tables that declare a
+/// column of it. Sorted by type name so the rendered revision is stable.
+/// The Alembic autogenerate comparator consumes this mechanically over
+/// FFI (AGENTS.md § I-1 item 17); it never re-derives the set.
 pub fn enum_types_created_with_tables(
     users: &BTreeMap<String, Vec<String>>,
     created_tables: &[String],
@@ -577,9 +593,8 @@ pub fn enum_types_created_with_tables(
     users
         .iter()
         .filter(|(type_name, tables)| {
-            !tables.is_empty()
-                && tables.iter().all(|table| created_tables.contains(table))
-                && !live_types.contains(type_name)
+            !live_types.contains(type_name)
+                && tables.iter().any(|table| created_tables.contains(table))
         })
         .map(|(type_name, _)| type_name.clone())
         .collect()
@@ -3740,7 +3755,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_types_created_with_tables_keeps_shared_and_live_types() {
+    fn enum_types_created_with_tables_needs_one_created_user_and_not_live() {
         let mut users = BTreeMap::new();
         users.insert(
             "categorycolor".to_string(),
@@ -3751,18 +3766,22 @@ mod tests {
             "ledgerrole".to_string(),
             vec!["ledger".to_string(), "member".to_string()],
         );
+        users.insert("memberkind".to_string(), vec!["member".to_string()]);
         users.insert("accountkind".to_string(), vec!["account".to_string()]);
         let created = vec![
             "card".to_string(),
             "category".to_string(),
+            "ledger".to_string(),
             "account".to_string(),
         ];
         let live = vec!["accountkind".to_string()];
-        // `ledgerrole` has a surviving user (`ledger`); `accountkind` is
-        // already live; the rest are this revision's, sorted by name.
+        // `ledgerrole` is partly created (`ledger` is created, `member` is
+        // not) and not live, so `member` can only be using it through a
+        // column this revision adds: it drops. `memberkind` has no created
+        // user and `accountkind` is already live, so neither drops. Sorted.
         assert_eq!(
             enum_types_created_with_tables(&users, &created, &live),
-            vec!["cardsize", "categorycolor"]
+            vec!["cardsize", "categorycolor", "ledgerrole"]
         );
         assert!(enum_types_created_with_tables(&users, &[], &[]).is_empty());
     }
