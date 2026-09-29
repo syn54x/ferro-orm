@@ -1,5 +1,5 @@
-"""Enum type provenance in a generated revision (#438, #443; AGENTS.md
-§ I-1 item 17; ADR-0020, ADR-0021).
+"""Enum type provenance in a generated revision (#438, #443, #439; AGENTS.md
+§ I-1 item 17; ADR-0020, ADR-0021, ADR-0022).
 
 A generated revision's ``create_table`` creates each named enum type as a
 SQLAlchemy side effect of the column's ``sa.Enum`` — there is no Alembic op
@@ -9,16 +9,22 @@ that carries no column objects, so nothing ever emits ``DROP TYPE`` and the
 types survive ``alembic downgrade`` (#438). And a ``create_table`` whose enum
 column reuses a type an earlier revision (or auto-migrate) already created
 re-issues ``CREATE TYPE`` and the upgrade fails with ``DuplicateObject``
-(#443).
+(#443). And an ``add_column`` is the one place SQLAlchemy never creates a
+type: a revision whose only use of a new type is an ``add_column`` fails
+with ``UndefinedObject`` (#439).
 
-One decision answers both: which types the revision *introduces* (every
-column declaring the type is one the revision adds, a created table's column
-or an ``add_column``). An introduced type is created inline by
-``create_table`` as before and dropped by ferro's ``DROP TYPE`` op on
-downgrade, after the last ``drop_table``. A type the revision merely
+One decision answers all three: which types the revision *introduces*
+(every column declaring the type is one the revision adds, a created
+table's column or an ``add_column``), and for those, whether a
+``create_table`` creates the type inline or the revision must execute the
+``CREATE TYPE`` itself. An introduced type is created inline by
+``create_table`` as before — or, when every column of it is an
+``add_column``, by ferro's ``op.execute`` of the Rust-rendered guarded
+``CREATE TYPE`` ahead of the table ops — and dropped by ferro's ``DROP TYPE``
+op on downgrade, after the last ``drop_table``. A type the revision merely
 *reuses* renders its ``create_table`` columns as
 ``postgresql.ENUM(..., create_type=False)`` and is never dropped. The
-decision and the rendered drop come from the Rust core over FFI
+decision and both rendered statements come from the Rust core over FFI
 (``_plan_enum_type_provenance``); the ``create_type=False`` rendering goes
 through the bridge's ``render_item`` hook, wired in ``env.py``, because
 SQLAlchemy's own ``repr`` of a ``postgresql.ENUM`` omits the flag. It is
@@ -45,6 +51,16 @@ from tests._alembic_harness import (
 )
 
 DROP_COLOR_SQL = 'DROP TYPE "categorycolor"'
+# The guarded CREATE TYPE the auto-migrate create pass executes for the same
+# model — pinned as a literal here and in ferro-ddl-lowering's unit tests
+# (``render_pg_enum_create_type``), so the two migration doors cannot drift.
+CREATE_COLOR_SQL = (
+    "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t "
+    "JOIN pg_namespace n ON n.oid = t.typnamespace "
+    "WHERE t.typname = 'categorycolor' AND n.nspname = current_schema()) THEN "
+    "CREATE TYPE \"categorycolor\" AS ENUM ('rust', 'amber'); "
+    "END IF; END $$"
+)
 DROP_SIZE_SQL = 'DROP TYPE "cardsize"'
 INTRODUCED_COLOR_TYPE = "sa.Enum('rust', 'amber', name='categorycolor')"
 INTRODUCED_SIZE_TYPE = "sa.Enum('small', 'large', name='cardsize')"
@@ -236,6 +252,12 @@ async def test_a_type_shared_by_a_new_table_and_an_added_column_is_dropped(
     )
     assert "op.create_table('category'" in upgrade_code, upgrade_code
     assert "op.add_column('card'" in upgrade_code, upgrade_code
+    # `create_table` creates the type inline, ahead of the add_column; a
+    # rendered CREATE TYPE on top would fail with DuplicateObject (#439).
+    assert repr(CREATE_COLOR_SQL) not in upgrade_code, upgrade_code
+    assert upgrade_code.index("op.create_table('category'") < upgrade_code.index(
+        "op.add_column('card'"
+    )
     _assert_statement_in_code(DROP_COLOR_SQL, downgrade_code)
     drop_type_at = downgrade_code.index(repr(DROP_COLOR_SQL))
     assert downgrade_code.index("op.drop_table('category')") < drop_type_at
@@ -294,6 +316,7 @@ async def test_a_type_a_surviving_table_still_uses_is_kept(
     _assert_statement_in_code(DROP_SIZE_SQL, downgrade_code)
     assert repr(DROP_COLOR_SQL) not in downgrade_code, downgrade_code
     assert "create_type" not in downgrade_code, downgrade_code
+    assert "CREATE TYPE" not in upgrade_code, upgrade_code
 
     _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
     assert _live_enum_types(postgres_base_url, db_schema_name) == [
@@ -516,14 +539,19 @@ async def test_a_pre_existing_orphan_type_is_dropped_with_the_table_that_adopts_
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_a_type_introduced_by_add_column_alone_is_dropped(
+async def test_a_type_introduced_by_add_column_alone_is_created_and_dropped(
     db_url, postgres_base_url, db_schema_name
 ):
     """No ``create_table`` at all: the existing ``card`` gains ``color``. The
-    only column of ``categorycolor`` is one this revision adds, so the
-    downgrade drops the type after ``drop_column``. Whether the upgrade's
-    ``add_column`` creates the type on its own is Alembic's business (a
-    sibling of #443); the downgrade's half is right either way."""
+    only column of ``categorycolor`` is one this revision adds, so the type
+    is the revision's — and nothing creates it: SQLAlchemy creates a named
+    enum type inline with ``create_table`` only, so Alembic's ``add_column``
+    ran against a type that did not exist and failed with
+    ``UndefinedObject`` (#439). The generated ``upgrade()`` now executes the
+    Rust-rendered guarded ``CREATE TYPE`` ahead of the ``add_column`` — the
+    statement the auto-migrate create pass executes for the same model —
+    and the ``downgrade()`` drops the type after ``drop_column`` as before.
+    The issue's loop: upgrade, downgrade, upgrade again."""
     _define_titled_card(with_color=False)
     await connect(db_url, auto_migrate=True)
     _rewind_registry()
@@ -536,10 +564,79 @@ async def test_a_type_introduced_by_add_column_alone_is_dropped(
     )
     assert "op.create_table(" not in upgrade_code, upgrade_code
     assert "op.add_column('card'" in upgrade_code, upgrade_code
+    _assert_statement_in_code(CREATE_COLOR_SQL, upgrade_code)
+    assert upgrade_code.index(repr(CREATE_COLOR_SQL)) < upgrade_code.index(
+        "op.add_column('card'"
+    )
+    assert upgrade_code.count("CREATE TYPE") == 1, upgrade_code
+    assert "import ferro" not in upgrade_code, upgrade_code
     _assert_statement_in_code(DROP_COLOR_SQL, downgrade_code)
     assert downgrade_code.index("op.drop_column('card'") < downgrade_code.index(
         repr(DROP_COLOR_SQL)
     )
+    assert "CREATE TYPE" not in downgrade_code, downgrade_code
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == ["categorycolor"]
+
+    _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == []
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == ["categorycolor"]
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_two_added_columns_of_one_new_type_create_it_once(
+    db_url, postgres_base_url, db_schema_name
+):
+    """``card`` and ``category`` both live without their enum column; this
+    revision adds ``color`` to each. One type, two ``add_column``s, no
+    ``create_table``: the type is created once, ahead of both, and dropped
+    once after both on downgrade."""
+
+    class Card(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str | None = None
+
+    class Category(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str | None = None
+
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    class Card(Model):  # type: ignore[no-redef]  # noqa: F811
+        id: int | None = Field(default=None, primary_key=True)
+        title: str | None = None
+        color: CategoryColor | None = None
+
+    class Category(Model):  # type: ignore[no-redef]  # noqa: F811
+        id: int | None = Field(default=None, primary_key=True)
+        title: str | None = None
+        color: CategoryColor | None = None
+
+    await connect(db_url)
+
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    assert "op.create_table(" not in upgrade_code, upgrade_code
+    assert "op.add_column('card'" in upgrade_code, upgrade_code
+    assert "op.add_column('category'" in upgrade_code, upgrade_code
+    assert upgrade_code.count(repr(CREATE_COLOR_SQL)) == 1, upgrade_code
+    create_at = upgrade_code.index(repr(CREATE_COLOR_SQL))
+    assert create_at < upgrade_code.index("op.add_column('card'")
+    assert create_at < upgrade_code.index("op.add_column('category'")
+    assert downgrade_code.count(repr(DROP_COLOR_SQL)) == 1, downgrade_code
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == ["categorycolor"]
+    _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == []
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
 
 
 @pytest.mark.backend_matrix
@@ -587,6 +684,60 @@ async def test_a_mixed_case_type_name_round_trips_quoted(
     assert _live_enum_types(postgres_base_url, db_schema_name) == []
 
 
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_type_created_by_statement_lands_before_tables_beside_label_additions(
+    db_url, postgres_base_url, db_schema_name
+):
+    """The two before-tables enum families share the front of the revision:
+    ``cardsize`` lives with a stale label set and gains ``large`` (label
+    addition, ADR-0011) while ``card`` gains ``color`` of the brand-new
+    ``categorycolor`` (type creation, ADR-0022). Both land ahead of the
+    ``add_column``, and the upgrade runs."""
+    from ferro.raw import execute
+    from ferro.session import engines
+
+    class Card(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        title: str | None = None
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await execute("CREATE TYPE \"cardsize\" AS ENUM ('small')")
+        await execute('ALTER TABLE "card" ADD COLUMN "size" "cardsize"')
+    _rewind_registry()
+
+    class Card(Model):  # type: ignore[no-redef]  # noqa: F811
+        id: int | None = Field(default=None, primary_key=True)
+        title: str | None = None
+        size: CardSize | None = None
+        color: CategoryColor | None = None
+
+    await connect(db_url)
+
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    add_column_at = upgrade_code.index("op.add_column('card'")
+    assert upgrade_code.index(repr(CREATE_COLOR_SQL)) < add_column_at, upgrade_code
+    # The renderer repr-quotes the statement; assert on its stable substrings.
+    add_value_at = upgrade_code.index("ADD VALUE IF NOT EXISTS")
+    assert add_value_at < add_column_at, upgrade_code
+    assert "large" in upgrade_code[add_value_at:add_column_at], upgrade_code
+    assert "autocommit_block" in upgrade_code, upgrade_code
+    # `cardsize` survives on a column the revision never added; `categorycolor`
+    # is the revision's and is dropped after the column.
+    _assert_statement_in_code(DROP_COLOR_SQL, downgrade_code)
+    assert 'DROP TYPE "cardsize"' not in downgrade_code, downgrade_code
+
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    assert _live_enum_types(postgres_base_url, db_schema_name) == [
+        "cardsize",
+        "categorycolor",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # SQLite: enums store as text; there is no type to drop
 # ---------------------------------------------------------------------------
@@ -617,8 +768,88 @@ async def test_sqlite_autogenerate_renders_no_type_drop(db_url, tmp_path):
 
     assert "op.drop_table('category')" in downgrade_code, downgrade_code
     assert "DROP TYPE" not in downgrade_code, downgrade_code
+    assert "CREATE TYPE" not in upgrade_code, upgrade_code
     assert "create_type" not in upgrade_code, upgrade_code
     assert INTRODUCED_COLOR_TYPE in upgrade_code, upgrade_code
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_sqlite_add_column_of_a_new_enum_renders_no_type_statement(
+    db_url, tmp_path
+):
+    """The one shape that renders a ``CREATE TYPE`` on Postgres — an existing
+    table gaining a column of a brand-new enum, no ``create_table`` — renders
+    neither the creation nor the drop on SQLite, where enums store as text
+    (#439). The create_table shape above cannot tell: its creation is inline
+    on Postgres too."""
+    from alembic.autogenerate import produce_migrations, render_python_code
+    from alembic.migration import MigrationContext
+
+    from ferro.migrations import get_metadata, render_item
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'autogen.db'}")
+    live = sa.MetaData()
+    sa.Table(
+        "card",
+        live,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("title", sa.String, nullable=True),
+    )
+    live.create_all(engine)
+
+    _define_titled_card(with_color=True)
+    await connect(db_url)
+    try:
+        with engine.connect() as conn:
+            ctx = MigrationContext.configure(conn, opts={"render_item": render_item})
+            script = produce_migrations(ctx, get_metadata())
+        upgrade_code = render_python_code(script.upgrade_ops, render_item=render_item)
+        downgrade_code = render_python_code(
+            script.downgrade_ops, render_item=render_item
+        )
+    finally:
+        engine.dispose()
+
+    assert "op.add_column('card'" in upgrade_code, upgrade_code
+    assert "op.create_table(" not in upgrade_code, upgrade_code
+    assert "CREATE TYPE" not in upgrade_code, upgrade_code
+    assert "DROP TYPE" not in downgrade_code, downgrade_code
+
+
+# ---------------------------------------------------------------------------
+# The op pair: symmetric, and the diff tuples ``compare_metadata`` reports
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.parametrize("create_statement", [None, CREATE_COLOR_SQL])
+def test_enum_type_op_pair_is_symmetric_and_its_diff_tuples_are_pinned(
+    create_statement,
+):
+    """Both ops carry both statements, reversing twice is the identity, and
+    each diff tuple is ``(tag, type_name, <statement this op executes>,
+    <its reverse's>)`` — ``None`` for an inline-created type's creation."""
+    from ferro.migrations.alembic import FerroEnumTypeDropOp, FerroEnumTypeIntroducedOp
+
+    introduced = FerroEnumTypeIntroducedOp(
+        "categorycolor", create_statement, DROP_COLOR_SQL
+    )
+    drop = introduced.reverse()
+    assert isinstance(drop, FerroEnumTypeDropOp)
+    assert introduced.to_diff_tuple() == (
+        "ferro_enum_type_introduced",
+        "categorycolor",
+        create_statement,
+        DROP_COLOR_SQL,
+    )
+    assert drop.to_diff_tuple() == (
+        "ferro_enum_type_drop",
+        "categorycolor",
+        DROP_COLOR_SQL,
+        create_statement,
+    )
+    assert drop.reverse().to_diff_tuple() == introduced.to_diff_tuple()
 
 
 # ---------------------------------------------------------------------------

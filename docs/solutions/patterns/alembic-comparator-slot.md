@@ -47,7 +47,7 @@ with that comment and still ran first.
 | Enum label addition | Before-tables | `FIRST` and insert at `ops[:0]` |
 | Check add / rebuild / drop | After-tables | `LAST` then append |
 | Row security | After-tables | `LAST` then append |
-| Enum type provenance (#438/#443, ADR-0020/0021) | Downgrade-after-tables; also rewrites `create_table` columns in place | `LAST` and insert at `ops[:0]` |
+| Enum type provenance (#438/#443/#439, ADR-0020/0021/0022) | Before-tables on upgrade (a `CREATE TYPE` for an `add_column`-only type) and downgrade-after-tables (the `DROP TYPE`); also rewrites `create_table` columns in place | `LAST` and insert at `ops[:0]` |
 
 Two `LAST` families keep registration order in the Alembic adapter: checks,
 then row security. The enum type drop family inserts at the front, so its
@@ -60,8 +60,10 @@ every `create_table` lands before every `drop_table` in `downgrade()`; an op
 inserted ahead of every `create_table` lands after every `drop_table`.
 
 The enum type drop op needs the second placement: `DROP TYPE` is only legal
-once no column uses the type, and it renders nothing on the upgrade side
-(SQLAlchemy emits `CREATE TYPE` inline with `create_table`). It still has to
+once no column uses the type, and on the upgrade side it renders either
+nothing (SQLAlchemy emits `CREATE TYPE` inline with `create_table`) or, for a
+type only `add_column`s carry, a `CREATE TYPE` that must precede those
+`add_column`s (#439) — front of the list on both sides. It still has to
 run at `LAST`, because it reads the revision's `CreateTableOp`s and
 `AddColumnOp`s to decide which types the revision introduces. `LAST` says when the comparator runs;
 `ops[:0]` says where its op renders. They are separate choices.

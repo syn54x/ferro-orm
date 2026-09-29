@@ -561,15 +561,35 @@ pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
     )
 }
 
-/// A generated revision's relationship to one native enum type (#438, #443;
-/// ADR-0020, ADR-0021). A type the revision touches has exactly one verdict.
+/// How a generated revision brings a native enum type it introduces into
+/// being (#439). SQLAlchemy creates a named enum type inline with
+/// `create_table` and nowhere else: an `add_column` of the type runs against
+/// a type that does not exist and fails with `UndefinedObject`. CONTEXT.md's
+/// *Type creation* names the `Statement` mode only — the statement ferro
+/// renders — not the inline creation SQLAlchemy performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnumTypeCreation {
+    /// At least one column of the type is on a table the revision creates,
+    /// so SQLAlchemy's `create_table` issues the `CREATE TYPE`; the revision
+    /// renders nothing for it.
+    Inline,
+    /// Every column of the type is an `add_column` on a surviving table:
+    /// nothing creates the type, so the revision must execute
+    /// [`render_pg_enum_create_type`] itself, ahead of its table operations.
+    Statement,
+}
+
+/// A generated revision's relationship to one native enum type (#438, #443,
+/// #439; ADR-0020, ADR-0021, ADR-0022). A type the revision touches has
+/// exactly one verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnumTypeProvenance {
     /// Every column declaring the type is one the revision adds: the revision
-    /// brings the type into being (SQLAlchemy creates it inline with
-    /// `create_table`), and its `downgrade()` must drop it after the last
-    /// `DROP TABLE` / `DROP COLUMN`.
-    Introduced,
+    /// brings the type into being — inline with one of its `create_table`s,
+    /// or by an explicit statement when it only ever `add_column`s it
+    /// ([`EnumTypeCreation`]) — and its `downgrade()` must drop it after the
+    /// last `DROP TABLE` / `DROP COLUMN`.
+    Introduced { creation: EnumTypeCreation },
     /// A column the revision adds declares the type, but so does a column the
     /// downgrade leaves standing or puts back: the type already lives on every
     /// database the revision can run against, so the revision's `create_table`
@@ -577,10 +597,11 @@ pub enum EnumTypeProvenance {
     Reused,
 }
 
-/// The type-provenance decision for a generated revision (ADR-0020, ADR-0021):
-/// for each named enum type the revision touches, whether it introduces the
-/// type or reuses it. A type with no added column is absent — the revision
-/// does not touch it.
+/// The type-provenance decision for a generated revision (ADR-0020, ADR-0021,
+/// ADR-0022): for each named enum type the revision touches, whether it
+/// introduces the type — and if so, whether a `create_table` creates it inline
+/// or the revision must execute the `CREATE TYPE` itself — or reuses it. A
+/// type with no added column is absent — the revision does not touch it.
 ///
 /// Example: `category(color categorycolor)` lives; the revision creates
 /// `card(color categorycolor, size cardsize)`. Every column of `cardsize` is
@@ -589,6 +610,11 @@ pub enum EnumTypeProvenance {
 /// "type already exists" (#438). `card.color` is added but `category.color`
 /// is not, so `categorycolor` is `Reused`: the revision's `create_table`
 /// must not re-issue `CREATE TYPE` for it (#443), and the downgrade keeps it.
+/// Had the revision instead added `member.kind memberkind` to the existing
+/// `member` table, `memberkind` would be `Introduced` with
+/// `EnumTypeCreation::Statement`: no `create_table` creates the type, and an
+/// `add_column` alone never does, so the revision executes the `CREATE TYPE`
+/// before its table operations (#439).
 ///
 /// A type with any column the downgrade leaves standing (a pre-existing
 /// column on a surviving table, including one `include_object` hides from
@@ -599,12 +625,15 @@ pub enum EnumTypeProvenance {
 ///
 /// `declaring_columns` maps each declared type name to the `(table, column)`
 /// pairs that declare it; `added_columns` lists the `(table, column)` pairs
-/// the revision adds. Keyed by type name so the rendered revision is stable.
-/// The Alembic autogenerate comparator consumes this mechanically over FFI
-/// (AGENTS.md § I-1 item 17); it never re-derives a verdict.
+/// the revision adds, and `inline_created_columns` the subset of those on
+/// tables the revision creates (SQLAlchemy creates their enum types inline).
+/// Keyed by type name so the rendered revision is stable. The Alembic
+/// autogenerate comparator consumes this mechanically over FFI (AGENTS.md
+/// § I-1 item 17); it never re-derives a verdict.
 pub fn enum_type_provenance(
     declaring_columns: &BTreeMap<String, Vec<(String, String)>>,
     added_columns: &[(String, String)],
+    inline_created_columns: &[(String, String)],
 ) -> BTreeMap<String, EnumTypeProvenance> {
     declaring_columns
         .iter()
@@ -613,7 +642,12 @@ pub fn enum_type_provenance(
             let provenance = if added == 0 {
                 return None;
             } else if added == columns.len() {
-                EnumTypeProvenance::Introduced
+                let creation = if columns.iter().any(|c| inline_created_columns.contains(c)) {
+                    EnumTypeCreation::Inline
+                } else {
+                    EnumTypeCreation::Statement
+                };
+                EnumTypeProvenance::Introduced { creation }
             } else {
                 EnumTypeProvenance::Reused
             };
@@ -3902,6 +3936,7 @@ mod tests {
 
     #[test]
     fn enum_type_provenance_gives_every_touched_type_one_verdict() {
+        use EnumTypeCreation::{Inline, Statement};
         use EnumTypeProvenance::{Introduced, Reused};
         let col = |t: &str, c: &str| (t.to_string(), c.to_string());
         let mut declaring = BTreeMap::new();
@@ -3917,8 +3952,14 @@ mod tests {
             "ledgerrole".to_string(),
             vec![col("ledger", "role"), col("member", "role")],
         );
-        // add_column only, no create_table at all.
+        // add_column only, no create_table at all: nothing creates the type
+        // inline, so the revision must (#439).
         declaring.insert("memberkind".to_string(), vec![col("member", "kind")]);
+        // Two add_columns of one type, on two surviving tables: one statement.
+        declaring.insert(
+            "auditlevel".to_string(),
+            vec![col("member", "level"), col("account", "level")],
+        );
         // Two columns of one type on one table: one added, one pre-existing.
         declaring.insert(
             "accountkind".to_string(),
@@ -3932,9 +3973,17 @@ mod tests {
             col("card", "size"),
             col("ledger", "role"),
             col("member", "kind"),
+            col("member", "level"),
+            col("account", "level"),
             col("account", "kind"),
         ];
-        let verdicts = enum_type_provenance(&declaring, &added);
+        // The revision creates `category` and `card`; every other table survives.
+        let inline_created = vec![
+            col("category", "color"),
+            col("card", "color"),
+            col("card", "size"),
+        ];
+        let verdicts = enum_type_provenance(&declaring, &added, &inline_created);
         assert_eq!(
             verdicts
                 .iter()
@@ -3942,14 +3991,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("accountkind", Reused),
-                ("cardsize", Introduced),
-                ("categorycolor", Introduced),
+                ("auditlevel", Introduced { creation: Statement }),
+                ("cardsize", Introduced { creation: Inline }),
+                ("categorycolor", Introduced { creation: Inline }),
                 ("ledgerrole", Reused),
-                ("memberkind", Introduced),
+                ("memberkind", Introduced { creation: Statement }),
             ]
         );
-        assert!(enum_type_provenance(&declaring, &[]).is_empty());
-        assert!(enum_type_provenance(&BTreeMap::new(), &added).is_empty());
+        assert!(enum_type_provenance(&declaring, &[], &[]).is_empty());
+        assert!(enum_type_provenance(&BTreeMap::new(), &added, &inline_created).is_empty());
+    }
+
+    #[test]
+    fn enum_type_introduced_by_create_table_and_add_column_is_created_inline() {
+        // `card` is created with `color`; `category` survives and gains `color`
+        // by add_column. SQLAlchemy creates the type with `card`, so the
+        // revision must not also execute a `CREATE TYPE` (DuplicateObject).
+        let col = |t: &str, c: &str| (t.to_string(), c.to_string());
+        let mut declaring = BTreeMap::new();
+        declaring.insert(
+            "categorycolor".to_string(),
+            vec![col("category", "color"), col("card", "color")],
+        );
+        let added = vec![col("category", "color"), col("card", "color")];
+        let verdicts = enum_type_provenance(&declaring, &added, &[col("card", "color")]);
+        assert_eq!(
+            verdicts["categorycolor"],
+            EnumTypeProvenance::Introduced {
+                creation: EnumTypeCreation::Inline
+            }
+        );
     }
 
     #[test]

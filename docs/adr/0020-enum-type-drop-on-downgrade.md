@@ -97,6 +97,12 @@ Rejected alternatives:
   revision's by provenance, so its column keeps the inline-creating
   `sa.Enum` and collides with the leftover. (#443 is the other shape — a
   type a *declared surviving column* uses — and ADR-0021 fixes that one.)
+  When the adopting revision only `add_column`s the type, ADR-0022's
+  guarded creation is a no-op against the orphan and the column adopts it
+  as it stands; the downgrade drops it either way.
+- An `add_column`-only revision that introduces a type also has to create
+  it — SQLAlchemy never does for `add_column` — and ADR-0022 renders that
+  creation ahead of the table ops from the same provenance verdict.
 - A type a table outside ferro's metadata still uses (a hand-made table
   sharing a ferro type name) makes the downgrade fail with a dependency
   error rather than silently keeping the type; the revision is then edited

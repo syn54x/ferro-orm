@@ -127,7 +127,7 @@ jobs:
 
       - name: Static type gate (ty, scoped)
         run: |
-          uv run ty check src/ferro/query tests/test_query_typing.py tests/test_static_contracts.py
+          uv run ty check src/ferro/query tests/test_query_typing.py tests/test_static_contracts.py tests/test_alembic_typing.py
 
       - name: Run IR vector contract harness
         run: |

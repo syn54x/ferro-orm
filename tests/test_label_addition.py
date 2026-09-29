@@ -322,6 +322,57 @@ async def test_autogenerate_emits_label_additions_in_autocommit_block(
 
 
 @pytest.mark.asyncio
+async def test_autogenerate_label_addition_followed_by_a_table_op_is_runnable(
+    db_url, postgres_base_url, db_schema_name, clean_registry
+):
+    """A label addition and a table op in one revision (#447). The
+    autocommit block is rendered through Mako's PythonPrinter, which
+    indents everything after a line ending in : until a blank line
+    closes the block; the renderer used to pre-indent the block body and
+    never close it, so the add_column that followed rendered *inside*
+    the block at a depth that no longer matched and the generated file was
+    an IndentationError. The revision must execute end to end, with
+    the label committed before the table op that follows it."""
+    from tests._alembic_harness import run_generated_code
+
+    await connect(db_url)
+    async with engines.session():
+        await execute("CREATE TYPE \"provider\" AS ENUM ('plaid')")
+        await execute(
+            'CREATE TABLE "feed" ("id" serial PRIMARY KEY, "provider" "provider" NOT NULL)'
+        )
+    reset_engine()
+
+    class Provider(StrEnum):
+        PLAID = "plaid"
+        MX = "mx"
+
+    class Feed(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        provider: Provider
+        note: str | None = None  # new this revision: a table op after the block
+
+    code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
+    assert "autocommit_block" in code
+    assert code.index("ADD VALUE IF NOT EXISTS") < code.index("op.add_column('feed'")
+    # The block's body sits one level in, and the table op is back at the
+    # function's level — not nested inside the autocommit block.
+    with_line = next(line for line in code.splitlines() if "autocommit_block" in line)
+    execute_line = next(line for line in code.splitlines() if "ADD VALUE" in line)
+    add_column_line = next(
+        line for line in code.splitlines() if "op.add_column" in line
+    )
+    indent = lambda line: len(line) - len(line.lstrip())  # noqa: E731
+    assert indent(execute_line) == indent(with_line) + 4, code
+    assert indent(add_column_line) == indent(with_line), code
+
+    run_generated_code(code, postgres_base_url, db_schema_name)
+    await connect(db_url)
+    async with engines.session():
+        assert await _live_labels("provider") == ["plaid", "mx"]
+
+
+@pytest.mark.asyncio
 async def test_autogenerate_emits_nothing_for_enums_in_sync(
     db_url, postgres_base_url, db_schema_name, clean_registry
 ):

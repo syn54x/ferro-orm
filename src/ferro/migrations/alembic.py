@@ -1,11 +1,14 @@
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Literal
 
 try:
     import sqlalchemy as sa
 except ImportError:
     sa = None
+
+if TYPE_CHECKING:
+    from alembic.autogenerate.api import AutogenContext
 
 from .._annotation_utils import _VARCHAR_RE
 from .._core import (
@@ -303,7 +306,9 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
     return None
 
 
-def render_item(type_: str, obj: Any, autogen_context: Any) -> "str | bool":
+def render_item(
+    type_: str, obj: Any, autogen_context: "AutogenContext"
+) -> "str | Literal[False]":
     """Alembic ``render_item`` hook for ferro's bridge — wire it in ``env.py``::
 
         from ferro.migrations import get_metadata, render_item
@@ -326,7 +331,10 @@ def render_item(type_: str, obj: Any, autogen_context: Any) -> "str | bool":
     ``from sqlalchemy.dialects import postgresql`` import the revision needs.
 
     Everything else returns ``False`` so Alembic's own renderers keep their
-    say. A project with its own ``render_item`` composes this one the same
+    say. The signature is Alembic's ``RenderItemFn`` exactly —
+    ``(str, Any, AutogenContext) -> str | Literal[False]`` — so the
+    ``env.py`` line above passes a static type check as written (#446).
+    A project with its own ``render_item`` composes this one the same
     way: call it first, fall through on ``False``. The comparator checks at
     autogenerate time that a revision needing this rendering runs in a
     context that performs it, and refuses with the line to add otherwise —
@@ -378,8 +386,25 @@ try:
 except ImportError:  # pragma: no cover - alembic optional at import time
     _alembic_comparators = None
 
-
 if _alembic_comparators is not None:
+    # Every statement a ferro op executes is rendered by the Rust core and
+    # written into the revision through ``op.execute``. A plain string there
+    # is wrapped in ``sqlalchemy.text()``, which parses ``:word`` as a bind
+    # parameter — so an enum label such as ``':admin'`` failed the upgrade
+    # with "A value is required for bind parameter" (#449) — and whose
+    # backslash escape cannot express every literal either (``':smile:'``
+    # escapes to ``\:smile:``, which ``text()`` never unescapes). The
+    # statement is therefore rendered as ``sa.DDL(...)``: a DDL construct is
+    # never bind-parsed, runs in offline ``--sql`` mode like any other op,
+    # and has one rule, ``%`` is a formatting character and is written
+    # ``%%``, which is total and reversed before execution. The SQL Postgres
+    # runs is byte-identical to what the runtime executes (AGENTS.md § I-1);
+    # the revision file differs from it only by that doubling. Pinned by
+    # ``tests/test_alembic_render_execute.py`` against a live Postgres.
+    def _render_execute(statement: str) -> str:
+        """The one rendering of ``op.execute(...)`` for a Rust-rendered
+        statement: ``op.execute(sa.DDL('<statement>'))`` with ``%`` doubled."""
+        return f"op.execute(sa.DDL({statement.replace('%', '%%')!r}))"
 
     class AddEnumLabelsOp(_MigrateOperation):
         """Autogenerate carrier for one ferro-owned enum type's label drift.
@@ -505,79 +530,124 @@ if _alembic_comparators is not None:
         upgrade_ops.ops[:0] = drifted
 
     # -----------------------------------------------------------------------
-    # Enum type provenance (#438, #443; AGENTS.md § I-1 item 17). ADR-0020
-    # and ADR-0021 carry the rationale and the rules; the slot is in
-    # docs/solutions/patterns/alembic-comparator-slot.md. Three facts the
-    # code cannot say for itself:
+    # Enum type provenance (#438, #443, #439; AGENTS.md § I-1 item 17).
+    # ADR-0020, ADR-0021 and ADR-0022 carry the rationale and the rules; the
+    # slot is in docs/solutions/patterns/alembic-comparator-slot.md. Four
+    # facts the code cannot say for itself:
     #
     # 1. Alembic has no op for the `CREATE TYPE` that `create_table` performs
-    #    (SQLAlchemy emits it inline, unconditionally), so the introduced-side
-    #    carrier renders nothing; only its reverse, the type drop, renders a
-    #    statement.
-    # 2. A reused type gets no carrier at all: its `create_table` columns are
+    #    (SQLAlchemy emits it inline, unconditionally), so for a type a
+    #    `create_table` introduces the carrier renders nothing; only its
+    #    reverse, the type drop, renders a statement.
+    # 2. `add_column` is the one place SQLAlchemy never creates a type, so a
+    #    type introduced by `add_column` alone has nothing creating it and
+    #    the upgrade fails with `UndefinedObject` (#439). For that shape the
+    #    carrier renders an `op.execute` of the Rust-rendered guarded
+    #    `CREATE TYPE` — the statement the auto-migrate create pass executes
+    #    for the same model — ahead of the table ops.
+    # 3. A reused type gets no carrier at all: its `create_table` columns are
     #    rewritten to `postgresql.ENUM(..., create_type=False)` so SQLAlchemy
-    #    does not re-issue that `CREATE TYPE` (#443). `add_column` is left
-    #    alone — Alembic never creates a type there. `repr()` of the type
-    #    omits the flag, so the rendering goes through the bridge's
-    #    `render_item` hook (wired in `env.py`); a revision that needs it in
-    #    a context that lacks it is refused here, with the line to add.
-    # 3. I-12: the comparator reads the revision's table and column ops, so
+    #    does not re-issue that `CREATE TYPE` (#443). Its `add_column`s are
+    #    left alone — they never create a type. `repr()` of the type omits
+    #    the flag, so the rendering goes through the bridge's `render_item`
+    #    hook (wired in `env.py`); a revision that needs it in a context that
+    #    lacks it is refused here, with the line to add.
+    # 4. I-12: the comparator reads the revision's table and column ops, so
     #    it runs at `priority=LAST`, but it inserts at the FRONT of the ops
-    #    list: `UpgradeOps.reverse()` reverses the list, and `DROP TYPE` is
-    #    only legal after every `drop_table` / `drop_column`.
+    #    list: the create statement must precede every `add_column`, and
+    #    `UpgradeOps.reverse()` reverses the list, so `DROP TYPE` lands after
+    #    every `drop_table` / `drop_column`.
     # -----------------------------------------------------------------------
 
     class FerroEnumTypeIntroducedOp(_MigrateOperation):
         """The creating side of a *type drop*: one named enum type this
         revision introduces (every column of it is one the revision adds).
-        Renders nothing — SQLAlchemy emits ``CREATE TYPE`` inline with
-        ``create_table`` — and reverses to :class:`FerroEnumTypeDropOp`. A
-        type the revision merely reuses gets no carrier; its columns are
-        rewritten instead (see ``_reuse_enum_type_on_created_tables``)."""
+        When a ``create_table`` of the revision carries the type, SQLAlchemy
+        emits ``CREATE TYPE`` inline and this renders nothing
+        (``create_statement`` is ``None``). When only ``add_column``s carry
+        it, nothing else creates the type, so this is the *type creation*
+        (CONTEXT.md): a plain ``op.execute`` of the Rust-rendered guarded
+        ``CREATE TYPE``, ahead of the table ops (#439). Reverses to
+        :class:`FerroEnumTypeDropOp` either way. A type the revision merely
+        reuses gets no carrier; its columns are rewritten instead (see
+        ``_reuse_enum_type_on_created_tables``).
 
-        def __init__(self, type_name: str, drop_statement: str) -> None:
+        The op pair is symmetric: each carries both statements, so reversing
+        twice gives back the same op, and each ``to_diff_tuple`` is
+        ``(tag, type_name, <statement this op executes>, <its reverse's>)``
+        — the shape ``alembic.autogenerate.compare_metadata`` reports."""
+
+        def __init__(
+            self, type_name: str, create_statement: "str | None", drop_statement: str
+        ) -> None:
             self.type_name = type_name
+            self.create_statement = create_statement
             self.drop_statement = drop_statement
 
         def to_diff_tuple(self):
-            return ("ferro_enum_type_introduced", self.type_name)
+            return (
+                "ferro_enum_type_introduced",
+                self.type_name,
+                self.create_statement,
+                self.drop_statement,
+            )
 
         def reverse(self) -> "FerroEnumTypeDropOp":
-            return FerroEnumTypeDropOp(self.type_name, self.drop_statement)
+            return FerroEnumTypeDropOp(
+                self.type_name, self.drop_statement, self.create_statement
+            )
 
     class FerroEnumTypeDropOp(_MigrateOperation):
         """The *type drop* (CONTEXT.md): a plain ``op.execute`` of the
         Rust-rendered ``DROP TYPE`` for one enum type the revision being
         reversed introduced — a generated revision does not import ferro to
-        run."""
+        run. Symmetric with :class:`FerroEnumTypeIntroducedOp` (see there)."""
 
-        def __init__(self, type_name: str, statement: str) -> None:
+        def __init__(
+            self, type_name: str, drop_statement: str, create_statement: "str | None"
+        ) -> None:
             self.type_name = type_name
-            self.statement = statement
+            self.drop_statement = drop_statement
+            self.create_statement = create_statement
 
         def to_diff_tuple(self):
-            return ("ferro_enum_type_drop", self.type_name, self.statement)
+            return (
+                "ferro_enum_type_drop",
+                self.type_name,
+                self.drop_statement,
+                self.create_statement,
+            )
 
         def reverse(self) -> "FerroEnumTypeIntroducedOp":
-            return FerroEnumTypeIntroducedOp(self.type_name, self.statement)
+            return FerroEnumTypeIntroducedOp(
+                self.type_name, self.create_statement, self.drop_statement
+            )
 
-    def _revision_added_columns(upgrade_ops, metadata) -> set[tuple[str, str]]:
-        """Every ``(table, column)`` this revision adds: each column of a
+    def _revision_added_columns(
+        upgrade_ops, metadata
+    ) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        """Every ``(table, column)`` this revision adds — each column of a
         table its ``create_table`` ops create, plus each ``add_column`` in
-        its per-table ``ModifyTableOps`` containers."""
+        its per-table ``ModifyTableOps`` containers — and, second, the subset
+        on created tables, whose enum types SQLAlchemy creates inline with
+        the table (an ``add_column`` never creates one; #439)."""
         added: set[tuple[str, str]] = set()
+        inline_created: set[tuple[str, str]] = set()
         for op in upgrade_ops.ops:
             if isinstance(op, _CreateTableOp):
                 table = metadata.tables.get(op.table_name)
                 if table is not None:
-                    added.update((op.table_name, c.name) for c in table.columns)
+                    inline_created.update(
+                        (op.table_name, c.name) for c in table.columns
+                    )
             elif isinstance(op, _ModifyTableOps):
                 for inner in op.ops:
                     if isinstance(inner, _AddColumnOp):
                         added.add((op.table_name, inner.column.name))
             elif isinstance(op, _AddColumnOp):
                 added.add((op.table_name, op.column.name))
-        return added
+        added.update(inline_created)
+        return added, inline_created
 
     def _revision_restored_enum_columns(
         upgrade_ops,
@@ -675,28 +745,32 @@ if _alembic_comparators is not None:
     @_alembic_comparators.dispatch_for("schema", priority=_AlembicDispatchPriority.LAST)
     def _compare_enum_types(autogen_context, upgrade_ops, schemas) -> None:
         """Decide each native enum type's provenance for this revision
-        (ADR-0020, ADR-0021): a ``DROP TYPE`` on downgrade for each type the
-        revision introduces (every column declaring it is one the revision
-        adds — the downgrade drops those columns and tables first, so nothing
-        uses the type when the drop runs), and ``create_type=False`` on every
-        ``create_table`` column of a type it merely reuses."""
+        (ADR-0020, ADR-0021, ADR-0022): a ``DROP TYPE`` on downgrade for each
+        type the revision introduces (every column declaring it is one the
+        revision adds — the downgrade drops those columns and tables first,
+        so nothing uses the type when the drop runs), a ``CREATE TYPE`` ahead
+        of the table ops for an introduced type no ``create_table`` of the
+        revision creates inline (``add_column`` only; #439), and
+        ``create_type=False`` on every ``create_table`` column of a type it
+        merely reuses."""
         if autogen_context.dialect.name != "postgresql":
             return
         metadata = autogen_context.metadata
         if metadata is None:
             return
 
-        added = _revision_added_columns(upgrade_ops, metadata)
+        added, inline_created = _revision_added_columns(upgrade_ops, metadata)
         if not added:
             return
 
         # Every native enum type with the columns that use it once the
         # downgrade has run: the model's declared columns plus the columns
         # this revision drops, which the downgrade restores before the type
-        # drop would run.
+        # drop would run. Labels are the declared ones: only a declared type
+        # can be introduced (every added column is a declared column).
+        declared = _declared_enum_types(metadata)
         declaring: dict[str, list[tuple[str, str]]] = {
-            name: list(enum_type.columns)
-            for name, enum_type in _declared_enum_types(metadata).items()
+            name: list(enum_type.columns) for name, enum_type in declared.items()
         }
         for type_name, columns in _revision_restored_enum_columns(upgrade_ops).items():
             declaring.setdefault(type_name, []).extend(columns)
@@ -704,7 +778,12 @@ if _alembic_comparators is not None:
             return
 
         verdicts = json.loads(
-            _plan_enum_type_provenance(json.dumps(declaring), json.dumps(sorted(added)))
+            _plan_enum_type_provenance(
+                json.dumps(declaring),
+                json.dumps(sorted(added)),
+                json.dumps(sorted(inline_created)),
+                json.dumps({name: t.labels for name, t in declared.items()}),
+            )
         )
         _reuse_enum_type_on_created_tables(
             autogen_context,
@@ -712,7 +791,9 @@ if _alembic_comparators is not None:
             {v["name"] for v in verdicts if v["provenance"] == "reused"},
         )
         upgrade_ops.ops[:0] = [
-            FerroEnumTypeIntroducedOp(v["name"], v["drop_statement"])
+            FerroEnumTypeIntroducedOp(
+                v["name"], v["create_statement"], v["drop_statement"]
+            )
             for v in verdicts
             if v["provenance"] == "introduced"
         ]
@@ -942,23 +1023,27 @@ if _alembic_comparators is not None:
                 f"op.drop_constraint({name!r}, {op.table_name!r}, type_='check')"
                 for name in reversed(op.names)
             ]
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(FerroCheckRebuildOp)
     def _render_check_rebuilds(autogen_context, op: FerroCheckRebuildOp) -> list[str]:
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(FerroCheckDropOp)
     def _render_check_drops(autogen_context, op: FerroCheckDropOp) -> list[str]:
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(FerroEnumTypeIntroducedOp)
-    def _render_enum_type_introduced(autogen_context, op) -> list[str]:
-        return []
+    def _render_enum_type_introduced(
+        autogen_context, op: FerroEnumTypeIntroducedOp
+    ) -> list[str]:
+        if op.create_statement is None:
+            return []
+        return [_render_execute(op.create_statement)]
 
     @_alembic_renderers.dispatch_for(FerroEnumTypeDropOp)
     def _render_enum_type_drop(autogen_context, op: FerroEnumTypeDropOp) -> list[str]:
-        return [f"op.execute({op.statement!r})"]
+        return [_render_execute(op.drop_statement)]
 
     @_alembic_renderers.dispatch_for(AddEnumLabelsOp)
     def _render_add_enum_labels(autogen_context, op: AddEnumLabelsOp) -> list[str]:
@@ -975,8 +1060,20 @@ if _alembic_comparators is not None:
             # Outside the migration transaction: ALTER TYPE ... ADD VALUE is
             # non-transactional before PG12, and the label must be committed
             # before any table op below can reference it.
+            #
+            # Alembic renders each op's lines through Mako's PythonPrinter,
+            # which tracks block structure itself: a line ending in ':'
+            # indents everything after it, and only a blank line closes the
+            # block again (the same shape Alembic's own batch renderer
+            # emits for `with op.batch_alter_table(...) as batch_op:`). The
+            # body lines therefore carry no indentation of their own, and
+            # the trailing blank line is what puts the next op back at the
+            # function's level — without it every op after this one rendered
+            # inside the autocommit block, and the pre-indented body made
+            # the file an IndentationError (#447).
             lines.append("with op.get_context().autocommit_block():")
-            lines.extend(f"    op.execute({stmt!r})" for stmt in op.statements)
+            lines.extend(_render_execute(stmt) for stmt in op.statements)
+            lines.append("")
         return lines
 
     # -----------------------------------------------------------------------
@@ -1419,10 +1516,10 @@ if _alembic_comparators is not None:
 
     @_alembic_renderers.dispatch_for(FerroRowSecurityOp)
     def _render_row_security(autogen_context, op: FerroRowSecurityOp) -> list[str]:
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
 
     @_alembic_renderers.dispatch_for(FerroRowSecurityDropOp)
     def _render_row_security_drops(
         autogen_context, op: FerroRowSecurityDropOp
     ) -> list[str]:
-        return [f"op.execute({stmt!r})" for stmt in op.statements]
+        return [_render_execute(stmt) for stmt in op.statements]
