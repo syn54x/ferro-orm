@@ -149,7 +149,7 @@ The `migrate_updates` step that alters existing schema objects — tables and fe
 _Avoid_: Update pass, schema sync, drift repair
 
 **Migration** (in-house):
-The numbered unit of schema-and-data change in ferro's own migration system: what a developer reviews, applies, and reverts as one thing. It holds one or more ordered *steps*; a one-step migration is a single file, a multi-step one is a directory. Numbered sequentially, so numbers count migrations, never steps. Distinct from a *generated revision*, which is Alembic's unit.
+The numbered unit of schema-and-data change in ferro's own migration system: what a developer reviews, applies, and reverts as one thing. It is a directory holding one or more ordered *steps* and its *schema snapshot*. Numbered sequentially, so numbers count migrations, never steps. Distinct from a *generated revision*, which is Alembic's unit.
 _Avoid_: Change, change set, revision, version
 
 **Step**:
@@ -159,6 +159,14 @@ _Avoid_: Operation, phase, sub-migration
 **Data step**:
 A Python step that moves or transforms rows and never changes schema. It sees the models as they were when the previous migration finished (*historical models*), not the models in the codebase today, so it keeps working after the codebase moves on.
 _Avoid_: Data migration script, RunPython, backfill file
+
+**Schema snapshot**:
+The declared modelset as it was when a migration was generated, stored inside the migration and linked to the snapshot before it. It is the previous state the generator diffs against and the state *historical models* are built from — what the models said, never what the migration's SQL would produce.
+_Avoid_: IR dump, state file, history, replayed state
+
+**Drift**:
+A live database whose *ferro-owned artifacts* disagree with the *schema snapshot* of the last migration applied to it. A database behind the newest migration is pending, not drifted. Drift is reported, never repaired by the migration system and never a generator input.
+_Avoid_: Schema mismatch, out-of-sync, dirty database
 
 **Ferro-owned artifact**:
 A schema object ferro may reconcile to match the declared model. Indexes and constraints are ferro-owned by naming (`idx_`, `uq_`, `fk_`, `ck_`); native enum types are ferro-owned by derivation — the type's name matches the name ferro derives from the model. A generated revision owns an enum type a third way, by provenance: it introduces every column of the type, so its downgrade drops the type (see *Type drop*); a type it adds a column of but does not introduce is one it reuses, never creates (see *Type reuse*). Artifacts owned none of these ways belong to the user and are never altered or dropped.
