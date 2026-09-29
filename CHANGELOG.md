@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.21.2 (2026-09-29)
+
+### Bug Fixes
+
+- **alembic**: Create add_column-only enum types, type render_item, close the label-addition block
+  ([#448](https://github.com/syn54x/ferro-orm/pull/448),
+  [`dc49156`](https://github.com/syn54x/ferro-orm/commit/dc49156be6b8c998fd726230bc5a1ffb5fce15c4))
+
+
 ## v0.21.1 (2026-09-28)
 
 ### Bug Fixes
