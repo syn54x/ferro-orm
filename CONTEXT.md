@@ -148,6 +148,18 @@ _Avoid_: Bootstrap, ensure-tables, table sync
 The `migrate_updates` step that alters existing schema objects — tables and ferro-owned enum types — to match the registered models; the only authority for DDL against an object that already exists. Within one table, column changes land before the indexes and constraints that reference them; label additions land before any table's changes.
 _Avoid_: Update pass, schema sync, drift repair
 
+**Migration** (in-house):
+The numbered unit of schema-and-data change in ferro's own migration system: what a developer reviews, applies, and reverts as one thing. It holds one or more ordered *steps*; a one-step migration is a single file, a multi-step one is a directory. Numbered sequentially, so numbers count migrations, never steps. Distinct from a *generated revision*, which is Alembic's unit.
+_Avoid_: Change, change set, revision, version
+
+**Step**:
+One file inside a migration, applied and recorded on its own so a failure resumes where it stopped. A DDL step is SQL rendered by the same functions the reconciliation pass runs; a *data step* is Python.
+_Avoid_: Operation, phase, sub-migration
+
+**Data step**:
+A Python step that moves or transforms rows and never changes schema. It sees the models as they were when the previous migration finished (*historical models*), not the models in the codebase today, so it keeps working after the codebase moves on.
+_Avoid_: Data migration script, RunPython, backfill file
+
 **Ferro-owned artifact**:
 A schema object ferro may reconcile to match the declared model. Indexes and constraints are ferro-owned by naming (`idx_`, `uq_`, `fk_`, `ck_`); native enum types are ferro-owned by derivation — the type's name matches the name ferro derives from the model. A generated revision owns an enum type a third way, by provenance: it introduces every column of the type, so its downgrade drops the type (see *Type drop*); a type it adds a column of but does not introduce is one it reuses, never creates (see *Type reuse*). Artifacts owned none of these ways belong to the user and are never altered or dropped.
 _Avoid_: Managed index, system constraint, internal index
