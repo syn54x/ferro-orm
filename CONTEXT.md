@@ -157,11 +157,31 @@ One file inside a migration, applied and recorded on its own so a failure resume
 _Avoid_: Operation, phase, sub-migration
 
 **Data step**:
-A Python step that moves or transforms rows and never changes schema. It sees the models as they were when the previous migration finished (*historical models*), not the models in the codebase today, so it keeps working after the codebase moves on.
+A Python step that moves or transforms rows and never changes schema. It sees *historical models*, never the models in the codebase today, so it keeps working after the codebase moves on. Every data step is either an *atomic data step* or a *chunked data step*; there is no third shape.
 _Avoid_: Data migration script, RunPython, backfill file
 
+**Historical model**:
+A throwaway class a data step queries and saves through, built from a *schema snapshot* rather than from code: the columns present in either the previous migration's snapshot or the migration's own, which is the table as it stands between that migration's expand and contract steps. It carries columns only — no relations, methods or validators.
+_Avoid_: Frozen model, snapshot model, old model
+
+**Atomic data step**:
+A data step that runs as one transaction with its step record committed inside it, so the whole step lands or none of it does. The default shape.
+_Avoid_: Transactional step, small data step
+
+**Chunked data step**:
+A data step the runner drives in batches over one declared query, one transaction per batch with the *cursor* committed in it, so an interrupted step resumes at its last completed batch and never replays a row.
+_Avoid_: Batched migration, non-transactional step, manual loop
+
+**Cursor**:
+The position of the last row of a chunked data step's last committed batch — its order-key values, primary key included — from which the next batch, or the next run, continues.
+_Avoid_: Offset, progress marker, checkpoint
+
+**No-transaction step**:
+A DDL step that declares, in its file, that the runner opens no transaction around it, so statements that refuse to run inside one (`CREATE INDEX CONCURRENTLY`, SQLite's foreign-key pragma) can. Because its record can no longer commit with its DDL, it must be safe to re-run from its first statement.
+_Avoid_: No-tx step, autocommit step, unsafe step
+
 **Schema snapshot**:
-The declared modelset as it was when a migration was generated, stored inside the migration and linked to the snapshot before it. It is the previous state the generator diffs against and the state *historical models* are built from — what the models said, never what the migration's SQL would produce.
+The declared modelset as it was when a migration was generated, stored inside the migration and linked to the snapshot before it. It is the previous state the generator diffs against and one of the two states *historical models* are built from — what the models said, never what the migration's SQL would produce.
 _Avoid_: IR dump, state file, history, replayed state
 
 **Drift**:
