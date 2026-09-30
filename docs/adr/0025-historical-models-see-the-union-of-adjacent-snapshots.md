@@ -6,3 +6,10 @@ A data step runs between its migration's expand and contract DDL steps, when the
 
 - **The previous migration's snapshot alone** (the original historical-models decision). Rejected: a backfill of a column this migration adds cannot see the column.
 - **An intermediate `ir.json` written by the generator after the expand steps.** Rejected: a second snapshot per migration, unavailable to hand-written `--empty` migrations, and a second file format for the integrity floor to checksum.
+
+## Amended by the model-change casebook (#481)
+
+Two cases the union alone gets wrong:
+
+- **A column present only in the migration's own snapshot is nullable in the historical model**, whatever the declaration says. The expand step created it nullable and every row holds `NULL` until the backfill runs; a historical class that took the own snapshot's `NOT NULL` literally would hydrate `None` into a required field on every row.
+- **A rename is one column under two names, not two columns.** The plain union of `name` (previous) and `full_name` (own) describes a table that never exists. When a rename hint is honoured, the union applies it; a rename that reaches a data step without a hint is drop-plus-add, and the historical model sees only the new column, which is what the live table holds. The same rule covers renamed enum labels.
