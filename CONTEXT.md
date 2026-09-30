@@ -153,7 +153,7 @@ The numbered unit of schema-and-data change in ferro's own migration system: wha
 _Avoid_: Change, change set, revision, version
 
 **Step**:
-One file inside a migration, applied and recorded on its own so a failure resumes where it stopped. A DDL step is SQL rendered by the same functions the reconciliation pass runs; a *data step* is Python.
+One file inside a migration, applied and recorded on its own so a failure resumes where it stopped. A DDL step is SQL rendered by the same functions the reconciliation pass runs, once per *target dialect*; a *data step* is Python and dialect-neutral.
 _Avoid_: Operation, phase, sub-migration
 
 **Data step**:
@@ -161,7 +161,7 @@ A Python step that moves or transforms rows and never changes schema. It sees *h
 _Avoid_: Data migration script, RunPython, backfill file
 
 **Historical model**:
-A throwaway class a data step queries and saves through, built from a *schema snapshot* rather than from code: the columns present in either the previous migration's snapshot or the migration's own, which is the table as it stands between that migration's expand and contract steps. It carries columns only — no relations, methods or validators.
+A throwaway class a data step queries and saves through, built from a *schema snapshot* rather than from code: the columns present in either the previous migration's snapshot or the migration's own, which is the table as it stands between that migration's expand and contract steps: a column only the migration adds is nullable there, and a renamed column appears once, under its new name. It carries columns only — no relations, methods or validators.
 _Avoid_: Frozen model, snapshot model, old model
 
 **Atomic data step**:
@@ -183,6 +183,14 @@ _Avoid_: No-tx step, autocommit step, unsafe step
 **Schema snapshot**:
 The declared modelset as it was when a migration was generated, stored inside the migration and linked to the snapshot before it. It is the previous state the generator diffs against and one of the two states *historical models* are built from — what the models said, never what the migration's SQL would produce.
 _Avoid_: IR dump, state file, history, replayed state
+
+**Target dialect**:
+A database dialect a project's migrations are generated for, declared in its configuration per database alias. A migration carries one rendering of each DDL step per target dialect and nothing for any other.
+_Avoid_: Backend, supported database, flavor
+
+**Schema change**:
+A difference between two *schema snapshots* that renders DDL. A difference that renders none (a Python default, a back-reference) is not a schema change and generates no migration.
+_Avoid_: Model change, diff, IR change
 
 **Drift**:
 A live database whose *ferro-owned artifacts* disagree with the *schema snapshot* of the last migration applied to it. A database behind the newest migration is pending, not drifted. Drift is reported, never repaired by the migration system and never a generator input.
