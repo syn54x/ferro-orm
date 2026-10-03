@@ -156,6 +156,14 @@ _Avoid_: Change, change set, revision, version
 One file inside a migration, applied and recorded on its own so a failure resumes where it stopped. A DDL step is SQL rendered by the same functions the reconciliation pass runs, once per *target dialect*; a *data step* is Python and dialect-neutral.
 _Avoid_: Operation, phase, sub-migration
 
+**Down** (of a step):
+The reverse of a *step*, kept beside it: what a *run* executes to revert that step. Every step has one. A DDL step's down returns the schema to what the previous migration's *schema snapshot* declares, never the rows a drop removed. A down either does work, declares with a reason that there is nothing to reverse, or declares the step an *irreversible step*.
+_Avoid_: Rollback (a transaction rolls back), downgrade (Alembic's word), undo
+
+**Irreversible step**:
+A step whose *down* is a declaration, with a stated reason, that it cannot be reversed. A *run* that would have to revert it refuses before reverting anything. Only a person declares one; a generated step is never irreversible.
+_Avoid_: One-way step, forward-only step, missing down
+
 **Data step**:
 A Python step that moves or transforms rows and never changes schema. It sees *historical models*, never the models in the codebase today, so it keeps working after the codebase moves on. Every data step is either an *atomic data step* or a *chunked data step*; there is no third shape.
 _Avoid_: Data migration script, RunPython, backfill file
@@ -181,7 +189,7 @@ A DDL step that declares, in its file, that the runner opens no transaction arou
 _Avoid_: No-tx step, autocommit step, unsafe step
 
 **Run**:
-One invocation of the in-house migration runner against one database, from taking the *run lock* to releasing it. It applies zero or more pending *steps*, in order, and stops at the first that fails.
+One invocation of the in-house migration runner against one database, from taking the *run lock* to releasing it. It goes one way: it applies zero or more pending *steps* in order, or reverts applied steps in reverse order through their *downs*, and stops at the first that fails.
 _Avoid_: Deploy, session, migration (a run applies migrations; it is not one)
 
 **Run lock**:
@@ -193,7 +201,7 @@ The table inside a database where the in-house migration system keeps one *step 
 _Avoid_: Ledger, history table, version table, migration log
 
 **Step record**:
-One row of the *tracking table*: a *step* that was started on this database, the checksum of the file that was run and of its migration's *schema snapshot*, and whether it finished. A record that is started and not finished marks where the next *run* resumes; a chunked data step's record also carries its *cursor*.
+One row of the *tracking table*: a *step* that was started on this database, the checksum of the file that was run and of its migration's *schema snapshot*, and whether it finished. A record that is started and not finished marks where the next *run* resumes; a chunked data step's record also carries its *cursor*. A chunked step being reverted keeps its record, marked as reverting and carrying the down's own cursor, until its last batch.
 _Avoid_: Migration row, version row, applied migration
 
 **Baseline**:
