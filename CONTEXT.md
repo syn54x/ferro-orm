@@ -180,6 +180,14 @@ _Avoid_: Offset, progress marker, checkpoint
 A DDL step that declares, in its file, that the runner opens no transaction around it, so statements that refuse to run inside one (`CREATE INDEX CONCURRENTLY`, SQLite's foreign-key pragma) can. Because its record can no longer commit with its DDL, it must be safe to re-run from its first statement.
 _Avoid_: No-tx step, autocommit step, unsafe step
 
+**Run**:
+One invocation of the in-house migration runner against one database, from taking the *run lock* to releasing it. It applies zero or more pending *steps*, in order, and stops at the first that fails.
+_Avoid_: Deploy, session, migration (a run applies migrations; it is not one)
+
+**Run lock**:
+The lock that admits one *run* per database at a time. It is released by the database or the operating system when the running process dies, never by a timeout or an operator, so a crashed run can always be told from a live one.
+_Avoid_: Migration lock, lock row, mutex
+
 **Schema snapshot**:
 The declared modelset as it was when a migration was generated, stored inside the migration and linked to the snapshot before it. It is the previous state the generator diffs against and one of the two states *historical models* are built from — what the models said, never what the migration's SQL would produce.
 _Avoid_: IR dump, state file, history, replayed state
