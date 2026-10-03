@@ -188,6 +188,14 @@ _Avoid_: Deploy, session, migration (a run applies migrations; it is not one)
 The lock that admits one *run* per database at a time. It is released by the database or the operating system when the running process dies, never by a timeout or an operator, so a crashed run can always be told from a live one.
 _Avoid_: Migration lock, lock row, mutex
 
+**Tracking table**:
+The table inside a database where the in-house migration system keeps one *step record* per step it has started there. It says where that database stands now, not what was ever done to it: reverting a step removes its record.
+_Avoid_: Ledger, history table, version table, migration log
+
+**Step record**:
+One row of the *tracking table*: a *step* that was started on this database, the checksum of the file that was run and of its migration's *schema snapshot*, and whether it finished. A record that is started and not finished marks where the next *run* resumes; a chunked data step's record also carries its *cursor*.
+_Avoid_: Migration row, version row, applied migration
+
 **Schema snapshot**:
 The declared modelset as it was when a migration was generated, stored inside the migration and linked to the snapshot before it. It is the previous state the generator diffs against and one of the two states *historical models* are built from — what the models said, never what the migration's SQL would produce.
 _Avoid_: IR dump, state file, history, replayed state
