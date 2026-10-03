@@ -185,8 +185,12 @@ The position of the last row of a chunked data step's last committed batch — i
 _Avoid_: Offset, progress marker, checkpoint
 
 **No-transaction step**:
-A DDL step that declares, in its file, that the runner opens no transaction around it, so statements that refuse to run inside one (`CREATE INDEX CONCURRENTLY`, SQLite's foreign-key pragma) can. Because its record can no longer commit with its DDL, it must be safe to re-run from its first statement.
+A DDL step that declares, in its file, that the runner opens no transaction around it, so statements that refuse to run inside one (`CREATE INDEX CONCURRENTLY`) can. Because its record can no longer commit with its DDL, it must be safe to re-run from its first statement. A *table rebuild* is not one.
 _Avoid_: No-tx step, autocommit step, unsafe step
+
+**Table rebuild**:
+The SQLite rendering of a schema change SQLite cannot make in place: the table is created again in its new shape under a temporary name, its rows are copied across, and it replaces the old table. One DDL step per rebuilt table, atomic, carrying every change that migration makes to the table. It needs foreign-key enforcement off while it runs, which its file declares and the runner arranges. It refuses a live table holding anything the *schema snapshot* does not declare, since the copy would discard it. Distinct from a *constraint rebuild*, which touches no rows.
+_Avoid_: Batch operation, table recreate, copy-and-move, 12-step
 
 **Run**:
 One invocation of the in-house migration runner against one database, from taking the *run lock* to releasing it. It goes one way: it applies zero or more pending *steps* in order, or reverts applied steps in reverse order through their *downs*, and stops at the first that fails.
