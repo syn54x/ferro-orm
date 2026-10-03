@@ -196,6 +196,10 @@ _Avoid_: Ledger, history table, version table, migration log
 One row of the *tracking table*: a *step* that was started on this database, the checksum of the file that was run and of its migration's *schema snapshot*, and whether it finished. A record that is started and not finished marks where the next *run* resumes; a chunked data step's record also carries its *cursor*.
 _Avoid_: Migration row, version row, applied migration
 
+**Baseline**:
+Recording migrations as applied on a database that already has their schema, built by auto-migrate or Alembic before the project had migrations. Nothing is executed: the database is checked against the *schema snapshot* of the last migration being recorded, and the *step records* are written only when it shows no *drift*. A baselined migration is never reverted by running its down steps, since it created nothing there; undoing a baseline removes the records.
+_Avoid_: Fake, stamp, mark-applied
+
 **Schema snapshot**:
 The declared modelset as it was when a migration was generated, stored inside the migration and linked to the snapshot before it. It is the previous state the generator diffs against and one of the two states *historical models* are built from — what the models said, never what the migration's SQL would produce.
 _Avoid_: IR dump, state file, history, replayed state
@@ -209,7 +213,7 @@ A difference between two *schema snapshots* that renders DDL. A difference that 
 _Avoid_: Model change, diff, IR change
 
 **Drift**:
-A live database whose *ferro-owned artifacts* disagree with the *schema snapshot* of the last migration applied to it. A database behind the newest migration is pending, not drifted. Drift is reported, never repaired by the migration system and never a generator input.
+A live database whose *ferro-owned artifacts* disagree with the *schema snapshot* of the last migration applied to it. A database behind the newest migration is pending, not drifted. A live table the snapshot does not declare is not drift: it was never ferro's. Drift is reported, never repaired by the migration system and never a generator input.
 _Avoid_: Schema mismatch, out-of-sync, dirty database
 
 **Ferro-owned artifact**:
