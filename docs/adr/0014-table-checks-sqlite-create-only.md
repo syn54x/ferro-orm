@@ -9,3 +9,5 @@ Rejected alternatives:
 - **Postgres-only (skip SQLite create too)**: leaves a fresh SQLite schema unenforced with no path except "use Postgres," for a constraint SQLite's `CREATE TABLE` already supports.
 - **Elide on create to match column `db_check`**: copies a limitation of the ALTER-shaped column-check path rather than of SQLite.
 - **Table-rebuild on SQLite reconcile**: a half-working in-place migrate; Alembic's batch mode is the reviewed-rebuild door.
+
+Amended by ADR-0034 (2026-10-03): the reconciliation pass still warns and skips, but the reviewed-rebuild door is an in-house migration, whose SQLite rendering writes the rebuild. The column `db_check` elision ends with it: a column check renders inline on SQLite.
