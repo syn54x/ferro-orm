@@ -212,6 +212,18 @@ _Avoid_: Backend, supported database, flavor
 A difference between two *schema snapshots* that renders DDL. A difference that renders none (a Python default, a back-reference) is not a schema change and generates no migration.
 _Avoid_: Model change, diff, IR change
 
+**Rename hint**:
+A declaration on a model or enum saying what a column, a table or an enum label was called before. Without one, a rename is indistinguishable from a drop and an add, and generates exactly that. A hint is live only while the previous *schema snapshot* still holds the old name and lacks the new one; after its migration is generated it is inert and may be deleted. An enum type's rename needs no hint: it is read off the columns that moved to it.
+_Avoid_: Rename marker, rename directive, migration hint
+
+**Destructive step**:
+A generated DDL step that discards data when it runs: it drops a column, a table or an enum type. It is always generated and says so in its file; review is the gate, never a flag or a refusal.
+_Avoid_: Dangerous step, unsafe step, data-loss migration
+
+**Data-dependent step**:
+A generated DDL step that discards nothing but fails on a database whose rows do not satisfy it: a type change whose cast fails, a `NOT NULL`, a unique or a check over existing rows, the removal of an enum label rows still carry. It says so in its file.
+_Avoid_: Risky step, may-fail step, conditional step
+
 **Drift**:
 A live database whose *ferro-owned artifacts* disagree with the *schema snapshot* of the last migration applied to it. A database behind the newest migration is pending, not drifted. A live table the snapshot does not declare is not drift: it was never ferro's. Drift is reported, never repaired by the migration system and never a generator input.
 _Avoid_: Schema mismatch, out-of-sync, dirty database
