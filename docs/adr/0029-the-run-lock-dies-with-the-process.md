@@ -18,4 +18,4 @@ The SQLite half has no precedent. Of twelve tools read at source (2026-10), eigh
 - On Postgres the lock is **verified, not trusted**: after acquiring, and before each step and each batch, the runner checks on the lock connection that its session still holds the lock. A transaction-mode pooler fails the first check and the run is refused ("migrations need a direct or session-mode connection"); a lock connection dropped mid-run aborts before the next step or batch, and the next run resumes from the recorded position.
 - Every batch's write transaction on SQLite still opens with `BEGIN IMMEDIATE` (ADR-0024); the file lock excludes other runs, not the application's own writers.
 - The file lock is as reliable as SQLite's own locking, which is to say not on network filesystems; ferro makes no promise there that SQLite does not.
-- Every mutating verb takes the run lock; `status` takes none. A command over several database aliases runs them one after another, each under its own lock.
+- Every mutating verb takes the run lock; `status` takes none. A command acts on exactly one database (ADR-0036), so a run never spans two.
