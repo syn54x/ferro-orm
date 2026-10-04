@@ -39,7 +39,7 @@ Three decisions are in that file.
 - `ctx.dialect`: the target dialect token, for raw SQL that must branch.
 - `ctx.log`: a stdlib logger named for the step.
 
-It has no `transaction()`, no batch counters, no alias, migration number or direction, and no path to today's models. A nested `ferro.transaction()` inside a step is a savepoint, as in application code. Querying a class imported from the codebase raises and names `ctx.models.<Name>`.
+It has no `transaction()`, no batch counters, no database name, migration number or direction, and no path to today's models. A nested `ferro.transaction()` inside a step is a savepoint, as in application code. Querying a class imported from the codebase raises and names `ctx.models.<Name>`.
 
 ## Considered options
 

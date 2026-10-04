@@ -224,8 +224,12 @@ _Avoid_: Fake, stamp, mark-applied
 The declared modelset as it was when a migration was generated, stored inside the migration and linked to the snapshot before it. It is the previous state the generator diffs against and one of the two states *historical models* are built from — what the models said, never what the migration's SQL would produce.
 _Avoid_: IR dump, state file, history, replayed state
 
+**Database** (configured):
+A named set of models whose tables live together, declared in project configuration. It has one migration lineage. Many connections may reach one database, and one database's migrations may be run against many servers: a tenant per server, SQLite locally and Postgres in production. A model belongs to a database by the module that defines it, never by a declaration on the class.
+_Avoid_: Alias, connection name, app
+
 **Target dialect**:
-A database dialect a project's migrations are generated for, declared in its configuration per database alias. A migration carries one rendering of each DDL step per target dialect and nothing for any other.
+A database dialect a project's migrations are generated for, declared in its configuration per *database*. A migration carries one rendering of each DDL step per target dialect and nothing for any other.
 _Avoid_: Backend, supported database, flavor
 
 **Schema change**:
