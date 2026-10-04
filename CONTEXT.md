@@ -165,15 +165,15 @@ A step whose *down* is a declaration, with a stated reason, that it cannot be re
 _Avoid_: One-way step, forward-only step, missing down
 
 **Data step**:
-A Python step that moves or transforms rows and never changes schema. It sees *historical models*, never the models in the codebase today, so it keeps working after the codebase moves on. Every data step is either an *atomic data step* or a *chunked data step*; there is no third shape.
+A Python step that moves or transforms rows and never changes schema. It sees *historical models*, never the models in the codebase today, so it keeps working after the codebase moves on. Every data step is either an *atomic data step* or a *chunked data step*; there is no third shape, and the step says which it is: neither is assumed.
 _Avoid_: Data migration script, RunPython, backfill file
 
 **Historical model**:
-A throwaway class a data step queries and saves through, built from a *schema snapshot* rather than from code: the columns present in either the previous migration's snapshot or the migration's own, which is the table as it stands between that migration's expand and contract steps: a column only the migration adds is nullable there, and a renamed column appears once, under its new name. It carries columns only — no relations, methods or validators.
+A throwaway class a data step queries and saves through, built from a *schema snapshot* rather than from code: the columns present in either the previous migration's snapshot or the migration's own, which is the table as it stands between that migration's expand and contract steps: a column only the migration adds is nullable there, and a renamed column appears once, under its new name. It carries columns only — no relations, methods or validators. Every table in that union has one, a many-to-many join table included, though no class was ever written for it.
 _Avoid_: Frozen model, snapshot model, old model
 
 **Atomic data step**:
-A data step that runs as one transaction with its step record committed inside it, so the whole step lands or none of it does. The default shape.
+A data step that runs as one transaction with its step record committed inside it, so the whole step lands or none of it does. The shape for work small enough to hold in one transaction.
 _Avoid_: Transactional step, small data step
 
 **Chunked data step**:
@@ -183,6 +183,14 @@ _Avoid_: Batched migration, non-transactional step, manual loop
 **Cursor**:
 The position of the last row of a chunked data step's last committed batch — its order-key values, primary key included — from which the next batch, or the next run, continues.
 _Avoid_: Offset, progress marker, checkpoint
+
+**Step context**:
+What a *data step* is handed to do its work: the *historical models*, raw SQL on the step's own transaction, the *target dialect*, and a log. It offers no way to open, commit or leave that transaction, and no way to the models in the codebase today.
+_Avoid_: Migration context, environment, connection
+
+**Unwritten step**:
+A scaffolded *data step* that still holds the marker standing where only a person can supply the answer, such as the value an existing row should get. A migration holding one is refused when it is loaded, so it never runs and never writes a placeholder.
+_Avoid_: Stub, placeholder step, empty step
 
 **No-transaction step**:
 A DDL step that declares, in its file, that the runner opens no transaction around it, so statements that refuse to run inside one (`CREATE INDEX CONCURRENTLY`) can. Because its record can no longer commit with its DDL, it must be safe to re-run from its first statement. A *table rebuild* is not one.
