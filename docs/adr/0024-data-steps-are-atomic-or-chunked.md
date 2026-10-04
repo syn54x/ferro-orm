@@ -4,6 +4,8 @@ A data step in an in-house migration is either **atomic** (one transaction; the 
 
 Amended by ADR-0034: a SQLite table rebuild is not a no-transaction step. It cannot be re-run from its first statement, so it declares `-- ferro: foreign-keys-off` and stays atomic, with the runner owning the pragma around its transaction.
 
+Amended by ADR-0035: atomic is no longer implied. A data step declares `@atomic` or `@chunked(…)`, and an undecorated one is refused at load. The scaffold's refused body is spelled `todo("…")`.
+
 ## Considered options
 
 - **A boolean `transactional` flag with a developer-owned chunk loop.** Rejected: see above. It is the "best-effort" shape I-6 rules out.
