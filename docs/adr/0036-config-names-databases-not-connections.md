@@ -1,5 +1,7 @@
 # Config names databases, not connections, and a model's database is its defining module
 
+Amended by ADR-0039: the same keys may live in a `ferro.toml` (no `tool.ferro` prefix), every consumer reads config through `FerroSettings`, and a directory holding both files is refused. Amended by ADR-0038: the run-lock key no longer follows `tracking_schema`, and the connection-to-database binding is the `database=` and `using=` arguments of the `ferro.migrations` calls.
+
 A project with one database configures the in-house tooling in three lines of `pyproject.toml`:
 
 ```toml
