@@ -189,8 +189,12 @@ What a *data step* is handed to do its work: the *historical models*, raw SQL on
 _Avoid_: Migration context, environment, connection
 
 **Unwritten step**:
-A scaffolded *data step* that still holds the marker standing where only a person can supply the answer, such as the value an existing row should get. A migration holding one is refused when it is loaded, so it never runs and never writes a placeholder.
+A scaffolded step that still lacks what only a person can supply: a *data step* holding the marker where a value belongs, or a hand-requested SQL step with no statement. A migration holding one is refused when it is loaded, so it never runs and never writes a placeholder.
 _Avoid_: Stub, placeholder step, empty step
+
+**Guard step**:
+A generated, complete *data step* that stands where a scaffolded backfill would, written when the developer states that no row needs a value. It changes nothing and fails the migration if such a row exists.
+_Avoid_: Assertion step, skipped backfill, no-op step
 
 **No-transaction step**:
 A DDL step that declares, in its file, that the runner opens no transaction around it, so statements that refuse to run inside one (`CREATE INDEX CONCURRENTLY`) can. Because its record can no longer commit with its DDL, it must be safe to re-run from its first statement. A *table rebuild* is not one.
@@ -231,6 +235,10 @@ _Avoid_: Alias, connection name, app
 **Target dialect**:
 A database dialect a project's migrations are generated for, declared in its configuration per *database*. A migration carries one rendering of each DDL step per target dialect and nothing for any other.
 _Avoid_: Backend, supported database, flavor
+
+**Rendering** (of a DDL step):
+One *target dialect*'s SQL for a DDL step. Every DDL step has a rendering for every target dialect under the same step number; where a dialect has no work the rendering says so explicitly.
+_Avoid_: Variant, dialect file, translation
 
 **Schema change**:
 A difference between two *schema snapshots* that renders DDL. A difference that renders none (a Python default, a back-reference) is not a schema change and generates no migration.
