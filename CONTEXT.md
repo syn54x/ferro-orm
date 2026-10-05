@@ -196,6 +196,22 @@ _Avoid_: Stub, placeholder step, empty step
 A generated, complete *data step* that stands where a scaffolded backfill would, written when the developer states that no row needs a value. It changes nothing and fails the migration if such a row exists.
 _Avoid_: Assertion step, skipped backfill, no-op step
 
+**Backfill**:
+A scaffolded *data step* that supplies the values a *schema change* demands of rows that already exist: a new required column, a column that stops accepting `NULL`, an enum label rows still carry. It works only on the rows that still need a value, so running it again is exact. It is an *unwritten step* until a person supplies what the generator cannot know.
+_Avoid_: Data migration, populate step, seed step
+
+**Expand step**:
+The generated DDL step that runs before a migration's data steps. It holds only what existing rows already satisfy: a new column created nullable, with its index, unique, foreign key and check. A migration with no data step has no expand step; its DDL is one schema step.
+_Avoid_: Pre-step, additive step, phase one
+
+**Contract step**:
+The generated DDL step that runs after a migration's data steps. It holds what the rows had to be prepared for (`NOT NULL`, the removal of an enum label) and every *destructive step* statement, so a *backfill* can still read a column the same migration drops.
+_Avoid_: Post-step, cleanup step, tighten step
+
+**Restructure scaffold**:
+The generated expand, backfills and contract for a change that replaces a key and everything that references it, spanning the parent table and each child. A primary-key change is the one case today.
+_Avoid_: PK migration, key swap, multi-table split
+
 **No-transaction step**:
 A DDL step that declares, in its file, that the runner opens no transaction around it, so statements that refuse to run inside one (`CREATE INDEX CONCURRENTLY`) can. Because its record can no longer commit with its DDL, it must be safe to re-run from its first statement. A *table rebuild* is not one.
 _Avoid_: No-tx step, autocommit step, unsafe step
