@@ -4,6 +4,8 @@ A DDL step is SQL, and ferro's SQL differs by dialect: column types, the standal
 
 Amended by ADR-0036: target dialects are declared per *database* (the word that replaces "database alias"), and the URL-implied default is gone. `dialects` is required; `migrate new` without it refuses and prints the line to add, so the generator reads no URL.
 
+Amended by ADR-0037: the layout is a dialect suffix on each file under step numbers shared by every dialect, with an explicit `-- ferro: not-applicable` rendering where a dialect has no work.
+
 ## Considered options
 
 - **One chain per dialect** (the SQL-tool norm). Rejected: two chains share nothing, so their numbers, snapshots and data steps drift; ferro's generator can write both from one plan and keep them in lockstep, which no SQL-storing tool can.
