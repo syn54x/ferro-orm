@@ -1,0 +1,64 @@
+# The Alembic bridge translates the one planner
+
+A model gains a column and a check over it:
+
+```python
+class Card(Model):
+    flavor: str | None = None
+    __ferro_checks__ = (Check("flavor_set", lambda card: card.flavor != None),)
+```
+
+`alembic revision --autogenerate` writes two lines for it, and until this decision two different deciders produced them: SQLAlchemy reflection compared the live table against the `MetaData` built from the models and proposed the `add_column`; ferro's own comparator queried `pg_constraint`, asked the Rust core, and proposed the check. The reconciliation pass answered the first question a third way, through `plan_from_ir`. Keeping those answers in step by hand is what AGENTS.md I-1's parity list paid for, and every new artifact (rename hints, SQLite inline checks, persisted defaults) added a row to it.
+
+We decided that the bridge has **one decider**: it reads the live database through the converter the reconciliation pass uses, calls the one planner (ADR-0023's, grown to carry checks, enum labels and row security on both sides), and translates the planner's ops into the revision.
+
+```python
+def upgrade():
+    op.add_column('card', sa.Column('flavor', sa.String(), nullable=True))                     # an op with an Alembic twin
+    op.execute("ALTER TABLE card ADD CONSTRAINT ck_card_flavor_set CHECK (flavor IS NOT NULL)")  # an op without one
+```
+
+**Native where Alembic has a twin, the pass's statement where it does not.** Create and drop table, add and drop column, type and nullability changes, indexes, foreign keys, and table and column renames are written as Alembic's own ops, built from the same `sa.Column` the bridge builds today. Everything else (label addition, check rebuilds, row security, renames of owned names, enum label renames) is `op.execute` of the byte-identical statement the pass would run. The destructive and data-dependent markers the in-house generator writes as `-- ferro:` headers are Python comments above the op.
+
+**The bridge sees exactly what the reconciliation pass sees.** It plans with destructive changes on, since a revision is reviewed before it runs. An empty autogenerate and "no drift" are the same statement. Anything on a ferro table that ferro never declared (a hand-set server default, a comment, a foreign constraint) is no longer proposed. A live table no model declares stays Alembic's, as do a project's own SQLAlchemy tables, which keep Alembic's full comparison.
+
+**Alembic is told to leave ferro tables alone, in `env.py`, and autogenerate refuses when it was not.**
+
+```python
+context.configure(connection=connection, target_metadata=get_metadata(), **ferro_options())
+```
+
+`ferro_options()` carries the `render_item` hook and an object filter that hides ferro tables and both tracking tables from Alembic's own comparator, wrapping any filter the project passes in. The tables stay in `target_metadata`, so a SQLAlchemy table's foreign key to a ferro table still resolves.
+
+**`downgrade()` is the planner run backwards**, declared to live, through the same translator: the mechanism ADR-0033 gives the in-house door. The bridge has no snapshot, so a re-added column returns with what the converter can read (type, nullability, index, foreign key, checks). A step the planner calls irreversible renders as a `raise` carrying its reason.
+
+**Rename hints are honoured.** A hint is live while the database holds the old name and not the new one, so the same model means a rename on both doors.
+
+**Data steps are the bridge's boundary.** A change that demands values of existing rows is written as the plain op, marked, and names the door that generates the backfill:
+
+```python
+# ferro: data-dependent (fails while card has rows; in-house migrations generate the backfill)
+op.add_column('card', sa.Column('flavor', sa.String(), nullable=False))
+```
+
+A primary-key change is refused, as it is in-house until the restructure scaffold ships. On SQLite, a change that needs a table rebuild is refused at autogenerate and points at in-house migrations (ADR-0034); changes SQLite alters natively still autogenerate.
+
+**A tracked database refuses autogenerate over ferro models.** The refusal names `ferro migrate new` and tells a project whose Alembic chain still manages its own SQLAlchemy tables to drop `get_metadata()` from `env.py` and keep the filter. Autogenerate writes nothing, so it takes no run lock. `alembic upgrade` runs a plain revision file with no ferro code in it and is not policed; an old revision applied to a tracked database is drift.
+
+**`get_metadata()` reads the project configuration when there is one.** It imports the configured database's `models` through `FerroSettings` with the CLI's import rules and returns only that database's tables (`get_metadata(database="…")` when several are configured). A registered model whose module no configured database lists is refused by name. With no configuration it behaves as before.
+
+## Considered options
+
+- **Keep the per-family comparators.** Rejected: "peer" becomes a tax that grows with every artifact, and the two deciders can still disagree, which is what a phantom diff is.
+- **One decider, the whole revision as `op.execute`.** Rejected: one pin instead of two, bought by making revisions dialect-locked SQL with no typed ops to edit. A chain could no longer run on SQLite in tests and Postgres in production.
+- **Take ferro tables from Alembic automatically**, deleting its ops after the fact. Rejected: Alembic still logs changes that then vanish, and the precedent (`render_item`) is a wired line that is refused when missing.
+- **Alembic's batch mode on SQLite.** Rejected: it has no pragma handling, so the drop cascades into `ON DELETE CASCADE` children.
+- **A backfill scaffold in the revision.** Rejected: a second, weaker generator with no historical models behind it.
+- **Alembic's per-op `reverse()` for the downgrade.** Rejected: one hand-written reverse per family, and ordering that leans on `UpgradeOps.reverse()`.
+
+## Consequences
+
+- AGENTS.md I-1: the "Alembic comparator consumes … over FFI" clauses of items 11–16 collapse into "the bridge translates the one planner's ops", carried by two pins: every planner op translates to a revision whose executed DDL matches the pass's, and the existing type-rendering parity test. Item 17 (enum type provenance) stays its own rule: it is decided from the revision alone and has no runtime twin.
+- AGENTS.md I-12: the slot rules go. Ferro registers one comparator, and the translator never reorders the planner's ops.
+- The switch ships in one release, after the planner and the live converter grow; the bridge keeps its per-family comparators until then.
+- An existing `env.py` is refused on its next autogenerate with the `ferro_options()` line to add.
