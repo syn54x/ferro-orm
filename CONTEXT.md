@@ -260,6 +260,18 @@ _Avoid_: Risky step, may-fail step, conditional step
 A live database whose *ferro-owned artifacts* disagree with the *schema snapshot* of the last migration applied to it. A database behind the newest migration is pending, not drifted. A live table the snapshot does not declare is not drift: it was never ferro's. Drift is reported, never repaired by the migration system and never a generator input.
 _Avoid_: Schema mismatch, out-of-sync, dirty database
 
+**Pending**:
+A *migration* or *step* the project's migrations directory holds and a database's *tracking table* has no finished *step record* for. A database with anything pending is behind, which is not *drift*; an application can refuse to start on it or apply it.
+_Avoid_: Unapplied, outstanding, out of date
+
+**Ahead**:
+A database whose *tracking table* holds *step records* for migrations the running code's migrations directory does not have: an older build of the application meeting a newer schema. Refused by default, and allowed only when the application says so.
+_Avoid_: Newer database, future migration, unknown migration
+
+**Project configuration**:
+The committed file that declares a project's *databases* to ferro's tooling: which modules hold the models, the *target dialects*, where the migrations live. It is one file, never two merged, and never overridden from the environment. Distinct from *session settings*, which are Postgres values on a `Session`.
+_Avoid_: Settings (alone), env config, config layers
+
 **Ferro-owned artifact**:
 A schema object ferro may reconcile to match the declared model. Indexes and constraints are ferro-owned by naming (`idx_`, `uq_`, `fk_`, `ck_`); native enum types are ferro-owned by derivation — the type's name matches the name ferro derives from the model. A generated revision owns an enum type a third way, by provenance: it introduces every column of the type, so its downgrade drops the type (see *Type drop*); a type it adds a column of but does not introduce is one it reuses, never creates (see *Type reuse*). Artifacts owned none of these ways belong to the user and are never altered or dropped.
 _Avoid_: Managed index, system constraint, internal index
