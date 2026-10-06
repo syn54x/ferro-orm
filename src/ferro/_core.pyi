@@ -120,6 +120,53 @@ def _plan_from_ir(
     """
     ...
 
+def _generate_migration(
+    parent_ir_json: str | None, target_ir_json: str, dialects: list[str]
+) -> str | None:
+    """Generate the migration that turns the head snapshot into the declared modelset.
+
+    ``parent_ir_json`` is the head migration's ``ir.json`` text exactly as
+    stored, or ``None`` before the first migration (generated against the
+    empty modelset); ``target_ir_json`` is the declared ``schema`` IR
+    envelope; ``dialects`` are the target dialects. Returns the JSON of the
+    generated migration — ``{"steps": [{"ordinal", "name", "kind",
+    "renderings": {<dialect>: {"up", "down", "headers", "down_headers"}}}],
+    "snapshot": {...}, "snapshot_json", "summary", "warnings"}`` — or ``None``
+    when nothing renders DDL (no schema change). Raises ``ValueError`` naming
+    the refusal (``not generated yet: <op> on <table> (ticket #N)``).
+    """
+    ...
+
+def _check_migrations(directory: str, target_ir_json: str, dialects: list[str]) -> str:
+    """Check a migrations directory against the declared modelset, reading files only.
+
+    Returns JSON ``{"ok": bool, "head": str | None, "problems": [{"kind",
+    "message"}]}``: a malformed directory or broken snapshot chain, a DDL step
+    missing a target dialect's rendering, a model change no migration records.
+    """
+    ...
+
+def _read_migrations_dir(directory: str) -> str:
+    """Read and verify a migrations directory; returns the JSON of its migrations.
+
+    Raises ``ValueError`` naming the problem and its fix (a duplicate or
+    missing number, a broken chain, an unparseable header, ...). A directory
+    that does not exist holds no migrations.
+    """
+    ...
+
+def _load_snapshot(ir_json: str) -> str:
+    """Load one ``ir.json`` of any shipped ``ir_version``.
+
+    Returns JSON ``{"checksum", "parent_checksum", "ir"}`` (checksums in hex).
+    """
+    ...
+
+def _store_snapshot(parent_ir_json: str) -> str:
+    """The ``ir.json`` text of a migration that changes no schema: a full copy
+    of the parent's modelset whose ``parent_checksum`` is the parent's."""
+    ...
+
 async def _live_schema_ir(
     using: str | None = None, tables_json: str | None = None
 ) -> tuple[str, str]:
