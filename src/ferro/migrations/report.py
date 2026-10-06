@@ -27,7 +27,6 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ..cli import exit_codes
 from ..exceptions import FerroError
 
 __all__ = [
@@ -151,6 +150,9 @@ class StatusReport:
     @property
     def exit_code(self) -> int:
         """4 when anything needs attention, 3 when anything is pending, else 0."""
+        # Imported here so the in-process API never loads the CLI package.
+        from ..cli import exit_codes
+
         if self.needs_attention:
             return exit_codes.NEEDS_ATTENTION
         if self.pending:

@@ -34,22 +34,9 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
 )
 
 pytestmark = [
-    pytest.mark.usefixtures("isolated_imports", "clean_registry", "fresh_cli"),
+    pytest.mark.usefixtures("isolated_imports", "clean_registry"),
     pytest.mark.backend_matrix,
 ]
-
-
-@pytest.fixture
-def fresh_cli(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Build the ``ferro`` app afresh in each test.
-
-    ``ferro.migrations.runner`` imports ``ferro.cli`` at collection, so the
-    module (and its cached app) outlives ``isolated_imports``, which drops the
-    cyclopts modules the app was built from at the end of every test.
-    """
-    import ferro.cli
-
-    monkeypatch.setattr(ferro.cli, "_built", None)
 
 
 COLUMNS = (

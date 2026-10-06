@@ -26,14 +26,13 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
 from tests.test_migrate_up import (  # noqa: F401 - fixtures
     configure,
     db,
-    fresh_cli,
     new,
     settings_and_database,
     sql_step,
 )
 
 pytestmark = [
-    pytest.mark.usefixtures("isolated_imports", "clean_registry", "fresh_cli"),
+    pytest.mark.usefixtures("isolated_imports", "clean_registry"),
     pytest.mark.backend_matrix,
     pytest.mark.asyncio,
 ]
