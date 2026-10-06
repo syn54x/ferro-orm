@@ -3371,6 +3371,49 @@ fn live_labels_come_from_the_facts_and_extras_only_warn() {
     assert!(plan.warnings[0].contains("'legacy'"));
 }
 
+/// A declared unique lives in `uniques`, not `indexes`; planning two
+/// identical declared snapshots must read it on both sides, or every
+/// `unique=True` column is a phantom `AddIndex` (#518).
+#[test]
+fn identical_snapshots_with_a_unique_column_plan_nothing() {
+    let model = SchemaModel {
+        uniques: vec![SchemaUnique {
+            name: "uq_author_name".to_string(),
+            columns: vec!["name".to_string()],
+        }],
+        indexes: vec![SchemaIndex {
+            name: "idx_author_email".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+        }],
+        ..schema_model(
+            "author",
+            vec![
+                pk_col("id", "int"),
+                col_with_flags("name", "varchar", false, true, false, None),
+                col_with_flags("email", "varchar", false, false, true, None),
+            ],
+        )
+    };
+    let snapshot = envelope(vec![model]);
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        for destructive in [false, true] {
+            let plan = plan_from_ir(
+                &snapshot,
+                &snapshot,
+                dialect,
+                &LiveFacts::declared(),
+                PlanOptions { destructive },
+            );
+            assert!(
+                plan.operations.is_empty(),
+                "{dialect:?} destructive={destructive}: {:?}",
+                plan.operations
+            );
+        }
+    }
+}
+
 #[test]
 fn identical_snapshots_with_checks_policies_and_types_plan_nothing() {
     let mut model = ledgerrow_model_with_row_security(true);
