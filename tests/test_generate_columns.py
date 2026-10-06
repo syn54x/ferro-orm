@@ -331,6 +331,7 @@ def test_a2_a_required_column_with_a_literal_default_backfills_existing_rows(
     assert run("migrate", "up", "--url", db.url) == 0
     assert db.rows("SELECT tier FROM author") == [("free",)]
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert plan_against(db, snapshot(project, 1), snapshot(project, 2)) == []
     assert run("migrate", "up", "--url", db.url) == 0
     assert plan_against(db, snapshot(project, 2), snapshot(project, 1)) == []
 
@@ -502,6 +503,31 @@ def test_a9_a_unique_on_an_existing_sqlite_table_is_built_in_the_schema_step(
 def test_a9_an_index_on_an_existing_postgres_table_is_its_own_step(project, pkg):
     err = refused(project, pkg, "postgres", EMAIL, UNIQUE_EMAIL)
     assert err == "not generated yet: AddIndex on author (ticket #527)\n"
+
+
+TAG = """
+class Tag(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    label: Annotated[str, FerroField(unique=True)]
+"""
+
+
+@pytest.mark.postgres_only
+def test_a9_a_unique_on_a_table_the_migration_creates_is_inline_on_postgres(
+    project, pkg, db
+):
+    start(project, pkg, db, AUTHOR)
+
+    up, down = edit(project, pkg, db, AUTHOR + TAG, "tag")
+
+    # The table's own step carries its unique: no index step, nothing refused.
+    sql = statements(up)
+    assert sql[0].startswith('CREATE TABLE IF NOT EXISTS "tag"')
+    assert sql[1:] == [
+        'CREATE UNIQUE INDEX IF NOT EXISTS "uq_tag_label" ON "tag" ("label")'
+    ]
+    assert statements(down) == ['DROP TABLE "tag"']
+    round_trip(project, db)
 
 
 # -- A8, C5: no schema change --------------------------------------------------------------
