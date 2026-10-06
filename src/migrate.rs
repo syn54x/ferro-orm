@@ -14,12 +14,15 @@
 //! modelset, and `ferro_migrate::render_plan` renders it through the same
 //! `ferro_ddl_lowering` functions every migration door uses (AGENTS.md § I-1).
 
-use crate::backend::EngineHandle;
+use crate::backend::{EngineBindValue, EngineHandle};
 use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
     quote_ident, sqlite_indexes_covering_column,
 };
 use crate::live_ir::{LiveTable, live_schema_ir, live_tables_to_schema_ir};
+use crate::run::{
+    FORMAT_TABLE, RunLock, TRACKING_TABLE, governed_schema, refused, tracking_tables_for,
+};
 use crate::schema::internal_create_tables;
 use crate::state::{MODEL_REGISTRY, engine_for_connection};
 use ferro_ddl_lowering::{Dialect, LiveRowSecurity, row_security_migrator_warning};
@@ -28,7 +31,9 @@ use ferro_migrate::{
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::prelude::*;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Atomically install the column registry, schema modelset, and modelset
 /// fingerprint from one assembled payload (#244).
@@ -355,8 +360,169 @@ async fn execute_table_ops(
     }
 }
 
-/// Run the full auto-migrate pass: create missing tables, then (per
-/// `MigrateOptions`) reconcile existing tables with the registered models.
+/// How long an auto-migrate pass waits for the run lock. The wait has no
+/// practical bound on purpose: the lock is held only by a live run (the
+/// database or the operating system releases a dead one), and a boot that
+/// gave up while another boot or a `ferro migrate up` was mid-pass would
+/// fail a start that is about to succeed. One year is "until it is free"
+/// while staying far inside `Instant`'s range.
+const AUTO_MIGRATE_LOCK_WAIT: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+
+/// Which public call is running the auto-migrate passes: the waiting
+/// warning names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoMigrateDoor {
+    /// `connect()` with an auto-migrate flag.
+    Connect,
+    /// `ferro.create_tables()`.
+    CreateTables,
+    /// `ferro.migrate()`.
+    Migrate,
+}
+
+impl AutoMigrateDoor {
+    fn call(self) -> &'static str {
+        match self {
+            AutoMigrateDoor::Connect => "connect(auto_migrate=…)",
+            AutoMigrateDoor::CreateTables => "create_tables()",
+            AutoMigrateDoor::Migrate => "migrate()",
+        }
+    }
+}
+
+/// The warning an auto-migrate pass raises the moment it finds the run lock
+/// held, so a caller that is waiting says why.
+pub fn auto_migrate_waiting_text(door: AutoMigrateDoor) -> String {
+    format!(
+        "{} is waiting: another ferro migration run or auto-migrate pass holds the run lock \
+         on this database. It goes on once that one finishes.",
+        door.call()
+    )
+}
+
+/// The refusal for an auto-migrate flag on a database ferro migrations
+/// governs (ADR-0038): `governed` is the schema the pass would change,
+/// `home` the schema holding its tracking table.
+pub fn tracked_schema_refusal(governed: &str, home: &str) -> String {
+    format!(
+        "connect(auto_migrate=…) is refused: {governed} is governed by ferro migrations \
+         ({home}.{TRACKING_TABLE}). Use ferro migrate up, or drop the tracking tables to \
+         leave migrations."
+    )
+}
+
+/// Every table named like a tracking table, as `(schema, table)`: SQLite's
+/// are in `main`.
+async fn tracking_named_tables(engine: &EngineHandle) -> PyResult<HashSet<(String, String)>> {
+    let names = [
+        EngineBindValue::String(TRACKING_TABLE.to_string()),
+        EngineBindValue::String(FORMAT_TABLE.to_string()),
+    ];
+    let (sql, schema_column) = match engine.backend() {
+        Dialect::Sqlite => (
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
+            None,
+        ),
+        Dialect::Postgres => (
+            "SELECT table_name::text, table_schema::text FROM information_schema.tables \
+             WHERE table_name IN ($1, $2)",
+            Some(1),
+        ),
+    };
+    let rows = engine
+        .fetch_all_sql_unprepared_with_binds(sql, &names)
+        .await
+        .map_err(|e| crate::errors::map_db_error("auto-migrate reading the catalog", e))?;
+    let text = |row: &crate::backend::EngineRow, index: usize| match row.values.get(index) {
+        Some((_, crate::backend::EngineValue::String(value))) => Some(value.clone()),
+        _ => None,
+    };
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let table = text(row, 0)?;
+            let schema = match schema_column {
+                Some(index) => text(row, index)?,
+                None => "main".to_string(),
+            };
+            Some((schema, table))
+        })
+        .collect())
+}
+
+/// Refuse when ferro migrations govern the schema auto-migrate is about to
+/// change (ADR-0038), before any DDL. Two sources, either one refuses:
+///
+/// - **where the project keeps its tracking tables**: a tracking table in
+///   the connection's current schema, or a `_ferro_migrations` without its
+///   format table in a configured `tracking_schema` (`settings_schemas`,
+///   from `FerroSettings`), whose governed schema cannot be read;
+/// - **the catalog**: every format table whose `governed_schema` is the
+///   current schema, wherever it sits. This one holds in an image built
+///   without its config file.
+///
+/// A neighbour schema governed by its own migrations is not this schema's
+/// business and refuses nothing.
+///
+/// # Errors
+/// `RunRefused` with [`tracked_schema_refusal`]'s text; a database error.
+pub async fn guard_tracked_schema(
+    engine: &EngineHandle,
+    settings_schemas: &[String],
+) -> PyResult<()> {
+    let governed = governed_schema(engine).await?;
+    let present = tracking_named_tables(engine).await?;
+    let has =
+        |schema: &str, table: &str| present.contains(&(schema.to_string(), table.to_string()));
+    if has(&governed, TRACKING_TABLE) || has(&governed, FORMAT_TABLE) {
+        return Err(refused(tracked_schema_refusal(&governed, &governed)));
+    }
+    if engine.backend() == Dialect::Postgres {
+        for schema in settings_schemas {
+            if has(schema, TRACKING_TABLE) && !has(schema, FORMAT_TABLE) {
+                return Err(refused(tracked_schema_refusal(&governed, schema)));
+            }
+        }
+    }
+    if let Some(table) = tracking_tables_for(engine, Some(&governed)).await?.first() {
+        return Err(refused(tracked_schema_refusal(&governed, &table.schema)));
+    }
+    Ok(())
+}
+
+/// Run the full auto-migrate pass under the run lock (ADR-0038): take the
+/// lock a migration run takes, refuse a schema ferro migrations govern
+/// ([`guard_tracked_schema`]), then create missing tables and (per
+/// `MigrateOptions`) reconcile existing ones. Two processes booting
+/// together serialize here, and the second sees the first's DDL. The lock
+/// is released on every exit path.
+///
+/// `door` names the public call for the waiting warning.
+///
+/// # Errors
+/// The guard's refusal; the pooler refusal behind a transaction-mode
+/// pooler; whatever the passes raise.
+pub async fn internal_migrate(
+    engine: Arc<EngineHandle>,
+    opts: MigrateOptions,
+    tracking_schemas: &[String],
+    door: AutoMigrateDoor,
+) -> PyResult<()> {
+    let lock = RunLock::acquire(&engine, None, AUTO_MIGRATE_LOCK_WAIT, |_| {
+        crate::emit_user_warning_always(&auto_migrate_waiting_text(door));
+    })
+    .await?;
+    let outcome = async {
+        guard_tracked_schema(&engine, tracking_schemas).await?;
+        run_passes(engine.clone(), opts).await
+    }
+    .await;
+    let released = lock.release().await;
+    outcome.and(released)
+}
+
+/// The create pass, then (per `MigrateOptions`) the reconciliation of
+/// existing tables with the registered models.
 ///
 /// The reconciliation is one plan for the whole modelset: the live database
 /// is read into an IR plus its live facts ([`live_schema_ir`]), the one
@@ -373,7 +539,7 @@ async fn execute_table_ops(
 /// refresh fails, or if the plan contains a change that cannot be applied
 /// safely — rendering runs before anything executes, so such a plan executes
 /// nothing.
-pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult<()> {
+async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult<()> {
     let tables_before_create = internal_create_tables(engine.clone(), opts.updates).await?;
     if !opts.updates {
         return Ok(());
@@ -515,22 +681,26 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
 /// would be surprising; use `create_tables()` for that.
 ///
 /// On Postgres each table's plan runs in one transaction (a mid-plan failure
-/// rolls that table back); SQLite applies statements one at a time.
+/// rolls that table back); SQLite applies statements one at a time. Like
+/// `connect()`'s flags it runs under the run lock and refuses a database
+/// governed by ferro migrations; `tracking_schemas` are the project's
+/// configured `tracking_schema`s.
 ///
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or the migration fails.
 #[pyfunction]
-#[pyo3(signature = (using=None, updates=true, destructive=false))]
+#[pyo3(signature = (using=None, updates=true, destructive=false, tracking_schemas=Vec::new()))]
 pub fn migrate(
     py: Python<'_>,
     using: Option<String>,
     updates: bool,
     destructive: bool,
+    tracking_schemas: Vec<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let opts = MigrateOptions::laddered(updates, destructive);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
-        internal_migrate(engine, opts).await
+        internal_migrate(engine, opts, &tracking_schemas, AutoMigrateDoor::Migrate).await
     })
 }
 

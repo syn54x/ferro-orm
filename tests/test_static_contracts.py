@@ -245,3 +245,33 @@ def test_operator_predicate_surface_is_gone():
     assert "_deprecated_operator_query_node" not in builder_src
     metaclass_src = Path("src/ferro/metaclass.py").read_text(encoding="utf-8")
     assert "FieldProxy(" not in metaclass_src
+
+
+def test_the_migration_calls_pass_the_type_checker():
+    """`ferro.migrations.up/require_applied/status/check` and their three
+    exceptions are typed as published (#521)."""
+    result = _run_ty(FIXTURES / "good_migrations_api.py")
+    assert result.returncode == 0, (
+        f"the migration calls must type-check cleanly:\n{result.stdout}\n{result.stderr}"
+    )
+
+
+def test_ferro_migrations_publishes_the_calls_and_their_exceptions():
+    import ferro.migrations as migrations
+    from ferro import _core
+
+    assert {
+        "up",
+        "require_applied",
+        "status",
+        "check",
+        "PendingMigrationsError",
+        "DatabaseAheadError",
+        "MigrationRefused",
+    } <= set(migrations.__all__)
+    for name in migrations.__all__:
+        assert getattr(migrations, name) is not None
+    stub = Path("src/ferro/_core.pyi").read_text(encoding="utf-8")
+    assert "def _default_connection_name() -> str | None:" in stub
+    assert stub.count("tracking_schemas: list[str] = ...") == 3
+    assert callable(_core._default_connection_name)

@@ -27,7 +27,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ..exceptions import FerroError
+from .errors import MigrationRefused
 
 __all__ = [
     "MigrationStatus",
@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 
-class RunRefused(FerroError):
+class RunRefused(MigrationRefused):
     """A migration run refused before running anything, naming the fix.
 
     Raised by the Rust core for every refusal the run planner, the run lock

@@ -276,20 +276,33 @@ pub fn register_model_schema(
 
 /// Manually triggers table creation for all registered models.
 ///
-/// Returns an awaitable object (Python coroutine).
+/// Returns an awaitable object (Python coroutine). Like `connect()`'s
+/// auto-migrate flags it runs under the run lock and refuses a database
+/// governed by ferro migrations (ADR-0038); `tracking_schemas` are the
+/// project's configured `tracking_schema`s.
 ///
 /// # Errors
-/// Returns a `PyErr` if the engine is not initialized or if SQL execution fails.
+/// Returns a `PyErr` if the engine is not initialized, the database is
+/// governed by ferro migrations, or SQL execution fails.
 #[pyfunction]
-#[pyo3(signature = (using=None))]
-pub fn create_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_, PyAny>> {
+#[pyo3(signature = (using=None, tracking_schemas=Vec::new()))]
+pub fn create_tables(
+    py: Python<'_>,
+    using: Option<String>,
+    tracking_schemas: Vec<String>,
+) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
-        // `create_tables()` is the create pass on its own — nothing reconciles
-        // an existing table afterwards, so a declaration on one is reported.
-        internal_create_tables(engine, false)
-            .await
-            .map(|_existing| ())
+        // `create_tables()` is the create pass on its own (no `updates`):
+        // nothing reconciles an existing table afterwards, so a declaration
+        // on one is reported. It shares the lock-then-guard path.
+        crate::migrate::internal_migrate(
+            engine,
+            crate::migrate::MigrateOptions::laddered(false, false),
+            &tracking_schemas,
+            crate::migrate::AutoMigrateDoor::CreateTables,
+        )
+        .await
     })
 }
 

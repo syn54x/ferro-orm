@@ -364,16 +364,34 @@ async def connect(
             covering the column are dropped first; columns that are primary keys or
             enforced by table constraints fail with a clear error instead.
 
+    Auto-migrate and ferro migrations are exclusive per database: with any of
+    the three flags, a database whose schema ferro migrations govern (it
+    carries a ``_ferro_migrations`` tracking table) is refused before any
+    DDL, and the passes run under the same run lock ``ferro migrate up``
+    takes, so two processes booting together never collide. Only then is the
+    project's ``FerroSettings()`` read (for its ``tracking_schema``s); a
+    plain ``connect(url)`` reads no config and runs no extra query.
+
     Raises:
         ValueError: A connection with this name (or a default connection,
             when ``name`` is omitted) is already registered. Use ``name=...``
             for additional connections or ``reset_engine()`` to tear down.
+        ferro.migrations.MigrationRefused: an auto-migrate flag on a database
+            governed by ferro migrations (use ``ferro migrate up``), or behind
+            a transaction-mode pooler on Postgres.
 
     For schema changes beyond these (renames, primary-key changes, complex
     transforms), use the Alembic bridge — see ``docs/guide/migrations.md``.
     """
     _ensure_rust_registration_synced()
 
+    # Only an auto-migrate flag reads the config: a plain connect() is
+    # exactly what it was.
+    guard = (
+        {"tracking_schemas": _configured_tracking_schemas()}
+        if auto_migrate or migrate_updates or migrate_destructive
+        else {}
+    )
     pool_config = pool or PoolConfig()
     await _core_connect(
         url,
@@ -386,6 +404,21 @@ async def connect(
         identity_map=identity_map,
         migrate_updates=migrate_updates,
         migrate_destructive=migrate_destructive,
+        **guard,
+    )
+
+
+def _configured_tracking_schemas() -> list[str]:
+    """Every ``tracking_schema`` the project configures, for the auto-migrate
+    guard (ADR-0038). No config file is not an error: the guard still reads
+    the catalog."""
+    settings = FerroSettings()
+    return sorted(
+        {
+            database.tracking_schema
+            for database in settings.databases.values()
+            if database.tracking_schema is not None
+        }
     )
 
 
@@ -401,11 +434,16 @@ async def create_tables(using=None):
     created. The runtime emits each ``CREATE TABLE`` from this SchemaIR via the
     shared emitter.
 
+    Like ``connect()``'s auto-migrate flags, it runs under the run lock and
+    refuses a database governed by ferro migrations.
+
     Args:
         using: Named connection to create tables on, or None for the default.
     """
     _ensure_rust_registration_synced()
-    return await _core_create_tables(using=using)
+    return await _core_create_tables(
+        using=using, tracking_schemas=_configured_tracking_schemas()
+    )
 
 
 async def migrate(using=None, updates=True, destructive=False):
@@ -420,9 +458,17 @@ async def migrate(using=None, updates=True, destructive=False):
         updates: If True (default), add missing columns and reconcile
             type, nullability, and foreign-key definition drift (see ``connect``).
         destructive: If True, also drop live columns absent from the model. Implies ``updates``.
+
+    Like ``connect()``'s auto-migrate flags, it runs under the run lock and
+    refuses a database governed by ferro migrations.
     """
     _ensure_rust_registration_synced()
-    return await _core_migrate(using=using, updates=updates, destructive=destructive)
+    return await _core_migrate(
+        using=using,
+        updates=updates,
+        destructive=destructive,
+        tracking_schemas=_configured_tracking_schemas(),
+    )
 
 
 __all__ = [
