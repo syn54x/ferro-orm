@@ -205,16 +205,25 @@ async def test_a_neighbour_schema_under_migrations_does_not_refuse(project, pkg,
         db.execute(f'DROP SCHEMA "{neighbour}" CASCADE')
 
 
-async def test_a_plain_connect_reads_no_config_and_runs_no_extra_query(
+async def test_a_plain_connect_reads_no_config_and_runs_no_guard(
     project, pkg, db, monkeypatch
 ):
+    """A plain ``connect(url)`` on a tracked database reads no config and
+    never enters the guard path. That path takes the run lock first, so with
+    the lock held elsewhere a plain connect that ran it would wait; it
+    returns at once instead."""
     await track(project, pkg, db)
+    await ferro.connect(db.url, name="holder")
+    handle = await _core._acquire_run_lock("holder", None, 0)
 
     def no_config(*_args, **_kwargs):
         raise AssertionError("a plain connect() must not read the config")
 
     monkeypatch.setattr(ferro.settings.FerroSettings, "__init__", no_config)
-    await ferro.connect(db.url)
+    try:
+        await asyncio.wait_for(ferro.connect(db.url), 5)
+    finally:
+        await _core._release_run_lock(handle)
 
     assert _core._catalog_query_count_for_test() == 0
     assert _core.connection_backend() == db.backend
