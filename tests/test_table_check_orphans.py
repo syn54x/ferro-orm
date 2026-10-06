@@ -158,7 +158,7 @@ def test_leftover_table_check_warns_and_stays_under_migrate_updates():
         assert len(warnings) == 1, (dialect, warnings)
         assert SIDE_CHECK_NAME in warnings[0]
         assert "migrate_destructive" in warnings[0]
-        assert "Alembic" in warnings[0]
+        assert "ferro migrate new" in warnings[0]
 
 
 def test_leftover_table_check_drops_under_migrate_destructive_on_postgres():
@@ -180,7 +180,7 @@ def test_leftover_table_check_warns_and_skips_on_sqlite_even_when_destructive():
     )
     assert statements == []
     assert any(SIDE_CHECK_NAME in warning for warning in warnings)
-    assert any("Alembic" in warning for warning in warnings)
+    assert any("ferro migrate new" in warning for warning in warnings)
 
 
 def test_clearing_db_check_follows_the_same_warn_and_drop_rule():

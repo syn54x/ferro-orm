@@ -189,8 +189,8 @@ async def test_db_check_constraint_exists_after_auto_migrate(
 
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
-async def test_db_check_not_emitted_on_sqlite_runtime_ddl(db_url):
-    """Rust emitter elides post-create CHECK on SQLite (Phase 1)."""
+async def test_db_check_is_inline_on_sqlite_runtime_ddl(db_url):
+    """SQLite carries the db_check as a named column constraint (#514)."""
 
     class FormatRow(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -208,9 +208,8 @@ async def test_db_check_not_emitted_on_sqlite_runtime_ddl(db_url):
     )
     all_sql = " ".join((row[0] or "") for row in cursor.fetchall()).upper()
     conn.close()
-    assert " CHECK (" not in all_sql and " CHECK(" not in all_sql, (
-        "SQLite runtime DDL should not emit CHECK constraints for db_check in Phase 1; "
-        f"got: {all_sql!r}"
+    assert 'CONSTRAINT "CK_FORMATROW_FORMAT" CHECK (' in all_sql, (
+        f"SQLite runtime DDL should carry the db_check inline; got: {all_sql!r}"
     )
 
 

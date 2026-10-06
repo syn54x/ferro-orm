@@ -215,7 +215,7 @@ def test_sqlite_warns_with_the_constraint_name_and_emits_no_sql():
     assert statements == []
     assert len(warnings) == 1
     assert SIDE_CHECK_NAME in warnings[0]
-    assert "Alembic" in warnings[0]
+    assert "ferro migrate new" in warnings[0]
 
 
 def test_without_migrate_updates_no_rebuild_is_planned():

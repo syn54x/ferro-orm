@@ -3090,7 +3090,10 @@ mod tests {
             render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Sqlite)
                 .expect("declared column check must resolve");
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
-        assert!(emission.inline.is_none(), "no column definition to carry it");
+        assert!(
+            emission.inline.is_none(),
+            "no column definition to carry it"
+        );
         let warning = emission.warning.expect("SQLite must never skip silently");
         assert!(warning.contains("ck_transfer_kind"), "{warning}");
         assert!(warning.contains("ferro migrate new"), "{warning}");
