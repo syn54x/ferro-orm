@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any, Optional
 
 class RouteHandle:
@@ -175,6 +176,103 @@ def _load_snapshot(ir_json: str) -> str:
 def _store_snapshot(parent_ir_json: str) -> str:
     """The ``ir.json`` text of a migration that changes no schema: a full copy
     of the parent's modelset whose ``parent_checksum`` is the parent's."""
+    ...
+
+# -- the migration runner (#519) -------------------------------------------------
+
+def _run_plan(
+    directory: str,
+    records_json: str,
+    dialect: str,
+    direction_json: str,
+    allow_ahead: bool,
+    live_tables_json: str | None = None,
+) -> str:
+    """Plan a run: the JSON ``RunPlan`` (``{"steps": [...], "ahead": [...]}``).
+
+    Raises ``RunRefused`` with the refusal's text (an edited applied file, a
+    snapshot mismatch, a broken chain, out of order, applied but missing,
+    the database's tables built without migrations when ``live_tables_json``
+    is given and no record exists, ...).
+    """
+    ...
+
+def _run_status(
+    directory: str, records_json: str, dialect: str, lock_held: bool
+) -> str:
+    """``ferro migrate status`` read-only, as the JSON ``RunStatus``."""
+    ...
+
+async def _acquire_run_lock(
+    using: str | None,
+    governed_schema: str | None = None,
+    timeout_s: float = 30.0,
+    on_wait: Callable[[str], object] | None = None,
+) -> int:
+    """Take the run lock (waiting up to ``timeout_s``; ``on_wait(text)`` once
+    when another run holds it); returns a handle. Raises ``RunRefused`` on
+    timeout or behind a transaction-mode pooler."""
+    ...
+
+async def _verify_run_lock(handle: int) -> None:
+    """Raise ``RunRefused`` unless the lock behind ``handle`` is still held."""
+    ...
+
+async def _release_run_lock(handle: int) -> None:
+    """Release the lock behind ``handle``."""
+    ...
+
+async def _run_lock_is_held(
+    using: str | None, governed_schema: str | None = None
+) -> bool:
+    """Whether any run holds the run lock, without taking it."""
+    ...
+
+async def _close_run_lock_connection_for_test(handle: int) -> None:
+    """Close the Postgres lock connection without releasing it (tests only)."""
+    ...
+
+async def _ensure_tracking_tables(
+    using: str | None, tracking_schema: str | None = None
+) -> None:
+    """Create ``_ferro_migrations`` and ``_ferro_migrations_format`` where
+    missing. Raises ``RunRefused`` naming ``CREATE SCHEMA`` for a missing
+    ``tracking_schema``."""
+    ...
+
+async def _read_records(using: str | None, tracking_schema: str | None = None) -> str:
+    """JSON ``{"table", "exists", "format", "governed_schema", "records",
+    "refusal"}``; creates nothing."""
+    ...
+
+async def _write_record(
+    using: str | None, record_json: str, tracking_schema: str | None = None
+) -> None:
+    """Upsert one step record."""
+    ...
+
+async def _execute_sql_step(
+    using: str | None,
+    planned_step_json: str,
+    sql: str,
+    record_json: str,
+    tracking_schema: str | None = None,
+    lock: int | None = None,
+) -> str:
+    """Run one planned SQL step and write its record; JSON ``{"ok", "ms",
+    "error", "message"}``."""
+    ...
+
+async def _tracking_tables_for(using: str | None, schema: str | None = None) -> str:
+    """JSON list of the tracking tables governing ``schema``."""
+    ...
+
+async def _live_tables(using: str | None = None) -> str:
+    """JSON list of the governed schema's tables."""
+    ...
+
+async def _disconnect(name: str) -> None:
+    """Close and forget one named, non-default connection."""
     ...
 
 async def _live_schema_ir(
