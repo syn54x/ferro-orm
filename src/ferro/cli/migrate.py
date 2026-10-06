@@ -205,6 +205,79 @@ def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
     return exit_codes.PENDING
 
 
+@migrate.command
+def up(
+    *,
+    lock_timeout: Annotated[
+        str,
+        Parameter(
+            help=(
+                "How long to wait for another run's lock: 30s, 500ms, 1m, or a "
+                "number of seconds (0 refuses at once)."
+            )
+        ),
+    ] = "30s",
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
+    """Apply every pending migration, in order, under the run lock.
+
+    Prints one line per applied step. A refusal or a failed step prints why
+    and how to go on, and exits 1; the next up resumes where this one stopped.
+    """
+    import asyncio
+
+    from ..migrations.runner import up as run_up
+
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    report = asyncio.run(
+        run_up(
+            settings,
+            database,
+            url=glob.url,
+            lock_timeout=lock_timeout,
+            progress=lambda line: print(line, flush=True),
+        )
+    )
+    if report.refusal is not None:
+        print(report.refusal, file=sys.stderr)
+        return exit_codes.REFUSED
+    if not report.applied:
+        print("nothing to apply: the database is up to date")
+    return exit_codes.OK
+
+
+@migrate.command
+def status(
+    *,
+    steps: Annotated[
+        bool,
+        Parameter(
+            help="Print every migration's steps, not only those needing attention."
+        ),
+    ] = False,
+    json_: Annotated[
+        bool, Parameter(name="--json", help="Print the report as a JSON document.")
+    ] = False,
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
+    """Show which migrations this database has applied, without changing it.
+
+    Exits 0 when everything is installed, 3 when something is pending, 4 when
+    something needs attention (a failed or interrupted step, an edited file,
+    a database ahead of the directory).
+    """
+    import asyncio
+
+    from ..migrations.runner import status as run_status
+
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    report = asyncio.run(run_status(settings, database, url=glob.url))
+    print(report.to_json() if json_ else report.render(steps=steps))
+    return report.exit_code
+
+
 def _refuse_url(glob: Global, verb: str) -> None:
     if glob.url is not None:
         raise SettingsError(
