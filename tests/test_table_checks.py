@@ -403,8 +403,9 @@ def test_alembic_metadata_matches_the_runtime_check_names_and_bodies():
 
 
 def test_db_check_column_check_stays_out_of_the_create_table_body():
-    """``Field(db_check=True)`` keeps its ALTER-shaped path: emitted after
-    CREATE on Postgres, elided on SQLite. Table checks did not change it."""
+    """``Field(db_check=True)`` keeps its ALTER-shaped path on Postgres
+    (emitted after CREATE); on SQLite it rides its column's definition inline
+    (#514), never the table-constraint list. Table checks did not change it."""
 
     class Flavor(StrEnum):
         SWEET = "sweet"
@@ -421,7 +422,10 @@ def test_db_check_column_check_stays_out_of_the_create_table_body():
     assert any("ck_cookie_flavor" in sql for sql in pg_post)
 
     lite_create, lite_post, _ = _render_create_table_sql_for_test("Cookie", payload, "sqlite")
-    assert "CHECK" not in lite_create
+    assert (
+        '"flavor" text NOT NULL CONSTRAINT "ck_cookie_flavor" '
+        "CHECK (\"flavor\" IN ('sweet', 'salty'))"
+    ) in lite_create
     assert not any("CHECK" in sql for sql in lite_post), lite_post
 
 

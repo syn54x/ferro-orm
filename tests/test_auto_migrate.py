@@ -375,7 +375,7 @@ async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         count: int
 
-    with pytest.warns(UserWarning, match=r"migdrift\.count.*Alembic"):
+    with pytest.warns(UserWarning, match=r"migdrift\.count.*ferro migrate new"):
         await ferro.connect(db_url, migrate_updates=True)
 
     columns = _sqlite_columns(db_url, "migdrift")
@@ -666,7 +666,7 @@ async def test_destructive_refuses_unique_constraint_column_on_sqlite(
         )
     ferro.reset_engine()
 
-    with pytest.raises(ValueError, match=r"miguq\.old_code.*UNIQUE.*Alembic"):
+    with pytest.raises(ValueError, match=r"miguq\.old_code.*UNIQUE.*ferro migrate new"):
         await ferro.connect(db_url, migrate_destructive=True)
 
 
@@ -1656,3 +1656,199 @@ async def test_self_fk_does_not_evict_component_from_create_order(
 
         fetched = await AOrderedRef.get(ref.id)
         assert fetched.node_id == child.id
+
+
+# ---------------------------------------------------------------------------
+# #514: SQLite emits the inline column CHECK and ADD COLUMN ... REFERENCES
+# instead of warn-skipping them.
+# ---------------------------------------------------------------------------
+
+
+def _sqlite_query(db_url: str, sql: str) -> list[tuple]:
+    import sqlite3
+
+    db_path = db_url.removeprefix("sqlite:").split("?", 1)[0]
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+
+def _sqlite_table_sql(db_url: str, table: str) -> str:
+    rows = _sqlite_query(
+        db_url, f"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+    )
+    return rows[0][0]
+
+
+def _rewind_registry() -> None:
+    from ferro import clear_registry, reset_engine
+    from ferro.registry import REGISTRY
+
+    reset_engine()
+    clear_registry()
+    REGISTRY.reset_for_test()
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_sqlite_create_carries_the_named_inline_db_check(
+    db_url, clean_registry, recwarn
+):
+    from enum import StrEnum
+
+    from ferro import CheckViolationError
+
+    class OrderStatus(StrEnum):
+        OPEN = "open"
+        SHIPPED = "shipped"
+
+    class CheckedOrder(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        status: Annotated[OrderStatus, FerroField(db_type="text", db_check=True)]
+
+    await ferro.connect(db_url, auto_migrate=True)
+
+    assert (
+        '"status" text NOT NULL CONSTRAINT "ck_checkedorder_status" '
+        "CHECK (\"status\" IN ('open', 'shipped'))"
+    ) in _sqlite_table_sql(db_url, "checkedorder")
+    assert not [w for w in recwarn if "ck_checkedorder_status" in str(w.message)]
+
+    async with ferro.engines.session():
+        await CheckedOrder.create(status=OrderStatus.OPEN)
+        with pytest.raises(CheckViolationError):
+            await execute('INSERT INTO "checkedorder" ("status") VALUES (\'lost\')')
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_sqlite_migrate_updates_adds_a_db_check_column_with_its_inline_check(
+    db_url, clean_registry, recwarn
+):
+    from enum import StrEnum
+
+    from ferro import CheckViolationError
+
+    class ParcelSize(StrEnum):
+        SMALL = "small"
+        LARGE = "large"
+
+    class Parcel(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await Parcel.create(label="first")
+    _rewind_registry()
+
+    class Parcel(Model):  # noqa: F811 — the same table, one column wider
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        size: Annotated[
+            ParcelSize | None, FerroField(db_type="text", db_check=True)
+        ] = None
+
+    recwarn.clear()
+    await ferro.connect(db_url, migrate_updates=True)
+
+    assert (
+        '"size" text CONSTRAINT "ck_parcel_size" '
+        "CHECK (\"size\" IN ('small', 'large'))"
+    ) in _sqlite_table_sql(db_url, "parcel")
+    assert not [w for w in recwarn if "ck_parcel_size" in str(w.message)]
+
+    async with ferro.engines.session():
+        await Parcel.create(label="second", size=ParcelSize.LARGE)
+        with pytest.raises(CheckViolationError):
+            await execute(
+                'INSERT INTO "parcel" ("label", "size") VALUES (\'third\', \'huge\')'
+            )
+
+    # The live table now carries the check: a second boot plans nothing for it.
+    _rewind_registry()
+
+    class Parcel(Model):  # noqa: F811
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+        size: Annotated[
+            ParcelSize | None, FerroField(db_type="text", db_check=True)
+        ] = None
+
+    recwarn.clear()
+    await ferro.connect(db_url, migrate_updates=True)
+    assert not [w for w in recwarn if "ck_parcel_size" in str(w.message)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
+    db_url, clean_registry, recwarn
+):
+    from ferro import ForeignKey
+
+    class Author(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+
+    class Book(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await Book.create(title="untethered")
+    _rewind_registry()
+
+    class Author(Model):  # noqa: F811
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        books: Relation[list["Book"]] = BackRef()
+
+    class Book(Model):  # noqa: F811 — gains a nullable FK
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        author: Annotated[
+            Author | None, ForeignKey(related_name="books", on_delete="CASCADE")
+        ] = None
+
+    recwarn.clear()
+    await ferro.connect(db_url, migrate_updates=True)
+
+    assert (
+        '"author_id" integer REFERENCES "author"("id") ON DELETE CASCADE'
+        in _sqlite_table_sql(db_url, "book")
+    )
+    fks = _sqlite_query(db_url, 'PRAGMA foreign_key_list("book")')
+    # (id, seq, table, from, to, on_update, on_delete, match)
+    assert [(fk[2], fk[3], fk[4], fk[6]) for fk in fks] == [
+        ("author", "author_id", "id", "CASCADE")
+    ]
+    assert not [w for w in recwarn if "FOREIGN KEY" in str(w.message)]
+
+    async with ferro.engines.session():
+        author = await Author.create(name="Ursula")
+        tethered = await Book.create(title="tethered", author=author)
+        await execute('DELETE FROM "author"')
+        assert await Book.where(lambda book: book.id == tethered.id).first() is None
+
+    # Reconciled: a second boot neither re-adds nor warns about the FK.
+    _rewind_registry()
+
+    class Author(Model):  # noqa: F811
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        books: Relation[list["Book"]] = BackRef()
+
+    class Book(Model):  # noqa: F811
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        author: Annotated[
+            Author | None, ForeignKey(related_name="books", on_delete="CASCADE")
+        ] = None
+
+    recwarn.clear()
+    await ferro.connect(db_url, migrate_updates=True)
+    assert not [w for w in recwarn if "FOREIGN KEY" in str(w.message)]
