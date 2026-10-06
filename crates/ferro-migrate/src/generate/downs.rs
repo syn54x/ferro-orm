@@ -10,17 +10,31 @@
 //!
 //! Every statement comes from [`render_plan`] over [`plan_from_ir`]`(after,
 //! before)`: no statement is built here (AGENTS.md § I-1). The down restores
-//! schema, never data, so a down that recreates a dropped table or column
-//! carries `-- ferro: data-dependent`; a down never carries `destructive`
-//! (ADR-0033: nearly every down of an add is a drop), and a generated down is
-//! never `irreversible` — only a person declares that.
+//! schema, never data, so a down that recreates a dropped table or `NOT NULL`
+//! column carries `-- ferro: data-dependent`, as does one whose statements
+//! can fail on the rows it finds (a cast, `SET NOT NULL`, a unique); a down
+//! never carries `destructive` (ADR-0033: nearly every down of an add is a
+//! drop), and a generated down is never `irreversible` — only a person
+//! declares that.
+//!
+//! A dropped `NOT NULL` column with no default comes back `NOT NULL` on
+//! Postgres as the pass's two statements for it, added nullable then
+//! `SET NOT NULL`: on an empty table the down reaches the parent snapshot,
+//! on a populated one it fails (ADR-0033), never landing on a relaxed schema.
+//!
+//! ```text
+//! 0003_drop_bio/01_schema.down.postgres.sql   -- ferro: data-dependent
+//!                                             ALTER TABLE "author" ADD COLUMN "bio" varchar;
+//!                                             ALTER TABLE "author" ALTER COLUMN "bio" SET NOT NULL;
+//! ```
 
-use super::{DESTRUCTIVE, step_text};
+use super::columns::{self, PlanContext, PlanDirection};
+use super::{DESTRUCTIVE, GenerateError, refuse_unrendered, step_text};
 use crate::directory::Headers;
 use crate::{
-    Dialect, EmissionError, LiveFacts, MigrationOp, MigrationPlan, plan_from_ir, render_plan,
+    Dialect, LiveFacts, MigrationOp, MigrationPlan, RenderedOp, plan_from_ir, render_plan,
 };
-use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
+use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use std::collections::BTreeSet;
 
 use super::Rendering;
@@ -41,30 +55,158 @@ fn subject(op: &MigrationOp) -> Option<Subject> {
     }
 }
 
+fn find_column<'a>(
+    ir: &'a IrEnvelope<SchemaIrPayload>,
+    table: &str,
+    column: &str,
+) -> Option<&'a SchemaColumn> {
+    ir.payload
+        .models
+        .iter()
+        .find(|model| model.table_name == table)?
+        .columns
+        .iter()
+        .find(|col| col.name == column)
+}
+
+/// The column `op` adds, or whose type or nullability it changes, as `new`
+/// declares it.
+fn target_column<'a>(
+    op: &MigrationOp,
+    new: &'a IrEnvelope<SchemaIrPayload>,
+) -> Option<&'a SchemaColumn> {
+    match op {
+        MigrationOp::AddColumn { table, column }
+        | MigrationOp::AlterColumnType { table, column }
+        | MigrationOp::AlterColumnNullability { table, column } => find_column(new, table, column),
+        _ => None,
+    }
+}
+
 /// Whether running `op` brings back something the up removed, whose rows are
-/// gone: a down that does this restores the schema but not the data.
-fn recreates(op: &MigrationOp) -> bool {
+/// gone: a table, or a `NOT NULL` column (a nullable one comes back exactly
+/// as declared, holding nothing).
+fn recreates(op: &MigrationOp, new: &IrEnvelope<SchemaIrPayload>) -> bool {
+    match op {
+        MigrationOp::AddTable { .. } => true,
+        MigrationOp::AddColumn { .. } => target_column(op, new).is_some_and(|col| !col.nullable),
+        _ => false,
+    }
+}
+
+/// Whether `op`'s statements can fail on the rows the table holds: a cast,
+/// a `SET NOT NULL`, a unique over existing values, or a `NOT NULL` column
+/// added with no value to give them.
+fn may_fail_on_rows(op: &MigrationOp, new: &IrEnvelope<SchemaIrPayload>) -> bool {
+    let column = target_column(op, new);
+    match op {
+        MigrationOp::AlterColumnType { .. } => true,
+        MigrationOp::AlterColumnNullability { .. } => column.is_some_and(|col| !col.nullable),
+        MigrationOp::AddIndex { unique, .. } => *unique,
+        MigrationOp::AddColumn { .. } => {
+            column.is_some_and(|col| columns::needs_values(col) || (!col.nullable && col.unique))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `op` drops data.
+fn drops_data(op: &MigrationOp) -> bool {
     matches!(
         op,
-        MigrationOp::AddTable { .. } | MigrationOp::AddColumn { .. }
+        MigrationOp::DropTable { .. }
+            | MigrationOp::DropEnumType { .. }
+            | MigrationOp::DropColumn { .. }
     )
 }
 
-/// The statements `ops` render to on `dialect`, planned `old → new`.
+/// `new` with every `NOT NULL` column that `ops` adds with no value for
+/// existing rows declared nullable, and the `SET NOT NULL` that brings each
+/// back to `new`: the two halves of putting such a column back on Postgres.
+fn relaxed(
+    ops: &[MigrationOp],
+    new: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+) -> (IrEnvelope<SchemaIrPayload>, Vec<MigrationOp>) {
+    let mut relaxed = new.clone();
+    let mut tighten = Vec::new();
+    if dialect != Dialect::Postgres {
+        return (relaxed, tighten);
+    }
+    for op in ops {
+        let MigrationOp::AddColumn { table, column } = op else {
+            continue;
+        };
+        let Some(col) = relaxed
+            .payload
+            .models
+            .iter_mut()
+            .filter(|model| &model.table_name == table)
+            .flat_map(|model| model.columns.iter_mut())
+            .find(|col| &col.name == column)
+        else {
+            continue;
+        };
+        if columns::needs_values(col) {
+            col.nullable = true;
+            tighten.push(MigrationOp::AlterColumnNullability {
+                table: table.clone(),
+                column: column.clone(),
+            });
+        }
+    }
+    (relaxed, tighten)
+}
+
+fn rendered(
+    ops: Vec<MigrationOp>,
+    old: &IrEnvelope<SchemaIrPayload>,
+    new: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+) -> Result<Vec<RenderedOp>, GenerateError> {
+    let plan = MigrationPlan {
+        operations: ops,
+        ..MigrationPlan::default()
+    };
+    Ok(render_plan(&plan, old, new, dialect)?)
+}
+
+/// The statements `ops` render to on `dialect`, planned `old → new`. A down
+/// (`restore`) adds a `NOT NULL` column with no default nullable and sets it
+/// `NOT NULL` right after its own statements; an up never meets one
+/// ([`columns::assign`] sends it to a backfill).
 fn statements(
     ops: Vec<MigrationOp>,
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
-) -> Result<Vec<String>, EmissionError> {
-    let plan = MigrationPlan {
-        operations: ops,
-        ..MigrationPlan::default()
+    restore: bool,
+) -> Result<Vec<String>, GenerateError> {
+    let (relaxed, tighten) = if restore {
+        relaxed(&ops, new, dialect)
+    } else {
+        (new.clone(), Vec::new())
     };
-    Ok(render_plan(&plan, old, new, dialect)?
-        .into_iter()
-        .flat_map(|rendered| rendered.statements)
-        .collect())
+    let ops_rendered = rendered(ops, old, &relaxed, dialect)?;
+    refuse_unrendered(&ops_rendered, dialect)?;
+    let tighten_rendered = rendered(tighten, &relaxed, new, dialect)?;
+    refuse_unrendered(&tighten_rendered, dialect)?;
+    let mut out = Vec::new();
+    for op in ops_rendered {
+        out.extend(op.statements);
+        if let MigrationOp::AddColumn { table, column } = &op.op {
+            out.extend(
+                tighten_rendered
+                    .iter()
+                    .filter(|t| {
+                        matches!(&t.op, MigrationOp::AlterColumnNullability { table: tt, column: tc }
+                            if tt == table && tc == column)
+                    })
+                    .flat_map(|t| t.statements.iter().cloned()),
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// One generated step on `dialect`, both directions: the up file renders
@@ -72,41 +214,48 @@ fn statements(
 /// inverse — [`plan_from_ir`]`(after, before)` with every drop planned,
 /// restricted to the tables and enum types `step_ops` touch.
 ///
-/// The down's headers: `data-dependent` when an inverse op recreates a
-/// dropped table or column; `not-applicable` when the step has nothing to
-/// reverse on `dialect`; never `destructive`, never `irreversible`.
+/// The up's headers: `destructive` when it drops a table, a column or an
+/// enum type; `data-dependent` when its statements can fail on existing rows.
+/// The down's: `data-dependent` when an inverse op recreates a dropped table
+/// or `NOT NULL` column, or can fail on the rows it finds; `not-applicable`
+/// when the step has nothing to reverse on `dialect`; never `destructive`,
+/// never `irreversible`.
 ///
 /// # Errors
-/// An op that cannot render (an [`EmissionError`] from [`render_plan`]).
+/// An op that cannot render (an [`crate::EmissionError`] from
+/// [`render_plan`]), or that renders only a warning
+/// ([`GenerateError::Unrenderable`]).
 pub fn render_down(
     step_ops: &[MigrationOp],
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
-) -> Result<Rendering, EmissionError> {
+) -> Result<Rendering, GenerateError> {
     let subjects: BTreeSet<Subject> = step_ops.iter().filter_map(subject).collect();
     let inverse: Vec<MigrationOp> =
         plan_from_ir(after, before, dialect, &LiveFacts::declared(), DESTRUCTIVE)
             .operations
             .into_iter()
             .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
+            .filter(|op| {
+                let ctx = PlanContext::of(op, after, before, dialect, PlanDirection::Down);
+                !columns::carried_by_its_column_drop(op, &ctx)
+            })
             .collect();
 
-    let up_statements = statements(step_ops.to_vec(), before, after, dialect)?;
+    let up_statements = statements(step_ops.to_vec(), before, after, dialect, false)?;
     let headers = Headers {
-        destructive: !up_statements.is_empty()
-            && step_ops.iter().any(|op| {
-                matches!(
-                    op,
-                    MigrationOp::DropTable { .. } | MigrationOp::DropEnumType { .. }
-                )
-            }),
+        destructive: !up_statements.is_empty() && step_ops.iter().any(drops_data),
+        data_dependent: !up_statements.is_empty()
+            && step_ops.iter().any(|op| may_fail_on_rows(op, after)),
         not_applicable: up_statements.is_empty(),
         ..Headers::default()
     };
 
-    let data_dependent = inverse.iter().any(recreates);
-    let down_statements = statements(inverse, after, before, dialect)?;
+    let data_dependent = inverse
+        .iter()
+        .any(|op| recreates(op, before) || may_fail_on_rows(op, before));
+    let down_statements = statements(inverse, after, before, dialect, true)?;
     let down_headers = Headers {
         data_dependent: !down_statements.is_empty() && data_dependent,
         not_applicable: down_statements.is_empty(),

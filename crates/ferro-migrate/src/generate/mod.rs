@@ -15,18 +15,23 @@
 //! generator decides which step an op lands in and which headers the file
 //! carries, never a statement (AGENTS.md § I-1).
 //!
-//! This slice generates new and dropped models (their tables, the enum types
-//! they introduce or retire, and everything a `CREATE TABLE` carries). Every
-//! other change is refused naming the ticket that generates it.
+//! It generates new and dropped models (their tables, the enum types they
+//! introduce or retire, and everything a `CREATE TABLE` carries) and the
+//! plain `ALTER TABLE` edits of an existing table where the dialect has a
+//! native statement. [`columns::assign`] decides each op's step; every other
+//! change is refused naming the ticket that generates it.
 
+pub mod columns;
 pub mod downs;
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
 use crate::snapshot::{Snapshot, SnapshotError};
 use crate::{
-    Dialect, EmissionError, LiveFacts, MigrationOp, MigrationPlan, PlanOptions, plan_from_ir,
-    render_plan,
+    Dialect, EmissionError, LiveFacts, MigrationOp, MigrationPlan, PlanOptions, RenderedOp,
+    plan_from_ir, render_plan,
 };
+use columns::{Needs, Phase, PlanContext, PlanDirection, Refusal, StepAssignment};
+use ferro_ddl_lowering::extra_check_names_warning;
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -87,6 +92,40 @@ pub enum GenerateError {
         /// The ticket that generates it.
         ticket: u32,
     },
+    /// The op needs a SQLite table rebuild (ticket #526).
+    NeedsRebuild {
+        /// The op kind (`AlterColumnType`, …).
+        op: String,
+        /// The table it changes.
+        table: String,
+    },
+    /// The op needs values for existing rows (ticket #534).
+    NeedsBackfill {
+        /// The op kind (`AddColumn`, …).
+        op: String,
+        /// The table it changes.
+        table: String,
+        /// The column whose existing rows need a value.
+        column: String,
+    },
+    /// The models change a table's primary key (ticket #536).
+    PrimaryKeyChange {
+        /// The table whose key changes.
+        table: String,
+    },
+    /// The renderer has no statement for an op on a dialect, only a warning
+    /// saying why (a cast the pass refuses): writing the file without it
+    /// would be a silent omission.
+    Unrenderable {
+        /// The op kind.
+        op: String,
+        /// The table it changes.
+        table: String,
+        /// The dialect.
+        dialect: StepDialect,
+        /// The renderer's warning.
+        warning: String,
+    },
     /// The planner reported a change between the two snapshots that it turns
     /// into no op (an enum label removal, a drifting foreign key ferro does
     /// not own) — writing nothing for it would be a silent omission.
@@ -110,6 +149,30 @@ impl std::fmt::Display for GenerateError {
                 subject,
                 ticket,
             } => write!(f, "not generated yet: {op} on {subject} (ticket #{ticket})"),
+            GenerateError::NeedsRebuild { op, table } => write!(
+                f,
+                "not generated yet: {op} on {table} needs a table rebuild (ticket #526)"
+            ),
+            GenerateError::NeedsBackfill { op, table, .. } => write!(
+                f,
+                "not generated yet: {op} on {table} needs a backfill (ticket #534)"
+            ),
+            GenerateError::PrimaryKeyChange { table } => write!(
+                f,
+                "not generated yet: a primary-key change on {table} (ticket #536): a table's \
+                 primary key cannot change in place; declare a new model with the new key, \
+                 copy the rows across, then drop the old model"
+            ),
+            GenerateError::Unrenderable {
+                op,
+                table,
+                dialect,
+                warning,
+            } => write!(
+                f,
+                "not generated yet: {op} on {table} has no statement on {}: {warning}",
+                dialect.suffix().unwrap_or("every dialect")
+            ),
             GenerateError::Unplanned { dialect, warning } => write!(
                 f,
                 "not generated yet: the models change something the planner has no \
@@ -139,20 +202,6 @@ impl From<SnapshotError> for GenerateError {
     }
 }
 
-/// The phase step an op lands in. This slice has one: `schema`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Phase {
-    Schema,
-}
-
-impl Phase {
-    fn step_name(self) -> &'static str {
-        match self {
-            Phase::Schema => "schema",
-        }
-    }
-}
-
 /// The op's kind as the plan JSON spells it (`AddTable`, …).
 fn op_kind(op: &MigrationOp) -> String {
     serde_json::to_value(op)
@@ -161,28 +210,105 @@ fn op_kind(op: &MigrationOp) -> String {
         .unwrap_or_else(|| format!("{op:?}"))
 }
 
-/// Which step `op` belongs in, or the refusal naming the ticket that
-/// generates it.
-fn phase_of(op: &MigrationOp) -> Result<Phase, GenerateError> {
+/// What `op` changes, for a refusal: its table, or the enum type.
+fn op_subject(op: &MigrationOp) -> String {
     match op {
-        MigrationOp::AddTable { .. }
-        | MigrationOp::DropTable { .. }
-        | MigrationOp::CreateEnumType { .. }
-        | MigrationOp::DropEnumType { .. } => Ok(Phase::Schema),
-        // A label added to a type that already exists cannot be reversed by a
-        // down (Postgres drops no enum label), so it belongs to the enum-label
-        // ticket's steps, whichever table introduced it.
-        MigrationOp::AddEnumLabel { type_name, .. } => Err(GenerateError::NotGeneratedYet {
-            op: op_kind(op),
-            subject: type_name.clone(),
-            ticket: 529,
-        }),
-        other => Err(GenerateError::NotGeneratedYet {
-            op: op_kind(other),
-            subject: other.table().unwrap_or_default().to_string(),
-            ticket: 524,
-        }),
+        MigrationOp::AddEnumLabel { type_name, .. }
+        | MigrationOp::CreateEnumType { type_name, .. }
+        | MigrationOp::DropEnumType { type_name } => type_name.clone(),
+        other => other.table().unwrap_or_default().to_string(),
     }
+}
+
+/// The column an op changes, when it changes one.
+fn op_column(op: &MigrationOp) -> String {
+    match op {
+        MigrationOp::AddColumn { column, .. }
+        | MigrationOp::DropColumn { column, .. }
+        | MigrationOp::AlterColumnType { column, .. }
+        | MigrationOp::AlterColumnNullability { column, .. }
+        | MigrationOp::AddForeignKey { column, .. }
+        | MigrationOp::RebuildForeignKey { column, .. } => column.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Which step `op` belongs in, in the file that turns `before` into `after`
+/// on `dialect` ([`columns::assign`]), or the refusal naming the ticket that
+/// generates it.
+fn phase_of(
+    op: &MigrationOp,
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+    direction: PlanDirection,
+) -> Result<Phase, GenerateError> {
+    let ctx = PlanContext::of(op, before, after, dialect, direction);
+    let StepAssignment { phase, needs } = columns::assign(op, &ctx);
+    let table = op_subject(op);
+    match needs {
+        Needs::Native => Ok(phase),
+        Needs::Rebuild => Err(GenerateError::NeedsRebuild {
+            op: op_kind(op),
+            table,
+        }),
+        Needs::Backfill => Err(GenerateError::NeedsBackfill {
+            op: op_kind(op),
+            table,
+            column: op_column(op),
+        }),
+        Needs::Refused(Refusal::Ticket(ticket)) => Err(GenerateError::NotGeneratedYet {
+            op: op_kind(op),
+            subject: table,
+            ticket,
+        }),
+        Needs::Refused(Refusal::PrimaryKeyChange) => Err(GenerateError::PrimaryKeyChange { table }),
+        Needs::Refused(Refusal::LiveOnly) => Err(GenerateError::Render(format!(
+            "{} on {table} is planned only against a live database, never between two \
+             schema snapshots",
+            op_kind(op)
+        ))),
+    }
+}
+
+/// The ops of `plan` the file renders: every op but a SQLite check drop the
+/// same file's `DROP COLUMN` carries ([`columns::carried_by_its_column_drop`]).
+fn rendered_ops(
+    plan: &MigrationPlan,
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+    direction: PlanDirection,
+) -> Vec<MigrationOp> {
+    plan.operations
+        .iter()
+        .filter(|op| {
+            let ctx = PlanContext::of(op, before, after, dialect, direction);
+            !columns::carried_by_its_column_drop(op, &ctx)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Refuse an op the renderer answered with a warning and no statement (a
+/// cast the pass refuses): the file would otherwise silently leave it out.
+/// A new table's warnings (row security on SQLite) are reported, not refused:
+/// the table itself is created.
+fn refuse_unrendered(rendered: &[RenderedOp], dialect: Dialect) -> Result<(), GenerateError> {
+    for op in rendered {
+        if matches!(op.op, MigrationOp::AddTable { .. }) {
+            continue;
+        }
+        if let Some(warning) = op.warnings.first() {
+            return Err(GenerateError::Unrenderable {
+                op: op_kind(&op.op),
+                table: op_subject(&op.op),
+                dialect: dialect.into(),
+                warning: warning.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The modelset with no models, in `like`'s IR version: the parent of `0001`.
@@ -210,9 +336,21 @@ fn plan(
     plan_from_ir(old, new, dialect, &LiveFacts::declared(), DESTRUCTIVE)
 }
 
-/// Every warning `plan` raises that planning `standing → standing` does not:
-/// the reports this change caused, not the ones the models always raise.
+/// Every warning `plan` raises that planning `standing → standing` does not
+/// and that none of its ops answers: the reports this change caused, not the
+/// ones the models always raise. A leftover CHECK's report is answered by the
+/// plan's drop of it.
 fn change_warnings(plan: &MigrationPlan, standing: &MigrationPlan) -> Vec<String> {
+    let mut dropped_checks: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for op in &plan.operations {
+        if let MigrationOp::DropCheck { table, name } = op {
+            dropped_checks.entry(table).or_default().push(name.clone());
+        }
+    }
+    let answered: BTreeSet<String> = dropped_checks
+        .iter()
+        .filter_map(|(table, names)| extra_check_names_warning(table, names))
+        .collect();
     let already: BTreeSet<&String> = standing
         .warnings
         .iter()
@@ -221,20 +359,24 @@ fn change_warnings(plan: &MigrationPlan, standing: &MigrationPlan) -> Vec<String
     plan.warnings
         .iter()
         .chain(&plan.always_warnings)
-        .filter(|warning| !already.contains(warning))
+        .filter(|warning| !already.contains(warning) && !answered.contains(*warning))
         .cloned()
         .collect()
 }
 
-/// Refuse anything in `plan` this generator does not generate: an op with no
-/// phase, or a warning the change caused that no op answers.
+/// Refuse anything in `plan` (the file turning `before` into `after`) this
+/// generator does not generate: an op with no phase, or a warning the change
+/// caused that no op answers.
 fn refuse_unsupported(
     plan: &MigrationPlan,
     standing: &MigrationPlan,
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
+    direction: PlanDirection,
 ) -> Result<(), GenerateError> {
     for op in &plan.operations {
-        phase_of(op)?;
+        phase_of(op, before, after, dialect, direction)?;
     }
     if let Some(warning) = change_warnings(plan, standing).into_iter().next() {
         return Err(GenerateError::Unplanned {
@@ -260,20 +402,23 @@ fn step_text(headers: &Headers, statements: &[String]) -> String {
     out
 }
 
-/// Every warning rendering `plan` raises on `dialect` (a backend limitation
-/// a dialect skips, such as row security on SQLite), each once, into
-/// `warnings`.
+/// Every warning rendering `ops` raises on `dialect` (a backend limitation a
+/// dialect skips, such as row security on SQLite), each once, into
+/// `warnings`; an op the renderer leaves out with a warning is refused.
 fn render_warnings(
-    plan: &MigrationPlan,
+    ops: &[MigrationOp],
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     warnings: &mut Vec<String>,
 ) -> Result<(), GenerateError> {
-    for warning in render_plan(plan, old, new, dialect)?
-        .into_iter()
-        .flat_map(|rendered| rendered.warnings)
-    {
+    let plan = MigrationPlan {
+        operations: ops.to_vec(),
+        ..MigrationPlan::default()
+    };
+    let rendered = render_plan(&plan, old, new, dialect)?;
+    refuse_unrendered(&rendered, dialect)?;
+    for warning in rendered.into_iter().flat_map(|rendered| rendered.warnings) {
         if !warnings.contains(&warning) {
             warnings.push(warning);
         }
@@ -286,9 +431,9 @@ fn short_model_name(model_name: &str) -> &str {
     model_name.rsplit('.').next().unwrap_or(model_name)
 }
 
-/// What the up plans change, in words, over every dialect.
+/// What the up ops change, in words, over every dialect.
 fn summarize(
-    plans: &[MigrationPlan],
+    ups: &[Vec<MigrationOp>],
     parent: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
 ) -> String {
@@ -304,7 +449,8 @@ fn summarize(
     let mut dropped = BTreeSet::new();
     let mut types_added = BTreeSet::new();
     let mut types_dropped = BTreeSet::new();
-    for op in plans.iter().flat_map(|plan| &plan.operations) {
+    let mut changed = BTreeSet::new();
+    for op in ups.iter().flatten() {
         match op {
             MigrationOp::AddTable { table } => {
                 added.insert(model_of(target, table));
@@ -318,11 +464,16 @@ fn summarize(
             MigrationOp::DropEnumType { type_name } => {
                 types_dropped.insert(type_name.clone());
             }
-            _ => {}
+            other => {
+                if let Some(table) = other.table() {
+                    changed.insert(model_of(target, table));
+                }
+            }
         }
     }
     [
         ("new models", added),
+        ("changed models", changed),
         ("dropped models", dropped),
         ("new enum types", types_added),
         ("dropped enum types", types_dropped),
@@ -348,9 +499,12 @@ fn summarize(
 /// method) is not a schema change (ADR-0027).
 ///
 /// # Errors
-/// [`GenerateError::NotGeneratedYet`] for an op this slice does not generate,
-/// [`GenerateError::Unplanned`] for a change the planner reports but has no
-/// op for, [`GenerateError::Render`] when an op cannot render.
+/// [`GenerateError::NotGeneratedYet`], [`GenerateError::NeedsRebuild`],
+/// [`GenerateError::NeedsBackfill`] and [`GenerateError::PrimaryKeyChange`]
+/// for a change this generator does not generate yet,
+/// [`GenerateError::Unrenderable`] for an op the renderer leaves out with a
+/// warning, [`GenerateError::Unplanned`] for a change the planner reports but
+/// has no op for, [`GenerateError::Render`] when an op cannot render.
 pub fn generate(
     parent: Option<&Snapshot>,
     target: &IrEnvelope<SchemaIrPayload>,
@@ -361,27 +515,60 @@ pub fn generate(
     }
     let empty = empty_modelset(target);
     let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
+    // The planner has no op for a primary key moving between columns.
+    if let Some(table) = columns::primary_key_change(parent_ir, target) {
+        return Err(GenerateError::PrimaryKeyChange { table });
+    }
 
     let mut ups = Vec::new();
     let mut downs = Vec::new();
     for &dialect in dialects {
         let up = plan(parent_ir, target, dialect);
-        refuse_unsupported(&up, &plan(target, target, dialect), dialect)?;
+        refuse_unsupported(
+            &up,
+            &plan(target, target, dialect),
+            parent_ir,
+            target,
+            dialect,
+            PlanDirection::Up,
+        )?;
         let down = plan(target, parent_ir, dialect);
-        refuse_unsupported(&down, &plan(parent_ir, parent_ir, dialect), dialect)?;
-        ups.push(up);
+        refuse_unsupported(
+            &down,
+            &plan(parent_ir, parent_ir, dialect),
+            target,
+            parent_ir,
+            dialect,
+            PlanDirection::Down,
+        )?;
+        ups.push(rendered_ops(
+            &up,
+            parent_ir,
+            target,
+            dialect,
+            PlanDirection::Up,
+        ));
         downs.push(down);
     }
-    if ups.iter().chain(&downs).all(MigrationPlan::is_empty) {
+    if ups.iter().all(Vec::is_empty) && downs.iter().all(MigrationPlan::is_empty) {
         return Ok(None);
     }
 
-    let phases: BTreeSet<Phase> = ups
-        .iter()
-        .chain(&downs)
-        .flat_map(|plan| &plan.operations)
-        .map(phase_of)
-        .collect::<Result<_, _>>()?;
+    let mut phases = BTreeSet::new();
+    for (&dialect, (up, down)) in dialects.iter().zip(ups.iter().zip(&downs)) {
+        for op in up {
+            phases.insert(phase_of(op, parent_ir, target, dialect, PlanDirection::Up)?);
+        }
+        for op in &down.operations {
+            phases.insert(phase_of(
+                op,
+                target,
+                parent_ir,
+                dialect,
+                PlanDirection::Down,
+            )?);
+        }
+    }
     let mut warnings = Vec::new();
     for (&dialect, up) in dialects.iter().zip(&ups) {
         render_warnings(up, parent_ir, target, dialect, &mut warnings)?;
@@ -391,8 +578,8 @@ pub fn generate(
         let mut renderings = BTreeMap::new();
         for (&dialect, up) in dialects.iter().zip(&ups) {
             let mut step_ops = Vec::new();
-            for op in &up.operations {
-                if phase_of(op)? == phase {
+            for op in up {
+                if phase_of(op, parent_ir, target, dialect, PlanDirection::Up)? == phase {
                     step_ops.push(op.clone());
                 }
             }
@@ -742,19 +929,294 @@ mod tests {
         assert_eq!(generate(Some(&parent), &ir(vec![edited]), &BOTH), Ok(None));
     }
 
-    #[test]
-    fn a_column_change_on_an_existing_table_is_refused_naming_its_ticket() {
-        let parent = snapshot_of(&ir(vec![author()]), None);
-        let mut edited = author();
-        edited.columns.push(SchemaColumn {
+    /// What the reconciliation pass executes to turn `before` into `after`
+    /// on `dialect`, statement by statement.
+    fn pass(
+        before: &IrEnvelope<SchemaIrPayload>,
+        after: &IrEnvelope<SchemaIrPayload>,
+        dialect: Dialect,
+    ) -> Vec<String> {
+        render_plan(&plan(before, after, dialect), before, after, dialect)
+            .expect("render")
+            .into_iter()
+            .flat_map(|rendered| rendered.statements)
+            .collect()
+    }
+
+    fn with_columns(extra: Vec<SchemaColumn>) -> SchemaModel {
+        let mut model = author();
+        model.columns.extend(extra);
+        model
+    }
+
+    fn optional(name: &str, logical_type: &str) -> SchemaColumn {
+        SchemaColumn {
             nullable: true,
-            ..column("bio", "string")
-        });
-        let err = generate(Some(&parent), &ir(vec![edited]), &BOTH).expect_err("refused");
+            ..column(name, logical_type)
+        }
+    }
+
+    /// The one-step migration from `before` to `after` on `dialects`.
+    fn edit(
+        before: Vec<SchemaModel>,
+        after: Vec<SchemaModel>,
+        dialects: &[Dialect],
+    ) -> GeneratedMigration {
+        let parent = snapshot_of(&ir(before), None);
+        generate(Some(&parent), &ir(after), dialects)
+            .expect("ok")
+            .expect("a change")
+    }
+
+    fn refusal(before: Vec<SchemaModel>, after: Vec<SchemaModel>, dialects: &[Dialect]) -> String {
+        let parent = snapshot_of(&ir(before), None);
+        generate(Some(&parent), &ir(after), dialects)
+            .expect_err("refused")
+            .to_string()
+    }
+
+    #[test]
+    fn an_optional_column_is_the_passs_add_column_and_its_down_drops_it() {
+        let after = with_columns(vec![optional("bio", "string")]);
+        let migration = edit(vec![author()], vec![after.clone()], &BOTH);
+        for dialect in BOTH {
+            let r = rendering(&migration, dialect.into());
+            let up = pass(&ir(vec![author()]), &ir(vec![after.clone()]), dialect);
+            assert_eq!(up, ["ALTER TABLE \"author\" ADD COLUMN \"bio\" varchar"]);
+            assert_eq!(r.up, file(&up, ""), "{dialect:?}");
+            assert_eq!(r.headers, Headers::default());
+            assert_eq!(r.down, "ALTER TABLE \"author\" DROP COLUMN \"bio\";\n");
+            assert_eq!(
+                r.down_headers,
+                Headers::default(),
+                "a down is never destructive"
+            );
+        }
+    }
+
+    #[test]
+    fn a_required_column_with_a_literal_default_backfills_it_as_the_pass_does() {
+        let tier = SchemaColumn {
+            default: Some(serde_json::json!("free")),
+            ..column("tier", "string")
+        };
+        let after = with_columns(vec![tier]);
+        let migration = edit(vec![author()], vec![after.clone()], &BOTH);
+        for dialect in BOTH {
+            let r = rendering(&migration, dialect.into());
+            let up = pass(&ir(vec![author()]), &ir(vec![after.clone()]), dialect);
+            assert!(up[0].contains("NOT NULL DEFAULT 'free'"), "{up:?}");
+            assert_eq!(r.up, file(&up, ""), "{dialect:?}");
+            assert_eq!(r.down, "ALTER TABLE \"author\" DROP COLUMN \"tier\";\n");
+        }
         assert_eq!(
-            err.to_string(),
-            "not generated yet: AddColumn on author (ticket #524)"
+            rendering(&migration, StepDialect::Postgres).up,
+            "ALTER TABLE \"author\" ADD COLUMN \"tier\" varchar NOT NULL DEFAULT 'free';\n\n\
+             ALTER TABLE \"author\" ALTER COLUMN \"tier\" DROP DEFAULT;\n"
         );
+    }
+
+    #[test]
+    fn dropping_an_optional_column_is_destructive_and_its_down_adds_it_back() {
+        let before = with_columns(vec![optional("bio", "string")]);
+        let migration = edit(vec![before], vec![author()], &BOTH);
+        for dialect in BOTH {
+            let r = rendering(&migration, dialect.into());
+            assert_eq!(
+                r.up,
+                "-- ferro: destructive\n\nALTER TABLE \"author\" DROP COLUMN \"bio\";\n"
+            );
+            assert_eq!(
+                r.down,
+                "ALTER TABLE \"author\" ADD COLUMN \"bio\" varchar;\n"
+            );
+            assert_eq!(r.down_headers, Headers::default());
+        }
+    }
+
+    #[test]
+    fn a_dropped_not_null_column_comes_back_not_null_marked_data_dependent() {
+        let before = with_columns(vec![column("bio", "string")]);
+        let migration = edit(vec![before.clone()], vec![author()], &[Dialect::Postgres]);
+        let pg = rendering(&migration, StepDialect::Postgres);
+        assert!(pg.headers.destructive);
+        assert_eq!(
+            pg.down,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" ADD COLUMN \"bio\" varchar;\n\n\
+             ALTER TABLE \"author\" ALTER COLUMN \"bio\" SET NOT NULL;\n"
+        );
+        assert!(pg.down_headers.data_dependent && !pg.down_headers.destructive);
+        // SQLite has no SET NOT NULL and refuses a NOT NULL ADD COLUMN with
+        // no default: the down is a rebuild.
+        assert_eq!(
+            refusal(vec![before], vec![author()], &BOTH),
+            "not generated yet: AddColumn on author needs a table rebuild (ticket #526)"
+        );
+    }
+
+    #[test]
+    fn a_dropped_columns_index_and_check_go_with_it() {
+        let mut before = with_columns(vec![SchemaColumn {
+            index: true,
+            ..optional("bio", "string")
+        }]);
+        before.indexes.push(ferro_schema_ir::SchemaIndex {
+            name: "idx_author_bio".into(),
+            columns: vec!["bio".into()],
+            unique: false,
+        });
+        before.checks.push(ferro_schema_ir::SchemaCheck {
+            name: "ck_author_bio".into(),
+            column: "bio".into(),
+            values: vec!["'a'".into()],
+        });
+        let migration = edit(vec![before.clone()], vec![author()], &BOTH);
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        assert_eq!(
+            sqlite.up,
+            "-- ferro: destructive\n\nDROP INDEX IF EXISTS \"idx_author_bio\";\n\n\
+             ALTER TABLE \"author\" DROP COLUMN \"bio\";\n"
+        );
+        assert!(migration.warnings.is_empty(), "{:?}", migration.warnings);
+        let pg = rendering(&migration, StepDialect::Postgres);
+        assert_eq!(
+            pg.up,
+            file(
+                &pass(&ir(vec![before]), &ir(vec![author()]), Dialect::Postgres),
+                "-- ferro: destructive\n"
+            )
+        );
+        assert!(
+            pg.down
+                .contains("CREATE INDEX IF NOT EXISTS \"idx_author_bio\"")
+        );
+    }
+
+    #[test]
+    fn a_postgres_type_change_casts_both_ways_marked_data_dependent() {
+        let before = with_columns(vec![column("age", "integer")]);
+        let after = with_columns(vec![column("age", "string")]);
+        let migration = edit(vec![before], vec![after], &[Dialect::Postgres]);
+        let pg = rendering(&migration, StepDialect::Postgres);
+        assert_eq!(
+            pg.up,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" ALTER COLUMN \"age\" TYPE varchar USING \"age\"::varchar;\n"
+        );
+        assert_eq!(
+            pg.down,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" ALTER COLUMN \"age\" TYPE integer USING \"age\"::integer;\n"
+        );
+    }
+
+    #[test]
+    fn relaxing_not_null_on_postgres_and_its_down_sets_it_again() {
+        let before = with_columns(vec![column("bio", "string")]);
+        let after = with_columns(vec![optional("bio", "string")]);
+        let migration = edit(vec![before], vec![after], &[Dialect::Postgres]);
+        let pg = rendering(&migration, StepDialect::Postgres);
+        assert_eq!(
+            pg.up,
+            "ALTER TABLE \"author\" ALTER COLUMN \"bio\" DROP NOT NULL;\n"
+        );
+        assert_eq!(
+            pg.down,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" ALTER COLUMN \"bio\" SET NOT NULL;\n"
+        );
+    }
+
+    #[test]
+    fn a_unique_on_an_existing_sqlite_table_is_built_in_the_schema_step() {
+        let mut after = author();
+        after.columns[1].unique = true;
+        after.uniques.push(ferro_schema_ir::SchemaUnique {
+            name: "uq_author_name".into(),
+            columns: vec!["name".into()],
+        });
+        let migration = edit(vec![author()], vec![after.clone()], &[Dialect::Sqlite]);
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        // A duplicate fails it: data-dependent.
+        assert_eq!(
+            sqlite.up,
+            "-- ferro: data-dependent\n\n\
+             CREATE UNIQUE INDEX IF NOT EXISTS \"uq_author_name\" ON \"author\" (\"name\");\n"
+        );
+        assert_eq!(sqlite.down, "DROP INDEX IF EXISTS \"uq_author_name\";\n");
+        // On an existing Postgres table an index is its own concurrent step.
+        assert_eq!(
+            refusal(vec![author()], vec![after], &BOTH),
+            "not generated yet: AddIndex on author (ticket #527)"
+        );
+    }
+
+    #[test]
+    fn several_models_edited_at_once_share_one_schema_step_parents_first() {
+        let tag = || model("Tag", vec![pk()]);
+        let mut post_after = post();
+        post_after.columns.push(optional("subtitle", "string"));
+        let author_after = with_columns(vec![optional("bio", "string")]);
+        let migration = edit(
+            vec![author(), post(), tag()],
+            vec![author_after, post_after, tag()],
+            &BOTH,
+        );
+        for dialect in BOTH {
+            assert_eq!(
+                rendering(&migration, dialect.into()).up,
+                "ALTER TABLE \"author\" ADD COLUMN \"bio\" varchar;\n\n\
+                 ALTER TABLE \"post\" ADD COLUMN \"subtitle\" varchar;\n"
+            );
+            assert_eq!(
+                rendering(&migration, dialect.into()).down,
+                "ALTER TABLE \"author\" DROP COLUMN \"bio\";\n\n\
+                 ALTER TABLE \"post\" DROP COLUMN \"subtitle\";\n"
+            );
+        }
+    }
+
+    #[test]
+    fn shapes_this_generator_cannot_render_yet_are_refused_naming_their_ticket() {
+        let age_int = with_columns(vec![column("age", "integer")]);
+        let age_text = with_columns(vec![column("age", "string")]);
+        assert_eq!(
+            refusal(vec![age_int], vec![age_text], &BOTH),
+            "not generated yet: AlterColumnType on author needs a table rebuild (ticket #526)"
+        );
+        assert_eq!(
+            refusal(
+                vec![author()],
+                vec![with_columns(vec![column("slug", "string")])],
+                &BOTH
+            ),
+            "not generated yet: AddColumn on author needs a backfill (ticket #534)"
+        );
+        assert_eq!(
+            refusal(
+                vec![with_columns(vec![optional("bio", "string")])],
+                vec![with_columns(vec![column("bio", "string")])],
+                &[Dialect::Postgres]
+            ),
+            "not generated yet: AlterColumnNullability on author needs a backfill (ticket #534)"
+        );
+    }
+
+    #[test]
+    fn a_primary_key_change_is_refused_with_the_recipe() {
+        let mut moved = author();
+        moved.columns[0].primary_key = false;
+        moved.columns[0].autoincrement = false;
+        moved.columns[1].primary_key = true;
+        for dialects in [&[Dialect::Postgres][..], &[Dialect::Sqlite][..]] {
+            assert_eq!(
+                refusal(vec![author()], vec![moved.clone()], dialects),
+                "not generated yet: a primary-key change on author (ticket #536): a table's \
+                 primary key cannot change in place; declare a new model with the new key, \
+                 copy the rows across, then drop the old model"
+            );
+        }
     }
 
     #[test]
