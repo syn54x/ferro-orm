@@ -1,0 +1,1 @@
+verified 2026-10-06T19:41:37Z: uv sync --extra cli; maturin develop; pytest tests/test_cli_init.py tests/test_settings.py tests/test_import_budget.py -> 109 passed; uv run ferro --help -> exit 0, lists migrate
