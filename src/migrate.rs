@@ -1,54 +1,34 @@
 //! Auto-migrate schema diffing and execution.
 //!
 //! Extends `connect(auto_migrate=True)` beyond table creation: with
-//! `migrate_updates`, missing model columns are added to existing tables
-//! (plus, on Postgres, type/nullability reconciliation); with
-//! `migrate_destructive`, live columns that no longer exist on the model are
-//! dropped. Capability matrix and semantics are documented on the Python
+//! `migrate_updates`, existing tables are reconciled with the registered
+//! models (missing columns, indexes, foreign keys and checks added; on
+//! Postgres, type/nullability drift, enum labels and row security
+//! reconciled); with `migrate_destructive`, what the models no longer declare
+//! is dropped. Capability matrix and semantics are documented on the Python
 //! `ferro.connect` / `ferro.migrate` APIs.
 //!
-//! Column DDL for auto-migrate is planned via SchemaIR diffing (`plan_from_ir`) and
-//! lowered by `ferro-migrate` (`emit_sql_with_ir`), so an auto-migrated database
-//! matches a freshly created one (AGENTS.md § I-1).
+//! The pass is read-live → plan → render → execute: the live database is read
+//! into an IR plus its live facts (`crate::live_ir`), the one planner
+//! (`ferro_migrate::plan_from_ir`) decides every change for the whole
+//! modelset, and `ferro_migrate::render_plan` renders it through the same
+//! `ferro_ddl_lowering` functions every migration door uses (AGENTS.md § I-1).
 
 use crate::backend::EngineHandle;
-use ferro_ddl_lowering::{
-    Dialect, LiveRowSecurity, ResolvedStorage, extra_check_names, extra_check_names_warning,
-    extra_enum_labels, extra_enum_labels_warning, information_schema_to_db_type_token,
-    missing_enum_labels, plan_row_security_reconcile, render_pg_enum_add_value,
-    resolve_column_storage, row_security_migrator_warning,
-};
-use ferro_migrate::{
-    LiveCheckValidity, LiveFkValidity, LiveIndexValidity, MigrationOp, emit_sql_with_ir,
-    plan_check_drops, plan_check_rebuilds, plan_from_ir, plan_index_rebuilds, plan_missing_checks,
-    plan_validations,
-};
-use ferro_schema_ir::{
-    IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
-    SchemaModel, SchemaUnique,
-};
 use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
-    live_enum_type_labels, live_table_checks, live_table_columns, live_table_foreign_keys,
-    live_table_indexes, live_table_row_security, quote_ident, sqlite_indexes_covering_column,
+    quote_ident, sqlite_indexes_covering_column,
 };
-use crate::schema::{internal_create_tables, order_models_for_migration};
+use crate::live_ir::{LiveTable, live_schema_ir, live_tables_to_schema_ir};
+use crate::schema::internal_create_tables;
 use crate::state::{MODEL_REGISTRY, engine_for_connection};
+use ferro_ddl_lowering::{Dialect, LiveRowSecurity, row_security_migrator_warning};
+use ferro_migrate::{
+    LiveFacts, MigrationOp, PlanOptions, RenderedOp, plan_from_ir, render_plan, validate_schema_ir,
+};
+use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::prelude::*;
 use std::sync::Arc;
-
-fn schema_ir_column<'a>(
-    envelope: &'a IrEnvelope<SchemaIrPayload>,
-    table: &str,
-    column: &str,
-) -> Option<&'a SchemaColumn> {
-    envelope
-        .payload
-        .models
-        .iter()
-        .find(|model| model.table_name == table)
-        .and_then(|model| model.columns.iter().find(|col| col.name == column))
-}
 
 /// Atomically install the column registry, schema modelset, and modelset
 /// fingerprint from one assembled payload (#244).
@@ -129,91 +109,6 @@ pub fn _clear_schema_ir_modelset_for_test() -> PyResult<()> {
     Ok(())
 }
 
-/// Narrow the declared modelset to a single-model envelope for `table`,
-/// matching the shape `plan_table_migration` expects (old vs new are both
-/// single-model). Returns None if the model is absent from the modelset.
-fn declared_envelope_for(
-    modelset: &IrEnvelope<SchemaIrPayload>,
-    table: &str,
-) -> Option<IrEnvelope<SchemaIrPayload>> {
-    let model = modelset.payload.models.iter().find(|m| m.table_name == table)?;
-    Some(IrEnvelope {
-        ir_kind: "schema".to_string(),
-        ir_version: modelset.ir_version,
-        payload: SchemaIrPayload {
-            dialect_agnostic: modelset.payload.dialect_agnostic,
-            models: vec![model.clone()],
-        },
-    })
-}
-
-fn live_columns_to_schema_ir(
-    table_lower: &str,
-    live: &[LiveColumn],
-    live_indexes: &[LiveIndex],
-    live_foreign_keys: &[LiveForeignKey],
-    backend: Dialect,
-) -> IrEnvelope<SchemaIrPayload> {
-    let dialect = backend;
-    let mut columns: Vec<SchemaColumn> = live
-        .iter()
-        .map(|col| SchemaColumn {
-            name: col.name.clone(),
-            logical_type: "unknown".to_string(),
-            db_type: Some(information_schema_to_db_type_token(
-                &col.declared_type,
-                col.char_max_len,
-                dialect,
-            )),
-            db_type_explicit: None,
-            nullable: col.is_nullable,
-            primary_key: col.is_primary_key,
-            autoincrement: false,
-            unique: false,
-            index: false,
-            default: None,
-            format: None,
-            enum_values: None,
-            enum_type_name: None,
-            postgres_native_enum: col.is_enum_udt,
-        })
-        .collect();
-    columns.sort_by(|a, b| a.name.cmp(&b.name));
-    IrEnvelope {
-        ir_kind: "schema".to_string(),
-        ir_version: 1,
-        payload: SchemaIrPayload {
-            dialect_agnostic: true,
-            models: vec![SchemaModel {
-                model_name: table_lower.to_string(),
-                table_name: table_lower.to_string(),
-                columns,
-                foreign_keys: {
-                    let mut fks: Vec<SchemaForeignKey> = live_foreign_keys
-                        .iter()
-                        .map(|fk| SchemaForeignKey {
-                            column: fk.column.clone(),
-                            to_table: fk.to_table.clone(),
-                            to_column: fk.to_column.clone(),
-                            on_delete: Some(fk.on_delete.clone()),
-                            name: fk.name.clone(),
-                        })
-                        .collect();
-                    fks.sort_by(|a, b| a.column.cmp(&b.column));
-                    fks
-                },
-                indexes: live_indexes.iter().map(|i| SchemaIndex {
-                    name: i.name.clone(), columns: i.columns.clone(), unique: i.unique,
-                }).collect(),
-                uniques: Vec::<SchemaUnique>::new(),
-                checks: Vec::<SchemaCheck>::new(),
-                table_checks: Vec::new(),
-                row_security: None,
-            }],
-        },
-    }
-}
-
 /// Which migration behaviors beyond table creation are enabled.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MigrateOptions {
@@ -232,276 +127,44 @@ impl MigrateOptions {
             destructive,
         }
     }
-}
 
-/// The DDL and diagnostics produced by diffing one table.
-#[derive(Debug)]
-pub struct MigrationPlan {
-    /// Ready-to-execute DDL statements, in order.
-    pub statements: Vec<String>,
-    /// Columns to drop (destructive mode). Kept separate from `statements`
-    /// because the executor must resolve live index dependencies first.
-    pub drop_columns: Vec<String>,
-    /// Human-readable notes emitted as Python `UserWarning`s.
-    pub warnings: Vec<String>,
-    /// Notes emitted with `emit_user_warning_always` — the warning registry
-    /// can never swallow them. Row security lives here: a table whose rows are
-    /// not fenced the way the model says is still not fenced on the fourth
-    /// boot, and a process that connects repeatedly must not be reassured by
-    /// silence.
-    pub always_warnings: Vec<String>,
-}
-
-impl MigrationPlan {
-    fn new() -> Self {
-        Self {
-            statements: Vec::new(),
-            drop_columns: Vec::new(),
-            warnings: Vec::new(),
-            always_warnings: Vec::new(),
+    fn plan_options(self) -> PlanOptions {
+        PlanOptions {
+            destructive: self.destructive,
         }
     }
+}
 
-    fn is_empty(&self) -> bool {
-        self.statements.is_empty() && self.drop_columns.is_empty()
+fn parse_dialect(dialect: &str) -> PyResult<Dialect> {
+    match dialect {
+        "postgres" => Ok(Dialect::Postgres),
+        "sqlite" => Ok(Dialect::Sqlite),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
+            other
+        ))),
     }
 }
 
-/// Diff one registered model schema against its live table and produce the
-/// DDL plan. Pure with respect to the database — callers introspect first.
-///
-/// # Errors
-/// Returns a `PyErr` for changes that cannot be applied safely: adding a
-/// primary-key column, or adding a NOT NULL column without a usable literal
-/// default. These abort the migration ("fail loudly").
-pub fn plan_table_migration(
-    table_lower: &str,
-    declared: &IrEnvelope<SchemaIrPayload>,
-    live: &[LiveColumn],
-    live_indexes: &[LiveIndex],
-    live_foreign_keys: &[LiveForeignKey],
-    live_checks: &[LiveCheck],
-    live_row_security: &LiveRowSecurity,
-    backend: Dialect,
-    opts: MigrateOptions,
-) -> PyResult<MigrationPlan> {
-    if !opts.updates {
-        return Ok(MigrationPlan::new());
-    }
-
-    let old_ir =
-        live_columns_to_schema_ir(table_lower, live, live_indexes, live_foreign_keys, backend);
-    let new_ir = declared;
-    let mut typed_plan = plan_from_ir(&old_ir, new_ir, backend);
-    // Invalid-index rebuilds (#515; ADR-0044) go where `AddIndex` goes: after
-    // the column ops, ahead of the first foreign-key op `plan_from_ir` emits
-    // for this table. An invalid index is present live, so the IR diff above
-    // never planned an `AddIndex` for it.
-    let index_validity: Vec<LiveIndexValidity> = live_indexes
-        .iter()
-        .map(|index| LiveIndexValidity {
-            name: index.name.clone(),
-            valid: index.valid,
-        })
-        .collect();
-    let index_slot = typed_plan
-        .operations
-        .iter()
-        .position(|op| {
-            matches!(
-                op,
-                MigrationOp::AddForeignKey { .. } | MigrationOp::RebuildForeignKey { .. }
-            )
-        })
-        .unwrap_or(typed_plan.operations.len());
-    typed_plan.operations.splice(
-        index_slot..index_slot,
-        plan_index_rebuilds(table_lower, new_ir, &index_validity),
-    );
-    // Check addition (#343; ADR-0013) is planned after the column diff so a
-    // CHECK over a newly added column lands after its ADD COLUMN. Live CHECKs
-    // travel beside the IR rather than inside it: their bodies are the
-    // backend's own rendering, and the IR carries exactly one body language
-    // (AGENTS.md § I-1).
-    let live_check_names: Vec<String> =
-        live_checks.iter().map(|check| check.name.clone()).collect();
-    typed_plan.operations.extend(plan_missing_checks(
-        table_lower,
-        &old_ir,
-        new_ir,
-        &live_check_names,
-    ));
-    // Body drift (#344; ADR-0015) is planned after missing-name adds. Live
-    // catalog text stays beside the IR; only ferro-owned names are eligible
-    // for rebuild (a user-owned CHECK is never dropped).
-    let live_for_rebuild: Vec<(String, String)> = live_checks
-        .iter()
-        .filter(|check| check.ferro_owned)
-        .map(|check| (check.name.clone(), check.definition.clone()))
-        .collect();
-    typed_plan.operations.extend(plan_check_rebuilds(
-        table_lower,
-        new_ir,
-        &live_for_rebuild,
-    ));
-    // Validation (#515; ADR-0043): a declared FK or check that exists live
-    // `NOT VALID` is validated in place, after every `AddForeignKey` /
-    // `AddCheck` above. A name a rebuild already covers is left out: the
-    // rebuild's bare ADD installs a valid constraint.
-    let rebuilt: Vec<String> = typed_plan
-        .operations
-        .iter()
-        .filter_map(|op| match op {
-            MigrationOp::RebuildCheck { name, .. } => Some(name.clone()),
-            MigrationOp::RebuildForeignKey { old_name, .. } => Some(old_name.clone()),
-            _ => None,
-        })
-        .collect();
-    let fk_validity: Vec<LiveFkValidity> = live_foreign_keys
-        .iter()
-        .filter_map(|fk| {
-            Some(LiveFkValidity {
-                name: fk.name.clone()?,
-                validated: fk.validated,
-            })
-        })
-        .collect();
-    let check_validity: Vec<LiveCheckValidity> = live_checks
-        .iter()
-        .map(|check| LiveCheckValidity {
-            name: check.name.clone(),
-            validated: check.validated,
-        })
-        .collect();
-    typed_plan.operations.extend(
-        plan_validations(table_lower, new_ir, &fk_validity, &check_validity)
-            .into_iter()
-            .filter(|op| {
-                !matches!(op, MigrationOp::ValidateConstraint { name, .. } if rebuilt.contains(name))
-            }),
-    );
-    // Leftovers (#345; ADR-0013): live ferro-owned names the model does not
-    // declare. Always warn (silence is wrong — leftover CHECKs keep rejecting
-    // rows the model now allows). DropCheck ops only when destructive — do
-    // not piggy-back on the DropIndex retain-filter, which would also
-    // swallow this warning on a warning-only plan.
-    let live_ferro_owned_names: Vec<String> = live_for_rebuild
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect();
-    let declared_check_names: Vec<String> = new_ir
-        .payload
-        .models
-        .iter()
-        .find(|model| model.table_name == table_lower)
-        .map(|model| {
-            model
-                .table_checks
-                .iter()
-                .map(|check| check.name.clone())
-                .chain(model.checks.iter().map(|check| check.name.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let extras = extra_check_names(&declared_check_names, &live_ferro_owned_names);
-    if let Some(warning) = extra_check_names_warning(table_lower, &extras) {
-        typed_plan.warnings.push(warning);
-    }
-    if opts.destructive {
-        typed_plan.operations.extend(plan_check_drops(
-            table_lower,
-            new_ir,
-            &live_ferro_owned_names,
-        ));
-    }
-
-    if !opts.destructive {
-        typed_plan
-            .operations
-            .retain(|op| !matches!(op, MigrationOp::DropColumn { .. } | MigrationOp::DropIndex { .. }));
-    }
-
-    let mut plan = MigrationPlan::new();
-    let mut exec_ops = Vec::new();
-
-    for operation in typed_plan.operations {
-        if let MigrationOp::DropColumn { table, column } = &operation {
-            let Some(old_col) = schema_ir_column(&old_ir, table, column) else {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Cannot drop column '{}.{}': column metadata missing from live IR context.",
-                    table, column
-                )));
-            };
-            if old_col.primary_key {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Cannot drop column '{}.{}': it is part of the primary key. \
-                     Primary-key changes need a reviewed migration (`ferro migrate new`).",
-                    table, column
-                )));
-            }
-            plan.drop_columns.push(column.clone());
-        } else {
-            exec_ops.push(operation);
-        }
-    }
-
-    let exec_plan = ferro_migrate::MigrationPlan {
-        operations: exec_ops,
-        warnings: typed_plan.warnings,
-    };
-    let emission = emit_sql_with_ir(&exec_plan, &old_ir, new_ir, backend)
-        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.message))?;
-
-    plan.statements = emission.statements;
-    plan.warnings = emission.warnings;
-
-    // Row security lands LAST for this table (#413; PRD #406 user story 20).
-    // Every column change and every data-shaped step above has already run, so
-    // the migrator's own DML saw the rows it had to touch before any policy
-    // starts filtering them. The whole decision — flags, additions, rebuilds,
-    // orphan drops, and every warning — is one call into the lowering layer,
-    // the same one the Alembic operation consumes over FFI (AGENTS.md § I-1).
-    if let Some(model) = new_ir
-        .payload
-        .models
-        .iter()
-        .find(|model| model.table_name == table_lower)
-    {
-        let rs_plan =
-            plan_row_security_reconcile(model, live_row_security, backend, opts.destructive)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        plan.statements.extend(rs_plan.statements);
-        plan.always_warnings.extend(rs_plan.warnings);
-    }
-    Ok(plan)
+fn emission_error(err: ferro_migrate::EmissionError) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(err.message)
 }
 
-/// Prefix of the debug line the reconciliation pass logs (on the `ferro`
-/// logger) before it executes each statement of a table's plan (column drops,
-/// which run through their own dependency-aware path, are not included), so
-/// a run's exact DDL is observable without a database-side statement log.
+/// Prefix of the debug line auto-migrate logs (on the `ferro` logger) before
+/// it executes each statement — the create pass's, every statement of a
+/// table's reconciliation plan including its column drops, and each enum type
+/// statement (logged against its type name) — so a run's exact DDL is
+/// observable without a database-side statement log.
 const RECONCILE_STATEMENT_LOG_PREFIX: &str = "Ferro Engine: auto-migrate executing on";
 
-fn log_reconcile_statement(table_lower: &str, sql: &str) {
+pub(crate) fn log_reconcile_statement(table_lower: &str, sql: &str) {
     crate::log_debug(format!(
         "{RECONCILE_STATEMENT_LOG_PREFIX} '{table_lower}': {sql}"
     ));
 }
 
-/// Render the `ALTER TABLE ... DROP COLUMN ...` DDL for one column drop.
-/// Shared by the SQLite path in [`execute_drop_column`] and the Postgres
-/// per-table transaction in [`internal_migrate`].
-fn render_drop_column_sql(table_lower: &str, col_name: &str) -> String {
-    format!(
-        "ALTER TABLE {} DROP COLUMN {}",
-        quote_ident(table_lower),
-        quote_ident(col_name)
-    )
-}
-
 /// Map a column-drop execution failure to a `PyErr` with a consistent,
-/// actionable message. Shared by the SQLite path in [`execute_drop_column`]
-/// and the Postgres per-table transaction in [`internal_migrate`].
+/// actionable message, on both dialects.
 fn map_drop_column_error(table_lower: &str, col_name: &str, e: sqlx::Error) -> PyErr {
     crate::errors::map_db_error(
         &format!(
@@ -513,104 +176,238 @@ fn map_drop_column_error(table_lower: &str, col_name: &str, e: sqlx::Error) -> P
     )
 }
 
-/// Drop one column, resolving SQLite index dependencies first.
+fn map_statement_error(table_lower: &str, sql: &str, e: sqlx::Error) -> PyErr {
+    crate::errors::map_db_error(
+        &format!(
+            "Auto-migrate DDL failed for table '{}' (statement: {})",
+            table_lower, sql
+        ),
+        e,
+    )
+}
+
+/// Drop one column on SQLite, resolving its index dependencies first.
 ///
 /// Explicit indexes covering the column are orphaned by its removal and are
 /// dropped beforehand (SQLite refuses `DROP COLUMN` on an indexed column).
 /// Constraint autoindexes cannot be dropped separately, so their presence is
 /// a hard error, as is any remaining engine refusal (CHECK references,
-/// triggers, views, inbound foreign keys).
-async fn execute_drop_column(
+/// triggers, views, inbound foreign keys). `drop_sql` is the op's rendering.
+async fn execute_sqlite_drop_column(
     engine: &EngineHandle,
     table_lower: &str,
     col_name: &str,
-    backend: Dialect,
+    drop_sql: &str,
 ) -> PyResult<()> {
-    if backend == Dialect::Sqlite {
-        let indexes = sqlite_indexes_covering_column(engine, table_lower, col_name).await?;
-        if let Some(blocking) = indexes.iter().find(|index| index.origin != "c") {
-            let constraint = match blocking.origin.as_str() {
-                "u" => "a UNIQUE constraint",
-                "pk" => "the PRIMARY KEY",
-                _ => "a table constraint",
-            };
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Cannot drop column '{}.{}': it is enforced by {} ('{}'), which SQLite \
-                 cannot drop separately from the table definition. Generate a reviewed \
-                 migration with `ferro migrate new`.",
-                table_lower, col_name, constraint, blocking.name
-            )));
-        }
-        for index in &indexes {
-            let sql = format!("DROP INDEX IF EXISTS {}", quote_ident(&index.name));
-            engine.execute_sql_unprepared(&sql).await.map_err(|e| {
-                crate::errors::map_db_error(
-                    &format!(
-                        "Auto-migrate failed dropping index '{}' (required to drop column \
-                         '{}.{}')",
-                        index.name, table_lower, col_name
-                    ),
-                    e,
-                )
-            })?;
-        }
+    let indexes = sqlite_indexes_covering_column(engine, table_lower, col_name).await?;
+    if let Some(blocking) = indexes.iter().find(|index| index.origin != "c") {
+        let constraint = match blocking.origin.as_str() {
+            "u" => "a UNIQUE constraint",
+            "pk" => "the PRIMARY KEY",
+            _ => "a table constraint",
+        };
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Cannot drop column '{}.{}': it is enforced by {} ('{}'), which SQLite \
+             cannot drop separately from the table definition. Generate a reviewed \
+             migration with `ferro migrate new`.",
+            table_lower, col_name, constraint, blocking.name
+        )));
+    }
+    for index in &indexes {
+        let sql = format!("DROP INDEX IF EXISTS {}", quote_ident(&index.name));
+        log_reconcile_statement(table_lower, &sql);
+        engine.execute_sql_unprepared(&sql).await.map_err(|e| {
+            crate::errors::map_db_error(
+                &format!(
+                    "Auto-migrate failed dropping index '{}' (required to drop column \
+                     '{}.{}')",
+                    index.name, table_lower, col_name
+                ),
+                e,
+            )
+        })?;
     }
 
-    let sql = render_drop_column_sql(table_lower, col_name);
+    log_reconcile_statement(table_lower, drop_sql);
     engine
-        .execute_sql_unprepared(&sql)
+        .execute_sql_unprepared(drop_sql)
         .await
         .map_err(|e| map_drop_column_error(table_lower, col_name, e))?;
     Ok(())
 }
 
+/// The actionable failure for one enum-type statement.
+fn type_statement_error(op: &MigrationOp, e: sqlx::Error) -> PyErr {
+    let context = match op {
+        MigrationOp::AddEnumLabel { type_name, label } => {
+            format!("Auto-migrate failed to add enum label '{label}' to type '{type_name}'")
+        }
+        MigrationOp::CreateEnumType { type_name, .. } => {
+            format!("Auto-migrate failed to create enum type '{type_name}'")
+        }
+        MigrationOp::DropEnumType { type_name } => {
+            format!("Auto-migrate failed to drop enum type '{type_name}'")
+        }
+        other => format!("Auto-migrate failed executing {other:?}"),
+    };
+    crate::errors::map_db_error(&context, e)
+}
+
+fn type_name_of(op: &MigrationOp) -> &str {
+    match op {
+        MigrationOp::AddEnumLabel { type_name, .. }
+        | MigrationOp::CreateEnumType { type_name, .. }
+        | MigrationOp::DropEnumType { type_name } => type_name,
+        _ => "",
+    }
+}
+
+/// Execute one table's rendered ops. On Postgres the whole group runs in one
+/// transaction (FF-G G3): a mid-plan failure leaves the table exactly as it
+/// was, so a failed run is safely re-runnable. SQLite runs statement at a
+/// time, with each column drop going through its index-dependency path.
+/// Returns how many statements ran and how many columns were dropped.
+async fn execute_table_ops(
+    engine: &EngineHandle,
+    table: &str,
+    ops: &[&RenderedOp],
+    backend: Dialect,
+) -> PyResult<(usize, usize)> {
+    let statements: usize = ops.iter().map(|op| op.statements.len()).sum();
+    let drops = ops
+        .iter()
+        .filter(|op| matches!(op.op, MigrationOp::DropColumn { .. }))
+        .count();
+    if statements == 0 {
+        return Ok((0, 0));
+    }
+
+    if backend == Dialect::Sqlite {
+        for op in ops {
+            if let MigrationOp::DropColumn { column, .. } = &op.op {
+                for sql in &op.statements {
+                    execute_sqlite_drop_column(engine, table, column, sql).await?;
+                }
+                continue;
+            }
+            for sql in &op.statements {
+                log_reconcile_statement(table, sql);
+                engine
+                    .execute_sql_unprepared(sql)
+                    .await
+                    .map_err(|e| map_statement_error(table, sql, e))?;
+            }
+        }
+        return Ok((statements - drops, drops));
+    }
+
+    let mut conn = engine.begin_transaction_connection().await.map_err(|e| {
+        crate::errors::map_db_error(
+            &format!(
+                "Auto-migrate failed to open a transaction for table '{}'",
+                table
+            ),
+            e,
+        )
+    })?;
+    let table_result: PyResult<()> = async {
+        for op in ops {
+            for sql in &op.statements {
+                log_reconcile_statement(table, sql);
+                conn.execute_sql_unprepared(sql)
+                    .await
+                    .map_err(|e| match &op.op {
+                        MigrationOp::DropColumn { column, .. } => {
+                            map_drop_column_error(table, column, e)
+                        }
+                        _ => map_statement_error(table, sql, e),
+                    })?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    match table_result {
+        Ok(()) => {
+            conn.commit().await.map_err(|e| {
+                crate::errors::map_db_error(
+                    &format!("Auto-migrate failed to commit DDL for table '{}'", table),
+                    e,
+                )
+            })?;
+            Ok((statements - drops, drops))
+        }
+        Err(err) => {
+            // Same disposal the create pass and settings delivery perform
+            // (#416): a connection whose ROLLBACK failed may be
+            // idle-in-transaction, and sqlx only pings on release, so it is
+            // discarded rather than returned to the pool.
+            if let Err(rollback_err) = conn.rollback().await {
+                crate::log_debug(format!(
+                    "⚠️ Ferro Engine: rollback after failed migration of '{}' also \
+                     failed: {} — discarding the connection",
+                    table, rollback_err
+                ));
+                let _ = conn.detach_and_close().await;
+            }
+            Err(err)
+        }
+    }
+}
+
 /// Run the full auto-migrate pass: create missing tables, then (per
 /// `MigrateOptions`) reconcile existing tables with the registered models.
 ///
-/// After any ALTER/DROP executed, the engine pool is refreshed so no
-/// connection can serve a statement prepared against the pre-DDL schema.
+/// The reconciliation is one plan for the whole modelset: the live database
+/// is read into an IR plus its live facts ([`live_schema_ir`]), the one
+/// planner decides every change ([`plan_from_ir`]), [`render_plan`] renders
+/// it, and this function executes it — enum type statements in autocommit
+/// first (a label is committed before any table statement can name it), then
+/// each table's ops in its own transaction on Postgres.
+///
+/// After any DDL executed, the engine pool is refreshed so no connection can
+/// serve a statement prepared against the pre-DDL schema.
 ///
 /// # Errors
-/// Returns a `PyErr` if introspection, DDL execution, or the pool refresh
-/// fails, or if the diff contains a change that cannot be applied safely.
+/// Returns a `PyErr` if introspection, rendering, DDL execution, or the pool
+/// refresh fails, or if the plan contains a change that cannot be applied
+/// safely — rendering runs before anything executes, so such a plan executes
+/// nothing.
 pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult<()> {
     let tables_before_create = internal_create_tables(engine.clone(), opts.updates).await?;
     if !opts.updates {
         return Ok(());
     }
 
-    let schemas = {
-        let registry = MODEL_REGISTRY.read().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry")
-        })?;
-        registry.clone()
-    };
     let modelset = {
         let guard = crate::state::SCHEMA_IR_MODELSET.read().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
         })?;
-        guard.clone().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-            "SchemaIR modelset not set — connect()/migrate() must push it before migrating"
-        ))?
+        guard.clone().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "SchemaIR modelset not set — connect()/migrate() must push it before migrating",
+            )
+        })?
     };
     let backend = engine.backend();
 
-    let mut warnings = Vec::new();
-    // Row-security notes go here instead: they describe whether THIS connect
-    // left rows fenced, so the warning registry must never quiet them down
-    // after the first boot.
-    let mut always_warnings: Vec<String> = Vec::new();
-    let mut ddl_ran = false;
+    // ADR-0010: the reconciliation pass owns tables that already existed. A
+    // table the create pass built in this same run is already exactly the
+    // model, so it is not read live: the plan sees it as an add, which the
+    // create pass has executed.
+    let mut existing: Vec<String> = modelset
+        .payload
+        .models
+        .iter()
+        .map(|model| model.table_name.clone())
+        .filter(|table| tables_before_create.contains(table))
+        .collect();
+    existing.sort();
+    let (live, facts) = live_schema_ir(&engine, Some(&existing)).await?;
+    let plan = plan_from_ir(&live, &modelset, backend, &facts, opts.plan_options());
+    let rendered = render_plan(&plan, &live, &modelset, backend).map_err(emission_error)?;
 
-    // Label addition (ADR-0011): reconcile ferro-owned enum types before any
-    // table's plan. Per-type, not per-table (a shared StrEnum reconciles
-    // once), and outside the per-table transactions below — `ALTER TYPE ...
-    // ADD VALUE` is non-transactional before PG12 and its label is unusable
-    // until commit on PG12+; autocommit execution here means every label is
-    // committed before a table plan (e.g. a new column defaulting to it)
-    // can reference it.
     if backend == Dialect::Postgres {
-        ddl_ran |= add_missing_enum_labels(&engine, &modelset, &mut warnings).await?;
         // The migrator warning (#413; PRD #406 user story 19) is asked once,
         // before any table is touched: is the role running this migration
         // itself subject to the FORCE policies it is about to maintain? A
@@ -640,138 +437,53 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
         }
     }
 
-    for (_name, model) in order_models_for_migration(schemas, &modelset) {
-        let table_lower = model.table_name.clone();
-        // ADR-0010: the reconciliation pass owns tables that already existed.
-        // A table the create pass built in this same run is already exactly the
-        // model — re-diffing it can only replay that pass's own
-        // backend-limitation warnings (e.g. the SQLite row-security skip).
-        if !tables_before_create.contains(&table_lower) {
+    let mut warnings = plan.warnings.clone();
+    let mut ddl_ran = false;
+    let mut index = 0;
+    while index < rendered.len() {
+        let current = &rendered[index];
+        // An add is the create pass's, which has already run.
+        if matches!(current.op, MigrationOp::AddTable { .. }) {
+            index += 1;
             continue;
         }
-        let Some(live) = live_table_columns(&engine, &table_lower).await? else {
-            // A table that vanished between the create pass and here.
+        let Some(table) = current.op.table() else {
+            // Enum type statements run in autocommit: `ALTER TYPE ... ADD
+            // VALUE` is non-transactional before PG12 and its label is
+            // unusable until commit on PG12+.
+            for sql in &current.statements {
+                log_reconcile_statement(type_name_of(&current.op), sql);
+                engine
+                    .execute_sql_unprepared(sql)
+                    .await
+                    .map_err(|e| type_statement_error(&current.op, e))?;
+                ddl_ran = true;
+            }
+            warnings.extend(current.warnings.iter().cloned());
+            index += 1;
             continue;
         };
-        let live_indexes = live_table_indexes(&engine, &table_lower).await?;
-        let live_foreign_keys = live_table_foreign_keys(&engine, &table_lower).await?;
-        let live_checks = live_table_checks(&engine, &table_lower).await?;
-        let live_row_security = live_table_row_security(&engine, &table_lower).await?;
-
-        let Some(declared) = declared_envelope_for(&modelset, &table_lower) else { continue };
-        let mut plan = plan_table_migration(
-            &table_lower,
-            &declared,
-            &live,
-            &live_indexes,
-            &live_foreign_keys,
-            &live_checks,
-            &live_row_security,
-            backend,
-            opts,
-        )?;
-        if plan.is_empty() {
-            warnings.append(&mut plan.warnings);
-            always_warnings.append(&mut plan.always_warnings);
-            continue;
+        let group: Vec<&RenderedOp> = rendered[index..]
+            .iter()
+            .take_while(|op| op.op.table() == Some(table))
+            .filter(|op| !matches!(op.op, MigrationOp::AddTable { .. }))
+            .collect();
+        let consumed = rendered[index..]
+            .iter()
+            .take_while(|op| op.op.table() == Some(table))
+            .count();
+        let (statements, dropped) = execute_table_ops(&engine, table, &group, backend).await?;
+        if statements + dropped > 0 {
+            ddl_ran = true;
+            crate::log_debug(format!(
+                "✅ Ferro Engine: Table '{}' migrated ({} statement(s), {} column(s) dropped)",
+                table, statements, dropped
+            ));
         }
-
-        if backend == Dialect::Postgres {
-            // FF-G G3: Postgres DDL is transactional — run this table's whole
-            // plan in one transaction so a mid-plan failure leaves the table
-            // exactly as it was. Per-table, not whole-run: every table ends
-            // fully migrated or untouched, so a failed run is safely
-            // re-runnable. (SQLite keeps statement-at-a-time execution below;
-            // its scope is documented on connect()/migrate().)
-            let mut conn = engine.begin_transaction_connection().await.map_err(|e| {
-                crate::errors::map_db_error(
-                    &format!(
-                        "Auto-migrate failed to open a transaction for table '{}'",
-                        table_lower
-                    ),
-                    e,
-                )
-            })?;
-            let table_result: PyResult<()> = async {
-                for sql in &plan.statements {
-                    log_reconcile_statement(&table_lower, sql);
-                    conn.execute_sql_unprepared(sql).await.map_err(|e| {
-                        crate::errors::map_db_error(
-                            &format!(
-                                "Auto-migrate DDL failed for table '{}' (statement: {})",
-                                table_lower, sql
-                            ),
-                            e,
-                        )
-                    })?;
-                }
-                for col_name in &plan.drop_columns {
-                    // Postgres needs no index pre-scan (that path is
-                    // SQLite-only in execute_drop_column).
-                    conn.execute_sql_unprepared(&render_drop_column_sql(&table_lower, col_name))
-                        .await
-                        .map_err(|e| map_drop_column_error(&table_lower, col_name, e))?;
-                }
-                Ok(())
-            }
-            .await;
-            match table_result {
-                Ok(()) => {
-                    conn.commit().await.map_err(|e| {
-                        crate::errors::map_db_error(
-                            &format!(
-                                "Auto-migrate failed to commit DDL for table '{}'",
-                                table_lower
-                            ),
-                            e,
-                        )
-                    })?;
-                    ddl_ran = true;
-                }
-                Err(err) => {
-                    // Same disposal the create pass and settings delivery
-                    // perform (#416): a connection whose ROLLBACK failed may be
-                    // idle-in-transaction, and sqlx only pings on release, so
-                    // it is discarded rather than returned to the pool.
-                    if let Err(rollback_err) = conn.rollback().await {
-                        crate::log_debug(format!(
-                            "⚠️ Ferro Engine: rollback after failed migration of '{}' also \
-                             failed: {} — discarding the connection",
-                            table_lower, rollback_err
-                        ));
-                        let _ = conn.detach_and_close().await;
-                    }
-                    return Err(err);
-                }
-            }
-        } else {
-            for sql in &plan.statements {
-                log_reconcile_statement(&table_lower, sql);
-                engine.execute_sql_unprepared(sql).await.map_err(|e| {
-                    crate::errors::map_db_error(
-                        &format!(
-                            "Auto-migrate DDL failed for table '{}' (statement: {})",
-                            table_lower, sql
-                        ),
-                        e,
-                    )
-                })?;
-                ddl_ran = true;
-            }
-            for col_name in &plan.drop_columns {
-                execute_drop_column(&engine, &table_lower, col_name, backend).await?;
-                ddl_ran = true;
-            }
+        for op in &group {
+            warnings.extend(op.warnings.iter().cloned());
         }
-        warnings.append(&mut plan.warnings);
-        always_warnings.append(&mut plan.always_warnings);
-
-        crate::log_debug(format!(
-            "✅ Ferro Engine: Table '{}' migrated ({} statement(s), {} column(s) dropped)",
-            table_lower,
-            plan.statements.len(),
-            plan.drop_columns.len()
-        ));
+        index += consumed;
     }
 
     if ddl_ran {
@@ -786,66 +498,13 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
     for warning in &warnings {
         crate::emit_user_warning(warning);
     }
-    for warning in &always_warnings {
+    // Row-security notes describe whether THIS connect left rows fenced, so
+    // the warning registry must never quiet them down after the first boot.
+    for warning in &plan.always_warnings {
         crate::emit_user_warning_always(warning);
     }
 
     Ok(())
-}
-
-/// The reconciliation pass's label addition (ADR-0011; CONTEXT.md *label
-/// addition*): append model-declared labels missing from live ferro-owned
-/// enum types. A type is ferro-owned by *derivation* — its name is the one
-/// model resolution produces — so the declared side of the diff is itself the
-/// ownership test; live types with no model-derived counterpart are user-owned
-/// and never touched. Live types absent entirely are the create pass's / ADD
-/// COLUMN guard's concern, not label addition's. Returns whether DDL executed.
-async fn add_missing_enum_labels(
-    engine: &EngineHandle,
-    modelset: &IrEnvelope<SchemaIrPayload>,
-    warnings: &mut Vec<String>,
-) -> PyResult<bool> {
-    // Declared native enum types, deduped across models and columns in
-    // deterministic order (a shared StrEnum reconciles exactly once).
-    let mut declared: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    for model in &modelset.payload.models {
-        for col in &model.columns {
-            if let Ok(ResolvedStorage::PgEnum { type_name, labels }) =
-                resolve_column_storage(col, Dialect::Postgres)
-            {
-                declared.entry(type_name).or_insert(labels);
-            }
-        }
-    }
-    if declared.is_empty() {
-        return Ok(false);
-    }
-
-    let live = live_enum_type_labels(engine).await?;
-    let mut ran = false;
-    for (type_name, labels) in &declared {
-        let Some(live_labels) = live.get(type_name) else { continue };
-        // Warn-never-act (ADR-0011): live labels the model no longer declares
-        // are named loudly — rows may still hold them — but never removed.
-        // Once per drifted type, not per table referencing it.
-        let extra = extra_enum_labels(labels, live_labels);
-        if let Some(warning) = extra_enum_labels_warning(type_name, &extra) {
-            warnings.push(warning);
-        }
-        for label in missing_enum_labels(labels, live_labels) {
-            let sql = render_pg_enum_add_value(type_name, &label);
-            engine.execute_sql_unprepared(&sql).await.map_err(|e| {
-                crate::errors::map_db_error(
-                    &format!(
-                        "Auto-migrate failed to add enum label '{label}' to type '{type_name}'"
-                    ),
-                    e,
-                )
-            })?;
-            ran = true;
-        }
-    }
-    Ok(ran)
 }
 
 /// Manually run the auto-migrate pass against a connected engine.
@@ -875,15 +534,28 @@ pub fn migrate(
     })
 }
 
-/// Test-only helper: run the migration diff for one table against a JSON
-/// description of its live columns, without a database. Returns
-/// `(statements, warnings)`; destructive drops are rendered as plain
-/// `DROP COLUMN` statements (the dependency-aware index handling needs a live
-/// database and is exercised by integration tests).
+fn parse_json_or_default<T: serde::de::DeserializeOwned + Default>(
+    json: &str,
+    what: &str,
+) -> PyResult<T> {
+    if json.is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_str(json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid {what} JSON: {e}")))
+}
+
+/// Test-only helper: plan and render the reconciliation of one table against
+/// a JSON description of its live state, without a database. Returns
+/// `(statements, warnings)` — every rendered statement in plan order, then
+/// the planning warnings, the rendering warnings and the row-security
+/// warnings. Column drops render as their plain `DROP COLUMN` (the SQLite
+/// index-dependency handling needs a live database and is exercised by
+/// integration tests).
 ///
 /// # Errors
 /// Returns a `PyErr` when the JSON cannot be parsed, the dialect is
-/// unrecognized, or the diff contains an unsafe change.
+/// unrecognized, or the plan contains an unsafe change.
 #[pyfunction]
 #[pyo3(name = "_render_migration_sql_for_test")]
 #[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new(), live_foreign_keys_json=String::new(), live_checks_json=String::new(), live_row_security_json=String::new()))]
@@ -899,82 +571,127 @@ pub fn _render_migration_sql_for_test(
     live_checks_json: String,
     live_row_security_json: String,
 ) -> PyResult<(Vec<String>, Vec<String>)> {
-    let backend = match dialect.as_str() {
-        "postgres" => Dialect::Postgres,
-        "sqlite" => Dialect::Sqlite,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unknown dialect {:?}; expected 'postgres' or 'sqlite'",
-                other
-            )));
-        }
-    };
-    let declared: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&schema_ir_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid schema_ir_json: {e}"))
-    })?;
-    let live: Vec<LiveColumn> = serde_json::from_str(&live_columns_json).map_err(|e| {
+    let backend = parse_dialect(&dialect)?;
+    let declared: IrEnvelope<SchemaIrPayload> =
+        serde_json::from_str(&schema_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid schema_ir_json: {e}"))
+        })?;
+    let columns: Vec<LiveColumn> = serde_json::from_str(&live_columns_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid live-columns JSON: {}", e))
     })?;
-    let live_indexes: Vec<LiveIndex> = if live_indexes_json.is_empty() {
-        Vec::new()
-    } else {
-        serde_json::from_str(&live_indexes_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid live-indexes JSON: {}", e))
-        })?
-    };
-    let live_foreign_keys: Vec<LiveForeignKey> = if live_foreign_keys_json.is_empty() {
-        Vec::new()
-    } else {
-        serde_json::from_str(&live_foreign_keys_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "Invalid live-foreign-keys JSON: {}",
-                e
-            ))
-        })?
+    let table = LiveTable {
+        name,
+        columns,
+        indexes: parse_json_or_default::<Vec<LiveIndex>>(&live_indexes_json, "live-indexes")?,
+        foreign_keys: parse_json_or_default::<Vec<LiveForeignKey>>(
+            &live_foreign_keys_json,
+            "live-foreign-keys",
+        )?,
+        checks: parse_json_or_default::<Vec<LiveCheck>>(&live_checks_json, "live-checks")?,
+        row_security: parse_json_or_default::<LiveRowSecurity>(
+            &live_row_security_json,
+            "live-row-security",
+        )?,
     };
 
-    let live_checks: Vec<LiveCheck> = if live_checks_json.is_empty() {
-        Vec::new()
-    } else {
-        serde_json::from_str(&live_checks_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid live-checks JSON: {}", e))
-        })?
-    };
-
-    let live_row_security: LiveRowSecurity = if live_row_security_json.is_empty() {
-        LiveRowSecurity::default()
-    } else {
-        serde_json::from_str(&live_row_security_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "Invalid live-row-security JSON: {}",
-                e
-            ))
-        })?
-    };
-
-    let table_lower = name;
     let opts = MigrateOptions::laddered(updates, destructive);
-    let plan = plan_table_migration(
-        &table_lower,
-        &declared,
-        &live,
-        &live_indexes,
-        &live_foreign_keys,
-        &live_checks,
-        &live_row_security,
-        backend,
-        opts,
-    )?;
-
-    let mut statements = plan.statements;
-    for col_name in &plan.drop_columns {
-        statements.push(format!(
-            "ALTER TABLE {} DROP COLUMN {}",
-            quote_ident(&table_lower),
-            quote_ident(col_name)
-        ));
+    if !opts.updates {
+        return Ok((Vec::new(), Vec::new()));
     }
+    let (live, facts) = live_tables_to_schema_ir(vec![table], Default::default(), backend);
+    let plan = plan_from_ir(&live, &declared, backend, &facts, opts.plan_options());
+    let rendered = render_plan(&plan, &live, &declared, backend).map_err(emission_error)?;
+
+    let mut statements = Vec::new();
     let mut warnings = plan.warnings;
+    for op in rendered {
+        statements.extend(op.statements);
+        warnings.extend(op.warnings);
+    }
     warnings.extend(plan.always_warnings);
     Ok((statements, warnings))
+}
+
+fn parse_schema_envelope(json: &str, what: &str) -> PyResult<IrEnvelope<SchemaIrPayload>> {
+    let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_str(json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid {what}: {e}")))?;
+    if envelope.ir_kind != "schema" {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{what}: expected ir_kind 'schema', got '{}'",
+            envelope.ir_kind
+        )));
+    }
+    Ok(envelope)
+}
+
+/// The one planner over FFI: every change that turns the `old_ir_json`
+/// snapshot into `new_ir_json` on `dialect`, as JSON.
+///
+/// `options_json` is `{"destructive": bool}`. `facts_json` is the live
+/// side-table `_live_schema_ir` returns beside a live envelope; omitted, the
+/// old snapshot is read as declared (`LiveFacts::declared`). The result is
+/// `{"operations": [{"kind": …, <op fields>}], "warnings": […],
+/// "always_warnings": […]}`; with `render`, each op also carries the
+/// `statements` and `warnings` it renders to.
+///
+/// # Errors
+/// `ValueError` when a JSON argument is malformed, an envelope is not a
+/// `schema` IR, the dialect is unknown, or an op cannot render.
+#[pyfunction]
+#[pyo3(name = "_plan_from_ir")]
+#[pyo3(signature = (old_ir_json, new_ir_json, dialect, options_json, render=false, facts_json=None))]
+pub fn _plan_from_ir(
+    old_ir_json: String,
+    new_ir_json: String,
+    dialect: String,
+    options_json: String,
+    render: bool,
+    facts_json: Option<String>,
+) -> PyResult<String> {
+    let backend = parse_dialect(&dialect)?;
+    let old = parse_schema_envelope(&old_ir_json, "old_ir_json")?;
+    let new = parse_schema_envelope(&new_ir_json, "new_ir_json")?;
+    let options: PlanOptions = serde_json::from_str(&options_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid options_json: {e}"))
+    })?;
+    let facts: LiveFacts = match facts_json {
+        Some(json) => serde_json::from_str(&json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
+        })?,
+        None => LiveFacts::declared(),
+    };
+    validate_schema_ir(&old).map_err(emission_error)?;
+    validate_schema_ir(&new).map_err(emission_error)?;
+
+    let plan = plan_from_ir(&old, &new, backend, &facts, options);
+    let to_value = |value: serde_json::Result<serde_json::Value>| {
+        value.map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
+        })
+    };
+    let operations: Vec<serde_json::Value> = if render {
+        render_plan(&plan, &old, &new, backend)
+            .map_err(emission_error)?
+            .into_iter()
+            .map(|rendered| {
+                let mut op = to_value(serde_json::to_value(&rendered.op))?;
+                if let Some(fields) = op.as_object_mut() {
+                    fields.insert("statements".into(), rendered.statements.into());
+                    fields.insert("warnings".into(), rendered.warnings.into());
+                }
+                Ok(op)
+            })
+            .collect::<PyResult<_>>()?
+    } else {
+        plan.operations
+            .iter()
+            .map(|op| to_value(serde_json::to_value(op)))
+            .collect::<PyResult<_>>()?
+    };
+    let out = serde_json::json!({
+        "operations": operations,
+        "warnings": plan.warnings,
+        "always_warnings": plan.always_warnings,
+    });
+    Ok(out.to_string())
 }

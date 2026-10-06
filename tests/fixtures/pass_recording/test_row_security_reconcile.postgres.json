@@ -1,0 +1,206 @@
+{
+  "tests/test_row_security_reconcile.py::test_a_declaration_on_a_live_table_plans_flags_then_the_policy": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+          "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_a_dropped_declaration_never_disables_and_always_warns": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Table 'ledgerrow' has row-level security enabled in the database, but the model no longer declares __ferro_rls__. Ferro never disables row security on migrate_updates \u2014 the table keeps filtering rows, and any ferro-owned policy keeps applying. Restore the declaration, or tear it down with migrate_destructive=True.",
+          "Table 'ledgerrow' has row policy/policies 'rls_ledgerrow_ledger_id' that the model no longer declares. They are still filtering rows. Ferro leaves them in place unless you pass migrate_destructive=True \u2014 dropping a policy removes protection, so it is never automatic."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_a_reconciled_declaration_does_not_warn_about_an_unapplied_one[postgres]": {
+    "statements": [
+      "'ledgerrow': CREATE TABLE IF NOT EXISTS \"ledgerrow\" ( \"id\" serial PRIMARY KEY NOT NULL, \"label\" varchar NOT NULL, \"ledger_id\" uuid NOT NULL )",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+      "'ledgerrow': DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" DISABLE ROW LEVEL SECURITY"
+    ],
+    "warnings": [
+      "migrate_destructive tore down row security on table 'ledgerrow': dropped row policy/policies 'rls_ledgerrow_ledger_id'; cleared FORCE ROW LEVEL SECURITY; disabled ROW LEVEL SECURITY. Rows on this table are no longer filtered by the artifacts ferro owned.",
+      "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and the create pass never alters an existing table (ADR-0010). Its row-security flags and policies were NOT applied \u2014 rows are NOT filtered. Connect with migrate_updates=True to reconcile them, or apply them with a reviewed migration."
+    ]
+  },
+  "tests/test_row_security_reconcile.py::test_a_reconciled_policy_actually_filters_rows[postgres]": {
+    "statements": [
+      "'ledgerrow': CREATE TABLE IF NOT EXISTS \"ledgerrow\" ( \"id\" serial PRIMARY KEY NOT NULL, \"label\" varchar NOT NULL, \"ledger_id\" uuid NOT NULL )",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+    ],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_a_second_reconcile_of_the_same_declaration_emits_nothing[postgres]": {
+    "statements": [
+      "'ledgerrow': CREATE TABLE IF NOT EXISTS \"ledgerrow\" ( \"id\" serial PRIMARY KEY NOT NULL, \"label\" varchar NOT NULL, \"ledger_id\" uuid NOT NULL )",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+    ],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_an_unchanged_declaration_plans_nothing": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_dropping_the_declaration_warns_every_connect_and_changes_nothing[postgres]": {
+    "statements": [
+      "'ledgerrow': CREATE TABLE IF NOT EXISTS \"ledgerrow\" ( \"id\" serial PRIMARY KEY NOT NULL, \"label\" varchar NOT NULL, \"ledger_id\" uuid NOT NULL )",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+    ],
+    "warnings": [
+      "Table 'ledgerrow' has row-level security enabled in the database, but the model no longer declares __ferro_rls__. Ferro never disables row security on migrate_updates \u2014 the table keeps filtering rows, and any ferro-owned policy keeps applying. Restore the declaration, or tear it down with migrate_destructive=True.",
+      "Table 'ledgerrow' has row policy/policies 'rls_ledgerrow_ledger_id' that the model no longer declares. They are still filtering rows. Ferro leaves them in place unless you pass migrate_destructive=True \u2014 dropping a policy removes protection, so it is never automatic.",
+      "Table 'ledgerrow' has row-level security enabled in the database, but the model no longer declares __ferro_rls__. Ferro never disables row security on migrate_updates \u2014 the table keeps filtering rows, and any ferro-owned policy keeps applying. Restore the declaration, or tear it down with migrate_destructive=True.",
+      "Table 'ledgerrow' has row policy/policies 'rls_ledgerrow_ledger_id' that the model no longer declares. They are still filtering rows. Ferro leaves them in place unless you pass migrate_destructive=True \u2014 dropping a policy removes protection, so it is never automatic."
+    ]
+  },
+  "tests/test_row_security_reconcile.py::test_flags_are_turned_on_one_at_a_time": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_force_false_never_clears_a_live_force_on_updates": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Table 'ledgerrow' has FORCE ROW LEVEL SECURITY set in the database, but the model declares force=False. Ferro never clears the flag on migrate_updates \u2014 the table owner stays bound by the policies. Clear it with migrate_destructive=True if that is what you want."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_migrate_destructive_tears_the_declaration_down[postgres]": {
+    "statements": [
+      "'ledgerrow': CREATE TABLE IF NOT EXISTS \"ledgerrow\" ( \"id\" serial PRIMARY KEY NOT NULL, \"label\" varchar NOT NULL, \"ledger_id\" uuid NOT NULL )",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+      "'ledgerrow': DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" DISABLE ROW LEVEL SECURITY"
+    ],
+    "warnings": [
+      "migrate_destructive tore down row security on table 'ledgerrow': dropped row policy/policies 'rls_ledgerrow_ledger_id'; cleared FORCE ROW LEVEL SECURITY; disabled ROW LEVEL SECURITY. Rows on this table are no longer filtered by the artifacts ferro owned."
+    ]
+  },
+  "tests/test_row_security_reconcile.py::test_migrate_updates_brings_a_live_table_to_its_declaration[postgres]": {
+    "statements": [
+      "'ledgerrow': CREATE TABLE IF NOT EXISTS \"ledgerrow\" ( \"id\" serial PRIMARY KEY NOT NULL, \"label\" varchar NOT NULL, \"ledger_id\" uuid NOT NULL )",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+    ],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_policy_ddl_lands_after_the_tables_own_column_and_data_steps": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"ledgerrow\" ADD COLUMN \"note\" varchar NOT NULL DEFAULT 'unset'",
+          "ALTER TABLE \"ledgerrow\" ALTER COLUMN \"note\" DROP DEFAULT",
+          "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+          "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_row_security_reconcile_statement_parity_pin": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+          "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_sqlite_reconciliation_emits_no_row_security_ddl": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Column 'ledgerrow.label' is nullable in the database but the model expects NOT NULL. SQLite cannot change column nullability in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+          "Column 'ledgerrow.ledger_id' is nullable in the database but the model expects NOT NULL. SQLite cannot change column nullability in place; generate a reviewed migration with `ferro migrate new` to migrate this column."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_the_migrator_warning_fires_for_a_bound_role[postgres]": {
+    "statements": [
+      "'ledgerrow': CREATE TABLE IF NOT EXISTS \"ledgerrow\" ( \"id\" serial PRIMARY KEY NOT NULL, \"label\" varchar NOT NULL, \"ledger_id\" uuid NOT NULL )",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+    ],
+    "warnings": [
+      "The connected role is neither a superuser nor BYPASSRLS, and this migration touches table(s) 'ledgerrow' with FORCE ROW LEVEL SECURITY. Row policies apply to the migrating role too, so a backfill or data step can silently see and update zero rows. Migrate as a role with BYPASSRLS if this pass moves data."
+    ]
+  },
+  "tests/test_row_security_reconcile.py::test_the_migrator_warning_is_silent_for_the_superuser_matrix_role[postgres]": {
+    "statements": [
+      "'ledgerrow': CREATE TABLE IF NOT EXISTS \"ledgerrow\" ( \"id\" serial PRIMARY KEY NOT NULL, \"label\" varchar NOT NULL, \"ledger_id\" uuid NOT NULL )",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+      "'ledgerrow': ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+      "'ledgerrow': CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+    ],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_without_migrate_updates_nothing_is_planned": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  }
+}

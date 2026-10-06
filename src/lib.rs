@@ -11,6 +11,7 @@ mod connection;
 mod errors;
 mod hydration;
 mod introspect;
+mod live_ir;
 mod migrate;
 mod naming_ffi;
 mod operations;
@@ -184,6 +185,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         migrate::_render_migration_sql_for_test,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(migrate::_plan_from_ir, m)?)?;
+    m.add_function(wrap_pyfunction!(live_ir::_live_schema_ir, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_index_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_unique_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_composite_index_name, m)?)?;

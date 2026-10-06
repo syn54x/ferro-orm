@@ -1,0 +1,51 @@
+{
+  "tests/test_label_addition.py::test_appended_labels_sort_last_regardless_of_declaration_order[postgres]": {
+    "statements": [
+      "'provider': ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"
+    ],
+    "warnings": []
+  },
+  "tests/test_label_addition.py::test_extra_live_labels_warn_and_are_never_removed[postgres]": {
+    "statements": [],
+    "warnings": [
+      "Enum type 'provider' has label(s) 'legacy' that the model no longer declares. Label addition is append-only: ferro never removes enum labels (existing rows may still hold them). Remove or rename labels with a reviewed Alembic migration."
+    ]
+  },
+  "tests/test_label_addition.py::test_migrate_updates_appends_missing_label_and_member_round_trips[postgres]": {
+    "statements": [
+      "'provider': ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"
+    ],
+    "warnings": []
+  },
+  "tests/test_label_addition.py::test_new_label_as_default_of_new_column_in_same_run[postgres]": {
+    "statements": [
+      "'state': ALTER TYPE \"state\" ADD VALUE IF NOT EXISTS 'closed'",
+      "'ticket': DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'state' AND n.nspname = current_schema()) THEN CREATE TYPE \"state\" AS ENUM ('open', 'closed'); END IF; END $$",
+      "'ticket': ALTER TABLE \"ticket\" ADD COLUMN \"state\" state NOT NULL DEFAULT 'closed'",
+      "'ticket': ALTER TABLE \"ticket\" ALTER COLUMN \"state\" DROP DEFAULT"
+    ],
+    "warnings": []
+  },
+  "tests/test_label_addition.py::test_new_table_defaulting_to_new_label_of_existing_stale_type[postgres]": {
+    "statements": [
+      "'audit': DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'state' AND n.nspname = current_schema()) THEN CREATE TYPE \"state\" AS ENUM ('open', 'closed'); END IF; END $$",
+      "'audit': CREATE TABLE IF NOT EXISTS \"audit\" ( \"id\" serial PRIMARY KEY NOT NULL, \"state\" state NOT NULL )",
+      "'state': ALTER TYPE \"state\" ADD VALUE IF NOT EXISTS 'closed'"
+    ],
+    "warnings": []
+  },
+  "tests/test_label_addition.py::test_second_boot_is_a_noop[postgres]": {
+    "statements": [
+      "'provider': ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"
+    ],
+    "warnings": []
+  },
+  "tests/test_label_addition.py::test_shared_type_reconciles_exactly_once[postgres]": {
+    "statements": [
+      "'provider': ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"
+    ],
+    "warnings": [
+      "Enum type 'provider' has label(s) 'legacy' that the model no longer declares. Label addition is append-only: ferro never removes enum labels (existing rows may still hold them). Remove or rename labels with a reviewed Alembic migration."
+    ]
+  }
+}

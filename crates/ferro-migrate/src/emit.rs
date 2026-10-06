@@ -1,21 +1,20 @@
 //! Executable SQL emission from IR-backed migration plans.
 
-use crate::{Dialect, EmissionError, EmissionResult, MigrationOp, MigrationPlan};
+use crate::{Dialect, EmissionError, EmissionResult};
 use ferro_ddl_lowering::{
     self, CheckEmission, ResolvedStorage, apply_canonical_type_for, canonical_from_schema_column,
     canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
     fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
-    refused_conversion_warning, render_check_addition, render_check_drop, render_check_rebuild,
-    render_db_check, render_json_backfill_default, render_pg_enum_create_type,
-    render_sqlite_add_column_references, render_validate_constraint, render_table_check_body, resolve_column_storage,
-    row_security_statements, single_index_name, single_unique_index_name, sqlite_declared_type,
-    sqlite_type_storage_drift,
+    refused_conversion_warning, render_db_check, render_json_backfill_default,
+    render_pg_enum_create_type, render_sqlite_add_column_references, render_table_check_body,
+    resolve_column_storage, row_security_statements, single_index_name, single_unique_index_name,
+    sqlite_declared_type, sqlite_type_storage_drift,
 };
-use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
+use ferro_schema_ir::{SchemaColumn, SchemaModel};
 use sea_query::{
     Alias, ColumnDef, Expr, ForeignKey, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A rendered `CREATE TABLE` plus its standalone post-create artifacts.
 ///
@@ -128,15 +127,7 @@ fn append_named_table_checks(
     Ok(format!("{head}, {clauses} )"))
 }
 
-fn index_models<'a>(models: &'a [SchemaModel]) -> BTreeMap<String, &'a SchemaModel> {
-    let mut indexed = BTreeMap::new();
-    for model in models {
-        indexed.insert(model.table_name.clone(), model);
-    }
-    indexed
-}
-
-fn find_model<'a>(
+pub(crate) fn find_model<'a>(
     models: &'a BTreeMap<String, &'a SchemaModel>,
     table: &str,
 ) -> Result<&'a SchemaModel, EmissionError> {
@@ -145,7 +136,7 @@ fn find_model<'a>(
     })
 }
 
-fn find_column<'a>(
+pub(crate) fn find_column<'a>(
     model: &'a SchemaModel,
     column: &str,
 ) -> Result<&'a SchemaColumn, EmissionError> {
@@ -261,7 +252,7 @@ pub fn render_create_table(
     })
 }
 
-fn render_index_sql(
+pub(crate) fn render_index_sql(
     table_lower: &str,
     name: &str,
     columns: &[String],
@@ -376,35 +367,18 @@ pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a Schema
     )
 }
 
-fn emit_add_table_passes(
-    add_models: Vec<&SchemaModel>,
-    dialect: Dialect,
-    result: &mut EmissionResult,
-) -> Result<(), EmissionError> {
-    let ordered = order_models_for_create(&add_models);
-    // Enum types can be shared across models in one add set; emit each
-    // idempotent CREATE TYPE guard once.
-    let mut emitted_type_guards: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    for model in &ordered {
-        let emission = render_create_table(model, dialect)?;
-        for guard in emission.pre_create_sqls {
-            if emitted_type_guards.insert(guard.clone()) {
-                result.statements.push(guard);
-            }
-        }
-        result.statements.push(emission.create_sql);
-        result.statements.extend(emission.post_create_sqls);
-        result.warnings.extend(emission.warnings);
-    }
-    Ok(())
-}
-
-fn emit_add_column(
+/// The `ALTER TABLE … ADD COLUMN` emission for one new column of an existing
+/// table, with everything that rides it: its backfill-default drop, its
+/// single-column unique/index, its column check and its foreign key. A native
+/// enum column carries the idempotent type guard ahead of the add unless
+/// `types_created_by_plan` names its type — that plan's `CreateEnumType` op
+/// already created it.
+pub(crate) fn emit_add_column(
     table: &str,
     column: &str,
     model: &SchemaModel,
     dialect: Dialect,
+    types_created_by_plan: &BTreeSet<String>,
 ) -> Result<EmissionResult, EmissionError> {
     let col = find_column(model, column)?;
     let ld = dialect;
@@ -490,7 +464,9 @@ fn emit_add_column(
 
     let mut result = EmissionResult::default();
     // A native-enum column needs its type to exist first (idempotent guard).
-    if let ResolvedStorage::PgEnum { type_name, labels } = &storage {
+    if let ResolvedStorage::PgEnum { type_name, labels } = &storage
+        && !types_created_by_plan.contains(type_name)
+    {
         result
             .statements
             .push(render_pg_enum_create_type(type_name, labels));
@@ -561,7 +537,7 @@ fn emit_add_column(
 /// IR foreign key. Postgres-only — SQLite cannot add table constraints to an
 /// existing table: a nullable added column carries
 /// `render_sqlite_add_column_references` inline, and every other shape warns.
-fn render_add_fk_sql(table: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> String {
+pub(crate) fn render_add_fk_sql(table: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> String {
     format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
         quote_ident(table),
@@ -574,7 +550,7 @@ fn render_add_fk_sql(table: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> Str
 }
 
 /// Find the declared FK for `column` on `table` in the new-IR model.
-fn find_foreign_key<'a>(
+pub(crate) fn find_foreign_key<'a>(
     model: &'a SchemaModel,
     table: &str,
     column: &str,
@@ -591,7 +567,7 @@ fn find_foreign_key<'a>(
         })
 }
 
-fn emit_alter_column_type(
+pub(crate) fn emit_alter_column_type(
     table: &str,
     column: &str,
     old_col: &SchemaColumn,
@@ -695,7 +671,7 @@ fn emit_alter_column_type(
     Ok(result)
 }
 
-fn emit_alter_column_nullability(
+pub(crate) fn emit_alter_column_nullability(
     table: &str,
     column: &str,
     old_col: &SchemaColumn,
@@ -746,236 +722,6 @@ fn emit_alter_column_nullability(
         }
     }
     result
-}
-
-/// Render executable SQL for each operation in `plan` using IR metadata.
-pub fn emit_sql_with_ir(
-    plan: &MigrationPlan,
-    old_ir: &IrEnvelope<SchemaIrPayload>,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-) -> Result<EmissionResult, EmissionError> {
-    let old_models = index_models(&old_ir.payload.models);
-    let new_models = index_models(&new_ir.payload.models);
-
-    let mut result = EmissionResult {
-        statements: Vec::new(),
-        warnings: plan.warnings.clone(),
-    };
-
-    let mut add_table_models = Vec::new();
-    for operation in &plan.operations {
-        if let MigrationOp::AddTable { table } = operation {
-            add_table_models.push(find_model(&new_models, table)?);
-        }
-    }
-
-    if !add_table_models.is_empty() {
-        emit_add_table_passes(add_table_models, dialect, &mut result)?;
-    }
-
-    for operation in &plan.operations {
-        match operation {
-            MigrationOp::AddTable { .. } => {}
-            MigrationOp::DropTable { table } => {
-                result
-                    .statements
-                    .push(format!("DROP TABLE \"{}\"", table));
-            }
-            MigrationOp::AddColumn { table, column } => {
-                let model = find_model(&new_models, table)?;
-                let partial = emit_add_column(table, column, model, dialect)?;
-                result.statements.extend(partial.statements);
-                result.warnings.extend(partial.warnings);
-            }
-            MigrationOp::DropColumn { table, column } => {
-                let old_model = find_model(&old_models, table)?;
-                let old_col = find_column(old_model, column)?;
-                if old_col.primary_key {
-                    return Err(EmissionError {
-                        message: format!(
-                            "Cannot drop column '{}.{}': it is part of the primary key. \
-                             Primary-key changes need a reviewed migration \
-                             (`ferro migrate new`).",
-                            table, column
-                        ),
-                    });
-                }
-                result.statements.push(format!(
-                    "ALTER TABLE \"{}\" DROP COLUMN \"{}\"",
-                    table, column
-                ));
-            }
-            MigrationOp::AlterColumnType { table, column } => {
-                let old_model = find_model(&old_models, table)?;
-                let new_model = find_model(&new_models, table)?;
-                let old_col = find_column(old_model, column)?;
-                let new_col = find_column(new_model, column)?;
-                let partial = emit_alter_column_type(table, column, old_col, new_col, dialect)?;
-                result.statements.extend(partial.statements);
-                result.warnings.extend(partial.warnings);
-            }
-            MigrationOp::AlterColumnNullability { table, column } => {
-                let old_model = find_model(&old_models, table)?;
-                let new_model = find_model(&new_models, table)?;
-                let old_col = find_column(old_model, column)?;
-                let new_col = find_column(new_model, column)?;
-                let partial =
-                    emit_alter_column_nullability(table, column, old_col, new_col, dialect);
-                result.statements.extend(partial.statements);
-                result.warnings.extend(partial.warnings);
-            }
-            MigrationOp::AddIndex { table, name, columns, unique } => {
-                result.statements.push(render_index_sql(table, name, columns, *unique, dialect));
-            }
-            // `table` is intentionally unused: DROP INDEX is schema-scoped (not
-            // table-qualified) on both SQLite and Postgres, so only the index name is needed.
-            MigrationOp::DropIndex { table: _, name } => {
-                result.statements.push(format!("DROP INDEX IF EXISTS \"{}\"", name));
-            }
-            // ADR-0044: an invalid index is present (so `IF NOT EXISTS` would
-            // skip it) but never used. Drop it by name — it is known to exist —
-            // then run the exact create statement the `AddIndex` path renders.
-            MigrationOp::RebuildIndex {
-                table,
-                name,
-                columns,
-                unique,
-            } => {
-                result
-                    .statements
-                    .push(format!("DROP INDEX {}", quote_ident(name)));
-                result
-                    .statements
-                    .push(render_index_sql(table, name, columns, *unique, dialect));
-            }
-            MigrationOp::ValidateConstraint { table, name } => match dialect {
-                Dialect::Postgres => {
-                    result
-                        .statements
-                        .push(render_validate_constraint(table, name));
-                }
-                Dialect::Sqlite => {
-                    return Err(EmissionError {
-                        message: format!(
-                            "Validate operation for constraint '{name}' on table '{table}' \
-                             cannot run on SQLite, which has no unvalidated constraints; \
-                             the planner must never plan it there"
-                        ),
-                    });
-                }
-            },
-            MigrationOp::AddForeignKey { table, column } => {
-                let model = find_model(&new_models, table)?;
-                let fk = find_foreign_key(model, table, column)?;
-                match dialect {
-                    Dialect::Postgres => result.statements.push(render_add_fk_sql(table, fk)),
-                    Dialect::Sqlite => result.warnings.push(format!(
-                        "Declared FOREIGN KEY on '{}.{}' (on_delete {}) has no live \
-                         constraint, and SQLite cannot add table constraints to an \
-                         existing table. Referential integrity for this column is not \
-                         database-enforced; generate a reviewed migration with \
-                         `ferro migrate new` to rebuild the table with the constraint.",
-                        table,
-                        column,
-                        fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
-                    )),
-                }
-            }
-            MigrationOp::AddCheck { table, name } => {
-                let model = find_model(&new_models, table)?;
-                let emission = render_check_addition(table, model, name, dialect)
-                    .ok_or_else(|| EmissionError {
-                        message: format!(
-                            "Check-addition operation for '{}' on table '{}' has no matching \
-                             CHECK constraint in the declared IR",
-                            name, table
-                        ),
-                    })?;
-                if let Some(statement) = emission.statement {
-                    result.statements.push(statement);
-                }
-                if let Some(warning) = emission.warning {
-                    result.warnings.push(warning);
-                }
-            }
-            MigrationOp::RebuildCheck { table, name } => {
-                let model = find_model(&new_models, table)?;
-                let emission = render_check_rebuild(table, model, name, dialect)
-                    .ok_or_else(|| EmissionError {
-                        message: format!(
-                            "Check-rebuild operation for '{}' on table '{}' has no matching CHECK constraint in the declared IR",
-                            name, table
-                        ),
-                    })?;
-                result.statements.extend(emission.statements);
-                if let Some(warning) = emission.warning {
-                    result.warnings.push(warning);
-                }
-            }
-            MigrationOp::DropCheck { table, name } => {
-                let model = find_model(&new_models, table)?;
-                let still_declared = model.table_checks.iter().any(|check| check.name == *name)
-                    || model.checks.iter().any(|check| check.name == *name);
-                if still_declared {
-                    return Err(EmissionError {
-                        message: format!(
-                            "Check-drop operation for '{name}' on table '{table}' is still \
-                             declared in the model IR"
-                        ),
-                    });
-                }
-                let emission = render_check_drop(table, name, dialect);
-                if let Some(statement) = emission.statement {
-                    result.statements.push(statement);
-                }
-                if let Some(warning) = emission.warning {
-                    result.warnings.push(warning);
-                }
-            }
-            MigrationOp::RebuildForeignKey {
-                table,
-                column,
-                old_name,
-            } => {
-                let model = find_model(&new_models, table)?;
-                let fk = find_foreign_key(model, table, column)?;
-                match dialect {
-                    Dialect::Postgres => {
-                        result.statements.push(format!(
-                            "ALTER TABLE {} DROP CONSTRAINT {}",
-                            quote_ident(table),
-                            quote_ident(old_name),
-                        ));
-                        result.statements.push(render_add_fk_sql(table, fk));
-                    }
-                    Dialect::Sqlite => {
-                        let live_action = find_model(&old_models, table)
-                            .ok()
-                            .and_then(|old| {
-                                old.foreign_keys.iter().find(|live| live.column == *column)
-                            })
-                            .map(|live| {
-                                fk_action_sql(fk_action_from_str(live.on_delete.as_deref()))
-                            })
-                            .unwrap_or("<unknown>");
-                        result.warnings.push(format!(
-                            "Foreign key on '{}.{}' declares on_delete {} but the live \
-                             constraint enforces {}; SQLite cannot alter constraints in \
-                             place, so the live behavior remains. Generate a reviewed \
-                             migration with `ferro migrate new` to apply the declared action.",
-                            table,
-                            column,
-                            fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
-                            live_action,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(result)
 }
 
 #[cfg(test)]

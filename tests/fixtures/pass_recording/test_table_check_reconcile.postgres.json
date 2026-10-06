@@ -1,0 +1,211 @@
+{
+  "tests/test_table_check_reconcile.py::test_a_new_column_and_a_check_over_it_land_in_one_run[postgres]": {
+    "statements": [
+      "'split': CREATE TABLE IF NOT EXISTS \"split\" ( \"id\" serial PRIMARY KEY NOT NULL, \"left\" varchar )",
+      "'split': ALTER TABLE \"split\" ADD COLUMN \"right\" varchar",
+      "'split': ALTER TABLE \"split\" ADD CONSTRAINT \"ck_split_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL))"
+    ],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_a_new_column_lands_before_the_check_that_references_it": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"reconcile\" ADD COLUMN \"right\" varchar",
+          "ALTER TABLE \"reconcile\" ADD CONSTRAINT \"ck_reconcile_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL))"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_a_second_migrate_updates_boot_is_a_noop[postgres]": {
+    "statements": [
+      "'reconcile': CREATE TABLE IF NOT EXISTS \"reconcile\" ( \"id\" serial PRIMARY KEY NOT NULL, \"left\" varchar, \"right\" varchar )",
+      "'reconcile': ALTER TABLE \"reconcile\" ADD CONSTRAINT \"ck_reconcile_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL))"
+    ],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_a_table_created_in_this_run_is_not_reconciled_again[sqlite]": {
+    "statements": [
+      "'cookie': CREATE TABLE IF NOT EXISTS \"cookie\" ( \"flavor\" text NOT NULL CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty')), \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT )"
+    ],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_autogenerate_adds_a_column_before_the_check_that_references_it[postgres]": {
+    "statements": [
+      "'reconcile': CREATE TABLE IF NOT EXISTS \"reconcile\" ( \"id\" serial PRIMARY KEY NOT NULL, \"left\" varchar )"
+    ],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_autogenerate_is_empty_once_the_check_is_reconciled[postgres]": {
+    "statements": [
+      "'reconcile': CREATE TABLE IF NOT EXISTS \"reconcile\" ( \"id\" serial PRIMARY KEY NOT NULL, \"left\" varchar, \"right\" varchar )",
+      "'reconcile': ALTER TABLE \"reconcile\" ADD CONSTRAINT \"ck_reconcile_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL))"
+    ],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_autogenerate_proposes_the_same_add_as_the_runtime[postgres]": {
+    "statements": [
+      "'reconcile': CREATE TABLE IF NOT EXISTS \"reconcile\" ( \"id\" serial PRIMARY KEY NOT NULL, \"left\" varchar, \"right\" varchar )"
+    ],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_check_addition_statement_parity_pin": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"reconcile\" ADD CONSTRAINT \"ck_reconcile_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL))"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_column_check_on_a_new_column_rides_its_add_column_exactly_once": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"cookie\" ADD COLUMN \"flavor\" text NOT NULL DEFAULT 'sweet'",
+          "ALTER TABLE \"cookie\" ALTER COLUMN \"flavor\" DROP DEFAULT",
+          "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_cookie_flavor' AND conrelid = '\"cookie\"'::regclass) THEN ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty')); END IF; END $$"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_live_table_check_replans_to_nothing": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      },
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_migrate_updates_adds_a_missing_table_check[postgres]": {
+    "statements": [
+      "'reconcile': CREATE TABLE IF NOT EXISTS \"reconcile\" ( \"id\" serial PRIMARY KEY NOT NULL, \"left\" varchar, \"right\" varchar )",
+      "'reconcile': ALTER TABLE \"reconcile\" ADD CONSTRAINT \"ck_reconcile_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL))"
+    ],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_missing_table_check_renders_one_alter_add_constraint_on_postgres": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"reconcile\" ADD CONSTRAINT \"ck_reconcile_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL))"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_rows_violating_the_new_check_fail_the_connect_and_roll_the_table_back[postgres]": {
+    "statements": [
+      "'reconcile': CREATE TABLE IF NOT EXISTS \"reconcile\" ( \"id\" serial PRIMARY KEY NOT NULL, \"left\" varchar, \"right\" varchar )",
+      "'reconcile': ALTER TABLE \"reconcile\" ADD COLUMN \"memo\" varchar",
+      "'reconcile': ALTER TABLE \"reconcile\" ADD CONSTRAINT \"ck_reconcile_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL))"
+    ],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_sqlite_column_check_on_a_new_column_rides_its_add_column_inline": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"cookie\" ADD COLUMN \"flavor\" text NOT NULL DEFAULT 'sweet' CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty'))"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_sqlite_column_check_on_an_existing_column_warns_naming_migrations": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Check constraint 'ck_cookie_flavor' on column 'cookie.flavor' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_sqlite_reconcile_warns_with_the_constraint_name_and_adds_nothing[sqlite]": {
+    "statements": [
+      "'reconcile': CREATE TABLE IF NOT EXISTS \"reconcile\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"left\" varchar, \"right\" varchar )"
+    ],
+    "warnings": [
+      "Table check 'ck_reconcile_at_most_one_side' is declared on 'reconcile' but missing from the live table, and SQLite cannot add a table constraint to an existing table (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it."
+    ]
+  },
+  "tests/test_table_check_reconcile.py::test_sqlite_warns_with_the_constraint_name_and_emits_no_sql": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Table check 'ck_reconcile_at_most_one_side' is declared on 'reconcile' but missing from the live table, and SQLite cannot add a table constraint to an existing table (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_toggling_db_check_on_a_live_column_adds_the_column_check[postgres]": {
+    "statements": [
+      "'cookie': CREATE TABLE IF NOT EXISTS \"cookie\" ( \"flavor\" text NOT NULL, \"id\" serial PRIMARY KEY NOT NULL )",
+      "'cookie': DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_cookie_flavor' AND conrelid = '\"cookie\"'::regclass) THEN ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty')); END IF; END $$"
+    ],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_toggling_db_check_on_an_existing_column_adds_the_column_check": {
+    "rendered": [
+      {
+        "statements": [
+          "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_cookie_flavor' AND conrelid = '\"cookie\"'::regclass) THEN ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty')); END IF; END $$"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_user_owned_live_check_is_not_a_counterpart_and_is_never_touched": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"reconcile\" ADD CONSTRAINT \"ck_reconcile_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL))"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_reconcile.py::test_without_migrate_updates_no_check_is_planned": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      },
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  }
+}

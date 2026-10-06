@@ -1,0 +1,148 @@
+{
+  "tests/test_table_check_orphans.py::test_check_drop_statement_parity_pin": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"orphan\" DROP CONSTRAINT \"ck_orphan_at_most_one_side\""
+        ],
+        "warnings": [
+          "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`)."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_orphans.py::test_clearing_db_check_follows_the_same_warn_and_drop_rule": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Table 'cookie' has CHECK constraint(s) 'ck_cookie_flavor' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`)."
+        ]
+      },
+      {
+        "statements": [
+          "ALTER TABLE \"cookie\" DROP CONSTRAINT \"ck_cookie_flavor\""
+        ],
+        "warnings": [
+          "Table 'cookie' has CHECK constraint(s) 'ck_cookie_flavor' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`)."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_orphans.py::test_declared_check_is_not_a_leftover": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      },
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_orphans.py::test_leftover_table_check_drops_under_migrate_destructive_on_postgres": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"orphan\" DROP CONSTRAINT \"ck_orphan_at_most_one_side\""
+        ],
+        "warnings": [
+          "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`)."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_orphans.py::test_leftover_table_check_warns_and_skips_on_sqlite_even_when_destructive": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+          "CHECK constraint 'ck_orphan_at_most_one_side' on table 'orphan' is no longer declared, and SQLite cannot drop a table constraint in place (it requires a full table rebuild). The live constraint remains; generate a reviewed migration with `ferro migrate new` to drop it."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_orphans.py::test_leftover_table_check_warns_and_stays_under_migrate_updates": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`)."
+        ]
+      },
+      {
+        "statements": [],
+        "warnings": [
+          "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`)."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_orphans.py::test_sqlite_destructive_still_skips_the_drop[sqlite]": {
+    "statements": [
+      "'orphan': CREATE TABLE IF NOT EXISTS \"orphan\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"left\" varchar, \"right\" varchar, CONSTRAINT \"ck_orphan_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL)) )"
+    ],
+    "warnings": [
+      "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+      "CHECK constraint 'ck_orphan_at_most_one_side' on table 'orphan' is no longer declared, and SQLite cannot drop a table constraint in place (it requires a full table rebuild). The live constraint remains; generate a reviewed migration with `ferro migrate new` to drop it."
+    ]
+  },
+  "tests/test_table_check_orphans.py::test_sqlite_leftover_warns_and_rewrites_nothing[sqlite]": {
+    "statements": [
+      "'orphan': CREATE TABLE IF NOT EXISTS \"orphan\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"left\" varchar, \"right\" varchar, CONSTRAINT \"ck_orphan_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL)) )"
+    ],
+    "warnings": [
+      "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`)."
+    ]
+  },
+  "tests/test_table_check_orphans.py::test_user_owned_live_check_is_never_warned_or_dropped": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      },
+      {
+        "statements": [],
+        "warnings": []
+      },
+      {
+        "statements": [],
+        "warnings": []
+      },
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_orphans.py::test_without_migrate_updates_no_leftover_is_planned": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      },
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  }
+}

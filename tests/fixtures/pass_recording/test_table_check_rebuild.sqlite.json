@@ -1,0 +1,121 @@
+{
+  "tests/test_table_check_rebuild.py::test_catalog_wrapping_is_not_drift": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      },
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_rebuild.py::test_check_rebuild_statement_parity_pin": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"rebuild\" DROP CONSTRAINT \"ck_rebuild_at_most_one_side\"",
+          "ALTER TABLE \"rebuild\" ADD CONSTRAINT \"ck_rebuild_at_most_one_side\" CHECK ((\"left\" IS NULL) AND (\"right\" IS NULL))"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_rebuild.py::test_column_check_label_change_renders_drop_then_bare_add": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"cookie\" DROP CONSTRAINT \"ck_cookie_flavor\"",
+          "ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty', 'umami'))"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_rebuild.py::test_drifted_table_check_renders_drop_then_bare_add_on_postgres": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"rebuild\" DROP CONSTRAINT \"ck_rebuild_at_most_one_side\"",
+          "ALTER TABLE \"rebuild\" ADD CONSTRAINT \"ck_rebuild_at_most_one_side\" CHECK ((\"left\" IS NULL) AND (\"right\" IS NULL))"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_rebuild.py::test_second_boot_shape_replans_to_nothing": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_rebuild.py::test_sqlite_rebuild_warns_with_the_constraint_name_and_rewrites_nothing[sqlite]": {
+    "statements": [
+      "'rebuild': CREATE TABLE IF NOT EXISTS \"rebuild\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"left\" varchar, \"right\" varchar, CONSTRAINT \"ck_rebuild_at_most_one_side\" CHECK ((\"left\" IS NULL) OR (\"right\" IS NULL)) )"
+    ],
+    "warnings": [
+      "CHECK constraint 'ck_rebuild_at_most_one_side' on table 'rebuild' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate."
+    ]
+  },
+  "tests/test_table_check_rebuild.py::test_sqlite_warns_with_the_constraint_name_and_emits_no_sql": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "CHECK constraint 'ck_rebuild_at_most_one_side' on table 'rebuild' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_rebuild.py::test_undeclared_live_ck_is_not_a_rebuild": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Table 'rebuild' has CHECK constraint(s) 'ck_rebuild_orphan' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`)."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_rebuild.py::test_user_owned_live_check_is_never_rebuilt": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_table_check_rebuild.py::test_without_migrate_updates_no_rebuild_is_planned": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      },
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  }
+}
