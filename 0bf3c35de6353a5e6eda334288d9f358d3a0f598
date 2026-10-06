@@ -1,0 +1,1 @@
+verified 2026-10-06T19:28:05Z: cargo test -p ferro-ddl-lowering -p ferro-migrate (142+110 ok); cargo test --no-default-features --features testing (294 ok); CARGO_PROFILE_RELEASE_STRIP=none uv run maturin develop; Verify pytest list --db-backends=sqlite,postgres: 322 passed, 0 skipped
