@@ -151,6 +151,8 @@ pub fn _load_snapshot(ir_json: String) -> PyResult<String> {
 #[pyo3(name = "_store_snapshot")]
 pub fn _store_snapshot(parent_ir_json: String) -> PyResult<String> {
     let parent = load_snapshot(parent_ir_json.as_bytes(), "the head snapshot")?;
-    String::from_utf8(Snapshot::store(&parent.ir, Some(parent.checksum)))
+    let bytes = Snapshot::store(&parent.ir, Some(parent.checksum))
+        .map_err(|err| PyValueError::new_err(format!("the copied snapshot {err}")))?;
+    String::from_utf8(bytes)
         .map_err(|e| PyRuntimeError::new_err(format!("the stored snapshot is not UTF-8: {e}")))
 }

@@ -104,22 +104,31 @@ impl Snapshot {
     /// or `null` for the first migration), every object's keys sorted,
     /// two-space indented, ending in a newline. The same modelset always
     /// stores to the same bytes.
-    pub fn store(ir: &IrEnvelope<SchemaIrPayload>, parent_checksum: Option<[u8; 48]>) -> Vec<u8> {
-        // The IR types are plain data (strings, numbers, vectors, options):
-        // serializing them to a `Value` cannot fail.
-        let mut document = serde_json::to_value(ir).unwrap_or(serde_json::Value::Null);
-        if let Some(object) = document.as_object_mut() {
-            object.insert(
-                PARENT_CHECKSUM_KEY.to_string(),
-                parent_checksum
-                    .map(|checksum| serde_json::Value::String(encode_checksum(&checksum)))
-                    .unwrap_or(serde_json::Value::Null),
-            );
-        }
-        let mut bytes =
-            serde_json::to_vec_pretty(&canonical(document)).unwrap_or_else(|_| b"null".to_vec());
+    ///
+    /// # Errors
+    /// A [`SnapshotError`] when the modelset does not serialize to a JSON
+    /// object: a snapshot that cannot be written is a refusal, never a
+    /// placeholder.
+    pub fn store(
+        ir: &IrEnvelope<SchemaIrPayload>,
+        parent_checksum: Option<[u8; 48]>,
+    ) -> Result<Vec<u8>, SnapshotError> {
+        let fail = |message: String| SnapshotError { message };
+        let mut document = serde_json::to_value(ir)
+            .map_err(|err| fail(format!("cannot be serialized ({err})")))?;
+        let object = document
+            .as_object_mut()
+            .ok_or_else(|| fail("does not serialize to a JSON object".to_string()))?;
+        object.insert(
+            PARENT_CHECKSUM_KEY.to_string(),
+            parent_checksum
+                .map(|checksum| serde_json::Value::String(encode_checksum(&checksum)))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        let mut bytes = serde_json::to_vec_pretty(&canonical(document))
+            .map_err(|err| fail(format!("cannot be serialized ({err})")))?;
         bytes.push(b'\n');
-        bytes
+        Ok(bytes)
     }
 }
 
@@ -208,8 +217,8 @@ mod tests {
         for (name, bytes) in schema_vectors() {
             let loaded = Snapshot::load(&bytes).expect("load");
             let parent = Some(sha384(b"parent"));
-            let first = Snapshot::store(&loaded.ir, parent);
-            let second = Snapshot::store(&loaded.ir, parent);
+            let first = Snapshot::store(&loaded.ir, parent).expect("store");
+            let second = Snapshot::store(&loaded.ir, parent).expect("store");
             assert_eq!(first, second, "{name}: canonical bytes are deterministic");
             assert!(first.ends_with(b"\n"), "{name}: ends with a newline");
             let back = Snapshot::load(&first).expect("stored snapshot loads");
@@ -223,7 +232,7 @@ mod tests {
     fn stored_json_has_sorted_keys_and_a_hex_parent_checksum() {
         let (_, bytes) = schema_vectors().remove(0);
         let ir = Snapshot::load(&bytes).expect("load").ir;
-        let root = Snapshot::store(&ir, None);
+        let root = Snapshot::store(&ir, None).expect("store");
         let text = String::from_utf8(root).expect("utf-8");
         assert!(text.contains("\"parent_checksum\": null"), "{text}");
         let keys: Vec<&str> = text
@@ -236,7 +245,8 @@ mod tests {
             ["ir_kind", "ir_version", "parent_checksum", "payload"]
         );
 
-        let child = String::from_utf8(Snapshot::store(&ir, Some([0xab; 48]))).expect("utf-8");
+        let child = String::from_utf8(Snapshot::store(&ir, Some([0xab; 48])).expect("store"))
+            .expect("utf-8");
         assert!(child.contains(&format!("\"parent_checksum\": \"{}\"", "ab".repeat(48))));
     }
 

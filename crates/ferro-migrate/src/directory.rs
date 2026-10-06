@@ -892,7 +892,7 @@ mod tests {
                 "-- ferro: destructive\n\nDROP TABLE \"t\";\n",
             );
         }
-        let ir = Snapshot::store(&empty_ir(), parent.map(sha384));
+        let ir = Snapshot::store(&empty_ir(), parent.map(sha384)).expect("store");
         std::fs::write(dir.join(SNAPSHOT_FILE), &ir).expect("ir.json");
         ir
     }

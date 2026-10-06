@@ -426,7 +426,7 @@ pub fn generate(
         });
     }
 
-    let bytes = Snapshot::store(target, parent.map(|snapshot| snapshot.checksum));
+    let bytes = Snapshot::store(target, parent.map(|snapshot| snapshot.checksum))?;
     let snapshot = Snapshot::load(&bytes)?;
     let snapshot_json = String::from_utf8(bytes).map_err(|err| {
         GenerateError::Render(format!("the generated snapshot is not UTF-8: {err}"))
@@ -620,7 +620,8 @@ mod tests {
     }
 
     fn snapshot_of(ir: &IrEnvelope<SchemaIrPayload>, parent: Option<&Snapshot>) -> Snapshot {
-        Snapshot::load(&Snapshot::store(ir, parent.map(|p| p.checksum))).expect("load")
+        Snapshot::load(&Snapshot::store(ir, parent.map(|p| p.checksum)).expect("store"))
+            .expect("load")
     }
 
     /// Every statement the create pass executes for `model`, in its order.
@@ -688,7 +689,7 @@ mod tests {
         assert_eq!(migration.snapshot.ir, target);
         assert_eq!(
             migration.snapshot_json.as_bytes(),
-            Snapshot::store(&target, None).as_slice()
+            Snapshot::store(&target, None).expect("store").as_slice()
         );
         assert_eq!(
             migration.summary,
