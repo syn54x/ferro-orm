@@ -158,6 +158,21 @@ def test_a_not_valid_check_and_an_invalid_index_have_their_own_lines(
     assert "body differs" not in out
 
 
+def test_a_primary_key_moved_by_hand_is_one_line(project, pkg, db, capsys):
+    if db.backend != "postgres":
+        pytest.skip("SQLite cannot move a primary key in place")
+    applied(project, pkg, db, capsys)
+    db.execute('ALTER TABLE "team" DROP CONSTRAINT "team_pkey"')
+    db.execute('ALTER TABLE "team" ADD PRIMARY KEY ("name")')
+
+    code, out, _ = drift_cli(db, capsys)
+    assert code == 4
+    assert out == (
+        f"drift against {HEAD}:\n  team primary key is (name), snapshot says (id)\n"
+    )
+    assert [op["kind"] for op in drift_api(db).operations] == ["ChangePrimaryKey"]
+
+
 # -- what drift never reports ------------------------------------------------------
 
 
@@ -419,9 +434,22 @@ def test_every_planner_op_kind_has_its_own_line():
             "labels": ["draft"],
             "columns": ["name"],
             "unique": False,
+            "from": ["id"],
+            "to": ["name"],
         }
         line = render_op(op)
         assert line and not line.startswith(f"{kind} on "), kind
+
+
+def test_a_moved_primary_key_names_both_column_sets():
+    op = {"kind": "ChangePrimaryKey", "table": "team", "from": ["name"], "to": ["id"]}
+    assert render_op(op) == "team primary key is (name), snapshot says (id)"
+    composite = {**op, "from": ["org_id", "name"], "to": []}
+    assert (
+        render_op(composite) == "team primary key is (org_id, name), snapshot says ()"
+    )
+    with pytest.raises(ValueError, match=r"ChangePrimaryKey op has no 'to' field"):
+        render_op({"kind": "ChangePrimaryKey", "table": "team", "from": ["id"]})
 
 
 def test_an_unknown_op_kind_still_renders_a_line():
