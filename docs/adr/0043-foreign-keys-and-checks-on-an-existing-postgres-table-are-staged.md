@@ -65,7 +65,7 @@ No data step is scaffolded. Ferro knows the shape of a demanded value (write one
 
 - **SQLite** adds a constraint to an existing table by table rebuild (ADR-0034), and the rebuild *is* the validation: the copy fails on a violating check, and `foreign_key_check` before commit fails on an orphan. Under shared step numbers (ADR-0037) the rebuild sits in the schema or expand step and the validate step renders `-- ferro: not-applicable`; a project whose dialects would all render it that way (SQLite-only) gets no validate step. The data-dependent marker therefore sits on step 01 in the SQLite file and step 02 in the Postgres file: each file tells its own truth, and a step named `validate` never holds a rebuild.
 - **The Alembic bridge renders the plain op**, `op.create_foreign_key` / `op.create_check_constraint`, marked data-dependent, in the revision's one transaction (ADR-0042's reasoning: staging is a property of ferro's runner, not of the planner's op).
-- **Unique constraints are not staged.** Postgres has no `NOT VALID` for them; the online form is `CREATE UNIQUE INDEX CONCURRENTLY` plus `ADD CONSTRAINT … UNIQUE USING INDEX`, which cannot run in a transaction and so belongs to the `CONCURRENTLY` decision, not this one.
+- **Unique constraints are not staged.** Postgres has no `NOT VALID` for them; the online form is `CREATE UNIQUE INDEX CONCURRENTLY` plus `ADD CONSTRAINT … UNIQUE USING INDEX`, which cannot run in a transaction and so belongs to the `CONCURRENTLY` decision, not this one (ADR-0044, which also finds that a ferro unique is an index and never a constraint, so the second statement is not written).
 
 ## Considered options
 

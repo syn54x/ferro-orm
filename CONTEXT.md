@@ -201,7 +201,7 @@ A scaffolded *data step* that supplies the values a *schema change* demands of r
 _Avoid_: Data migration, populate step, seed step
 
 **Expand step**:
-The generated DDL step that runs before a migration's data steps. It holds only what existing rows already satisfy: a new column created nullable, with its index, unique, foreign key and check. A migration with no data step has no expand step; its DDL is one schema step.
+The generated DDL step that runs before a migration's data steps. It holds only what existing rows already satisfy: a new column created nullable, with its foreign key and check; on a table that already exists the column's index and unique follow the data steps as *index steps*. A migration with no data step has no expand step; its DDL is one schema step.
 _Avoid_: Pre-step, additive step, phase one
 
 **Contract step**:
@@ -217,12 +217,20 @@ The generated Postgres DDL step between a migration's data steps and its *contra
 _Avoid_: Stage step, guard, pre-contract
 
 **Staged constraint**:
-How a generated Postgres migration adds a foreign key or a check to a table that already exists without scanning it under a lock that blocks writers: the constraint is installed under its own name as not yet validated, refusing every new write that violates it, and a later step validates it. Always generated on Postgres for a table that already exists, whether or not the column is new; a table the same migration creates needs none; a unique constraint cannot be staged; SQLite has no equivalent (a *table rebuild*). A declared constraint found live but not validated is *drift*.
+How a generated Postgres migration adds a foreign key or a check to a table that already exists without scanning it under a lock that blocks writers: the constraint is installed under its own name as not yet validated, refusing every new write that violates it, and a later step validates it. Always generated on Postgres for a table that already exists, whether or not the column is new; a table the same migration creates needs none; a unique cannot be staged and is an *index step* instead; SQLite has no equivalent (a *table rebuild*). A declared constraint found live but not validated is *drift*.
 _Avoid_: NOT VALID trick, deferred constraint, lazy constraint
 
 **Validate step**:
 The generated Postgres DDL step that validates a migration's *staged constraints* when the migration has no *contract step* to do it in. It is the *data-dependent step* of that migration; its down returns each constraint to not yet validated. Never holds a *table rebuild*.
 _Avoid_: Verify step, check step, post-schema step
+
+**Index step**:
+The generated DDL step that builds or drops one index on a table that already exists, after the migration's data steps. On Postgres it is a *no-transaction step* that builds without blocking writers, and its first statement removes whatever an earlier failed build left behind under that name, so it is exact from the top; on SQLite it holds the plain index inside a transaction. The step for a unique is the migration's *data-dependent step*: a duplicate fails it, and nothing is scaffolded to resolve one. An index on a table the same migration creates needs none; a unique is never a constraint, so this is the whole of its online form.
+_Avoid_: Concurrent index step, CONCURRENTLY step, index migration
+
+**DDL lock timeout**:
+How long a DDL statement that ferro executes on Postgres, in a *run* or in the *reconciliation pass*, waits for a table lock before giving up, so a statement queued behind one long query never queues every other query behind itself. A statement that gives up is retried, its step from the first statement, a fixed number of times before the step fails. Set per *database* in *project configuration*; distinct from the wait for the *run lock*, and not applied to a *data step*.
+_Avoid_: Lock timeout (the run-lock wait), statement timeout, lock retry
 
 **Restructure scaffold**:
 The generated expand, backfills and contract for a change that replaces a key and everything that references it, spanning the parent table and each child. A primary-key change is the one case today.
