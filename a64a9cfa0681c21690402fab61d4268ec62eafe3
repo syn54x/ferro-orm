@@ -1,0 +1,1 @@
+verified 2026-10-06T18:34:50Z: cargo test -p ferro-ddl-lowering -p ferro-migrate (141+97 passed); maturin develop (.so sha 9a0393e -> 092346a); pytest test_migrate_plan/test_auto_migrate/test_table_check_rebuild/test_table_check_reconcile --db-backends=sqlite,postgres: 163 passed, 0 skipped
