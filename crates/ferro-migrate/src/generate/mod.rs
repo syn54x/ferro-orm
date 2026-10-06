@@ -657,13 +657,14 @@ mod tests {
                 "{dialect:?}"
             );
             assert_eq!(r.headers, Headers::default());
-            assert_eq!(r.down_headers, Headers::default(), "a down is never destructive");
+            assert_eq!(
+                r.down_headers,
+                Headers::default(),
+                "a down is never destructive"
+            );
         }
         let pg = rendering(&migration, StepDialect::Postgres);
-        assert_eq!(
-            pg.down,
-            "DROP TABLE \"author\";\n\nDROP TYPE \"status\";\n"
-        );
+        assert_eq!(pg.down, "DROP TABLE \"author\";\n\nDROP TYPE \"status\";\n");
         assert_eq!(
             rendering(&migration, StepDialect::Sqlite).down,
             "DROP TABLE \"author\";\n"

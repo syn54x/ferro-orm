@@ -10,7 +10,9 @@
 //! ```
 //!
 //! [`plan_run`] returns the steps to run, each with the record it writes and
-//! the [`ExecMode`] its headers ask for; [`run_status`] answers `ferro migrate
+//! the [`ExecMode`] its headers ask for — going up, every pending step in
+//! order; going down ([`Direction::Down`], ADR-0033), every recorded step
+//! above the [`Target`] in reverse order, each with its down file; [`run_status`] answers `ferro migrate
 //! status` from the same inputs; [`check_adoption`] and [`check_format`] are
 //! the two refusals that need a fact read from the database (its live tables,
 //! its tracking table's format number). [`split_statements`] cuts a step file
@@ -142,10 +144,10 @@ pub struct StepRecord {
     pub ferro_version: String,
     /// Ran, or recorded by a baseline.
     pub origin: Origin,
-    /// A chunked `down` is part-way (#520 drives it).
+    /// A chunked `down` is part-way (declared by #520; #532 drives it).
     #[serde(default)]
     pub reverting: bool,
-    /// A chunked `down`'s own cursor (#520 drives it).
+    /// A chunked `down`'s own cursor (declared by #520; #532 drives it).
     #[serde(default)]
     pub revert_cursor: Option<String>,
 }
@@ -162,26 +164,23 @@ impl StepRecord {
     }
 }
 
-/// Where `ferro migrate down` stops (#473: `--to 0005`, `--to 0007:02`, `--all`).
+/// Where `ferro migrate down` stops (#473: `down`, `--to 0005`,
+/// `--to 0007:02`, `--all`). As JSON: `"latest"`, `{"migration": 5}`,
+/// `{"step": [7, 2]}`, `"all"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "to", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum Target {
-    /// Revert the latest applied migration.
-    Latest,
-    /// Revert down to (keeping) this migration.
-    Migration {
-        /// `NNNN`.
-        migration: u16,
-    },
-    /// Revert down to (keeping) this step.
-    Step {
-        /// `NNNN`.
-        migration: u16,
-        /// `NN`.
-        step: u8,
-    },
-    /// Revert everything.
+    /// Keep this migration fully applied; revert everything above it
+    /// (`--to 0005`; `--to 0000` reverts everything).
+    Migration(u16),
+    /// Keep steps up to this one of this migration; revert everything above
+    /// it (`--to 0007:02`).
+    Step(u16, u8),
+    /// Revert everything (`--all`).
     All,
+    /// Revert the latest migration with a record, a partly applied one
+    /// included (`down` with no target).
+    Latest,
 }
 
 /// Which way a run goes.
@@ -190,7 +189,7 @@ pub enum Target {
 pub enum Direction {
     /// Apply every pending step.
     Up,
-    /// Revert to `target` (ticket #520).
+    /// Revert every recorded step above `target`, in reverse order.
     Down {
         /// Where to stop.
         target: Target,
@@ -241,17 +240,18 @@ pub struct PlannedStep {
     pub migration_name: String,
     /// `NN`.
     pub step: u8,
-    /// The up file's name (`01_schema.up.sqlite.sql`).
+    /// The file the run executes: the up file going up
+    /// (`01_schema.up.sqlite.sql`), the down file going down.
     pub file: String,
-    /// The up file's path.
+    /// That file's path.
     pub path: PathBuf,
-    /// The record kind this attempt writes.
+    /// The record kind this attempt writes (going down: the standing record's).
     pub kind: RecordKind,
-    /// SHA-384 of the up file's raw bytes, lowercase hex.
+    /// SHA-384 of that file's raw bytes, lowercase hex.
     pub checksum: String,
     /// SHA-384 of the migration's `ir.json`, lowercase hex.
     pub snapshot_checksum: String,
-    /// The up file's headers (informational once planned: `mode` decides).
+    /// That file's headers (informational once planned: `mode` decides).
     #[serde(skip_deserializing)]
     pub headers: Headers,
     /// How the executor runs it.
@@ -260,8 +260,14 @@ pub struct PlannedStep {
     pub resumes: bool,
     /// Set when the unfinished attempt ran a different file.
     pub edited: Option<EditedUnfinished>,
-    /// The record this step writes (timestamps and `ferro_version` filled at
-    /// execution).
+    /// Going down: why the step's down runs no statement — the down file's
+    /// `-- ferro: nothing-to-reverse <reason>`, or an up that never finished
+    /// in a transaction and so left nothing behind. Its record is removed.
+    #[serde(default)]
+    pub nothing_to_reverse: Option<String>,
+    /// Going up, the record this step writes (timestamps and `ferro_version`
+    /// filled at execution); going down, the standing record its down
+    /// removes.
     pub record: StepRecord,
 }
 
@@ -357,6 +363,30 @@ pub enum RunRefusal {
         /// `NNNN_<name>/<file>`.
         file: String,
     },
+    /// A step `down` would have to revert is declared irreversible
+    /// (`-- ferro: irreversible <reason>`, ADR-0033). Nothing is reverted,
+    /// including the steps above it; there is no flag to skip it.
+    Irreversible {
+        /// `NNNN`.
+        migration: u16,
+        /// `NN`.
+        step: u8,
+        /// The declared reason.
+        reason: String,
+    },
+    /// `down` would revert a migration `baseline` recorded (ADR-0031): its
+    /// down would drop tables it never created.
+    BelowBaseline {
+        /// `NNNN` of the highest baselined migration: the floor.
+        migration: u16,
+    },
+    /// `--to` names a migration or step the directory does not hold.
+    NoSuchTarget {
+        /// The target as the operator wrote it (`0009`, `0003:04`).
+        target: String,
+        /// The directory's name (`migrations`).
+        directory: String,
+    },
     /// A direction this ferro does not run yet.
     NotImplemented {
         /// What is not implemented.
@@ -402,6 +432,9 @@ impl RunRefusal {
             RunRefusal::TablesExist { .. } => "tables_exist",
             RunRefusal::Reverting { .. } => "reverting",
             RunRefusal::NotRunnableYet { .. } => "not_runnable_yet",
+            RunRefusal::Irreversible { .. } => "irreversible",
+            RunRefusal::BelowBaseline { .. } => "below_baseline",
+            RunRefusal::NoSuchTarget { .. } => "no_such_target",
             RunRefusal::NotImplemented { .. } => "not_implemented",
             RunRefusal::MissingRendering { .. } => "missing_rendering",
             RunRefusal::BadHeaders { .. } => "bad_headers",
@@ -573,6 +606,27 @@ impl std::fmt::Display for RunRefusal {
             RunRefusal::NotRunnableYet { file } => {
                 write!(f, "not runnable yet: data step {file} (ticket #530)")
             }
+            RunRefusal::Irreversible {
+                migration,
+                step,
+                reason,
+            } => write!(
+                f,
+                "ferro migrate: {migration:04}:{step:02} is irreversible: {reason}\nThere is no \
+                 flag to skip it: to revert past it, write the step's down in place of the \
+                 declaration. Nothing was reverted."
+            ),
+            RunRefusal::BelowBaseline { migration } => write!(
+                f,
+                "ferro migrate: {migration:04} was recorded by `baseline` and created nothing \
+                 here; `down` can go no lower than {migration:04}. Nothing was reverted."
+            ),
+            RunRefusal::NoSuchTarget { target, directory } => write!(
+                f,
+                "ferro migrate: --to {target} names nothing in {directory}/: give a migration \
+                 number (0005), a migration and step (0005:02), or 0000 for everything. \
+                 Nothing was reverted."
+            ),
             RunRefusal::NotImplemented { what } => write!(f, "not implemented yet: {what}"),
             RunRefusal::MissingRendering {
                 migration,
@@ -837,7 +891,7 @@ fn check_order(dir: &MigrationsDir, by_key: &RecordMap) -> Result<(), RunRefusal
 /// head); a snapshot or finished step edited after it was applied; a pending
 /// migration below an applied one; a DDL step without this dialect's
 /// rendering; headers the dialect cannot honour; a pending data step
-/// (ticket #530); `Direction::Down` (ticket #520).
+/// (ticket #530). Going down, see [`plan_down`]'s refusals.
 pub fn plan_run(
     dir: &MigrationsDir,
     records: &[StepRecord],
@@ -845,10 +899,8 @@ pub fn plan_run(
     direction: Direction,
     allow_ahead: bool,
 ) -> Result<RunPlan, RunRefusal> {
-    if let Direction::Down { .. } = direction {
-        return Err(RunRefusal::NotImplemented {
-            what: "ferro migrate down (ticket #520)".to_string(),
-        });
+    if let Direction::Down { target } = direction {
+        return plan_down(dir, records, dialect, target);
     }
     let ahead = check_records(dir, records, allow_ahead, true)?;
     let by_key: RecordMap = records.iter().map(|r| ((r.migration, r.step), r)).collect();
@@ -890,6 +942,7 @@ pub fn plan_run(
                 mode,
                 resumes: record.is_some(),
                 edited,
+                nothing_to_reverse: None,
                 record: StepRecord {
                     migration: migration.number,
                     step: step.ordinal,
@@ -914,6 +967,139 @@ pub fn plan_run(
         }
     }
     Ok(RunPlan { steps, ahead })
+}
+
+/// Why an unfinished transactional step's down runs nothing.
+const UNFINISHED_TRANSACTIONAL: &str =
+    "its up never finished, and a transactional step that does not finish leaves nothing behind";
+
+/// The highest `(migration, step)` a `down` to `target` keeps; every record
+/// above it is reverted.
+fn down_floor(
+    dir: &MigrationsDir,
+    records: &[StepRecord],
+    target: Target,
+) -> Result<(u16, u8), RunRefusal> {
+    let no_such = |target: String| RunRefusal::NoSuchTarget {
+        target,
+        directory: directory_label(dir),
+    };
+    match target {
+        Target::All | Target::Migration(0) => Ok((0, 0)),
+        Target::Latest => Ok(records
+            .iter()
+            .map(|r| r.migration)
+            .max()
+            .map_or((0, 0), |latest| (latest.saturating_sub(1), u8::MAX))),
+        Target::Migration(number) => dir
+            .migrations
+            .get(usize::from(number) - 1)
+            .map(|_| (number, u8::MAX))
+            .ok_or_else(|| no_such(format!("{number:04}"))),
+        Target::Step(number, step) => dir
+            .migrations
+            .get(usize::from(number).wrapping_sub(1))
+            .filter(|m| m.steps.iter().any(|s| s.ordinal == step))
+            .map(|_| (number, step))
+            .ok_or_else(|| no_such(format!("{number:04}:{step:02}"))),
+    }
+}
+
+/// Plan a `down` (ADR-0033): every recorded step above `target`, newest
+/// first, each with its down file — or the refusal that stops the run before
+/// it reverts anything.
+///
+/// A step's down runs in the [`ExecMode`] its down file's headers ask for. A
+/// `-- ferro: nothing-to-reverse <reason>` down, and an unfinished
+/// transactional step (whose attempt rolled back), run no statement: their
+/// record is removed. An unfinished no-transaction step runs its down, since
+/// the statements before its failure stayed applied.
+///
+/// # Errors
+/// Before anything is reverted: a record for a migration or step the
+/// directory lacks (the down files come only from disk, so a database ahead
+/// of the checkout is refused whatever `allow_ahead` says); a snapshot or
+/// finished step edited since it was applied; a `--to` naming nothing;
+/// [`RunRefusal::BelowBaseline`] for a step a baseline recorded;
+/// [`RunRefusal::Irreversible`] for a step whose down declares it so, quoting
+/// the reason; a data step (ticket #530); down headers the dialect cannot
+/// honour.
+fn plan_down(
+    dir: &MigrationsDir,
+    records: &[StepRecord],
+    dialect: Dialect,
+    target: Target,
+) -> Result<RunPlan, RunRefusal> {
+    check_records(dir, records, false, false)?;
+    let by_key: RecordMap = records.iter().map(|r| ((r.migration, r.step), r)).collect();
+    check_applied(dir, &by_key, dialect)?;
+    let floor = down_floor(dir, records, target)?;
+    let baseline_floor = records
+        .iter()
+        .filter(|r| r.origin == Origin::Baseline)
+        .map(|r| r.migration)
+        .max();
+
+    let mut steps = Vec::new();
+    for (&(number, ordinal), record) in by_key.iter().rev() {
+        if (number, ordinal) <= floor {
+            break;
+        }
+        if let Some(floor) = baseline_floor
+            && number <= floor
+        {
+            return Err(RunRefusal::BelowBaseline { migration: floor });
+        }
+        // `check_records` refused every record the directory lacks.
+        let Some((migration, step)) = dir
+            .migrations
+            .get(usize::from(number) - 1)
+            .and_then(|m| Some((m, m.steps.iter().find(|s| s.ordinal == ordinal)?)))
+        else {
+            continue;
+        };
+        let file = step_file(migration, step, dialect)?;
+        let shown_up = format!("{}/{}", migration.dir_name(), file_name(&file.up));
+        let (Some(down), Some(down_checksum), StepKind::Ddl | StepKind::PortableSql) =
+            (&file.down, &file.down_checksum, step.kind)
+        else {
+            return Err(RunRefusal::NotRunnableYet { file: shown_up });
+        };
+        if let Some(reason) = &file.down_headers.irreversible {
+            return Err(RunRefusal::Irreversible {
+                migration: number,
+                step: ordinal,
+                reason: reason.clone(),
+            });
+        }
+        let name = file_name(down);
+        let shown = format!("{}/{name}", migration.dir_name());
+        let mode = exec_mode(&file.down_headers, dialect, &shown)?;
+        let nothing_to_reverse = file.down_headers.nothing_to_reverse.clone().or_else(|| {
+            (!record.is_finished() && record.kind == RecordKind::Ddl)
+                .then(|| UNFINISHED_TRANSACTIONAL.to_string())
+        });
+        steps.push(PlannedStep {
+            migration: number,
+            migration_name: migration.dir_name(),
+            step: ordinal,
+            file: name,
+            path: down.clone(),
+            kind: record.kind,
+            checksum: encode_checksum(down_checksum),
+            snapshot_checksum: record.snapshot_checksum.clone(),
+            headers: file.down_headers.clone(),
+            mode,
+            resumes: false,
+            edited: None,
+            nothing_to_reverse,
+            record: (*record).clone(),
+        });
+    }
+    Ok(RunPlan {
+        steps,
+        ahead: Vec::new(),
+    })
 }
 
 /// The refusal for a database with no records that already holds a table
@@ -999,7 +1185,8 @@ pub enum StepState {
     Pending,
     /// Not finished, and a run holds the lock.
     Running,
-    /// Started, not finished, the last attempt's error recorded.
+    /// The last attempt's error recorded: an up that did not finish, or a
+    /// down that failed and left the step's record standing.
     Failed,
     /// Started, not finished, no error recorded and no run holds the lock.
     Interrupted,
@@ -1102,6 +1289,9 @@ pub fn run_status(
             let mut state = match record {
                 None => StepState::Pending,
                 Some(r) if r.reverting => StepState::Reverting,
+                // A finished step carrying an error: its down failed, and the
+                // record stands until a `down` reverts it.
+                Some(r) if r.is_finished() && r.error.is_some() => StepState::Failed,
                 Some(r) if r.is_finished() && r.origin == Origin::Baseline => {
                     StepState::InstalledBaseline
                 }
@@ -1318,7 +1508,9 @@ mod tests {
         }
     }
 
-    fn sql_file(dialect: &str, ordinal: u8, name: &str, body: &str) -> StepFile {
+    const DOWN: &str = "DROP TABLE x;\n";
+
+    fn sql_file(dialect: &str, ordinal: u8, name: &str, body: &str, down: &str) -> StepFile {
         StepFile {
             up: PathBuf::from(format!("/m/{ordinal:02}_{name}.up.{dialect}.sql")),
             down: Some(PathBuf::from(format!(
@@ -1326,17 +1518,27 @@ mod tests {
             ))),
             up_checksum: sha384(body.as_bytes()),
             headers: Headers::parse(body).expect("headers"),
+            down_checksum: Some(sha384(down.as_bytes())),
+            down_headers: Headers::parse(down).expect("down headers"),
         }
     }
 
     /// A DDL step rendered for both dialects with `body`.
     fn ddl(ordinal: u8, name: &str, body: &str) -> Step {
+        ddl_with_down(ordinal, name, body, DOWN)
+    }
+
+    /// A DDL step rendered for both dialects with `body` and the down `down`.
+    fn ddl_with_down(ordinal: u8, name: &str, body: &str, down: &str) -> Step {
         let mut files = BTreeMap::new();
         files.insert(
             StepDialect::Postgres,
-            sql_file("postgres", ordinal, name, body),
+            sql_file("postgres", ordinal, name, body, down),
         );
-        files.insert(StepDialect::Sqlite, sql_file("sqlite", ordinal, name, body));
+        files.insert(
+            StepDialect::Sqlite,
+            sql_file("sqlite", ordinal, name, body, down),
+        );
         Step {
             ordinal,
             name: name.to_string(),
@@ -1354,6 +1556,8 @@ mod tests {
                 down: None,
                 up_checksum: sha384(b"# data"),
                 headers: Headers::default(),
+                down_checksum: None,
+                down_headers: Headers::default(),
             },
         );
         Step {
@@ -1616,19 +1820,309 @@ mod tests {
         );
     }
 
+    fn down(
+        dir: &MigrationsDir,
+        records: &[StepRecord],
+        target: Target,
+    ) -> Result<RunPlan, RunRefusal> {
+        plan_run(
+            dir,
+            records,
+            Dialect::Sqlite,
+            Direction::Down { target },
+            false,
+        )
+    }
+
+    /// `0001` (one step), `0002` (one step), `0003` (three steps), all applied.
+    fn three_with_steps() -> (MigrationsDir, Vec<StepRecord>) {
+        let dir = dir(vec![
+            (
+                "a",
+                vec![ddl(1, "schema", "CREATE TABLE a (id int);\n")],
+                &["a"],
+            ),
+            (
+                "b",
+                vec![ddl(1, "schema", "CREATE TABLE b (id int);\n")],
+                &["a", "b"],
+            ),
+            (
+                "c",
+                vec![
+                    ddl(1, "expand", "CREATE TABLE c (id int);\n"),
+                    ddl(2, "fix", "UPDATE c SET id = 1;\n"),
+                    ddl(3, "contract", "DROP TABLE b;\n"),
+                ],
+                &["a", "c"],
+            ),
+        ]);
+        let records = [(1, 1), (2, 1), (3, 1), (3, 2), (3, 3)]
+            .into_iter()
+            .map(|(m, s)| finished(&dir, m, s))
+            .collect();
+        (dir, records)
+    }
+
     #[test]
-    fn down_is_declared_and_not_implemented() {
+    fn down_reverts_every_target_form_newest_first() {
+        let (dir, records) = three_with_steps();
+        let latest = down(&dir, &records, Target::Latest).expect("latest");
+        assert_eq!(keys(&latest), [(3, 3), (3, 2), (3, 1)]);
+        assert_eq!(
+            keys(&down(&dir, &records, Target::Migration(1)).expect("to 0001")),
+            [(3, 3), (3, 2), (3, 1), (2, 1)]
+        );
+        assert_eq!(
+            keys(&down(&dir, &records, Target::Step(3, 2)).expect("to 0003:02")),
+            [(3, 3)]
+        );
+        let all = [(3, 3), (3, 2), (3, 1), (2, 1), (1, 1)];
+        assert_eq!(keys(&down(&dir, &records, Target::All).expect("all")), all);
+        assert_eq!(
+            keys(&down(&dir, &records, Target::Migration(0)).expect("to 0000")),
+            all
+        );
+        assert!(
+            down(&dir, &records, Target::Migration(3))
+                .expect("at head")
+                .steps
+                .is_empty()
+        );
+        assert!(
+            down(&dir, &[], Target::Latest)
+                .expect("nothing")
+                .steps
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_planned_down_runs_the_down_file_and_removes_the_standing_record() {
+        let (dir, records) = three_with_steps();
+        let plan = down(&dir, &records, Target::Latest).expect("plan");
+        let step = &plan.steps[0];
+        assert_eq!(step.file, "03_contract.down.sqlite.sql");
+        assert_eq!(step.path, PathBuf::from("/m/03_contract.down.sqlite.sql"));
+        assert_eq!(step.checksum, encode_checksum(&sha384(DOWN.as_bytes())));
+        assert_eq!(step.mode, ExecMode::Transactional);
+        assert_eq!(step.record, records[4]);
+        assert_eq!(step.nothing_to_reverse, None);
+    }
+
+    #[test]
+    fn a_partly_applied_migration_is_the_latest_and_an_unfinished_transactional_step_runs_nothing()
+    {
+        let (dir, mut records) = three_with_steps();
+        records.truncate(3);
+        records.push(started(&dir, 3, 2));
+        let plan = down(&dir, &records, Target::Latest).expect("plan");
+        assert_eq!(keys(&plan), [(3, 2), (3, 1)]);
+        assert_eq!(
+            plan.steps[0].nothing_to_reverse.as_deref(),
+            Some(UNFINISHED_TRANSACTIONAL)
+        );
+        assert_eq!(plan.steps[1].nothing_to_reverse, None);
+    }
+
+    #[test]
+    fn a_nothing_to_reverse_down_is_planned_with_its_reason() {
+        let dir = dir(vec![(
+            "a",
+            vec![ddl_with_down(
+                1,
+                "schema",
+                "CREATE TABLE a (id int);\n",
+                "-- ferro: nothing-to-reverse the label stays\n",
+            )],
+            &["a"],
+        )]);
+        let plan = down(&dir, &[finished(&dir, 1, 1)], Target::Latest).expect("plan");
+        assert_eq!(
+            plan.steps[0].nothing_to_reverse.as_deref(),
+            Some("the label stays")
+        );
+    }
+
+    #[test]
+    fn an_irreversible_step_refuses_the_whole_down_quoting_its_reason() {
+        let dir = dir(vec![
+            (
+                "a",
+                vec![ddl(1, "schema", "CREATE TABLE a (id int);\n")],
+                &["a"],
+            ),
+            (
+                "b",
+                vec![
+                    ddl(1, "expand", "CREATE TABLE b (id int);\n"),
+                    ddl_with_down(
+                        2,
+                        "purge",
+                        "DELETE FROM b;\n",
+                        "-- ferro: irreversible dropped rows cannot come back\n",
+                    ),
+                    ddl(3, "index", "CREATE INDEX i ON b (id);\n"),
+                ],
+                &["a", "b"],
+            ),
+        ]);
+        let records: Vec<StepRecord> = [(1, 1), (2, 1), (2, 2), (2, 3)]
+            .into_iter()
+            .map(|(m, s)| finished(&dir, m, s))
+            .collect();
+        let refusal = down(&dir, &records, Target::Latest).expect_err("irreversible");
+        assert_eq!(
+            refusal,
+            RunRefusal::Irreversible {
+                migration: 2,
+                step: 2,
+                reason: "dropped rows cannot come back".into(),
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: 0002:02 is irreversible: dropped rows cannot come back\nThere is \
+             no flag to skip it: to revert past it, write the step's down in place of the \
+             declaration. Nothing was reverted."
+        );
+        // Stopping above it is fine: only the steps a run reverts are read.
+        assert_eq!(
+            keys(&down(&dir, &records, Target::Step(2, 2)).expect("above")),
+            [(2, 3)]
+        );
+    }
+
+    #[test]
+    fn down_stops_at_a_baselined_migration() {
+        let (dir, mut records) = three_with_steps();
+        records[0].origin = Origin::Baseline;
+        records[1].origin = Origin::Baseline;
+        assert_eq!(
+            keys(&down(&dir, &records, Target::Migration(2)).expect("above the floor")),
+            [(3, 3), (3, 2), (3, 1)]
+        );
+        let refusal = down(&dir, &records, Target::All).expect_err("below");
+        assert_eq!(refusal, RunRefusal::BelowBaseline { migration: 2 });
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: 0002 was recorded by `baseline` and created nothing here; `down` \
+             can go no lower than 0002. Nothing was reverted."
+        );
+        assert_eq!(
+            down(&dir, &records, Target::Migration(1))
+                .expect_err("below")
+                .kind(),
+            "below_baseline"
+        );
+    }
+
+    #[test]
+    fn a_target_the_directory_lacks_is_refused_naming_it() {
+        let (dir, records) = three_with_steps();
+        for (target, shown) in [
+            (Target::Migration(9), "0009"),
+            (Target::Step(3, 4), "0003:04"),
+            (Target::Step(9, 1), "0009:01"),
+        ] {
+            let refusal = down(&dir, &records, target).expect_err("no such");
+            assert_eq!(refusal.kind(), "no_such_target");
+            assert!(
+                refusal.to_string().starts_with(&format!(
+                    "ferro migrate: --to {shown} names nothing in migrations/"
+                )),
+                "{refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_database_ahead_of_the_checkout_cannot_go_down_and_a_data_step_is_not_runnable_yet() {
+        let (dir, records) = three_with_steps();
+        let mut ahead = records.clone();
+        ahead.push(StepRecord {
+            migration: 4,
+            migration_name: "0004_gone".into(),
+            ..records[0].clone()
+        });
         let refusal = plan_run(
-            &three(),
-            &[],
+            &dir,
+            &ahead,
             Dialect::Sqlite,
             Direction::Down {
                 target: Target::Latest,
             },
-            false,
+            true,
         )
-        .expect_err("down");
-        assert_eq!(refusal.kind(), "not_implemented");
+        .expect_err("ahead");
+        assert_eq!(refusal.kind(), "applied_missing");
+
+        let with_data = super::tests::dir(vec![(
+            "backfill",
+            vec![
+                ddl(1, "schema", "CREATE TABLE a (id int);\n"),
+                data(2, "backfill"),
+            ],
+            &["a"],
+        )]);
+        // The same migration without its data step: `up` cannot plan past
+        // the data step, but its snapshot (and so the record) is the same.
+        let ddl_only = super::tests::dir(vec![(
+            "backfill",
+            vec![ddl(1, "schema", "CREATE TABLE a (id int);\n")],
+            &["a"],
+        )]);
+        let mut records = vec![finished(&ddl_only, 1, 1)];
+        records.push(StepRecord {
+            step: 2,
+            file: "02_backfill.py".into(),
+            checksum: encode_checksum(&sha384(b"# data")),
+            ..records[0].clone()
+        });
+        assert_eq!(
+            down(&with_data, &records, Target::Latest)
+                .expect_err("data")
+                .kind(),
+            "not_runnable_yet"
+        );
+    }
+
+    #[test]
+    fn targets_read_and_write_the_json_the_cli_sends() {
+        let parse = |json: &str| serde_json::from_str::<Direction>(json).expect(json);
+        assert_eq!(parse(r#"{"direction": "up"}"#), Direction::Up);
+        for (json, target) in [
+            (r#""latest""#, Target::Latest),
+            (r#""all""#, Target::All),
+            (r#"{"migration": 5}"#, Target::Migration(5)),
+            (r#"{"step": [7, 2]}"#, Target::Step(7, 2)),
+        ] {
+            assert_eq!(
+                parse(&format!(r#"{{"direction": "down", "target": {json}}}"#)),
+                Direction::Down { target }
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_step_carrying_an_error_is_a_failed_down() {
+        let (dir, mut records) = three_with_steps();
+        records[4].error = Some("relation \"b\" does not exist".into());
+        records[4].failed_at = Some("2026-10-06T10:00:00.000000Z".into());
+        let status = run_status(&dir, &records, Dialect::Sqlite, false);
+        let states: Vec<StepState> = status.migrations[2].steps.iter().map(|s| s.state).collect();
+        assert_eq!(
+            states,
+            [
+                StepState::Installed,
+                StepState::Installed,
+                StepState::Failed
+            ]
+        );
+        assert_eq!(
+            keys(&down(&dir, &records, Target::Latest).expect("resume")),
+            [(3, 3), (3, 2), (3, 1)]
+        );
     }
 
     #[test]

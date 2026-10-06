@@ -156,10 +156,7 @@ mod tests {
         let before = ir(vec![]);
         let after = ir(vec![author()]);
         let pg = render(&before, &after, Dialect::Postgres);
-        assert_eq!(
-            pg.down,
-            "DROP TABLE \"author\";\n\nDROP TYPE \"status\";\n"
-        );
+        assert_eq!(pg.down, "DROP TABLE \"author\";\n\nDROP TYPE \"status\";\n");
         assert_eq!(pg.down_headers, Headers::default());
         assert_eq!(pg.up, file(&create_pass(&author(), Dialect::Postgres), ""));
         assert_eq!(pg.headers, Headers::default());
@@ -236,7 +233,11 @@ mod tests {
                 "-- ferro: data-dependent\n"
             )
         );
-        assert!(dropped.down.contains("CREATE POLICY \"rls_ledger_owner_id\""));
+        assert!(
+            dropped
+                .down
+                .contains("CREATE POLICY \"rls_ledger_owner_id\"")
+        );
     }
 
     #[test]
