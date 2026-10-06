@@ -1,0 +1,137 @@
+{
+  "tests/test_row_security_rebuild.py::test_a_clause_the_declaration_no_longer_asks_for_is_drift": {
+    "rendered": [
+      {
+        "statements": [
+          "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR SELECT USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_a_drifted_shorthand_body_is_dropped_and_recreated": {
+    "rendered": [
+      {
+        "statements": [
+          "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_a_raw_body_difference_is_reported_and_never_rebuilt": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Row policy 'rls_ledgerrow_ledger_id' on table 'ledgerrow' is declared with a raw using=/with_check= expression whose live definition no longer matches the declaration as ferro reads it.\n  declared: USING (\"id\" BETWEEN 1 AND 5)\n  live:     USING (((id >= 1) AND (id <= 5)))\nPostgres stores its own rewriting of raw SQL, so ferro cannot tell an edited expression from a re-spelled one and does NOT rebuild it. If you changed the declaration, apply it with a reviewed migration (or drop the policy and reconnect, and ferro will create it from the declaration)."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_a_second_pass_over_the_rebuilt_policy_plans_nothing": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_a_user_owned_policy_is_never_rebuilt": {
+    "rendered": [
+      {
+        "statements": [
+          "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)"
+        ],
+        "warnings": [
+          "Table 'ledgerrow' carries row policy/policies 'handwritten_admin' that ferro does not own (their names do not start with 'rls_'). They still filter rows and compose with the declared policies. Ferro never alters or drops them."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_an_unchanged_raw_body_is_silent": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_an_unchanged_shorthand_policy_is_not_rebuilt": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_command_drift_on_a_raw_policy_still_rebuilds": {
+    "rendered": [
+      {
+        "statements": [
+          "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR SELECT USING (\"id\" > 0)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_command_drift_rebuilds": {
+    "rendered": [
+      {
+        "statements": [
+          "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR SELECT USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_restrictive_drift_rebuilds": {
+    "rendered": [
+      {
+        "statements": [
+          "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" AS RESTRICTIVE FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_rebuild.py::test_row_policy_rebuild_statement_parity_pin": {
+    "rendered": [
+      {
+        "statements": [
+          "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  }
+}

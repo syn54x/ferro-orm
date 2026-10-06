@@ -235,6 +235,13 @@ pub fn information_schema_to_db_type_token(
     dialect: Dialect,
 ) -> String {
     let lower = declared_type.to_ascii_lowercase();
+    // SQLite's `PRAGMA table_info` reports the declared type verbatim, so a
+    // `varchar(n)` column ferro created reads back with its length — the
+    // token the declared side resolves to. (Postgres reports the length in
+    // `character_maximum_length` instead.)
+    if dialect == Dialect::Sqlite && parse_varchar_token(&lower).is_some() {
+        return lower;
+    }
     let base = match lower.as_str() {
         "boolean" => match dialect {
             Dialect::Sqlite => "int",
@@ -304,10 +311,15 @@ pub fn schema_columns_storage_drift(
     if let Ok(ResolvedStorage::PgEnum { .. }) = resolve_column_storage(new_col, dialect) {
         return !old_col.postgres_native_enum;
     }
-    match (
-        canonical_from_schema_column(old_col, dialect),
-        canonical_from_schema_column(new_col, dialect),
-    ) {
+    // Both sides' scalar storage comes from the one storage decision (I-1
+    // item 3), so an enum's SQLite `varchar(<longest label>)` is compared as
+    // such — never as the bare string cascade. A live column carries no enum
+    // metadata, so for it this is the cascade over its introspected token.
+    let scalar = |col: &SchemaColumn| match resolve_column_storage(col, dialect) {
+        Ok(ResolvedStorage::Scalar(canonical)) => Ok(canonical),
+        _ => canonical_from_schema_column(col, dialect),
+    };
+    match (scalar(old_col), scalar(new_col)) {
         (Ok(old_c), Ok(new_c)) => {
             // Compare by storage token, not raw canonical: on SQLite both `Uuid`
             // and `Char(32)` map to "uuid" (and `DateTime`/`Timestamp` to
@@ -3545,6 +3557,16 @@ mod tests {
             information_schema_to_db_type_token("BLOB", None, Dialect::Sqlite),
             "blob"
         );
+        // SQLite reports a declared length verbatim; it reads back as the
+        // token the declared column resolves to, so it is not drift (#517).
+        assert_eq!(
+            information_schema_to_db_type_token("VARCHAR(9)", None, Dialect::Sqlite),
+            "varchar(9)"
+        );
+        assert_eq!(
+            information_schema_to_db_type_token("varchar", None, Dialect::Sqlite),
+            "varchar"
+        );
     }
 
     #[test]
@@ -3610,6 +3632,26 @@ mod tests {
         // Model derived IR: logical_type "uuid" (Python SchemaIR compiler).
         let model = col_with_db_type("id", "uuid", None, None);
         assert!(!schema_columns_storage_drift(&live, &model, Dialect::Sqlite));
+    }
+
+    /// An enum stores as `varchar(<longest label>)` on SQLite; the live column
+    /// ferro created reads back as that token and is not drift (#517).
+    #[test]
+    fn sqlite_enum_model_does_not_drift_against_its_own_varchar_live() {
+        let live = col_with_db_type(
+            "status",
+            "unknown",
+            None,
+            Some(&information_schema_to_db_type_token("varchar(9)", None, Dialect::Sqlite)),
+        );
+        let mut model = col_with_db_type("status", "string", None, None);
+        model.enum_values = Some(vec![
+            serde_json::json!("draft"),
+            serde_json::json!("published"),
+        ]);
+        assert!(!schema_columns_storage_drift(&live, &model, Dialect::Sqlite));
+        let wider = col_with_db_type("status", "unknown", None, Some("varchar(4)"));
+        assert!(schema_columns_storage_drift(&wider, &model, Dialect::Sqlite));
     }
 
     /// Since FF-B B2, `datetime.time` fields store as `time` on both dialects

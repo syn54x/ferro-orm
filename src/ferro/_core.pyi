@@ -97,6 +97,41 @@ def _render_migration_sql_for_test(
     """
     ...
 
+def _plan_from_ir(
+    old_ir_json: str,
+    new_ir_json: str,
+    dialect: str,
+    options_json: str,
+    render: bool = False,
+    facts_json: str | None = None,
+) -> str:
+    """The one planner: every change that turns one SchemaIR snapshot into another.
+
+    ``old_ir_json`` / ``new_ir_json`` are ``schema`` IR envelopes (as
+    ``ferro.ir.compile_registry_schema_ir()`` or ``_live_schema_ir`` return
+    them); ``dialect`` is ``"postgres"`` or ``"sqlite"``; ``options_json`` is
+    ``{"destructive": bool}``. ``facts_json`` is the live side-table
+    ``_live_schema_ir`` returns beside a live envelope; omitted, the old
+    snapshot reads as declared. Returns JSON
+    ``{"operations": [{"kind": ..., <op fields>}], "warnings": [...],
+    "always_warnings": [...]}``, ops in execution order; with ``render`` each op
+    also carries its ``statements`` and ``warnings`` for ``dialect`` — the
+    byte-identical statements the reconciliation pass executes (I-1).
+    """
+    ...
+
+async def _live_schema_ir(
+    using: str | None = None, tables_json: str | None = None
+) -> tuple[str, str]:
+    """Read the database behind connection ``using`` into the planner's input.
+
+    Returns ``(ir_json, facts_json)``: a ``schema`` IR envelope with one model
+    per live table (only the tables in ``tables_json``, a JSON list of names,
+    when given) and the live facts the IR cannot carry — CHECK and policy
+    bodies as the catalog prints them, validity flags, enum labels.
+    """
+    ...
+
 async def _live_table_checks_for_test(
     table: str, using: str | None = None
 ) -> list[dict[str, object]]:
