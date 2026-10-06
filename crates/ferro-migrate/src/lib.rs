@@ -1,23 +1,28 @@
 //! Schema IR diffing and SQL emission for migration planning.
 //!
-//! Compares two [`SchemaIrPayload`] snapshots and produces a [`MigrationPlan`].
-//! [`emit_sql_with_ir`] lowers structural ops to executable backend-specific DDL.
+//! There is **one planner** ([`plan_from_ir`]): it compares two
+//! [`ferro_schema_ir::SchemaIrPayload`] snapshots — declared against declared,
+//! or declared against the live database read into an IR plus its
+//! [`LiveFacts`] — and decides every change for the whole modelset as one
+//! ordered [`MigrationPlan`]. [`render_plan`] lowers each op to executable,
+//! dialect-specific DDL through the `ferro_ddl_lowering` functions every
+//! migration door shares (AGENTS.md § I-1).
 
 mod emit;
 mod order;
+mod plan;
+mod render;
 
-use ferro_ddl_lowering::{
-    drifted_check_names, extra_check_names, fk_action_from_str, fk_action_sql, fk_name,
-    is_ferro_fk_name, missing_check_names, schema_columns_storage_drift,
-};
-use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
-use std::collections::{BTreeMap, BTreeSet};
-
-pub use emit::{emit_sql_with_ir, order_models_for_create, render_create_table, CreateTableEmission};
-pub use order::order_by_dependencies;
+pub use emit::{CreateTableEmission, order_models_for_create, render_create_table};
 pub use ferro_ddl_lowering::Dialect;
+pub use order::order_by_dependencies;
+pub use plan::{
+    LiveCheckFact, LiveFacts, LiveTableFacts, plan_check_drops, plan_check_rebuilds, plan_from_ir,
+    plan_index_rebuilds, plan_missing_checks, plan_validations,
+};
+pub use render::{RenderedOp, render_plan, validate_schema_ir};
 
-/// Executable SQL plus non-fatal warnings from [`emit_sql_with_ir`].
+/// Executable SQL plus non-fatal warnings for one rendered op.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EmissionResult {
     /// DDL statements to execute in order.
@@ -41,9 +46,38 @@ impl std::fmt::Display for EmissionError {
 
 impl std::error::Error for EmissionError {}
 
-/// One structural change inferred from an IR diff.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One change the planner decided. Serializes with its variant name as
+/// `kind` beside its fields (`{"kind": "AddColumn", "table": …, "column": …}`),
+/// the shape the `_core._plan_from_ir` FFI door returns.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind")]
 pub enum MigrationOp {
+    /// A label the model declares that a native Postgres enum type lacks
+    /// (ADR-0011) — `ALTER TYPE … ADD VALUE IF NOT EXISTS`. Planned before
+    /// every table op, so a column default naming the label can use it.
+    AddEnumLabel {
+        /// Enum type name.
+        type_name: String,
+        /// Label to append.
+        label: String,
+    },
+    /// A native Postgres enum type the plan introduces (every column
+    /// declaring it is one the plan adds) and that does not exist yet
+    /// (ADR-0021, ADR-0022) — the guarded `CREATE TYPE`, ahead of every table
+    /// op. An `AddTable` / `AddColumn` of the type then renders no guard.
+    CreateEnumType {
+        /// Enum type name.
+        type_name: String,
+        /// Labels in declared order.
+        labels: Vec<String>,
+    },
+    /// A native Postgres enum type every one of whose declaring columns the
+    /// plan removes, and that no surviving column declares (ADR-0020) —
+    /// `DROP TYPE`, after every table op. Destructive only.
+    DropEnumType {
+        /// Enum type name.
+        type_name: String,
+    },
     /// A model exists in the new IR but not the old.
     AddTable {
         /// Table to create.
@@ -173,12 +207,91 @@ pub enum MigrationOp {
         /// Whether this is a unique index.
         unique: bool,
     },
+    /// A declared row policy with no live policy of that name (#413) —
+    /// `CREATE POLICY`. Postgres-only, like every row-security op (ADR-0014).
+    AddRowPolicy {
+        /// Owning table.
+        table: String,
+        /// Live policy name (`rls_<table>_<name>`).
+        name: String,
+    },
+    /// A live ferro-owned policy whose definition drifted from its
+    /// declaration (ADR-0019) — `DROP POLICY` + `CREATE POLICY`.
+    RebuildRowPolicy {
+        /// Owning table.
+        table: String,
+        /// Policy name.
+        name: String,
+    },
+    /// A live ferro-owned policy the model no longer declares — `DROP
+    /// POLICY`. Destructive only.
+    DropRowPolicy {
+        /// Owning table.
+        table: String,
+        /// Live policy name.
+        name: String,
+    },
+    /// `ENABLE ROW LEVEL SECURITY` on a table that declares row security.
+    EnableRowSecurity {
+        /// Owning table.
+        table: String,
+    },
+    /// `FORCE ROW LEVEL SECURITY` on a table that declares `force=True`.
+    ForceRowSecurity {
+        /// Owning table.
+        table: String,
+    },
+    /// `DISABLE ROW LEVEL SECURITY` on a table whose model dropped its
+    /// declaration while ferro still manages it. Destructive only.
+    DisableRowSecurity {
+        /// Owning table.
+        table: String,
+    },
+    /// `NO FORCE ROW LEVEL SECURITY` on a table whose model no longer asks
+    /// for `force`. Destructive only.
+    NoForceRowSecurity {
+        /// Owning table.
+        table: String,
+    },
+}
+
+impl MigrationOp {
+    /// The table this op changes, or `None` for an op on an enum type.
+    pub fn table(&self) -> Option<&str> {
+        match self {
+            MigrationOp::AddEnumLabel { .. }
+            | MigrationOp::CreateEnumType { .. }
+            | MigrationOp::DropEnumType { .. } => None,
+            MigrationOp::AddTable { table }
+            | MigrationOp::DropTable { table }
+            | MigrationOp::AddColumn { table, .. }
+            | MigrationOp::DropColumn { table, .. }
+            | MigrationOp::AlterColumnType { table, .. }
+            | MigrationOp::AlterColumnNullability { table, .. }
+            | MigrationOp::AddIndex { table, .. }
+            | MigrationOp::DropIndex { table, .. }
+            | MigrationOp::AddForeignKey { table, .. }
+            | MigrationOp::AddCheck { table, .. }
+            | MigrationOp::RebuildCheck { table, .. }
+            | MigrationOp::DropCheck { table, .. }
+            | MigrationOp::RebuildForeignKey { table, .. }
+            | MigrationOp::ValidateConstraint { table, .. }
+            | MigrationOp::RebuildIndex { table, .. }
+            | MigrationOp::AddRowPolicy { table, .. }
+            | MigrationOp::RebuildRowPolicy { table, .. }
+            | MigrationOp::DropRowPolicy { table, .. }
+            | MigrationOp::EnableRowSecurity { table }
+            | MigrationOp::ForceRowSecurity { table }
+            | MigrationOp::DisableRowSecurity { table }
+            | MigrationOp::NoForceRowSecurity { table } => Some(table),
+        }
+    }
 }
 
 /// Whether one live FK constraint is validated (`pg_constraint.convalidated`;
 /// always `true` on SQLite). The thin live-state slice [`plan_validations`]
 /// reads — introspection types stay outside this crate.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveFkValidity {
     /// Live constraint name.
     pub name: String,
@@ -188,7 +301,7 @@ pub struct LiveFkValidity {
 
 /// Whether one live CHECK constraint is validated
 /// (`pg_constraint.convalidated`; always `true` on SQLite).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveCheckValidity {
     /// Live constraint name.
     pub name: String,
@@ -198,7 +311,7 @@ pub struct LiveCheckValidity {
 
 /// Whether one live index is valid (`pg_index.indisvalid`; always `true` on
 /// SQLite).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveIndexValidity {
     /// Live index name.
     pub name: String,
@@ -206,504 +319,39 @@ pub struct LiveIndexValidity {
     pub valid: bool,
 }
 
-/// Ordered migration operations plus non-fatal warnings collected during planning.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The whole modelset's ordered operations plus the warnings planning raised.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MigrationPlan {
-    /// Structural operations to apply (in order).
+    /// Operations to apply, in execution order (see [`plan_from_ir`]).
     pub operations: Vec<MigrationOp>,
-    /// Human-readable warnings (e.g. backend limitations) that do not abort planning.
+    /// Advisory warnings planning raised (a user-owned FK that drifts,
+    /// leftover CHECKs, extra enum labels). Warnings an op raises while
+    /// rendering travel on its [`RenderedOp`] instead.
     pub warnings: Vec<String>,
+    /// Warnings about a standing condition of the live database that holds
+    /// on every run until someone acts — every row-security report (a
+    /// foreign or unverifiable policy, a dropped declaration, a teardown).
+    /// Callers surface these every time: a table whose rows are not fenced
+    /// the way the model says is still not fenced on the next run, and
+    /// silence after the first would be misread as safety.
+    pub always_warnings: Vec<String>,
+}
+
+/// What a plan may do beyond bringing the database up to the model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanOptions {
+    /// Plan the ops that remove something the model no longer declares:
+    /// dropped tables, columns, indexes, checks, row policies and enum
+    /// types, and the row-security teardown (ADR-0013's ladder). Without it
+    /// they are left in place and reported.
+    #[serde(default)]
+    pub destructive: bool,
 }
 
 impl MigrationPlan {
     /// Returns `true` when there are no operations to run.
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
-    }
-}
-
-/// Render placeholder SQL (or comments) for each operation in `plan`.
-///
-/// Legacy shim retained until runtime cutover ([#119](https://github.com/syn54x/ferro-orm/issues/119))
-/// wires [`emit_sql_with_ir`]. `DropTable` / `DropColumn` are executable; other ops emit comments.
-pub fn emit_sql(plan: &MigrationPlan, dialect: Dialect) -> Vec<String> {
-    let mut sql = Vec::new();
-    for operation in &plan.operations {
-        match operation {
-            MigrationOp::AddTable { table } => {
-                sql.push(format!("-- table '{}' must be created via schema emitter", table));
-            }
-            MigrationOp::DropTable { table } => {
-                sql.push(format!("DROP TABLE \"{}\"", table));
-            }
-            MigrationOp::AddColumn { table, column } => {
-                sql.push(format!(
-                    "-- column '{}.{}' requires typed ADD COLUMN planning",
-                    table, column
-                ));
-            }
-            MigrationOp::DropColumn { table, column } => {
-                sql.push(format!(
-                    "ALTER TABLE \"{}\" DROP COLUMN \"{}\"",
-                    table, column
-                ));
-            }
-            MigrationOp::AlterColumnType { table, column } => match dialect {
-                Dialect::Postgres => sql.push(format!(
-                    "-- alter type for '{}.{}' resolved by backend planner",
-                    table, column
-                )),
-                Dialect::Sqlite => sql.push(format!(
-                    "-- sqlite cannot alter type in place for '{}.{}'",
-                    table, column
-                )),
-            },
-            MigrationOp::AlterColumnNullability { table, column } => match dialect {
-                Dialect::Postgres => sql.push(format!(
-                    "-- alter nullability for '{}.{}' resolved by backend planner",
-                    table, column
-                )),
-                Dialect::Sqlite => sql.push(format!(
-                    "-- sqlite cannot alter nullability in place for '{}.{}'",
-                    table, column
-                )),
-            },
-            MigrationOp::AddIndex { name, .. } | MigrationOp::RebuildIndex { name, .. } => {
-                sql.push(format!("-- index '{}' handled by emit_sql_with_ir", name));
-            }
-            MigrationOp::ValidateConstraint { name, .. } => {
-                sql.push(format!(
-                    "-- constraint '{}' handled by emit_sql_with_ir",
-                    name
-                ));
-            }
-            MigrationOp::DropIndex { name, .. } => {
-                sql.push(format!("-- index '{}' handled by emit_sql_with_ir", name));
-            }
-            MigrationOp::AddForeignKey { table, column }
-            | MigrationOp::RebuildForeignKey { table, column, .. } => {
-                sql.push(format!(
-                    "-- foreign key for '{}.{}' handled by emit_sql_with_ir",
-                    table, column
-                ));
-            }
-            MigrationOp::AddCheck { name, .. }
-            | MigrationOp::RebuildCheck { name, .. }
-            | MigrationOp::DropCheck { name, .. } => {
-                sql.push(format!("-- check '{}' handled by emit_sql_with_ir", name));
-            }
-        }
-    }
-    sql
-}
-
-/// Diff two schema IR envelopes and produce a [`MigrationPlan`].
-pub fn plan_from_ir(
-    old_ir: &IrEnvelope<SchemaIrPayload>,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-) -> MigrationPlan {
-    let old_models = index_models(&old_ir.payload.models);
-    let new_models = index_models(&new_ir.payload.models);
-    let mut plan = MigrationPlan::default();
-
-    let old_tables: BTreeSet<&str> = old_models.keys().map(String::as_str).collect();
-    let new_tables: BTreeSet<&str> = new_models.keys().map(String::as_str).collect();
-
-    for table in new_tables.difference(&old_tables) {
-        plan.operations.push(MigrationOp::AddTable {
-            table: (*table).to_string(),
-        });
-    }
-    for table in old_tables.difference(&new_tables) {
-        plan.operations.push(MigrationOp::DropTable {
-            table: (*table).to_string(),
-        });
-    }
-
-    for table in new_tables.intersection(&old_tables) {
-        let Some(old_model) = old_models.get(*table) else {
-            continue;
-        };
-        let Some(new_model) = new_models.get(*table) else {
-            continue;
-        };
-        diff_model_columns(*table, old_model, new_model, dialect, &mut plan);
-        diff_model_indexes(*table, old_model, new_model, &mut plan);
-        diff_model_foreign_keys(*table, old_model, new_model, &mut plan);
-    }
-
-    plan
-}
-
-/// Plan the [`MigrationOp::AddCheck`] operations for one table (#343; ADR-0013):
-/// every declared CHECK constraint — table check or column check — that
-/// `live_check_names` does not already cover.
-///
-/// Separate from [`plan_from_ir`] because a live CHECK is not IR. Introspection
-/// reports a name plus the *backend's* rendering of the body; putting that
-/// rendering in a `SchemaCheck`/`SchemaTableCheck` would introduce a second
-/// body language beside the IR predicate, which is exactly what AGENTS.md § I-1
-/// forbids. The decision itself is name-based and single-sourced in
-/// `ferro_ddl_lowering::missing_check_names`.
-///
-/// Callers append the result to the plan **after** [`plan_from_ir`]'s
-/// operations, so a check over a newly added column lands after its
-/// `ALTER TABLE … ADD COLUMN` (CONTEXT.md *reconciliation pass*).
-pub fn plan_missing_checks(
-    table: &str,
-    old_ir: &IrEnvelope<SchemaIrPayload>,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live_check_names: &[String],
-) -> Vec<MigrationOp> {
-    let old_models = index_models(&old_ir.payload.models);
-    let new_models = index_models(&new_ir.payload.models);
-    let (Some(old_model), Some(new_model)) = (old_models.get(table), new_models.get(table)) else {
-        return Vec::new();
-    };
-    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
-
-    missing_check_names(new_model, live_check_names)
-        .into_iter()
-        .filter(|name| {
-            // A column check whose column is newly added rides the AddColumn
-            // emission (`emit_add_column` emits its DO-block), the same dedup
-            // `diff_model_indexes` applies to single-column indexes. Table
-            // checks are never emitted by AddColumn, so they always stand alone.
-            new_model
-                .checks
-                .iter()
-                .find(|check| &check.name == name)
-                .is_none_or(|check| old_col_names.contains(check.column.as_str()))
-        })
-        .map(|name| MigrationOp::AddCheck {
-            table: table.to_string(),
-            name,
-        })
-        .collect()
-}
-
-/// Plan the [`MigrationOp::RebuildCheck`] operations for one table (#344;
-/// ADR-0015): every declared CHECK whose live counterpart exists and whose
-/// normalized body differs from the canonical rendering.
-///
-/// Callers append the result **after** [`plan_missing_checks`]. Live catalog
-/// text stays beside the IR (`live` is `(name, definition)` pairs); it is
-/// never copied into `SchemaCheck` / `SchemaTableCheck`.
-pub fn plan_check_rebuilds(
-    table: &str,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live: &[(String, String)],
-) -> Vec<MigrationOp> {
-    let new_models = index_models(&new_ir.payload.models);
-    let Some(new_model) = new_models.get(table) else {
-        return Vec::new();
-    };
-    drifted_check_names(new_model, live)
-        .into_iter()
-        .map(|name| MigrationOp::RebuildCheck {
-            table: table.to_string(),
-            name,
-        })
-        .collect()
-}
-
-/// Plan the [`MigrationOp::DropCheck`] operations for one table (#345;
-/// ADR-0013): every live ferro-owned CHECK name the model no longer
-/// declares, in live order.
-///
-/// Callers append the result **after** [`plan_check_rebuilds`]. The
-/// `live_ferro_owned_names` slice is already filtered (`ferro_owned`);
-/// [`extra_check_names`] is a set-difference only. Connect-time callers
-/// gate the ops on `migrate_destructive`; the warning for leftovers is
-/// planned separately so a non-destructive retain-filter cannot swallow it.
-pub fn plan_check_drops(
-    table: &str,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live_ferro_owned_names: &[String],
-) -> Vec<MigrationOp> {
-    let new_models = index_models(&new_ir.payload.models);
-    let Some(new_model) = new_models.get(table) else {
-        return Vec::new();
-    };
-    let declared: Vec<String> = new_model
-        .table_checks
-        .iter()
-        .map(|check| check.name.clone())
-        .chain(new_model.checks.iter().map(|check| check.name.clone()))
-        .collect();
-    extra_check_names(&declared, live_ferro_owned_names)
-        .into_iter()
-        .map(|name| MigrationOp::DropCheck {
-            table: table.to_string(),
-            name,
-        })
-        .collect()
-}
-
-/// Plan the [`MigrationOp::ValidateConstraint`] operations for one table
-/// (#515; ADR-0043): every declared FK, then every declared CHECK (table
-/// checks, then column checks), whose live constraint of the same name exists
-/// `NOT VALID`.
-///
-/// A name absent live is an add ([`plan_from_ir`] / [`plan_missing_checks`]),
-/// and a live name the model does not declare is never validated — ferro only
-/// touches what it declares. Callers append the result after every
-/// `AddCheck` / `AddForeignKey`, and leave out any name a rebuild in the same
-/// plan already covers: a rebuild's bare `ADD` installs a valid constraint.
-pub fn plan_validations(
-    table: &str,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live_fks: &[LiveFkValidity],
-    live_checks: &[LiveCheckValidity],
-) -> Vec<MigrationOp> {
-    let new_models = index_models(&new_ir.payload.models);
-    let Some(new_model) = new_models.get(table) else {
-        return Vec::new();
-    };
-    let unvalidated_fk = |name: &String| {
-        live_fks
-            .iter()
-            .any(|live| &live.name == name && !live.validated)
-    };
-    let unvalidated_check = |name: &String| {
-        live_checks
-            .iter()
-            .any(|live| &live.name == name && !live.validated)
-    };
-    let fk_names = new_model
-        .foreign_keys
-        .iter()
-        .map(|fk| emit::fk_constraint_name(table, fk))
-        .filter(unvalidated_fk);
-    let check_names = new_model
-        .table_checks
-        .iter()
-        .map(|check| check.name.clone())
-        .chain(new_model.checks.iter().map(|check| check.name.clone()))
-        .filter(unvalidated_check);
-    fk_names
-        .chain(check_names)
-        .map(|name| MigrationOp::ValidateConstraint {
-            table: table.to_string(),
-            name,
-        })
-        .collect()
-}
-
-/// Plan the [`MigrationOp::RebuildIndex`] operations for one table (#515;
-/// ADR-0044): every declared standalone index or unique whose live index of
-/// the same name exists but is invalid, in declared order.
-///
-/// A name absent live is an `AddIndex` ([`plan_from_ir`]); an invalid live
-/// index the model does not declare is leftover handling, never rebuilt.
-/// Callers place the result where `AddIndex` goes (after the column ops,
-/// before the foreign-key ops).
-pub fn plan_index_rebuilds(
-    table: &str,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live_indexes: &[LiveIndexValidity],
-) -> Vec<MigrationOp> {
-    let new_models = index_models(&new_ir.payload.models);
-    let Some(new_model) = new_models.get(table) else {
-        return Vec::new();
-    };
-    emit::standalone_indexes(new_model)
-        .into_iter()
-        .filter(|(name, _, _)| {
-            live_indexes
-                .iter()
-                .any(|live| &live.name == name && !live.valid)
-        })
-        .map(|(name, columns, unique)| MigrationOp::RebuildIndex {
-            table: table.to_string(),
-            name,
-            columns,
-            unique,
-        })
-        .collect()
-}
-
-fn index_models<'a>(models: &'a [SchemaModel]) -> BTreeMap<String, &'a SchemaModel> {
-    let mut indexed = BTreeMap::new();
-    for model in models {
-        indexed.insert(model.table_name.clone(), model);
-    }
-    indexed
-}
-
-fn diff_model_columns(
-    table: &str,
-    old_model: &SchemaModel,
-    new_model: &SchemaModel,
-    dialect: Dialect,
-    plan: &mut MigrationPlan,
-) {
-    let old_cols: BTreeMap<&str, _> = old_model
-        .columns
-        .iter()
-        .map(|column| (column.name.as_str(), column))
-        .collect();
-    let new_cols: BTreeMap<&str, _> = new_model
-        .columns
-        .iter()
-        .map(|column| (column.name.as_str(), column))
-        .collect();
-
-    let old_names: BTreeSet<&str> = old_cols.keys().copied().collect();
-    let new_names: BTreeSet<&str> = new_cols.keys().copied().collect();
-
-    for col in new_names.difference(&old_names) {
-        plan.operations.push(MigrationOp::AddColumn {
-            table: table.to_string(),
-            column: (*col).to_string(),
-        });
-    }
-    for col in old_names.difference(&new_names) {
-        plan.operations.push(MigrationOp::DropColumn {
-            table: table.to_string(),
-            column: (*col).to_string(),
-        });
-    }
-
-    for col in new_names.intersection(&old_names) {
-        let Some(old_col) = old_cols.get(*col) else {
-            continue;
-        };
-        let Some(new_col) = new_cols.get(*col) else {
-            continue;
-        };
-        if schema_columns_storage_drift(old_col, new_col, dialect) {
-            plan.operations.push(MigrationOp::AlterColumnType {
-                table: table.to_string(),
-                column: (*col).to_string(),
-            });
-        }
-        if old_col.nullable != new_col.nullable {
-            plan.operations.push(MigrationOp::AlterColumnNullability {
-                table: table.to_string(),
-                column: (*col).to_string(),
-            });
-        }
-    }
-}
-
-fn diff_model_indexes(
-    table: &str,
-    old_model: &SchemaModel,
-    new_model: &SchemaModel,
-    plan: &mut MigrationPlan,
-) {
-    // Columns present in the old model — indexes that cover only NEW columns are
-    // emitted by emit_add_column during AddColumn processing, so we must not emit
-    // a redundant standalone AddIndex for them.
-    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
-
-    let old_by_name: BTreeMap<String, (Vec<String>, bool)> = old_model
-        .indexes
-        .iter()
-        .map(|i| (i.name.clone(), (i.columns.clone(), i.unique)))
-        .collect();
-    let new_set = emit::standalone_indexes(new_model);
-    let new_names: BTreeSet<&str> = new_set.iter().map(|(n, _, _)| n.as_str()).collect();
-
-    for (name, columns, unique) in &new_set {
-        if !old_by_name.contains_key(name) {
-            // Skip AddIndex only when it is a single-column index whose sole column is
-            // newly added — emit_add_column already emits that CREATE INDEX.
-            // Composite indexes are never emitted by emit_add_column and must NOT be
-            // skipped here, even when every indexed column is new (AGENTS.md I-1).
-            if columns.len() == 1 && !old_col_names.contains(columns[0].as_str()) {
-                continue;
-            }
-            plan.operations.push(MigrationOp::AddIndex {
-                table: table.to_string(),
-                name: name.clone(),
-                columns: columns.clone(),
-                unique: *unique,
-            });
-        }
-    }
-    for name in old_by_name.keys() {
-        if !new_names.contains(name.as_str()) {
-            plan.operations.push(MigrationOp::DropIndex {
-                table: table.to_string(),
-                name: name.clone(),
-            });
-        }
-    }
-}
-
-fn diff_model_foreign_keys(
-    table: &str,
-    old_model: &SchemaModel,
-    new_model: &SchemaModel,
-    plan: &mut MigrationPlan,
-) {
-    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
-
-    for fk in &new_model.foreign_keys {
-        // An FK on a newly added column rides the AddColumn emission; the
-        // reconcile step only governs FKs whose column already exists live.
-        if !old_col_names.contains(fk.column.as_str()) {
-            continue;
-        }
-
-        let Some(live) = old_model
-            .foreign_keys
-            .iter()
-            .find(|live| live.column == fk.column)
-        else {
-            plan.operations.push(MigrationOp::AddForeignKey {
-                table: table.to_string(),
-                column: fk.column.clone(),
-            });
-            continue;
-        };
-
-        // Live `to_column` can be empty when the backend reports an
-        // implicit-PK reference (SQLite); only a stated target can drift.
-        let target_drift = live.to_table != fk.to_table
-            || (!live.to_column.is_empty() && live.to_column != fk.to_column);
-        // Compare via the canonical SQL rendering — sea-query's
-        // `ForeignKeyAction` has no equality of its own.
-        let action_drift = fk_action_sql(fk_action_from_str(live.on_delete.as_deref()))
-            != fk_action_sql(fk_action_from_str(fk.on_delete.as_deref()));
-        if !target_drift && !action_drift {
-            continue;
-        }
-
-        match live.name.as_deref() {
-            // A drifting constraint ferro does not own is never altered —
-            // but it is never silent either.
-            Some(name) if !is_ferro_fk_name(name) => {
-                plan.warnings.push(format!(
-                    "Foreign key on '{}.{}' drifts from the model (live: REFERENCES {} \
-                     ON DELETE {}; declared: REFERENCES {} ON DELETE {}), but the live \
-                     constraint '{}' is not ferro-owned, so it is left untouched. \
-                     Migrate it manually or with Alembic.",
-                    table,
-                    fk.column,
-                    live.to_table,
-                    fk_action_sql(fk_action_from_str(live.on_delete.as_deref())),
-                    fk.to_table,
-                    fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
-                    name,
-                ));
-            }
-            _ => {
-                plan.operations.push(MigrationOp::RebuildForeignKey {
-                    table: table.to_string(),
-                    column: fk.column.clone(),
-                    // SQLite exposes no live constraint names; fall back to
-                    // the canonical name (unused there — emission warns).
-                    old_name: live
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| fk_name(table, &fk.column, &live.to_table)),
-                });
-            }
-        }
     }
 }
 

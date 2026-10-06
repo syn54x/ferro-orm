@@ -9,7 +9,13 @@ import json
 
 import pytest
 
-from ferro._core import _render_migration_sql_for_test
+from typing import Annotated
+
+from ferro._core import (
+    _live_schema_ir,
+    _plan_from_ir,
+    _render_migration_sql_for_test,
+)
 from ferro.columns import ColumnSpec, ForeignKeyRef, _enum_values, _logical_type
 from ferro.ir.compiler import compile_schema_ir_payload, wrap_schema_ir
 
@@ -921,3 +927,174 @@ class TestValidityFlags:
         assert not any(
             "VALIDATE" in sql or sql.startswith("DROP INDEX") for sql in stmts
         )
+
+
+# ---------------------------------------------------------------------------
+# The one planner over FFI (#517): ``_plan_from_ir`` decides every change
+# between two SchemaIR envelopes for the whole modelset; ``_live_schema_ir``
+# reads a live database into the same input.
+# ---------------------------------------------------------------------------
+
+EMPTY_MODELSET = json.dumps(
+    {
+        "ir_kind": "schema",
+        "ir_version": 1,
+        "payload": {"dialect_agnostic": True, "models": []},
+    }
+)
+
+
+def _declare_library_models():
+    """``planauthor`` and ``planbook`` (FK → planauthor, a native-enum status
+    on Postgres, a db_check'd text kind, an index and a composite unique),
+    declared child first so the planner, not declaration order, decides."""
+    from enum import StrEnum
+
+    from ferro import BackRef, ForeignKey, Model, Relation
+    from ferro.base import FerroField
+
+    class PlanStatus(StrEnum):
+        DRAFT = "draft"
+        PUBLISHED = "published"
+
+    class PlanKind(StrEnum):
+        NOVEL = "novel"
+        ESSAY = "essay"
+
+    class PlanBook(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        author: Annotated["PlanAuthor", ForeignKey(related_name="books")]
+        title: Annotated[str, FerroField(index=True)]
+        status: PlanStatus = PlanStatus.DRAFT
+        kind: Annotated[PlanKind, FerroField(db_type="text", db_check=True)] = (
+            PlanKind.NOVEL
+        )
+
+    class PlanAuthor(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: Annotated[str, FerroField(unique=True)]
+        books: Relation[list[PlanBook]] = BackRef()
+
+    return PlanAuthor, PlanBook
+
+
+def _declared_modelset() -> str:
+    from ferro.ir.compiler import compile_registry_schema_ir
+
+    return json.dumps(compile_registry_schema_ir())
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+def test_plan_from_an_empty_modelset_adds_every_model_parents_first(
+    dialect, clean_registry
+):
+    _declare_library_models()
+    declared = _declared_modelset()
+
+    plan = json.loads(
+        _plan_from_ir(EMPTY_MODELSET, declared, dialect, '{"destructive": false}')
+    )
+    kinds = [
+        (op["kind"], op.get("table", op.get("type_name"))) for op in plan["operations"]
+    ]
+    tables = [("AddTable", "planauthor"), ("AddTable", "planbook")]
+    if dialect == "postgres":
+        assert kinds == [("CreateEnumType", "planstatus"), *tables]
+        assert plan["operations"][0]["labels"] == ["draft", "published"]
+    else:
+        assert kinds == tables
+    assert plan["warnings"] == []
+    assert plan["always_warnings"] == []
+
+    rendered = json.loads(
+        _plan_from_ir(
+            EMPTY_MODELSET, declared, dialect, '{"destructive": false}', render=True
+        )
+    )
+    statements = [sql for op in rendered["operations"] for sql in op["statements"]]
+    assert sum("CREATE TYPE" in sql for sql in statements) == (
+        1 if dialect == "postgres" else 0
+    ), "a type is created once, by its own op"
+    creates = [sql for sql in statements if sql.startswith("CREATE TABLE")]
+    assert [sql.split('"')[1] for sql in creates] == ["planauthor", "planbook"]
+
+
+def test_plan_from_ir_rejects_what_it_cannot_plan(clean_registry):
+    with pytest.raises(ValueError, match="Unknown dialect"):
+        _plan_from_ir(EMPTY_MODELSET, EMPTY_MODELSET, "mysql", "{}")
+    with pytest.raises(ValueError, match="options_json"):
+        _plan_from_ir(EMPTY_MODELSET, EMPTY_MODELSET, "sqlite", '"destructive"')
+    with pytest.raises(ValueError, match="ir_kind"):
+        not_schema = json.dumps({**json.loads(EMPTY_MODELSET), "ir_kind": "query"})
+        _plan_from_ir(not_schema, EMPTY_MODELSET, "sqlite", "{}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_freshly_migrated_database_reads_back_as_a_plan_with_nothing_to_do(
+    db_url, db_backend, clean_registry
+):
+    import ferro
+
+    _declare_library_models()
+    await ferro.connect(db_url, auto_migrate=True)
+    declared = _declared_modelset()
+
+    ir_json, facts_json = await _live_schema_ir()
+    live = json.loads(ir_json)
+    assert [model["table_name"] for model in live["payload"]["models"]] == [
+        "planauthor",
+        "planbook",
+    ]
+    for destructive in ("false", "true"):
+        plan = json.loads(
+            _plan_from_ir(
+                ir_json,
+                declared,
+                db_backend,
+                f'{{"destructive": {destructive}}}',
+                facts_json=facts_json,
+            )
+        )
+        assert plan == {"operations": [], "warnings": [], "always_warnings": []}
+
+    # A table the live database lacks is an add; reading only one table
+    # makes the other one missing.
+    only_author, author_facts = await _live_schema_ir(None, '["planauthor"]')
+    plan = json.loads(
+        _plan_from_ir(
+            only_author,
+            declared,
+            db_backend,
+            '{"destructive": false}',
+            facts_json=author_facts,
+        )
+    )
+    assert [op["kind"] for op in plan["operations"]] == ["AddTable"]
+    assert plan["operations"][0]["table"] == "planbook"
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_live_facts_carry_check_bodies_validity_and_row_security(
+    db_url, db_backend, clean_registry
+):
+    import ferro
+
+    _declare_library_models()
+    await ferro.connect(db_url, auto_migrate=True)
+    _, facts_json = await _live_schema_ir(None, '["planbook"]')
+    facts = json.loads(facts_json)
+    book = facts["tables"]["planbook"]
+    assert [check["name"] for check in book["checks"]] == ["ck_planbook_kind"]
+    assert book["checks"][0]["ferro_owned"] is True
+    assert book["checks"][0]["validated"] is True
+    assert all(index["valid"] for index in book["indexes"])
+    assert book["row_security"] == {"enabled": False, "forced": False, "policies": []}
+    if db_backend == "postgres":
+        assert facts["enum_labels"] == {"planstatus": ["draft", "published"]}
+        assert book["foreign_keys"] == [
+            {"name": "fk_planbook_author_id_planauthor", "validated": True}
+        ]
+    else:
+        assert facts["enum_labels"] == {}
