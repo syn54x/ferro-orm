@@ -136,7 +136,7 @@ def test_a_not_valid_check_and_an_invalid_index_have_their_own_lines(
     )
     db.execute(
         "UPDATE pg_index SET indisvalid = false "
-        f"WHERE indexrelid = '\"{db.schema}\".\"idx_team_size\"'::regclass"
+        f'WHERE indexrelid = \'"{db.schema}"."idx_team_size"\'::regclass'
     )
 
     code, out, _ = drift_cli(db, capsys)
@@ -237,9 +237,7 @@ def test_a_failed_step_refuses_naming_status(project, pkg, db, capsys):
 def test_a_held_lock_refuses_naming_status(project, pkg, db, capsys):
     applied(project, pkg, db, capsys)
     # A run is in its step: the record is open and the lock is held.
-    db.execute(
-        "UPDATE _ferro_migrations SET finished_at = NULL WHERE migration = 2"
-    )
+    db.execute("UPDATE _ferro_migrations SET finished_at = NULL WHERE migration = 2")
 
     async def held() -> DriftReport:
         await ferro.connect(db.url, name="holder")
@@ -261,9 +259,7 @@ def test_a_held_lock_refuses_naming_status(project, pkg, db, capsys):
 
 def test_an_interrupted_step_refuses_naming_status(project, pkg, db, capsys):
     applied(project, pkg, db, capsys)
-    db.execute(
-        "UPDATE _ferro_migrations SET finished_at = NULL WHERE migration = 2"
-    )
+    db.execute("UPDATE _ferro_migrations SET finished_at = NULL WHERE migration = 2")
 
     code, out, err = drift_cli(db, capsys)
     assert code == 4
@@ -304,9 +300,7 @@ def test_raise_for_problems_carries_every_line(project, pkg, db, capsys):
 # -- integration ------------------------------------------------------------------------
 
 
-def test_drift_takes_no_lock_and_creates_nothing(
-    project, pkg, db, capsys, monkeypatch
-):
+def test_drift_takes_no_lock_and_creates_nothing(project, pkg, db, capsys, monkeypatch):
     applied(project, pkg, db, capsys)
     held_while_reading: list[bool] = []
     live_schema_ir = _core._live_schema_ir
@@ -336,7 +330,9 @@ def test_drift_on_the_default_connection(project, pkg, db, capsys):
 
 def migration_op_variants() -> list[str]:
     source = MIGRATION_OP.read_text()
-    body = source.split("pub enum MigrationOp {", 1)[1].split("\nimpl MigrationOp", 1)[0]
+    body = source.split("pub enum MigrationOp {", 1)[1].split("\nimpl MigrationOp", 1)[
+        0
+    ]
     return re.findall(r"^    ([A-Z][A-Za-z]+) \{", body, flags=re.MULTILINE)
 
 
