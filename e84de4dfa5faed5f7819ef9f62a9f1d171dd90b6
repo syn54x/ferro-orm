@@ -1,0 +1,1 @@
+verified 2026-10-06: pytest tests/test_cli_init.py tests/test_settings.py tests/test_import_budget.py -> 109 passed; uv run ferro --help -> exit 0
