@@ -258,9 +258,16 @@ async def _execute_sql_step(
     record_json: str,
     tracking_schema: str | None = None,
     lock: int | None = None,
+    direction_json: str | None = None,
 ) -> str:
-    """Run one planned SQL step and write its record; JSON ``{"ok", "ms",
-    "error", "message"}``."""
+    """Run one planned SQL step and settle its record; JSON ``{"ok", "ms",
+    "error", "message"}``.
+
+    ``direction_json`` is the plan's direction (``_run_plan``'s; up when
+    omitted). Going up ``sql`` is the up file and the record is written when
+    the step finishes; going down ``sql`` is the down file and the standing
+    record is removed in the down's transaction (kept, with ``failed_at`` and
+    ``error``, when the down fails)."""
     ...
 
 async def _tracking_tables_for(using: str | None, schema: str | None = None) -> str:

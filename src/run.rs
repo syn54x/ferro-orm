@@ -12,6 +12,9 @@
 //! read the records ([`read_records`]), and ran
 //! `0001_create_author/01_schema.up.postgres.sql` through
 //! [`execute_sql_step`], whose record committed with the file's statements.
+//! `ferro migrate down` runs the step's `.down` file through the same
+//! executor, and [`remove_record`] deletes the record in the down's own
+//! transaction.
 //!
 //! I-1: the runner renders no schema DDL. The only DDL built here is the
 //! tracking tables' own (#466); every other statement comes from a step file.
@@ -21,8 +24,8 @@ use crate::backend::{
 };
 use ferro_ddl_lowering::Dialect;
 use ferro_migrate::run_plan::{
-    ExecMode, Origin, PlannedStep, RecordKind, StepRecord, TRACKING_FORMAT, check_format,
-    run_lock_key, split_statements,
+    Direction, ExecMode, Origin, PlannedStep, RecordKind, StepRecord, TRACKING_FORMAT,
+    check_format, run_lock_key, split_statements,
 };
 use ferro_migrate::snapshot::{encode_checksum, sha384};
 use once_cell::sync::Lazy;
@@ -1137,12 +1140,70 @@ fn describe_fk_violations(rows: &[EngineRow]) -> String {
         .join("; ")
 }
 
+/// What a step's own transaction does to its record when the step succeeds:
+/// going up, write the finished record; going down, remove it.
+enum Settle {
+    Write(Box<StepRecord>),
+    Remove { migration: u16, step: u8 },
+}
+
+async fn settle(
+    conn: &mut EngineConnection,
+    tracking_schema: Option<&str>,
+    settle: Settle,
+) -> Result<(), sqlx::Error> {
+    match settle {
+        Settle::Write(record) => {
+            let dialect = conn.dialect();
+            conn.fetch_all_sql_unprepared_with_binds(
+                &upsert_sql(dialect, &Tracking::new(dialect, tracking_schema)),
+                &record_binds(&record),
+            )
+            .await
+            .map(|_| ())
+        }
+        Settle::Remove { migration, step } => {
+            remove_record(conn, tracking_schema, migration, step).await
+        }
+    }
+}
+
+/// Remove the record of `(migration, step)` on `tx` — inside the transaction
+/// of the step's down, so the record goes exactly when the down commits
+/// (ADR-0033: the tracking table says where the database stands now).
+///
+/// # Errors
+/// A database error.
+pub async fn remove_record(
+    tx: &mut EngineConnection,
+    tracking_schema: Option<&str>,
+    migration: u16,
+    step: u8,
+) -> Result<(), sqlx::Error> {
+    let dialect = tx.dialect();
+    let sql = format!(
+        "DELETE FROM {} WHERE migration = {} AND step = {}",
+        Tracking::new(dialect, tracking_schema).table(TRACKING_TABLE),
+        param(dialect, 1),
+        param(dialect, 2)
+    );
+    tx.fetch_all_sql_unprepared_with_binds(
+        &sql,
+        &[
+            EngineBindValue::I64(i64::from(migration)),
+            EngineBindValue::I64(i64::from(step)),
+        ],
+    )
+    .await
+    .map(|_| ())
+}
+
 async fn foreign_keys_off(
     conn: &mut EngineConnection,
     statements: &[String],
     file: &str,
-    upsert: &str,
-    finished: impl FnOnce() -> StepRecord,
+    tracking_schema: Option<&str>,
+    finished: impl FnOnce() -> Settle,
 ) -> Result<(), StepFailure> {
     conn.execute_sql_unprepared("PRAGMA foreign_keys = OFF")
         .await?;
@@ -1165,24 +1226,32 @@ async fn foreign_keys_off(
             describe_fk_violations(&violations)
         )));
     }
-    conn.fetch_all_sql_unprepared_with_binds(upsert, &record_binds(&finished()))
-        .await?;
+    settle(conn, tracking_schema, finished()).await?;
     conn.execute_sql_unprepared("COMMIT").await?;
     conn.execute_sql_unprepared("PRAGMA foreign_keys = ON")
         .await?;
     Ok(())
 }
 
-fn failure_message(step: &PlannedStep, error: &str) -> String {
-    let after = match step.mode {
-        ExecMode::NoTransaction => {
+fn failure_message(step: &PlannedStep, error: &str, down: bool) -> String {
+    let after = match (step.mode, down) {
+        (ExecMode::NoTransaction, false) => {
             "It runs without a transaction, so the statements before the failing one stay \
              applied; fix the file or the database and run `ferro migrate up` again: the step \
              re-runs from its first statement."
         }
-        ExecMode::Transactional | ExecMode::ForeignKeysOff => {
+        (ExecMode::Transactional | ExecMode::ForeignKeysOff, false) => {
             "The step was rolled back; fix the file or the database and run `ferro migrate up` \
              again to resume at it."
+        }
+        (ExecMode::NoTransaction, true) => {
+            "It runs without a transaction, so the statements before the failing one stay \
+             reverted, and the step's record stands; fix the file or the database and run \
+             `ferro migrate down` again: the down re-runs from its first statement."
+        }
+        (ExecMode::Transactional | ExecMode::ForeignKeysOff, true) => {
+            "The down was rolled back and the step's record stands; fix the file or the \
+             database and run `ferro migrate down` again to resume at it."
         }
     };
     format!(
@@ -1191,73 +1260,110 @@ fn failure_message(step: &PlannedStep, error: &str) -> String {
     )
 }
 
-/// Execute one SQL step and write its record, in the step's mode:
+/// Execute one planned SQL step in the step's mode, and settle its record:
+/// going up the record is written, going down it is removed.
 ///
-/// - **Transactional**: the started record commits first (so `status`
-///   sees the attempt), then one transaction runs the file's statements and
-///   the finished mark and commits them together.
-/// - **NoTransaction** (Postgres): the started record, then each statement
-///   in autocommit (what lets `CREATE INDEX CONCURRENTLY` run), then the
-///   finished mark.
+/// - **Transactional**: going up, the started record commits first (so
+///   `status` sees the attempt); then one transaction runs the file's
+///   statements and writes the finished mark (up) or removes the record
+///   (down), and commits them together.
+/// - **NoTransaction** (Postgres): (up: the started record, then) each
+///   statement in autocommit (what lets `CREATE INDEX CONCURRENTLY` run),
+///   then the finished mark or the removal.
 /// - **ForeignKeysOff** (SQLite): one dedicated connection —
 ///   `PRAGMA foreign_keys = OFF` (read back), `BEGIN IMMEDIATE`, the file,
-///   `PRAGMA foreign_key_check` as a failure, the finished mark, `COMMIT`,
-///   the pragma restored; the connection is closed on failure.
+///   `PRAGMA foreign_key_check` as a failure, the finished mark or the
+///   removal, `COMMIT`, the pragma restored; the connection is closed on
+///   failure.
 ///
 /// A failure rolls back what the mode can roll back, then writes `failed_at`
-/// and `error` on the started record in a separate transaction; the next run
-/// resumes at the step. `sql` must be the bytes the planner hashed.
+/// and `error` on the step's record in a separate transaction: going up the
+/// started record, going down the standing one (which stays). The next run
+/// resumes at the step. A down with [`PlannedStep::nothing_to_reverse`] runs
+/// no statement and removes the record. `sql` must be the bytes the planner
+/// hashed (the up file going up, the down file going down).
 ///
 /// # Errors
-/// A refusal when `sql` is not the planned file (edited mid-run) or the
-/// record is not the planned step's; a database error writing a record. A
-/// failing statement is not an error: it is the returned [`StepOutcome`].
+/// A refusal when `sql` is not the planned file (edited mid-run), when the
+/// record is not the planned step's, or when a down declaring
+/// `nothing-to-reverse` holds statements; a database error writing a
+/// record. A failing statement is not an error: it is the returned
+/// [`StepOutcome`].
 pub async fn execute_sql_step(
     engine: &EngineHandle,
     tracking_schema: Option<&str>,
     step: &PlannedStep,
     sql: &str,
     record: StepRecord,
+    direction: Direction,
 ) -> PyResult<StepOutcome> {
+    let down = matches!(direction, Direction::Down { .. });
+    let verb = if down { "down" } else { "up" };
     let shown = format!("{}/{}", step.migration_name, step.file);
     if encode_checksum(&sha384(sql.as_bytes())) != step.checksum {
         return Err(refused(format!(
             "ferro migrate: {shown} changed while this run was in progress; it was planned \
-             with sha384:{}. Run `ferro migrate up` again. Nothing more was applied.",
-            step.checksum
+             with sha384:{}. Run `ferro migrate {verb}` again. Nothing more was {}.",
+            step.checksum,
+            if down { "reverted" } else { "applied" }
         )));
     }
-    if (record.migration, record.step, &record.checksum)
-        != (step.migration, step.step, &step.checksum)
-    {
+    let planned_record = if down {
+        (record.migration, record.step, &record.checksum)
+            == (step.migration, step.step, &step.record.checksum)
+    } else {
+        (record.migration, record.step, &record.checksum)
+            == (step.migration, step.step, &step.checksum)
+    };
+    if !planned_record {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "the record for {}:{} does not describe the planned step {shown}",
             record.migration, record.step
         )));
     }
-    let dialect = engine.backend();
-    let tracking = Tracking::new(dialect, tracking_schema);
-    let statements = split_statements(sql);
-    let started_at = now_iso();
-    let started = StepRecord {
-        started_at: started_at.clone(),
-        finished_at: None,
-        failed_at: None,
-        error: None,
-        duration_ms: 0,
-        kind: step.mode.record_kind(),
-        ..record
+    let mut statements = split_statements(sql);
+    if down && step.nothing_to_reverse.is_some() {
+        if step.headers.nothing_to_reverse.is_some() && !statements.is_empty() {
+            return Err(refused(format!(
+                "ferro migrate: {shown} declares nothing-to-reverse but holds statements; keep \
+                 one: delete the statements, or the declaration. Nothing more was reverted."
+            )));
+        }
+        statements.clear();
+    }
+
+    let started = if down {
+        record
+    } else {
+        let started = StepRecord {
+            started_at: now_iso(),
+            finished_at: None,
+            failed_at: None,
+            error: None,
+            duration_ms: 0,
+            kind: step.mode.record_kind(),
+            ..record
+        };
+        write_record(engine, tracking_schema, &started, None).await?;
+        started
     };
-    write_record(engine, tracking_schema, &started, None).await?;
 
     let clock = Instant::now();
-    let finish = |ms: i64| StepRecord {
-        finished_at: Some(now_iso()),
-        duration_ms: ms,
-        ..started.clone()
-    };
-    let upsert = upsert_sql(dialect, &tracking);
     let elapsed = |clock: Instant| i64::try_from(clock.elapsed().as_millis()).unwrap_or(i64::MAX);
+    let finish = |ms: i64| {
+        if down {
+            Settle::Remove {
+                migration: started.migration,
+                step: started.step,
+            }
+        } else {
+            Settle::Write(Box::new(StepRecord {
+                finished_at: Some(now_iso()),
+                duration_ms: ms,
+                ..started.clone()
+            }))
+        }
+    };
 
     let outcome: Result<(), StepFailure> = match step.mode {
         ExecMode::Transactional => match engine.begin_transaction_connection().await {
@@ -1265,9 +1371,7 @@ pub async fn execute_sql_step(
             Ok(mut conn) => {
                 let result = async {
                     run_statements(&mut conn, &statements, &shown).await?;
-                    let finished = finish(elapsed(clock));
-                    conn.fetch_all_sql_unprepared_with_binds(&upsert, &record_binds(&finished))
-                        .await?;
+                    settle(&mut conn, tracking_schema, finish(elapsed(clock))).await?;
                     conn.commit().await?;
                     Ok::<(), StepFailure>(())
                 }
@@ -1281,23 +1385,24 @@ pub async fn execute_sql_step(
         ExecMode::NoTransaction => match pool_connection(engine).await {
             Err(err) => Err(err.into()),
             Ok(mut conn) => {
-                let result = run_statements(&mut conn, &statements, &shown).await;
-                drop(conn);
-                match result {
-                    Ok(()) => write_record(engine, tracking_schema, &finish(elapsed(clock)), None)
-                        .await
-                        .map_err(|e| StepFailure(e.to_string())),
-                    Err(err) => Err(err),
+                let result = async {
+                    run_statements(&mut conn, &statements, &shown).await?;
+                    settle(&mut conn, tracking_schema, finish(elapsed(clock))).await?;
+                    Ok::<(), StepFailure>(())
                 }
+                .await;
+                drop(conn);
+                result
             }
         },
         ExecMode::ForeignKeysOff => match pool_connection(engine).await {
             Err(err) => Err(err.into()),
             Ok(mut conn) => {
-                let result = foreign_keys_off(&mut conn, &statements, &shown, &upsert, || {
-                    finish(elapsed(clock))
-                })
-                .await;
+                let result =
+                    foreign_keys_off(&mut conn, &statements, &shown, tracking_schema, || {
+                        finish(elapsed(clock))
+                    })
+                    .await;
                 if result.is_err() {
                     let _ = conn.execute_sql_unprepared("ROLLBACK").await;
                     let _ = conn.detach_and_close().await;
@@ -1324,14 +1429,16 @@ pub async fn execute_sql_step(
             let failed = StepRecord {
                 failed_at: Some(now_iso()),
                 error: Some(error.clone()),
-                duration_ms: ms,
+                // The upsert adds this to the time already recorded; a failed
+                // down adds nothing to the time the step took to apply.
+                duration_ms: if down { 0 } else { ms },
                 ..started
             };
             write_record(engine, tracking_schema, &failed, None).await?;
             Ok(StepOutcome {
                 ok: false,
                 ms,
-                message: Some(failure_message(step, &error)),
+                message: Some(failure_message(step, &error, down)),
                 error: Some(error),
             })
         }

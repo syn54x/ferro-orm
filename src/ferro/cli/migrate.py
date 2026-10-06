@@ -247,6 +247,104 @@ def up(
     return exit_codes.OK
 
 
+_NOT_A_TERMINAL = (
+    "Not a terminal: pass --yes to revert without a prompt. Nothing was reverted."
+)
+
+
+@migrate.command
+def down(
+    *,
+    to: Annotated[
+        str | None,
+        Parameter(
+            help=(
+                "Where to stop: 0005 leaves 0005 fully applied, 0007:02 leaves "
+                "steps 01-02 of 0007 applied, 0000 reverts everything. Without "
+                "it, down reverts the latest applied migration."
+            )
+        ),
+    ] = None,
+    all_: Annotated[
+        bool, Parameter(name="--all", negative="", help="Revert every migration.")
+    ] = False,
+    yes: Annotated[
+        bool,
+        Parameter(
+            name=["--yes", "-y"], negative="", help="Revert without asking first."
+        ),
+    ] = False,
+    lock_timeout: Annotated[
+        str,
+        Parameter(
+            help=(
+                "How long to wait for another run's lock: 30s, 500ms, 1m, or a "
+                "number of seconds (0 refuses at once)."
+            )
+        ),
+    ] = "30s",
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
+    """Revert applied migrations, newest step first, under the run lock.
+
+    Prints what it would revert and asks first (--yes skips the question).
+    A step declared irreversible, or a migration a baseline recorded, stops
+    the whole run before anything is reverted. A failed down prints why and
+    exits 1, its step still recorded; the next down resumes there.
+    """
+    import asyncio
+
+    from ..migrations.runner import DownPlan, plan_down
+    from ..migrations.runner import down as run_down
+
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    if not yes and not sys.stdin.isatty():
+        plan = asyncio.run(
+            plan_down(settings, database, target=to, all=all_, url=glob.url)
+        )
+        if plan.refusal is not None:
+            print(plan.refusal, file=sys.stderr)
+            return exit_codes.REFUSED
+        if not plan.steps:
+            print("nothing to revert")
+            return exit_codes.OK
+        print(plan.describe())
+        print(_NOT_A_TERMINAL, file=sys.stderr)
+        return exit_codes.REFUSED
+
+    def confirm(plan: DownPlan) -> bool:
+        print(plan.describe(), flush=True)
+        return yes or _confirm_revert(plan.question())
+
+    report = asyncio.run(
+        run_down(
+            settings,
+            database,
+            target=to,
+            all=all_,
+            url=glob.url,
+            lock_timeout=lock_timeout,
+            confirm=confirm,
+            progress=lambda line: print(line, flush=True),
+        )
+    )
+    if report.refusal is not None:
+        print(report.refusal, file=sys.stderr)
+        return exit_codes.REFUSED
+    if report.declined:
+        print("Nothing was reverted.")
+    elif not report.reverted:
+        print("nothing to revert")
+    return exit_codes.OK
+
+
+def _confirm_revert(question: str) -> bool:
+    """``Revert 0002_add_teams (1 step)? [y/N]``: anything but yes is no."""
+    answer = _read(f"{question} [y/N] ", question, "--yes").lower()
+    return answer in ("y", "yes")
+
+
 @migrate.command
 def status(
     *,
@@ -573,7 +671,7 @@ def _read(prompt: str, question: str, flag: str) -> str:
         return input(prompt).strip()
     except EOFError:
         raise SettingsError(
-            f"init has no terminal to ask {question!r} on; pass {flag}"
+            f"there is no terminal to ask {question!r} on; pass {flag}"
         ) from None
 
 
