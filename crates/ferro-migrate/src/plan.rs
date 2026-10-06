@@ -345,6 +345,7 @@ fn plan_existing_table(
     let mut ops = Vec::new();
     let mut column_drops = Vec::new();
 
+    ops.extend(primary_key_change(table, old_model, new_model));
     diff_model_columns(
         table,
         old_model,
@@ -892,6 +893,36 @@ pub(crate) fn index_models(models: &[SchemaModel]) -> BTreeMap<String, &SchemaMo
         .iter()
         .map(|model| (model.table_name.clone(), model))
         .collect()
+}
+
+/// The table's primary-key columns, in column order.
+fn primary_key_columns(model: &SchemaModel) -> Vec<String> {
+    model
+        .columns
+        .iter()
+        .filter(|col| col.primary_key)
+        .map(|col| col.name.clone())
+        .collect()
+}
+
+/// A [`MigrationOp::ChangePrimaryKey`] when the two models' primary keys are
+/// not the same set of columns. Compared as sets: a live table reports its
+/// columns in catalog order, a declared one in model order.
+fn primary_key_change(
+    table: &str,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+) -> Option<MigrationOp> {
+    let (from, to) = (
+        primary_key_columns(old_model),
+        primary_key_columns(new_model),
+    );
+    let set = |cols: &[String]| cols.iter().cloned().collect::<BTreeSet<_>>();
+    (set(&from) != set(&to)).then(|| MigrationOp::ChangePrimaryKey {
+        table: table.to_string(),
+        from,
+        to,
+    })
 }
 
 fn diff_model_columns(

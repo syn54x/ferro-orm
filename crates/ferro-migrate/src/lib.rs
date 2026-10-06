@@ -134,6 +134,18 @@ pub enum MigrationOp {
         /// Column whose nullability drifted.
         column: String,
     },
+    /// The table's primary-key columns differ between the snapshots (a key
+    /// moved between columns, gained or lost one). No migration door changes
+    /// a primary key in place: the pass warns and skips, the generator
+    /// refuses with the recipe.
+    ChangePrimaryKey {
+        /// Owning table.
+        table: String,
+        /// The old snapshot's primary-key columns, in column order.
+        from: Vec<String>,
+        /// The new snapshot's primary-key columns, in column order.
+        to: Vec<String>,
+    },
     /// A standalone Ferro-named index/unique present in the model but not live.
     AddIndex {
         /// Owning table.
@@ -286,6 +298,7 @@ impl MigrationOp {
             | MigrationOp::DropColumn { table, .. }
             | MigrationOp::AlterColumnType { table, .. }
             | MigrationOp::AlterColumnNullability { table, .. }
+            | MigrationOp::ChangePrimaryKey { table, .. }
             | MigrationOp::AddIndex { table, .. }
             | MigrationOp::DropIndex { table, .. }
             | MigrationOp::AddForeignKey { table, .. }
