@@ -315,3 +315,26 @@ async def test_auto_migrate_waits_for_a_held_run_lock_then_runs(project, db):
         "migration run or auto-migrate pass holds the run lock on this database. "
         "It goes on once that one finishes."
     ]
+
+
+async def test_the_waiting_warning_names_the_call_that_waits(project, db):
+    declare_fresh_model()
+    await ferro.connect(db.url)
+    await ferro.connect(db.url, name="holder")
+    handle = await _core._acquire_run_lock("holder", None, 0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            pending = asyncio.create_task(ferro.create_tables())
+            await asyncio.sleep(0.5)
+            assert not pending.done()
+        finally:
+            await _core._release_run_lock(handle)
+        await asyncio.wait_for(pending, 10)
+
+    assert "guardfresh" in db.tables()
+    assert [str(w.message) for w in caught if "is waiting" in str(w.message)] == [
+        "ferro auto-migrate: create_tables() is waiting: another ferro migration "
+        "run or auto-migrate pass holds the run lock on this database. It goes on "
+        "once that one finishes."
+    ]

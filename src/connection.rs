@@ -4,7 +4,7 @@
 //! and engine resets.
 
 use crate::backend::{EngineHandle, PoolSpec, dialect_from_url};
-use crate::migrate::{MigrateOptions, internal_migrate};
+use crate::migrate::{AutoMigrateDoor, MigrateOptions, internal_migrate};
 use crate::session_settings::SettingsDelivery;
 use crate::state::{
     CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, Dialect, ENGINE, SESSION_REGISTRY,
@@ -282,7 +282,13 @@ pub fn connect(
         // (ADR-0038), before the connection is registered.
         let opts = MigrateOptions::laddered(migrate_updates, migrate_destructive);
         if auto_migrate || opts.updates {
-            internal_migrate(engine_handle.clone(), opts, &tracking_schemas).await?;
+            internal_migrate(
+                engine_handle.clone(),
+                opts,
+                &tracking_schemas,
+                AutoMigrateDoor::Connect,
+            )
+            .await?;
         }
 
         let mut registry = CONNECTION_REGISTRY.write().map_err(|_| {

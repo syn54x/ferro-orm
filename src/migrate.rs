@@ -368,11 +368,37 @@ async fn execute_table_ops(
 /// while staying far inside `Instant`'s range.
 const AUTO_MIGRATE_LOCK_WAIT: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 
+/// Which public call is running the auto-migrate passes: the waiting
+/// warning names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoMigrateDoor {
+    /// `connect()` with an auto-migrate flag.
+    Connect,
+    /// `ferro.create_tables()`.
+    CreateTables,
+    /// `ferro.migrate()`.
+    Migrate,
+}
+
+impl AutoMigrateDoor {
+    fn call(self) -> &'static str {
+        match self {
+            AutoMigrateDoor::Connect => "connect(auto_migrate=…)",
+            AutoMigrateDoor::CreateTables => "create_tables()",
+            AutoMigrateDoor::Migrate => "migrate()",
+        }
+    }
+}
+
 /// The warning an auto-migrate pass raises the moment it finds the run lock
-/// held, so a boot that is waiting says why.
-pub const AUTO_MIGRATE_WAITING_TEXT: &str = "connect(auto_migrate=…) is waiting: another ferro \
-     migration run or auto-migrate pass holds the run lock on this database. It goes on once \
-     that one finishes.";
+/// held, so a caller that is waiting says why.
+pub fn auto_migrate_waiting_text(door: AutoMigrateDoor) -> String {
+    format!(
+        "{} is waiting: another ferro migration run or auto-migrate pass holds the run lock \
+         on this database. It goes on once that one finishes.",
+        door.call()
+    )
+}
 
 /// The refusal for an auto-migrate flag on a database ferro migrations
 /// governs (ADR-0038): `governed` is the schema the pass would change,
@@ -471,6 +497,8 @@ pub async fn guard_tracked_schema(
 /// together serialize here, and the second sees the first's DDL. The lock
 /// is released on every exit path.
 ///
+/// `door` names the public call for the waiting warning.
+///
 /// # Errors
 /// The guard's refusal; the pooler refusal behind a transaction-mode
 /// pooler; whatever the passes raise.
@@ -478,9 +506,10 @@ pub async fn internal_migrate(
     engine: Arc<EngineHandle>,
     opts: MigrateOptions,
     tracking_schemas: &[String],
+    door: AutoMigrateDoor,
 ) -> PyResult<()> {
     let lock = RunLock::acquire(&engine, None, AUTO_MIGRATE_LOCK_WAIT, |_| {
-        crate::emit_user_warning_always(AUTO_MIGRATE_WAITING_TEXT);
+        crate::emit_user_warning_always(&auto_migrate_waiting_text(door));
     })
     .await?;
     let outcome = async {
@@ -671,7 +700,7 @@ pub fn migrate(
     let opts = MigrateOptions::laddered(updates, destructive);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
-        internal_migrate(engine, opts, &tracking_schemas).await
+        internal_migrate(engine, opts, &tracking_schemas, AutoMigrateDoor::Migrate).await
     })
 }
 

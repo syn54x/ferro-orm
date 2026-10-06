@@ -300,6 +300,7 @@ pub fn create_tables(
             engine,
             crate::migrate::MigrateOptions::laddered(false, false),
             &tracking_schemas,
+            crate::migrate::AutoMigrateDoor::CreateTables,
         )
         .await
     })
