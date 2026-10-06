@@ -26,8 +26,9 @@ The rules, each enforced here with a refusal that names its fix:
   directory holding both is refused. A selected file is used alone: nothing
   is layered on it.
 - **The file is the only source.** No environment variable overrides a key
-  and no ``.env`` is loaded; ``settings_customise_sources`` keeps only the
-  values this module reads from the file. The database URL is never in the
+  and no ``.env`` is loaded; ``settings_customise_sources`` reads the
+  located file with pydantic-settings' ``TomlConfigSettingsSource`` and
+  keeps no other source. The database URL is never in the
   file: ``url_for`` takes an override or reads the variable ``url_env``
   names.
 - **No file is not an error** for ``FerroSettings()``: it returns an empty
@@ -60,13 +61,16 @@ from pydantic import (
     Field,
     PrivateAttr,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 from pydantic_settings import (
     BaseSettings,
+    InitSettingsSource,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
+    TomlConfigSettingsSource,
 )
 
 from .base import ForeignKey, ManyToManyRelation
@@ -244,12 +248,23 @@ class FerroSettings(BaseSettings):
     lookup); ``FerroSettings(config=path)`` names it. With no file found the
     object is empty: ``databases == {}`` and ``searched`` lists every
     directory examined.
+
+    The lookup is ferro's; reading the file is pydantic-settings':
+    ``__init__`` hands the located path to ``settings_customise_sources``
+    through the init source, which then reads it with one
+    ``TomlConfigSettingsSource`` and nothing else. The validators below shape
+    the file's keys (one database or a ``databases`` table) into
+    ``databases`` and refuse what does not belong, naming where it goes.
     """
 
-    model_config = SettingsConfigDict(extra="forbid", frozen=True)
+    model_config = SettingsConfigDict(extra="forbid", frozen=True, case_sensitive=True)
 
     config_path: Path | None = None
+    """The config file read, or ``None`` when none was found."""
+    config_table: tuple[str, ...] = ()
+    """Where the keys sit in it: ``("tool", "ferro")``, or ``()`` for the top level."""
     searched: list[Path] = Field(default_factory=list)
+    """Every directory the walk-up examined without finding a config."""
     python_path: list[Path] = Field(default_factory=list)
     databases: dict[str, DatabaseSettings] = Field(default_factory=dict)
 
@@ -258,16 +273,11 @@ class FerroSettings(BaseSettings):
         if path is None:
             super().__init__(searched=searched)
             return
-        config_file = _ConfigFile(path)
-        values = config_file.values()
+        table = _config_table(path)
         try:
-            super().__init__(config_path=path, **values)
+            super().__init__(config_path=path, config_table=table, searched=searched)
         except ValidationError as exc:
-            raise SettingsError(config_file.describe(exc)) from None
-        project = _Project(path, tuple(self.python_path), self.databases)
-        for database in self.databases.values():
-            database._project = project
-        _refuse_overlapping_directories(path, self.databases)
+            raise SettingsError(_describe(_Layout(path, table), exc)) from None
 
     @classmethod
     def settings_customise_sources(
@@ -278,12 +288,94 @@ class FerroSettings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Only the values ``__init__`` read from the config file.
+        """The located config file, read by ``TomlConfigSettingsSource``.
 
-        No environment variable, ``.env`` file or secrets directory ever sets
-        a field (ADR-0036: these keys decide what a migration contains).
+        ``init_settings`` carries only what ``__init__`` located (the path,
+        its table header, the directories searched). No environment
+        variable, ``.env`` file or secrets directory ever sets a field
+        (ADR-0036: these keys decide what a migration contains).
         """
-        return (init_settings,)
+        located = (
+            init_settings.init_kwargs
+            if isinstance(init_settings, InitSettingsSource)
+            else {}
+        )
+        path = located.get("config_path")
+        if path is None:
+            return (init_settings,)
+        header = located.get("config_table", ())
+        try:
+            file_settings = TomlConfigSettingsSource(
+                settings_cls, toml_file=path, toml_table_header=header
+            )
+        except tomllib.TOMLDecodeError as exc:
+            raise SettingsError(
+                f"{path} is not valid TOML: {exc}; fix the file"
+            ) from None
+        layout = _Layout(path, header)
+        for key in _LOCATED_FIELDS:
+            if key in file_settings.toml_data:
+                layout.refuse_unknown(key, layout.top_label, allowed=_TOP_LEVEL_KEYS)
+        return (init_settings, file_settings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _shape(cls, data: Any) -> Any:
+        """Shape the file's keys into ``python_path`` and ``databases``.
+
+        Every key-level refusal (unknown, reserved, misplaced, missing) is
+        decided here, where the layout is known, so its message says where
+        the key goes. Type errors are left to field validation.
+        """
+        if not isinstance(data, dict) or data.get("config_path") is None:
+            return data
+        layout = _Layout(Path(data["config_path"]), tuple(data.get("config_table", ())))
+        located = {key: data[key] for key in _LOCATED_FIELDS if key in data}
+        keys = {key: value for key, value in data.items() if key not in _LOCATED_FIELDS}
+        if not layout.header and not any(key in _FERRO_KEYS for key in keys):
+            raise SettingsError(
+                f"{layout.path} holds no ferro config: no [tool.ferro] table and "
+                f"no ferro keys at the top level. Add a [tool.ferro] table with "
+                f"models = [...] and dialects = [...], or write those keys at "
+                f"the top level of a {FERRO_TOML}"
+            )
+        if "databases" in keys:
+            entries = layout.several(keys)
+            defaults = {name: Path(DEFAULT_DIRECTORY, name) for name in entries}
+        else:
+            single = {key: value for key, value in keys.items() if key != "python_path"}
+            entries = {DEFAULT_DATABASE: (layout.top_label, single)}
+            defaults = {DEFAULT_DATABASE: Path(DEFAULT_DIRECTORY)}
+        databases = {
+            name: layout.database(
+                name, label, entry, layout.path.parent / defaults[name]
+            )
+            for name, (label, entry) in entries.items()
+        }
+        shaped = {**located, "databases": databases}
+        if "python_path" in keys:
+            shaped["python_path"] = keys["python_path"]
+        return shaped
+
+    @field_validator("python_path", mode="after")
+    @classmethod
+    def _relative_to_config(cls, value: list[Path], info: ValidationInfo) -> list[Path]:
+        """``python_path`` entries are relative to the config file's directory."""
+        config_path = info.data.get("config_path")
+        if config_path is None:
+            return value
+        return [(config_path.parent / entry).resolve() for entry in value]
+
+    @model_validator(mode="after")
+    def _bind_databases(self) -> FerroSettings:
+        """Refuse overlapping directories; give each database its project."""
+        if self.config_path is None:
+            return self
+        _refuse_overlapping_directories(self.config_path, self.databases)
+        project = _Project(self.config_path, tuple(self.python_path), self.databases)
+        for database in self.databases.values():
+            database._project = project
+        return self
 
     def database(self, name: str | None = None) -> DatabaseSettings:
         """The database called ``name``; implied when exactly one is configured."""
@@ -341,6 +433,10 @@ class FerroSettings(BaseSettings):
         )
 
 
+_LOCATED_FIELDS = ("config_path", "config_table", "searched")
+"""The fields ``__init__`` sets from the lookup; never keys of the file."""
+
+
 # -- lookup --------------------------------------------------------------------
 
 
@@ -358,7 +454,7 @@ def _locate(config: Path | str | None) -> tuple[Path | None, list[Path]]:
         ferro_toml = directory / FERRO_TOML
         pyproject = directory / PYPROJECT_TOML
         has_ferro_toml = ferro_toml.is_file()
-        has_pyproject = pyproject.is_file() and _has_tool_ferro(pyproject)
+        has_pyproject = pyproject.is_file() and _config_table(pyproject) == _TOOL_FERRO
         if has_ferro_toml and has_pyproject:
             raise SettingsError(
                 f"{directory} holds two ferro configs, {ferro_toml} and the "
@@ -384,124 +480,61 @@ def _selected(path: Path, origin: str) -> Path:
     return resolved
 
 
-def _read_toml(path: Path) -> dict[str, Any]:
+_TOOL_FERRO = ("tool", "ferro")
+
+
+def _config_table(path: Path) -> tuple[str, ...]:
+    """Where ``path`` keeps ferro's keys: ``("tool", "ferro")`` or the top level.
+
+    The one look at the document before pydantic-settings reads it: the
+    file's content, not its name, decides the table header, and a file
+    carrying both shapes (or a ``[tool.ferro]`` that is not a table) is
+    refused here because the source, once given a header, sees only that
+    table.
+    """
     try:
         with path.open("rb") as handle:
-            return tomllib.load(handle)
+            document = tomllib.load(handle)
     except tomllib.TOMLDecodeError as exc:
         raise SettingsError(f"{path} is not valid TOML: {exc}; fix the file") from None
+    tool = document.get("tool")
+    if not (isinstance(tool, dict) and "ferro" in tool):
+        return ()
+    top_level_keys = [key for key in document if key in _FERRO_KEYS]
+    if top_level_keys:
+        keys = ", ".join(f"`{key}`" for key in top_level_keys)
+        raise SettingsError(
+            f"{path} carries ferro config twice: a [tool.ferro] table and "
+            f"{keys} at the top level; ferro reads one and never merges them. "
+            f"Keep one: move those keys into [tool.ferro], or remove [tool.ferro]"
+        )
+    if not isinstance(tool["ferro"], dict):
+        raise SettingsError(
+            f"{path}: [tool.ferro] must be a table with models = [...] and "
+            f"dialects = [...]"
+        )
+    return _TOOL_FERRO
 
 
-def _has_tool_ferro(pyproject: Path) -> bool:
-    tool = _read_toml(pyproject).get("tool")
-    return isinstance(tool, dict) and "ferro" in tool
+# -- shaping one file's keys ----------------------------------------------------
 
 
-# -- reading one file ----------------------------------------------------------
+@dataclass(frozen=True)
+class _Layout:
+    """Where a config file keeps its keys, for refusals that say where a key goes."""
 
-
-class _ConfigFile:
-    """One config file's keys, checked and shaped for :class:`FerroSettings`.
-
-    The file's content decides where its keys are: a file whose top level
-    holds a ``[tool.ferro]`` table (a ``pyproject.toml``, or any file selected
-    with ``config=`` / ``FERRO_CONFIG``) is read there; any other file
-    (``ferro.toml``) carries the keys at its top level. Both read to the same
-    values, and a file carrying both shapes is refused. Every key-level refusal (unknown, reserved,
-    misplaced, missing) is decided here so its message can say where the key
-    goes; type errors are left to pydantic and described by
-    :func:`_describe_validation_error`.
-    """
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.document = _read_toml(path)
-        tool = self.document.get("tool")
-        self.in_tool_table = isinstance(tool, dict) and "ferro" in tool
-        self.prefix = "tool.ferro" if self.in_tool_table else ""
-        self.labels: dict[str, str] = {}
+    path: Path
+    header: tuple[str, ...]
 
     @property
     def top_label(self) -> str:
-        return (
-            "[tool.ferro]"
-            if self.in_tool_table
-            else f"the top level of {self.path.name}"
-        )
+        return "[tool.ferro]" if self.header else f"the top level of {self.path.name}"
 
     def database_label(self, name: str) -> str:
-        return f"[{_join(self.prefix, 'databases')}.{name}]"
+        return f"[{_join(*self.header, 'databases')}.{name}]"
 
-    def values(self) -> dict[str, Any]:
-        table = self._table()
-        config_dir = self.path.parent
-        python_path = table.get("python_path", [])
-        values: dict[str, Any] = {
-            "python_path": _resolve_paths(config_dir, python_path),
-        }
-        if "databases" in table:
-            entries = self._several(table)
-            defaults = {name: Path(DEFAULT_DIRECTORY, name) for name in entries}
-        else:
-            entries = {
-                DEFAULT_DATABASE: (
-                    self.top_label,
-                    {k: v for k, v in table.items() if k != "python_path"},
-                )
-            }
-            defaults = {DEFAULT_DATABASE: Path(DEFAULT_DIRECTORY)}
-        self.labels = {name: label for name, (label, _) in entries.items()}
-        values["databases"] = {
-            name: self._database(name, label, entry, config_dir / defaults[name])
-            for name, (label, entry) in entries.items()
-        }
-        return values
-
-    def describe(self, exc: ValidationError) -> str:
-        """Each pydantic error as ``<table> `<key>`: <problem>``."""
-        lines = []
-        for error in exc.errors():
-            location = error["loc"]
-            if location[:1] == ("databases",) and len(location) >= 2:
-                where = self.labels.get(str(location[1]), self.top_label)
-                key = _key_path(location[2:])
-            else:
-                where = self.top_label
-                key = _key_path(location)
-            message = error["msg"].removeprefix("Value error, ")
-            lines.append(f"  {where}{f' `{key}`' if key else ''}: {message}")
-        return f"{self.path} is not a valid ferro config:\n" + "\n".join(lines)
-
-    def _table(self) -> dict[str, Any]:
-        document = self.document
-        top_level_keys = [key for key in document if key in _FERRO_KEYS]
-        if self.in_tool_table:
-            if top_level_keys:
-                keys = ", ".join(f"`{key}`" for key in top_level_keys)
-                raise SettingsError(
-                    f"{self.path} carries ferro config twice: a [tool.ferro] "
-                    f"table and {keys} at the top level; ferro reads one and "
-                    f"never merges them. Keep one: move those keys into "
-                    f"[tool.ferro], or remove [tool.ferro]"
-                )
-            table = document["tool"]["ferro"]
-            if not isinstance(table, dict):
-                raise SettingsError(
-                    f"{self.path}: [tool.ferro] must be a table with models = "
-                    f"[...] and dialects = [...]"
-                )
-            return table
-        if not top_level_keys:
-            raise SettingsError(
-                f"{self.path} holds no ferro config: no [tool.ferro] table and "
-                f"no ferro keys at the top level. Add a [tool.ferro] table with "
-                f"models = [...] and dialects = [...], or write those keys at "
-                f"the top level of a {FERRO_TOML}"
-            )
-        return document
-
-    def _several(self, table: dict[str, Any]) -> dict[str, tuple[str, Any]]:
-        for key in table:
+    def several(self, keys: dict[str, Any]) -> dict[str, tuple[str, Any]]:
+        for key in keys:
             if key in _DATABASE_KEYS:
                 raise SettingsError(
                     f"{self.path}: `{key}` sits at {self.top_label} beside a "
@@ -509,8 +542,8 @@ class _ConfigFile:
                     f"its own keys and nothing is inherited. Move `{key}` into "
                     f"{self.database_label('<name>')}"
                 )
-            self._refuse_unknown(key, self.top_label, allowed=_TOP_LEVEL_KEYS)
-        databases = table["databases"]
+            self.refuse_unknown(key, self.top_label, allowed=_TOP_LEVEL_KEYS)
+        databases = keys["databases"]
         if not isinstance(databases, dict) or not databases:
             raise SettingsError(
                 f"{self.path}: `databases` must hold at least one "
@@ -521,7 +554,7 @@ class _ConfigFile:
             for name, entry in databases.items()
         }
 
-    def _database(
+    def database(
         self, name: str, label: str, entry: Any, default_directory: Path
     ) -> dict[str, Any]:
         if not isinstance(entry, dict):
@@ -534,7 +567,7 @@ class _ConfigFile:
                     f"{self.path}: `python_path` in {label} is a top-level key "
                     f"shared by every database; move it to {self.top_label}"
                 )
-            self._refuse_unknown(key, label, allowed=_DATABASE_KEYS)
+            self.refuse_unknown(key, label, allowed=_DATABASE_KEYS)
         missing = [key for key in ("models", "dialects") if key not in entry]
         if missing:
             lines = "\n    ".join(_LINE_TO_ADD[key] for key in missing)
@@ -554,9 +587,7 @@ class _ConfigFile:
             ),
         }
 
-    def _refuse_unknown(
-        self, key: str, label: str, *, allowed: tuple[str, ...]
-    ) -> None:
+    def refuse_unknown(self, key: str, label: str, *, allowed: tuple[str, ...]) -> None:
         if key in allowed:
             return
         if key in _RESERVED_KEYS:
@@ -580,12 +611,32 @@ class _ConfigFile:
         raise SettingsError(f"{self.path}: unknown key `{key}` in {label}{hint}")
 
 
-def _resolve_paths(config_dir: Path, entries: Any) -> Any:
-    """Resolve ``python_path`` against the config directory; leave a wrong
-    type for pydantic to refuse by name."""
-    if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
-        return entries
-    return [(config_dir / entry).resolve() for entry in entries]
+def _describe(layout: _Layout, exc: ValidationError) -> str:
+    """Each pydantic error as ``<table> `<key>`: <problem>``."""
+    several = _uses_databases_table(layout)
+    lines = []
+    for error in exc.errors():
+        location = error["loc"]
+        if location[:1] == ("databases",) and len(location) >= 2:
+            name = str(location[1])
+            where = layout.database_label(name) if several else layout.top_label
+            key = _key_path(location[2:])
+        else:
+            where = layout.top_label
+            key = _key_path(location)
+        message = error["msg"].removeprefix("Value error, ")
+        lines.append(f"  {where}{f' `{key}`' if key else ''}: {message}")
+    return f"{layout.path} is not a valid ferro config:\n" + "\n".join(lines)
+
+
+def _uses_databases_table(layout: _Layout) -> bool:
+    """Whether the file declares a ``databases`` table (only for labelling an
+    error; the file already parsed once, so this read cannot fail)."""
+    with layout.path.open("rb") as handle:
+        table: Any = tomllib.load(handle)
+    for key in layout.header:
+        table = table[key]
+    return "databases" in table
 
 
 def _key_path(parts: tuple[int | str, ...]) -> str:

@@ -529,6 +529,23 @@ def test_an_unknown_key_is_refused_by_name(project: Path):
     assert str(project / "ferro.toml") in str(exc.value)
 
 
+@pytest.mark.parametrize("key", ["config_path", "searched", "config_table"])
+def test_a_file_key_naming_a_lookup_attribute_is_refused_by_name(
+    project: Path, key: str
+):
+    # These attributes come from the lookup, never from the file; a file key
+    # spelled like one must not be silently shadowed.
+    _write(
+        project / "ferro.toml",
+        f'models = ["m"]\ndialects = ["sqlite"]\n{key} = ["elsewhere"]\n',
+    )
+
+    with pytest.raises(SettingsError) as exc:
+        FerroSettings()
+
+    assert f"unknown key `{key}`" in str(exc.value)
+
+
 def test_an_unknown_key_inside_a_database_is_refused_by_name(project: Path):
     _write(
         project / "pyproject.toml",
