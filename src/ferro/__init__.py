@@ -385,10 +385,12 @@ async def connect(
     """
     _ensure_rust_registration_synced()
 
-    tracking_schemas = (
-        _configured_tracking_schemas()
+    # Only an auto-migrate flag reads the config: a plain connect() is
+    # exactly what it was.
+    guard = (
+        {"tracking_schemas": _configured_tracking_schemas()}
         if auto_migrate or migrate_updates or migrate_destructive
-        else []
+        else {}
     )
     pool_config = pool or PoolConfig()
     await _core_connect(
@@ -402,7 +404,7 @@ async def connect(
         identity_map=identity_map,
         migrate_updates=migrate_updates,
         migrate_destructive=migrate_destructive,
-        tracking_schemas=tracking_schemas,
+        **guard,
     )
 
 

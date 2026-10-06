@@ -446,7 +446,8 @@ pub async fn guard_tracked_schema(
 ) -> PyResult<()> {
     let governed = governed_schema(engine).await?;
     let present = tracking_named_tables(engine).await?;
-    let has = |schema: &str, table: &str| present.contains(&(schema.to_string(), table.to_string()));
+    let has =
+        |schema: &str, table: &str| present.contains(&(schema.to_string(), table.to_string()));
     if has(&governed, TRACKING_TABLE) || has(&governed, FORMAT_TABLE) {
         return Err(refused(tracked_schema_refusal(&governed, &governed)));
     }
