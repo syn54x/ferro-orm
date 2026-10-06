@@ -36,12 +36,14 @@ async def connect(
     migrate_updates: bool = False,
     migrate_destructive: bool = False,
     settings_delivery: str = "transaction",
+    tracking_schemas: list[str] = ...,
 ) -> None: ...
 async def create_tables(using: Optional[str] = None) -> None: ...
 async def migrate(
     using: Optional[str] = None,
     updates: bool = True,
     destructive: bool = False,
+    tracking_schemas: list[str] = ...,
 ) -> None:
     """Run the auto-migrate pass against a connected engine.
 
@@ -595,4 +597,10 @@ def _row_policy_command_from_catalog_code(code: str) -> str | None:
 
 def _is_ferro_row_policy_name(name: str) -> bool:
     """Whether a live policy name follows ferro's ``rls_`` ownership prefix."""
+    ...
+
+# --- #521: connect() guard ---
+
+def _default_connection_name() -> str | None:
+    """The default connection's name, or ``None`` when there is none."""
     ...
