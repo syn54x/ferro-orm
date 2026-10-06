@@ -476,13 +476,14 @@ pub fn plan_table_migration(
     Ok(plan)
 }
 
-/// Prefix of the debug line the reconciliation pass logs (on the `ferro`
-/// logger) before it executes each statement of a table's plan (column drops,
-/// which run through their own dependency-aware path, are not included), so
-/// a run's exact DDL is observable without a database-side statement log.
+/// Prefix of the debug line auto-migrate logs (on the `ferro` logger) before
+/// it executes each statement — the create pass's, every statement of a
+/// table's reconciliation plan including its column drops, and each label
+/// addition (logged against its type name) — so a run's exact DDL is
+/// observable without a database-side statement log.
 const RECONCILE_STATEMENT_LOG_PREFIX: &str = "Ferro Engine: auto-migrate executing on";
 
-fn log_reconcile_statement(table_lower: &str, sql: &str) {
+pub(crate) fn log_reconcile_statement(table_lower: &str, sql: &str) {
     crate::log_debug(format!(
         "{RECONCILE_STATEMENT_LOG_PREFIX} '{table_lower}': {sql}"
     ));
@@ -543,6 +544,7 @@ async fn execute_drop_column(
         }
         for index in &indexes {
             let sql = format!("DROP INDEX IF EXISTS {}", quote_ident(&index.name));
+            log_reconcile_statement(table_lower, &sql);
             engine.execute_sql_unprepared(&sql).await.map_err(|e| {
                 crate::errors::map_db_error(
                     &format!(
@@ -557,6 +559,7 @@ async fn execute_drop_column(
     }
 
     let sql = render_drop_column_sql(table_lower, col_name);
+    log_reconcile_statement(table_lower, &sql);
     engine
         .execute_sql_unprepared(&sql)
         .await
@@ -708,7 +711,9 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
                 for col_name in &plan.drop_columns {
                     // Postgres needs no index pre-scan (that path is
                     // SQLite-only in execute_drop_column).
-                    conn.execute_sql_unprepared(&render_drop_column_sql(&table_lower, col_name))
+                    let sql = render_drop_column_sql(&table_lower, col_name);
+                    log_reconcile_statement(&table_lower, &sql);
+                    conn.execute_sql_unprepared(&sql)
                         .await
                         .map_err(|e| map_drop_column_error(&table_lower, col_name, e))?;
                 }
@@ -834,6 +839,7 @@ async fn add_missing_enum_labels(
         }
         for label in missing_enum_labels(labels, live_labels) {
             let sql = render_pg_enum_add_value(type_name, &label);
+            log_reconcile_statement(type_name, &sql);
             engine.execute_sql_unprepared(&sql).await.map_err(|e| {
                 crate::errors::map_db_error(
                     &format!(

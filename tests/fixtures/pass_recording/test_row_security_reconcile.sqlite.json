@@ -1,0 +1,116 @@
+{
+  "tests/test_row_security_reconcile.py::test_a_declaration_on_a_live_table_plans_flags_then_the_policy": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+          "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_a_dropped_declaration_never_disables_and_always_warns": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Table 'ledgerrow' has row-level security enabled in the database, but the model no longer declares __ferro_rls__. Ferro never disables row security on migrate_updates \u2014 the table keeps filtering rows, and any ferro-owned policy keeps applying. Restore the declaration, or tear it down with migrate_destructive=True.",
+          "Table 'ledgerrow' has row policy/policies 'rls_ledgerrow_ledger_id' that the model no longer declares. They are still filtering rows. Ferro leaves them in place unless you pass migrate_destructive=True \u2014 dropping a policy removes protection, so it is never automatic."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_an_unchanged_declaration_plans_nothing": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_flags_are_turned_on_one_at_a_time": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_force_false_never_clears_a_live_force_on_updates": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Table 'ledgerrow' has FORCE ROW LEVEL SECURITY set in the database, but the model declares force=False. Ferro never clears the flag on migrate_updates \u2014 the table owner stays bound by the policies. Clear it with migrate_destructive=True if that is what you want."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_policy_ddl_lands_after_the_tables_own_column_and_data_steps": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"ledgerrow\" ADD COLUMN \"note\" varchar NOT NULL DEFAULT 'unset'",
+          "ALTER TABLE \"ledgerrow\" ALTER COLUMN \"note\" DROP DEFAULT",
+          "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+          "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_row_security_reconcile_statement_parity_pin": {
+    "rendered": [
+      {
+        "statements": [
+          "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY",
+          "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY",
+          "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)"
+        ],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_sqlite_reconciliation_emits_no_row_security_ddl": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": [
+          "Column 'ledgerrow.label' is nullable in the database but the model expects NOT NULL. SQLite cannot change column nullability in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+          "Column 'ledgerrow.ledger_id' is nullable in the database but the model expects NOT NULL. SQLite cannot change column nullability in place; generate a reviewed migration with `ferro migrate new` to migrate this column."
+        ]
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  },
+  "tests/test_row_security_reconcile.py::test_without_migrate_updates_nothing_is_planned": {
+    "rendered": [
+      {
+        "statements": [],
+        "warnings": []
+      }
+    ],
+    "statements": [],
+    "warnings": []
+  }
+}

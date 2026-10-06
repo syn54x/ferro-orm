@@ -163,16 +163,19 @@ async fn create_one_table(
     let table = model.table_name.as_str();
     if dialect != Dialect::Postgres {
         for pre_sql in &emission.pre_create_sqls {
+            crate::migrate::log_reconcile_statement(table, pre_sql);
             engine
                 .execute_sql_unprepared(pre_sql)
                 .await
                 .map_err(|e| create_step_error(table, "enum type", pre_sql, e))?;
         }
+        crate::migrate::log_reconcile_statement(table, &emission.create_sql);
         engine
             .execute_sql(&emission.create_sql)
             .await
             .map_err(|e| create_step_error(table, "table", &emission.create_sql, e))?;
         for post_sql in &emission.post_create_sqls {
+            crate::migrate::log_reconcile_statement(table, post_sql);
             engine
                 .execute_sql(post_sql)
                 .await
@@ -189,14 +192,17 @@ async fn create_one_table(
     })?;
     let table_result: PyResult<()> = async {
         for pre_sql in &emission.pre_create_sqls {
+            crate::migrate::log_reconcile_statement(table, pre_sql);
             conn.execute_sql_unprepared(pre_sql)
                 .await
                 .map_err(|e| create_step_error(table, "enum type", pre_sql, e))?;
         }
+        crate::migrate::log_reconcile_statement(table, &emission.create_sql);
         conn.execute_sql(&emission.create_sql)
             .await
             .map_err(|e| create_step_error(table, "table", &emission.create_sql, e))?;
         for post_sql in &emission.post_create_sqls {
+            crate::migrate::log_reconcile_statement(table, post_sql);
             conn.execute_sql(post_sql)
                 .await
                 .map_err(|e| create_step_error(table, "artifact", post_sql, e))?;

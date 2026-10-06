@@ -1,0 +1,237 @@
+{
+  "tests/test_auto_migrate.py::test_added_indexed_and_unique_columns_get_their_indexes[sqlite]": {
+    "statements": [
+      "'migindexed': ALTER TABLE \"migindexed\" ADD COLUMN \"slug\" varchar",
+      "'migindexed': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_migindexed_slug\" ON \"migindexed\" (\"slug\")",
+      "'migindexed': ALTER TABLE \"migindexed\" ADD COLUMN \"status\" varchar",
+      "'migindexed': CREATE INDEX IF NOT EXISTS \"idx_migindexed_status\" ON \"migindexed\" (\"status\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_connect_with_auto_migrate[sqlite]": {
+    "statements": [
+      "'automigrateduser': CREATE TABLE IF NOT EXISTS \"automigrateduser\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"username\" varchar NOT NULL )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_connect_without_auto_migrate[sqlite]": {
+    "statements": [
+      "'automigrateduser': CREATE TABLE IF NOT EXISTS \"automigrateduser\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"username\" varchar NOT NULL )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_create_tables_pushes_modelset_for_model_defined_after_connect[sqlite]": {
+    "statements": [
+      "'latemodel': CREATE TABLE IF NOT EXISTS \"latemodel\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"label\" varchar NOT NULL )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_destructive_drop_of_indexed_column_drops_index_first[sqlite]": {
+    "statements": [
+      "'migidx': DROP INDEX IF EXISTS \"idx_migidx_old_status\"",
+      "'migidx': ALTER TABLE \"migidx\" DROP COLUMN \"old_status\""
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_index_reconcile_adds_composite_index_to_existing_table[sqlite]": {
+    "statements": [
+      "'idxcompmodel': CREATE INDEX IF NOT EXISTS \"idx_idxcompmodel_col_a_col_b\" ON \"idxcompmodel\" (\"col_a\", \"col_b\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_index_reconcile_adds_single_column_index_to_existing_column[sqlite]": {
+    "statements": [
+      "'idxsinglemodel': CREATE INDEX IF NOT EXISTS \"idx_idxsinglemodel_status\" ON \"idxsinglemodel\" (\"status\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_index_reconcile_destructive_drops_removed_composite_index[sqlite]": {
+    "statements": [
+      "'idxdropmodel': CREATE TABLE IF NOT EXISTS \"idxdropmodel\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"p\" integer NOT NULL, \"q\" integer NOT NULL )",
+      "'idxdropmodel': CREATE INDEX IF NOT EXISTS \"idx_idxdropmodel_p_q\" ON \"idxdropmodel\" (\"p\", \"q\")",
+      "'idxdropmodel': DROP INDEX IF EXISTS \"idx_idxdropmodel_p_q\""
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_index_reconcile_noop_when_index_already_present[sqlite]": {
+    "statements": [
+      "'idxnoopmodel': CREATE TABLE IF NOT EXISTS \"idxnoopmodel\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"x\" integer NOT NULL, \"y\" integer NOT NULL )",
+      "'idxnoopmodel': CREATE INDEX IF NOT EXISTS \"idx_idxnoopmodel_x_y\" ON \"idxnoopmodel\" (\"x\", \"y\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_index_reconcile_user_index_survives_auto_migrate[sqlite]": {
+    "statements": [
+      "'idxusermodel': CREATE TABLE IF NOT EXISTS \"idxusermodel\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"m\" integer NOT NULL, \"n\" integer NOT NULL )",
+      "'idxusermodel': CREATE INDEX IF NOT EXISTS \"idx_idxusermodel_m_n\" ON \"idxusermodel\" (\"m\", \"n\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_json_factory_default_backfills_existing_rows[sqlite]": {
+    "statements": [
+      "'migturns': ALTER TABLE \"migturns\" ADD COLUMN \"turns\" JSON NOT NULL DEFAULT '{}'"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_json_factory_is_not_a_create_table_server_default[sqlite]": {
+    "statements": [
+      "'migfreshturns': CREATE TABLE IF NOT EXISTS \"migfreshturns\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"turns\" JSON NOT NULL )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_json_static_object_default_backfills_existing_rows[sqlite]": {
+    "statements": [
+      "'migflags': ALTER TABLE \"migflags\" ADD COLUMN \"flags\" JSON NOT NULL DEFAULT '{}'"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_m2m_join_table_created_during_auto_migrate[sqlite]": {
+    "statements": [
+      "'actor': CREATE TABLE IF NOT EXISTS \"actor\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'movie': CREATE TABLE IF NOT EXISTS \"movie\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"title\" varchar NOT NULL )",
+      "'actor_movies': CREATE TABLE IF NOT EXISTS \"actor_movies\" ( \"actor_id\" integer NOT NULL, \"movie_id\" integer NOT NULL, CONSTRAINT \"fk_actor_movies_actor_id_actor\" FOREIGN KEY (\"actor_id\") REFERENCES \"actor\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_actor_movies_movie_id_movie\" FOREIGN KEY (\"movie_id\") REFERENCES \"movie\" (\"id\") ON DELETE CASCADE )",
+      "'actor_movies': CREATE INDEX IF NOT EXISTS \"idx_actor_movies_movie_id_actor_id\" ON \"actor_movies\" (\"movie_id\", \"actor_id\")",
+      "'actor_movies': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_actor_movies_actor_id_movie_id\" ON \"actor_movies\" (\"actor_id\", \"movie_id\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_manual_migrate_on_live_pool_refreshes_cached_statements[sqlite]": {
+    "statements": [
+      "'migreport': ALTER TABLE \"migreport\" ADD COLUMN \"summary\" varchar"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_destructive_drops_removed_columns[sqlite]": {
+    "statements": [
+      "'migslim': ALTER TABLE \"migslim\" DROP COLUMN \"legacy_notes\""
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_adds_columns_before_composite_unique_referencing_them[sqlite]": {
+    "statements": [
+      "'provtxn': CREATE TABLE IF NOT EXISTS \"provtxn\" ( \"account_id\" integer NOT NULL, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT )",
+      "'provtxn': ALTER TABLE \"provtxn\" ADD COLUMN \"pending\" integer NOT NULL DEFAULT FALSE",
+      "'provtxn': ALTER TABLE \"provtxn\" ADD COLUMN \"provider_transaction_id\" varchar",
+      "'provtxn': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_provtxn_account_id_provider_transaction_id\" ON \"provtxn\" (\"account_id\", \"provider_transaction_id\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_adds_missing_columns_and_hydrates[sqlite]": {
+    "statements": [
+      "'miginvoice': ALTER TABLE \"miginvoice\" ADD COLUMN \"memo\" varchar",
+      "'miginvoice': ALTER TABLE \"miginvoice\" ADD COLUMN \"paid_date\" DATE"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_rebuilds_an_invalid_index[sqlite]": {
+    "statements": [
+      "'vfauthor': CREATE TABLE IF NOT EXISTS \"vfauthor\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'vfpost': CREATE TABLE IF NOT EXISTS \"vfpost\" ( \"author_id\" integer, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"slug\" varchar, \"title\" varchar, CONSTRAINT \"fk_vfpost_author_id_vfauthor\" FOREIGN KEY (\"author_id\") REFERENCES \"vfauthor\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"ck_vfpost_title_set\" CHECK (\"title\" IS NOT NULL) )",
+      "'vfpost': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_vfpost_slug\" ON \"vfpost\" (\"slug\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_validates_a_not_valid_constraint_in_place[sqlite-ck_vfpost_title_set]": {
+    "statements": [
+      "'vfauthor': CREATE TABLE IF NOT EXISTS \"vfauthor\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'vfpost': CREATE TABLE IF NOT EXISTS \"vfpost\" ( \"author_id\" integer, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"slug\" varchar, \"title\" varchar, CONSTRAINT \"fk_vfpost_author_id_vfauthor\" FOREIGN KEY (\"author_id\") REFERENCES \"vfauthor\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"ck_vfpost_title_set\" CHECK (\"title\" IS NOT NULL) )",
+      "'vfpost': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_vfpost_slug\" ON \"vfpost\" (\"slug\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_validates_a_not_valid_constraint_in_place[sqlite-fk_vfpost_author_id_vfauthor]": {
+    "statements": [
+      "'vfauthor': CREATE TABLE IF NOT EXISTS \"vfauthor\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'vfpost': CREATE TABLE IF NOT EXISTS \"vfpost\" ( \"author_id\" integer, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"slug\" varchar, \"title\" varchar, CONSTRAINT \"fk_vfpost_author_id_vfauthor\" FOREIGN KEY (\"author_id\") REFERENCES \"vfauthor\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"ck_vfpost_title_set\" CHECK (\"title\" IS NOT NULL) )",
+      "'vfpost': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_vfpost_slug\" ON \"vfpost\" (\"slug\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_self_fk_does_not_evict_component_from_create_order[sqlite]": {
+    "statements": [
+      "'zorderednode': CREATE TABLE IF NOT EXISTS \"zorderednode\" ( \"id\" CHAR(32) NOT NULL PRIMARY KEY, \"parent_id\" CHAR(32), CONSTRAINT \"fk_zorderednode_parent_id_zorderednode\" FOREIGN KEY (\"parent_id\") REFERENCES \"zorderednode\" (\"id\") ON DELETE CASCADE )",
+      "'aorderedref': CREATE TABLE IF NOT EXISTS \"aorderedref\" ( \"id\" CHAR(32) NOT NULL PRIMARY KEY, \"node_id\" CHAR(32) NOT NULL, CONSTRAINT \"fk_aorderedref_node_id_zorderednode\" FOREIGN KEY (\"node_id\") REFERENCES \"zorderednode\" (\"id\") ON DELETE CASCADE )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_sqlite_bytes_field_does_not_false_positive_blob_drift[sqlite]": {
+    "statements": [
+      "'document': CREATE TABLE IF NOT EXISTS \"document\" ( \"data\" blob NOT NULL, \"id\" CHAR(32) NOT NULL PRIMARY KEY, \"name\" varchar NOT NULL )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_sqlite_create_carries_the_named_inline_db_check[sqlite]": {
+    "statements": [
+      "'checkedorder': CREATE TABLE IF NOT EXISTS \"checkedorder\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" text NOT NULL CONSTRAINT \"ck_checkedorder_status\" CHECK (\"status\" IN ('open', 'shipped')) )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_sqlite_fk_on_delete_drift_warns_loudly[sqlite]": {
+    "statements": [
+      "'fkwarnconn': CREATE TABLE IF NOT EXISTS \"fkwarnconn\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'fkwarnaccount': CREATE TABLE IF NOT EXISTS \"fkwarnaccount\" ( \"connection_id\" integer, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, CONSTRAINT \"fk_fkwarnaccount_connection_id_fkwarnconn\" FOREIGN KEY (\"connection_id\") REFERENCES \"fkwarnconn\" (\"id\") ON DELETE CASCADE )"
+    ],
+    "warnings": [
+      "Foreign key on 'fkwarnaccount.connection_id' declares on_delete SET NULL but the live constraint enforces CASCADE; SQLite cannot alter constraints in place, so the live behavior remains. Generate a reviewed migration with `ferro migrate new` to apply the declared action."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_sqlite_genuine_text_to_blob_diff_still_warns[sqlite]": {
+    "statements": [],
+    "warnings": [
+      "Column 'attachment.payload' is declared 'text' in the database but the model expects 'blob'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_sqlite_migrate_updates_adds_a_db_check_column_with_its_inline_check[sqlite]": {
+    "statements": [
+      "'parcel': CREATE TABLE IF NOT EXISTS \"parcel\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"label\" varchar NOT NULL )",
+      "'parcel': ALTER TABLE \"parcel\" ADD COLUMN \"size\" text CONSTRAINT \"ck_parcel_size\" CHECK (\"size\" IN ('small', 'large'))"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references[sqlite]": {
+    "statements": [
+      "'author': CREATE TABLE IF NOT EXISTS \"author\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'book': CREATE TABLE IF NOT EXISTS \"book\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"title\" varchar NOT NULL )",
+      "'book': ALTER TABLE \"book\" ADD COLUMN \"author_id\" integer REFERENCES \"author\"(\"id\") ON DELETE CASCADE"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_sqlite_type_drift_warns_and_leaves_column_untouched[sqlite]": {
+    "statements": [],
+    "warnings": [
+      "Column 'migdrift.count' is declared 'varchar' in the database but the model expects 'integer'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability[sqlite]": {
+    "statements": [
+      "'uuidactor': CREATE TABLE IF NOT EXISTS \"uuidactor\" ( \"id\" CHAR(32) NOT NULL PRIMARY KEY, \"name\" varchar NOT NULL )",
+      "'uuidmovie': CREATE TABLE IF NOT EXISTS \"uuidmovie\" ( \"id\" CHAR(32) NOT NULL PRIMARY KEY, \"title\" varchar NOT NULL )",
+      "'uuidactor_movies': CREATE TABLE IF NOT EXISTS \"uuidactor_movies\" ( \"uuidactor_id\" CHAR(32) NOT NULL, \"uuidmovie_id\" CHAR(32) NOT NULL, CONSTRAINT \"fk_uuidactor_movies_uuidactor_id_uuidactor\" FOREIGN KEY (\"uuidactor_id\") REFERENCES \"uuidactor\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_uuidactor_movies_uuidmovie_id_uuidmovie\" FOREIGN KEY (\"uuidmovie_id\") REFERENCES \"uuidmovie\" (\"id\") ON DELETE CASCADE )",
+      "'uuidactor_movies': CREATE INDEX IF NOT EXISTS \"idx_uuidactor_movies_uuidmovie_id_uuidactor_id\" ON \"uuidactor_movies\" (\"uuidmovie_id\", \"uuidactor_id\")",
+      "'uuidactor_movies': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_uuidactor_movies_uuidactor_id_uuidmovie_id\" ON \"uuidactor_movies\" (\"uuidactor_id\", \"uuidmovie_id\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_uuid_m2m_relationship_query_serializes_source_id[sqlite]": {
+    "statements": [
+      "'uuidpost': CREATE TABLE IF NOT EXISTS \"uuidpost\" ( \"id\" CHAR(32) NOT NULL PRIMARY KEY, \"title\" varchar NOT NULL )",
+      "'uuidtag': CREATE TABLE IF NOT EXISTS \"uuidtag\" ( \"id\" CHAR(32) NOT NULL PRIMARY KEY, \"name\" varchar NOT NULL )",
+      "'uuidpost_tags': CREATE TABLE IF NOT EXISTS \"uuidpost_tags\" ( \"uuidpost_id\" CHAR(32) NOT NULL, \"uuidtag_id\" CHAR(32) NOT NULL, CONSTRAINT \"fk_uuidpost_tags_uuidpost_id_uuidpost\" FOREIGN KEY (\"uuidpost_id\") REFERENCES \"uuidpost\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_uuidpost_tags_uuidtag_id_uuidtag\" FOREIGN KEY (\"uuidtag_id\") REFERENCES \"uuidtag\" (\"id\") ON DELETE CASCADE )",
+      "'uuidpost_tags': CREATE INDEX IF NOT EXISTS \"idx_uuidpost_tags_uuidtag_id_uuidpost_id\" ON \"uuidpost_tags\" (\"uuidtag_id\", \"uuidpost_id\")",
+      "'uuidpost_tags': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_uuidpost_tags_uuidpost_id_uuidtag_id\" ON \"uuidpost_tags\" (\"uuidpost_id\", \"uuidtag_id\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_uuid_pk_derived_drift_is_stable[sqlite]": {
+    "statements": [
+      "'uuiddriftmodel': CREATE TABLE IF NOT EXISTS \"uuiddriftmodel\" ( \"id\" CHAR(32) NOT NULL PRIMARY KEY, \"name\" varchar NOT NULL )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_uuid_pk_derived_second_pass_is_noop[sqlite]": {
+    "statements": [
+      "'uuidpkitem': CREATE TABLE IF NOT EXISTS \"uuidpkitem\" ( \"id\" CHAR(32) NOT NULL PRIMARY KEY, \"label\" varchar NOT NULL )"
+    ],
+    "warnings": []
+  }
+}

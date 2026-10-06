@@ -1,0 +1,10 @@
+{
+  "tests/test_row_security_create_pass.py::test_sqlite_registers_warns_and_skips_the_ddl[sqlite]": {
+    "statements": [
+      "'ledgerrow': CREATE TABLE IF NOT EXISTS \"ledgerrow\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"label\" varchar NOT NULL, \"ledger_id\" CHAR(32) NOT NULL )"
+    ],
+    "warnings": [
+      "Table 'ledgerrow' declares __ferro_rls__, but row-level security is a PostgreSQL-only feature: the table is created without its policies and rows are NOT filtered on SQLite. Run against PostgreSQL for enforcement."
+    ]
+  }
+}
