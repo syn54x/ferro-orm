@@ -220,10 +220,12 @@ def test_config_argument_wins_over_ferro_config(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     env_file = _write(
-        tmp_path / "env" / "ferro.toml", 'models = ["env.models"]\ndialects = ["sqlite"]\n'
+        tmp_path / "env" / "ferro.toml",
+        'models = ["env.models"]\ndialects = ["sqlite"]\n',
     )
     arg_file = _write(
-        tmp_path / "arg" / "ferro.toml", 'models = ["arg.models"]\ndialects = ["sqlite"]\n'
+        tmp_path / "arg" / "ferro.toml",
+        'models = ["arg.models"]\ndialects = ["sqlite"]\n',
     )
     monkeypatch.setenv("FERRO_CONFIG", str(env_file))
 
@@ -767,7 +769,9 @@ def test_import_models_puts_the_config_directory_first_on_sys_path(
             name: str
         """,
     )
-    _write(project / "ferro.toml", f'models = ["{pkg}.models"]\ndialects = ["sqlite"]\n')
+    _write(
+        project / "ferro.toml", f'models = ["{pkg}.models"]\ndialects = ["sqlite"]\n'
+    )
     sub = project / "deep"
     sub.mkdir()
     sys.path.insert(0, "/nonexistent-first")
@@ -841,7 +845,7 @@ def test_import_models_returns_only_the_models_its_database_claims(
 ):
     _package(
         project,
-        f"{pkg}.a.models",
+        f"{pkg}.a",
         "from ferro import Model\n\n"
         "class SettingsAlpha(Model):\n    id: int | None = None\n",
     )
@@ -919,7 +923,9 @@ def test_one_database_claims_every_registered_model(
         "from ferro import Model\n\n"
         "class SettingsLoner(Model):\n    id: int | None = None\n",
     )
-    _write(project / "ferro.toml", f'models = ["{pkg}.models"]\ndialects = ["sqlite"]\n')
+    _write(
+        project / "ferro.toml", f'models = ["{pkg}.models"]\ndialects = ["sqlite"]\n'
+    )
     sys.path.insert(0, str(project))
     loner = __import__(f"{pkg}.elsewhere", fromlist=["x"]).SettingsLoner
 
