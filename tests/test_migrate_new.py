@@ -173,11 +173,13 @@ def test_the_first_migration_renders_every_target_dialect_and_a_root_snapshot(
     pg_up = statements(migration / "01_schema.up.postgres.sql")
     assert pg_up[0].startswith("DO $$") and 'CREATE TYPE "status"' in pg_up[0]
     assert pg_up[1].startswith('CREATE TABLE IF NOT EXISTS "author"')
+    # A down drops what its up created, type after table, and is never marked
+    # destructive (ADR-0033: nearly every down of an add is a drop).
     assert (migration / "01_schema.down.postgres.sql").read_text() == (
-        '-- ferro: destructive\n\nDROP TABLE "author";\n\nDROP TYPE "status";\n'
+        'DROP TABLE "author";\n\nDROP TYPE "status";\n'
     )
     assert (migration / "01_schema.down.sqlite.sql").read_text() == (
-        '-- ferro: destructive\n\nDROP TABLE "author";\n'
+        'DROP TABLE "author";\n'
     )
     out = capsys.readouterr().out
     assert "migrations/0001_create_author/" in out
@@ -251,7 +253,13 @@ def test_dropping_a_model_drops_children_first_and_the_down_recreates_them(
         'DROP TYPE "kind"',
         'DROP TYPE "status"',
     ]
-    # The down recreates the dropped tables exactly as 0001's up created them.
+    # The down recreates the dropped tables exactly as 0001's up created them,
+    # empty: their rows are gone, so it is marked data-dependent.
+    assert (
+        (second / "01_schema.down.postgres.sql")
+        .read_text()
+        .startswith("-- ferro: data-dependent\n")
+    )
     down = statements(second / "01_schema.down.postgres.sql")
     assert down[:-1] == statements(first / "01_schema.up.postgres.sql")
     assert down[-1] == 'DROP TABLE "tag"'

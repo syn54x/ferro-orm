@@ -408,17 +408,22 @@ pub fn _write_record(
     })
 }
 
-/// Execute one planned SQL step (`sql` is the up file's text) and write its
-/// record (`record_json`, the plan's record with `ferro_version` set). With
-/// `lock`, the run lock behind that handle is verified first. Returns JSON
-/// `{"ok", "ms", "error", "message"}`.
+/// Execute one planned SQL step and settle its record. `direction_json` is
+/// the plan's direction (`{"direction": "up"}` or `{"direction": "down",
+/// "target": ...}`): going up `sql` is the up file's text and `record_json`
+/// the plan's record with `ferro_version` set, written when the step
+/// finishes; going down `sql` is the down file's text and `record_json` the
+/// standing record, removed in the down's transaction. With `lock`, the run
+/// lock behind that handle is verified first. Returns JSON `{"ok", "ms",
+/// "error", "message"}`.
 ///
 /// # Errors
 /// `RunRefused` when the lock was lost or the file changed since it was
 /// planned; a database error writing a record.
 #[pyfunction]
 #[pyo3(name = "_execute_sql_step")]
-#[pyo3(signature = (using, planned_step_json, sql, record_json, tracking_schema=None, lock=None))]
+#[pyo3(signature = (using, planned_step_json, sql, record_json, tracking_schema=None, lock=None, direction_json=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn _execute_sql_step(
     py: Python<'_>,
     using: Option<String>,
@@ -427,9 +432,14 @@ pub fn _execute_sql_step(
     record_json: String,
     tracking_schema: Option<String>,
     lock: Option<u64>,
+    direction_json: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let step: ferro_migrate::PlannedStep = parse_json(&planned_step_json, "planned_step_json")?;
     let record: ferro_migrate::StepRecord = parse_json(&record_json, "record_json")?;
+    let direction = match direction_json {
+        Some(json) => parse_json(&json, "direction_json")?,
+        None => ferro_migrate::Direction::Up,
+    };
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;
         if let Some(handle) = lock {
@@ -439,9 +449,15 @@ pub fn _execute_sql_step(
                 .verify()
                 .await?;
         }
-        let outcome =
-            crate::run::execute_sql_step(&engine, tracking_schema.as_deref(), &step, &sql, record)
-                .await?;
+        let outcome = crate::run::execute_sql_step(
+            &engine,
+            tracking_schema.as_deref(),
+            &step,
+            &sql,
+            record,
+            direction,
+        )
+        .await?;
         to_json(&outcome)
     })
 }
