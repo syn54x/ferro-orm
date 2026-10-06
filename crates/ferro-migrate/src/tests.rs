@@ -3371,6 +3371,121 @@ fn live_labels_come_from_the_facts_and_extras_only_warn() {
     assert!(plan.warnings[0].contains("'legacy'"));
 }
 
+/// Two new tables, each introducing its own enum type: every type is created
+/// first, by type name, then the tables in dependency order — the sequence
+/// the create pass executes too (#518; AGENTS.md § I-12).
+#[test]
+fn new_tables_create_every_enum_type_first_by_name_then_the_tables() {
+    let enum_col = |name: &str, type_name: &str, labels: &[&str]| SchemaColumn {
+        enum_values: Some(labels.iter().map(|l| serde_json::json!(l)).collect()),
+        enum_type_name: Some(type_name.to_string()),
+        db_type: None,
+        ..col(name, "text", false)
+    };
+    let author = schema_model(
+        "author",
+        vec![
+            pk_col("id", "int"),
+            enum_col("status", "status", &["draft", "live"]),
+        ],
+    );
+    let post = SchemaModel {
+        foreign_keys: vec![SchemaForeignKey {
+            column: "author_id".to_string(),
+            to_table: "author".to_string(),
+            to_column: "id".to_string(),
+            on_delete: None,
+            name: None,
+        }],
+        ..schema_model(
+            "post",
+            vec![
+                pk_col("id", "int"),
+                col("author_id", "int", false),
+                enum_col("kind", "kind", &["note", "essay"]),
+            ],
+        )
+    };
+    // Child declared first: the planner, not declaration order, decides.
+    let new_ir = envelope(vec![post.clone(), author.clone()]);
+    let old_ir = empty_envelope();
+    let plan = plan_from_ir(
+        &old_ir,
+        &new_ir,
+        Dialect::Postgres,
+        &LiveFacts::declared(),
+        PlanOptions::default(),
+    );
+    let statements = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres)
+        .expect("render")
+        .statements;
+    let shape: Vec<String> = statements
+        .iter()
+        .map(|sql| {
+            if sql.contains("CREATE TYPE \"kind\"") {
+                "type kind".to_string()
+            } else if sql.contains("CREATE TYPE \"status\"") {
+                "type status".to_string()
+            } else {
+                sql.split('(').next().unwrap_or_default().trim().to_string()
+            }
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            "type kind",
+            "type status",
+            "CREATE TABLE IF NOT EXISTS \"author\"",
+            "CREATE TABLE IF NOT EXISTS \"post\"",
+        ],
+        "{statements:#?}"
+    );
+}
+
+/// A declared unique lives in `uniques`, not `indexes`; planning two
+/// identical declared snapshots must read it on both sides, or every
+/// `unique=True` column is a phantom `AddIndex` (#518).
+#[test]
+fn identical_snapshots_with_a_unique_column_plan_nothing() {
+    let model = SchemaModel {
+        uniques: vec![SchemaUnique {
+            name: "uq_author_name".to_string(),
+            columns: vec!["name".to_string()],
+        }],
+        indexes: vec![SchemaIndex {
+            name: "idx_author_email".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+        }],
+        ..schema_model(
+            "author",
+            vec![
+                pk_col("id", "int"),
+                col_with_flags("name", "varchar", false, true, false, None),
+                col_with_flags("email", "varchar", false, false, true, None),
+            ],
+        )
+    };
+    let snapshot = envelope(vec![model]);
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        for destructive in [false, true] {
+            let plan = plan_from_ir(
+                &snapshot,
+                &snapshot,
+                dialect,
+                &LiveFacts::declared(),
+                PlanOptions { destructive },
+            );
+            assert!(
+                plan.operations.is_empty(),
+                "{dialect:?} destructive={destructive}: {:?}",
+                plan.operations
+            );
+        }
+    }
+}
+
 #[test]
 fn identical_snapshots_with_checks_policies_and_types_plan_nothing() {
     let mut model = ledgerrow_model_with_row_security(true);
