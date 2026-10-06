@@ -272,7 +272,10 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: Dialect) -> Vec<String> {
                 sql.push(format!("-- index '{}' handled by emit_sql_with_ir", name));
             }
             MigrationOp::ValidateConstraint { name, .. } => {
-                sql.push(format!("-- constraint '{}' handled by emit_sql_with_ir", name));
+                sql.push(format!(
+                    "-- constraint '{}' handled by emit_sql_with_ir",
+                    name
+                ));
             }
             MigrationOp::DropIndex { name, .. } => {
                 sql.push(format!("-- index '{}' handled by emit_sql_with_ir", name));

@@ -53,6 +53,11 @@ pub struct LiveIndex {
     pub columns: Vec<String>,
     #[serde(default)]
     pub unique: bool,
+    /// Postgres `pg_index.indisvalid`; always `true` on SQLite. An invalid
+    /// index (the leftover of a failed concurrent build) is present but never
+    /// used — drift the pass rebuilds (ADR-0044).
+    #[serde(default = "serde_default_true")]
+    pub valid: bool,
 }
 
 /// Ferro emits standalone indexes as `idx_<table>_<cols>` and uniques as
@@ -64,8 +69,9 @@ pub(crate) fn is_ferro_index_name(name: &str) -> bool {
 /// One live CHECK constraint on a table, normalized across backends.
 ///
 /// `definition` is the catalog rendering: Postgres `pg_get_constraintdef`
-/// (`CHECK (...)`), SQLite the inline `CHECK (...)` fragment from
-/// `sqlite_master.sql`. Returned as-is — body-drift normalization is #344.
+/// (`CHECK (...)`, with a trailing ` NOT VALID` when unvalidated), SQLite the
+/// inline `CHECK (...)` fragment from `sqlite_master.sql`. Returned as-is —
+/// body-drift normalization is #344.
 ///
 /// `ferro_owned` is true when the constraint name follows the `ck_*`
 /// convention; user-owned CHECKs are included so reconciliation can skip them.
@@ -75,6 +81,10 @@ pub struct LiveCheck {
     pub definition: String,
     #[serde(default)]
     pub ferro_owned: bool,
+    /// Postgres `pg_constraint.convalidated`; always `true` on SQLite. A
+    /// `NOT VALID` check is drift the pass validates in place (ADR-0043).
+    #[serde(default = "serde_default_true")]
+    pub validated: bool,
 }
 
 /// Ferro emits table and column CHECKs as `ck_<table>_<suffix>`. Reconciliation
@@ -105,6 +115,10 @@ pub struct LiveForeignKey {
     /// `ON DELETE` action in the declared-IR vocabulary: `CASCADE`,
     /// `SET NULL`, `SET DEFAULT`, `RESTRICT`, `NO ACTION`.
     pub on_delete: String,
+    /// Postgres `pg_constraint.convalidated`; always `true` on SQLite. A
+    /// `NOT VALID` foreign key is drift the pass validates in place (ADR-0043).
+    #[serde(default = "serde_default_true")]
+    pub validated: bool,
 }
 
 /// Map `pg_constraint.confdeltype` to the declared-IR action vocabulary.
@@ -291,6 +305,8 @@ async fn sqlite_table_foreign_keys(
                 on_delete: row_string(row, "on_delete")
                     .unwrap_or_else(|| "NO ACTION".to_string())
                     .to_uppercase(),
+                // SQLite has no unvalidated constraints.
+                validated: true,
             })
         })
         .collect())
@@ -307,6 +323,7 @@ async fn postgres_table_foreign_keys(
             rel_f.relname::text AS to_table,
             dst.attname::text AS to_column,
             con.confdeltype::text AS on_delete,
+            con.convalidated AS validated,
             array_length(con.conkey, 1)::bigint AS n_cols
         FROM pg_constraint con
         JOIN pg_class rel ON rel.oid = con.conrelid
@@ -337,6 +354,7 @@ async fn postgres_table_foreign_keys(
                 to_table: row_string(row, "to_table")?,
                 to_column: row_string(row, "to_column").unwrap_or_default(),
                 on_delete: fk_action_from_confdeltype(&row_string(row, "on_delete")?)?.to_string(),
+                validated: row_bool(row, "validated"),
             })
         })
         .collect())
@@ -491,7 +509,14 @@ async fn sqlite_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<Ve
             .map_err(|e| introspection_error("PRAGMA index_info", table, e))?;
         // PRAGMA index_info returns rows in `seqno` order already.
         let columns: Vec<String> = col_rows.iter().filter_map(|r| row_string(r, "name")).collect();
-        out.push(LiveIndex { name, columns, unique });
+        // SQLite has no invalid indexes: `CREATE INDEX` either completes or
+        // leaves nothing behind.
+        out.push(LiveIndex {
+            name,
+            columns,
+            unique,
+            valid: true,
+        });
     }
     Ok(out)
 }
@@ -501,6 +526,7 @@ async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<
     let sql = r#"
         SELECT cl.relname::text AS index_name,
                i.indisunique     AS is_unique,
+               i.indisvalid      AS is_valid,
                a.attname::text   AS column_name,
                array_position(i.indkey::smallint[], a.attnum) AS pos
         FROM pg_index i
@@ -526,10 +552,16 @@ async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<
             continue;
         }
         let unique = row_bool(row, "is_unique");
+        let valid = row_bool(row, "is_valid");
         let Some(column) = row_string(row, "column_name") else { continue };
         match out.last_mut() {
             Some(last) if last.name == name => last.columns.push(column),
-            _ => out.push(LiveIndex { name, columns: vec![column], unique }),
+            _ => out.push(LiveIndex {
+                name,
+                columns: vec![column],
+                unique,
+                valid,
+            }),
         }
     }
     Ok(out)
@@ -564,6 +596,8 @@ async fn sqlite_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec
             ferro_owned: is_ferro_check_name(&name),
             name,
             definition,
+            // SQLite has no unvalidated constraints.
+            validated: true,
         })
         .collect())
 }
@@ -571,7 +605,8 @@ async fn sqlite_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec
 async fn postgres_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveCheck>> {
     let sql = r#"
         SELECT con.conname::text AS name,
-               pg_get_constraintdef(con.oid)::text AS definition
+               pg_get_constraintdef(con.oid)::text AS definition,
+               con.convalidated AS validated
         FROM pg_constraint con
         JOIN pg_class rel ON rel.oid = con.conrelid
         JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
@@ -594,6 +629,7 @@ async fn postgres_table_checks(engine: &EngineHandle, table: &str) -> PyResult<V
                 ferro_owned: is_ferro_check_name(&name),
                 name,
                 definition,
+                validated: row_bool(row, "validated"),
             })
         })
         .collect())

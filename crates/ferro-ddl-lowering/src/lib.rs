@@ -1046,11 +1046,10 @@ pub struct CheckRebuildEmission {
 /// its own field (`pg_constraint.convalidated`) and its own op
 /// (`VALIDATE CONSTRAINT`, [`render_validate_constraint`]); ADR-0043.
 pub fn normalize_check_definition(definition: &str) -> String {
-    let tokens = flatten_associative_chains(unwrap_outer_parens(strip_pg_in_any(
-        strip_type_casts(strip_trailing_not_valid(strip_leading_check(
-            tokenize_check_sql(definition),
-        ))),
-    )));
+    let tokens =
+        flatten_associative_chains(unwrap_outer_parens(strip_pg_in_any(strip_type_casts(
+            strip_trailing_not_valid(strip_leading_check(tokenize_check_sql(definition))),
+        ))));
     render_check_tokens(&tokens)
 }
 

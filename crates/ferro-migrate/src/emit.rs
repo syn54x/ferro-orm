@@ -836,13 +836,24 @@ pub fn emit_sql_with_ir(
             // ADR-0044: an invalid index is present (so `IF NOT EXISTS` would
             // skip it) but never used. Drop it by name — it is known to exist —
             // then run the exact create statement the `AddIndex` path renders.
-            MigrationOp::RebuildIndex { table, name, columns, unique } => {
-                result.statements.push(format!("DROP INDEX {}", quote_ident(name)));
-                result.statements.push(render_index_sql(table, name, columns, *unique, dialect));
+            MigrationOp::RebuildIndex {
+                table,
+                name,
+                columns,
+                unique,
+            } => {
+                result
+                    .statements
+                    .push(format!("DROP INDEX {}", quote_ident(name)));
+                result
+                    .statements
+                    .push(render_index_sql(table, name, columns, *unique, dialect));
             }
             MigrationOp::ValidateConstraint { table, name } => match dialect {
                 Dialect::Postgres => {
-                    result.statements.push(render_validate_constraint(table, name));
+                    result
+                        .statements
+                        .push(render_validate_constraint(table, name));
                 }
                 Dialect::Sqlite => {
                     return Err(EmissionError {

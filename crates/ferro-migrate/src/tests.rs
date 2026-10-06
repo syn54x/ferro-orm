@@ -2831,15 +2831,17 @@ fn plan_index_rebuilds_rebuilds_a_declared_index_that_exists_invalid() {
 #[test]
 fn plan_index_rebuilds_is_a_noop_for_valid_absent_or_undeclared_indexes() {
     let new_ir = envelope(vec![post_model_with_constraints()]);
-    assert!(plan_index_rebuilds(
-        "post",
-        &new_ir,
-        &[
-            index_validity("idx_post_author_id_title", true),
-            index_validity("uq_post_slug", true),
-        ],
-    )
-    .is_empty());
+    assert!(
+        plan_index_rebuilds(
+            "post",
+            &new_ir,
+            &[
+                index_validity("idx_post_author_id_title", true),
+                index_validity("uq_post_slug", true),
+            ],
+        )
+        .is_empty()
+    );
     assert!(plan_index_rebuilds("post", &new_ir, &[]).is_empty());
     assert!(
         plan_index_rebuilds("post", &new_ir, &[index_validity("idx_post_legacy", false)])
@@ -2916,18 +2918,26 @@ fn emit_rebuild_index_drops_then_runs_the_add_index_create_statement() {
         }],
         warnings: vec![],
     };
-    let created = emit_sql_with_ir(&add, &empty_envelope(), &empty_envelope(), Dialect::Postgres)
-        .unwrap()
-        .statements;
-    let rebuilt =
-        emit_sql_with_ir(&rebuild, &empty_envelope(), &empty_envelope(), Dialect::Postgres)
-            .unwrap();
+    let created = emit_sql_with_ir(
+        &add,
+        &empty_envelope(),
+        &empty_envelope(),
+        Dialect::Postgres,
+    )
+    .unwrap()
+    .statements;
+    let rebuilt = emit_sql_with_ir(
+        &rebuild,
+        &empty_envelope(),
+        &empty_envelope(),
+        Dialect::Postgres,
+    )
+    .unwrap();
     assert_eq!(
         rebuilt.statements,
         vec![
             "DROP INDEX \"uq_post_slug\"".to_string(),
-            "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_post_slug\" ON \"post\" (\"slug\")"
-                .to_string(),
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_post_slug\" ON \"post\" (\"slug\")".to_string(),
         ]
     );
     assert_eq!(
