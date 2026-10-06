@@ -276,6 +276,60 @@ def test_a_selected_pyproject_without_tool_ferro_is_refused(
     assert str(chosen) in str(exc.value)
 
 
+def test_a_selected_file_of_any_name_carrying_tool_ferro_reads_that_table(
+    project: Path, tmp_path: Path
+):
+    chosen = _write(
+        tmp_path / "ci" / "ci.toml",
+        """
+        [tool.ferro]
+        models   = ["ci.models"]
+        dialects = ["postgres"]
+        """,
+    )
+
+    assert FerroSettings(config=chosen).database().models == ["ci.models"]
+
+
+def test_ferro_config_naming_a_pyproject_in_the_top_level_shape_reads_it(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    chosen = _write(
+        tmp_path / "deploy" / "pyproject.toml",
+        'models = ["deploy.models"]\ndialects = ["sqlite"]\n',
+    )
+    monkeypatch.setenv("FERRO_CONFIG", str(chosen))
+
+    db = FerroSettings().database()
+
+    assert db.models == ["deploy.models"]
+    assert db.directory == chosen.parent / "migrations"
+
+
+def test_a_file_carrying_both_shapes_is_refused_naming_both(
+    project: Path, tmp_path: Path
+):
+    chosen = _write(
+        tmp_path / "both" / "ci.toml",
+        """
+        models   = ["top.models"]
+        dialects = ["sqlite"]
+
+        [tool.ferro]
+        models   = ["tool.models"]
+        dialects = ["sqlite"]
+        """,
+    )
+
+    with pytest.raises(SettingsError) as exc:
+        FerroSettings(config=chosen)
+
+    message = str(exc.value)
+    assert "[tool.ferro]" in message
+    assert "`models`" in message and "`dialects`" in message
+    assert str(chosen) in message
+
+
 def test_environment_never_overrides_a_field(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -974,6 +1028,95 @@ def test_a_foreign_key_across_two_databases_is_refused_naming_both(
     gizmo = sys.modules[f"{pkg}.a"].SettingsGizmo
     with pytest.raises(SettingsError):
         settings.database_for(gizmo)
+
+
+def test_a_forward_reference_foreign_key_across_two_databases_is_refused_naming_both(
+    project: Path, pkg: str, isolated_imports, clean_registry
+):
+    # Database `a` names its target by string and never imports `b`'s module,
+    # so the target is only found once every configured module is imported.
+    _package(
+        project,
+        f"{pkg}.b",
+        """
+        from ferro import BackRef, Model
+        from ferro.query import Relation
+
+        class SettingsCustomer(Model):
+            id: int | None = None
+            invoices: Relation[list["SettingsInvoice"]] = BackRef()
+        """,
+    )
+    _package(
+        project,
+        f"{pkg}.a",
+        """
+        from typing import Annotated
+
+        from ferro import ForeignKey, Model
+
+        class SettingsInvoice(Model):
+            id: int | None = None
+            customer: Annotated["SettingsCustomer", ForeignKey(related_name="invoices")]
+        """,
+    )
+    _two_databases(project, pkg)
+    settings = FerroSettings()
+
+    with pytest.raises(SettingsError) as exc:
+        settings.database("a").import_models()
+
+    message = str(exc.value)
+    assert "`a`" in message and "`b`" in message
+    assert "SettingsInvoice" in message and "SettingsCustomer" in message
+    assert "no configured module" not in message
+
+    invoice = sys.modules[f"{pkg}.a"].SettingsInvoice
+    with pytest.raises(SettingsError) as exc:
+        settings.database_for(invoice)
+    assert "`a`" in str(exc.value) and "`b`" in str(exc.value)
+
+
+def test_a_forward_reference_no_configured_module_defines_is_refused(
+    project: Path, pkg: str, isolated_imports, clean_registry
+):
+    _package(
+        project,
+        f"{pkg}.a",
+        """
+        from typing import Annotated
+
+        from ferro import ForeignKey, Model
+
+        class SettingsOrphanRef(Model):
+            id: int | None = None
+            ghost: Annotated["SettingsGhost", ForeignKey(related_name="refs")]
+        """,
+    )
+    _package(project, f"{pkg}.b", "")
+    _two_databases(project, pkg)
+
+    with pytest.raises(SettingsError) as exc:
+        FerroSettings().database("a").import_models()
+
+    message = str(exc.value)
+    assert "SettingsGhost" in message
+    assert "no configured module defines it" in message
+
+
+def test_import_models_that_register_nothing_is_refused(
+    project: Path, pkg: str, isolated_imports, clean_registry
+):
+    _package(project, f"{pkg}.empty", "VALUE = 1\n")
+    _write(project / "ferro.toml", f'models = ["{pkg}.empty"]\ndialects = ["sqlite"]\n')
+
+    with pytest.raises(SettingsError) as exc:
+        FerroSettings().database().import_models()
+
+    message = str(exc.value)
+    assert "models" in message
+    assert f"{pkg}.empty" in message
+    assert "drop" in message
 
 
 def test_a_model_claimed_by_two_databases_may_be_shared(
