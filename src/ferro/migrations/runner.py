@@ -398,7 +398,7 @@ async def _plan_down(
     """The planned down steps, or the refusal, against the records as they
     stand now."""
     state = json.loads(
-        await _core._read_records(name, _tracking_schema(database, dialect))
+        await _core._read_records(name, tracking_schema_for(database, dialect))
     )
     if state["refusal"] is not None:
         return [], state["refusal"]
@@ -444,7 +444,7 @@ async def plan_down(
     del settings
     direction = parse_target(target, all=all)
     async with _connection(database, using, url) as name:
-        dialect = _dialect(name, database)
+        dialect = connection_dialect(name, database)
         return _down_plan(*await _plan_down(name, database, dialect, direction))
 
 
@@ -485,8 +485,8 @@ async def down(
     report = RunReport()
     say = progress or (lambda _line: None)
     async with _connection(database, using, url) as name:
-        dialect = _dialect(name, database)
-        tracking = _tracking_schema(database, dialect)
+        dialect = connection_dialect(name, database)
+        tracking = tracking_schema_for(database, dialect)
         seen, refusal = await _plan_down(name, database, dialect, direction)
         if refusal is not None:
             report.refusal = refusal
