@@ -8,15 +8,18 @@
 //! target modelset ──plan_from_ir──▶ down ops ──render_plan──▶ 01_schema.down.<dialect>.sql
 //! ```
 //!
-//! The down is the same planner run backwards (target → parent), so a
-//! dropped model's down recreates it from the parent snapshot exactly as a
-//! new model's up creates it. Every statement comes from [`render_plan`]: the
+//! The down is the same planner run backwards (target → parent), restricted
+//! to what each step touches ([`downs::render_down`]), so a dropped model's
+//! down recreates it from the parent snapshot exactly as a new model's up
+//! creates it. Every statement comes from [`render_plan`]: the
 //! generator decides which step an op lands in and which headers the file
 //! carries, never a statement (AGENTS.md § I-1).
 //!
 //! This slice generates new and dropped models (their tables, the enum types
 //! they introduce or retire, and everything a `CREATE TABLE` carries). Every
 //! other change is refused naming the ticket that generates it.
+
+pub mod downs;
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
 use crate::snapshot::{Snapshot, SnapshotError};
@@ -257,45 +260,25 @@ fn step_text(headers: &Headers, statements: &[String]) -> String {
     out
 }
 
-fn removes_something(ops: &[&MigrationOp]) -> bool {
-    ops.iter().any(|op| {
-        matches!(
-            op,
-            MigrationOp::DropTable { .. } | MigrationOp::DropEnumType { .. }
-        )
-    })
-}
-
-/// One direction of one step on one dialect: the headers and the file text.
-fn render_file(
+/// Every warning rendering `plan` raises on `dialect` (a backend limitation
+/// a dialect skips, such as row security on SQLite), each once, into
+/// `warnings`.
+fn render_warnings(
     plan: &MigrationPlan,
-    phase: Phase,
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     warnings: &mut Vec<String>,
-) -> Result<(Headers, String), GenerateError> {
-    let mut statements = Vec::new();
-    let mut ops = Vec::new();
-    for rendered in render_plan(plan, old, new, dialect)? {
-        if phase_of(&rendered.op)? != phase {
-            continue;
+) -> Result<(), GenerateError> {
+    for warning in render_plan(plan, old, new, dialect)?
+        .into_iter()
+        .flat_map(|rendered| rendered.warnings)
+    {
+        if !warnings.contains(&warning) {
+            warnings.push(warning);
         }
-        statements.extend(rendered.statements);
-        for warning in rendered.warnings {
-            if !warnings.contains(&warning) {
-                warnings.push(warning);
-            }
-        }
-        ops.push(rendered.op);
     }
-    let headers = Headers {
-        destructive: !statements.is_empty() && removes_something(&ops.iter().collect::<Vec<_>>()),
-        not_applicable: statements.is_empty(),
-        ..Headers::default()
-    };
-    let text = step_text(&headers, &statements);
-    Ok((headers, text))
+    Ok(())
 }
 
 /// The short name of a model (`Author` for `myapp.models.Author`).
@@ -400,22 +383,22 @@ pub fn generate(
         .map(phase_of)
         .collect::<Result<_, _>>()?;
     let mut warnings = Vec::new();
+    for (&dialect, up) in dialects.iter().zip(&ups) {
+        render_warnings(up, parent_ir, target, dialect, &mut warnings)?;
+    }
     let mut steps = Vec::new();
     for (ordinal, phase) in (1u8..).zip(phases) {
         let mut renderings = BTreeMap::new();
-        for ((&dialect, up), down) in dialects.iter().zip(&ups).zip(&downs) {
-            let (headers, up_text) =
-                render_file(up, phase, parent_ir, target, dialect, &mut warnings)?;
-            let (down_headers, down_text) =
-                render_file(down, phase, target, parent_ir, dialect, &mut warnings)?;
+        for (&dialect, up) in dialects.iter().zip(&ups) {
+            let mut step_ops = Vec::new();
+            for op in &up.operations {
+                if phase_of(op)? == phase {
+                    step_ops.push(op.clone());
+                }
+            }
             renderings.insert(
                 StepDialect::from(dialect),
-                Rendering {
-                    up: up_text,
-                    down: down_text,
-                    headers,
-                    down_headers,
-                },
+                downs::render_down(&step_ops, parent_ir, target, dialect)?,
             );
         }
         steps.push(GeneratedStep {
@@ -524,7 +507,7 @@ mod tests {
 
     const BOTH: [Dialect; 2] = [Dialect::Postgres, Dialect::Sqlite];
 
-    fn ir(models: Vec<SchemaModel>) -> IrEnvelope<SchemaIrPayload> {
+    pub(super) fn ir(models: Vec<SchemaModel>) -> IrEnvelope<SchemaIrPayload> {
         IrEnvelope {
             ir_kind: "schema".into(),
             ir_version: 1,
@@ -535,7 +518,7 @@ mod tests {
         }
     }
 
-    fn column(name: &str, logical_type: &str) -> SchemaColumn {
+    pub(super) fn column(name: &str, logical_type: &str) -> SchemaColumn {
         SchemaColumn {
             name: name.into(),
             logical_type: logical_type.into(),
@@ -554,7 +537,7 @@ mod tests {
         }
     }
 
-    fn pk() -> SchemaColumn {
+    pub(super) fn pk() -> SchemaColumn {
         SchemaColumn {
             primary_key: true,
             autoincrement: true,
@@ -570,7 +553,7 @@ mod tests {
         }
     }
 
-    fn model(name: &str, columns: Vec<SchemaColumn>) -> SchemaModel {
+    pub(super) fn model(name: &str, columns: Vec<SchemaColumn>) -> SchemaModel {
         SchemaModel {
             model_name: format!("myapp.models.{name}"),
             table_name: name.to_lowercase(),
@@ -584,14 +567,14 @@ mod tests {
         }
     }
 
-    fn author() -> SchemaModel {
+    pub(super) fn author() -> SchemaModel {
         model(
             "Author",
             vec![pk(), column("name", "string"), status(&["draft", "live"])],
         )
     }
 
-    fn post() -> SchemaModel {
+    pub(super) fn post() -> SchemaModel {
         SchemaModel {
             foreign_keys: vec![SchemaForeignKey {
                 column: "author_id".into(),
@@ -625,7 +608,7 @@ mod tests {
     }
 
     /// Every statement the create pass executes for `model`, in its order.
-    fn create_pass(model: &SchemaModel, dialect: Dialect) -> Vec<String> {
+    pub(super) fn create_pass(model: &SchemaModel, dialect: Dialect) -> Vec<String> {
         let emission = render_create_table(model, dialect).expect("create");
         let mut out = emission.pre_create_sqls;
         out.push(emission.create_sql);
@@ -633,7 +616,7 @@ mod tests {
         out
     }
 
-    fn file(statements: &[String], headers: &str) -> String {
+    pub(super) fn file(statements: &[String], headers: &str) -> String {
         let mut out = headers.to_string();
         for statement in statements {
             if !out.is_empty() {
@@ -674,16 +657,16 @@ mod tests {
                 "{dialect:?}"
             );
             assert_eq!(r.headers, Headers::default());
-            assert!(r.down_headers.destructive);
+            assert_eq!(r.down_headers, Headers::default(), "a down is never destructive");
         }
         let pg = rendering(&migration, StepDialect::Postgres);
         assert_eq!(
             pg.down,
-            "-- ferro: destructive\n\nDROP TABLE \"author\";\n\nDROP TYPE \"status\";\n"
+            "DROP TABLE \"author\";\n\nDROP TYPE \"status\";\n"
         );
         assert_eq!(
             rendering(&migration, StepDialect::Sqlite).down,
-            "-- ferro: destructive\n\nDROP TABLE \"author\";\n"
+            "DROP TABLE \"author\";\n"
         );
         assert_eq!(migration.snapshot.parent_checksum, None);
         assert_eq!(migration.snapshot.ir, target);
@@ -717,7 +700,7 @@ mod tests {
         );
         let pg = rendering(&migration, StepDialect::Postgres);
         assert_eq!(pg.up, file(&create_pass(&post(), Dialect::Postgres), ""));
-        assert_eq!(pg.down, "-- ferro: destructive\n\nDROP TABLE \"post\";\n");
+        assert_eq!(pg.down, "DROP TABLE \"post\";\n");
         assert_eq!(migration.summary, "new models: Post");
     }
 
@@ -738,11 +721,11 @@ mod tests {
         ]);
         assert_eq!(pg.up, file(&up, "-- ferro: destructive\n"));
         // The down recreates the parent snapshot's tables, parents first, and
-        // drops the table the up created.
+        // drops the table the up created: data-dependent, never destructive.
         let mut down = create_pass(&author(), Dialect::Postgres);
         down.extend(create_pass(&post(), Dialect::Postgres));
         down.push("DROP TABLE \"tag\"".to_string());
-        assert_eq!(pg.down, file(&down, "-- ferro: destructive\n"));
+        assert_eq!(pg.down, file(&down, "-- ferro: data-dependent\n"));
         assert_eq!(
             migration.summary,
             "new models: Tag; dropped models: Author, Post; dropped enum types: status"
@@ -831,22 +814,6 @@ mod tests {
         // dialect: the SQLite row-security warning is standing, not a change.
         let parent = snapshot_of(&ir(vec![guarded.clone()]), None);
         assert_eq!(generate(Some(&parent), &ir(vec![guarded]), &BOTH), Ok(None));
-    }
-
-    #[test]
-    fn a_dialect_with_no_work_gets_the_one_line_not_applicable_file() {
-        let mut warnings = Vec::new();
-        let (headers, text) = render_file(
-            &MigrationPlan::default(),
-            Phase::Schema,
-            &ir(vec![]),
-            &ir(vec![]),
-            Dialect::Sqlite,
-            &mut warnings,
-        )
-        .expect("render");
-        assert!(headers.not_applicable);
-        assert_eq!(text, "-- ferro: not-applicable\n");
     }
 
     #[test]
