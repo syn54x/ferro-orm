@@ -32,7 +32,9 @@ Inside the one-migration shape, a live writer can insert an author with no slug 
 - A generated backfill's query is always "the rows that still need a value" (`slug IS NULL`), so running it again touches only what is left.
 - The contract's `SET NOT NULL` is a data-dependent step. When it fails on a remaining `NULL`, its refusal names the recovery: `ferro migrate down --to 0008:01`, which reverts nothing (the backfill's down is nothing-to-reverse) and clears the backfill's record, then `ferro migrate up`.
 
-The rule is the same on Postgres and SQLite. Closing the write side on Postgres, by adding `CHECK (slug IS NOT NULL) NOT VALID` in the expand so no `NULL` can land at all, is an online-safety decision taken on its own ticket.
+The recovery rule is the same on Postgres and SQLite.
+
+Amended by ADR-0042: on Postgres the contract's `SET NOT NULL` is staged after the backfill (an `add_constraint` step installs `CHECK (slug IS NOT NULL) NOT VALID`; the contract validates it, sets `NOT NULL` and drops it), so the late row fails at `VALIDATE` and the table is never scanned under an exclusive lock. The check is *not* placed in the expand: Postgres enforces a `NOT VALID` check on every `UPDATE`, so a check ahead of the backfill would fail live writes to rows the backfill has not reached.
 
 ## Considered options
 
