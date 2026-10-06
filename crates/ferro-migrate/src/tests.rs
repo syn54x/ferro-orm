@@ -234,7 +234,7 @@ const ORG_CREATE_SQLITE: &str =
     "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )";
 const ORG_CREATE_POSTGRES: &str =
     "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" serial PRIMARY KEY NOT NULL, \"name\" varchar NOT NULL )";
-const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" NUMERIC NOT NULL, \"birth_date\" DATE NOT NULL, \"created_at\" DATETIME NOT NULL, \"email\" varchar NOT NULL, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" JSON NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" CHAR(32) NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" TIME NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
+const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" NUMERIC NOT NULL, \"birth_date\" DATE NOT NULL, \"created_at\" DATETIME NOT NULL, \"email\" varchar NOT NULL, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" JSON NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user')), \"token\" CHAR(32) NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" TIME NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
 const ACCOUNT_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" bytea NOT NULL, \"balance\" decimal NOT NULL, \"birth_date\" date NOT NULL, \"created_at\" timestamp with time zone NOT NULL, \"email\" varchar NOT NULL, \"id\" serial PRIMARY KEY NOT NULL, \"metadata_blob\" jsonb NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" time NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
 
 fn assert_no_comment_placeholders(statements: &[String]) {
@@ -582,7 +582,7 @@ fn emit_sql_with_ir_add_column_fk_postgres() {
 }
 
 #[test]
-fn emit_sql_with_ir_add_column_fk_sqlite_warns() {
+fn emit_sql_with_ir_add_column_nullable_fk_sqlite_references_inline() {
     let parent = schema_model("team", vec![col("id", "int", false)]);
     let child = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
@@ -606,7 +606,72 @@ fn emit_sql_with_ir_add_column_fk_sqlite_warns() {
     };
     let result =
         emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
-    assert!(result.warnings.iter().any(|w| w.contains("FOREIGN KEY")));
+    // A nullable add has no DEFAULT (its default is NULL): the one shape
+    // SQLite's ADD COLUMN accepts a REFERENCES clause for (#514). A missing
+    // on_delete defaults to CASCADE, as on the create path.
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"user\" ADD COLUMN \"team_id\" integer \
+             REFERENCES \"team\"(\"id\") ON DELETE CASCADE"
+                .to_string()
+        ]
+    );
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+#[test]
+fn emit_sql_with_ir_add_column_not_null_fk_with_default_sqlite_warns_naming_migrations() {
+    let parent = schema_model("team", vec![col("id", "int", false)]);
+    let child = SchemaModel {
+        foreign_keys: vec![SchemaForeignKey {
+            column: "team_id".to_string(),
+            to_table: "team".to_string(),
+            to_column: "id".to_string(),
+            on_delete: Some("RESTRICT".to_string()),
+            name: Some("fk_user_team_id_team".to_string()),
+        }],
+        columns: vec![SchemaColumn {
+            default: Some(serde_json::json!(1)),
+            ..col("team_id", "int", false)
+        }],
+        ..schema_model("user", vec![])
+    };
+    let old_ir = envelope(vec![parent.clone(), schema_model("user", vec![])]);
+    let new_ir = envelope(vec![parent, child]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::AddColumn {
+            table: "user".to_string(),
+            column: "team_id".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+
+    let lite = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
+    assert_eq!(
+        lite.statements,
+        vec!["ALTER TABLE \"user\" ADD COLUMN \"team_id\" integer NOT NULL DEFAULT 1".to_string()],
+        "the column is added; SQLite refuses REFERENCES with a non-NULL default"
+    );
+    assert_eq!(lite.warnings.len(), 1, "{:?}", lite.warnings);
+    assert!(lite.warnings[0].contains("user.team_id"), "{}", lite.warnings[0]);
+    assert!(lite.warnings[0].contains("FOREIGN KEY"), "{}", lite.warnings[0]);
+    assert!(lite.warnings[0].contains("ferro migrate new"), "{}", lite.warnings[0]);
+    assert!(!lite.warnings[0].contains("Alembic"), "{}", lite.warnings[0]);
+
+    // Postgres: the column, the backfill drop, then the named constraint.
+    let pg = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(
+        pg.statements,
+        vec![
+            "ALTER TABLE \"user\" ADD COLUMN \"team_id\" integer NOT NULL DEFAULT 1".to_string(),
+            "ALTER TABLE \"user\" ALTER COLUMN \"team_id\" DROP DEFAULT".to_string(),
+            "ALTER TABLE \"user\" ADD CONSTRAINT \"fk_user_team_id_team\" FOREIGN KEY \
+             (\"team_id\") REFERENCES \"team\" (\"id\") ON DELETE RESTRICT"
+                .to_string(),
+        ]
+    );
+    assert!(pg.warnings.is_empty(), "{:?}", pg.warnings);
 }
 
 #[test]
@@ -649,6 +714,109 @@ fn emit_sql_with_ir_alter_column_type_sqlite_warns_only() {
         emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.statements.is_empty());
     assert!(result.warnings.iter().any(|w| w.contains("cannot change column types")));
+}
+
+#[test]
+fn sqlite_warn_skips_name_migrations_not_alembic() {
+    // #514: every SQLite warning the pass still emits points at the door that
+    // will work — `ferro migrate new` — never at Alembic.
+    let type_old = envelope(vec![schema_model("user", vec![col("name", "text", true)])]);
+    let type_new = envelope(vec![schema_model("user", vec![col("name", "int", true)])]);
+    let null_new = envelope(vec![schema_model("user", vec![col("name", "text", false)])]);
+    let fk = SchemaForeignKey {
+        column: "team_id".to_string(),
+        to_table: "team".to_string(),
+        to_column: "id".to_string(),
+        on_delete: Some("CASCADE".to_string()),
+        name: Some("fk_user_team_id_team".to_string()),
+    };
+    let fk_live = envelope(vec![SchemaModel {
+        foreign_keys: vec![SchemaForeignKey {
+            on_delete: Some("RESTRICT".to_string()),
+            ..fk.clone()
+        }],
+        ..schema_model("user", vec![col("team_id", "int", true)])
+    }]);
+    let fk_new = envelope(vec![SchemaModel {
+        foreign_keys: vec![fk],
+        ..schema_model("user", vec![col("team_id", "int", true)])
+    }]);
+    let fk_none = envelope(vec![schema_model("user", vec![col("team_id", "int", true)])]);
+
+    let cases: Vec<(MigrationOp, &IrEnvelope<SchemaIrPayload>, &IrEnvelope<SchemaIrPayload>)> = vec![
+        (
+            MigrationOp::AlterColumnType { table: "user".to_string(), column: "name".to_string() },
+            &type_old,
+            &type_new,
+        ),
+        (
+            MigrationOp::AlterColumnNullability {
+                table: "user".to_string(),
+                column: "name".to_string(),
+            },
+            &type_old,
+            &null_new,
+        ),
+        (
+            MigrationOp::AddForeignKey { table: "user".to_string(), column: "team_id".to_string() },
+            &fk_none,
+            &fk_new,
+        ),
+        (
+            MigrationOp::RebuildForeignKey {
+                table: "user".to_string(),
+                column: "team_id".to_string(),
+                old_name: "fk_user_team_id_team".to_string(),
+            },
+            &fk_live,
+            &fk_new,
+        ),
+    ];
+    for (op, old_ir, new_ir) in cases {
+        let plan = MigrationPlan { operations: vec![op.clone()], warnings: Vec::new() };
+        let result = emit_sql_with_ir(&plan, old_ir, new_ir, Dialect::Sqlite).unwrap();
+        assert!(result.statements.is_empty(), "{op:?}: {:?}", result.statements);
+        assert_eq!(result.warnings.len(), 1, "{op:?}: {:?}", result.warnings);
+        assert!(result.warnings[0].contains("ferro migrate new"), "{op:?}: {}", result.warnings[0]);
+        assert!(!result.warnings[0].contains("Alembic"), "{op:?}: {}", result.warnings[0]);
+    }
+}
+
+#[test]
+fn primary_key_refusals_name_migrations_not_alembic() {
+    let with_pk = envelope(vec![schema_model("user", vec![pk_col("id", "int")])]);
+    let without = envelope(vec![schema_model("user", vec![])]);
+    for (op, old_ir, new_ir) in [
+        (
+            MigrationOp::AddColumn { table: "user".to_string(), column: "id".to_string() },
+            &without,
+            &with_pk,
+        ),
+        (
+            MigrationOp::DropColumn { table: "user".to_string(), column: "id".to_string() },
+            &with_pk,
+            &without,
+        ),
+    ] {
+        let plan = MigrationPlan { operations: vec![op.clone()], warnings: Vec::new() };
+        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+            let err = emit_sql_with_ir(&plan, old_ir, new_ir, dialect).unwrap_err();
+            assert!(err.message.contains("ferro migrate new"), "{op:?}: {}", err.message);
+            assert!(!err.message.contains("Alembic"), "{op:?}: {}", err.message);
+        }
+    }
+}
+
+#[test]
+fn render_create_table_sqlite_fails_loudly_when_a_column_check_has_no_column() {
+    let mut model = schema_model("account", vec![pk_col("id", "int")]);
+    model.checks = vec![SchemaCheck {
+        name: "ck_account_role".to_string(),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string()],
+    }];
+    let err = render_create_table(&model, Dialect::Sqlite).unwrap_err();
+    assert!(err.message.contains("ck_account_role"), "{}", err.message);
 }
 
 #[test]
@@ -1029,14 +1197,13 @@ fn render_create_table_golden_sqlite() {
     want.sort();
     assert_eq!(got, want);
 
-    // SQLite elides the db_check CHECK and warns; no CHECK in any statement.
-    assert!(!acct.create_sql.contains("CHECK"));
+    // SQLite carries the db_check inline on its column (#514): named, in the
+    // CREATE TABLE, never a post-create statement, and no elision warning.
+    assert!(acct.create_sql.contains(
+        "\"role\" text NOT NULL CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))"
+    ));
     assert!(!acct.post_create_sqls.iter().any(|s| s.contains("CHECK")));
-    assert!(
-        acct.warnings.iter().any(|w| w.contains("ck_account_role")),
-        "expected SQLite db_check elision warning, got: {:?}",
-        acct.warnings
-    );
+    assert!(acct.warnings.is_empty(), "unexpected warnings: {:?}", acct.warnings);
 
     // FKs are inline, named, not in post-create, and no SQLite FK-drop warning.
     assert!(acct
@@ -1834,7 +2001,8 @@ fn emit_sql_with_ir_drop_check_drops_on_postgres_and_warns_on_sqlite() {
         "{}",
         lite.warnings[0]
     );
-    assert!(lite.warnings[0].contains("Alembic"), "{}", lite.warnings[0]);
+    assert!(lite.warnings[0].contains("ferro migrate new"), "{}", lite.warnings[0]);
+    assert!(!lite.warnings[0].contains("Alembic"), "{}", lite.warnings[0]);
 }
 
 #[test]
@@ -1883,7 +2051,7 @@ fn render_db_check_postgres_emits_quoted_alter_no_warning() {
 }
 
 #[test]
-fn render_db_check_sqlite_elides_with_warning() {
+fn render_db_check_sqlite_renders_inline_without_warning() {
     let check = SchemaCheck {
         name: "ck_account_role".to_string(),
         column: "role".to_string(),
@@ -1891,11 +2059,15 @@ fn render_db_check_sqlite_elides_with_warning() {
     };
     let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Sqlite);
     assert!(e.statement.is_none());
-    assert!(e.warning.as_deref().unwrap().contains("ck_account_role"));
+    assert!(e.warning.is_none());
+    assert_eq!(
+        e.inline.as_deref(),
+        Some("CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))")
+    );
 }
 
 #[test]
-fn emit_sql_with_ir_add_column_db_check_postgres_quoted_and_sqlite_warns() {
+fn emit_sql_with_ir_add_column_db_check_postgres_quoted_and_sqlite_inline() {
     // A model whose `role` column has a db_check enum constraint.
     // The check name must equal test_db_check_constraint_name("account", "role")
     // so the emit_add_column matching loop fires.
@@ -1924,17 +2096,18 @@ fn emit_sql_with_ir_add_column_db_check_postgres_quoted_and_sqlite_warns() {
         pg.statements
     );
 
+    // SQLite's ADD COLUMN accepts a column CHECK: the constraint rides the
+    // added column's definition, named, and nothing is elided (#514).
     let lite = emit_sql_with_ir(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
-    assert!(
-        !lite.statements.iter().any(|s| s.contains("CHECK")),
-        "SQLite ALTER path must NOT emit a CHECK statement; got: {:?}",
-        lite.statements
+    assert_eq!(
+        lite.statements,
+        vec![
+            "ALTER TABLE \"account\" ADD COLUMN \"role\" varchar \
+             CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))"
+                .to_string()
+        ]
     );
-    assert!(
-        lite.warnings.iter().any(|w| w.contains("ck_account_role")),
-        "SQLite ALTER path must warn about ck_account_role; got: {:?}",
-        lite.warnings
-    );
+    assert!(lite.warnings.is_empty(), "unexpected warnings: {:?}", lite.warnings);
 }
 
 #[test]

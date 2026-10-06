@@ -373,7 +373,7 @@ pub fn plan_table_migration(
             if old_col.primary_key {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "Cannot drop column '{}.{}': it is part of the primary key. \
-                     Primary-key changes must be migrated with Alembic.",
+                     Primary-key changes need a reviewed migration (`ferro migrate new`).",
                     table, column
                 )));
             }
@@ -432,7 +432,7 @@ fn map_drop_column_error(table_lower: &str, col_name: &str, e: sqlx::Error) -> P
     crate::errors::map_db_error(
         &format!(
             "Cannot drop column '{}.{}' (columns referenced by constraints, foreign \
-             keys, triggers, or views must be migrated with Alembic)",
+             keys, triggers, or views need a reviewed migration: `ferro migrate new`)",
             table_lower, col_name
         ),
         e,
@@ -462,8 +462,8 @@ async fn execute_drop_column(
             };
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Cannot drop column '{}.{}': it is enforced by {} ('{}'), which SQLite \
-                 cannot drop separately from the table definition. Use Alembic for this \
-                 migration.",
+                 cannot drop separately from the table definition. Generate a reviewed \
+                 migration with `ferro migrate new`.",
                 table_lower, col_name, constraint, blocking.name
             )));
         }
@@ -571,7 +571,7 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
         // ADR-0010: the reconciliation pass owns tables that already existed.
         // A table the create pass built in this same run is already exactly the
         // model — re-diffing it can only replay that pass's own
-        // backend-limitation warnings (e.g. the SQLite `db_check` elision).
+        // backend-limitation warnings (e.g. the SQLite row-security skip).
         if !tables_before_create.contains(&table_lower) {
             continue;
         }
