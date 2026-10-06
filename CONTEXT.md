@@ -208,6 +208,14 @@ _Avoid_: Pre-step, additive step, phase one
 The generated DDL step that runs after a migration's data steps. It holds what the rows had to be prepared for (`NOT NULL`, the removal of an enum label) and every *destructive step* statement, so a *backfill* can still read a column the same migration drops.
 _Avoid_: Post-step, cleanup step, tighten step
 
+**Staged `NOT NULL`**:
+How a generated Postgres migration makes an existing column required without scanning its table under a lock that blocks writers: an *add-constraint step* installs a temporary check that refuses `NULL` on every new write, and the *contract step* validates it, sets `NOT NULL` and removes it. Always generated on Postgres for a table that already exists; a table the same migration creates needs none, and SQLite has no equivalent (a *table rebuild*).
+_Avoid_: Write-side guard, NOT VALID trick, bouncer
+
+**Add-constraint step**:
+The generated Postgres DDL step between a migration's data steps and its *contract step* that installs the temporary check of a *staged `NOT NULL`* and commits, so the contract's validation never runs under the lock the installation takes. Its down removes the check. Not a *guard step*, which is a data step.
+_Avoid_: Stage step, guard, pre-contract
+
 **Restructure scaffold**:
 The generated expand, backfills and contract for a change that replaces a key and everything that references it, spanning the parent table and each child. A primary-key change is the one case today.
 _Avoid_: PK migration, key swap, multi-table split
