@@ -308,6 +308,14 @@ _Avoid_: Unapplied, outstanding, out of date
 A database whose *tracking table* holds *step records* for migrations the running code's migrations directory does not have: an older build of the application meeting a newer schema. Refused by default, and allowed only when the application says so.
 _Avoid_: Newer database, future migration, unknown migration
 
+**Migration test harness**:
+What a project's test suite uses to stand a throwaway database at any migration by name, seed it through that migration's *historical models*, apply or revert one named migration, and walk the whole lineage. It carries the targets and the promptless revert the application's own calls refuse, because a test is about one migration and is deleted with it. It never makes a database fresh, never skips a *target dialect*, and names no state between two steps of one migration.
+_Avoid_: Test runner, fixtures, migration sandbox
+
+**Round trip**:
+The test that applies every *migration* in order, reverts every one, and applies them again, checking after each stop that the database shows no *drift* against the *schema snapshot* it should stand at. It proves every *down* reaches its parent. An *irreversible step* ends the downward walk at its migration, reported rather than failed: everything above it round-trips, everything below is applied only.
+_Avoid_: Up-down test, reversibility check, migration smoke test
+
 **Project configuration**:
 The committed file that declares a project's *databases* to ferro's tooling: which modules hold the models, the *target dialects*, where the migrations live. It is one file, never two merged, and never overridden from the environment. Distinct from *session settings*, which are Postgres values on a `Session`.
 _Avoid_: Settings (alone), env config, config layers

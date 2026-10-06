@@ -34,6 +34,8 @@ Inside the one-migration shape, a live writer can insert an author with no slug 
 
 The recovery rule is the same on Postgres and SQLite.
 
+See ADR-0045: the rejection of targets stands for the application API; a test is about one migration by name, so the migration test harness carries `apply_through`, `apply` and `revert_to`, never a step-level target.
+
 Amended by ADR-0042: on Postgres the contract's `SET NOT NULL` is staged after the backfill (an `add_constraint` step installs `CHECK (slug IS NOT NULL) NOT VALID`; the contract validates it, sets `NOT NULL` and drops it), so the late row fails at `VALIDATE` and the table is never scanned under an exclusive lock. The check is *not* placed in the expand: Postgres enforces a `NOT VALID` check on every `UPDATE`, so a check ahead of the backfill would fail live writes to rows the backfill has not reached.
 
 ## Considered options
