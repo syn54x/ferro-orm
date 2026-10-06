@@ -8,6 +8,7 @@ mod backend;
 mod codec;
 mod codec_plan;
 mod connection;
+mod ddl_exec;
 mod errors;
 mod hydration;
 mod introspect;

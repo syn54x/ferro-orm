@@ -22,6 +22,7 @@
 use crate::backend::{
     EngineBindValue, EngineConnection, EngineHandle, EngineRow, EngineValue, NullKind,
 };
+use crate::ddl_exec::{Attempt, DdlError, DdlExecutor, StatementError, pool_connection};
 use ferro_ddl_lowering::Dialect;
 use ferro_migrate::run_plan::{
     Direction, ExecMode, Origin, PlannedStep, RecordKind, StepRecord, TRACKING_FORMAT,
@@ -101,6 +102,21 @@ impl std::fmt::Display for RunLockRefusal {
     }
 }
 
+/// Whether a failed lock probe means the lock's session is gone (the
+/// connection broke, so the server released the lock) rather than a query
+/// the database refused. Only the first is a lost lock; the second is the
+/// database's error, reported as itself.
+pub fn probe_lost_the_session(err: &sqlx::Error) -> bool {
+    matches!(
+        err,
+        sqlx::Error::Io(_)
+            | sqlx::Error::Tls(_)
+            | sqlx::Error::Protocol(_)
+            | sqlx::Error::PoolClosed
+            | sqlx::Error::WorkerCrashed
+    )
+}
+
 /// The decision behind [`RunLock::verify`]: whether this session holds the
 /// lock, on the first check after acquiring or a later one.
 ///
@@ -125,7 +141,7 @@ pub fn lock_timeout_text(timeout: Duration) -> String {
     )
 }
 
-fn show_duration(duration: Duration) -> String {
+pub(crate) fn show_duration(duration: Duration) -> String {
     let ms = duration.as_millis();
     if ms.is_multiple_of(1000) {
         format!("{}s", ms / 1000)
@@ -306,6 +322,34 @@ pub struct RunLock {
 static MEMORY_LOCKS: Lazy<std::sync::Mutex<HashSet<String>>> =
     Lazy::new(|| std::sync::Mutex::new(HashSet::new()));
 
+/// The fault a poisoned in-process lock registry names, instead of reading
+/// as "held" and waiting out the timeout.
+const POISONED_MEMORY_LOCKS: &str = "ferro migrate: the in-process run lock registry is \
+     unusable: a thread panicked while holding it. Restart the process. Nothing was applied.";
+
+/// Take the in-process lock `name` in `registry`: `true` when taken, `false`
+/// when another run holds it.
+///
+/// # Errors
+/// A refusal naming the fault when the registry is poisoned.
+fn take_memory_lock(registry: &std::sync::Mutex<HashSet<String>>, name: &str) -> PyResult<bool> {
+    registry
+        .lock()
+        .map(|mut held| held.insert(name.to_string()))
+        .map_err(|_| refused(POISONED_MEMORY_LOCKS))
+}
+
+/// Whether the in-process lock `name` in `registry` is held.
+///
+/// # Errors
+/// A refusal naming the fault when the registry is poisoned.
+fn memory_lock_held(registry: &std::sync::Mutex<HashSet<String>>, name: &str) -> PyResult<bool> {
+    registry
+        .lock()
+        .map(|held| held.contains(name))
+        .map_err(|_| refused(POISONED_MEMORY_LOCKS))
+}
+
 /// What a SQLite database's lock is: a sidecar file, or (in memory) a name.
 enum SqliteTarget {
     File(PathBuf),
@@ -457,11 +501,7 @@ impl RunLock {
                 }
                 SqliteTarget::Memory(name) => {
                     loop {
-                        let inserted = MEMORY_LOCKS
-                            .lock()
-                            .map(|mut held| held.insert(name.clone()))
-                            .unwrap_or(false);
-                        if inserted {
+                        if take_memory_lock(&MEMORY_LOCKS, &name)? {
                             break;
                         }
                         if !waited() {
@@ -481,8 +521,9 @@ impl RunLock {
     /// session; a file or in-process lock cannot be lost while held.
     ///
     /// # Errors
-    /// The pooler refusal on the first check after acquiring, the
-    /// dropped-lock refusal on a later one.
+    /// The pooler refusal when the first check after acquiring answers "not
+    /// held", the dropped-lock refusal when a later one does or its session
+    /// is gone; the database's own error when it refuses the probe.
     pub async fn verify(&mut self) -> PyResult<()> {
         let LockState::Postgres {
             conn,
@@ -497,14 +538,18 @@ impl RunLock {
             None => false,
             Some(conn) => {
                 let (classid, objid) = lock_ids(*key);
-                sqlx::query(HELD_BY_THIS_SESSION)
+                let probe = sqlx::query(HELD_BY_THIS_SESSION)
                     .bind(classid)
                     .bind(objid)
                     .persistent(false)
                     .fetch_one(conn)
                     .await
-                    .and_then(|row| row.try_get::<bool, _>(0))
-                    .unwrap_or(false)
+                    .and_then(|row| row.try_get::<bool, _>(0));
+                match probe {
+                    Ok(held) => held,
+                    Err(err) if !first && probe_lost_the_session(&err) => false,
+                    Err(err) => return Err(db_error("verifying the run lock", err)),
+                }
             }
         };
         lock_verification_outcome(held, first).map_err(|r| refused(r.to_string()))?;
@@ -515,8 +560,8 @@ impl RunLock {
     /// Release the lock and close its connection.
     ///
     /// # Errors
-    /// None today; a lock whose connection is already gone was released by
-    /// the server.
+    /// The poisoned-registry refusal for an in-process lock; a lock whose
+    /// connection is already gone was released by the server.
     pub async fn release(mut self) -> PyResult<()> {
         match &mut self.state {
             LockState::Postgres { conn, key, .. } => {
@@ -535,12 +580,38 @@ impl RunLock {
                 }
             }
             LockState::Memory { name } => {
-                if let Ok(mut held) = MEMORY_LOCKS.lock() {
-                    held.remove(name);
-                }
+                MEMORY_LOCKS
+                    .lock()
+                    .map_err(|_| refused(POISONED_MEMORY_LOCKS))?
+                    .remove(name);
             }
         }
         Ok(())
+    }
+
+    /// A Postgres lock on a fresh connection of `engine` that never took the
+    /// advisory lock, not yet verified: what a transaction-mode pooler hands
+    /// back. Tests drive the pooler refusal (the first check) with it.
+    ///
+    /// # Errors
+    /// A refusal for a non-Postgres engine; a database error.
+    pub async fn unacquired_for_test(engine: &EngineHandle) -> PyResult<RunLock> {
+        let governed = governed_schema_of(engine).await?;
+        let pool = engine
+            .postgres_pool()
+            .ok_or_else(|| refused("ferro migrate: the engine has no Postgres pool"))?;
+        let conn = pool
+            .acquire()
+            .await
+            .map_err(|e| db_error("opening a connection", e))?
+            .detach();
+        Ok(RunLock {
+            state: LockState::Postgres {
+                conn: Some(conn),
+                key: run_lock_key(&governed),
+                verified: false,
+            },
+        })
     }
 
     /// Close the lock's connection without releasing it first, as a dropped
@@ -588,10 +659,7 @@ impl RunLock {
                         Err(_) => Ok(true),
                     }
                 }
-                SqliteTarget::Memory(name) => Ok(MEMORY_LOCKS
-                    .lock()
-                    .map(|held| held.contains(&name))
-                    .unwrap_or(false)),
+                SqliteTarget::Memory(name) => memory_lock_held(&MEMORY_LOCKS, &name),
             },
         }
     }
@@ -628,15 +696,43 @@ pub fn registered_lock(handle: u64) -> PyResult<Arc<tokio::sync::Mutex<RunLock>>
         })
 }
 
-/// Forget `handle` and return its lock for release.
-pub fn unregister_lock(handle: u64) -> PyResult<Arc<tokio::sync::Mutex<RunLock>>> {
-    RUN_LOCKS
+const LOCK_IN_USE: &str =
+    "the run lock is in use by another call; release it after that call returns";
+
+/// Take the lock behind `handle` out of `registry` for release, only once
+/// no other call holds it: a release refused while the lock is in use
+/// leaves the handle registered, so it can be retried.
+///
+/// # Errors
+/// `RuntimeError` while another call holds the lock (the handle stays) or
+/// on a poisoned registry; `ValueError` for an unknown handle.
+fn take_registered_lock(
+    registry: &std::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<RunLock>>>>,
+    handle: u64,
+) -> PyResult<RunLock> {
+    let mut locks = registry
         .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("run lock registry poisoned"))?
-        .remove(&handle)
-        .ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!("no run lock with handle {handle}"))
-        })
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("run lock registry poisoned"))?;
+    let unknown =
+        || pyo3::exceptions::PyValueError::new_err(format!("no run lock with handle {handle}"));
+    // Every clone is made from the registry under this mutex, so a count of
+    // one cannot rise before the removal below.
+    if Arc::strong_count(locks.get(&handle).ok_or_else(unknown)?) != 1 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(LOCK_IN_USE));
+    }
+    let lock = locks.remove(&handle).ok_or_else(unknown)?;
+    Arc::try_unwrap(lock)
+        .map(tokio::sync::Mutex::into_inner)
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(LOCK_IN_USE))
+}
+
+/// Forget `handle` and return its lock for release; while another call
+/// holds the lock, refuse and keep the handle, so the release can be retried.
+///
+/// # Errors
+/// As [`take_registered_lock`].
+pub fn unregister_lock(handle: u64) -> PyResult<RunLock> {
+    take_registered_lock(&RUN_LOCKS, handle)
 }
 
 // -- the tracking tables ------------------------------------------------------------
@@ -1102,26 +1198,37 @@ impl From<sqlx::Error> for StepFailure {
     }
 }
 
+impl From<StatementError> for StepFailure {
+    fn from(err: StatementError) -> Self {
+        StepFailure(error_text(&err.error))
+    }
+}
+
+impl From<DdlError<StatementError>> for StepFailure {
+    fn from(err: DdlError<StatementError>) -> Self {
+        match err {
+            DdlError::LockTimeout(timeout) => StepFailure(timeout.to_string()),
+            DdlError::Failed(failure) => failure.into(),
+        }
+    }
+}
+
+fn log_step_statement(file: &str, statement: &str) {
+    crate::log_debug(format!("ferro migrate: {file}: {statement}"));
+}
+
 async fn run_statements(
     conn: &mut EngineConnection,
     statements: &[String],
     file: &str,
-) -> Result<(), StepFailure> {
+) -> Result<(), StatementError> {
     for statement in statements {
-        crate::log_debug(format!("ferro migrate: {file}: {statement}"));
-        conn.execute_sql_unprepared(statement).await?;
+        log_step_statement(file, statement);
+        conn.execute_sql_unprepared(statement)
+            .await
+            .map_err(|error| StatementError::at(statement, error))?;
     }
     Ok(())
-}
-
-async fn pool_connection(engine: &EngineHandle) -> Result<EngineConnection, sqlx::Error> {
-    if let Some(pool) = engine.sqlite_pool() {
-        return Ok(EngineConnection::Sqlite(pool.acquire().await?));
-    }
-    match engine.postgres_pool() {
-        Some(pool) => Ok(EngineConnection::Postgres(pool.acquire().await?)),
-        None => Err(sqlx::Error::PoolClosed),
-    }
 }
 
 /// `PRAGMA foreign_key_check`'s rows as one readable line each.
@@ -1228,9 +1335,24 @@ async fn foreign_keys_off(
     }
     settle(conn, tracking_schema, finished()).await?;
     conn.execute_sql_unprepared("COMMIT").await?;
-    conn.execute_sql_unprepared("PRAGMA foreign_keys = ON")
-        .await?;
     Ok(())
+}
+
+/// A foreign-keys-off step's outcome and whether its connection must be
+/// closed, given the step (through `COMMIT`) and the `PRAGMA foreign_keys =
+/// ON` restore after it. The restore comes after the commit, so its failure
+/// never turns a committed step into a failed one (that would overwrite a
+/// finished record and re-run the step); it only keeps a connection with
+/// foreign keys off out of the pool.
+fn foreign_keys_off_outcome(
+    step: Result<(), StepFailure>,
+    restore: Result<(), sqlx::Error>,
+) -> (Result<(), StepFailure>, bool) {
+    match (step, restore) {
+        (Ok(()), Ok(())) => (Ok(()), false),
+        (Ok(()), Err(_)) => (Ok(()), true),
+        (Err(failure), _) => (Err(failure), true),
+    }
 }
 
 fn failure_message(step: &PlannedStep, error: &str, down: bool) -> String {
@@ -1276,6 +1398,14 @@ fn failure_message(step: &PlannedStep, error: &str, down: bool) -> String {
 ///   removal, `COMMIT`, the pragma restored; the connection is closed on
 ///   failure.
 ///
+/// The transactional and no-transaction modes run under `ddl`, the DDL lock
+/// timeout (ADR-0044): on Postgres a statement that waits longer than the
+/// timeout for a lock gives up and the step is re-run from its first
+/// statement, `on_attempt` hearing each attempt that timed out; the record
+/// stays started (`running`) across attempts, and the finished record's
+/// `duration_ms` covers every attempt and wait. After the last attempt the
+/// step fails with a message naming `ddl_lock_timeout`.
+///
 /// A failure rolls back what the mode can roll back, then writes `failed_at`
 /// and `error` on the step's record in a separate transaction: going up the
 /// started record, going down the standing one (which stays). The next run
@@ -1289,6 +1419,7 @@ fn failure_message(step: &PlannedStep, error: &str, down: bool) -> String {
 /// `nothing-to-reverse` holds statements; a database error writing a
 /// record. A failing statement is not an error: it is the returned
 /// [`StepOutcome`].
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_sql_step(
     engine: &EngineHandle,
     tracking_schema: Option<&str>,
@@ -1296,6 +1427,8 @@ pub async fn execute_sql_step(
     sql: &str,
     record: StepRecord,
     direction: Direction,
+    ddl: &DdlExecutor,
+    on_attempt: impl FnMut(Attempt),
 ) -> PyResult<StepOutcome> {
     let down = matches!(direction, Direction::Down { .. });
     let verb = if down { "down" } else { "up" };
@@ -1365,46 +1498,53 @@ pub async fn execute_sql_step(
         }
     };
 
+    // One attempt of a transactional or no-transaction step: the file's
+    // statements, then the record settled on the same connection (inside the
+    // transaction, for a transactional step). The executor wraps it in the
+    // DDL lock timeout and re-runs it from the first statement on a timeout.
+    let (statements, shown, finish, elapsed) = (&statements, &shown, &finish, &elapsed);
+    let attempt = |mut conn: EngineConnection| async move {
+        let result = async {
+            run_statements(&mut conn, statements, shown).await?;
+            settle(&mut conn, tracking_schema, finish(elapsed(clock))).await?;
+            Ok::<(), StatementError>(())
+        }
+        .await;
+        (conn, result)
+    };
+    let log = |sql: &str| log_step_statement(shown, sql);
     let outcome: Result<(), StepFailure> = match step.mode {
-        ExecMode::Transactional => match engine.begin_transaction_connection().await {
-            Err(err) => Err(err.into()),
-            Ok(mut conn) => {
-                let result = async {
-                    run_statements(&mut conn, &statements, &shown).await?;
-                    settle(&mut conn, tracking_schema, finish(elapsed(clock))).await?;
-                    conn.commit().await?;
-                    Ok::<(), StepFailure>(())
-                }
-                .await;
-                if result.is_err() && conn.rollback().await.is_err() {
-                    let _ = conn.detach_and_close().await;
-                }
-                result
-            }
-        },
-        ExecMode::NoTransaction => match pool_connection(engine).await {
-            Err(err) => Err(err.into()),
-            Ok(mut conn) => {
-                let result = async {
-                    run_statements(&mut conn, &statements, &shown).await?;
-                    settle(&mut conn, tracking_schema, finish(elapsed(clock))).await?;
-                    Ok::<(), StepFailure>(())
-                }
-                .await;
-                drop(conn);
-                result
-            }
-        },
+        ExecMode::Transactional => ddl
+            .transactional(engine, log, on_attempt, attempt)
+            .await
+            .map_err(StepFailure::from),
+        ExecMode::NoTransaction => ddl
+            .unwrapped(engine, log, on_attempt, attempt)
+            .await
+            .map_err(StepFailure::from),
         ExecMode::ForeignKeysOff => match pool_connection(engine).await {
             Err(err) => Err(err.into()),
             Ok(mut conn) => {
-                let result =
-                    foreign_keys_off(&mut conn, &statements, &shown, tracking_schema, || {
-                        finish(elapsed(clock))
-                    })
-                    .await;
-                if result.is_err() {
+                let step = foreign_keys_off(&mut conn, statements, shown, tracking_schema, || {
+                    finish(elapsed(clock))
+                })
+                .await;
+                let restore = if step.is_ok() {
+                    conn.execute_sql_unprepared("PRAGMA foreign_keys = ON")
+                        .await
+                        .map(|_| ())
+                } else {
                     let _ = conn.execute_sql_unprepared("ROLLBACK").await;
+                    Ok(())
+                };
+                if let Err(err) = &restore {
+                    crate::log_debug(format!(
+                        "ferro migrate: {shown} committed, but restoring PRAGMA foreign_keys = \
+                         ON on its connection failed ({err}); closing the connection"
+                    ));
+                }
+                let (result, close) = foreign_keys_off_outcome(step, restore);
+                if close {
                     let _ = conn.detach_and_close().await;
                 }
                 result
@@ -1471,6 +1611,76 @@ mod tests {
                 .to_string()
                 .contains("the run lock was lost")
         );
+    }
+
+    #[test]
+    fn only_a_broken_session_reads_as_a_lost_lock_and_a_refused_probe_is_its_own_error() {
+        let io = || sqlx::Error::Io(std::io::Error::other("connection reset"));
+        assert!(probe_lost_the_session(&io()));
+        assert!(probe_lost_the_session(&sqlx::Error::PoolClosed));
+        // The database answered: whatever it said is reported as itself,
+        // never as a pooler or a dropped lock.
+        assert!(!probe_lost_the_session(&sqlx::Error::RowNotFound));
+        assert!(!probe_lost_the_session(&sqlx::Error::ColumnNotFound(
+            "exists".to_string()
+        )));
+    }
+
+    #[test]
+    fn a_poisoned_in_process_registry_names_the_fault_instead_of_reading_as_held() {
+        let registry = std::sync::Mutex::new(HashSet::new());
+        assert!(take_memory_lock(&registry, "db").is_ok_and(|taken| taken));
+        assert!(take_memory_lock(&registry, "db").is_ok_and(|taken| !taken));
+        assert!(memory_lock_held(&registry, "db").is_ok_and(|held| held));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = registry.lock();
+            panic!("poison the registry");
+        });
+        Python::attach(|py| {
+            for err in [
+                take_memory_lock(&registry, "other").err(),
+                memory_lock_held(&registry, "db").err(),
+            ] {
+                let text = err.map(|e| e.value(py).to_string()).unwrap_or_default();
+                assert!(text.contains("run lock registry is unusable"), "{text}");
+            }
+        });
+    }
+
+    #[test]
+    fn a_release_refused_while_the_lock_is_in_use_keeps_the_handle_for_a_retry() {
+        let registry = std::sync::Mutex::new(HashMap::new());
+        let lock = RunLock {
+            state: LockState::Memory {
+                name: "test".to_string(),
+            },
+        };
+        registry
+            .lock()
+            .map(|mut locks| locks.insert(7, Arc::new(tokio::sync::Mutex::new(lock))))
+            .ok();
+        let in_use = registry
+            .lock()
+            .ok()
+            .and_then(|locks| locks.get(&7).cloned());
+        assert!(take_registered_lock(&registry, 7).is_err());
+        assert!(registry.lock().is_ok_and(|locks| locks.contains_key(&7)));
+        drop(in_use);
+        assert!(take_registered_lock(&registry, 7).is_ok());
+        assert!(registry.lock().is_ok_and(|locks| locks.is_empty()));
+        assert!(take_registered_lock(&registry, 7).is_err());
+    }
+
+    #[test]
+    fn a_failed_pragma_restore_after_commit_keeps_the_step_committed_and_closes_the_connection() {
+        let restore_failed = || Err(sqlx::Error::PoolClosed);
+        let (outcome, close) = foreign_keys_off_outcome(Ok(()), restore_failed());
+        assert!(outcome.is_ok() && close);
+        let (outcome, close) = foreign_keys_off_outcome(Ok(()), Ok(()));
+        assert!(outcome.is_ok() && !close);
+        let (outcome, close) =
+            foreign_keys_off_outcome(Err(StepFailure("boom".to_string())), Ok(()));
+        assert!(outcome.is_err() && close);
     }
 
     #[test]

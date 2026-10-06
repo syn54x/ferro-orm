@@ -15,6 +15,7 @@
 //! `ferro_ddl_lowering` functions every migration door uses (AGENTS.md § I-1).
 
 use crate::backend::{EngineBindValue, EngineHandle};
+use crate::ddl_exec::{DdlError, DdlExecutor, DdlFailure};
 use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
     quote_ident, sqlite_indexes_covering_column,
@@ -114,23 +115,44 @@ pub fn _clear_schema_ir_modelset_for_test() -> PyResult<()> {
     Ok(())
 }
 
+/// `ddl_lock_timeout`'s default (ADR-0044), for a project with no config.
+pub const DEFAULT_DDL_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Which migration behaviors beyond table creation are enabled.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct MigrateOptions {
     /// Add missing model columns to existing tables; on Postgres, also
     /// reconcile column type and nullability drift.
     pub updates: bool,
     /// Drop live columns that no longer exist on the model. Implies `updates`.
     pub destructive: bool,
+    /// How long each reconciliation statement waits for a table lock on
+    /// Postgres before its table's plan is retried (ADR-0044); `None`
+    /// waits without limit.
+    pub ddl_lock_timeout: Option<Duration>,
 }
 
 impl MigrateOptions {
-    /// Apply the flag ladder: `destructive` ⇒ `updates`.
+    /// Apply the flag ladder: `destructive` ⇒ `updates`; the DDL lock
+    /// timeout at its default.
     pub fn laddered(updates: bool, destructive: bool) -> Self {
         Self {
             updates: updates || destructive,
             destructive,
+            ddl_lock_timeout: Some(DEFAULT_DDL_LOCK_TIMEOUT),
         }
+    }
+
+    /// The same options under the project's `ddl_lock_timeout`, in seconds
+    /// as Python reads it from `FerroSettings` (`0` disables).
+    ///
+    /// # Errors
+    /// `ValueError` for a negative or non-finite number.
+    pub fn with_ddl_lock_timeout_seconds(self, seconds: f64) -> PyResult<Self> {
+        Ok(Self {
+            ddl_lock_timeout: DdlExecutor::from_seconds(seconds)?.timeout,
+            ..self
+        })
     }
 
     fn plan_options(self) -> PlanOptions {
@@ -168,6 +190,19 @@ pub(crate) fn log_reconcile_statement(table_lower: &str, sql: &str) {
     ));
 }
 
+/// Prefix of the debug line logged before each statement the DDL lock
+/// timeout (ADR-0044) adds around a reconciliation unit on Postgres —
+/// `SET LOCAL lock_timeout = '5000ms'`, or `SET` / `RESET lock_timeout`
+/// around an enum type's statements. A line of its own, not
+/// [`RECONCILE_STATEMENT_LOG_PREFIX`]'s: it is the session's lock policy,
+/// not a statement of the pass, so every recording and parity check of the
+/// pass's DDL (AGENTS.md § I-1) reads exactly what it did before.
+const LOCK_TIMEOUT_LOG_PREFIX: &str = "Ferro Engine: auto-migrate lock timeout on";
+
+fn log_lock_timeout_statement(subject: &str, sql: &str) {
+    crate::log_debug(format!("{LOCK_TIMEOUT_LOG_PREFIX} '{subject}': {sql}"));
+}
+
 /// Map a column-drop execution failure to a `PyErr` with a consistent,
 /// actionable message, on both dialects.
 fn map_drop_column_error(table_lower: &str, col_name: &str, e: sqlx::Error) -> PyErr {
@@ -179,6 +214,49 @@ fn map_drop_column_error(table_lower: &str, col_name: &str, e: sqlx::Error) -> P
         ),
         e,
     )
+}
+
+/// A reconciliation statement's failure: the database error, the statement,
+/// and the column when the statement drops one (its message differs).
+struct PassFailure {
+    error: sqlx::Error,
+    statement: Option<String>,
+    dropped_column: Option<String>,
+}
+
+impl From<sqlx::Error> for PassFailure {
+    fn from(error: sqlx::Error) -> Self {
+        Self {
+            error,
+            statement: None,
+            dropped_column: None,
+        }
+    }
+}
+
+impl DdlFailure for PassFailure {
+    fn database_error(&self) -> Option<&sqlx::Error> {
+        Some(&self.error)
+    }
+
+    fn statement(&self) -> Option<&str> {
+        self.statement.as_deref()
+    }
+}
+
+/// The warning the pass raises for each attempt that timed out waiting for
+/// a lock: `reconciling 'author': waiting for a lock on "author" (attempt 1
+/// of 10, retry in 1s)`.
+fn pass_attempt_warning(subject: &str, attempt: &crate::ddl_exec::Attempt, of: u8) -> String {
+    format!("reconciling '{subject}': {}", attempt.describe(of))
+}
+
+/// The error for a reconciliation unit that timed out on every attempt:
+/// `OperationalError` naming `ddl_lock_timeout`.
+fn pass_lock_timeout_error(subject: &str, timeout: &crate::ddl_exec::DdlLockTimeout) -> PyErr {
+    crate::ddl_exec::lock_timeout_error(&format!(
+        "Auto-migrate DDL failed for '{subject}': {timeout}"
+    ))
 }
 
 fn map_statement_error(table_lower: &str, sql: &str, e: sqlx::Error) -> PyErr {
@@ -268,15 +346,19 @@ fn type_name_of(op: &MigrationOp) -> &str {
 }
 
 /// Execute one table's rendered ops. On Postgres the whole group runs in one
-/// transaction (FF-G G3): a mid-plan failure leaves the table exactly as it
-/// was, so a failed run is safely re-runnable. SQLite runs statement at a
-/// time, with each column drop going through its index-dependency path.
+/// transaction (FF-G G3) under the DDL lock timeout (ADR-0044): `SET LOCAL
+/// lock_timeout` first, and a statement that times out waiting for a lock
+/// rolls the group back and runs it again from the top, up to ten attempts.
+/// A mid-plan failure leaves the table exactly as it was, so a failed run is
+/// safely re-runnable. SQLite runs statement at a time, with each column
+/// drop going through its index-dependency path, and sets no timeout.
 /// Returns how many statements ran and how many columns were dropped.
 async fn execute_table_ops(
     engine: &EngineHandle,
     table: &str,
     ops: &[&RenderedOp],
     backend: Dialect,
+    ddl: &DdlExecutor,
 ) -> PyResult<(usize, usize)> {
     let statements: usize = ops.iter().map(|op| op.statements.len()).sum();
     let drops = ops
@@ -306,57 +388,52 @@ async fn execute_table_ops(
         return Ok((statements - drops, drops));
     }
 
-    let mut conn = engine.begin_transaction_connection().await.map_err(|e| {
-        crate::errors::map_db_error(
-            &format!(
-                "Auto-migrate failed to open a transaction for table '{}'",
-                table
-            ),
-            e,
-        )
-    })?;
-    let table_result: PyResult<()> = async {
-        for op in ops {
-            for sql in &op.statements {
-                log_reconcile_statement(table, sql);
-                conn.execute_sql_unprepared(sql)
-                    .await
-                    .map_err(|e| match &op.op {
-                        MigrationOp::DropColumn { column, .. } => {
-                            map_drop_column_error(table, column, e)
+    // The executor owns the transaction: BEGIN, `SET LOCAL lock_timeout`,
+    // this group, COMMIT; on a failure ROLLBACK, and a connection whose
+    // ROLLBACK failed is discarded rather than returned to the pool (#416).
+    let of = ddl.max_attempts;
+    let result = ddl
+        .transactional(
+            engine,
+            |sql| log_lock_timeout_statement(table, sql),
+            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt, of)),
+            |mut conn| async move {
+                let result = async {
+                    for op in ops {
+                        for sql in &op.statements {
+                            log_reconcile_statement(table, sql);
+                            conn.execute_sql_unprepared(sql).await.map_err(|error| {
+                                PassFailure {
+                                    error,
+                                    statement: Some(sql.clone()),
+                                    dropped_column: match &op.op {
+                                        MigrationOp::DropColumn { column, .. } => {
+                                            Some(column.clone())
+                                        }
+                                        _ => None,
+                                    },
+                                }
+                            })?;
                         }
-                        _ => map_statement_error(table, sql, e),
-                    })?;
-            }
-        }
-        Ok(())
-    }
-    .await;
-    match table_result {
-        Ok(()) => {
-            conn.commit().await.map_err(|e| {
-                crate::errors::map_db_error(
-                    &format!("Auto-migrate failed to commit DDL for table '{}'", table),
-                    e,
-                )
-            })?;
-            Ok((statements - drops, drops))
-        }
-        Err(err) => {
-            // Same disposal the create pass and settings delivery perform
-            // (#416): a connection whose ROLLBACK failed may be
-            // idle-in-transaction, and sqlx only pings on release, so it is
-            // discarded rather than returned to the pool.
-            if let Err(rollback_err) = conn.rollback().await {
-                crate::log_debug(format!(
-                    "⚠️ Ferro Engine: rollback after failed migration of '{}' also \
-                     failed: {} — discarding the connection",
-                    table, rollback_err
-                ));
-                let _ = conn.detach_and_close().await;
-            }
-            Err(err)
-        }
+                    }
+                    Ok::<(), PassFailure>(())
+                }
+                .await;
+                (conn, result)
+            },
+        )
+        .await;
+    match result {
+        Ok(()) => Ok((statements - drops, drops)),
+        Err(DdlError::LockTimeout(timeout)) => Err(pass_lock_timeout_error(table, &timeout)),
+        Err(DdlError::Failed(failure)) => Err(match (failure.dropped_column, failure.statement) {
+            (Some(column), _) => map_drop_column_error(table, &column, failure.error),
+            (None, Some(sql)) => map_statement_error(table, &sql, failure.error),
+            (None, None) => crate::errors::map_db_error(
+                &format!("Auto-migrate failed to apply DDL to table '{table}'"),
+                failure.error,
+            ),
+        }),
     }
 }
 
@@ -603,6 +680,7 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
         }
     }
 
+    let ddl = DdlExecutor::new(opts.ddl_lock_timeout);
     let mut warnings = plan.warnings.clone();
     let mut ddl_ran = false;
     let mut index = 0;
@@ -616,13 +694,37 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
         let Some(table) = current.op.table() else {
             // Enum type statements run in autocommit: `ALTER TYPE ... ADD
             // VALUE` is non-transactional before PG12 and its label is
-            // unusable until commit on PG12+.
-            for sql in &current.statements {
-                log_reconcile_statement(type_name_of(&current.op), sql);
-                engine
-                    .execute_sql_unprepared(sql)
-                    .await
-                    .map_err(|e| type_statement_error(&current.op, e))?;
+            // unusable until commit on PG12+. On their own connection, under
+            // `SET lock_timeout` / `RESET lock_timeout` (ADR-0044).
+            if !current.statements.is_empty() {
+                let subject = type_name_of(&current.op);
+                let of = ddl.max_attempts;
+                let statements = &current.statements;
+                ddl.unwrapped(
+                    &engine,
+                    |sql| log_lock_timeout_statement(subject, sql),
+                    |attempt| {
+                        crate::emit_user_warning_always(&pass_attempt_warning(
+                            subject, &attempt, of,
+                        ))
+                    },
+                    |mut conn| async move {
+                        let mut result = Ok(());
+                        for sql in statements {
+                            log_reconcile_statement(subject, sql);
+                            if let Err(error) = conn.execute_sql_unprepared(sql).await {
+                                result = Err(crate::ddl_exec::StatementError::at(sql, error));
+                                break;
+                            }
+                        }
+                        (conn, result)
+                    },
+                )
+                .await
+                .map_err(|err| match err {
+                    DdlError::LockTimeout(timeout) => pass_lock_timeout_error(subject, &timeout),
+                    DdlError::Failed(failure) => type_statement_error(&current.op, failure.error),
+                })?;
                 ddl_ran = true;
             }
             warnings.extend(current.warnings.iter().cloned());
@@ -638,7 +740,8 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
             .iter()
             .take_while(|op| op.op.table() == Some(table))
             .count();
-        let (statements, dropped) = execute_table_ops(&engine, table, &group, backend).await?;
+        let (statements, dropped) =
+            execute_table_ops(&engine, table, &group, backend, &ddl).await?;
         if statements + dropped > 0 {
             ddl_ran = true;
             crate::log_debug(format!(
@@ -678,7 +781,9 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
 /// Mirrors `connect(auto_migrate=True, migrate_updates=..., migrate_destructive=...)`
 /// for consumers that want explicit control over when DDL runs. `updates`
 /// defaults to true — calling `migrate()` and getting create-only behavior
-/// would be surprising; use `create_tables()` for that.
+/// would be surprising; use `create_tables()` for that. The reconciliation
+/// runs under the project's `ddl_lock_timeout` (`ddl_lock_timeout_s`
+/// seconds, read by `ferro.migrate` from `FerroSettings`; `0` disables).
 ///
 /// On Postgres each table's plan runs in one transaction (a mid-plan failure
 /// rolls that table back); SQLite applies statements one at a time. Like
@@ -689,15 +794,17 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized or the migration fails.
 #[pyfunction]
-#[pyo3(signature = (using=None, updates=true, destructive=false, tracking_schemas=Vec::new()))]
+#[pyo3(signature = (using=None, updates=true, destructive=false, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0))]
 pub fn migrate(
     py: Python<'_>,
     using: Option<String>,
     updates: bool,
     destructive: bool,
     tracking_schemas: Vec<String>,
+    ddl_lock_timeout_s: f64,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let opts = MigrateOptions::laddered(updates, destructive);
+    let opts = MigrateOptions::laddered(updates, destructive)
+        .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
         internal_migrate(engine, opts, &tracking_schemas, AutoMigrateDoor::Migrate).await

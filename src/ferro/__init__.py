@@ -46,7 +46,7 @@ from .query import Relation, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .rowsecurity import RowPolicy, RowSecurity
 from .session import Session, current_session, engines
-from .settings import DatabaseSettings, FerroSettings
+from .settings import DatabaseSettings, FerroSettings, parse_ddl_lock_timeout
 
 # Set up the Ferro logger
 _logger = logging.getLogger("ferro")
@@ -369,8 +369,15 @@ async def connect(
     carries a ``_ferro_migrations`` tracking table) is refused before any
     DDL, and the passes run under the same run lock ``ferro migrate up``
     takes, so two processes booting together never collide. Only then is the
-    project's ``FerroSettings()`` read (for its ``tracking_schema``s); a
-    plain ``connect(url)`` reads no config and runs no extra query.
+    project's ``FerroSettings()`` read (for its ``tracking_schema``s and its
+    ``ddl_lock_timeout``); a plain ``connect(url)`` reads no config and runs
+    no extra query.
+
+    On Postgres every reconciliation statement waits for a table lock under
+    ``ddl_lock_timeout`` (default ``5s``; ``"0"`` waits without a limit): a
+    table's plan whose statement times out is rolled back and retried, up to
+    ten attempts, each one a ``UserWarning`` naming the attempt, and then
+    fails with ``OperationalError`` naming ``ddl_lock_timeout``.
 
     Raises:
         ValueError: A connection with this name (or a default connection,
@@ -388,7 +395,7 @@ async def connect(
     # Only an auto-migrate flag reads the config: a plain connect() is
     # exactly what it was.
     guard = (
-        {"tracking_schemas": _configured_tracking_schemas()}
+        _auto_migrate_settings()
         if auto_migrate or migrate_updates or migrate_destructive
         else {}
     )
@@ -408,18 +415,49 @@ async def connect(
     )
 
 
-def _configured_tracking_schemas() -> list[str]:
-    """Every ``tracking_schema`` the project configures, for the auto-migrate
-    guard (ADR-0038). No config file is not an error: the guard still reads
-    the catalog."""
+def _auto_migrate_settings() -> dict[str, Any]:
+    """What the auto-migrate passes read from ``FerroSettings()``, as the
+    Rust entry points' keyword arguments: every configured
+    ``tracking_schema`` for the guard (ADR-0038), and the
+    ``ddl_lock_timeout`` the reconciliation pass waits for table locks
+    under (ADR-0044). No config file is not an error: the guard still reads
+    the catalog, and the timeout is its default."""
     settings = FerroSettings()
-    return sorted(
-        {
-            database.tracking_schema
-            for database in settings.databases.values()
-            if database.tracking_schema is not None
-        }
-    )
+    return {
+        "tracking_schemas": sorted(
+            {
+                database.tracking_schema
+                for database in settings.databases.values()
+                if database.tracking_schema is not None
+            }
+        ),
+        "ddl_lock_timeout_s": _ddl_lock_timeout_seconds(settings),
+    }
+
+
+def _ddl_lock_timeout_seconds(settings: FerroSettings) -> float:
+    """The ``ddl_lock_timeout`` an auto-migrate pass runs under: the one
+    database's, else the one value every database claiming a registered
+    model agrees on, else the default. A connection does not say which
+    configured database it is, so databases that disagree leave the
+    default."""
+    default = DatabaseSettings.model_fields["ddl_lock_timeout"].default
+    databases = settings.databases
+    if not databases:
+        return parse_ddl_lock_timeout(default).total_seconds()
+    from .registry import REGISTRY
+    from .settings import _owners
+
+    claiming = {
+        owner.name: owner
+        for model in REGISTRY.models().values()
+        if isinstance(model, type)
+        for owner in _owners(databases, model)
+    } or databases
+    values = {database.ddl_lock_timeout_seconds for database in claiming.values()}
+    if len(values) == 1:
+        return values.pop()
+    return parse_ddl_lock_timeout(default).total_seconds()
 
 
 async def create_tables(using=None):
@@ -442,7 +480,7 @@ async def create_tables(using=None):
     """
     _ensure_rust_registration_synced()
     return await _core_create_tables(
-        using=using, tracking_schemas=_configured_tracking_schemas()
+        using=using, tracking_schemas=_auto_migrate_settings()["tracking_schemas"]
     )
 
 
@@ -467,7 +505,7 @@ async def migrate(using=None, updates=True, destructive=False):
         using=using,
         updates=updates,
         destructive=destructive,
-        tracking_schemas=_configured_tracking_schemas(),
+        **_auto_migrate_settings(),
     )
 
 
