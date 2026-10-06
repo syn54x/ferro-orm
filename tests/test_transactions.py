@@ -399,3 +399,110 @@ async def test_nested_transaction_inner_rollback_allows_outer_commit(db_url):
         assert await TxUser.where(lambda u: u.username == "outer_before").exists()
         assert await TxUser.where(lambda u: u.username == "outer_after").exists()
         assert not await TxUser.where(lambda u: u.username == "inner").exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_transaction_rolls_back_and_releases_connection(db_url):
+    """Cancelling a task inside transaction() rolls back instead of leaking the pin."""
+    import asyncio
+
+    class TxUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        wrote = asyncio.Event()
+
+        async def block():
+            async with transaction():
+                await TxUser.create(username="cancelled")
+                wrote.set()
+                await asyncio.sleep(30)
+
+        task = asyncio.create_task(block())
+        await wrote.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert not await TxUser.where(lambda u: u.username == "cancelled").exists()
+        # A pinned, un-rolled-back connection would hold the write lock (SQLite) or
+        # a row lock; a fresh transaction writing the same table must succeed.
+        async with transaction():
+            await TxUser.create(username="after")
+        assert await TxUser.where(lambda u: u.username == "after").exists()
+
+
+@pytest.mark.asyncio
+async def test_keyboard_interrupt_rolls_back_and_reraises(db_url):
+    class TxUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        with pytest.raises(KeyboardInterrupt):
+            async with transaction():
+                await TxUser.create(username="interrupted")
+                raise KeyboardInterrupt
+
+        assert not await TxUser.where(lambda u: u.username == "interrupted").exists()
+        async with transaction():
+            await TxUser.create(username="after")
+        assert await TxUser.where(lambda u: u.username == "after").exists()
+
+
+@pytest.mark.asyncio
+async def test_nested_cancellation_rolls_back_to_savepoint_only(db_url):
+    import asyncio
+
+    class TxUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        async with transaction():
+            await TxUser.create(username="outer_before")
+            try:
+                async with transaction():
+                    await TxUser.create(username="inner")
+                    raise asyncio.CancelledError
+            except asyncio.CancelledError:
+                pass
+            await TxUser.create(username="outer_after")
+
+        assert await TxUser.where(lambda u: u.username == "outer_before").exists()
+        assert await TxUser.where(lambda u: u.username == "outer_after").exists()
+        assert not await TxUser.where(lambda u: u.username == "inner").exists()
+
+
+@pytest.mark.asyncio
+async def test_rollback_failure_during_cancellation_chains_under_original(
+    db_url, monkeypatch
+):
+    import asyncio
+    import ferro.models as ferro_models
+
+    class TxUser(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        username: str
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        real_rollback = ferro_models.rollback_transaction
+
+        async def failing_rollback(tx_id, *, session_id=None):
+            await real_rollback(tx_id, session_id=session_id)  # still release the pin
+            raise RuntimeError("rollback failed")
+
+        monkeypatch.setattr(ferro_models, "rollback_transaction", failing_rollback)
+
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            async with transaction():
+                await TxUser.create(username="x")
+                raise asyncio.CancelledError
+
+        assert isinstance(excinfo.value.__context__, RuntimeError)
+        assert str(excinfo.value.__context__) == "rollback failed"
