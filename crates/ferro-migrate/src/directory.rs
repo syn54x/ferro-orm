@@ -89,9 +89,9 @@ pub struct Headers {
     pub data_dependent: bool,
     /// `-- ferro: not-applicable`
     pub not_applicable: bool,
-    /// `-- ferro: nothing-to-reverse: <reason>`
+    /// `-- ferro: nothing-to-reverse <reason>`
     pub nothing_to_reverse: Option<String>,
-    /// `-- ferro: irreversible: <reason>`
+    /// `-- ferro: irreversible <reason>`
     pub irreversible: Option<String>,
 }
 
@@ -100,10 +100,13 @@ pub const HEADER_PREFIX: &str = "-- ferro:";
 
 impl Headers {
     /// Read the headers from a step file's text: every leading line that
-    /// opens with `-- ferro:`. Reading stops at the first other line.
+    /// opens with `-- ferro:`. Reading stops at the first other line. A
+    /// declaration's reason follows its token after a space (ADR-0033:
+    /// `-- ferro: irreversible dropped rows cannot come back`).
     ///
     /// # Errors
-    /// The offending line, when a header line names no known header.
+    /// The offending line, when a header line names no known header, a flag
+    /// carries text after it, or a declaration has no reason.
     pub fn parse(text: &str) -> Result<Headers, String> {
         let mut headers = Headers::default();
         for line in text.lines() {
@@ -111,8 +114,8 @@ impl Headers {
                 break;
             };
             let rest = rest.trim();
-            let (token, reason) = match rest.split_once(':') {
-                Some((token, reason)) => (token.trim(), Some(reason.trim().to_string())),
+            let (token, reason) = match rest.split_once(char::is_whitespace) {
+                Some((token, reason)) => (token, Some(reason.trim().to_string())),
                 None => (rest, None),
             };
             match (token, reason) {
@@ -149,10 +152,10 @@ impl Headers {
             }
         }
         if let Some(reason) = &self.nothing_to_reverse {
-            lines.push(format!("{HEADER_PREFIX} nothing-to-reverse: {reason}\n"));
+            lines.push(format!("{HEADER_PREFIX} nothing-to-reverse {reason}\n"));
         }
         if let Some(reason) = &self.irreversible {
-            lines.push(format!("{HEADER_PREFIX} irreversible: {reason}\n"));
+            lines.push(format!("{HEADER_PREFIX} irreversible {reason}\n"));
         }
         lines.concat()
     }
@@ -170,6 +173,12 @@ pub struct StepFile {
     pub up_checksum: [u8; 48],
     /// The up file's headers.
     pub headers: Headers,
+    /// SHA-384 of the down file's raw bytes (`None` for a data step).
+    #[serde(serialize_with = "serialize_optional_checksum")]
+    pub down_checksum: Option<[u8; 48]>,
+    /// The down file's headers: what a run reverting the step reads, before
+    /// it reverts anything (ADR-0033).
+    pub down_headers: Headers,
 }
 
 /// One step of a migration.
@@ -430,7 +439,7 @@ impl std::fmt::Display for DirectoryError {
                 f,
                 "{}: {line:?} is not a ferro header; the headers are no-transaction, \
                  foreign-keys-off, destructive, data-dependent, not-applicable, \
-                 nothing-to-reverse: <reason> and irreversible: <reason>",
+                 nothing-to-reverse <reason> and irreversible <reason>",
                 show(file)
             ),
             DirectoryError::MissingRendering {
@@ -459,6 +468,16 @@ fn serialize_checksum<S: serde::Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&encode_checksum(checksum))
+}
+
+fn serialize_optional_checksum<S: serde::Serializer>(
+    checksum: &Option<[u8; 48]>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match checksum {
+        Some(checksum) => serializer.serialize_str(&encode_checksum(checksum)),
+        None => serializer.serialize_none(),
+    }
 }
 
 pub(crate) fn serialize_snapshot<S: serde::Serializer>(
@@ -781,6 +800,8 @@ fn read_step(
                 down: None,
                 up_checksum: sha384(&bytes),
                 headers: Headers::default(),
+                down_checksum: None,
+                down_headers: Headers::default(),
             },
         );
         return Ok(Step {
@@ -823,7 +844,8 @@ fn read_step(
             .clone();
         let up_bytes = read_bytes(root, &up)?;
         let headers = read_headers(root, &up, &up_bytes)?;
-        read_headers(root, &down, &read_bytes(root, &down)?)?;
+        let down_bytes = read_bytes(root, &down)?;
+        let down_headers = read_headers(root, &down, &down_bytes)?;
         files.insert(
             dialect,
             StepFile {
@@ -831,6 +853,8 @@ fn read_step(
                 up,
                 down: Some(down),
                 headers,
+                down_checksum: Some(sha384(&down_bytes)),
+                down_headers,
             },
         );
     }
@@ -889,7 +913,7 @@ mod tests {
             );
             write(
                 &dir.join(format!("01_schema.down.{dialect}.sql")),
-                "-- ferro: destructive\n\nDROP TABLE \"t\";\n",
+                "-- ferro: data-dependent\n\nDROP TABLE \"t\";\n",
             );
         }
         let ir = Snapshot::store(&empty_ir(), parent.map(sha384)).expect("store");
@@ -955,6 +979,16 @@ mod tests {
                 .unwrap()
                 .ends_with("01_schema.down.postgres.sql")
         );
+        assert!(pg.down_headers.data_dependent && !pg.headers.data_dependent);
+        assert_eq!(
+            pg.down_checksum,
+            Some(sha384(b"-- ferro: data-dependent\n\nDROP TABLE \"t\";\n"))
+        );
+        let data = &head.steps[2].files[&StepDialect::Portable];
+        assert_eq!(
+            (data.down_checksum, &data.down_headers),
+            (None, &Headers::default())
+        );
         assert_eq!(head.snapshot.parent_checksum, Some(sha384(&first)));
         assert!(
             read.missing_renderings(&[Dialect::Postgres, Dialect::Sqlite])
@@ -980,9 +1014,34 @@ mod tests {
             Err("-- ferro: sometimes".to_string())
         );
         assert_eq!(
-            Headers::parse("-- ferro: irreversible:\n"),
-            Err("-- ferro: irreversible:".to_string()),
+            Headers::parse("-- ferro: irreversible\n"),
+            Err("-- ferro: irreversible".to_string()),
             "a reason is required"
+        );
+        // ADR-0033 spells the reason after the token, as a person writes it.
+        assert_eq!(
+            Headers::parse(
+                "-- ferro: irreversible dropped rows cannot come back\n\
+                 -- ferro: nothing-to-reverse the label stays\n"
+            ),
+            Ok(Headers {
+                irreversible: Some("dropped rows cannot come back".into()),
+                nothing_to_reverse: Some("the label stays".into()),
+                ..Headers::default()
+            })
+        );
+        assert_eq!(
+            Headers {
+                irreversible: Some("rows are gone".into()),
+                ..Headers::default()
+            }
+            .render(),
+            "-- ferro: irreversible rows are gone\n"
+        );
+        assert_eq!(
+            Headers::parse("-- ferro: destructive now\n"),
+            Err("-- ferro: destructive now".to_string()),
+            "a flag takes no reason"
         );
     }
 
