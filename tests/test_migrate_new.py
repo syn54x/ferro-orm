@@ -485,15 +485,14 @@ async def test_the_up_file_is_what_auto_migrate_executes(
         logger.setLevel(previous)
 
     generated = statements(migration / f"01_schema.up.{db_backend}.sql")
-    # Byte-identical statements. The create pass creates each enum type just
-    # before the first table declaring it; the migration creates every type
-    # the migration introduces first. Every other statement keeps its order.
-    assert sorted(generated) == sorted(handler.statements)
-
-    def tables(sqls: list[str]) -> list[str]:
-        return [sql for sql in sqls if "CREATE TYPE" not in sql]
-
-    assert tables(generated) == tables(handler.statements)
+    # The same statements, byte for byte, in the same sequence: every enum
+    # type first (by name), then the tables, parents first.
+    assert generated == handler.statements
+    if db_backend == "postgres":
+        assert [sql.split('"')[1] for sql in generated if "CREATE TYPE" in sql] == [
+            "kind",
+            "status",
+        ]
     if db_backend == "postgres":
         assert any("CREATE POLICY" in sql for sql in generated)
 
