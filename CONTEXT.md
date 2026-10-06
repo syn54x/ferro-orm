@@ -216,6 +216,14 @@ _Avoid_: Write-side guard, NOT VALID trick, bouncer
 The generated Postgres DDL step between a migration's data steps and its *contract step* that installs the temporary check of a *staged `NOT NULL`* and commits, so the contract's validation never runs under the lock the installation takes. Its down removes the check. Not a *guard step*, which is a data step.
 _Avoid_: Stage step, guard, pre-contract
 
+**Staged constraint**:
+How a generated Postgres migration adds a foreign key or a check to a table that already exists without scanning it under a lock that blocks writers: the constraint is installed under its own name as not yet validated, refusing every new write that violates it, and a later step validates it. Always generated on Postgres for a table that already exists, whether or not the column is new; a table the same migration creates needs none; a unique constraint cannot be staged; SQLite has no equivalent (a *table rebuild*). A declared constraint found live but not validated is *drift*.
+_Avoid_: NOT VALID trick, deferred constraint, lazy constraint
+
+**Validate step**:
+The generated Postgres DDL step that validates a migration's *staged constraints* when the migration has no *contract step* to do it in. It is the *data-dependent step* of that migration; its down returns each constraint to not yet validated. Never holds a *table rebuild*.
+_Avoid_: Verify step, check step, post-schema step
+
 **Restructure scaffold**:
 The generated expand, backfills and contract for a change that replaces a key and everything that references it, spanning the parent table and each child. A primary-key change is the one case today.
 _Avoid_: PK migration, key swap, multi-table split
@@ -277,7 +285,7 @@ A generated DDL step that discards data when it runs: it drops a column, a table
 _Avoid_: Dangerous step, unsafe step, data-loss migration
 
 **Data-dependent step**:
-A generated DDL step that discards nothing but fails on a database whose rows do not satisfy it: a type change whose cast fails, a `NOT NULL`, a unique or a check over existing rows, the removal of an enum label rows still carry. It says so in its file.
+A generated DDL step that discards nothing but fails on a database whose rows do not satisfy it: a type change whose cast fails, a `NOT NULL`, a unique over existing rows, the validation of a *staged constraint*, the removal of an enum label rows still carry. It says so in its file.
 _Avoid_: Risky step, may-fail step, conditional step
 
 **Drift**:

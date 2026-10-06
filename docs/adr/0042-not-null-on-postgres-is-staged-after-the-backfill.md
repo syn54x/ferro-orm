@@ -48,4 +48,4 @@ Each down restores its step's pre-state exactly. The add-constraint step's down 
 - A Postgres `NOT NULL` migration has one more step than its SQLite rendering has work for. `status` and `down --to` address the same step numbers everywhere (ADR-0037).
 - A run that dies between the add-constraint step and the contract leaves `_ferro_notnull_*` on the table; `up` resumes at the contract and removes it. The name says whose it is.
 - ADR-0040's "same rule on Postgres and SQLite" now means the same *recovery* rule; the statement that fails differs.
-- Staging a foreign key or a check added to a populated column (`NOT VALID` → `VALIDATE`) is the same shape and is decided on its own ticket.
+- Staging a foreign key or a check added to an existing table (`NOT VALID` → `VALIDATE`) is the same shape; ADR-0043 decides it, and its validate rides in this contract step when the migration has one.
