@@ -52,8 +52,8 @@ pub enum CanonicalType {
 /// On SQLite the temporal/uuid/json/decimal families use SQLAlchemy's declared
 /// spellings (`DATETIME`, `DATE`, `TIME`, `CHAR(32)`, `JSON`, `NUMERIC`)
 /// instead of sea-query's `*_text` defaults, so a Ferro-created database
-/// reflects identically to an Alembic-created one (I-1; FF-B B5). SQLite's
-/// type affinity makes the storage classes identical either way.
+/// reflects identically to an Alembic-created one (I-1; FF-B B5). The type
+/// affinity of SQLite makes the storage classes identical either way.
 pub fn apply_canonical_type_for(
     col_def: &mut ColumnDef,
     canonical: CanonicalType,
@@ -707,6 +707,25 @@ pub fn fk_name(table_lower: &str, col_name: &str, to_table: &str) -> String {
     raw
 }
 
+/// The column-constraint `REFERENCES "<to_table>"("<to_column>") ON DELETE <action>`
+/// that SQLite's `ALTER TABLE ... ADD COLUMN` accepts for a foreign-key column
+/// (#514; ADR-0034).
+///
+/// SQLite cannot add a table constraint to an existing table, but its
+/// `ADD COLUMN` takes a column-level `REFERENCES` clause as long as the added
+/// column's default is `NULL` — so this is how a nullable FK column gets its
+/// constraint without a table rebuild. The caller decides that shape; a
+/// `NOT NULL` column with a backfill default cannot carry it. A missing
+/// `on_delete` resolves to `CASCADE`, as on the create path.
+pub fn render_sqlite_add_column_references(fk: &ferro_schema_ir::SchemaForeignKey) -> String {
+    format!(
+        "REFERENCES {}({}) ON DELETE {}",
+        quote_ident(&fk.to_table),
+        quote_ident(&fk.to_column),
+        fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+    )
+}
+
 /// Whether a live constraint name follows the ferro FK convention above — the
 /// ownership test: reconciliation only ever rebuilds names ferro emits;
 /// constraints named any other way belong to the user and are never altered.
@@ -816,23 +835,39 @@ pub fn render_table_check_body(check: &ferro_schema_ir::SchemaTableCheck) -> Str
 
 /// The CHECK body for a `db_check` enum constraint — byte-identical across the
 /// CREATE and ALTER emitters (and mirrored, escaping-free, by the Alembic emitter).
-/// Quoting is double-quote on both backends; the wrapping `ALTER ... ADD CONSTRAINT`
-/// is emitted only on Postgres (see `render_db_check`).
+/// Quoting is double-quote on both backends; Postgres wraps it in an
+/// `ALTER ... ADD CONSTRAINT`, SQLite in a column constraint (see `render_db_check`).
 pub fn render_check_body(check: &ferro_schema_ir::SchemaCheck) -> String {
     format!("{} IN ({})", quote_ident(&check.column), check.values.join(", "))
 }
 
-/// The outcome of emitting a `db_check` constraint for one dialect.
+/// The outcome of emitting one CHECK constraint for one dialect.
+///
+/// At most one of `statement` / `inline` is set: a standalone statement the
+/// caller executes, or a column-constraint fragment the caller appends to the
+/// owning column's definition. `warning` is set when the dialect cannot emit
+/// the constraint at all; the caller surfaces it verbatim.
 #[derive(Debug)]
 pub struct CheckEmission {
-    /// The `ALTER TABLE ... ADD CONSTRAINT ... CHECK (...)` statement (Postgres only).
+    /// A standalone statement (`ALTER TABLE ... ADD CONSTRAINT ...` or `DROP
+    /// CONSTRAINT`) to execute.
     pub statement: Option<String>,
-    /// The SQLite elision warning (SQLite only).
+    /// The named column constraint `CONSTRAINT "ck_..." CHECK (...)` to append to
+    /// the owning column's definition in `CREATE TABLE` or `ALTER TABLE ... ADD
+    /// COLUMN` (SQLite `db_check` only).
+    pub inline: Option<String>,
+    /// The skip warning when the dialect cannot emit the constraint.
     pub warning: Option<String>,
 }
 
 /// Single source for db_check emission: wrapper + dialect decision + body.
-/// Postgres emits the ALTER; SQLite elides with a warning (no silent drop).
+///
+/// Postgres emits a post-create `ALTER`. SQLite cannot add a constraint to an
+/// existing table, but it accepts a column constraint wherever the column is
+/// defined, so SQLite returns the named `inline` fragment
+/// `CONSTRAINT "ck_<table>_<col>" CHECK (<body>)` for the caller to append to
+/// the column's definition in `CREATE TABLE` or `ALTER TABLE ... ADD COLUMN`
+/// (#514; ADR-0034). Both dialects embed the same [`render_check_body`].
 ///
 /// The Postgres emission is idempotent: the `ALTER TABLE ... ADD CONSTRAINT` is
 /// guarded by a `DO $$ ... IF NOT EXISTS (pg_constraint) ...` block so a second
@@ -856,14 +891,17 @@ pub fn render_db_check(table: &str, check: &ferro_schema_ir::SchemaCheck, dialec
                 name = check.name,
                 body = render_check_body(check),
             )),
+            inline: None,
             warning: None,
         },
         Dialect::Sqlite => CheckEmission {
             statement: None,
-            warning: Some(format!(
-                "Check constraint '{}' on table '{}' is not emitted on SQLite (requires table rebuild).",
-                check.name, table
+            inline: Some(format!(
+                "CONSTRAINT {} CHECK ({})",
+                quote_ident(&check.name),
+                render_check_body(check),
             )),
+            warning: None,
         },
     }
 }
@@ -910,8 +948,10 @@ fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String> {
 /// the name is absent live, so no existence guard is needed. A **column check**
 /// reuses [`render_db_check`], the same idempotent DO-block the create path
 /// emits. On SQLite both are skipped with a warning that names the constraint
-/// (ADR-0014): adding a table constraint to an existing table needs a full
-/// table rebuild, which is Alembic's batch-mode door.
+/// (ADR-0014): the column already exists, and attaching a constraint to an
+/// existing table or column needs a full table rebuild, which is the
+/// Migrations door (`ferro migrate new`). A column check over a column added
+/// in the same pass never reaches here: it rides that `ADD COLUMN` inline.
 pub fn render_check_addition(
     table: &str,
     model: &ferro_schema_ir::SchemaModel,
@@ -922,7 +962,20 @@ pub fn render_check_addition(
         return Some(render_add_table_check(table, check, dialect));
     }
     let check = model.checks.iter().find(|check| check.name == name)?;
-    Some(render_db_check(table, check, dialect))
+    Some(match dialect {
+        Dialect::Postgres => render_db_check(table, check, dialect),
+        Dialect::Sqlite => CheckEmission {
+            statement: None,
+            inline: None,
+            warning: Some(format!(
+                "Check constraint '{}' on column '{}.{}' is declared but missing from the \
+                 live table, and SQLite cannot add a constraint to an existing column (it \
+                 requires a full table rebuild). The invariant is not database-enforced; \
+                 generate a reviewed migration with `ferro migrate new` to apply it.",
+                check.name, table, check.column
+            )),
+        },
+    })
 }
 
 /// The table-check half of [`render_check_addition`].
@@ -939,15 +992,17 @@ fn render_add_table_check(
                 quote_ident(&check.name),
                 render_table_check_body(check),
             )),
+            inline: None,
             warning: None,
         },
         Dialect::Sqlite => CheckEmission {
             statement: None,
+            inline: None,
             warning: Some(format!(
                 "Table check '{}' is declared on '{}' but missing from the live table, and \
                  SQLite cannot add a table constraint to an existing table (it requires a \
-                 full table rebuild). The invariant is not database-enforced; use Alembic's \
-                 batch mode to apply it.",
+                 full table rebuild). The invariant is not database-enforced; generate a \
+                 reviewed migration with `ferro migrate new` to apply it.",
                 check.name, table
             )),
         },
@@ -1045,8 +1100,9 @@ pub fn render_check_rebuild(
             warning: Some(format!(
                 "CHECK constraint '{name}' on table '{table}' has a declared body that \
                  differs from the live constraint, and SQLite cannot alter constraints in \
-                 place (it requires a full table rebuild). The live body remains; use \
-                 Alembic's batch mode to apply the declared predicate."
+                 place (it requires a full table rebuild). The live body remains; \
+                 generate a reviewed migration with `ferro migrate new` to apply the \
+                 declared predicate."
             )),
         },
     })
@@ -1086,7 +1142,7 @@ pub fn extra_check_names(
 /// The leftover-CHECK warning for one table, or `None` when nothing is extra.
 /// Single-sourced like [`extra_enum_labels_warning`]: callers emit it verbatim,
 /// never re-derive the wording. Names every leftover and points at
-/// `migrate_destructive` / Alembic.
+/// `migrate_destructive` / a reviewed migration (`ferro migrate new`).
 pub fn extra_check_names_warning(table: &str, extra: &[String]) -> Option<String> {
     if extra.is_empty() {
         return None;
@@ -1096,7 +1152,7 @@ pub fn extra_check_names_warning(table: &str, extra: &[String]) -> Option<String
         "Table '{table}' has CHECK constraint(s) {} that the model no longer \
          declares. Leftover CHECKs keep rejecting rows the model now allows. \
          They stay in place unless you pass migrate_destructive=True (Postgres) \
-         or drop them with a reviewed Alembic migration.",
+         or drop them with a reviewed migration (`ferro migrate new`).",
         listed.join(", "),
     ))
 }
@@ -1104,8 +1160,9 @@ pub fn extra_check_names_warning(table: &str, extra: &[String]) -> Option<String
 /// Render the DROP for one leftover CHECK constraint (ADR-0013, ADR-0014).
 ///
 /// Postgres: one `ALTER TABLE … DROP CONSTRAINT`. SQLite: no statement, a
-/// warning that names the constraint and points at Alembic batch mode — SQLite
-/// cannot drop a table constraint without a full table rebuild.
+/// warning that names the constraint and points at the Migrations door
+/// (`ferro migrate new`) — SQLite cannot drop a table constraint without a
+/// full table rebuild.
 pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmission {
     match dialect {
         Dialect::Postgres => CheckEmission {
@@ -1114,15 +1171,17 @@ pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmis
                 quote_ident(table),
                 quote_ident(name),
             )),
+            inline: None,
             warning: None,
         },
         Dialect::Sqlite => CheckEmission {
             statement: None,
+            inline: None,
             warning: Some(format!(
                 "CHECK constraint '{name}' on table '{table}' is no longer declared, \
                  and SQLite cannot drop a table constraint in place (it requires a \
-                 full table rebuild). The live constraint remains; use Alembic's \
-                 batch mode to drop it."
+                 full table rebuild). The live constraint remains; generate a \
+                 reviewed migration with `ferro migrate new` to drop it."
             )),
         },
     }
@@ -3017,7 +3076,28 @@ mod tests {
             warning.contains("ck_transfer_at_most_one_outflow"),
             "{warning}"
         );
-        assert!(warning.contains("Alembic"), "{warning}");
+        assert!(warning.contains("ferro migrate new"), "{warning}");
+        assert!(!warning.contains("Alembic"), "{warning}");
+    }
+
+    #[test]
+    fn render_check_addition_column_check_on_an_existing_column_warns_on_sqlite() {
+        // The column already exists: SQLite cannot attach a constraint to it
+        // without a table rebuild, so the inline fragment has nowhere to go.
+        let check = account_role_column_check();
+        let model = transfer_model_with_checks(vec![], vec![check]);
+        let emission =
+            render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Sqlite)
+                .expect("declared column check must resolve");
+        assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
+        assert!(
+            emission.inline.is_none(),
+            "no column definition to carry it"
+        );
+        let warning = emission.warning.expect("SQLite must never skip silently");
+        assert!(warning.contains("ck_transfer_kind"), "{warning}");
+        assert!(warning.contains("ferro migrate new"), "{warning}");
+        assert!(!warning.contains("Alembic"), "{warning}");
     }
 
     #[test]
@@ -3195,7 +3275,8 @@ mod tests {
             warning.contains("ck_transfer_at_most_one_outflow"),
             "{warning}"
         );
-        assert!(warning.contains("Alembic"), "{warning}");
+        assert!(warning.contains("ferro migrate new"), "{warning}");
+        assert!(!warning.contains("Alembic"), "{warning}");
     }
 
     #[test]
@@ -3259,7 +3340,7 @@ mod tests {
                  'ck_transfer_kind' that the model no longer declares. Leftover \
                  CHECKs keep rejecting rows the model now allows. They stay in \
                  place unless you pass migrate_destructive=True (Postgres) or \
-                 drop them with a reviewed Alembic migration."
+                 drop them with a reviewed migration (`ferro migrate new`)."
                     .to_string()
             )
         );
@@ -3282,8 +3363,8 @@ mod tests {
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
         let warning = emission.warning.expect("SQLite must never skip silently");
         assert!(warning.contains("ck_transfer_orphan"), "{warning}");
-        assert!(warning.contains("Alembic"), "{warning}");
-        assert!(warning.contains("batch"), "{warning}");
+        assert!(warning.contains("ferro migrate new"), "{warning}");
+        assert!(!warning.contains("Alembic"), "{warning}");
     }
 
     #[test]
@@ -3684,10 +3765,59 @@ mod tests {
     }
 
     #[test]
-    fn render_db_check_sqlite_still_elides_with_warning() {
+    fn render_db_check_postgres_has_no_inline_fragment() {
+        let e = render_db_check("account", &sample_check(), Dialect::Postgres);
+        assert!(e.inline.is_none(), "Postgres keeps the post-create ALTER");
+    }
+
+    #[test]
+    fn render_db_check_sqlite_renders_the_named_inline_column_constraint() {
         let e = render_db_check("account", &sample_check(), Dialect::Sqlite);
-        assert!(e.statement.is_none());
-        assert!(e.warning.as_deref().unwrap().contains("ck_account_role"));
+        assert!(e.statement.is_none(), "SQLite has no ADD CONSTRAINT");
+        assert!(e.warning.is_none(), "the constraint is emitted, not elided");
+        assert_eq!(
+            e.inline.as_deref(),
+            Some("CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user'))")
+        );
+        // The CHECK body is the one shared renderer (I-1).
+        assert!(
+            e.inline
+                .as_deref()
+                .unwrap()
+                .contains(&render_check_body(&sample_check()))
+        );
+    }
+
+    #[test]
+    fn render_sqlite_add_column_references_renders_the_column_reference_clause() {
+        let fk = ferro_schema_ir::SchemaForeignKey {
+            column: "author_id".to_string(),
+            to_table: "author".to_string(),
+            to_column: "id".to_string(),
+            on_delete: Some("CASCADE".to_string()),
+            name: Some("fk_book_author_id_author".to_string()),
+        };
+        assert_eq!(
+            render_sqlite_add_column_references(&fk),
+            "REFERENCES \"author\"(\"id\") ON DELETE CASCADE"
+        );
+        // A missing on_delete defaults to CASCADE, as on the create path.
+        let defaulted = ferro_schema_ir::SchemaForeignKey {
+            on_delete: None,
+            ..fk.clone()
+        };
+        assert_eq!(
+            render_sqlite_add_column_references(&defaulted),
+            "REFERENCES \"author\"(\"id\") ON DELETE CASCADE"
+        );
+        let set_null = ferro_schema_ir::SchemaForeignKey {
+            on_delete: Some("SET NULL".to_string()),
+            ..fk
+        };
+        assert_eq!(
+            render_sqlite_add_column_references(&set_null),
+            "REFERENCES \"author\"(\"id\") ON DELETE SET NULL"
+        );
     }
 
     #[test]

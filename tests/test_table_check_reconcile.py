@@ -182,7 +182,37 @@ def test_sqlite_warns_with_the_constraint_name_and_emits_no_sql():
     assert statements == []
     assert len(warnings) == 1
     assert SIDE_CHECK_NAME in warnings[0]
-    assert "Alembic" in warnings[0], "the warning names the reviewed-migration exit"
+    assert "ferro migrate new" in warnings[0], "the warning names the Migrations door"
+    assert "Alembic" not in warnings[0]
+
+
+def test_sqlite_column_check_on_an_existing_column_warns_naming_migrations():
+    """The column already exists: SQLite cannot attach a constraint to it
+    without a table rebuild, so the add is a loud skip naming the door."""
+    _define_cookie(db_check=True)
+    live_columns = [
+        {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False},
+        {"name": "flavor", "declared_type": "text", "is_nullable": False},
+    ]
+    statements, warnings = _render("cookie", live_columns, [], "sqlite")
+    assert statements == []
+    assert len(warnings) == 1
+    assert "ck_cookie_flavor" in warnings[0]
+    assert "ferro migrate new" in warnings[0] and "Alembic" not in warnings[0]
+
+
+def test_sqlite_column_check_on_a_new_column_rides_its_add_column_inline():
+    """#514: SQLite's ADD COLUMN accepts the column CHECK; nothing is skipped."""
+    _define_cookie(db_check=True)
+    pk_only = [
+        {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False}
+    ]
+    statements, warnings = _render("cookie", pk_only, [], "sqlite")
+    assert statements == [
+        'ALTER TABLE "cookie" ADD COLUMN "flavor" text NOT NULL DEFAULT \'sweet\''
+        " CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty'))"
+    ]
+    assert warnings == []
 
 
 def test_without_migrate_updates_no_check_is_planned():
@@ -439,12 +469,21 @@ async def test_sqlite_reconcile_warns_with_the_constraint_name_and_adds_nothing(
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_a_table_created_in_this_run_is_not_reconciled_again(db_url, recwarn):
-    """ADR-0010: the create pass owns the table it just built. Its
-    backend-limitation warning fires once for the run, not once per pass."""
-    _define_cookie(db_check=True)
+    """ADR-0010: the create pass owns the table it just built. On SQLite the
+    column check now rides the CREATE TABLE inline (#514), so neither pass
+    has anything to warn about."""
+    Cookie = _define_cookie(db_check=True)
     await connect(db_url, migrate_updates=True)
     named = [w for w in recwarn if "ck_cookie_flavor" in str(w.message)]
-    assert len(named) == 1, [str(w.message) for w in named]
+    assert named == [], [str(w.message) for w in named]
+    async with engines.session():
+        rows = await fetch_all(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'cookie'"
+        )
+        assert 'CONSTRAINT "ck_cookie_flavor" CHECK' in rows[0]["sql"]
+        await Cookie.create(flavor=Flavor.SALTY)
+        with pytest.raises(CheckViolationError):
+            await execute('INSERT INTO "cookie" ("flavor") VALUES (\'sour\')')
 
 
 # ---------------------------------------------------------------------------

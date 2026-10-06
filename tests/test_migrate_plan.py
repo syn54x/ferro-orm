@@ -56,6 +56,7 @@ def _prop_to_spec(name: str, prop: dict) -> ColumnSpec:
         enum_type_name=enum_type_name if isinstance(enum_type_name, str) and enum_type_name else None,
         db_type=db_type_value if db_type_explicit else None,
         db_type_explicit=db_type_explicit,
+        db_check=prop.get("db_check") is True,
         foreign_key=foreign_key,
     )
 
@@ -189,7 +190,7 @@ class TestAddColumn:
             }
         )
         for dialect in ("sqlite", "postgres"):
-            with pytest.raises(ValueError, match=r"invoice\.note.*Alembic"):
+            with pytest.raises(ValueError, match=r"invoice\.note.*ferro migrate new"):
                 render(schema, PK_ONLY_LIVE, dialect)
 
     def test_not_null_json_without_default_fails_loudly(self):
@@ -198,7 +199,7 @@ class TestAddColumn:
             {"turns": {"type": "object", "ferro_nullable": False}}
         )
         for dialect in ("sqlite", "postgres"):
-            with pytest.raises(ValueError, match=r"invoice\.turns.*Alembic"):
+            with pytest.raises(ValueError, match=r"invoice\.turns.*ferro migrate new"):
                 render(schema, PK_ONLY_LIVE, dialect)
 
     def test_not_null_without_default_fails_loudly(self):
@@ -212,7 +213,9 @@ class TestAddColumn:
             }
         )
         for dialect in ("sqlite", "postgres"):
-            with pytest.raises(ValueError, match=r"invoice\.created_at.*Alembic"):
+            with pytest.raises(
+                ValueError, match=r"invoice\.created_at.*ferro migrate new"
+            ):
                 render(schema, PK_ONLY_LIVE, dialect)
 
     def test_adding_primary_key_column_fails_loudly(self):
@@ -260,9 +263,74 @@ class TestAddColumn:
         ]
         assert warns == []
 
+        # #514: a nullable added FK column (default NULL) is the one shape
+        # SQLite's ADD COLUMN accepts a REFERENCES clause for.
         stmts, warns = render(schema, PK_ONLY_LIVE, "sqlite")
-        assert stmts == ['ALTER TABLE "invoice" ADD COLUMN "client_id" integer']
-        assert len(warns) == 1 and "FOREIGN KEY" in warns[0] and "Alembic" in warns[0]
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD COLUMN "client_id" integer'
+            ' REFERENCES "client"("id") ON DELETE CASCADE'
+        ]
+        assert warns == []
+
+    def test_not_null_fk_column_with_default_warns_naming_migrations_on_sqlite(self):
+        schema = schema_with(
+            {
+                "client_id": {
+                    "type": "integer",
+                    "ferro_nullable": False,
+                    "default": 1,
+                    "foreign_key": {"to_table": "client", "on_delete": "RESTRICT"},
+                }
+            }
+        )
+        stmts, warns = render(schema, PK_ONLY_LIVE, "sqlite")
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD COLUMN "client_id" integer NOT NULL DEFAULT 1'
+        ]
+        assert len(warns) == 1
+        assert "invoice.client_id" in warns[0] and "FOREIGN KEY" in warns[0]
+        assert "ferro migrate new" in warns[0] and "Alembic" not in warns[0]
+
+        # Postgres is unchanged: add, drop the backfill default, named constraint.
+        stmts, warns = render(schema, PK_ONLY_LIVE, "postgres")
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD COLUMN "client_id" integer NOT NULL DEFAULT 1',
+            'ALTER TABLE "invoice" ALTER COLUMN "client_id" DROP DEFAULT',
+            'ALTER TABLE "invoice" ADD CONSTRAINT "fk_invoice_client_id_client"'
+            ' FOREIGN KEY ("client_id") REFERENCES "client" ("id")'
+            " ON DELETE RESTRICT",
+        ]
+        assert warns == []
+
+    def test_db_check_column_add_is_inline_on_sqlite_and_an_alter_on_postgres(self):
+        schema = schema_with(
+            {
+                "status": {
+                    "type": "string",
+                    "enum": ["draft", "paid"],
+                    "db_type": "text",
+                    "db_check": True,
+                    "ferro_nullable": True,
+                }
+            }
+        )
+        stmts, warns = render(schema, PK_ONLY_LIVE, "sqlite")
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD COLUMN "status" text'
+            " CONSTRAINT \"ck_invoice_status\" CHECK (\"status\" IN ('draft', 'paid'))"
+        ]
+        assert warns == []
+
+        # Postgres keeps its post-add idempotent ALTER, byte-identical.
+        stmts, warns = render(schema, PK_ONLY_LIVE, "postgres")
+        assert stmts == [
+            'ALTER TABLE "invoice" ADD COLUMN "status" text',
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            "WHERE conname = 'ck_invoice_status' AND conrelid = '\"invoice\"'::regclass) THEN "
+            'ALTER TABLE "invoice" ADD CONSTRAINT "ck_invoice_status" '
+            "CHECK (\"status\" IN ('draft', 'paid')); END IF; END $$",
+        ]
+        assert warns == []
 
 
 class TestReconcileExisting:
@@ -308,7 +376,8 @@ class TestReconcileExisting:
         stmts, warns = render(schema, live, "sqlite")
         assert stmts == []
         assert len(warns) == 1
-        assert "invoice.count" in warns[0] and "Alembic" in warns[0]
+        assert "invoice.count" in warns[0] and "ferro migrate new" in warns[0]
+        assert "Alembic" not in warns[0]
 
     def test_sqlite_cosmetic_spelling_differences_do_not_warn(self):
         # An Alembic-created table spells temporal/uuid types differently than
@@ -342,7 +411,9 @@ class TestDestructive:
     def test_live_primary_key_missing_from_model_fails_loudly(self):
         schema = {"properties": {"name": {"type": "string"}}}
         live = PK_ONLY_LIVE + [{"name": "name", "declared_type": "varchar"}]
-        with pytest.raises(ValueError, match=r"invoice\.id.*primary key.*Alembic"):
+        with pytest.raises(
+            ValueError, match=r"invoice\.id.*primary key.*ferro migrate new"
+        ):
             render(schema, live, "sqlite", destructive=True)
 
     def test_destructive_implies_updates(self):
@@ -655,4 +726,5 @@ class TestForeignKeyReconcile:
         assert len(warns) == 1
         assert "on_delete SET NULL" in warns[0]
         assert "CASCADE" in warns[0]
-        assert "Alembic" in warns[0]
+        assert "ferro migrate new" in warns[0]
+        assert "Alembic" not in warns[0]

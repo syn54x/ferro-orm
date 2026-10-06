@@ -2,13 +2,14 @@
 
 use crate::{Dialect, EmissionError, EmissionResult, MigrationOp, MigrationPlan};
 use ferro_ddl_lowering::{
-    self, ResolvedStorage, apply_canonical_type_for, canonical_from_schema_column,
+    self, CheckEmission, ResolvedStorage, apply_canonical_type_for, canonical_from_schema_column,
     canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
     fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
     refused_conversion_warning, render_check_addition, render_check_drop, render_check_rebuild,
     render_db_check, render_json_backfill_default, render_pg_enum_create_type,
-    render_table_check_body, resolve_column_storage, row_security_statements, single_index_name,
-    single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
+    render_sqlite_add_column_references, render_table_check_body, resolve_column_storage,
+    row_security_statements, single_index_name, single_unique_index_name, sqlite_declared_type,
+    sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use sea_query::{
@@ -27,14 +28,15 @@ pub struct CreateTableEmission {
     /// `CREATE TYPE ... AS ENUM` guards for native Postgres enum columns
     /// (FF-B B2). Empty on SQLite.
     pub pre_create_sqls: Vec<String>,
-    /// `CREATE TABLE` including inline NAMED FKs (`CONSTRAINT "fk_..."`).
+    /// `CREATE TABLE` including inline NAMED FKs (`CONSTRAINT "fk_..."`) and,
+    /// on SQLite, each `db_check` as a named column constraint on its column.
     /// Single-column uniques are NOT inline — they are named `uq_` unique
     /// indexes in [`post_create_sqls`](Self::post_create_sqls) (FF-B B4/D1).
     pub create_sql: String,
     /// Standalone `CREATE [UNIQUE] INDEX` statements plus the Postgres `db_check`
     /// `ALTER`. Never contains foreign keys (those are inline in `create_sql`).
     pub post_create_sqls: Vec<String>,
-    /// Non-fatal warnings (e.g. the SQLite `db_check` elision).
+    /// Non-fatal warnings (e.g. the SQLite row-security skip).
     pub warnings: Vec<String>,
 }
 
@@ -174,6 +176,28 @@ pub fn render_create_table(
         .if_not_exists()
         .to_owned();
 
+    // One db_check emission per column check, decided once: Postgres yields a
+    // post-create statement, SQLite an inline fragment for the owning column.
+    let check_emissions: Vec<(&ferro_schema_ir::SchemaCheck, CheckEmission)> = model
+        .checks
+        .iter()
+        .map(|check| (check, render_db_check(table_lower, check, dialect)))
+        .collect();
+    if let Some((orphan, _)) = check_emissions.iter().find(|(check, emission)| {
+        emission.inline.is_some()
+            && !model
+                .columns
+                .iter()
+                .any(|col| check.name == db_check_constraint_name(table_lower, &col.name))
+    }) {
+        return Err(EmissionError {
+            message: format!(
+                "Cannot inline CHECK constraint '{}' on table '{}': no declared column owns it.",
+                orphan.name, table_lower
+            ),
+        });
+    }
+
     let mut pre_create_sqls: Vec<String> = Vec::new();
     for col in &model.columns {
         let storage =
@@ -199,9 +223,13 @@ pub fn render_create_table(
         if !col.nullable {
             col_def.not_null();
         }
+        // A SQLite db_check rides its column's definition as a named column
+        // constraint (#514); Postgres has no inline fragment.
+        append_inline_checks(&mut col_def, &check_emissions, table_lower, &col.name);
         // Single-column uniques are NOT inline: they are emitted as standalone
         // named `uq_` unique indexes (see `standalone_indexes`), the one shape
-        // fresh-create, the SQLite ALTER path, and Alembic reflection all share.
+        // fresh-create, the ALTER path on both dialects, and Alembic
+        // reflection all share.
         table_stmt.col(&mut col_def);
     }
 
@@ -224,7 +252,7 @@ pub fn render_create_table(
     };
     let create_sql = append_named_table_checks(create_sql, model)?;
 
-    let (post_create_sqls, warnings) = post_create_artifacts(model, dialect)?;
+    let (post_create_sqls, warnings) = post_create_artifacts(model, &check_emissions, dialect)?;
     Ok(CreateTableEmission {
         pre_create_sqls,
         create_sql,
@@ -272,8 +300,28 @@ pub(crate) fn standalone_indexes(model: &SchemaModel) -> Vec<(String, Vec<String
     out
 }
 
+/// Append every inline db_check fragment owned by `column` to its definition.
+/// The owner is matched by constraint name, the same rule `emit_add_column`
+/// uses (`ck_<table>_<col>`).
+fn append_inline_checks(
+    col_def: &mut ColumnDef,
+    check_emissions: &[(&ferro_schema_ir::SchemaCheck, CheckEmission)],
+    table: &str,
+    column: &str,
+) {
+    let owned_name = db_check_constraint_name(table, column);
+    for (check, emission) in check_emissions {
+        if check.name == owned_name
+            && let Some(inline) = &emission.inline
+        {
+            col_def.extra(inline.clone());
+        }
+    }
+}
+
 fn post_create_artifacts(
     model: &SchemaModel,
+    check_emissions: &[(&ferro_schema_ir::SchemaCheck, CheckEmission)],
     dialect: Dialect,
 ) -> Result<(Vec<String>, Vec<String>), EmissionError> {
     let table_lower = model.table_name.as_str();
@@ -284,13 +332,13 @@ fn post_create_artifacts(
         statements.push(render_index_sql(table_lower, &name, &columns, unique, dialect));
     }
 
-    for check in &model.checks {
-        let emission = render_db_check(table_lower, check, dialect);
-        if let Some(stmt) = emission.statement {
-            statements.push(stmt);
+    // Inline fragments already rode their column in the CREATE TABLE.
+    for (_, emission) in check_emissions {
+        if let Some(stmt) = &emission.statement {
+            statements.push(stmt.clone());
         }
-        if let Some(warning) = emission.warning {
-            warnings.push(warning);
+        if let Some(warning) = &emission.warning {
+            warnings.push(warning.clone());
         }
     }
 
@@ -368,7 +416,8 @@ fn emit_add_column(
         return Err(EmissionError {
             message: format!(
                 "Cannot add column '{}.{}': it is a primary key, and primary keys cannot \
-                 be added to existing tables. Use Alembic for this migration.",
+                 be added to existing tables. Generate a reviewed migration with \
+                 `ferro migrate new`.",
                 table, column
             ),
         });
@@ -394,7 +443,8 @@ fn emit_add_column(
             message: format!(
                 "Cannot add NOT NULL column '{}.{}' to an existing table: it has no \
                  literal default to backfill existing rows. Make the field nullable, \
-                 give it a literal default, or use Alembic for this migration.",
+                 give it a literal default, or generate a reviewed migration with \
+                 `ferro migrate new`.",
                 table, column
             ),
         });
@@ -409,6 +459,28 @@ fn emit_add_column(
         col_def.default(Expr::cust(expr.clone()));
     } else if let Some(default_value) = &scalar_backfill {
         col_def.default(default_value.clone());
+    }
+
+    // The column's db_check: Postgres runs its idempotent ALTER after the add;
+    // SQLite carries it inline on the added column (#514).
+    let owned_check = db_check_constraint_name(table, column);
+    let check_emissions: Vec<(&ferro_schema_ir::SchemaCheck, CheckEmission)> = model
+        .checks
+        .iter()
+        .filter(|check| check.name == owned_check)
+        .map(|check| (check, render_db_check(table, check, dialect)))
+        .collect();
+    append_inline_checks(&mut col_def, &check_emissions, table, column);
+
+    // SQLite's ADD COLUMN accepts a column-level REFERENCES clause only when
+    // the added column's default is NULL — a nullable add, which never carries
+    // a DEFAULT here. Any other shape keeps its column and warns below.
+    let fk = model.foreign_keys.iter().find(|fk| fk.column == column);
+    let sqlite_inline_fk = dialect == Dialect::Sqlite && col.nullable;
+    if let Some(fk) = fk
+        && sqlite_inline_fk
+    {
+        col_def.extra(render_sqlite_add_column_references(fk));
     }
 
     let stmt = Table::alter()
@@ -458,29 +530,27 @@ fn emit_add_column(
         ));
     }
 
-    for check in &model.checks {
-        if check.name == db_check_constraint_name(table, column) {
-            let emission = render_db_check(table, check, dialect);
-            if let Some(stmt) = emission.statement {
-                result.statements.push(stmt);
-            }
-            if let Some(warning) = emission.warning {
-                result.warnings.push(warning);
-            }
+    for (_, emission) in check_emissions {
+        if let Some(stmt) = emission.statement {
+            result.statements.push(stmt);
+        }
+        if let Some(warning) = emission.warning {
+            result.warnings.push(warning);
         }
     }
 
-    if let Some(fk) = model.foreign_keys.iter().find(|fk| fk.column == column) {
-        if dialect == Dialect::Postgres {
-            result.statements.push(render_add_fk_sql(table, fk));
-        } else {
-            result.warnings.push(format!(
-                "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint \
-                 (SQLite cannot add table constraints to an existing table). Referential \
-                 integrity for this column is not database-enforced; use Alembic if you \
-                 need the constraint.",
+    if let Some(fk) = fk {
+        match dialect {
+            Dialect::Postgres => result.statements.push(render_add_fk_sql(table, fk)),
+            Dialect::Sqlite if sqlite_inline_fk => {}
+            Dialect::Sqlite => result.warnings.push(format!(
+                "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint: SQLite's \
+                 ADD COLUMN accepts a REFERENCES clause only for a column whose default is \
+                 NULL, and this column is NOT NULL with a backfill default. Referential \
+                 integrity for this column is not database-enforced; generate a reviewed \
+                 migration with `ferro migrate new` to rebuild the table with the constraint.",
                 table, column
-            ));
+            )),
         }
     }
 
@@ -489,7 +559,8 @@ fn emit_add_column(
 
 /// `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... ON DELETE ...` for one
 /// IR foreign key. Postgres-only — SQLite cannot add table constraints to an
-/// existing table; its callers warn instead.
+/// existing table: a nullable added column carries
+/// `render_sqlite_add_column_references` inline, and every other shape warns.
 fn render_add_fk_sql(table: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> String {
     format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
@@ -611,8 +682,8 @@ fn emit_alter_column_type(
             if sqlite_type_storage_drift(old_col.db_type.as_deref().unwrap_or(""), new_canonical) {
                 result.warnings.push(format!(
                     "Column '{}.{}' is declared '{}' in the database but the model expects \
-                     '{}'. SQLite cannot change column types in place; use Alembic to \
-                     migrate this column.",
+                     '{}'. SQLite cannot change column types in place; generate a \
+                     reviewed migration with `ferro migrate new` to migrate this column.",
                     table,
                     column,
                     old_col.db_type.as_deref().unwrap_or(""),
@@ -656,8 +727,8 @@ fn emit_alter_column_nullability(
             if old_col.nullable != new_col.nullable {
                 result.warnings.push(format!(
                     "Column '{}.{}' is {} in the database but the model expects {}. SQLite \
-                     cannot change column nullability in place; use Alembic to migrate \
-                     this column.",
+                     cannot change column nullability in place; generate a reviewed \
+                     migration with `ferro migrate new` to migrate this column.",
                     table,
                     column,
                     if old_col.nullable {
@@ -724,7 +795,8 @@ pub fn emit_sql_with_ir(
                     return Err(EmissionError {
                         message: format!(
                             "Cannot drop column '{}.{}': it is part of the primary key. \
-                             Primary-key changes must be migrated with Alembic.",
+                             Primary-key changes need a reviewed migration \
+                             (`ferro migrate new`).",
                             table, column
                         ),
                     });
@@ -770,7 +842,8 @@ pub fn emit_sql_with_ir(
                         "Declared FOREIGN KEY on '{}.{}' (on_delete {}) has no live \
                          constraint, and SQLite cannot add table constraints to an \
                          existing table. Referential integrity for this column is not \
-                         database-enforced; use Alembic if you need the constraint.",
+                         database-enforced; generate a reviewed migration with \
+                         `ferro migrate new` to rebuild the table with the constraint.",
                         table,
                         column,
                         fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
@@ -857,8 +930,8 @@ pub fn emit_sql_with_ir(
                         result.warnings.push(format!(
                             "Foreign key on '{}.{}' declares on_delete {} but the live \
                              constraint enforces {}; SQLite cannot alter constraints in \
-                             place, so the live behavior remains. Migrate with Alembic to \
-                             apply the declared action.",
+                             place, so the live behavior remains. Generate a reviewed \
+                             migration with `ferro migrate new` to apply the declared action.",
                             table,
                             column,
                             fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
