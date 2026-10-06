@@ -7,20 +7,33 @@
 //! ordered [`MigrationPlan`]. [`render_plan`] lowers each op to executable,
 //! dialect-specific DDL through the `ferro_ddl_lowering` functions every
 //! migration door shares (AGENTS.md § I-1).
+//!
+//! The in-house migration system's offline half lives beside it: the schema
+//! snapshot ([`snapshot`]), the migrations-directory reader ([`directory`]) and
+//! the generator ([`generate`]), which renders the planner's ops into a
+//! migration's step files.
 
+pub mod directory;
 mod emit;
+pub mod generate;
 mod order;
 mod plan;
 mod render;
+pub mod snapshot;
 
+pub use directory::{
+    DirectoryError, Headers, Migration, MigrationsDir, Step, StepDialect, StepKind,
+};
 pub use emit::{CreateTableEmission, order_models_for_create, render_create_table};
 pub use ferro_ddl_lowering::Dialect;
+pub use generate::{CheckReport, GenerateError, GeneratedMigration, check_migrations, generate};
 pub use order::order_by_dependencies;
 pub use plan::{
     LiveCheckFact, LiveFacts, LiveTableFacts, plan_check_drops, plan_check_rebuilds, plan_from_ir,
     plan_index_rebuilds, plan_missing_checks, plan_validations,
 };
 pub use render::{RenderedOp, render_plan, validate_schema_ir};
+pub use snapshot::{Snapshot, SnapshotError};
 
 /// Executable SQL plus non-fatal warnings for one rendered op.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
