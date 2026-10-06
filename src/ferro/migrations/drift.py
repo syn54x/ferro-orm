@@ -138,6 +138,10 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "DropColumn": lambda op: f"{_column(op)} column is extra",
     "AlterColumnType": _type,
     "AlterColumnNullability": _nullability,
+    "ChangePrimaryKey": lambda op: (
+        f"{op['table']} primary key is ({', '.join(op['from'])}), "
+        f"snapshot says ({', '.join(op['to'])})"
+    ),
     "AddIndex": lambda op: f"{op['name']} index is missing",
     "DropIndex": lambda op: f"{op['name']} index is extra",
     "RebuildIndex": lambda op: f"{op['name']} index is invalid",
