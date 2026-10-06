@@ -178,6 +178,17 @@ async def transaction(using: str | None = None, *, session: "Session | None" = N
     except Exception:
         await rollback_transaction(tx_id, session_id=route.session_id)
         raise
+    except BaseException as interruption:
+        # Cancellation and KeyboardInterrupt skip `except Exception`; without
+        # this the registry would keep the pinned connection forever. The
+        # interruption is what the caller must see, so a failing rollback is
+        # attached to it as ``__context__`` rather than replacing it.
+        try:
+            await rollback_transaction(tx_id, session_id=route.session_id)
+        except BaseException as rollback_failure:
+            rollback_failure.__context__ = None
+            interruption.__context__ = rollback_failure
+        raise
     finally:
         _CURRENT_TRANSACTION.reset(token)
         _CURRENT_TRANSACTION_CONNECTION.reset(connection_token)
