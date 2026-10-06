@@ -170,20 +170,24 @@ new variant without a line here fails."""
 def render_op(op: dict[str, Any]) -> str:
     """One planner op as one plain-language line (``team.name column is
     missing``). An op kind this module does not know still renders, as
-    ``<kind> on <table>``.
+    ``<kind> on <table>``; a known kind missing one of its fields raises
+    ``ValueError`` naming both.
 
     ``AlterColumnType`` reads ``live_type`` / ``snapshot_type`` and
     ``AlterColumnNullability`` reads ``live_nullable`` when the op carries
     them (:func:`drift` adds them); without them the line says only that the
     two differ.
     """
-    renderer = _RENDERERS.get(op.get("kind", ""))
+    kind = op.get("kind", "unknown op")
+    renderer = _RENDERERS.get(kind)
     if renderer is not None:
         try:
             return renderer(op)
-        except KeyError:
-            pass
-    kind = op.get("kind", "unknown op")
+        except KeyError as missing:
+            raise ValueError(
+                f"{kind} op has no {missing.args[0]!r} field; the planner's op "
+                f"and this renderer disagree on its shape"
+            ) from None
     return f"{kind} on {op['table']}" if op.get("table") else kind
 
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .api import check, require_applied, status, up
-from .drift import DriftReport, drift
+from .drift import DriftReport, drift, render_op
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 
 if TYPE_CHECKING:
@@ -30,6 +30,7 @@ __all__ = [
     "drift",
     "get_metadata",
     "render_item",
+    "render_op",
     "require_applied",
     "status",
     "up",

@@ -17,15 +17,16 @@ drift happens in production, and reads the report back.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import re
+import shutil
 from pathlib import Path
 
 import pytest
 
 import ferro
 from ferro import _core
-from ferro.migrations import DriftReport, MigrationRefused
-from ferro.migrations.drift import _RENDERERS, render_op
+from ferro.migrations import DriftReport, MigrationRefused, render_op
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     isolated_imports,
@@ -34,7 +35,15 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
     run,
     write_models,
 )
-from tests.test_migrate_up import configure, db, new, sql_step  # noqa: F401
+from tests.test_migrate_up import (  # noqa: F401
+    configure,
+    db,
+    migrations,
+    new,
+    sql_step,
+)
+
+drift_module = importlib.import_module("ferro.migrations.drift")
 
 pytestmark = [
     pytest.mark.usefixtures("isolated_imports", "clean_registry"),
@@ -267,6 +276,64 @@ def test_an_interrupted_step_refuses_naming_status(project, pkg, db, capsys):
     assert "interrupted" in err and "`ferro migrate status`" in err
 
 
+def assert_refused_naming_status(db, capsys, *expected: str) -> None:
+    code, out, err = drift_cli(db, capsys)
+    assert (code, out) == (4, "")
+    assert "`ferro migrate status`" in err
+    for text in expected:
+        assert text in err
+    report = drift_api(db)
+    assert report.lines == [] and report.against is None and not report.clean
+
+
+def test_a_held_lock_with_every_record_finished_refuses(project, pkg, db, capsys):
+    applied(project, pkg, db, capsys)
+
+    async def held() -> DriftReport:
+        await ferro.connect(db.url, name="holder")
+        handle = await _core._acquire_run_lock("holder", None, 0)
+        try:
+            return await ferro.migrations.drift(url=db.url)
+        finally:
+            await _core._release_run_lock(handle)
+            await _core._disconnect("holder")
+
+    report = asyncio.run(held())
+    assert report.lines == [] and not report.clean
+    assert report.refusal is not None
+    assert "a migration run holds the run lock" in report.refusal
+    assert "`ferro migrate status`" in report.refusal
+
+
+def test_a_reverting_step_refuses(project, pkg, db, capsys):
+    applied(project, pkg, db, capsys)
+    db.execute("UPDATE _ferro_migrations SET reverting = TRUE WHERE migration = 2")
+
+    assert_refused_naming_status(db, capsys, "0002_add_teams/", "is reverting")
+
+
+def test_a_partly_applied_migration_refuses(project, pkg, db, capsys):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, TEAMS)
+    new("add_teams", "--sql-step", "seed")
+    seed = sorted(migrations(project).glob("0002_add_teams/02_seed.*"))
+    assert seed, sorted(p.name for p in migrations(project).rglob("*"))
+    assert run("migrate", "up", "--url", db.url) == 0
+    db.execute("DELETE FROM _ferro_migrations WHERE migration = 2 AND step = 2")
+    capsys.readouterr()
+
+    assert_refused_naming_status(db, capsys, "0002_add_teams is partly applied")
+
+
+def test_a_database_ahead_of_the_checkout_refuses(project, pkg, db, capsys):
+    applied(project, pkg, db, capsys)
+    shutil.rmtree(migrations(project) / HEAD)
+
+    assert_refused_naming_status(db, capsys, f"has applied {HEAD}")
+
+
 def test_a_database_with_no_records_drifts_against_nothing(project, pkg, db, capsys):
     configure(project, pkg, db.backend)
     write_models(project, pkg, AUTHOR)
@@ -339,7 +406,7 @@ def migration_op_variants() -> list[str]:
 def test_every_planner_op_kind_has_its_own_line():
     variants = migration_op_variants()
     assert len(variants) >= 25
-    assert sorted(_RENDERERS) == sorted(variants)
+    assert sorted(drift_module._RENDERERS) == sorted(variants)
     for kind in variants:
         op = {
             "kind": kind,
@@ -360,3 +427,15 @@ def test_every_planner_op_kind_has_its_own_line():
 def test_an_unknown_op_kind_still_renders_a_line():
     assert render_op({"kind": "Frobnicate", "table": "team"}) == "Frobnicate on team"
     assert render_op({"kind": "Frobnicate"}) == "Frobnicate"
+
+
+def test_a_known_op_kind_missing_a_field_fails_naming_both():
+    with pytest.raises(ValueError, match=r"AddColumn op has no 'column' field"):
+        render_op({"kind": "AddColumn", "table": "team"})
+
+
+def test_render_op_is_published_beside_drift():
+    """``ferro.migrations.drift`` is the function, so the renderer is reached
+    through the package; it is the drift module's own ``render_op``."""
+    assert ferro.migrations.drift is not drift_module
+    assert ferro.migrations.render_op is drift_module.render_op
