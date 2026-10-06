@@ -19,6 +19,7 @@ pub mod generate;
 mod order;
 mod plan;
 mod render;
+pub mod run_plan;
 pub mod snapshot;
 
 pub use directory::{
@@ -33,6 +34,10 @@ pub use plan::{
     plan_index_rebuilds, plan_missing_checks, plan_validations,
 };
 pub use render::{RenderedOp, render_plan, validate_schema_ir};
+pub use run_plan::{
+    Direction, ExecMode, Origin, PlannedStep, RecordKind, RunPlan, RunRefusal, RunStatus,
+    StepRecord, Target, plan_run,
+};
 pub use snapshot::{Snapshot, SnapshotError};
 
 /// Executable SQL plus non-fatal warnings for one rendered op.
