@@ -347,6 +347,50 @@ pub fn reset_engine() -> PyResult<()> {
     Ok(())
 }
 
+/// Close and forget one named, non-default connection — the counterpart of
+/// `connect(url, name=...)` for a caller that opened a connection for one
+/// job (the migration runner connecting to `--url`). The default connection
+/// is refused: tearing it down is `reset_engine()`'s job.
+///
+/// # Errors
+/// `ValueError` when the name is not registered or is the default
+/// connection; `RuntimeError` when a state lock is poisoned.
+#[pyfunction]
+#[pyo3(name = "_disconnect")]
+pub fn disconnect(py: Python<'_>, name: String) -> PyResult<Bound<'_, PyAny>> {
+    let default_name = DEFAULT_CONNECTION_NAME
+        .read()
+        .map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Default Connection")
+        })?
+        .clone();
+    if default_name.as_deref() == Some(name.as_str()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Connection '{name}' is the default connection; reset_engine() tears it down"
+        )));
+    }
+    let engine = CONNECTION_REGISTRY
+        .write()
+        .map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Connection Registry")
+        })?
+        .remove(&name)
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Connection '{name}' is not registered"
+            ))
+        })?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        if let Some(pool) = engine.sqlite_pool() {
+            pool.close().await;
+        }
+        if let Some(pool) = engine.postgres_pool() {
+            pool.close().await;
+        }
+        Ok(())
+    })
+}
+
 /// The connected dialect for ``using``, or the default connection.
 ///
 /// ``None`` when no engine is initialized — recipe compile stays

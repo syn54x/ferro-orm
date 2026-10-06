@@ -17,6 +17,7 @@ mod migrations_ffi;
 mod naming_ffi;
 mod operations;
 mod query;
+mod run;
 mod schema;
 mod schema_bind;
 mod session_settings;
@@ -162,6 +163,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(connection::reset_engine, m)?)?;
+    m.add_function(wrap_pyfunction!(connection::disconnect, m)?)?;
     m.add_function(wrap_pyfunction!(connection::set_default_connection, m)?)?;
     m.add_function(wrap_pyfunction!(connection::connection_backend, m)?)?;
     m.add_function(wrap_pyfunction!(clear_registry, m)?)?;
