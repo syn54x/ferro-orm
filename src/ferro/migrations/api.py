@@ -75,8 +75,8 @@ async def _ahead_or_behind(
     and the refusals ``up`` would meet. Raises :class:`DatabaseAheadError`
     when the database holds migrations the checkout lacks and ``allow_ahead``
     is off (and that is the only thing in the way)."""
-    dialect = runner._dialect(name, database)
-    tracking = runner._tracking_schema(database, dialect)
+    dialect = runner.connection_dialect(name, database)
+    tracking = runner.tracking_schema_for(database, dialect)
     state = json.loads(await _core._read_records(name, tracking))
     records = json.dumps(state["records"])
     directory = str(database.directory)

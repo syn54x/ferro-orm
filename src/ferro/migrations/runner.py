@@ -49,11 +49,13 @@ __all__ = [
     "AppliedStep",
     "DownPlan",
     "RunReport",
+    "connection_dialect",
     "down",
     "parse_lock_timeout",
     "parse_target",
     "plan_down",
     "status",
+    "tracking_schema_for",
     "up",
 ]
 
@@ -146,7 +148,9 @@ async def _connection(
         await _core._disconnect(name)
 
 
-def _dialect(name: str, database: DatabaseSettings) -> str:
+def connection_dialect(name: str, database: DatabaseSettings) -> str:
+    """The dialect of open connection ``name``, refused when it is not open
+    or ``database`` does not target it."""
     dialect = _core.connection_backend(name)
     if dialect is None:
         raise SettingsError(f"connection `{name}` is not open; connect it first")
@@ -159,7 +163,9 @@ def _dialect(name: str, database: DatabaseSettings) -> str:
     return dialect
 
 
-def _tracking_schema(database: DatabaseSettings, dialect: str) -> str | None:
+def tracking_schema_for(database: DatabaseSettings, dialect: str) -> str | None:
+    """Where ``database``'s tracking tables live on ``dialect``: its
+    ``tracking_schema`` on Postgres, else the governed schema (``None``)."""
     return database.tracking_schema if dialect == "postgres" else None
 
 
@@ -198,8 +204,8 @@ async def up(
     report = RunReport()
     say = progress or (lambda _line: None)
     async with _connection(database, using, url) as name:
-        dialect = _dialect(name, database)
-        tracking = _tracking_schema(database, dialect)
+        dialect = connection_dialect(name, database)
+        tracking = tracking_schema_for(database, dialect)
         try:
             handle = await _acquire_run_lock(name, None, timeout, _say_waiting)
         except RunRefused as refused:
@@ -297,8 +303,8 @@ async def status(
     """
     del settings
     async with _connection(database, using, url) as name:
-        dialect = _dialect(name, database)
-        tracking = _tracking_schema(database, dialect)
+        dialect = connection_dialect(name, database)
+        tracking = tracking_schema_for(database, dialect)
         state = json.loads(await _core._read_records(name, tracking))
         held = await _core._run_lock_is_held(name, None)
         raw = json.loads(
