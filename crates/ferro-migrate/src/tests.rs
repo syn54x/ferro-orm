@@ -3883,3 +3883,84 @@ fn a_foreign_key_cycle_keeps_every_table_in_name_order() {
     );
     assert_eq!(tables_in_plan_order(&plan), vec!["alpha", "beta"]);
 }
+
+#[test]
+fn plan_from_ir_plans_a_primary_key_moving_between_columns() {
+    let keyed_on_id = envelope(vec![schema_model(
+        "doc",
+        vec![pk_col("id", "integer"), col("slug", "text", false)],
+    )]);
+    let keyed_on_slug = envelope(vec![schema_model(
+        "doc",
+        vec![
+            col("id", "integer", false),
+            SchemaColumn {
+                primary_key: true,
+                ..col("slug", "text", false)
+            },
+        ],
+    )]);
+    let change = MigrationOp::ChangePrimaryKey {
+        table: "doc".to_string(),
+        from: vec!["id".to_string()],
+        to: vec!["slug".to_string()],
+    };
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan = plan_from_ir(
+            &keyed_on_id,
+            &keyed_on_slug,
+            dialect,
+            &LiveFacts::declared(),
+            destructive(),
+        );
+        assert_eq!(plan.operations.first(), Some(&change), "{dialect:?}");
+        // The pass warns and skips: no statement, one warning naming the
+        // reviewed-migration door.
+        let rendered = render_plan(&plan, &keyed_on_id, &keyed_on_slug, dialect).expect("render");
+        let op = rendered.iter().find(|r| r.op == change).expect("rendered");
+        assert!(op.statements.is_empty());
+        assert_eq!(
+            op.warnings,
+            [
+                "Table 'doc' declares primary key (slug) but its primary key is (id). A \
+                 primary key cannot be changed in place, so the live key remains; generate \
+                 a reviewed migration with `ferro migrate new`."
+            ]
+        );
+        let unchanged = plan_from_ir(
+            &keyed_on_id,
+            &keyed_on_id,
+            dialect,
+            &LiveFacts::declared(),
+            destructive(),
+        );
+        assert!(
+            unchanged.operations.is_empty(),
+            "{:?}",
+            unchanged.operations
+        );
+    }
+    // The same key listed in another column order is no change: a live table
+    // reports catalog order.
+    let composite = |cols: [&str; 2]| {
+        envelope(vec![schema_model(
+            "pair",
+            cols.iter().map(|name| pk_col(name, "integer")).collect(),
+        )])
+    };
+    let plan = plan_from_ir(
+        &composite(["a", "b"]),
+        &composite(["b", "a"]),
+        Dialect::Postgres,
+        &LiveFacts::declared(),
+        destructive(),
+    );
+    assert!(
+        !plan
+            .operations
+            .iter()
+            .any(|op| matches!(op, MigrationOp::ChangePrimaryKey { .. })),
+        "{:?}",
+        plan.operations
+    );
+}

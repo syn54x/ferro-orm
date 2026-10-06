@@ -231,6 +231,7 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
         // A label added to a type that already exists cannot be reversed by
         // a down (Postgres drops no enum label).
         MigrationOp::AddEnumLabel { .. } => refused(529),
+        MigrationOp::ChangePrimaryKey { .. } => primary_key,
         MigrationOp::AddColumn { column, .. } => {
             let Some(col) = ctx.column_after(column) else {
                 return Needs::Native;
@@ -329,31 +330,6 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
         | MigrationOp::DisableRowSecurity { .. }
         | MigrationOp::NoForceRowSecurity { .. } => refused(531),
     }
-}
-
-/// The table whose primary key differs between `before` and `after`, if
-/// any: the planner has no op for a key moving between columns, so the
-/// generator reads it off the two snapshots.
-pub fn primary_key_change(
-    before: &IrEnvelope<SchemaIrPayload>,
-    after: &IrEnvelope<SchemaIrPayload>,
-) -> Option<String> {
-    let key = |model: &SchemaModel| -> Vec<String> {
-        model
-            .columns
-            .iter()
-            .filter(|col| col.primary_key)
-            .map(|col| col.name.clone())
-            .collect()
-    };
-    before.payload.models.iter().find_map(|old| {
-        let new = after
-            .payload
-            .models
-            .iter()
-            .find(|model| model.table_name == old.table_name)?;
-        (key(old) != key(new)).then(|| old.table_name.clone())
-    })
 }
 
 #[cfg(test)]
@@ -1007,27 +983,20 @@ mod tests {
     }
 
     #[test]
-    fn a_primary_key_moving_between_columns_is_read_off_the_snapshots() {
-        let before = ir(vec![author(vec![])]);
-        assert_eq!(primary_key_change(&before, &before), None);
-        let moved = model(
-            "Author",
-            vec![
-                SchemaColumn {
-                    primary_key: false,
-                    ..pk()
-                },
-                SchemaColumn {
-                    primary_key: true,
-                    ..column("name", "string")
-                },
-            ],
-        );
-        assert_eq!(
-            primary_key_change(&before, &ir(vec![moved])),
-            Some("author".to_string())
-        );
-        // A table only one side has is a new or dropped model, not a key change.
-        assert_eq!(primary_key_change(&before, &ir(vec![])), None);
+    fn a_primary_key_change_is_the_primary_key_refusal_everywhere() {
+        let op = MigrationOp::ChangePrimaryKey {
+            table: "author".into(),
+            from: vec!["id".into()],
+            to: vec!["name".into()],
+        };
+        let a = author(vec![]);
+        for dialect in DIALECTS {
+            for direction in DIRECTIONS {
+                assert_eq!(
+                    needs_for(&op, &a, &a, dialect, direction),
+                    Needs::Refused(Refusal::PrimaryKeyChange)
+                );
+            }
+        }
     }
 }

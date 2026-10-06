@@ -515,10 +515,6 @@ pub fn generate(
     }
     let empty = empty_modelset(target);
     let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
-    // The planner has no op for a primary key moving between columns.
-    if let Some(table) = columns::primary_key_change(parent_ir, target) {
-        return Err(GenerateError::PrimaryKeyChange { table });
-    }
 
     let mut ups = Vec::new();
     let mut downs = Vec::new();
