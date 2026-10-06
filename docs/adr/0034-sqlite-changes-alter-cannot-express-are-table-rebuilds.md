@@ -1,5 +1,7 @@
 # On SQLite, a change `ALTER TABLE` cannot express is a table rebuild, and the runner owns its bracketing
 
+Amended by ADR-0046: a rebuild sits inside the `schema`/`expand` or `contract` step whose Postgres twin carries the change, never in its own step; the fold is per phase step, so a table may be copied once in the expand and once in the contract; a rebuild recreates the table and its ferro-owned indexes as they stand after its step; and the down of a rebuild restores the table as it stood before the step.
+
 Migration `0004` adds a table check to a model:
 
 ```python
@@ -48,9 +50,9 @@ One table in the planner decides, separately for each direction:
 | Add or drop an index or unique | `CREATE` / `DROP INDEX` |
 | Type change across affinity classes, nullability, any check or foreign-key change, primary key | rebuild |
 
-Adding a nullable foreign-key column is native on the way up and a rebuild on the way down. The down of a rebuild is a rebuild to the parent snapshot's table (ADR-0033).
+Adding a nullable foreign-key column is native on the way up and a rebuild on the way down. The down of a rebuild is a rebuild to the table as it stood before the step (ADR-0046; for a migration's first DDL step that is the parent snapshot's table, ADR-0033).
 
-All changes to one table in one migration fold into a single rebuild, native ones included, so the table is copied once. Each rebuilt table is its own step, so a failure on the second resumes there.
+A rebuild sits inside the phase step whose Postgres twin carries the change (ADR-0046). All changes that step makes to one table fold into a single rebuild, native ones included, so the table is copied once per phase step; a step that rebuilds two tables holds both rebuilds and runs as one transaction. The rebuild recreates the ferro-owned indexes on the table as they stand after its step, so an index an *index step* builds later is not created twice (ADR-0044, ADR-0046).
 
 A type change copies with `CAST("col" AS <type>)`. A rebuild carries the same `destructive` and `data-dependent` markers as its Postgres twin (ADR-0032).
 
