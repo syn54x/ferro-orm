@@ -415,7 +415,7 @@ def test_init_refuses_a_default_directory_holding_an_alembic_environment(
         ]
     )
 
-    assert code == 2
+    assert code == 1
     err = capsys.readouterr().err
     assert f"migrations/ holds an Alembic environment ({alembic_marker})" in err
     assert "--directory" in err
@@ -442,7 +442,7 @@ def test_init_refuses_migrations_beside_an_alembic_ini(
         ]
     )
 
-    assert code == 2
+    assert code == 1
     err = capsys.readouterr().err
     assert "migrations/ holds an Alembic environment (alembic.ini beside it)" in err
     assert "--directory" in err
@@ -495,7 +495,7 @@ def test_init_run_twice_refuses_naming_the_existing_tool_ferro(
 
     code = _app()(argv)
 
-    assert code == 2
+    assert code == 1
     err = capsys.readouterr().err
     assert str(project / "pyproject.toml") in err
     assert "[tool.ferro]" in err
@@ -521,7 +521,7 @@ def test_init_refuses_an_existing_ferro_toml(
         ]
     )
 
-    assert code == 2
+    assert code == 1
     assert str(project / "ferro.toml") in capsys.readouterr().err
 
 
@@ -545,7 +545,7 @@ def test_init_refuses_writing_a_second_config_beside_the_first(
         ]
     )
 
-    assert code == 2
+    assert code == 1
     err = capsys.readouterr().err
     assert str(project / "ferro.toml") in err
     assert (project / "pyproject.toml").read_text() == PYPROJECT
@@ -569,7 +569,7 @@ def test_init_refuses_a_config_file_ferro_cannot_find(
         ]
     )
 
-    assert code == 2
+    assert code == 1
     err = capsys.readouterr().err
     assert "settings.toml" in err and "ferro.toml" in err and "pyproject.toml" in err
 
@@ -592,7 +592,7 @@ def test_init_refuses_an_unknown_dialect_flag(
         ]
     )
 
-    assert code == 2
+    assert code == 1
     err = capsys.readouterr().err
     assert "mysql" in err and "--dialects" in err
     assert not (project / "ferro.toml").exists()
@@ -608,7 +608,7 @@ def test_init_with_no_terminal_refuses_naming_the_missing_flag(
 
     code = _app()(["migrate", "init", "--config-file", "ferro.toml"])
 
-    assert code == 2
+    assert code == 1
     assert "--models" in capsys.readouterr().err
     assert not (project / "ferro.toml").exists()
 
@@ -645,32 +645,36 @@ def test_init_refuses_global_options_it_has_no_use_for(
         ]
     )
 
-    assert code == 2
+    assert code == 1
     assert fix in capsys.readouterr().err
 
 
 # -- the shell: exit codes, refusals, the cli extra ------------------------------
 
 
-def test_exit_codes():
+def test_exit_code_values_are_pinned():
     from ferro.cli import exit_codes
 
-    assert (exit_codes.OK, exit_codes.USAGE) == (0, 2)
-    assert (exit_codes.PENDING, exit_codes.NEEDS_ATTENTION) == (3, 4)
+    # #473 decision 9; #519 and #523 code against these values.
+    assert exit_codes.OK == 0
+    assert exit_codes.REFUSED == 1
+    assert exit_codes.USAGE == 2
+    assert exit_codes.PENDING == 3
+    assert exit_codes.NEEDS_ATTENTION == 4
 
 
-def test_render_refusal_prints_the_message_and_returns_usage(
+def test_render_refusal_prints_the_message_and_returns_refused(
     capsys: pytest.CaptureFixture[str],
 ):
     from ferro.cli import exit_codes, render_refusal
 
     code = render_refusal(SettingsError("no ferro config found; create ferro.toml"))
 
-    assert code == exit_codes.USAGE
+    assert code == exit_codes.REFUSED
     assert capsys.readouterr().err == "no ferro config found; create ferro.toml\n"
 
 
-def test_a_settings_error_from_a_verb_renders_as_exit_2(
+def test_a_settings_error_from_a_verb_renders_as_exit_1(
     project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     (project / "pyproject.toml").write_text("[project\nname = 'broken'\n")
@@ -689,13 +693,13 @@ def test_a_settings_error_from_a_verb_renders_as_exit_2(
         ]
     )
 
-    assert code == 2
+    assert code == 1
     err = capsys.readouterr().err
     assert "is not valid TOML" in err
     assert "Traceback" not in err
 
 
-def test_main_returns_usage_on_an_unknown_option(capsys: pytest.CaptureFixture[str]):
+def test_an_unknown_option_is_a_usage_error_exit_2(capsys: pytest.CaptureFixture[str]):
     from ferro.cli import main
 
     assert main(["migrate", "init", "--no-such-flag"]) == 2
@@ -711,7 +715,7 @@ def test_help_lists_migrate(capsys: pytest.CaptureFixture[str]):
     assert "--config" in out and "--database" in out and "--url" in out
 
 
-def test_without_the_cli_extra_main_prints_the_install_hint(
+def test_without_the_cli_extra_main_prints_the_install_hint_and_exits_2(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     from ferro.cli import main

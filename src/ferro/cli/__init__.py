@@ -16,7 +16,8 @@ receives the three global options as one :class:`Global`, given before or
 after the verb (``ferro --database app migrate up`` or
 ``ferro migrate up --database app``). A :class:`~ferro.exceptions.FerroError`
 raised by a verb is a refusal: :func:`render_refusal` prints its message,
-which names the fix, and the command exits :data:`exit_codes.USAGE`.
+which names the fix, and the command exits :data:`exit_codes.REFUSED`.
+A bad flag or a missing ``cli`` extra exits :data:`exit_codes.USAGE`.
 """
 
 import sys
@@ -50,9 +51,9 @@ class Global:
 
 
 def render_refusal(err: FerroError) -> int:
-    """Print a refusal's message to stderr and return :data:`exit_codes.USAGE`."""
+    """Print a refusal's message to stderr and return :data:`exit_codes.REFUSED`."""
     print(err, file=sys.stderr)
-    return exit_codes.USAGE
+    return exit_codes.REFUSED
 
 
 def main(argv: Sequence[str] | None = None) -> int:
