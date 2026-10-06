@@ -175,6 +175,17 @@ pub fn render_plan(
                 out.statements.extend(emission.statements);
                 out.warnings.extend(emission.warnings);
             }
+            // No door changes a primary key in place: warn and skip.
+            MigrationOp::ChangePrimaryKey { table, from, to } => {
+                out.warnings.push(format!(
+                    "Table '{}' declares primary key ({}) but its primary key is ({}). A \
+                     primary key cannot be changed in place, so the live key remains; \
+                     generate a reviewed migration with `ferro migrate new`.",
+                    table,
+                    to.join(", "),
+                    from.join(", "),
+                ));
+            }
             MigrationOp::AddIndex {
                 table,
                 name,

@@ -370,14 +370,14 @@ def test_a_column_added_to_an_existing_table_is_refused_naming_its_ticket(
     write_config(project, pkg)
     write_models(project, pkg, AUTHOR)
     assert run("migrate", "new", "create_author") == 0
-    write_models(project, pkg, AUTHOR + "    bio: str | None = None\n")
+    write_models(project, pkg, AUTHOR + "    bio: str\n")
     before = listing(project / "migrations")
     capsys.readouterr()
 
     assert run("migrate", "new", "add_bio") == 1
 
     assert (
-        "not generated yet: AddColumn on author (ticket #524)"
+        "not generated yet: AddColumn on author needs a backfill (ticket #534)"
         in capsys.readouterr().err
     )
     assert listing(project / "migrations") == before
