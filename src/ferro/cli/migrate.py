@@ -1,0 +1,448 @@
+"""``ferro migrate``: the sub-app every migration verb registers on.
+
+This module defines ``init``. Later verbs register with ``@migrate.command``
+and take ``glob: Annotated[Global, Parameter(parse=False)]`` to receive the
+global options.
+
+``init`` writes the project configuration :class:`~ferro.FerroSettings`
+reads (ADR-0036, ADR-0039)::
+
+    $ ferro migrate init
+    Config file [pyproject.toml]:
+    Models module (dotted) [myapp.models]:
+    Target dialects [postgres]:
+    Another database (separate tables, own migration history)? [y/N]:
+    Wrote [tool.ferro] to pyproject.toml and created migrations/
+
+Every prompt has a flag that answers it. The config is appended to an
+existing ``pyproject.toml`` as text, so the user's other tables are never
+reformatted.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated
+
+from cyclopts import App, Parameter
+
+from ..settings import (
+    DEFAULT_DATABASE,
+    DEFAULT_DIRECTORY,
+    FERRO_TOML,
+    PYPROJECT_TOML,
+    FerroSettings,
+    SettingsError,
+)
+from . import Global, exit_codes
+
+__all__ = ["migrate"]
+
+migrate = App(
+    name="migrate",
+    help="Write, apply and check schema migrations.",
+)
+
+DIALECTS = ("postgres", "sqlite")
+_DATABASE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+_ANOTHER = "Another database (separate tables, own migration history)?"
+_FIRST_NAME_DEFAULT = "main"
+
+
+@dataclass(frozen=True)
+class _Database:
+    name: str
+    models: list[str]
+    dialects: list[str]
+    directory: Path
+    """Absolute."""
+
+
+@migrate.command
+def init(
+    *,
+    config_file: Annotated[
+        Path | None,
+        Parameter(
+            help=(
+                "The file to write: pyproject.toml (gets a [tool.ferro] table) "
+                "or ferro.toml. Asked when omitted; the default is pyproject.toml "
+                "when the project has one."
+            )
+        ),
+    ] = None,
+    models: Annotated[
+        str | None,
+        Parameter(help="The dotted module(s) defining the models, comma-separated."),
+    ] = None,
+    dialects: Annotated[
+        str | None,
+        Parameter(help="The target dialects, comma-separated: postgres, sqlite."),
+    ] = None,
+    directory: Annotated[
+        Path | None,
+        Parameter(
+            help=(
+                "Where migrations live (default migrations/; with several "
+                "databases, one subdirectory each)."
+            )
+        ),
+    ] = None,
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
+    """Set a project up: write its ferro config and create its migrations directory.
+
+    Asks for what the flags do not answer. --database names the one database
+    configured from flags; interactively, answer "y" to "Another database?"
+    to configure several.
+    """
+    if glob.url is not None:
+        raise SettingsError(
+            "init writes config and connects to no database; drop --url"
+        )
+    if glob.config is not None:
+        raise SettingsError(
+            "init writes a config file rather than reading one; name the file "
+            "to write with --config-file"
+        )
+
+    cwd = Path.cwd().resolve()
+    path = _config_path(cwd, config_file)
+    in_pyproject = path.name == PYPROJECT_TOML
+    _refuse_existing_config(path)
+
+    root = (
+        (cwd / directory).resolve()
+        if directory is not None
+        else path.parent / DEFAULT_DIRECTORY
+    )
+    _refuse_alembic(root, explicit=directory is not None)
+
+    databases = _databases(path, root, models, dialects, glob.database)
+    block = _render(databases, root, path, in_pyproject)
+    _write(path, block)
+    for database in databases:
+        database.directory.mkdir(parents=True, exist_ok=True)
+
+    print(block, end="")
+    written = "[tool.ferro] to pyproject.toml" if in_pyproject else path.name
+    created = " and ".join(f"{_shown(d.directory, cwd)}/" for d in databases)
+    print(f"Wrote {written} and created {created}")
+    return exit_codes.OK
+
+
+# -- which file ----------------------------------------------------------------
+
+
+def _config_path(cwd: Path, flag: Path | None) -> Path:
+    if flag is None:
+        default = PYPROJECT_TOML if (cwd / PYPROJECT_TOML).is_file() else FERRO_TOML
+        flag = Path(_ask("Config file", default=default, flag="--config-file"))
+    path = (cwd / flag).resolve()
+    if path.name not in (FERRO_TOML, PYPROJECT_TOML):
+        raise SettingsError(
+            f"init writes {FERRO_TOML} or {PYPROJECT_TOML}, the two files ferro's "
+            f"config lookup finds; got {flag}. Pass --config-file {FERRO_TOML} "
+            f"or --config-file {PYPROJECT_TOML}"
+        )
+    return path
+
+
+def _refuse_existing_config(path: Path) -> None:
+    """One config per project: refuse a second one in the file or beside it."""
+    pyproject = path.parent / PYPROJECT_TOML
+    ferro_toml = path.parent / FERRO_TOML
+    if ferro_toml.is_file():
+        raise SettingsError(
+            f"{ferro_toml} already holds this project's ferro config; init "
+            f"never rewrites one. Edit it, or delete it to start over"
+        )
+    if pyproject.is_file():
+        try:
+            document = tomllib.loads(pyproject.read_text())
+        except tomllib.TOMLDecodeError as exc:
+            raise SettingsError(
+                f"{pyproject} is not valid TOML: {exc}; fix the file"
+            ) from None
+        tool = document.get("tool")
+        if isinstance(tool, dict) and "ferro" in tool:
+            raise SettingsError(
+                f"{pyproject} already has a [tool.ferro] table; init never "
+                f"rewrites one. Edit it, or remove [tool.ferro] to start over"
+            )
+
+
+def _refuse_alembic(root: Path, *, explicit: bool) -> None:
+    """The migrations directory must not be an Alembic environment's."""
+    if not root.is_dir():
+        return
+    if (root / "env.py").is_file():
+        found = "env.py"
+    elif (root / "versions").is_dir():
+        found = "versions"
+    elif (root.parent / "alembic.ini").is_file():
+        found = "alembic.ini beside it"
+    else:
+        return
+    shown = _shown(root, Path.cwd().resolve())
+    fix = (
+        "Pass a different --directory"
+        if explicit
+        else "Pass --directory <path> to put ferro's migrations elsewhere "
+        '(init writes directory = "<path>")'
+    )
+    raise SettingsError(
+        f"{shown}/ holds an Alembic environment ({found}). {fix}, or move the "
+        f"Alembic folder."
+    )
+
+
+# -- which databases -----------------------------------------------------------
+
+
+def _databases(
+    path: Path,
+    root: Path,
+    models_flag: str | None,
+    dialects_flag: str | None,
+    name_flag: str | None,
+) -> list[_Database]:
+    models = _models(path, models_flag, first=True)
+    dialects = _dialects(dialects_flag, default="postgres")
+    scripted = models_flag is not None or dialects_flag is not None
+    if name_flag is not None:
+        _check_name(name_flag, taken=set(), flag="--database")
+    if scripted or not _confirm(_ANOTHER, flag="--models"):
+        if name_flag is None or name_flag == DEFAULT_DATABASE:
+            return [_Database(DEFAULT_DATABASE, models, dialects, root)]
+        return [_Database(name_flag, models, dialects, root / name_flag)]
+
+    first = name_flag or _ask_name(
+        "Name of the first database", taken=set(), default=_FIRST_NAME_DEFAULT
+    )
+    databases = [_Database(first, models, dialects, root / first)]
+    while True:
+        name = _ask_name("Name of the next database", taken={d.name for d in databases})
+        databases.append(
+            _Database(
+                name,
+                _models(path, None, first=False),
+                _dialects(None, default=",".join(databases[-1].dialects)),
+                root / name,
+            )
+        )
+        if not _confirm(_ANOTHER, flag="--models"):
+            return databases
+
+
+def _models(path: Path, flag: str | None, *, first: bool) -> list[str]:
+    if flag is not None:
+        models = _split(flag)
+        if not models:
+            raise SettingsError(
+                "--models is empty; pass the dotted module(s), e.g. --models myapp.models"
+            )
+        return models
+    default = _guess_models(path) if first else None
+    while True:
+        models = _split(
+            _ask("Models module (dotted)", default=default, flag="--models")
+        )
+        if models:
+            return models
+        print(
+            "Name the module(s) that define the models, e.g. myapp.models.",
+            file=sys.stderr,
+        )
+
+
+def _dialects(flag: str | None, *, default: str) -> list[str]:
+    if flag is not None:
+        dialects = _split(flag)
+        unknown = [d for d in dialects if d not in DIALECTS]
+        if unknown or not dialects:
+            raise SettingsError(
+                f"--dialects {flag!r}: {_unknown_dialects(unknown)}; pass a "
+                f"comma-separated list of {', '.join(DIALECTS)}"
+            )
+        return dialects
+    while True:
+        dialects = _split(_ask("Target dialects", default=default, flag="--dialects"))
+        unknown = [d for d in dialects if d not in DIALECTS]
+        if dialects and not unknown:
+            return dialects
+        print(
+            f"{_unknown_dialects(unknown)}; answer with {', '.join(DIALECTS)}, "
+            f"comma-separated.",
+            file=sys.stderr,
+        )
+
+
+def _unknown_dialects(unknown: list[str]) -> str:
+    if not unknown:
+        return "no dialect given"
+    return f"{', '.join(unknown)} {'is not a dialect' if len(unknown) == 1 else 'are not dialects'}"
+
+
+def _ask_name(question: str, *, taken: set[str], default: str | None = None) -> str:
+    while True:
+        name = _ask(question, default=default, flag="--database")
+        try:
+            _check_name(name, taken=taken, flag="the name")
+        except SettingsError as err:
+            print(err, file=sys.stderr)
+            continue
+        return name
+
+
+def _check_name(name: str, *, taken: set[str], flag: str) -> None:
+    if not _DATABASE_NAME.match(name):
+        raise SettingsError(
+            f"{flag} {name!r} is not a database name; use letters, digits, _ and -"
+        )
+    if name in taken:
+        raise SettingsError(
+            f"database `{name}` is already configured; pick another name"
+        )
+
+
+def _guess_models(path: Path) -> str | None:
+    """``<project name>.models`` from ``[project].name``, when there is one."""
+    pyproject = path.parent / PYPROJECT_TOML
+    if not pyproject.is_file():
+        return None
+    project = tomllib.loads(pyproject.read_text()).get("project")
+    name = project.get("name") if isinstance(project, dict) else None
+    if not isinstance(name, str) or not name:
+        return None
+    return f"{re.sub(r'[^A-Za-z0-9_]', '_', name).lower()}.models"
+
+
+# -- writing ---------------------------------------------------------------------
+
+
+def _render(
+    databases: list[_Database], root: Path, path: Path, in_pyproject: bool
+) -> str:
+    """The TOML block init appends, in exactly the shapes ``FerroSettings`` reads."""
+    prefix = "tool.ferro" if in_pyproject else ""
+    base = path.parent
+    if len(databases) == 1 and databases[0].name == DEFAULT_DATABASE:
+        database = databases[0]
+        lines = [f"[{prefix}]"] if prefix else []
+        lines += _keys(database)
+        if database.directory != base / DEFAULT_DIRECTORY:
+            lines.append(
+                f"directory = {_toml_str(_relative(database.directory, base))}"
+            )
+        return "\n".join(lines) + "\n"
+
+    blocks = []
+    for database in databases:
+        header = ".".join(part for part in (prefix, "databases", database.name) if part)
+        lines = [f"[{header}]", *_keys(database)]
+        lines.append(
+            f"url_env = {_toml_str(database.name.upper().replace('-', '_') + '_DATABASE_URL')}"
+        )
+        if database.directory != base / DEFAULT_DIRECTORY / database.name:
+            lines.append(
+                f"directory = {_toml_str(_relative(database.directory, base))}"
+            )
+        blocks.append("\n".join(lines) + "\n")
+    return "\n".join(blocks)
+
+
+def _keys(database: _Database) -> list[str]:
+    return [
+        f"models = {_toml_list(database.models)}",
+        f"dialects = {_toml_list(database.dialects)}",
+    ]
+
+
+def _write(path: Path, block: str) -> None:
+    """Append ``block`` to ``path`` as text, after a blank line.
+
+    The result is parsed before anything is written, so a file that would
+    stop being valid TOML is refused and left as it was; once written, it is
+    read back through ``FerroSettings``, and a refusal there restores the
+    file to what it was before init ran.
+    """
+    existing = path.read_text() if path.is_file() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    text = f"{existing}\n{block}" if existing else block
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SettingsError(
+            f"appending ferro's config to {path} would make it invalid TOML "
+            f"({exc}); add this to it by hand:\n{block}"
+        ) from None
+    original = path.read_bytes() if path.is_file() else None
+    path.write_text(text)
+    try:
+        FerroSettings(config=path)  # what init wrote is what every consumer reads
+    except SettingsError:
+        if original is None:
+            path.unlink()
+        else:
+            path.write_bytes(original)
+        raise
+
+
+# -- small helpers -----------------------------------------------------------------
+
+
+def _ask(question: str, *, default: str | None, flag: str) -> str:
+    """Ask one question on the terminal; an empty answer takes ``default``."""
+    shown = f" [{default}]" if default is not None else ""
+    answer = _read(f"{question}{shown}: ", question, flag)
+    return answer or default or ""
+
+
+def _confirm(question: str, *, flag: str) -> bool:
+    """Ask a yes/no question whose default is no; ask again on anything else."""
+    while True:
+        answer = _read(f"{question} [y/N]: ", question, flag).lower()
+        if answer in ("", "n", "no"):
+            return False
+        if answer in ("y", "yes"):
+            return True
+        print("Answer y or n.", file=sys.stderr)
+
+
+def _read(prompt: str, question: str, flag: str) -> str:
+    """Every prompt goes through here. With no terminal to ask on (end of
+    input), refuse naming the flag that answers the question."""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        raise SettingsError(
+            f"init has no terminal to ask {question!r} on; pass {flag}"
+        ) from None
+
+
+def _split(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _relative(target: Path, base: Path) -> str:
+    return Path(os.path.relpath(target, base)).as_posix()
+
+
+def _shown(target: Path, cwd: Path) -> str:
+    return _relative(target, cwd)
+
+
+def _toml_str(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _toml_list(values: list[str]) -> str:
+    return "[" + ", ".join(_toml_str(value) for value in values) + "]"
