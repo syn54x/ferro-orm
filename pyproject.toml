@@ -19,6 +19,14 @@ alembic = [
     "alembic>=1.18.1",
     "sqlalchemy>=2.0.46",
 ]
+# Install with: pip install "ferro-orm[cli]"
+# Enables the `ferro` command (`ferro migrate ...`).
+cli = [
+    "cyclopts>=5,<6",
+]
+
+[project.scripts]
+ferro = "ferro.cli:main"
 
 [tool.maturin]
 module-name = "ferro._core"
@@ -46,6 +54,7 @@ ci-test = [
     "pytest-postgresql>=8.0.0",
     "aiosqlite>=0.22.1",
     "greenlet>=3.3.1",
+    "cyclopts>=5,<6",
 ]
 docs = [
     "zensical>=0.0.45",
@@ -78,6 +87,7 @@ dev = [
     "aiosqlite>=0.22.1",
     "greenlet>=3.3.1",
     "ty>=0.0.56",
+    "cyclopts>=5,<6",
 ]
 
 [tool.pytest.ini_options]
