@@ -1,0 +1,1 @@
+verified 2026-10-06T21:25:42Z: cargo test -p ferro-migrate (157 ok); cargo test --no-default-features --features testing (298 ok); maturin develop; pytest test_migrate_up/status/run_lock/new --db-backends=sqlite,postgres (58 passed, 5 dialect skips)
