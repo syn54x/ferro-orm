@@ -376,6 +376,32 @@ def status(
     return report.exit_code
 
 
+@migrate.command
+def drift(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
+    """Compare this database with the schema of the last migration applied to it.
+
+    Prints one line per difference (a missing column, an invalid index, a
+    check whose body changed, ...) and exits 4, or prints "no drift" and
+    exits 0. Tables the migrations never declared are ignored. Exits 4 too,
+    naming what to run, on a database mid-migration or with no migration
+    records. Takes no lock and changes nothing.
+    """
+    import asyncio
+
+    from ..migrations.drift import audit
+
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    report = asyncio.run(audit(database, url=glob.url))
+    for warning in report.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    if report.refusal is not None:
+        print(report.refusal, file=sys.stderr)
+        return exit_codes.NEEDS_ATTENTION
+    print(report.render())
+    return exit_codes.OK if report.clean else exit_codes.NEEDS_ATTENTION
+
+
 def _refuse_url(glob: Global, verb: str) -> None:
     if glob.url is not None:
         raise SettingsError(
