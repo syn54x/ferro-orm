@@ -1039,11 +1039,36 @@ pub struct CheckRebuildEmission {
 /// parses that into one n-ary `BoolExpr` and `pg_get_constraintdef` prints
 /// `(a) OR (b) OR (c)`. Same predicate, so both normalize to the flat form
 /// (see [`flatten_associative_chains`]).
+///
+/// Postgres prints an unvalidated constraint as `CHECK (…) NOT VALID`. That
+/// trailing `NOT VALID` is the catalog's validity annotation, not part of
+/// the body, so it is stripped like the leading `CHECK` keyword. Validity is
+/// its own field (`pg_constraint.convalidated`) and its own op
+/// (`VALIDATE CONSTRAINT`, [`render_validate_constraint`]); ADR-0043.
 pub fn normalize_check_definition(definition: &str) -> String {
     let tokens = flatten_associative_chains(unwrap_outer_parens(strip_pg_in_any(
-        strip_type_casts(strip_leading_check(tokenize_check_sql(definition))),
+        strip_type_casts(strip_trailing_not_valid(strip_leading_check(
+            tokenize_check_sql(definition),
+        ))),
     )));
     render_check_tokens(&tokens)
+}
+
+/// Render the one `VALIDATE CONSTRAINT` statement for a foreign key or check
+/// that exists live `NOT VALID` (ADR-0043).
+///
+/// The single renderer for that statement (AGENTS.md § I-1): the
+/// reconciliation pass executes it through `ferro-migrate`'s
+/// `ValidateConstraint` op, and the generator's validate step and the
+/// Alembic bridge render it through this same function. `VALIDATE` flips
+/// only the constraint's validity flag — the name and body stay as they are.
+/// Postgres-only: SQLite has no unvalidated constraints.
+pub fn render_validate_constraint(table: &str, name: &str) -> String {
+    format!(
+        "ALTER TABLE {} VALIDATE CONSTRAINT {}",
+        quote_ident(table),
+        quote_ident(name),
+    )
 }
 
 /// Declared CHECK names whose live counterpart exists and whose normalized
@@ -2343,6 +2368,25 @@ fn strip_leading_check(mut tokens: Vec<CheckToken>) -> Vec<CheckToken> {
     tokens
 }
 
+/// Drop a trailing `NOT VALID` (Postgres's validity annotation on an
+/// unvalidated constraint; see [`normalize_check_definition`]).
+///
+/// Only after a closing parenthesis: the catalog always prints the body
+/// parenthesized, and `) NOT valid` cannot end an expression (`NOT` is a
+/// prefix operator), so a body that negates a column named `valid`
+/// (`NOT "valid"`) is never mistaken for the annotation.
+fn strip_trailing_not_valid(mut tokens: Vec<CheckToken>) -> Vec<CheckToken> {
+    let n = tokens.len();
+    if n >= 3
+        && tokens[n - 3] == CheckToken::Punct(')')
+        && matches!(&tokens[n - 2], CheckToken::Word(w) if w.eq_ignore_ascii_case("not"))
+        && matches!(&tokens[n - 1], CheckToken::Word(w) if w.eq_ignore_ascii_case("valid"))
+    {
+        tokens.truncate(n - 2);
+    }
+    tokens
+}
+
 fn unwrap_outer_parens(mut tokens: Vec<CheckToken>) -> Vec<CheckToken> {
     loop {
         if tokens.len() < 2 {
@@ -3184,6 +3228,63 @@ mod tests {
         assert!(
             drifted_check_names(&model, &leftover).is_empty(),
             "an undeclared live name is leftover handling (#345), not a rebuild"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Validity is its own field (ADR-0043): `pg_get_constraintdef` appends
+    // ` NOT VALID` to an unvalidated constraint's definition. That suffix is
+    // the catalog's validity annotation, not part of the body, so the body
+    // comparison never sees it; the validate op is decided from
+    // `pg_constraint.convalidated`, not from this text.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_not_valid_suffix_is_not_body_drift() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let live = [(
+            "ck_transfer_at_most_one_outflow".to_string(),
+            "CHECK (((outflow_transaction_id IS NULL) OR (outflow_activity_id IS NULL))) NOT VALID"
+                .to_string(),
+        )];
+        assert!(
+            drifted_check_names(&model, &live).is_empty(),
+            "an unvalidated check with the declared body is a validate, never a rebuild"
+        );
+        assert_eq!(
+            normalize_check_definition("CHECK ((a > 0)) NOT VALID"),
+            normalize_check_definition("CHECK ((a > 0))"),
+        );
+        assert_ne!(
+            normalize_check_definition("NOT \"valid\""),
+            normalize_check_definition(""),
+            "a body negating a column named `valid` is a body, not the annotation"
+        );
+    }
+
+    #[test]
+    fn a_not_valid_check_whose_body_also_drifted_is_still_drift() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let live = [(
+            "ck_transfer_at_most_one_outflow".to_string(),
+            "CHECK (((outflow_transaction_id IS NULL) AND (outflow_activity_id IS NULL))) NOT VALID"
+                .to_string(),
+        )];
+        assert_eq!(
+            drifted_check_names(&model, &live),
+            vec!["ck_transfer_at_most_one_outflow".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_validate_constraint_is_one_alter_table_statement() {
+        assert_eq!(
+            render_validate_constraint("post", "fk_post_author_id_author"),
+            "ALTER TABLE \"post\" VALIDATE CONSTRAINT \"fk_post_author_id_author\""
+        );
+        assert_eq!(
+            render_validate_constraint("t", "ck_t_x"),
+            "ALTER TABLE \"t\" VALIDATE CONSTRAINT \"ck_t_x\""
         );
     }
 
