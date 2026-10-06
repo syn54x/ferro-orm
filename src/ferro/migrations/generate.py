@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._core import _check_migrations, _generate_migration, _store_snapshot
-from ..exceptions import FerroError
+from .errors import MigrationRefused
 from .layout import (
     SNAPSHOT_FILE,
     GeneratedMigration,
@@ -54,7 +54,7 @@ __all__ = [
 ]
 
 
-class MigrationsCheckError(FerroError):
+class MigrationsCheckError(MigrationRefused):
     """Raised by :meth:`CheckReport.raise_for_problems`; carries the report."""
 
     def __init__(self, report: CheckReport) -> None:
