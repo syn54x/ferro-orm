@@ -46,6 +46,7 @@ from .query import Relation, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .rowsecurity import RowPolicy, RowSecurity
 from .session import Session, current_session, engines
+from .settings import DatabaseSettings, FerroSettings
 
 # Set up the Ferro logger
 _logger = logging.getLogger("ferro")
@@ -470,4 +471,6 @@ __all__ = [
     "engines",
     "current_session",
     "now",
+    "FerroSettings",
+    "DatabaseSettings",
 ]
