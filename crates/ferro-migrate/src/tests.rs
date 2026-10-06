@@ -2673,3 +2673,327 @@ fn add_table_pass_carries_row_security_through_emit_sql_with_ir() {
         emitted.statements
     );
 }
+
+// ---------------------------------------------------------------------------
+// Validity flags (#515; ADR-0043, ADR-0044): a live constraint or index can
+// exist and still not be trusted. A declared FK or check that exists live
+// `NOT VALID` is validated in place; a declared index that exists live
+// invalid is rebuilt (drop, then the create statement the add path renders).
+// ---------------------------------------------------------------------------
+
+/// `post` with a ferro-named FK to `author`, a table check, a composite
+/// index and a unique — every artifact kind a validity flag attaches to.
+fn post_model_with_constraints() -> SchemaModel {
+    SchemaModel {
+        foreign_keys: vec![SchemaForeignKey {
+            column: "author_id".to_string(),
+            to_table: "author".to_string(),
+            to_column: "id".to_string(),
+            on_delete: Some("CASCADE".to_string()),
+            name: Some("fk_post_author_id_author".to_string()),
+        }],
+        indexes: vec![SchemaIndex {
+            name: "idx_post_author_id_title".to_string(),
+            columns: vec!["author_id".to_string(), "title".to_string()],
+            unique: false,
+        }],
+        uniques: vec![SchemaUnique {
+            name: "uq_post_slug".to_string(),
+            columns: vec!["slug".to_string()],
+        }],
+        table_checks: vec![SchemaTableCheck {
+            name: "ck_post_title_set".to_string(),
+            predicate: CheckExpr::IsNotNull {
+                column: "title".to_string(),
+            },
+        }],
+        ..schema_model(
+            "post",
+            vec![
+                pk_col("id", "int"),
+                col("author_id", "int", true),
+                col("slug", "text", true),
+                col("title", "text", true),
+            ],
+        )
+    }
+}
+
+fn fk_validity(name: &str, validated: bool) -> LiveFkValidity {
+    LiveFkValidity {
+        name: name.to_string(),
+        validated,
+    }
+}
+
+fn check_validity(name: &str, validated: bool) -> LiveCheckValidity {
+    LiveCheckValidity {
+        name: name.to_string(),
+        validated,
+    }
+}
+
+fn index_validity(name: &str, valid: bool) -> LiveIndexValidity {
+    LiveIndexValidity {
+        name: name.to_string(),
+        valid,
+    }
+}
+
+#[test]
+fn plan_validations_validates_a_declared_fk_and_check_that_exist_not_valid() {
+    let new_ir = envelope(vec![post_model_with_constraints()]);
+    assert_eq!(
+        plan_validations(
+            "post",
+            &new_ir,
+            &[fk_validity("fk_post_author_id_author", false)],
+            &[check_validity("ck_post_title_set", false)],
+        ),
+        vec![
+            MigrationOp::ValidateConstraint {
+                table: "post".to_string(),
+                name: "fk_post_author_id_author".to_string(),
+            },
+            MigrationOp::ValidateConstraint {
+                table: "post".to_string(),
+                name: "ck_post_title_set".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn plan_validations_is_a_noop_for_validated_absent_or_undeclared_constraints() {
+    let new_ir = envelope(vec![post_model_with_constraints()]);
+    assert!(
+        plan_validations(
+            "post",
+            &new_ir,
+            &[fk_validity("fk_post_author_id_author", true)],
+            &[check_validity("ck_post_title_set", true)],
+        )
+        .is_empty(),
+        "a validated constraint replans to nothing"
+    );
+    assert!(
+        plan_validations("post", &new_ir, &[], &[]).is_empty(),
+        "a constraint absent live is an add, never a validate"
+    );
+    assert!(
+        plan_validations(
+            "post",
+            &new_ir,
+            &[fk_validity("post_author_id_fkey", false)],
+            &[
+                check_validity("ck_post_orphan", false),
+                check_validity("user_check", false)
+            ],
+        )
+        .is_empty(),
+        "a NOT VALID constraint the model does not declare is never touched"
+    );
+    assert!(
+        plan_validations("missing", &new_ir, &[], &[]).is_empty(),
+        "an undeclared table plans nothing"
+    );
+}
+
+#[test]
+fn plan_index_rebuilds_rebuilds_a_declared_index_that_exists_invalid() {
+    let new_ir = envelope(vec![post_model_with_constraints()]);
+    assert_eq!(
+        plan_index_rebuilds(
+            "post",
+            &new_ir,
+            &[
+                index_validity("idx_post_author_id_title", false),
+                index_validity("uq_post_slug", false),
+            ],
+        ),
+        vec![
+            MigrationOp::RebuildIndex {
+                table: "post".to_string(),
+                name: "idx_post_author_id_title".to_string(),
+                columns: vec!["author_id".to_string(), "title".to_string()],
+                unique: false,
+            },
+            MigrationOp::RebuildIndex {
+                table: "post".to_string(),
+                name: "uq_post_slug".to_string(),
+                columns: vec!["slug".to_string()],
+                unique: true,
+            },
+        ]
+    );
+}
+
+#[test]
+fn plan_index_rebuilds_is_a_noop_for_valid_absent_or_undeclared_indexes() {
+    let new_ir = envelope(vec![post_model_with_constraints()]);
+    assert!(
+        plan_index_rebuilds(
+            "post",
+            &new_ir,
+            &[
+                index_validity("idx_post_author_id_title", true),
+                index_validity("uq_post_slug", true),
+            ],
+        )
+        .is_empty()
+    );
+    assert!(plan_index_rebuilds("post", &new_ir, &[]).is_empty());
+    assert!(
+        plan_index_rebuilds("post", &new_ir, &[index_validity("idx_post_legacy", false)])
+            .is_empty(),
+        "an invalid index the model does not declare is leftover handling, not a rebuild"
+    );
+}
+
+#[test]
+fn emit_validate_constraint_renders_the_one_validate_statement_on_postgres() {
+    let new_ir = envelope(vec![post_model_with_constraints()]);
+    let plan = MigrationPlan {
+        operations: vec![
+            MigrationOp::ValidateConstraint {
+                table: "post".to_string(),
+                name: "fk_post_author_id_author".to_string(),
+            },
+            MigrationOp::ValidateConstraint {
+                table: "post".to_string(),
+                name: "ck_post_title_set".to_string(),
+            },
+        ],
+        warnings: Vec::new(),
+    };
+    let pg = emit_sql_with_ir(&plan, &new_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert_eq!(
+        pg.statements,
+        vec![
+            ferro_ddl_lowering::render_validate_constraint("post", "fk_post_author_id_author"),
+            ferro_ddl_lowering::render_validate_constraint("post", "ck_post_title_set"),
+        ]
+    );
+    assert_eq!(
+        pg.statements[0],
+        "ALTER TABLE \"post\" VALIDATE CONSTRAINT \"fk_post_author_id_author\""
+    );
+    assert!(pg.warnings.is_empty(), "{:?}", pg.warnings);
+}
+
+#[test]
+fn emit_validate_constraint_fails_loudly_on_sqlite() {
+    // SQLite has no unvalidated constraints (its flags always read `true`),
+    // so the planner never plans the op there; an op that reaches emission
+    // anyway is a planner bug, never a silent no-op.
+    let new_ir = envelope(vec![post_model_with_constraints()]);
+    let plan = MigrationPlan {
+        operations: vec![MigrationOp::ValidateConstraint {
+            table: "post".to_string(),
+            name: "ck_post_title_set".to_string(),
+        }],
+        warnings: Vec::new(),
+    };
+    let err = emit_sql_with_ir(&plan, &new_ir, &new_ir, Dialect::Sqlite).unwrap_err();
+    assert!(err.message.contains("ck_post_title_set"), "{}", err.message);
+}
+
+#[test]
+fn emit_rebuild_index_drops_then_runs_the_add_index_create_statement() {
+    let add = MigrationPlan {
+        operations: vec![MigrationOp::AddIndex {
+            table: "post".into(),
+            name: "uq_post_slug".into(),
+            columns: vec!["slug".into()],
+            unique: true,
+        }],
+        warnings: vec![],
+    };
+    let rebuild = MigrationPlan {
+        operations: vec![MigrationOp::RebuildIndex {
+            table: "post".into(),
+            name: "uq_post_slug".into(),
+            columns: vec!["slug".into()],
+            unique: true,
+        }],
+        warnings: vec![],
+    };
+    let created = emit_sql_with_ir(
+        &add,
+        &empty_envelope(),
+        &empty_envelope(),
+        Dialect::Postgres,
+    )
+    .unwrap()
+    .statements;
+    let rebuilt = emit_sql_with_ir(
+        &rebuild,
+        &empty_envelope(),
+        &empty_envelope(),
+        Dialect::Postgres,
+    )
+    .unwrap();
+    assert_eq!(
+        rebuilt.statements,
+        vec![
+            "DROP INDEX \"uq_post_slug\"".to_string(),
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_post_slug\" ON \"post\" (\"slug\")".to_string(),
+        ]
+    );
+    assert_eq!(
+        rebuilt.statements[1..],
+        created[..],
+        "the rebuild's create is byte-identical to the add path's"
+    );
+    assert!(rebuilt.warnings.is_empty(), "{:?}", rebuilt.warnings);
+}
+
+#[test]
+fn a_not_valid_check_whose_body_drifted_is_a_rebuild_and_an_unchanged_one_is_not() {
+    // The rebuild's bare ADD installs a valid constraint; the caller drops
+    // the validate for any name a rebuild already covers. Pin the rebuild
+    // planner's verdict for both NOT VALID shapes.
+    let new_ir = envelope(vec![post_model_with_constraints()]);
+    let drifted = [(
+        "ck_post_title_set".to_string(),
+        "CHECK ((title IS NULL)) NOT VALID".to_string(),
+    )];
+    assert_eq!(
+        plan_check_rebuilds("post", &new_ir, &drifted),
+        vec![MigrationOp::RebuildCheck {
+            table: "post".to_string(),
+            name: "ck_post_title_set".to_string(),
+        }]
+    );
+    let unchanged = [(
+        "ck_post_title_set".to_string(),
+        "CHECK ((title IS NOT NULL)) NOT VALID".to_string(),
+    )];
+    assert!(
+        plan_check_rebuilds("post", &new_ir, &unchanged).is_empty(),
+        "a NOT VALID check with the declared body is a validate, never a rebuild"
+    );
+}
+
+#[test]
+fn legacy_emit_sql_names_the_two_new_ops() {
+    let plan = MigrationPlan {
+        operations: vec![
+            MigrationOp::ValidateConstraint {
+                table: "post".into(),
+                name: "ck_post_title_set".into(),
+            },
+            MigrationOp::RebuildIndex {
+                table: "post".into(),
+                name: "uq_post_slug".into(),
+                columns: vec!["slug".into()],
+                unique: true,
+            },
+        ],
+        warnings: vec![],
+    };
+    let sql = emit_sql(&plan, Dialect::Postgres);
+    assert_eq!(sql.len(), 2);
+    assert!(sql[0].contains("ck_post_title_set"));
+    assert!(sql[1].contains("uq_post_slug"));
+}
