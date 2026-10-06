@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 import sys
 import textwrap
 import warnings
@@ -379,8 +380,8 @@ def test_a_duplicate_number_is_refused_naming_both_directories(project, pkg, cap
     write_models(project, pkg, AUTHOR)
     assert run("migrate", "new", "a") == 0
     migrations = project / "migrations"
-    (migrations / "0001_a").rename(migrations / "0001_b")
-    assert run("migrate", "new", "a") == 0  # 0001_a again: the root of a new chain
+    # Two branches each generated their own 0001.
+    shutil.copytree(migrations / "0001_a", migrations / "0001_b")
     capsys.readouterr()
 
     assert run("migrate", "new", "c") == 1

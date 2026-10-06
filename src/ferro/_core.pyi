@@ -149,6 +149,16 @@ def _check_migrations(directory: str, target_ir_json: str, dialects: list[str]) 
 def _read_migrations_dir(directory: str) -> str:
     """Read and verify a migrations directory; returns the JSON of its migrations.
 
+    ``{"path", "migrations": [{"number", "name", "dir", "steps": [{"ordinal",
+    "name", "kind" ("ddl" | "data" | "portable_sql"), "files": {<step
+    dialect>: {"up", "down", "up_checksum", "headers"}}}], "snapshot":
+    {"checksum", "parent_checksum", "ir"}}]}``. A step dialect is
+    ``"postgres"``, ``"sqlite"`` or ``"portable"`` (an unsuffixed file, or a
+    data step, serving every dialect); ``headers`` has ``no_transaction``,
+    ``foreign_keys_off``, ``destructive``, ``data_dependent``,
+    ``not_applicable`` and ``nothing_to_reverse`` / ``irreversible`` (a
+    reason or ``None``). Checksums are SHA-384 in lowercase hex.
+
     Raises ``ValueError`` naming the problem and its fix (a duplicate or
     missing number, a broken chain, an unparseable header, ...). A directory
     that does not exist holds no migrations.
