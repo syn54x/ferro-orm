@@ -99,6 +99,8 @@ _RESERVED_KEYS = {
         "remove it until #486 lands"
     ),
 }
+_FERRO_KEYS = frozenset(_DATABASE_KEYS + _TOP_LEVEL_KEYS) | frozenset(_RESERVED_KEYS)
+"""Keys that mark a file's top level as ferro config."""
 _LINE_TO_ADD = {
     "models": 'models = ["myapp.models"]',
     "dialects": 'dialects = ["postgres"]',
@@ -201,30 +203,30 @@ class DatabaseSettings(BaseModel):
         """Import this database's ``models`` modules and return its models.
 
         The config file's directory goes first on ``sys.path``, then each
-        ``python_path`` entry, and each module is imported as written. The
-        result is every registered model this database claims, in
-        registration order, after checking that every registered model has a
-        database and that none of this database's models has a foreign key
-        into another.
+        ``python_path`` entry, and each module is imported as written. Those
+        ``sys.path`` entries stay for the rest of the process, since an
+        imported module may import its siblings later. The result is every
+        registered model this database claims, in registration order, after
+        checking that every registered model has a database and that none of
+        this database's models has a foreign key into another. A foreign key
+        naming its target by string is resolved against every configured
+        database's modules, importing them if needed.
+
+        An empty result is refused: no models is never read as "drop every
+        table" (ADR-0036).
         """
         project = self._require_project()
-        roots = [project.config_path.parent, *project.python_path]
-        _prepend_sys_path(roots)
-        for module in self.models:
-            try:
-                importlib.import_module(module)
-            except ModuleNotFoundError as exc:
-                if exc.name is None or not _is_within(module, exc.name):
-                    raise
-                searched = ", ".join(str(root) for root in roots)
-                raise SettingsError(
-                    f"database `{self.name}` lists module `{module}` in models "
-                    f"({project.config_path}), but it cannot be imported: {exc}. "
-                    f"Searched the config directory and python_path first ({searched}). "
-                    f"If it lives under a source root, add that root to the top-level "
-                    f'python_path, e.g. python_path = ["src"]'
-                ) from exc
-        return _models_of(project.databases, self)
+        _import_database_modules(project, self)
+        models = _models_of(project, self)
+        if not models:
+            modules = ", ".join(f"`{module}`" for module in self.models)
+            raise SettingsError(
+                f"database `{self.name}` imported {modules} ({project.config_path}) "
+                f"and no model was registered from them; an empty modelset is "
+                f"never read as 'drop every table'. Point the models key at the "
+                f"modules that define this database's Model classes"
+            )
+        return models
 
     def _require_project(self) -> _Project:
         if self._project is None:
@@ -326,7 +328,7 @@ class FerroSettings(BaseSettings):
                 f"{_names(owners)}, so it has no single owner; "
                 f'choose one with database("<name>")'
             )
-        _check_references(self.databases, model, owners[0])
+        _check_references(owners[0]._require_project(), model, owners[0])
         return owners[0]
 
     def _no_config_message(self) -> str:
@@ -401,9 +403,11 @@ def _has_tool_ferro(pyproject: Path) -> bool:
 class _ConfigFile:
     """One config file's keys, checked and shaped for :class:`FerroSettings`.
 
-    A file named ``pyproject.toml`` carries its keys under ``[tool.ferro]``;
-    any other file (``ferro.toml``) carries them at the top level. Both read
-    to the same values. Every key-level refusal (unknown, reserved,
+    The file's content decides where its keys are: a file whose top level
+    holds a ``[tool.ferro]`` table (a ``pyproject.toml``, or any file selected
+    with ``config=`` / ``FERRO_CONFIG``) is read there; any other file
+    (``ferro.toml``) carries the keys at its top level. Both read to the same
+    values, and a file carrying both shapes is refused. Every key-level refusal (unknown, reserved,
     misplaced, missing) is decided here so its message can say where the key
     goes; type errors are left to pydantic and described by
     :func:`_describe_validation_error`.
@@ -411,15 +415,17 @@ class _ConfigFile:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.is_pyproject = path.name == PYPROJECT_TOML
-        self.prefix = "tool.ferro" if self.is_pyproject else ""
+        self.document = _read_toml(path)
+        tool = self.document.get("tool")
+        self.in_tool_table = isinstance(tool, dict) and "ferro" in tool
+        self.prefix = "tool.ferro" if self.in_tool_table else ""
         self.labels: dict[str, str] = {}
 
     @property
     def top_label(self) -> str:
         return (
             "[tool.ferro]"
-            if self.is_pyproject
+            if self.in_tool_table
             else f"the top level of {self.path.name}"
         )
 
@@ -467,23 +473,32 @@ class _ConfigFile:
         return f"{self.path} is not a valid ferro config:\n" + "\n".join(lines)
 
     def _table(self) -> dict[str, Any]:
-        document = _read_toml(self.path)
-        if not self.is_pyproject:
-            if "tool" in document:
+        document = self.document
+        top_level_keys = [key for key in document if key in _FERRO_KEYS]
+        if self.in_tool_table:
+            if top_level_keys:
+                keys = ", ".join(f"`{key}`" for key in top_level_keys)
                 raise SettingsError(
-                    f"{self.path}: unknown key `tool`; a file not named "
-                    f"{PYPROJECT_TOML} carries ferro's keys at the top level, "
-                    f"without [tool.ferro]"
+                    f"{self.path} carries ferro config twice: a [tool.ferro] "
+                    f"table and {keys} at the top level; ferro reads one and "
+                    f"never merges them. Keep one: move those keys into "
+                    f"[tool.ferro], or remove [tool.ferro]"
                 )
-            return document
-        tool = document.get("tool")
-        table = tool.get("ferro") if isinstance(tool, dict) else None
-        if not isinstance(table, dict):
+            table = document["tool"]["ferro"]
+            if not isinstance(table, dict):
+                raise SettingsError(
+                    f"{self.path}: [tool.ferro] must be a table with models = "
+                    f"[...] and dialects = [...]"
+                )
+            return table
+        if not top_level_keys:
             raise SettingsError(
-                f"{self.path} has no [tool.ferro] table; add one with models = "
-                f"[...] and dialects = [...], or select a {FERRO_TOML} instead"
+                f"{self.path} holds no ferro config: no [tool.ferro] table and "
+                f"no ferro keys at the top level. Add a [tool.ferro] table with "
+                f"models = [...] and dialects = [...], or write those keys at "
+                f"the top level of a {FERRO_TOML}"
             )
-        return table
+        return document
 
     def _several(self, table: dict[str, Any]) -> dict[str, tuple[str, Any]]:
         for key in table:
@@ -548,13 +563,20 @@ class _ConfigFile:
             raise SettingsError(
                 f"{self.path}: `{key}` in {label} {_RESERVED_KEYS[key]}"
             )
-        hint = (
-            "; the URL is never in the file: set url_env to the name of the "
-            "environment variable that holds it (DATABASE_URL by default), "
-            "or pass --url"
-            if key == "url"
-            else f"; the keys allowed there are {', '.join(allowed)}"
-        )
+        if key == "url":
+            hint = (
+                "; the URL is never in the file: set url_env to the name of the "
+                "environment variable that holds it (DATABASE_URL by default), "
+                "or pass --url"
+            )
+        elif key == "tool":
+            hint = (
+                "; ferro reads this file's top level because its [tool] table "
+                "has no [tool.ferro]. Put ferro's keys under [tool.ferro], or "
+                "remove [tool]"
+            )
+        else:
+            hint = f"; the keys allowed there are {', '.join(allowed)}"
         raise SettingsError(f"{self.path}: unknown key `{key}` in {label}{hint}")
 
 
@@ -607,11 +629,31 @@ def _owners(
     ]
 
 
-def _models_of(
-    databases: dict[str, DatabaseSettings], database: DatabaseSettings
-) -> list[type]:
+def _import_database_modules(project: _Project, database: DatabaseSettings) -> None:
+    """Import ``database``'s ``models`` modules with the config directory,
+    then ``python_path``, first on ``sys.path``."""
+    roots = [project.config_path.parent, *project.python_path]
+    _prepend_sys_path(roots)
+    for module in database.models:
+        try:
+            importlib.import_module(module)
+        except ModuleNotFoundError as exc:
+            if exc.name is None or not _is_within(module, exc.name):
+                raise
+            searched = ", ".join(str(root) for root in roots)
+            raise SettingsError(
+                f"database `{database.name}` lists module `{module}` in models "
+                f"({project.config_path}), but it cannot be imported: {exc}. "
+                f"Searched the config directory and python_path first ({searched}). "
+                f"If it lives under a source root, add that root to the top-level "
+                f'python_path, e.g. python_path = ["src"]'
+            ) from exc
+
+
+def _models_of(project: _Project, database: DatabaseSettings) -> list[type]:
     from .registry import REGISTRY
 
+    databases = project.databases
     registered = [m for m in REGISTRY.models().values() if isinstance(m, type)]
     mine = []
     for model in registered:
@@ -621,18 +663,36 @@ def _models_of(
         if any(owner.name == database.name for owner in owners):
             mine.append(model)
     for model in mine:
-        _check_references(databases, model, database)
+        _check_references(project, model, database)
     return mine
 
 
+def _resolve_target(project: _Project, reference: str) -> type | None:
+    """The model a string reference names, over the whole configured modelset.
+
+    A database's own imports may not include the target (a string reference
+    needs no import), so an unresolved reference imports every configured
+    database's modules before deciding: the target may be another database's
+    model, which is a cross-database foreign key, not a missing one.
+    """
+    from .registry import REGISTRY
+
+    target = REGISTRY.resolve_reference(reference, default=None)
+    if target is None:
+        for database in project.databases.values():
+            _import_database_modules(project, database)
+        target = REGISTRY.resolve_reference(reference, default=None)
+    return target
+
+
 def _check_references(
-    databases: dict[str, DatabaseSettings], model: type, database: DatabaseSettings
+    project: _Project, model: type, database: DatabaseSettings
 ) -> None:
     """Refuse a foreign key (or many-to-many) from ``model`` to a model that
     ``database`` does not claim."""
+    databases = project.databases
     if len(databases) == 1:
         return
-    from .registry import REGISTRY
 
     relations = getattr(model, "ferro_relations", None) or {}
     for field_name, relation in relations.items():
@@ -641,12 +701,13 @@ def _check_references(
         target = relation.to
         if isinstance(target, (str, ForwardRef)):
             reference = target if isinstance(target, str) else target.__forward_arg__
-            target = REGISTRY.resolve_reference(reference, default=None)
+            target = _resolve_target(project, reference)
             if target is None:
                 raise SettingsError(
                     f"{_identity(model)}.{field_name} references `{reference}`, "
-                    f"which no imported module defines; add the module that "
-                    f"defines it to database `{database.name}`'s models"
+                    f"but no configured module defines it ({project.config_path}); "
+                    f"add the module that defines `{reference}` to database "
+                    f"`{database.name}`'s models"
                 )
         target_owners = _owners(databases, target)
         if not target_owners:
