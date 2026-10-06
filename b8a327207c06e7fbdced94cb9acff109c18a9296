@@ -1,0 +1,1 @@
+verified 2026-10-06T23:26:32Z: cargo test --no-default-features --features testing 310/310; maturin develop; pytest test_ddl_lock_timeout test_migrate_up test_auto_migrate test_pass_recording --db-backends=sqlite,postgres 133 passed 18 skipped (dialect halves)
