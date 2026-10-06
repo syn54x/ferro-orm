@@ -19,8 +19,9 @@ use ferro_ddl_lowering::{
     resolve_column_storage, row_security_migrator_warning,
 };
 use ferro_migrate::{
-    MigrationOp, emit_sql_with_ir, plan_check_drops, plan_check_rebuilds, plan_from_ir,
-    plan_missing_checks,
+    LiveCheckValidity, LiveFkValidity, LiveIndexValidity, MigrationOp, emit_sql_with_ir,
+    plan_check_drops, plan_check_rebuilds, plan_from_ir, plan_index_rebuilds, plan_missing_checks,
+    plan_validations,
 };
 use ferro_schema_ir::{
     IrEnvelope, SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload,
@@ -292,6 +293,31 @@ pub fn plan_table_migration(
         live_columns_to_schema_ir(table_lower, live, live_indexes, live_foreign_keys, backend);
     let new_ir = declared;
     let mut typed_plan = plan_from_ir(&old_ir, new_ir, backend);
+    // Invalid-index rebuilds (#515; ADR-0044) go where `AddIndex` goes: after
+    // the column ops, ahead of the first foreign-key op `plan_from_ir` emits
+    // for this table. An invalid index is present live, so the IR diff above
+    // never planned an `AddIndex` for it.
+    let index_validity: Vec<LiveIndexValidity> = live_indexes
+        .iter()
+        .map(|index| LiveIndexValidity {
+            name: index.name.clone(),
+            valid: index.valid,
+        })
+        .collect();
+    let index_slot = typed_plan
+        .operations
+        .iter()
+        .position(|op| {
+            matches!(
+                op,
+                MigrationOp::AddForeignKey { .. } | MigrationOp::RebuildForeignKey { .. }
+            )
+        })
+        .unwrap_or(typed_plan.operations.len());
+    typed_plan.operations.splice(
+        index_slot..index_slot,
+        plan_index_rebuilds(table_lower, new_ir, &index_validity),
+    );
     // Check addition (#343; ADR-0013) is planned after the column diff so a
     // CHECK over a newly added column lands after its ADD COLUMN. Live CHECKs
     // travel beside the IR rather than inside it: their bodies are the
@@ -318,6 +344,42 @@ pub fn plan_table_migration(
         new_ir,
         &live_for_rebuild,
     ));
+    // Validation (#515; ADR-0043): a declared FK or check that exists live
+    // `NOT VALID` is validated in place, after every `AddForeignKey` /
+    // `AddCheck` above. A name a rebuild already covers is left out: the
+    // rebuild's bare ADD installs a valid constraint.
+    let rebuilt: Vec<String> = typed_plan
+        .operations
+        .iter()
+        .filter_map(|op| match op {
+            MigrationOp::RebuildCheck { name, .. } => Some(name.clone()),
+            MigrationOp::RebuildForeignKey { old_name, .. } => Some(old_name.clone()),
+            _ => None,
+        })
+        .collect();
+    let fk_validity: Vec<LiveFkValidity> = live_foreign_keys
+        .iter()
+        .filter_map(|fk| {
+            Some(LiveFkValidity {
+                name: fk.name.clone()?,
+                validated: fk.validated,
+            })
+        })
+        .collect();
+    let check_validity: Vec<LiveCheckValidity> = live_checks
+        .iter()
+        .map(|check| LiveCheckValidity {
+            name: check.name.clone(),
+            validated: check.validated,
+        })
+        .collect();
+    typed_plan.operations.extend(
+        plan_validations(table_lower, new_ir, &fk_validity, &check_validity)
+            .into_iter()
+            .filter(|op| {
+                !matches!(op, MigrationOp::ValidateConstraint { name, .. } if rebuilt.contains(name))
+            }),
+    );
     // Leftovers (#345; ADR-0013): live ferro-owned names the model does not
     // declare. Always warn (silence is wrong — leftover CHECKs keep rejecting
     // rows the model now allows). DropCheck ops only when destructive — do
@@ -412,6 +474,18 @@ pub fn plan_table_migration(
         plan.always_warnings.extend(rs_plan.warnings);
     }
     Ok(plan)
+}
+
+/// Prefix of the debug line the reconciliation pass logs (on the `ferro`
+/// logger) before it executes each statement of a table's plan (column drops,
+/// which run through their own dependency-aware path, are not included), so
+/// a run's exact DDL is observable without a database-side statement log.
+const RECONCILE_STATEMENT_LOG_PREFIX: &str = "Ferro Engine: auto-migrate executing on";
+
+fn log_reconcile_statement(table_lower: &str, sql: &str) {
+    crate::log_debug(format!(
+        "{RECONCILE_STATEMENT_LOG_PREFIX} '{table_lower}': {sql}"
+    ));
 }
 
 /// Render the `ALTER TABLE ... DROP COLUMN ...` DDL for one column drop.
@@ -620,6 +694,7 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
             })?;
             let table_result: PyResult<()> = async {
                 for sql in &plan.statements {
+                    log_reconcile_statement(&table_lower, sql);
                     conn.execute_sql_unprepared(sql).await.map_err(|e| {
                         crate::errors::map_db_error(
                             &format!(
@@ -671,6 +746,7 @@ pub async fn internal_migrate(engine: Arc<EngineHandle>, opts: MigrateOptions) -
             }
         } else {
             for sql in &plan.statements {
+                log_reconcile_statement(&table_lower, sql);
                 engine.execute_sql_unprepared(sql).await.map_err(|e| {
                     crate::errors::map_db_error(
                         &format!(

@@ -149,6 +149,61 @@ pub enum MigrationOp {
         /// Name of the live constraint to drop.
         old_name: String,
     },
+    /// A declared FK or CHECK that exists live but is `NOT VALID`
+    /// (`pg_constraint.convalidated = false`; ADR-0043) — validated in place
+    /// with `ALTER TABLE … VALIDATE CONSTRAINT`, never dropped and re-added.
+    /// Postgres-only: SQLite has no unvalidated constraints.
+    ValidateConstraint {
+        /// Owning table.
+        table: String,
+        /// Constraint name (`fk_*` / `ck_*`).
+        name: String,
+    },
+    /// A declared index or unique that exists live but is invalid
+    /// (`pg_index.indisvalid = false`, the leftover of a failed concurrent
+    /// build; ADR-0044) — rebuilt as `DROP INDEX` then the same
+    /// `CREATE [UNIQUE] INDEX` the [`MigrationOp::AddIndex`] path renders.
+    RebuildIndex {
+        /// Owning table.
+        table: String,
+        /// Index name.
+        name: String,
+        /// Indexed columns.
+        columns: Vec<String>,
+        /// Whether this is a unique index.
+        unique: bool,
+    },
+}
+
+/// Whether one live FK constraint is validated (`pg_constraint.convalidated`;
+/// always `true` on SQLite). The thin live-state slice [`plan_validations`]
+/// reads — introspection types stay outside this crate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveFkValidity {
+    /// Live constraint name.
+    pub name: String,
+    /// `false` when the constraint exists `NOT VALID`.
+    pub validated: bool,
+}
+
+/// Whether one live CHECK constraint is validated
+/// (`pg_constraint.convalidated`; always `true` on SQLite).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveCheckValidity {
+    /// Live constraint name.
+    pub name: String,
+    /// `false` when the constraint exists `NOT VALID`.
+    pub validated: bool,
+}
+
+/// Whether one live index is valid (`pg_index.indisvalid`; always `true` on
+/// SQLite).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveIndexValidity {
+    /// Live index name.
+    pub name: String,
+    /// `false` when the index exists but is invalid.
+    pub valid: bool,
 }
 
 /// Ordered migration operations plus non-fatal warnings collected during planning.
@@ -213,8 +268,14 @@ pub fn emit_sql(plan: &MigrationPlan, dialect: Dialect) -> Vec<String> {
                     table, column
                 )),
             },
-            MigrationOp::AddIndex { name, .. } => {
+            MigrationOp::AddIndex { name, .. } | MigrationOp::RebuildIndex { name, .. } => {
                 sql.push(format!("-- index '{}' handled by emit_sql_with_ir", name));
+            }
+            MigrationOp::ValidateConstraint { name, .. } => {
+                sql.push(format!(
+                    "-- constraint '{}' handled by emit_sql_with_ir",
+                    name
+                ));
             }
             MigrationOp::DropIndex { name, .. } => {
                 sql.push(format!("-- index '{}' handled by emit_sql_with_ir", name));
@@ -376,6 +437,89 @@ pub fn plan_check_drops(
         .map(|name| MigrationOp::DropCheck {
             table: table.to_string(),
             name,
+        })
+        .collect()
+}
+
+/// Plan the [`MigrationOp::ValidateConstraint`] operations for one table
+/// (#515; ADR-0043): every declared FK, then every declared CHECK (table
+/// checks, then column checks), whose live constraint of the same name exists
+/// `NOT VALID`.
+///
+/// A name absent live is an add ([`plan_from_ir`] / [`plan_missing_checks`]),
+/// and a live name the model does not declare is never validated — ferro only
+/// touches what it declares. Callers append the result after every
+/// `AddCheck` / `AddForeignKey`, and leave out any name a rebuild in the same
+/// plan already covers: a rebuild's bare `ADD` installs a valid constraint.
+pub fn plan_validations(
+    table: &str,
+    new_ir: &IrEnvelope<SchemaIrPayload>,
+    live_fks: &[LiveFkValidity],
+    live_checks: &[LiveCheckValidity],
+) -> Vec<MigrationOp> {
+    let new_models = index_models(&new_ir.payload.models);
+    let Some(new_model) = new_models.get(table) else {
+        return Vec::new();
+    };
+    let unvalidated_fk = |name: &String| {
+        live_fks
+            .iter()
+            .any(|live| &live.name == name && !live.validated)
+    };
+    let unvalidated_check = |name: &String| {
+        live_checks
+            .iter()
+            .any(|live| &live.name == name && !live.validated)
+    };
+    let fk_names = new_model
+        .foreign_keys
+        .iter()
+        .map(|fk| emit::fk_constraint_name(table, fk))
+        .filter(unvalidated_fk);
+    let check_names = new_model
+        .table_checks
+        .iter()
+        .map(|check| check.name.clone())
+        .chain(new_model.checks.iter().map(|check| check.name.clone()))
+        .filter(unvalidated_check);
+    fk_names
+        .chain(check_names)
+        .map(|name| MigrationOp::ValidateConstraint {
+            table: table.to_string(),
+            name,
+        })
+        .collect()
+}
+
+/// Plan the [`MigrationOp::RebuildIndex`] operations for one table (#515;
+/// ADR-0044): every declared standalone index or unique whose live index of
+/// the same name exists but is invalid, in declared order.
+///
+/// A name absent live is an `AddIndex` ([`plan_from_ir`]); an invalid live
+/// index the model does not declare is leftover handling, never rebuilt.
+/// Callers place the result where `AddIndex` goes (after the column ops,
+/// before the foreign-key ops).
+pub fn plan_index_rebuilds(
+    table: &str,
+    new_ir: &IrEnvelope<SchemaIrPayload>,
+    live_indexes: &[LiveIndexValidity],
+) -> Vec<MigrationOp> {
+    let new_models = index_models(&new_ir.payload.models);
+    let Some(new_model) = new_models.get(table) else {
+        return Vec::new();
+    };
+    emit::standalone_indexes(new_model)
+        .into_iter()
+        .filter(|(name, _, _)| {
+            live_indexes
+                .iter()
+                .any(|live| &live.name == name && !live.valid)
+        })
+        .map(|(name, columns, unique)| MigrationOp::RebuildIndex {
+            table: table.to_string(),
+            name,
+            columns,
+            unique,
         })
         .collect()
 }

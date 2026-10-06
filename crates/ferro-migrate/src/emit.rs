@@ -7,7 +7,7 @@ use ferro_ddl_lowering::{
     fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
     refused_conversion_warning, render_check_addition, render_check_drop, render_check_rebuild,
     render_db_check, render_json_backfill_default, render_pg_enum_create_type,
-    render_sqlite_add_column_references, render_table_check_body, resolve_column_storage,
+    render_sqlite_add_column_references, render_validate_constraint, render_table_check_body, resolve_column_storage,
     row_security_statements, single_index_name, single_unique_index_name, sqlite_declared_type,
     sqlite_type_storage_drift,
 };
@@ -55,7 +55,7 @@ fn apply_resolved_storage(col_def: &mut ColumnDef, storage: &ResolvedStorage, di
 
 /// The FK constraint name for one IR foreign key: the compiler-provided
 /// `SchemaForeignKey.name` when set, else the shared `fk_name` convention.
-fn fk_constraint_name(table_lower: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> String {
+pub(crate) fn fk_constraint_name(table_lower: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> String {
     fk.name
         .clone()
         .unwrap_or_else(|| fk_name(table_lower, &fk.column, &fk.to_table))
@@ -833,6 +833,38 @@ pub fn emit_sql_with_ir(
             MigrationOp::DropIndex { table: _, name } => {
                 result.statements.push(format!("DROP INDEX IF EXISTS \"{}\"", name));
             }
+            // ADR-0044: an invalid index is present (so `IF NOT EXISTS` would
+            // skip it) but never used. Drop it by name — it is known to exist —
+            // then run the exact create statement the `AddIndex` path renders.
+            MigrationOp::RebuildIndex {
+                table,
+                name,
+                columns,
+                unique,
+            } => {
+                result
+                    .statements
+                    .push(format!("DROP INDEX {}", quote_ident(name)));
+                result
+                    .statements
+                    .push(render_index_sql(table, name, columns, *unique, dialect));
+            }
+            MigrationOp::ValidateConstraint { table, name } => match dialect {
+                Dialect::Postgres => {
+                    result
+                        .statements
+                        .push(render_validate_constraint(table, name));
+                }
+                Dialect::Sqlite => {
+                    return Err(EmissionError {
+                        message: format!(
+                            "Validate operation for constraint '{name}' on table '{table}' \
+                             cannot run on SQLite, which has no unvalidated constraints; \
+                             the planner must never plan it there"
+                        ),
+                    });
+                }
+            },
             MigrationOp::AddForeignKey { table, column } => {
                 let model = find_model(&new_models, table)?;
                 let fk = find_foreign_key(model, table, column)?;

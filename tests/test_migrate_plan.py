@@ -728,3 +728,196 @@ class TestForeignKeyReconcile:
         assert "CASCADE" in warns[0]
         assert "ferro migrate new" in warns[0]
         assert "Alembic" not in warns[0]
+
+
+class TestValidityFlags:
+    """#515 (ADR-0043, ADR-0044): a live constraint or index can exist and
+    still not be trusted. A declared FK or check that exists ``NOT VALID`` is
+    validated in place; a declared index that exists invalid is rebuilt. The
+    flags default to ``true`` so live fixtures without them (and every SQLite
+    table) plan exactly what they planned before."""
+
+    LIVE_COLUMNS = PK_ONLY_LIVE + [
+        {"name": "client_id", "declared_type": "integer", "is_nullable": True},
+        {"name": "owner_id", "declared_type": "integer", "is_nullable": True},
+        {"name": "status", "declared_type": "text", "is_nullable": True},
+        {"name": "kind", "declared_type": "text", "is_nullable": True},
+        {"name": "slug", "declared_type": "character varying", "is_nullable": True},
+        {"name": "x", "declared_type": "integer", "is_nullable": True},
+        {"name": "y", "declared_type": "integer", "is_nullable": True},
+    ]
+
+    STATUS_CHECK_DEF = "CHECK ((status = ANY (ARRAY['draft'::text, 'paid'::text])))"
+
+    VALIDATE_STATUS = 'ALTER TABLE "invoice" VALIDATE CONSTRAINT "ck_invoice_status"'
+    VALIDATE_CLIENT_FK = (
+        'ALTER TABLE "invoice" VALIDATE CONSTRAINT "fk_invoice_client_id_client"'
+    )
+
+    def _schema(self, *, everything=False):
+        props = {
+            "client_id": {
+                "type": "integer",
+                "foreign_key": {"to_table": "client", "on_delete": "CASCADE"},
+            },
+            "status": {
+                "type": "string",
+                "enum": ["draft", "paid"],
+                "db_type": "text",
+                "db_check": True,
+            },
+            "slug": {"type": "string", "unique": True},
+            "x": {"type": "integer"},
+            "y": {"type": "integer"},
+        }
+        if everything:
+            props["owner_id"] = {
+                "type": "integer",
+                "foreign_key": {"to_table": "owner", "on_delete": "CASCADE"},
+            }
+            props["kind"] = {
+                "type": "string",
+                "enum": ["a", "b"],
+                "db_type": "text",
+                "db_check": True,
+            }
+        schema = schema_with(props)
+        if everything:
+            schema["ferro_composite_indexes"] = [["x", "y"]]
+        return schema
+
+    def _live_fks(self, *, validated):
+        fk = {
+            "name": "fk_invoice_client_id_client",
+            "column": "client_id",
+            "to_table": "client",
+            "to_column": "id",
+            "on_delete": "CASCADE",
+        }
+        if validated is not None:
+            fk["validated"] = validated
+        return [fk]
+
+    def _live_checks(self, *, validated, definition=None):
+        check = {
+            "name": "ck_invoice_status",
+            "definition": definition or self.STATUS_CHECK_DEF,
+            "ferro_owned": True,
+        }
+        if validated is not None:
+            check["validated"] = validated
+        return [check]
+
+    def _live_indexes(self, *, valid):
+        index = {"name": "uq_invoice_slug", "columns": ["slug"], "unique": True}
+        if valid is not None:
+            index["valid"] = valid
+        return [index]
+
+    def _render(self, dialect, *, schema=None, fks=None, checks=None, indexes=None):
+        return _render_migration_sql_for_test(
+            "invoice",
+            _compile_schema_ir_json(schema or self._schema(), "invoice"),
+            json.dumps(self.LIVE_COLUMNS),
+            dialect,
+            True,
+            False,
+            json.dumps(
+                indexes if indexes is not None else self._live_indexes(valid=True)
+            ),
+            json.dumps(fks if fks is not None else self._live_fks(validated=True)),
+            json.dumps(
+                checks if checks is not None else self._live_checks(validated=True)
+            ),
+        )
+
+    @pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+    def test_fixtures_without_the_flags_still_load_and_plan_nothing(self, dialect):
+        stmts, warns = self._render(
+            dialect,
+            fks=self._live_fks(validated=None),
+            checks=self._live_checks(validated=None),
+            indexes=self._live_indexes(valid=None),
+        )
+        assert stmts == []
+        assert warns == []
+
+    def test_pg_not_valid_check_is_one_validate_statement(self):
+        stmts, warns = self._render(
+            "postgres",
+            checks=self._live_checks(
+                validated=False, definition=self.STATUS_CHECK_DEF + " NOT VALID"
+            ),
+        )
+        assert stmts == [self.VALIDATE_STATUS]
+        assert warns == []
+
+    def test_pg_not_valid_fk_is_one_validate_statement(self):
+        stmts, warns = self._render("postgres", fks=self._live_fks(validated=False))
+        assert stmts == [self.VALIDATE_CLIENT_FK]
+        assert warns == []
+
+    def test_pg_invalid_index_is_dropped_then_created_with_the_add_statement(self):
+        stmts, warns = self._render("postgres", indexes=self._live_indexes(valid=False))
+        assert stmts == [
+            'DROP INDEX "uq_invoice_slug"',
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_invoice_slug" ON "invoice" ("slug")',
+        ]
+        assert warns == []
+
+    def test_pg_not_valid_check_whose_body_drifted_is_one_rebuild_and_no_validate(self):
+        drifted = "CHECK ((status = ANY (ARRAY['draft'::text]))) NOT VALID"
+        stmts, warns = self._render(
+            "postgres", checks=self._live_checks(validated=False, definition=drifted)
+        )
+        assert stmts == [
+            'ALTER TABLE "invoice" DROP CONSTRAINT "ck_invoice_status"',
+            'ALTER TABLE "invoice" ADD CONSTRAINT "ck_invoice_status" '
+            "CHECK (\"status\" IN ('draft', 'paid'))",
+        ]
+        assert warns == []
+
+    def test_pg_order_rebuild_index_with_adds_and_validates_after_constraint_adds(self):
+        """Acceptance criterion 4: ``RebuildIndex`` lands where ``AddIndex``
+        goes (after the column ops, before the foreign-key ops), and every
+        ``ValidateConstraint`` after every ``AddCheck`` / ``AddForeignKey``."""
+        stmts, warns = self._render(
+            "postgres",
+            schema=self._schema(everything=True),
+            fks=self._live_fks(validated=False),
+            checks=self._live_checks(
+                validated=False, definition=self.STATUS_CHECK_DEF + " NOT VALID"
+            ),
+            indexes=self._live_indexes(valid=False),
+        )
+        assert stmts == [
+            'CREATE INDEX IF NOT EXISTS "idx_invoice_x_y" ON "invoice" ("x", "y")',
+            'DROP INDEX "uq_invoice_slug"',
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_invoice_slug" ON "invoice" ("slug")',
+            'ALTER TABLE "invoice" ADD CONSTRAINT "fk_invoice_owner_id_owner"'
+            ' FOREIGN KEY ("owner_id") REFERENCES "owner" ("id") ON DELETE CASCADE',
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            "WHERE conname = 'ck_invoice_kind' AND conrelid = '\"invoice\"'::regclass) THEN "
+            'ALTER TABLE "invoice" ADD CONSTRAINT "ck_invoice_kind" '
+            "CHECK (\"kind\" IN ('a', 'b')); END IF; END $$",
+            self.VALIDATE_CLIENT_FK,
+            self.VALIDATE_STATUS,
+        ]
+        assert warns == []
+
+    def test_sqlite_plans_are_byte_unchanged_by_the_flags(self):
+        """SQLite introspection always reports ``true``, which is the serde
+        default: a SQLite plan with the flags omitted is byte-identical to
+        one with them, and neither carries a validate or a rebuild."""
+        baseline = self._render("sqlite", schema=self._schema(everything=True))
+        assert baseline == self._render(
+            "sqlite",
+            schema=self._schema(everything=True),
+            fks=self._live_fks(validated=None),
+            checks=self._live_checks(validated=None),
+            indexes=self._live_indexes(valid=None),
+        )
+        stmts, _ = baseline
+        assert not any(
+            "VALIDATE" in sql or sql.startswith("DROP INDEX") for sql in stmts
+        )

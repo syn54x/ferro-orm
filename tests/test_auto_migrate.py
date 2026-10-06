@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -1852,3 +1853,208 @@ async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
     recwarn.clear()
     await ferro.connect(db_url, migrate_updates=True)
     assert not [w for w in recwarn if "FOREIGN KEY" in str(w.message)]
+
+
+# ---------------------------------------------------------------------------
+# Validity flags (#515; ADR-0043, ADR-0044): a live constraint or index can
+# exist and still not be trusted. Postgres-only behaviour; on SQLite every
+# flag reads `true` and the second boot plans nothing new.
+# ---------------------------------------------------------------------------
+
+VF_CHECK = "ck_vfpost_title_set"
+VF_FK = "fk_vfpost_author_id_vfauthor"
+VF_UNIQUE = "uq_vfpost_slug"
+
+
+def _define_validity_models():
+    from typing import ClassVar
+
+    from ferro import Check, ForeignKey
+
+    class VfAuthor(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        posts: Relation[list["VfPost"]] = BackRef()
+
+    class VfPost(Model):
+        __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+            Check("title_set", lambda vfpost: vfpost.title != None),  # noqa: E711
+        )
+
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str | None = None
+        slug: Annotated[str | None, FerroField(unique=True)] = None
+        author: Annotated[VfAuthor | None, ForeignKey(related_name="posts")] = None
+
+    return VfAuthor, VfPost
+
+
+class _ReconcileStatements(logging.Handler):
+    """Collect the DDL the reconciliation pass logs for one table, in order."""
+
+    def __init__(self, table: str):
+        super().__init__(level=logging.DEBUG)
+        self.prefix = f"Ferro Engine: auto-migrate executing on '{table}': "
+        self.statements: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if message.startswith(self.prefix):
+            self.statements.append(message[len(self.prefix) :])
+
+
+async def _connect_capturing(db_url: str, table: str) -> list[str]:
+    """``connect(migrate_updates=True)`` with fresh models; return the
+    statements the pass executed for ``table``."""
+    _rewind_registry()
+    _define_validity_models()
+    logger = logging.getLogger("ferro")
+    handler = _ReconcileStatements(table)
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        await ferro.connect(db_url, migrate_updates=True)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+    return handler.statements
+
+
+async def _pg_constraint(name: str) -> dict:
+    rows = await fetch_all(
+        "SELECT oid::bigint AS oid, convalidated, "
+        "pg_get_constraintdef(oid) AS definition FROM pg_constraint "
+        f"WHERE conrelid = '\"vfpost\"'::regclass AND conname = '{name}'"
+    )
+    assert len(rows) == 1, f"expected exactly one {name}, got {rows}"
+    return rows[0]
+
+
+async def _pg_reinstall_not_valid(name: str) -> int:
+    """Replace a ferro-installed constraint with the same definition added
+    ``NOT VALID`` by hand. Returns the new constraint's oid."""
+    definition = (await _pg_constraint(name))["definition"]
+    await execute(f'ALTER TABLE "vfpost" DROP CONSTRAINT "{name}"')
+    await execute(
+        f'ALTER TABLE "vfpost" ADD CONSTRAINT "{name}" {definition} NOT VALID'
+    )
+    reinstalled = await _pg_constraint(name)
+    assert reinstalled["convalidated"] is False
+    assert reinstalled["definition"].endswith("NOT VALID")
+    return reinstalled["oid"]
+
+
+async def _bootstrap_validity_tables(db_url: str) -> None:
+    _rewind_registry()
+    _define_validity_models()
+    await ferro.connect(db_url, auto_migrate=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+@pytest.mark.parametrize("artifact", [VF_CHECK, VF_FK])
+async def test_migrate_updates_validates_a_not_valid_constraint_in_place(
+    db_url, db_backend, artifact, clean_registry
+):
+    await _bootstrap_validity_tables(db_url)
+    oid = None
+    if db_backend == "postgres":
+        async with ferro.engines.session():
+            oid = await _pg_reinstall_not_valid(artifact)
+
+    executed = await _connect_capturing(db_url, "vfpost")
+    if db_backend == "postgres":
+        assert executed == [f'ALTER TABLE "vfpost" VALIDATE CONSTRAINT "{artifact}"']
+        async with ferro.engines.session():
+            after = await _pg_constraint(artifact)
+        assert after["convalidated"] is True
+        assert after["oid"] == oid, "validated in place, never dropped and re-added"
+        assert not after["definition"].endswith("NOT VALID")
+    else:
+        assert executed == []
+
+    assert await _connect_capturing(db_url, "vfpost") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_migrate_updates_rebuilds_an_invalid_index(
+    db_url, db_backend, clean_registry
+):
+    await _bootstrap_validity_tables(db_url)
+    if db_backend == "postgres":
+        async with ferro.engines.session():
+            await execute(
+                "UPDATE pg_index SET indisvalid = false "
+                f"WHERE indexrelid = '\"{VF_UNIQUE}\"'::regclass"
+            )
+
+    executed = await _connect_capturing(db_url, "vfpost")
+    if db_backend == "postgres":
+        assert executed == [
+            f'DROP INDEX "{VF_UNIQUE}"',
+            f'CREATE UNIQUE INDEX IF NOT EXISTS "{VF_UNIQUE}" ON "vfpost" ("slug")',
+        ]
+        async with ferro.engines.session():
+            rows = await fetch_all(
+                "SELECT indisvalid FROM pg_index "
+                f"WHERE indexrelid = '\"{VF_UNIQUE}\"'::regclass"
+            )
+        assert [row["indisvalid"] for row in rows] == [True]
+    else:
+        assert executed == []
+
+    assert await _connect_capturing(db_url, "vfpost") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_validate_of_a_check_with_violating_rows_raises_check_violation(
+    db_url, clean_registry
+):
+    from ferro import CheckViolationError
+
+    await _bootstrap_validity_tables(db_url)
+    async with ferro.engines.session():
+        await execute(f'ALTER TABLE "vfpost" DROP CONSTRAINT "{VF_CHECK}"')
+        await execute('INSERT INTO "vfpost" ("title") VALUES (NULL)')
+        await execute(
+            f'ALTER TABLE "vfpost" ADD CONSTRAINT "{VF_CHECK}" '
+            "CHECK (title IS NOT NULL) NOT VALID"
+        )
+
+    with pytest.raises(CheckViolationError) as excinfo:
+        await _connect_capturing(db_url, "vfpost")
+    assert excinfo.value.constraint == VF_CHECK
+
+    # The failed validate rolled back with its table's plan: still NOT VALID.
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        assert (await _pg_constraint(VF_CHECK))["convalidated"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_validate_of_an_fk_with_violating_rows_raises_foreign_key_violation(
+    db_url, clean_registry
+):
+    from ferro import ForeignKeyViolationError
+
+    await _bootstrap_validity_tables(db_url)
+    async with ferro.engines.session():
+        definition = (await _pg_constraint(VF_FK))["definition"]
+        await execute(f'ALTER TABLE "vfpost" DROP CONSTRAINT "{VF_FK}"')
+        await execute('INSERT INTO "vfpost" ("title", "author_id") VALUES (\'t\', 999)')
+        await execute(
+            f'ALTER TABLE "vfpost" ADD CONSTRAINT "{VF_FK}" {definition} NOT VALID'
+        )
+
+    with pytest.raises(ForeignKeyViolationError) as excinfo:
+        await _connect_capturing(db_url, "vfpost")
+    assert excinfo.value.constraint == VF_FK
+
+    # The failed validate rolled back with its table's plan: still NOT VALID.
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        assert (await _pg_constraint(VF_FK))["convalidated"] is False
