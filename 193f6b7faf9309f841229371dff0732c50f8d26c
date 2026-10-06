@@ -1,0 +1,1 @@
+verified 2026-10-06T23:10:56Z: maturin develop; pytest tests/test_migrate_drift.py tests/test_migrate_up.py tests/test_migrations_api.py tests/test_static_contracts.py --db-backends=sqlite,postgres -q -rs -> 96 passed, 6 skipped (Postgres ran)
