@@ -1,0 +1,1 @@
+verified 2026-10-06T22:36:10Z on rebased head: cargo test 298 ok; maturin develop; pytest api/guard/auto_migrate/catalog_cache/static_contracts/pass_recording/migrate_down/migrate_up --db-backends=sqlite,postgres: 204 passed, 8 skipped (single-dialect); ty clean
