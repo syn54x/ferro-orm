@@ -42,6 +42,8 @@ For both doors to exclude each other the lock has to be the same lock wherever t
 - `status()` returns what `ferro migrate status --json` prints.
 - `baseline()` keeps ADR-0031 whole: it records only after the drift check passes. A local-first app that shipped on `auto_migrate=True` adopts migrations on its users' files with `status()`, `baseline()` when the file is unadopted, then `up()`.
 
+Amended by ADR-0045: `drift()` and `check()` join the public calls, each returning the report its CLI verb prints and raising nothing; `raise_for_problems()` on the report raises carrying it. The targets and the promptless revert this ADR keeps off the application API live in `ferro.migrations.testing`.
+
 **A database ahead of the code is refused by default.** When the tracking table holds records for migrations the directory does not have, `up()` and `require_applied()` raise `DatabaseAheadError` naming them. `allow_ahead=True` on either call turns that off.
 
 ## Considered options
