@@ -955,10 +955,12 @@ fn diff_model_indexes(
     // rendering, so no redundant standalone AddIndex is planned for them.
     let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
 
-    let old_by_name: BTreeMap<String, (Vec<String>, bool)> = old_model
-        .indexes
-        .iter()
-        .map(|i| (i.name.clone(), (i.columns.clone(), i.unique)))
+    // Both sides through `standalone_indexes`: a declared snapshot carries a
+    // unique in `uniques`, a live one in `indexes` (introspection leaves
+    // `uniques` empty), and either way it is one standalone index.
+    let old_by_name: BTreeMap<String, (Vec<String>, bool)> = emit::standalone_indexes(old_model)
+        .into_iter()
+        .map(|(name, columns, unique)| (name, (columns, unique)))
         .collect();
     let new_set = emit::standalone_indexes(new_model);
     let new_names: BTreeSet<&str> = new_set.iter().map(|(n, _, _)| n.as_str()).collect();

@@ -49,6 +49,7 @@ pub async fn internal_create_tables(
 
     let model_refs: Vec<&ferro_schema_ir::SchemaModel> =
         modelset.payload.models.iter().collect();
+    let mut to_create = Vec::new();
     for model in ferro_migrate::order_models_for_create(&model_refs) {
         if existing_tables.contains(&model.table_name) {
             crate::log_debug(format!(
@@ -77,8 +78,57 @@ pub async fn internal_create_tables(
                 model.table_name, err.message
             ))
         })?;
+        to_create.push((model, emission));
+    }
 
-        create_one_table(&engine, model, &emission, dialect).await?;
+    // Every native enum type the created tables declare comes into being
+    // ahead of every table, by type name — the one planner's order (enum type
+    // creation is a before-tables family, AGENTS.md § I-12), so a generated
+    // migration's up file and this pass execute the same sequence (I-1). Each
+    // statement is the table emission's own guarded `CREATE TYPE`, run once
+    // per type, in autocommit like the reconciliation pass's type statements.
+    let mut type_guards: std::collections::BTreeMap<String, (&str, &String)> =
+        std::collections::BTreeMap::new();
+    for (model, emission) in &to_create {
+        for guard in &emission.pre_create_sqls {
+            let type_name = model
+                .columns
+                .iter()
+                .find_map(
+                    |col| match ferro_ddl_lowering::resolve_column_storage(col, dialect) {
+                        Ok(ferro_ddl_lowering::ResolvedStorage::PgEnum { type_name, labels })
+                            if *guard
+                                == ferro_ddl_lowering::render_pg_enum_create_type(
+                                    &type_name, &labels,
+                                ) =>
+                        {
+                            Some(type_name)
+                        }
+                        _ => None,
+                    },
+                )
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "CREATE TABLE emission for '{}' carries a pre-create statement that \
+                         is no enum type of its columns: {guard}",
+                        model.table_name
+                    ))
+                })?;
+            type_guards
+                .entry(type_name)
+                .or_insert((model.table_name.as_str(), guard));
+        }
+    }
+    for (table, guard) in type_guards.values() {
+        crate::migrate::log_reconcile_statement(table, guard);
+        engine
+            .execute_sql_unprepared(guard)
+            .await
+            .map_err(|e| create_step_error(table, "enum type", guard, e))?;
+    }
+
+    for (model, emission) in &to_create {
+        create_one_table(&engine, model, emission, dialect).await?;
 
         for warning in &emission.warnings {
             crate::emit_user_warning(warning);
@@ -90,9 +140,10 @@ pub async fn internal_create_tables(
     Ok(existing_tables)
 }
 
-/// Execute one model's whole create emission — enum guards, `CREATE TABLE`, and
-/// every post-create artifact (indexes, checks, row-security flags and
-/// policies) — as ONE unit.
+/// Execute one model's create emission — `CREATE TABLE` and every
+/// post-create artifact (indexes, checks, row-security flags and
+/// policies) — as ONE unit. Its enum types were created ahead of every table
+/// by [`internal_create_tables`].
 ///
 /// On Postgres this is a single transaction, mirroring the reconciliation
 /// pass's per-table transaction (FF-G G3): a table ends fully created or not
@@ -116,13 +167,6 @@ async fn create_one_table(
 ) -> PyResult<()> {
     let table = model.table_name.as_str();
     if dialect != Dialect::Postgres {
-        for pre_sql in &emission.pre_create_sqls {
-            crate::migrate::log_reconcile_statement(table, pre_sql);
-            engine
-                .execute_sql_unprepared(pre_sql)
-                .await
-                .map_err(|e| create_step_error(table, "enum type", pre_sql, e))?;
-        }
         crate::migrate::log_reconcile_statement(table, &emission.create_sql);
         engine
             .execute_sql(&emission.create_sql)
@@ -145,12 +189,6 @@ async fn create_one_table(
         )
     })?;
     let table_result: PyResult<()> = async {
-        for pre_sql in &emission.pre_create_sqls {
-            crate::migrate::log_reconcile_statement(table, pre_sql);
-            conn.execute_sql_unprepared(pre_sql)
-                .await
-                .map_err(|e| create_step_error(table, "enum type", pre_sql, e))?;
-        }
         crate::migrate::log_reconcile_statement(table, &emission.create_sql);
         conn.execute_sql(&emission.create_sql)
             .await

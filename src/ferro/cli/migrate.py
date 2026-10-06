@@ -136,6 +136,83 @@ def init(
     return exit_codes.OK
 
 
+@migrate.command
+def new(
+    name: Annotated[
+        str,
+        Parameter(help="The migration's name: lowercase letters, digits and _."),
+    ],
+    *,
+    sql_step: Annotated[
+        str | None,
+        Parameter(
+            help=(
+                "Also add a hand-written SQL step NN_<name>.up.sql / .down.sql "
+                "that serves every dialect."
+            )
+        ),
+    ] = None,
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
+    """Write the next migration from the models' difference with the last one.
+
+    Diffs the declared models against the newest migration's schema snapshot
+    (never a database) and writes NNNN_<name>/ with one rendering per target
+    dialect. A change that renders no DDL writes nothing.
+    """
+    from ..migrations.generate import prepare, write
+
+    _refuse_url(glob, "new")
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    migration = prepare(settings, database, name, sql_step=sql_step)
+    if migration is None:
+        print("no schema change: nothing written")
+        return exit_codes.OK
+    written = write(database, migration)
+
+    print(f"{_shown(written, Path.cwd().resolve())}/")
+    for file_name in migration.files():
+        print(f"  {file_name}")
+    if migration.summary:
+        print(migration.summary)
+    for warning in migration.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    return exit_codes.OK
+
+
+@migrate.command
+def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
+    """Check, offline, that every model change has a migration and the
+    migrations directory is intact.
+
+    Exits 0 when it is, 3 naming each problem otherwise: an ungenerated
+    model change, a broken snapshot chain, a duplicate or missing number, a
+    step missing a target dialect's rendering.
+    """
+    from ..migrations.generate import check as generate_check
+
+    _refuse_url(glob, "check")
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    report = generate_check(settings, database)
+    if report.ok:
+        head = report.head or "no migration"
+        print(f"ok: models match {head}")
+        return exit_codes.OK
+    for problem in report.problems:
+        print(f"{problem.kind}: {problem.message}", file=sys.stderr)
+    return exit_codes.PENDING
+
+
+def _refuse_url(glob: Global, verb: str) -> None:
+    if glob.url is not None:
+        raise SettingsError(
+            f"{verb} reads the models and the migrations directory, never a "
+            f"database; drop --url"
+        )
+
+
 # -- which file ----------------------------------------------------------------
 
 
