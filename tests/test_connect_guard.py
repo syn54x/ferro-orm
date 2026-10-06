@@ -91,6 +91,38 @@ async def test_a_tracked_database_refuses_auto_migrate_through_the_config(
     assert ferro._core.connection_backend() is None
 
 
+@pytest.mark.parametrize("door", ["create_tables", "migrate"])
+async def test_the_manual_passes_refuse_a_tracked_database_too(
+    project, pkg, db, door, executed
+):
+    """``ferro.create_tables()`` and ``ferro.migrate()`` are the passes'
+    public doors: they share the lock and the guard."""
+    await track(project, pkg, db)
+    await ferro.connect(db.url)
+    declare_fresh_model()
+
+    with pytest.raises(MigrationRefused) as raised:
+        await getattr(ferro, door)()
+
+    assert str(raised.value) == guard_text(governed(db), governed(db))
+    assert executed == []
+    assert "guardfresh" not in db.tables()
+
+
+async def test_create_tables_still_creates_on_an_untracked_database(
+    project, pkg, db, executed
+):
+    configure(project, pkg, db.backend)
+    await ferro.connect(db.url)
+    declare_fresh_model()
+
+    await ferro.create_tables()
+
+    assert "guardfresh" in db.tables()
+    assert len(executed) == 1 and '"guardfresh"' in executed[0]
+    assert await _core._run_lock_is_held(None) is False
+
+
 async def test_without_a_config_file_the_catalog_still_refuses(
     project, pkg, db, tmp_path, monkeypatch
 ):

@@ -273,5 +273,5 @@ def test_ferro_migrations_publishes_the_calls_and_their_exceptions():
         assert getattr(migrations, name) is not None
     stub = Path("src/ferro/_core.pyi").read_text(encoding="utf-8")
     assert "def _default_connection_name() -> str | None:" in stub
-    assert stub.count("tracking_schemas: list[str] = ...") == 2
+    assert stub.count("tracking_schemas: list[str] = ...") == 3
     assert callable(_core._default_connection_name)

@@ -434,11 +434,16 @@ async def create_tables(using=None):
     created. The runtime emits each ``CREATE TABLE`` from this SchemaIR via the
     shared emitter.
 
+    Like ``connect()``'s auto-migrate flags, it runs under the run lock and
+    refuses a database governed by ferro migrations.
+
     Args:
         using: Named connection to create tables on, or None for the default.
     """
     _ensure_rust_registration_synced()
-    return await _core_create_tables(using=using)
+    return await _core_create_tables(
+        using=using, tracking_schemas=_configured_tracking_schemas()
+    )
 
 
 async def migrate(using=None, updates=True, destructive=False):
