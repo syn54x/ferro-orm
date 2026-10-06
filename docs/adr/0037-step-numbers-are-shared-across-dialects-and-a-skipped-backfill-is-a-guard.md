@@ -1,15 +1,17 @@
 # Step numbers are shared across dialects, and a skipped backfill is a generated guard
 
-`Author.slug` becomes required and `Post` gains a table check, in a project that targets Postgres and SQLite. Postgres needs three steps. SQLite needs a fourth, because a new check is a table rebuild there and each rebuild is its own step (ADR-0034):
+Amended by ADR-0046: a SQLite table rebuild sits inside the phase step whose Postgres twin carries the change, so the `NN_rebuild_<table>` step this ADR's first example showed does not exist; the example below is the amended layout.
+
+`Author.slug` becomes required and `Post` gains a table check, in a project that targets Postgres and SQLite. On Postgres the check is staged (ADR-0043) and `NOT NULL` is staged (ADR-0042), so the migration has five steps. SQLite has work for three of them: the check and `NOT NULL` are table rebuilds there, each inside the phase step its Postgres twin occupies (ADR-0034, ADR-0046), and the two steps that stage on Postgres hold a placeholder:
 
 ```text
 migrations/0008_author_slug/
-  01_expand.up.postgres.sql          01_expand.up.sqlite.sql
+  01_expand.up.postgres.sql          01_expand.up.sqlite.sql             <- sqlite: ADD COLUMN on author, rebuild of post
   01_expand.down.postgres.sql        01_expand.down.sqlite.sql
-  02_rebuild_post.up.sqlite.sql      02_rebuild_post.up.postgres.sql     <- "-- ferro: not-applicable"
-  02_rebuild_post.down.sqlite.sql    02_rebuild_post.down.postgres.sql   <- "-- ferro: not-applicable"
-  03_backfill_author.py
-  04_contract.up.postgres.sql        04_contract.up.sqlite.sql
+  02_backfill_author.py
+  03_add_constraint.up.postgres.sql  03_add_constraint.up.sqlite.sql     <- "-- ferro: not-applicable"
+  03_add_constraint.down.postgres.sql 03_add_constraint.down.sqlite.sql  <- "-- ferro: not-applicable"
+  04_contract.up.postgres.sql        04_contract.up.sqlite.sql           <- sqlite: rebuild of author
   04_contract.down.postgres.sql      04_contract.down.sqlite.sql
   ir.json
 ```
@@ -47,6 +49,6 @@ The claim "no row needs a value" is checked on every database the migration reac
 
 ## Consequences
 
-- A two-dialect project sees one-line placeholder files wherever SQLite rebuilds and Postgres does not. A single-dialect project never sees one.
+- A two-dialect project sees one-line placeholder files wherever Postgres stages a constraint and SQLite's rebuild already did the work in an earlier step (ADR-0042, ADR-0043, ADR-0046). A single-dialect project never sees one.
 - Skipping a backfill after seeing the scaffold means deleting the unapplied migration directory and running `new` again; the scaffold's header and `new`'s output both print the exact command.
 - The header vocabulary (`no-transaction`, `foreign-keys-off`, `destructive`, `data-dependent`) gains `not-applicable`.

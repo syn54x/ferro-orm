@@ -241,7 +241,7 @@ A DDL step that declares, in its file, that the runner opens no transaction arou
 _Avoid_: No-tx step, autocommit step, unsafe step
 
 **Table rebuild**:
-The SQLite rendering of a schema change SQLite cannot make in place: the table is created again in its new shape under a temporary name, its rows are copied across, and it replaces the old table. One DDL step per rebuilt table, atomic, carrying every change that migration makes to the table. It needs foreign-key enforcement off while it runs, which its file declares and the runner arranges. It refuses a live table holding anything the *schema snapshot* does not declare, since the copy would discard it. Distinct from a *constraint rebuild*, which touches no rows.
+The SQLite rendering of a schema change SQLite cannot make in place: the table is created again in its new shape under a temporary name, its rows are copied across, and it replaces the old table. It sits inside the DDL step whose change needs it (the *expand step*, a schema step, or the *contract step*; never a *validate step*, *add-constraint step* or *index step*), folds every change that step makes to the table, and recreates the table and its indexes as they stand after the step, so one table may be rebuilt once per such step. A step that rebuilds several tables is still one atomic step. It needs foreign-key enforcement off while it runs, which its file declares and the runner arranges. It refuses a live table holding anything the *schema snapshot* does not declare, since the copy would discard it. Distinct from a *constraint rebuild*, which touches no rows.
 _Avoid_: Batch operation, table recreate, copy-and-move, 12-step
 
 **Run**:
