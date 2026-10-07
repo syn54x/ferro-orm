@@ -159,7 +159,7 @@ Every step record holds the checksum of the file this database ran (the up file,
 
 | The step on this database | An edited file |
 | :--- | :--- |
-| Finished | Refused by `up`, `status` and `require_applied()`. Restore the file, or accept a deliberate edit with `ferro migrate rerecord <migration>:<step>`. |
+| Finished | Refused by `up` and `require_applied()`; `status` reports it (`installed (different checksum)`, with both checksums) and exits 4. Restore the file, or accept a deliberate edit with `ferro migrate rerecord <migration>:<step>`. |
 | Started, not finished: an atomic data step, a transactional DDL step or a no-transaction step | Accepted: it committed nothing (or is safe to re-run), so the next `up` re-records the checksum, says so, and runs the edited file. |
 | A chunked data step whose batches already committed rows | Refused: choose `rerecord <migration>:<step> --continue` (keep those rows, resume from the cursor) or `--restart` (run every row again from the first). |
 | Never run | Free to edit. |
@@ -187,7 +187,7 @@ A project configured with several databases runs each command against one of the
 ferro migrate up --database billing
 ```
 
-Each database has its own migrations directory and its own lineage. In code, pass `database="billing"` to `up()` / `require_applied()` / `status()` / `check()`, with `using=` naming the connection that reaches it. See [Multiple Databases](../../howto/multiple-databases.md).
+Each database has its own migrations directory and its own lineage. In code, pass `database="billing"` to `up()`, `require_applied()`, `status()` and `check()`. The three that read the database (`up()`, `require_applied()`, `status()`) also take `using=`, naming the open connection that reaches it; `check()` reads only the models and the migrations directory, so it takes no connection. See [Multiple Databases](../../howto/multiple-databases.md).
 
 ## See Also
 

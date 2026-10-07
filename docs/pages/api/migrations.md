@@ -13,7 +13,7 @@ await ferro.migrations.require_applied()   # a server that migrates in its deplo
 
 ## Running migrations
 
-Each call reads the project configuration (`settings=None` is `FerroSettings()`), picks its database (`database=None` is the one configured) and works on an open connection (`using=None` is the default one). A refusal is raised, never returned.
+Each call reads the project configuration (`settings=None` is `FerroSettings()`) and picks its database (`database=None` is the one configured). The calls that read a database take `using=`, the open connection to work on (`None` is the default one): `up`, `require_applied`, `status`, `drift`, `baseline` and `remove_baseline`; the last three also take `url=` to open a private connection instead. `check` reads only the models and the migrations directory and takes no connection. A refusal is raised, never returned.
 
 ::: ferro.migrations.up
 

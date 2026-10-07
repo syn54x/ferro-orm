@@ -51,7 +51,7 @@ The rule is per database, not per project. A throwaway test database built with 
 | A database with migrations applied | `connect(..., auto_migrate=True)` (or either stronger flag), `create_tables()`, `migrate()` | Refused before any DDL, text above |
 | A database with migrations applied | `alembic revision --autogenerate` over Ferro models | Refused, naming `ferro migrate new` ([Alembic](alembic.md#what-autogenerate-refuses)) |
 | A database auto-migrate or Alembic built | `ferro migrate up` | Refused, naming `ferro migrate baseline` ([adopting migrations](../../howto/adopting-migrations.md)) |
-| A database auto-migrate built | `alembic revision --autogenerate` | Works: the first revision is a clean baseline |
+| A database auto-migrate built | `alembic revision --autogenerate` | Works: the first revision is empty when the database matches the models, since both doors plan with the same planner |
 
 ## What each door covers
 
@@ -64,7 +64,7 @@ The rule is per database, not per project. A throwaway test database built with 
 | Rename a table (`__ferro_renamed_from__`) | ❌ the create pass builds the new name as a new, empty table | ✅ | ✅ |
 | Drop a column | with `migrate_destructive` | ✅ marked `-- ferro: destructive` | ✅ marked `# ferro: destructive` |
 | Drop a table | ❌ | ✅ marked `-- ferro: destructive` | ✅ marked `# ferro: destructive` |
-| A change existing rows need a value for (a required column, nullable to required, a removed enum label) | a literal default only | ✅ [expand, backfill, contract](data-steps.md) generated | ⚠️ the plain op, marked `# ferro: data-dependent`; the backfill is yours to write |
+| A change existing rows need a value for (a required column, nullable to required, a removed enum label) | a required column or nullable to required: only with a literal default; a removed enum label: warns, no DDL | ✅ [expand, backfill, contract](data-steps.md) generated | ⚠️ the plain op, marked `# ferro: data-dependent`; the backfill is yours to write |
 | Python data steps over the models as they were | ❌ | ✅ [data steps](data-steps.md) | hand-written `op.execute(...)` |
 | Change a primary key | ❌ | refused, with [the recipe](migrations.md#changing-a-primary-key) | ❌ refused, with the same recipe |
 

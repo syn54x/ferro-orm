@@ -144,7 +144,7 @@ On a Postgres table that already exists, a generated migration never scans the t
 Without a hint, a renamed column is a dropped column and an added one, and `new` writes exactly that, marked destructive, and says what it saw:
 
 ```text
-$ ferro migrate new rename_nickname
+$ ferro migrate new rename_writer
 ...
 author: if "nickname" became "handle", declare renamed_from="nickname"
 ```
@@ -251,7 +251,7 @@ An undeclared column is refused the same way (`declare it on the model in a migr
 
 ```text
 $ ferro migrate drift
-drift against 0002_rename_nickname:
+drift against 0002_rename_writer:
   idx_writer_handle index is missing
 ```
 
@@ -262,9 +262,9 @@ Drift is reported, never repaired: write the fix as a migration, or put the obje
 ```text
 $ ferro migrate down
 down reverts, in this order:
-  0002_rename_nickname  01_schema
-Revert 0002_rename_nickname (1 step)? [y/N] y
-0002_rename_nickname  01_schema  reverted (1 ms)
+  0002_rename_writer  01_schema
+Revert 0002_rename_writer (1 step)? [y/N] y
+0002_rename_writer  01_schema  reverted (1 ms)
 ```
 
 - With no flag, `down` reverts the latest applied migration; `--to 0005` leaves `0005` fully applied, `--to 0007:02` leaves steps `01`–`02` of `0007` applied, `--to 0000` (or `--all`) reverts everything.
