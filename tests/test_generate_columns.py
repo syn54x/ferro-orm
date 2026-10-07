@@ -402,7 +402,7 @@ def test_a4_a_dropped_not_null_column_comes_back_not_null_or_the_down_fails(
     assert run("migrate", "down", "--yes", "--url", db.url) == 1
     assert "contains null values" in capsys.readouterr().err
     record = db.records()[1]
-    assert record[10] is not None and "contains null values" in record[11]
+    assert record[10] is None and record[11] is None, "rolled back: unchanged"
     assert "nickname" not in [
         row[0]
         for row in db.rows(

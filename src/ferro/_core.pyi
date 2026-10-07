@@ -429,7 +429,7 @@ async def clear_m2m_links(
     source_id: Any,
     route: RouteHandle,
 ) -> None: ...
-async def begin_transaction(route: RouteHandle) -> str: ...
+async def begin_transaction(route: RouteHandle, immediate: bool = False) -> str: ...
 async def commit_transaction(tx_id: str, session_id: Optional[str] = None) -> None: ...
 def transaction_connection_name(
     tx_id: str, session_id: Optional[str] = None
@@ -678,4 +678,24 @@ async def _remove_baseline_records(
     """Delete every baseline-origin record; JSON ``[[migration, step], ...]``
     of those removed. Raises ``RunRefused`` naming a run-origin migration
     applied above the baseline."""
+    ...
+
+# --- #532: chunked ---
+
+async def _write_cursor(
+    using: str | None,
+    migration: int,
+    step: int,
+    cursor_json: str | None,
+    rows_done: int,
+    reverting: bool,
+    tracking_schema: str | None = None,
+    route: RouteHandle | None = None,
+) -> None:
+    """Commit one batch of a chunked step on its record: ``cursor_json``
+    (``{"keys": [...], "rows_done": N}``, ``None`` before any row) into
+    ``resume_cursor``, or with ``reverting`` into ``revert_cursor`` with the
+    record marked reverting, plus ``rows_done``; clears the last failure.
+    With ``route`` (the batch's ``transaction()`` block) it commits with the
+    batch. Raises ``RunRefused`` when the step has no record."""
     ...

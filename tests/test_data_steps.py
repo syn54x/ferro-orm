@@ -322,24 +322,6 @@ def test_an_undeclared_up_refuses_the_run_naming_the_function(project, pkg, db, 
     assert record(db, 2, 1) is None
 
 
-def test_a_chunked_step_is_refused_until_its_runner_lands(project, pkg, db, capsys):
-    applied_with_authors(project, pkg, db)
-    slug_step(
-        project,
-        pkg,
-        BACKFILL.replace(
-            "@atomic\nasync def up(ctx):",
-            "@chunked(lambda models: models.Author.select(), batch_size=10)\n"
-            "async def up(ctx, batch):",
-        ).replace("import atomic,", "import chunked,"),
-    )
-    capsys.readouterr()
-
-    assert run("migrate", "up", "--url", db.url) == 1
-
-    assert "chunked steps run in ticket #532" in capsys.readouterr().err
-
-
 def test_an_irreversible_down_refuses_the_revert_before_anything_is_reverted(
     project, pkg, db, capsys
 ):

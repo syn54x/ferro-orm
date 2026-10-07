@@ -1522,6 +1522,76 @@ pub async fn remove_record(
     .map(|_| ())
 }
 
+/// The statement that commits one batch of a chunked step on its record
+/// (ADR-0024): going up the batch's cursor lands in `resume_cursor`, going
+/// down in `revert_cursor` with `reverting` set (ADR-0033). Either way
+/// `rows_done` counts the rows this walk has committed, and the last
+/// attempt's failure is cleared: a committed batch supersedes it.
+fn write_cursor_sql(dialect: Dialect, tracking: &Tracking, reverting: bool) -> String {
+    let p = |n: usize| param(dialect, n);
+    let cursor = if reverting {
+        let truth = match dialect {
+            Dialect::Postgres => "TRUE",
+            Dialect::Sqlite => "1",
+        };
+        format!("reverting = {truth}, revert_cursor = {}", p(1))
+    } else {
+        format!("resume_cursor = {}", p(1))
+    };
+    format!(
+        "UPDATE {} SET {cursor}, rows_done = {}, failed_at = NULL, error = NULL \
+         WHERE migration = {} AND step = {} RETURNING migration",
+        tracking.table(TRACKING_TABLE),
+        p(2),
+        p(3),
+        p(4)
+    )
+}
+
+/// Commit a chunked step's batch on its record, on `tx` — inside the batch's
+/// own transaction, so the cursor commits with the batch's rows or not at
+/// all (ADR-0024). `cursor_json` is the batch's cursor
+/// (`{"keys": [...], "rows_done": N}`, `None` before the first row), and
+/// `reverting` says which walk it belongs to (see [`write_cursor_sql`]).
+///
+/// # Errors
+/// A refusal when the step has no record (its started record is written
+/// before its first batch); a database error.
+pub async fn write_cursor(
+    tx: &mut EngineConnection,
+    tracking_schema: Option<&str>,
+    migration: u16,
+    step: u8,
+    cursor_json: Option<&str>,
+    rows_done: i64,
+    reverting: bool,
+) -> PyResult<()> {
+    let dialect = tx.dialect();
+    let sql = write_cursor_sql(dialect, &Tracking::new(dialect, tracking_schema), reverting);
+    let rows = tx
+        .fetch_all_sql_unprepared_with_binds(
+            &sql,
+            &[
+                match cursor_json {
+                    Some(cursor) => EngineBindValue::String(cursor.to_string()),
+                    None => EngineBindValue::Null(NullKind::String),
+                },
+                EngineBindValue::I64(rows_done),
+                EngineBindValue::I64(i64::from(migration)),
+                EngineBindValue::I64(i64::from(step)),
+            ],
+        )
+        .await
+        .map_err(|e| db_error("writing the chunked step's cursor", e))?;
+    if rows.is_empty() {
+        return Err(refused(format!(
+            "ferro migrate: {migration:04}:{step:02} has no step record to carry its cursor; \
+             a chunked step's record is written before its first batch. Nothing more was run."
+        )));
+    }
+    Ok(())
+}
+
 async fn foreign_keys_off(
     conn: &mut EngineConnection,
     statements: &[String],
@@ -1574,6 +1644,15 @@ fn foreign_keys_off_outcome(
         (Ok(()), Err(_)) => (Ok(()), true),
         (Err(failure), _) => (Err(failure), true),
     }
+}
+
+/// Whether a failed attempt writes `failed_at` and the error on the step's
+/// record: always going up (the started record marks where `up` resumes);
+/// going down only when the failure left part of the down applied, which a
+/// no-transaction down does. A transactional down rolled back whole, so the
+/// step stands exactly as applied and its record is left as it was.
+fn failed_down_marks_record(down: bool, mode: ExecMode) -> bool {
+    !down || mode == ExecMode::NoTransaction
 }
 
 fn failure_message(step: &PlannedStep, error: &str, down: bool) -> String {
@@ -1629,8 +1708,10 @@ fn failure_message(step: &PlannedStep, error: &str, down: bool) -> String {
 ///
 /// A failure rolls back what the mode can roll back, then writes `failed_at`
 /// and `error` on the step's record in a separate transaction: going up the
-/// started record, going down the standing one (which stays). The next run
-/// resumes at the step. A down with [`PlannedStep::nothing_to_reverse`] runs
+/// started record; going down the standing one, only when the down ran
+/// without a transaction and so left part of itself applied (a rolled-back
+/// down leaves the record exactly as it was: the step stays applied, see
+/// [`failed_down_marks_record`]). The next run resumes at the step. A down with [`PlannedStep::nothing_to_reverse`] runs
 /// no statement and removes the record. `sql` must be the bytes the planner
 /// hashed (the up file going up, the down file going down).
 ///
@@ -1797,15 +1878,23 @@ pub async fn execute_sql_step(
                 }
                 _ => error,
             };
-            let failed = StepRecord {
-                failed_at: Some(now_iso()),
-                error: Some(error.clone()),
-                // The upsert adds this to the time already recorded; a failed
-                // down adds nothing to the time the step took to apply.
-                duration_ms: if down { 0 } else { ms },
-                ..started
-            };
-            write_record(engine, tracking_schema, &failed, None).await?;
+            // A down that rolled back changed nothing, so its record does not
+            // change either (the tracking table says where the database stands
+            // now): the step stays applied and the error is the run's to
+            // report. A no-transaction down left the statements before the
+            // failing one reverted, so its record carries the failure.
+            if failed_down_marks_record(down, step.mode) {
+                let failed = StepRecord {
+                    failed_at: Some(now_iso()),
+                    error: Some(error.clone()),
+                    // The upsert adds this to the time already recorded; a
+                    // failed down adds nothing to the time the step took to
+                    // apply.
+                    duration_ms: if down { 0 } else { ms },
+                    ..started
+                };
+                write_record(engine, tracking_schema, &failed, None).await?;
+            }
             Ok(StepOutcome {
                 ok: false,
                 ms,
@@ -1967,6 +2056,42 @@ mod tests {
         assert!(sqlite.starts_with("CREATE TABLE IF NOT EXISTS \"_ferro_migrations\""));
         assert!(sqlite.contains("started_at         TEXT NOT NULL"));
         assert!(sqlite.contains("rows_done          INTEGER,"));
+    }
+
+    #[test]
+    fn a_batch_cursor_goes_to_its_walks_column_and_clears_the_last_failure() {
+        let pg = Tracking::new(Dialect::Postgres, Some("audit"));
+        assert_eq!(
+            write_cursor_sql(Dialect::Postgres, &pg, false),
+            "UPDATE \"audit\".\"_ferro_migrations\" SET resume_cursor = $1, rows_done = $2, \
+             failed_at = NULL, error = NULL WHERE migration = $3 AND step = $4 RETURNING migration"
+        );
+        assert_eq!(
+            write_cursor_sql(Dialect::Postgres, &pg, true),
+            "UPDATE \"audit\".\"_ferro_migrations\" SET reverting = TRUE, revert_cursor = $1, \
+             rows_done = $2, failed_at = NULL, error = NULL WHERE migration = $3 AND step = $4 \
+             RETURNING migration"
+        );
+        let sqlite = Tracking::new(Dialect::Sqlite, None);
+        assert_eq!(
+            write_cursor_sql(Dialect::Sqlite, &sqlite, true),
+            "UPDATE \"_ferro_migrations\" SET reverting = 1, revert_cursor = ?, rows_done = ?, \
+             failed_at = NULL, error = NULL WHERE migration = ? AND step = ? RETURNING migration"
+        );
+    }
+
+    #[test]
+    fn only_a_down_that_left_part_of_itself_applied_marks_its_record() {
+        for mode in [
+            ExecMode::Transactional,
+            ExecMode::NoTransaction,
+            ExecMode::ForeignKeysOff,
+        ] {
+            assert!(failed_down_marks_record(false, mode), "every failed up");
+        }
+        assert!(failed_down_marks_record(true, ExecMode::NoTransaction));
+        assert!(!failed_down_marks_record(true, ExecMode::Transactional));
+        assert!(!failed_down_marks_record(true, ExecMode::ForeignKeysOff));
     }
 }
 

@@ -243,17 +243,17 @@ def test_down_to_a_migration_reverts_newest_first_and_a_failed_down_resumes(
     assert "0003_third   01_third   reverted (" in captured.out
     assert "ferro migrate: 0002_second/01_second.down.sql failed:" in captured.err
     assert "`ferro migrate down` again" in captured.err
-    # 0003's down committed with its record's removal; 0002's record stands,
-    # carrying the failure.
+    # 0003's down committed with its record's removal; 0002's down rolled
+    # back, so its step stays applied and its record unchanged (#532).
     assert "third" not in db.tables() and "second" in db.tables()
     records = db.records()
     assert [(r[0], r[1]) for r in records] == [(1, 1), (2, 1)]
     failed = records[1]
     assert failed[9] is not None, "the step stays applied"
-    assert failed[10] is not None and "no_such_table" in failed[11]
+    assert failed[10] is None and failed[11] is None
 
-    assert run("migrate", "status", "--url", db.url) == 4
-    assert "  01_second.up.sql  failed" in capsys.readouterr().out
+    assert run("migrate", "status", "--url", db.url) == 3
+    assert "0002_second         installed" in capsys.readouterr().out
 
     second_down.write_text('DROP TABLE "second";\n')
     assert run("migrate", "down", "--to", "0001", "--yes", "--url", db.url) == 0
