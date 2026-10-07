@@ -2158,6 +2158,34 @@ mod tests {
     }
 
     #[test]
+    fn a_new_table_reusing_a_type_neither_creates_nor_drops_it() {
+        let editor = model("Editor", vec![pk(), status(&["draft", "live"])]);
+        let migration = edit(vec![author()], vec![author(), editor], &[Dialect::Postgres]);
+        let pg = rendering(&migration, StepDialect::Postgres);
+        assert!(
+            pg.up.starts_with("CREATE TABLE IF NOT EXISTS \"editor\""),
+            "{}",
+            pg.up
+        );
+        assert!(!pg.up.contains("TYPE"), "{}", pg.up);
+        assert_eq!(pg.down, "DROP TABLE \"editor\";\n");
+        // A new type is created first and dropped last (B1).
+        let mut fresh = author();
+        fresh.columns[2].enum_type_name = Some("authorstatus".into());
+        let created = generate(None, &ir(vec![fresh]), &[Dialect::Postgres])
+            .expect("ok")
+            .expect("a change");
+        let pg = rendering(&created, StepDialect::Postgres);
+        assert!(pg.up.starts_with("DO $$ BEGIN IF NOT EXISTS"), "{}", pg.up);
+        assert!(pg.up.contains("CREATE TYPE \"authorstatus\""), "{}", pg.up);
+        assert!(
+            pg.down.ends_with("DROP TYPE \"authorstatus\";\n"),
+            "{}",
+            pg.down
+        );
+    }
+
+    #[test]
     fn a_removed_label_or_a_partial_type_move_is_refused() {
         let removed = relabelled("status", &["draft"], &[]);
         let err = refusal(vec![author()], vec![removed], &BOTH);

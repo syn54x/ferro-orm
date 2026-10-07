@@ -104,6 +104,10 @@ pub(crate) fn render_plan_in(
     validate_schema_ir(new)?;
     let old_models = index_models(&old.payload.models);
     let new_models = index_models(&new.payload.models);
+    // A type this plan creates, or that `old` already declares, needs no
+    // guarded `CREATE TYPE` beside a table or column of it (ADR-0021: a reused
+    // type is neither created nor dropped). A live `old` declares no enum
+    // type — introspection reads none — so the pass keeps every guard.
     let types_created_by_plan: BTreeSet<String> = plan
         .operations
         .iter()
@@ -111,6 +115,16 @@ pub(crate) fn render_plan_in(
             MigrationOp::CreateEnumType { type_name, .. } => Some(type_name.clone()),
             _ => None,
         })
+        .chain(
+            old.payload
+                .models
+                .iter()
+                .flat_map(|model| &model.columns)
+                .filter_map(|col| match resolve_column_storage(col, Dialect::Postgres) {
+                    Ok(ResolvedStorage::PgEnum { type_name, .. }) => Some(type_name),
+                    _ => None,
+                }),
+        )
         .collect();
     // Enum types shared across new tables: each idempotent guard once.
     let mut emitted_type_guards: HashSet<String> = HashSet::new();
