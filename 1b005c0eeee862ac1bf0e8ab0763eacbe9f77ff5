@@ -1,0 +1,1 @@
+verified 2026-10-07T06:03:11Z: uv run maturin develop (CARGO_PROFILE_RELEASE_STRIP=none) && uv run pytest tests/test_data_steps.py tests/test_historical_models.py tests/test_registry_swap.py tests/test_migrate_up.py tests/test_migrate_check.py tests/test_transactions.py --db-backends=sqlite,postgres -q -> 111 passed, 4 skipped (dialect-only)
