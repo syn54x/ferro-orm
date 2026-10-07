@@ -946,7 +946,10 @@ pub fn _render_migration_sql_for_test(
 /// is the forward op carrying `"irreversible": {"reason": …}`; a check or
 /// policy put back from the catalog is a `RestoreCheck` / `RestoreRowPolicy`;
 /// a foreign key the forward plan added comes off as `DropForeignKey`. With
-/// `render`, each op also carries its `statements` and `warnings`.
+/// `render`, each op also carries its `statements` and `warnings`; the ops at
+/// the `unrendered` indexes carry none: those the bridge writes itself, a
+/// re-added column that demands values of existing rows (the same subset its
+/// upgrade leaves out of `_render_plan_ops`).
 ///
 /// # Errors
 /// `ValueError` when a JSON argument is malformed, an envelope is not a
@@ -954,7 +957,7 @@ pub fn _render_migration_sql_for_test(
 /// step cannot render.
 #[pyfunction]
 #[pyo3(name = "_plan_reverse_from_ir")]
-#[pyo3(signature = (live_json, declared_json, dialect, options_json, facts_json, render=true))]
+#[pyo3(signature = (live_json, declared_json, dialect, options_json, facts_json, render=true, unrendered=None))]
 pub fn _plan_reverse_from_ir(
     live_json: String,
     declared_json: String,
@@ -962,6 +965,7 @@ pub fn _plan_reverse_from_ir(
     options_json: String,
     facts_json: String,
     render: bool,
+    unrendered: Option<Vec<usize>>,
 ) -> PyResult<String> {
     use ferro_migrate::plan::{render_reverse_plan, reverse_live_plan};
     let backend = parse_dialect(&dialect)?;
@@ -978,7 +982,9 @@ pub fn _plan_reverse_from_ir(
     let reverse =
         reverse_live_plan(&forward, &live, &facts, &declared, backend).map_err(plan_error)?;
     let operations: Vec<serde_json::Value> = if render {
-        render_reverse_plan(&reverse, &declared, backend)
+        let unrendered: std::collections::BTreeSet<usize> =
+            unrendered.unwrap_or_default().into_iter().collect();
+        render_reverse_plan(&reverse, &declared, backend, &unrendered)
             .map_err(emission_error)?
             .into_iter()
             .map(|rendered| {

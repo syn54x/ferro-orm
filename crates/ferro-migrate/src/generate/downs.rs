@@ -162,6 +162,7 @@ pub fn drops_data(op: &MigrationOp) -> bool {
 /// back to `new`: the two halves of putting such a column back on Postgres.
 fn relaxed(
     ops: &[MigrationOp],
+    old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
 ) -> (IrEnvelope<SchemaIrPayload>, Vec<MigrationOp>) {
@@ -172,7 +173,8 @@ fn relaxed(
             let MigrationOp::AddColumn { table, column } = op else {
                 continue;
             };
-            if find_column(new, table, column).is_some_and(columns::needs_values) {
+            let ctx = PlanContext::of(op, old, new, dialect, PlanDirection::Down);
+            if columns::restores_values(op, &ctx) {
                 loose.push((table.clone(), column.clone()));
                 tighten.push(MigrationOp::AlterColumnNullability {
                     table: table.clone(),
@@ -211,7 +213,7 @@ fn native_statements(
     constraints: ConstraintMode,
 ) -> Result<Vec<Vec<String>>, GenerateError> {
     let (relaxed, tighten) = if restore {
-        relaxed(&ops, new, dialect)
+        relaxed(&ops, old, new, dialect)
     } else {
         (new.clone(), Vec::new())
     };

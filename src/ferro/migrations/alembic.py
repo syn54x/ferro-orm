@@ -579,10 +579,22 @@ def _subject(op: Dict[str, Any]) -> str:
 
 
 def _demands_values(op: Dict[str, Any], verdict: Dict[str, Any]) -> bool:
-    """A column added ``NOT NULL`` with no value for the rows already there:
-    the pass has no statement for it (it refuses the add), so the revision
-    writes the plain Alembic op, marked ``data-dependent``."""
-    return op["kind"] == "AddColumn" and verdict["needs"] == "backfill"
+    """A column added ``NOT NULL`` with no value for the rows already there,
+    by the upgrade or (putting a dropped required column back) by the
+    downgrade: the pass has no statement for it (it refuses the add), so the
+    revision writes the plain Alembic op, marked ``data-dependent``. The
+    generator's verdict decides it, for both sides."""
+    return op["kind"] == "AddColumn" and verdict["demands_values"]
+
+
+def _sqlite_cannot_add_required(op: Dict[str, Any]) -> str:
+    """Why SQLite takes no column :func:`_demands_values` names, on either
+    side of a revision: ``ALTER TABLE … ADD COLUMN … NOT NULL`` needs a
+    default even on an empty table."""
+    return (
+        f"{op['kind']} on {_subject(op)} adds a NOT NULL column with no value for "
+        f"the rows already there, which SQLite cannot add in place"
+    )
 
 
 def _upgrade_plan(
@@ -623,10 +635,9 @@ def _upgrade_plan(
             )
         if _demands_values(op, verdict) and dialect == "sqlite":
             raise _refuse(
-                f"{op['kind']} on {_subject(op)} adds a NOT NULL column with no value "
-                f"for the rows already there, which SQLite cannot add in place. Give "
-                f"it a default, or write the change as a migration, which "
-                f"generates the backfill: `ferro migrate new`"
+                f"{_sqlite_cannot_add_required(op)}. Give it a default, or write the "
+                f"change as a migration, which generates the backfill: "
+                f"`ferro migrate new`"
             )
         op["verdict"] = verdict
     rendered = iter(
@@ -663,25 +674,35 @@ def _upgrade_plan(
 def _downgrade_plan(
     live: _LiveDatabase, declared: Dict[str, Any], dialect: str
 ) -> Dict[str, Any]:
-    """The planner run back from the models to the live database. A step
-    SQLite can only take by rebuilding the table, or one the renderer has no
-    statement for, cannot be undone by this revision: it is irreversible,
-    with the reason."""
+    """The planner run back from the models to the live database, every
+    step checked against the generator's verdicts the way the upgrade's are.
+    A step SQLite can only take by rebuilding the table, or one the renderer
+    has no statement for, cannot be undone by this revision: it is
+    irreversible, with the reason. A re-added column that demands values of
+    existing rows is left out of the rendering, as the upgrade leaves out
+    its own, and written as the plain op marked ``data-dependent`` (on
+    SQLite, which cannot add it in place, it is irreversible)."""
     declared_json = json.dumps(declared)
-    plan = json.loads(
-        _core._plan_reverse_from_ir(
-            live.schema_ir, declared_json, dialect, _DESTRUCTIVE, live.facts, True
+
+    def reverse(render: bool, unrendered: "list[int] | None" = None) -> Dict[str, Any]:
+        return json.loads(
+            _core._plan_reverse_from_ir(
+                live.schema_ir,
+                declared_json,
+                dialect,
+                _DESTRUCTIVE,
+                live.facts,
+                render,
+                unrendered,
+            )
         )
-    )
+
+    plan = reverse(False)
     before = plan["before"]
-    plan["operations"] = [
-        op
-        for op in plan["operations"]
-        if "irreversible" in op or op["statements"] or op["warnings"]
-    ]
+    operations = plan["operations"]
     planner_ops = [
-        (index, op)
-        for index, op in enumerate(plan["operations"])
+        op
+        for op in operations
         if "irreversible" not in op
         and not op["kind"].startswith(("Restore", "DropForeignKey"))
     ]
@@ -691,19 +712,40 @@ def _downgrade_plan(
             json.dumps(before),
             dialect,
             "down",
-            json.dumps([op for _, op in planner_ops]),
+            json.dumps(planner_ops),
         )
     )
-    for (_, op), verdict in zip(planner_ops, verdicts):
-        if verdict["needs"] == "rebuild":
+    for op, verdict in zip(planner_ops, verdicts):
+        op["verdict"] = verdict
+    unrendered = [
+        index
+        for index, op in enumerate(operations)
+        if "verdict" in op and _demands_values(op, op["verdict"])
+    ]
+    for op, written in zip(operations, reverse(True, unrendered)["operations"]):
+        op["statements"] = written["statements"]
+        op["warnings"] = written["warnings"]
+    kept = []
+    for index, op in enumerate(operations):
+        verdict = op.get("verdict")
+        if index not in unrendered and not (
+            "irreversible" in op or op["statements"] or op["warnings"]
+        ):
+            continue
+        if "irreversible" not in op and verdict and verdict["needs"] == "rebuild":
             op["irreversible"] = {
                 "reason": f"{op['kind']} on {_subject(op)} needs a SQLite table rebuild, "
                 f"which an Alembic revision cannot write; `ferro migrate new` writes it"
             }
-    for op in plan["operations"]:
-        if "irreversible" not in op and not op["statements"] and op.get("warnings"):
+        if "irreversible" not in op and index in unrendered and dialect == "sqlite":
+            op["irreversible"] = {
+                "reason": f"{_sqlite_cannot_add_required(op)}; `ferro migrate new` "
+                f"writes it"
+            }
+        if "irreversible" not in op and not op["statements"] and op["warnings"]:
             op["irreversible"] = {"reason": op["warnings"][0]}
-    return {**plan, "target": before, "dialect": dialect}
+        kept.append(op)
+    return {**plan, "operations": kept, "target": before, "dialect": dialect}
 
 
 try:
@@ -749,7 +791,7 @@ if _HAS_ALEMBIC:
                 f"the Alembic bridge plans for Postgres and SQLite; this database is "
                 f"{autogen_context.dialect.name}"
             )
-        tables = ferro.tables
+        tables = sorted({*ferro.tables, *_dropped_tables(autogen_context)})
         object_filter.hide(tables)
         live = _read_live(autogen_context.connection, tables)
         if live.tracking_tables:
@@ -769,6 +811,42 @@ if _HAS_ALEMBIC:
         downgrade = translate(down, direction="down")
         _require_enum_rendering(autogen_context, upgrade + downgrade)
         upgrade_ops.ops.insert(0, FerroRevisionOps(upgrade, downgrade))
+
+    def _dropped_tables(autogen_context: Any) -> list[str]:
+        """The live tables this revision drops: every table of the default
+        schema no ``target_metadata`` declares (a model the project deleted)
+        that the context's filters admit — exactly the tables Alembic's own
+        comparison would write ``drop_table`` for, found the way it finds
+        them. The planner drops them instead, so a native enum type only
+        they used goes with them (``DROP TYPE``, after the ``drop_table``)
+        and the downgrade puts back the type before the table, then the
+        table with its checks and policies. The version table and ferro's
+        tracking tables are never one."""
+        migration_context = autogen_context.migration_context
+        inspector = autogen_context.inspector
+        default_schema = inspector.bind.dialect.default_schema_name
+        declared = {
+            table.name
+            for table in autogen_context.sorted_tables
+            if table.schema in (None, default_schema)
+        }
+        skipped = set(_core._tracking_table_names())
+        if migration_context.version_table_schema in (None, default_schema):
+            skipped.add(migration_context.version_table)
+        dropped = []
+        for name in sorted(inspector.get_table_names()):
+            if (
+                name in declared
+                or name in skipped
+                or not autogen_context.run_name_filters(
+                    name, "table", {"schema_name": None}
+                )
+            ):
+                continue
+            table = sa.Table(name, sa.MetaData(), autoload_with=inspector.bind)
+            if autogen_context.run_object_filters(table, name, "table", True, None):
+                dropped.append(name)
+        return dropped
 
     def _columns_of(op: Any) -> list[tuple[str, Any]]:
         from alembic.operations import ops as alembic_ops

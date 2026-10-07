@@ -115,6 +115,7 @@ def _plan_reverse_from_ir(
     options_json: str,
     facts_json: str,
     render: bool = True,
+    unrendered: list[int] | None = None,
 ) -> str:
     """The reverse of the live-origin plan (``_plan_from_ir(live_json,
     declared_json, ..., facts_json)``): what turns the database it leaves
@@ -123,7 +124,9 @@ def _plan_reverse_from_ir(
     step nothing undoes carries ``irreversible: {"reason": ...}``, a check or
     policy put back from the catalog is a ``RestoreCheck`` /
     ``RestoreRowPolicy``, a foreign key the forward plan added comes off as
-    ``DropForeignKey``."""
+    ``DropForeignKey``. With ``render``, the ops at the ``unrendered``
+    indexes carry no statement: the ones the bridge writes itself (a
+    re-added column that demands values of existing rows)."""
     ...
 
 def _render_plan_ops(
@@ -573,7 +576,10 @@ def _plan_step_verdicts(
     ``before_json`` into ``after_json`` (``direction`` ``"up"`` / ``"down"``):
     the generator's step-assignment verdict. Returns a JSON list, one
     ``{"needs": "native" | "rebuild" | "backfill" | "refused", "refusal":
-    str | None, "primary_key": bool, "drops_data": bool}`` per op."""
+    str | None, "primary_key": bool, "drops_data": bool, "demands_values":
+    bool}`` per op; ``demands_values`` marks an op asking existing rows for a
+    value no statement supplies (a backfill going up, a re-added required
+    column going down)."""
     ...
 
 def _tracking_table_names() -> tuple[str, str]:

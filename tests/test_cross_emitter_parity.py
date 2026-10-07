@@ -863,22 +863,6 @@ FINDINGS = {
         ValueError,
         frozenset({"a", "f"}),
     ),
-    "A4-drop-a-required-column": Finding(
-        "finding (#538): autogenerate raises the planner's ValueError (\"Cannot add "
-        "NOT NULL column 'author.nickname' …\") rendering the downgrade of a dropped "
-        "required column, instead of a revision whose downgrade is data-dependent "
-        "(the generator's down) or a refusal",
-        ValueError,
-        frozenset({"f"}),
-    ),
-    "B2-drop-a-model": Finding(
-        "finding (#538): a dropped model is Alembic's own drop_table (ferro's "
-        "comparator plans only the declared tables), so the revision never runs "
-        'the pass\'s DropEnumType (DROP TYPE "kind") and leaves the type behind',
-        AssertionError,
-        frozenset({"f"}),
-        frozenset({"postgres"}),
-    ),
     "D3-rename-a-label": Finding(
         "finding (#538): on SQLite the live side carries no enum labels, so the "
         "pass plans no RenameEnumLabel for a __ferro_renamed_labels__ hint: "

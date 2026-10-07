@@ -209,9 +209,13 @@ pub fn _plan_enum_type_provenance(
 /// ops (`_plan_from_ir`'s `operations`; extra keys are ignored). Returns one
 /// JSON object per op: `{"needs": "native" | "rebuild" | "backfill" |
 /// "refused", "refusal": <text> | null, "primary_key": bool, "drops_data":
-/// bool}`. `refusal` is the generator's own text for a refused op (a
-/// primary-key change names ticket #536's recipe); `drops_data` is the
-/// generator's `destructive` test.
+/// bool, "demands_values": bool}`. `refusal` is the generator's own text for
+/// a refused op (a primary-key change names ticket #536's recipe);
+/// `drops_data` is the generator's `destructive` test; `demands_values` says
+/// the op asks the rows already there for a value no statement supplies —
+/// going up the generator's backfill (`columns::demands_values`), going down
+/// a re-added required column (`columns::restores_values`): the revision
+/// writes it as the plain op marked `data-dependent`, on either side.
 ///
 /// # Errors
 /// `ValueError` when an argument is malformed or an op is not a planner op.
@@ -225,7 +229,9 @@ pub fn _plan_step_verdicts(
 ) -> PyResult<String> {
     use ferro_migrate::MigrationOp;
     use ferro_migrate::generate::GenerateError;
-    use ferro_migrate::generate::columns::{Needs, PlanContext, PlanDirection, Refusal, assign};
+    use ferro_migrate::generate::columns::{
+        Needs, PlanContext, PlanDirection, Refusal, assign, demands_values, restores_values,
+    };
     use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
     let invalid = |what: &str, e: serde_json::Error| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid {what}: {e}"))
@@ -286,6 +292,7 @@ pub fn _plan_step_verdicts(
                 "refusal": refusal,
                 "primary_key": primary_key,
                 "drops_data": ferro_migrate::generate::downs::drops_data(op),
+                "demands_values": demands_values(op, &ctx) || restores_values(op, &ctx),
             })
         })
         .collect();

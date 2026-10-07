@@ -206,6 +206,26 @@ pub fn demands_values(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
     }
 }
 
+/// Whether `op`, in the file `ctx` describes, puts back a column the rows its
+/// table already holds have no value for: in a down file, on a table that
+/// exists before and after it, a re-added non-key column [`needs_values`]
+/// (the down of A4's dropped required column). Nothing backfills it: the
+/// generated down adds it nullable and sets it `NOT NULL` on Postgres, which
+/// reaches the parent snapshot on an empty table and fails on a populated one
+/// (ADR-0033); the Alembic bridge writes the plain op, marked
+/// `data-dependent` (ADR-0041).
+pub fn restores_values(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
+    if ctx.direction != PlanDirection::Down || !ctx.on_existing_table() {
+        return false;
+    }
+    match op {
+        MigrationOp::AddColumn { column, .. } => ctx
+            .column_after(column)
+            .is_some_and(|col| !col.primary_key && needs_values(col)),
+        _ => false,
+    }
+}
+
 /// Whether `col` is stored as a native Postgres enum type.
 fn native_enum(col: &SchemaColumn) -> bool {
     matches!(
