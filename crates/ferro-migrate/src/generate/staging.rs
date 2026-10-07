@@ -143,9 +143,16 @@ fn remove_index(model: &mut SchemaModel, name: &str) {
     }
 }
 
+/// Whether `model` declares the index `name`, by an entry or a column flag.
+pub(super) fn declares_index(model: &SchemaModel, name: &str) -> bool {
+    declared_indexes(model)
+        .iter()
+        .any(|index| index.name == name)
+}
+
 /// Put `parent`'s declaration of the index `name` back into `model`: its
 /// `indexes` / `uniques` entry and the column flag that declared it.
-fn restore_index(model: &mut SchemaModel, parent: &SchemaModel, name: &str) {
+pub(super) fn restore_index(model: &mut SchemaModel, parent: &SchemaModel, name: &str) {
     if let Some(index) = parent.indexes.iter().find(|index| index.name == name) {
         model.indexes.push(index.clone());
     }

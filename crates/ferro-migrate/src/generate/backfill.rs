@@ -39,7 +39,8 @@
 use super::columns::{self, Phase, PlanContext, PlanDirection};
 use super::staging::StagedConstraint;
 use super::{
-    GenerateError, GeneratedStep, Rendering, downs, enums, find_model, rebuild, step_text,
+    GenerateError, GeneratedStep, Rendering, downs, enums, find_model, rebuild, staging,
+    step_text,
 };
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::order::order_by_dependencies;
@@ -386,20 +387,23 @@ pub fn with_removed_labels(
     restored
 }
 
-/// `ir` with every table and column `withheld` drops (the ops
-/// [`columns::waits_for_the_data_steps`] sends to the contract) declared as
-/// `before` declares it: the schema the data steps run against, where the
-/// historical model's union (ADR-0025) still reads what the migration drops.
-/// A kept column comes back at its place, with its column check, the indexes
-/// and uniques over it and its foreign key, which go with it; a table check
-/// over it does not (its removal discards no data and stays in the schema
-/// step).
+/// `ir` with every op of `withheld` undone, as `before` declares what it
+/// removes: the schema the data steps run against, where the historical
+/// model's union (ADR-0025) still reads what the migration drops. `withheld`
+/// is exactly what the phase table sends to the contract
+/// ([`columns::waits_for_the_data_steps`]), and nothing else comes back: a
+/// dropped table; a dropped column at its place, with its foreign key (no op
+/// of its own: `DROP COLUMN` takes it); the index, unique or column check a
+/// held-back op drops with it. A removal the phase table leaves in the schema
+/// step (a table check over the column, a foreign key on a column that stays)
+/// stays removed. An enum type comes back with the columns that declare it.
 pub fn with_drops_kept(
     ir: &IrEnvelope<SchemaIrPayload>,
     before: &IrEnvelope<SchemaIrPayload>,
     withheld: &[MigrationOp],
 ) -> IrEnvelope<SchemaIrPayload> {
     let mut kept = ir.clone();
+    // Tables and columns first: an index or check comes back onto them.
     for op in withheld {
         match op {
             MigrationOp::DropTable { table } => {
@@ -408,27 +412,53 @@ pub fn with_drops_kept(
                 }
             }
             MigrationOp::DropColumn { table, column } => {
-                let Some(old) = find_model(before, table) else {
-                    continue;
-                };
-                let Some(model) = kept
-                    .payload
-                    .models
-                    .iter_mut()
-                    .find(|model| &model.table_name == table)
-                else {
-                    continue;
-                };
-                keep_column(model, old, column);
+                if let (Some(model), Some(old)) =
+                    (find_model_mut(&mut kept, table), find_model(before, table))
+                {
+                    keep_column(model, old, column);
+                }
             }
             _ => {}
+        }
+    }
+    for op in withheld {
+        let (table, name) = match op {
+            MigrationOp::DropIndex { table, name } | MigrationOp::DropCheck { table, name } => {
+                (table, name)
+            }
+            _ => continue,
+        };
+        let (Some(model), Some(old)) =
+            (find_model_mut(&mut kept, table), find_model(before, table))
+        else {
+            continue;
+        };
+        if matches!(op, MigrationOp::DropIndex { .. }) {
+            if !staging::declares_index(model, name) {
+                staging::restore_index(model, old, name);
+            }
+        } else if let Some(check) = old.checks.iter().find(|check| &check.name == name)
+            && !model.checks.iter().any(|c| &c.name == name)
+        {
+            model.checks.push(check.clone());
         }
     }
     kept
 }
 
+fn find_model_mut<'a>(
+    ir: &'a mut IrEnvelope<SchemaIrPayload>,
+    table: &str,
+) -> Option<&'a mut SchemaModel> {
+    ir.payload
+        .models
+        .iter_mut()
+        .find(|model| model.table_name == table)
+}
+
 /// Put `old`'s column `name` back into `model`, after the column `old`
-/// declares before it, with what goes with it.
+/// declares before it, with its foreign key; its index and unique flags stay
+/// off until a held-back index drop puts its index back.
 fn keep_column(model: &mut SchemaModel, old: &SchemaModel, name: &str) {
     let Some(at) = old.columns.iter().position(|col| col.name == name) else {
         return;
@@ -441,23 +471,10 @@ fn keep_column(model: &mut SchemaModel, old: &SchemaModel, name: &str) {
         .rev()
         .find_map(|prev| model.columns.iter().position(|col| col.name == prev.name))
         .map_or(0, |found| found + 1);
-    model.columns.insert(place, old.columns[at].clone());
-    let over = |columns: &[String]| columns.iter().any(|col| col == name);
-    for check in old.checks.iter().filter(|check| check.column == name) {
-        if !model.checks.iter().any(|c| c.name == check.name) {
-            model.checks.push(check.clone());
-        }
-    }
-    for index in old.indexes.iter().filter(|index| over(&index.columns)) {
-        if !model.indexes.iter().any(|i| i.name == index.name) {
-            model.indexes.push(index.clone());
-        }
-    }
-    for unique in old.uniques.iter().filter(|unique| over(&unique.columns)) {
-        if !model.uniques.iter().any(|u| u.name == unique.name) {
-            model.uniques.push(unique.clone());
-        }
-    }
+    let mut col = old.columns[at].clone();
+    col.index = false;
+    col.unique = false;
+    model.columns.insert(place, col);
     for fk in old.foreign_keys.iter().filter(|fk| fk.column == name) {
         if !model.foreign_keys.iter().any(|f| f.column == fk.column) {
             model.foreign_keys.push(fk.clone());
@@ -847,8 +864,8 @@ fn nullability(
 /// target shape, whose copy fails on a row that still holds `NULL`; its down
 /// rebuilds it back.
 ///
-/// Every op [`columns::waits_for_the_data_steps`] withheld (ADR-0025) drops
-/// here, after the data steps, as a migration without one drops it in its
+/// Every op [`columns::waits_for_the_data_steps`] withheld (ADR-0025),
+/// `withheld` per dialect in `dialects`' order, drops here, after the data steps, as a migration without one drops it in its
 /// schema step ([`downs::render_step`]): `DROP COLUMN`, `DROP TABLE`, then
 /// the `DROP TYPE` that follows them, before a removed label's type swap (a
 /// column the swap would otherwise have to convert is gone). On SQLite a drop
@@ -869,6 +886,7 @@ fn nullability(
 pub fn contract_step(
     demands: &[Demand],
     staged: &[StagedConstraint],
+    withheld: &[Vec<MigrationOp>],
     kept_target: &IrEnvelope<SchemaIrPayload>,
     relaxed_target: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
@@ -881,15 +899,19 @@ pub fn contract_step(
         .collect();
     let demands = demands.as_slice();
     let mut renderings = BTreeMap::new();
-    for &dialect in dialects {
-        // The drops the data steps waited for: `kept_target` → `relaxed_target`.
-        let withheld = super::rendered_ops(
-            &super::plan(kept_target, relaxed_target, dialect)?,
-            kept_target,
-            relaxed_target,
-            dialect,
-            PlanDirection::Up,
-        );
+    for (&dialect, held) in dialects.iter().zip(withheld) {
+        // The drops the phase table held back for the contract, rendered
+        // `kept_target` → `relaxed_target` but the SQLite check drop its
+        // `DROP COLUMN` carries.
+        let withheld: Vec<MigrationOp> = held
+            .iter()
+            .filter(|op| {
+                let ctx =
+                    PlanContext::of(op, kept_target, relaxed_target, dialect, PlanDirection::Up);
+                !columns::carried_by_its_column_drop(op, &ctx)
+            })
+            .cloned()
+            .collect();
         let drops = |ops: &[MigrationOp]| {
             downs::render_step(
                 ops,

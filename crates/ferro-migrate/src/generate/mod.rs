@@ -262,8 +262,9 @@ fn op_subject(op: &MigrationOp) -> String {
 }
 
 /// Which step `op` belongs in, in the file that turns `before` into `after`
-/// on `dialect` ([`columns::assign`]), or the refusal naming the ticket that
-/// generates it. An op that demands values of existing rows is
+/// on `dialect` in a migration that has (`data_steps`) or lacks a data step
+/// after its schema step ([`columns::assign`]), or the refusal naming the
+/// ticket that generates it. An op that demands values of existing rows is
 /// [`Phase::Backfill`]: the migration answers it with its expand → backfill →
 /// contract ([`backfill`]), and plans every step against the expanded schema,
 /// where no op demands anything.
@@ -273,8 +274,9 @@ fn phase_of(
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     direction: PlanDirection,
+    data_steps: bool,
 ) -> Result<Phase, GenerateError> {
-    let ctx = PlanContext::of(op, before, after, dialect, direction);
+    let ctx = PlanContext::of(op, before, after, dialect, direction).with_data_steps(data_steps);
     let StepAssignment { phase, needs } = columns::assign(op, &ctx);
     let table = op_subject(op);
     match needs {
@@ -337,6 +339,68 @@ fn refuse_unrendered(rendered: &[RenderedOp], dialect: Dialect) -> Result<(), Ge
         }
     }
     Ok(())
+}
+
+/// The phase steps the schema-step ops `ups` and their reverses `downs` (one
+/// per dialect, planned `before → expanded` and back) land in, in a migration
+/// that has (`data_steps`) or lacks a data step. Refuses a phase the steps
+/// before the data steps must never see: an index change (its own index
+/// step), a demand for values (the expanded schema relaxes every demanded
+/// column), or a drop the data steps wait for (the expanded schema keeps it
+/// until the contract).
+fn step_phases(
+    ups: &[Vec<MigrationOp>],
+    downs: &[MigrationPlan],
+    before: &IrEnvelope<SchemaIrPayload>,
+    expanded: &IrEnvelope<SchemaIrPayload>,
+    dialects: &[Dialect],
+    data_steps: bool,
+) -> Result<BTreeSet<Phase>, GenerateError> {
+    let mut phases = BTreeSet::new();
+    for (&dialect, (up, down)) in dialects.iter().zip(ups.iter().zip(downs)) {
+        for op in up {
+            phases.insert(phase_of(
+                op,
+                before,
+                expanded,
+                dialect,
+                PlanDirection::Up,
+                data_steps,
+            )?);
+        }
+        for op in &down.operations {
+            phases.insert(phase_of(
+                op,
+                expanded,
+                before,
+                dialect,
+                PlanDirection::Down,
+                data_steps,
+            )?);
+        }
+    }
+    if phases.contains(&Phase::Index) {
+        return Err(GenerateError::Render(
+            "an index change on an existing table reached a phase step; it is its own index \
+             step"
+                .to_string(),
+        ));
+    }
+    if phases.contains(&Phase::Backfill) {
+        return Err(GenerateError::Render(
+            "a change still asks existing rows for values on the expanded schema; every \
+             demanded column is nullable there"
+                .to_string(),
+        ));
+    }
+    if phases.contains(&Phase::Contract) {
+        return Err(GenerateError::Render(
+            "a drop the data steps wait for reached a step before them; the expanded schema \
+             keeps every table and column the contract drops"
+                .to_string(),
+        ));
+    }
+    Ok(phases)
 }
 
 /// The modelset with no models, in `like`'s IR version: the parent of `0001`.
@@ -413,7 +477,7 @@ fn refuse_unsupported(
     answered: &[String],
 ) -> Result<(), GenerateError> {
     for op in &plan.operations {
-        phase_of(op, before, after, dialect, direction)?;
+        phase_of(op, before, after, dialect, direction, false)?;
     }
     if let Some(warning) = change_warnings(plan, standing, answered).into_iter().next() {
         return Err(GenerateError::Unplanned {
@@ -709,25 +773,33 @@ pub fn generate_with(
     // which ops wait ([`columns::waits_for_the_data_steps`]), and every step
     // before the contract sees them still there.
     let data_steps = backfills || hand.is_some();
-    let mut withheld: Vec<MigrationOp> = Vec::new();
-    for &dialect in dialects.iter().filter(|_| data_steps) {
-        for op in plan(parent_ir, &shape, dialect)?.operations {
-            let ctx = PlanContext::of(&op, before, &shape, dialect, PlanDirection::Up)
-                .with_data_steps(true);
-            if columns::assign(&op, &ctx).phase == Phase::Contract && !withheld.contains(&op) {
-                withheld.push(op);
+    // The ops each dialect holds back for the contract, as the phase table
+    // decides them: the contract renders exactly these, and every step before
+    // it sees exactly what they remove ([`backfill::with_drops_kept`]).
+    let mut withheld: Vec<Vec<MigrationOp>> = Vec::new();
+    for &dialect in dialects {
+        let mut held = Vec::new();
+        if data_steps {
+            for op in plan(parent_ir, &shape, dialect)?.operations {
+                if phase_of(&op, before, &shape, dialect, PlanDirection::Up, true)?
+                    == Phase::Contract
+                {
+                    held.push(op);
+                }
             }
         }
+        withheld.push(held);
     }
+    let held: Vec<MigrationOp> = withheld.iter().flatten().cloned().collect();
     let expanded = backfill::with_drops_kept(
         &backfill::with_removed_labels(&backfill::relaxed(&shape, &demands), before, &removals),
         before,
-        &withheld,
+        &held,
     );
     let loose_target =
         backfill::with_removed_labels(&backfill::relaxed(target, &demands), before, &removals);
-    let kept_target = backfill::with_drops_kept(&loose_target, before, &withheld);
-    let contracts = backfills || !withheld.is_empty();
+    let kept_target = backfill::with_drops_kept(&loose_target, before, &held);
+    let contracts = backfills || !held.is_empty();
     let mut ups = Vec::new();
     let mut downs = Vec::new();
     for &dialect in dialects {
@@ -752,42 +824,7 @@ pub fn generate_with(
         return Ok(None);
     }
 
-    let mut phases = BTreeSet::new();
-    for (&dialect, (up, down)) in dialects.iter().zip(ups.iter().zip(&downs)) {
-        for op in up {
-            phases.insert(phase_of(op, before, &expanded, dialect, PlanDirection::Up)?);
-        }
-        for op in &down.operations {
-            phases.insert(phase_of(
-                op,
-                &expanded,
-                before,
-                dialect,
-                PlanDirection::Down,
-            )?);
-        }
-    }
-    if phases.contains(&Phase::Index) {
-        return Err(GenerateError::Render(
-            "an index change on an existing table reached a phase step; it is its own index \
-             step"
-                .to_string(),
-        ));
-    }
-    if phases.contains(&Phase::Backfill) {
-        return Err(GenerateError::Render(
-            "a change still asks existing rows for values on the expanded schema; every \
-             demanded column is nullable there"
-                .to_string(),
-        ));
-    }
-    if phases.contains(&Phase::Contract) {
-        return Err(GenerateError::Render(
-            "a drop the data steps wait for reached a step before them; the expanded schema \
-             keeps every table and column the contract drops"
-                .to_string(),
-        ));
-    }
+    let phases = step_phases(&ups, &downs, before, &expanded, dialects, data_steps)?;
     let mut warnings = Vec::new();
     let mut staged = Vec::new();
     for (&dialect, up) in dialects.iter().zip(&ups) {
@@ -807,7 +844,15 @@ pub fn generate_with(
         for (&dialect, up) in dialects.iter().zip(&ups) {
             let mut step_ops = Vec::new();
             for op in up {
-                if phase_of(op, before, &expanded, dialect, PlanDirection::Up)? == phase {
+                if phase_of(
+                    op,
+                    before,
+                    &expanded,
+                    dialect,
+                    PlanDirection::Up,
+                    data_steps,
+                )? == phase
+                {
                     step_ops.push(op.clone());
                 }
             }
@@ -858,6 +903,7 @@ pub fn generate_with(
         steps.push(backfill::contract_step(
             &demands,
             &staged,
+            &withheld,
             &kept_target,
             &loose_target,
             target,
@@ -2660,6 +2706,93 @@ mod tests {
             "{}",
             pg.down
         );
+    }
+
+    #[test]
+    fn f1_a_drop_that_reaches_a_step_before_the_data_steps_is_refused() {
+        // The expanded schema keeps what the contract drops, so no such op
+        // reaches the schema step; if one did, the phase table says where it
+        // belongs and generation stops rather than drop it early.
+        let (before, after) = (ir(vec![author()]), ir(vec![slug_for_name()]));
+        let ups = vec![vec![MigrationOp::DropColumn {
+            table: "author".into(),
+            column: "name".into(),
+        }]];
+        let downs = vec![MigrationPlan::default()];
+        let dialect = [Dialect::Postgres];
+        assert_eq!(
+            step_phases(&ups, &downs, &before, &after, &dialect, true)
+                .expect_err("refused")
+                .to_string(),
+            "a drop the data steps wait for reached a step before them; the expanded schema \
+             keeps every table and column the contract drops"
+        );
+        assert_eq!(
+            step_phases(&ups, &downs, &before, &after, &dialect, false).expect("ok"),
+            BTreeSet::from([Phase::Schema])
+        );
+    }
+
+    #[test]
+    fn f1_a_dropped_foreign_key_column_is_one_held_back_op_its_key_going_with_it() {
+        let mut keyless = post();
+        keyless.columns.retain(|col| col.name != "author_id");
+        keyless.foreign_keys.clear();
+        let parent = ir(vec![author(), post()]);
+        let shape = ir(vec![
+            with_columns(vec![column("slug", "string")]),
+            keyless.clone(),
+        ]);
+        // The phase table holds back the column's drop and nothing else on
+        // post: no op of its own drops the key.
+        for dialect in BOTH {
+            let ops: Vec<MigrationOp> = plan(&parent, &shape, dialect)
+                .expect("plan")
+                .operations
+                .into_iter()
+                .filter(|op| op.table() == Some("post"))
+                .collect();
+            let drop = MigrationOp::DropColumn {
+                table: "post".into(),
+                column: "author_id".into(),
+            };
+            assert_eq!(ops, std::slice::from_ref(&drop), "{dialect:?}");
+            assert_eq!(
+                phase_of(&drop, &parent, &shape, dialect, PlanDirection::Up, true),
+                Ok(Phase::Contract)
+            );
+            // What comes back for the data steps is exactly the column and
+            // the key it carries.
+            let kept = backfill::with_drops_kept(&shape, &parent, &[drop]);
+            assert_eq!(kept.payload.models[1], post(), "{dialect:?}");
+        }
+        let migration = edit(
+            vec![author(), post()],
+            vec![with_columns(vec![column("slug", "string")]), keyless],
+            &BOTH,
+        );
+        for dialect in BOTH {
+            let expand = step(&migration, "01_expand", dialect);
+            assert!(!expand.up.contains("post"), "{dialect:?}: {}", expand.up);
+        }
+        let pg = step(&migration, "04_contract", Dialect::Postgres);
+        assert!(
+            pg.up
+                .ends_with("ALTER TABLE \"post\" DROP COLUMN \"author_id\";\n"),
+            "{}",
+            pg.up
+        );
+        assert!(pg.down.contains("FOREIGN KEY"), "{}", pg.down);
+        // SQLite drops a foreign-key column by rebuilding its table.
+        let sqlite = step(&migration, "04_contract", Dialect::Sqlite);
+        assert!(
+            sqlite
+                .up
+                .contains("CREATE TABLE IF NOT EXISTS \"_ferro_new_post\""),
+            "{}",
+            sqlite.up
+        );
+        assert!(sqlite.headers.destructive && sqlite.headers.foreign_keys_off);
     }
 
     #[test]
