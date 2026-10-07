@@ -71,6 +71,30 @@ pub fn refused(text: impl Into<String>) -> PyErr {
     })
 }
 
+/// A run planner refusal as `RunRefused(text, kind=..., migration=...,
+/// step=..., reason=...)`, so a caller matches on its kind rather than its
+/// text. Falls back to `RuntimeError` only if the Python module cannot be
+/// imported.
+pub fn refused_by(refusal: &ferro_migrate::RunRefusal) -> PyErr {
+    let text = refusal.to_string();
+    Python::attach(|py| {
+        let kwargs = pyo3::types::PyDict::new(py);
+        let built = (|| {
+            kwargs.set_item("kind", refusal.kind())?;
+            kwargs.set_item("migration", refusal.migration())?;
+            kwargs.set_item("step", refusal.step())?;
+            kwargs.set_item("reason", refusal.reason())?;
+            py.import("ferro.migrations.report")?
+                .getattr("RunRefused")?
+                .call((text.clone(),), Some(&kwargs))
+        })();
+        match built {
+            Ok(instance) => PyErr::from_value(instance),
+            Err(_) => pyo3::exceptions::PyRuntimeError::new_err(text),
+        }
+    })
+}
+
 fn db_error(context: &str, err: sqlx::Error) -> PyErr {
     crate::errors::map_db_error(context, err)
 }
@@ -1607,6 +1631,74 @@ pub async fn write_cursor(
     Ok(())
 }
 
+/// The statement `rerecord` runs: the record's `file`, `checksum` and
+/// `kind`, and with `restart` its cursor cleared and `rows_done` zeroed,
+/// guarded on the checksum the plan read so a record that moved since is
+/// not rewritten.
+fn rerecord_sql(dialect: Dialect, tracking: &Tracking, restart: bool) -> String {
+    let p = |n: usize| param(dialect, n);
+    let cursor = if restart {
+        ", resume_cursor = NULL, rows_done = 0"
+    } else {
+        ""
+    };
+    format!(
+        "UPDATE {} SET file = {}, checksum = {}, kind = {}{cursor} \
+         WHERE migration = {} AND step = {} AND checksum = {} RETURNING migration",
+        tracking.table(TRACKING_TABLE),
+        p(1),
+        p(2),
+        p(3),
+        p(4),
+        p(5),
+        p(6)
+    )
+}
+
+/// Rewrite one step record as [`ferro_migrate::run_plan::rerecord_plan`]
+/// planned it (ADR-0030): its `file`, `checksum` and `kind`, and with
+/// `action.clear_cursor` (`--restart`) its `resume_cursor` and `rows_done`
+/// — one statement, so it lands whole or not at all. Runs nothing of the
+/// step. Called under the run lock.
+///
+/// # Errors
+/// A refusal when the record no longer holds the checksum the plan read; a
+/// database error.
+pub async fn rerecord_checksum(
+    engine: &EngineHandle,
+    tracking_schema: Option<&str>,
+    action: &ferro_migrate::run_plan::RerecordAction,
+) -> PyResult<()> {
+    let dialect = engine.backend();
+    let sql = rerecord_sql(
+        dialect,
+        &Tracking::new(dialect, tracking_schema),
+        action.clear_cursor,
+    );
+    let rows = engine
+        .fetch_all_sql_unprepared_with_binds(
+            &sql,
+            &[
+                EngineBindValue::String(action.file.clone()),
+                EngineBindValue::String(action.new_checksum.clone()),
+                EngineBindValue::String(action.kind.as_str().to_string()),
+                EngineBindValue::I64(i64::from(action.migration)),
+                EngineBindValue::I64(i64::from(action.step)),
+                EngineBindValue::String(action.old_checksum.clone()),
+            ],
+        )
+        .await
+        .map_err(|e| db_error("re-recording the step", e))?;
+    if rows.is_empty() {
+        return Err(refused(format!(
+            "ferro migrate: the record of {:04}:{:02} changed while rerecord ran; run `ferro \
+             migrate status` and try again. Nothing was changed.",
+            action.migration, action.step
+        )));
+    }
+    Ok(())
+}
+
 async fn foreign_keys_off(
     conn: &mut EngineConnection,
     statements: &[String],
@@ -2561,11 +2653,18 @@ mod baseline_tests {
 
         // What `up` and `status` make of those records: everything through
         // the target installed (baseline), only 0003 left to apply.
-        let up =
-            plan_run(&dir, &plan.records, Dialect::Sqlite, Direction::Up, false).expect("up plans");
+        let up = plan_run(
+            &dir,
+            &plan.records,
+            Dialect::Sqlite,
+            Direction::Up,
+            false,
+            None,
+        )
+        .expect("up plans");
         let pending: Vec<(u16, u8)> = up.steps.iter().map(|s| (s.migration, s.step)).collect();
         assert_eq!(pending, [(3, 1)]);
-        let status = run_status(&dir, &plan.records, Dialect::Sqlite, false);
+        let status = run_status(&dir, &plan.records, Dialect::Sqlite, false, None);
         let states: Vec<Vec<StepState>> = status
             .migrations
             .iter()
@@ -2671,7 +2770,7 @@ mod baseline_tests {
         step.files.remove(&StepDialect::Postgres);
         let migrations = dir(vec![("create_author", vec![step], &["author"])]);
         for dialect in [Dialect::Sqlite, Dialect::Postgres] {
-            let planned = plan_run(&migrations, &[], dialect, Direction::Up, false)
+            let planned = plan_run(&migrations, &[], dialect, Direction::Up, false, None)
                 .expect("up plans")
                 .steps
                 .remove(0)

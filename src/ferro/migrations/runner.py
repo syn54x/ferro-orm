@@ -66,8 +66,9 @@ from ..registry import REGISTRY
 from ..settings import _DURATION, _DURATION_UNITS, SettingsError
 from ..state import resolve_operation_scope
 from . import historical
-from .chunked import BatchFailed, run_chunked
+from .chunked import BatchFailed, order_keys, run_chunked
 from .context import HistoricalModels, StepContext
+from .errors import MigrationRefused
 from .historical import HistoricalModelError
 from .report import RunRefused, StatusReport
 from .steps import (
@@ -127,6 +128,10 @@ class RunReport:
     refusal: str | None = None
     """Why the run stopped: a refusal before anything ran, a lost lock, or a
     failed step (its error and how to resume). ``None`` when it finished."""
+    refused: RunRefused | None = None
+    """The refusal itself when the run was refused (``refusal`` is its
+    text): its ``kind``, ``migration``, ``step`` and ``reason`` say what it
+    is about. ``None`` when the run finished or a step failed."""
     notes: list[str] = field(default_factory=list)
     """What the run accepted on the way (an edited unfinished step)."""
     ahead: list[str] = field(default_factory=list)
@@ -261,7 +266,7 @@ async def up(
         try:
             handle = await _acquire_run_lock(name, None, timeout, _say_waiting)
         except RunRefused as refused:
-            report.refusal = str(refused)
+            report.refusal, report.refused = str(refused), refused
             return report
         try:
             await _run(
@@ -276,7 +281,7 @@ async def up(
                 last,
             )
         except RunRefused as refused:
-            report.refusal = str(refused)
+            report.refusal, report.refused = str(refused), refused
         finally:
             await _core._release_run_lock(handle)
     return report
@@ -298,6 +303,10 @@ async def _run(
         raise RunRefused(state["refusal"])
     records = state["records"]
     live = None if records else await _core._live_tables(name)
+    try:
+        keys = order_keys_on_disk(database.directory, records)
+    except MigrationRefused as refused:
+        raise RunRefused(f"{refused}. Nothing was applied.") from None
     plan = json.loads(
         _core._run_plan(
             str(database.directory),
@@ -306,6 +315,7 @@ async def _run(
             _UP,
             allow_ahead,
             live,
+            keys,
         )
     )
     report.ahead = list(plan["ahead"])
@@ -323,10 +333,12 @@ async def _run(
         for step in steps:
             shown = f"{step['migration_name']}/{step['file']}"
             if step["edited"] is not None:
+                # ADR-0030: an unfinished attempt that committed nothing (or a
+                # no-transaction step, re-runnable from its first statement)
+                # runs its edited file; the record takes the new checksum.
                 note = (
-                    f"{shown} changed since its unfinished attempt "
-                    f"(sha384:{step['edited']['recorded']}); running the file as it "
-                    f"is now and re-recording its checksum (sha384:{step['checksum']})"
+                    f"re-recorded {shown} (sha384:{step['edited']['recorded']} → "
+                    f"sha384:{step['checksum']})"
                 )
                 report.notes.append(note)
                 say(note)
@@ -408,6 +420,64 @@ def _key(step: dict[str, Any]) -> tuple[int, int]:
     return step["migration"], step["step"]
 
 
+def order_keys_on_disk(directory: Path, records: list[dict[str, Any]]) -> str:
+    """The order keys each cursor-holding chunked step's file pages over
+    today, as the run planner's ``order_keys_json``
+    (``[[migration, step, ["author.id", ...]], ...]``; an empty list for a
+    step whose ``up`` is no longer ``@chunked``).
+
+    A fact only Python can read (the query is a function of the migration's
+    historical models), read for every record that is an unfinished
+    chunked step holding a cursor: the planner decides whether its file was
+    edited and whether its cursor is still a position in the edited query
+    (ADR-0030). A directory that does not read gives no facts; the planner
+    refuses it with its own text.
+
+    Raises:
+        MigrationRefused: such a step's file does not load, or its query
+            does not build over its historical models.
+    """
+    wanted = sorted(
+        (record["migration"], record["step"])
+        for record in records
+        if record["kind"] == "chunked"
+        and record["finished_at"] is None
+        and record["resume_cursor"] is not None
+    )
+    if not wanted:
+        return "[]"
+    try:
+        raw = json.loads(_core._read_migrations_dir(str(directory)))
+    except ValueError:
+        return "[]"
+    migrations = {m["number"]: m for m in raw["migrations"]}
+    facts: list[list[Any]] = []
+    for number, ordinal in wanted:
+        migration = migrations.get(number)
+        step = next(
+            (s for s in (migration or {}).get("steps", []) if s["ordinal"] == ordinal),
+            None,
+        )
+        if migration is None or step is None:
+            continue  # the planner refuses a record the directory lacks
+        if step["kind"] != "data":
+            facts.append([number, ordinal, []])
+            continue
+        path = Path(step["files"]["portable"]["up"])
+        shape = load_step(path, None).up.shape
+        if not isinstance(shape, Chunked):
+            facts.append([number, ordinal, []])
+            continue
+        parent = migrations.get(number - 1)
+        models = historical.build(
+            parent["snapshot"]["ir"] if parent is not None else None,
+            migration["snapshot"]["ir"],
+            rev=f"{number:04}_{migration['name']}",
+        )
+        facts.append([number, ordinal, order_keys(chunked_query(shape, models, path))])
+    return json.dumps(facts)
+
+
 def _load_data_steps(
     steps: list[dict[str, Any]], direction: str
 ) -> dict[tuple[int, int], LoadedStep]:
@@ -435,7 +505,11 @@ def _load_data_steps(
                 f"ferro migrate: {step['migration']:04}:{step['step']:02} is "
                 f"irreversible: {shape.reason}\nThere is no flag to skip it: to revert "
                 f"past it, write the step's down in place of the declaration. Nothing "
-                f"was reverted."
+                f"was reverted.",
+                kind="irreversible",
+                migration=step["migration"],
+                step=step["step"],
+                reason=shape.reason,
             )
         if isinstance(shape, NothingToReverse):
             step["nothing_to_reverse"] = shape.reason
@@ -813,12 +887,19 @@ async def status(
         tracking = tracking_schema_for(database, dialect)
         state = json.loads(await _core._read_records(name, tracking))
         held = await _core._run_lock_is_held(name, None)
+        try:
+            keys: str | None = order_keys_on_disk(database.directory, state["records"])
+        except MigrationRefused:
+            # A step file that does not load: status still answers, and the
+            # edited-chunked refusal offers --continue on its condition.
+            keys = None
         raw = json.loads(
             _core._run_status(
                 str(database.directory),
                 json.dumps(state["records"]),
                 dialect,
                 held,
+                keys,
             )
         )
     return StatusReport.from_core(
@@ -905,14 +986,14 @@ def parse_target(target: str | None = None, *, all: bool = False) -> dict[str, A
 
 async def _plan_down(
     name: str, database: DatabaseSettings, dialect: str, direction: dict[str, Any]
-) -> tuple[list[dict[str, Any]], str | None]:
+) -> tuple[list[dict[str, Any]], RunRefused | None]:
     """The planned down steps, or the refusal, against the records as they
     stand now."""
     state = json.loads(
         await _core._read_records(name, tracking_schema_for(database, dialect))
     )
     if state["refusal"] is not None:
-        return [], state["refusal"]
+        return [], RunRefused(state["refusal"])
     try:
         plan = json.loads(
             _core._run_plan(
@@ -927,11 +1008,11 @@ async def _plan_down(
         # refuses here, before any lock; a nothing-to-reverse one says so.
         _load_data_steps(plan["steps"], "down")
     except RunRefused as refused:
-        return [], str(refused)
+        return [], refused
     return plan["steps"], None
 
 
-def _down_plan(steps: list[dict[str, Any]], refusal: str | None) -> DownPlan:
+def _down_plan(steps: list[dict[str, Any]], refusal: RunRefused | None) -> DownPlan:
     return DownPlan(
         steps=[
             DownStep(
@@ -941,7 +1022,7 @@ def _down_plan(steps: list[dict[str, Any]], refusal: str | None) -> DownPlan:
             )
             for step in steps
         ],
-        refusal=refusal,
+        refusal=None if refusal is None else str(refusal),
     )
 
 
@@ -1006,7 +1087,7 @@ async def down(
         tracking = tracking_schema_for(database, dialect)
         seen, refusal = await _plan_down(name, database, dialect, direction)
         if refusal is not None:
-            report.refusal = refusal
+            report.refusal, report.refused = str(refusal), refusal
             return report
         if not seen:
             return report
@@ -1016,12 +1097,12 @@ async def down(
         try:
             handle = await _acquire_run_lock(name, None, timeout, _say_waiting)
         except RunRefused as refused:
-            report.refusal = str(refused)
+            report.refusal, report.refused = str(refused), refused
             return report
         try:
             steps, refusal = await _plan_down(name, database, dialect, direction)
             if refusal is not None:
-                report.refusal = refusal
+                report.refusal, report.refused = str(refusal), refusal
             elif [s["record"] for s in steps] != [s["record"] for s in seen]:
                 report.refusal = (
                     "ferro migrate: the database's migration records changed while "
@@ -1041,7 +1122,7 @@ async def down(
                     say,
                 )
         except RunRefused as refused:
-            report.refusal = str(refused)
+            report.refusal, report.refused = str(refused), refused
         finally:
             await _core._release_run_lock(handle)
     return report

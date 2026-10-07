@@ -220,8 +220,8 @@ def chunked_query(shape: Chunked, models: HistoricalModels, path: Path) -> Query
     Raises:
         StepRefused: the declaration does not return a query; the query pages
             a table without a single primary key (a many-to-many join table,
-            #492); it has no ``order_by``, or its order keys leave out the
-            primary key; or it sets its own ``limit`` / ``offset`` /
+            #492); it has no ``order_by``, orders by a related model's
+            column, or its order keys leave out the primary key; or it sets its own ``limit`` / ``offset`` /
             ``after`` / ``before``. The message names the file and the fix.
     """
     from ..query import Query
@@ -253,7 +253,19 @@ def chunked_query(shape: Chunked, models: HistoricalModels, path: Path) -> Query
         )
     var = model.__name__.lower()
     add_pk = f".order_by(lambda {var}: {var}.{pk})"
-    keys = [entry.column for entry in query.order_by_clause if not entry.path]
+    related = [
+        ".".join((*entry.path, entry.column))
+        for entry in query.order_by_clause
+        if entry.path
+    ]
+    if related:
+        raise StepRefused(
+            f"ferro migrate: {shown}: @chunked orders {table} by {', '.join(related)}, "
+            f"a column of a related model; the cursor holds the last row's own order "
+            f"keys, so order by a column of the model, including its primary key: "
+            f"{add_pk}"
+        )
+    keys = [entry.column for entry in query.order_by_clause]
     if not query.order_by_clause:
         raise StepRefused(
             f"ferro migrate: {shown}: @chunked needs an ordered query: the runner "
