@@ -1,0 +1,1 @@
+verified 2026-10-07 (review round 1): maturin develop; pytest harness+historical+drift+migrate_up+data_steps+migrate_down --db-backends=sqlite,postgres -> 172 passed, 7 skipped (dialect-intrinsic)
