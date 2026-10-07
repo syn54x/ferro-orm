@@ -8,6 +8,7 @@ use ferro_migrate::snapshot::{Snapshot, encode_checksum};
 use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use crate::migrate::parse_dialect;
 use pyo3::prelude::*;
 use std::path::Path;
 
@@ -45,13 +46,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 fn parse_dialects(dialects: &[String]) -> PyResult<Vec<Dialect>> {
     dialects
         .iter()
-        .map(|dialect| match dialect.as_str() {
-            "postgres" => Ok(Dialect::Postgres),
-            "sqlite" => Ok(Dialect::Sqlite),
-            other => Err(PyValueError::new_err(format!(
-                "Unknown dialect {other:?}; expected 'postgres' or 'sqlite'"
-            ))),
-        })
+        .map(|dialect| parse_dialect(dialect))
         .collect()
 }
 
@@ -192,10 +187,6 @@ fn parse_json<T: serde::de::DeserializeOwned>(json: &str, what: &str) -> PyResul
     serde_json::from_str(json).map_err(|e| PyValueError::new_err(format!("invalid {what}: {e}")))
 }
 
-fn parse_dialect(dialect: &str) -> PyResult<Dialect> {
-    Ok(parse_dialects(&[dialect.to_string()])?[0])
-}
-
 /// `[[migration, step, ["author.id", ...]], ...]` → the planner's
 /// `OrderKeys`.
 fn parse_order_keys(json: &str) -> PyResult<ferro_migrate::run_plan::OrderKeys> {
@@ -318,7 +309,11 @@ pub fn _acquire_run_lock(
             "timeout_s must be a non-negative number of seconds; got {timeout_s}"
         )));
     }
-    let timeout = std::time::Duration::from_secs_f64(timeout_s);
+    let timeout = std::time::Duration::try_from_secs_f64(timeout_s).map_err(|_| {
+        PyValueError::new_err(format!(
+            "timeout_s {timeout_s:e} is too large to be a duration of seconds"
+        ))
+    })?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;
         let lock =

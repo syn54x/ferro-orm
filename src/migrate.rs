@@ -163,7 +163,7 @@ impl MigrateOptions {
     }
 }
 
-fn parse_dialect(dialect: &str) -> PyResult<Dialect> {
+pub(crate) fn parse_dialect(dialect: &str) -> PyResult<Dialect> {
     match dialect {
         "postgres" => Ok(Dialect::Postgres),
         "sqlite" => Ok(Dialect::Sqlite),

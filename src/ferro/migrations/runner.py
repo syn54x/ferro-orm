@@ -138,9 +138,20 @@ class RunReport:
     """Applied migrations the directory lacks, let through by ``allow_ahead``."""
 
 
+MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
+"""The longest lock timeout accepted: one year, the same "until it is free"
+bound ``connect(auto_migrate=...)`` waits (ADR-0038)."""
+
+
 def parse_lock_timeout(value: str | float) -> float:
     """Seconds from ``"30s"``, ``"500ms"``, ``"1m"`` or a plain number of
-    seconds (``0`` tries the lock once)."""
+    seconds (``0`` tries the lock once, :data:`MAX_LOCK_TIMEOUT_S` is the
+    most).
+
+    Raises:
+        SettingsError: ``value`` is not a duration, is negative, or is longer
+            than :data:`MAX_LOCK_TIMEOUT_S`.
+    """
     if isinstance(value, int | float) and not isinstance(value, bool):
         seconds = float(value)
     elif isinstance(value, str) and re.fullmatch(r"\d+(\.\d+)?", value.strip()):
@@ -162,6 +173,11 @@ def parse_lock_timeout(value: str | float) -> float:
         )
     if seconds < 0:
         raise SettingsError(f"lock timeout {value!r} is negative; use 0 or more")
+    if not seconds <= MAX_LOCK_TIMEOUT_S:  # also refuses nan
+        raise SettingsError(
+            f"lock timeout {value!r} is too long; use at most one year "
+            f"({MAX_LOCK_TIMEOUT_S:.0f} seconds)"
+        )
     return seconds
 
 
