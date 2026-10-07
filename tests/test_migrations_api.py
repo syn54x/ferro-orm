@@ -33,7 +33,6 @@ from ferro.migrations.report import StatusReport
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     LIBRARY,
-    isolated_imports,
     pkg,
     project,
     write_models,

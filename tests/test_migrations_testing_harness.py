@@ -43,7 +43,6 @@ from ferro.migrations.testing import Harness, RoundTripResult, harness
 from ferro.registry import SwappedOutModelError
 from ferro.settings import FerroSettings, SettingsError
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
-    isolated_imports,
     pkg,
     project,
     write_models,

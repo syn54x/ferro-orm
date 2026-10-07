@@ -29,7 +29,6 @@ import sys
 import pytest
 
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
-    isolated_imports,
     listing,
     pkg,
     project,

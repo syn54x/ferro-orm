@@ -941,18 +941,14 @@ class {name}(Model):
 
 
 @pytest.fixture
-def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    import sys
-
+def project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_imports: None
+) -> Path:
     monkeypatch.delenv("FERRO_CONFIG", raising=False)
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    before = set(sys.modules)
     root = tmp_path / "proj"
     root.mkdir()
     monkeypatch.chdir(root)
-    yield root
-    for module in set(sys.modules) - before:
-        del sys.modules[module]
+    return root
 
 
 def _package(root: Path, package: str, model: str) -> None:

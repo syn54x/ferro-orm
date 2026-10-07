@@ -47,7 +47,6 @@ from tests.test_migrate_down import (  # noqa: F401 - fixtures
     snapshot,
 )
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
-    isolated_imports,
     pkg,
     project,
     run,
