@@ -2,20 +2,22 @@
 
 Type-checked by the project's ``ty`` gate (see ``just check`` and the CI
 workflow), so a regression here is a red gate, not a user-side
-``# ty: ignore``. The one contract pinned: ``ferro.migrations.render_item``
-is a valid ``render_item=`` argument to ``context.configure(...)`` — the
-line the migrations guide tells every project to add to ``env.py``.
+``# ty: ignore``. The contracts pinned: the ``env.py`` line the migrations
+guide tells every project to write, ``context.configure(...,
+target_metadata=get_metadata(), **ferro_options())`` (ADR-0041), and
+``ferro.migrations.render_item`` as a valid ``render_item=`` argument, which
+a project's own hook composes with.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 from alembic import context
 from alembic.runtime.environment import RenderItemFn
 
-from ferro.migrations import get_metadata, render_item
+from ferro.migrations import ferro_options, get_metadata, render_item
 
 if TYPE_CHECKING:
     from alembic.autogenerate.api import AutogenContext
@@ -27,7 +29,18 @@ def _env_py_configure() -> None:
     """The documented ``env.py`` recipe, verbatim, so ``ty`` checks the
     exact call a user writes. Never executed: ``alembic.context`` is a
     proxy that only works while Alembic runs ``env.py``."""
-    context.configure(target_metadata=get_metadata(), render_item=render_item)
+    context.configure(target_metadata=get_metadata(), **ferro_options())
+    context.configure(
+        target_metadata=get_metadata(database="app"),
+        **ferro_options(render_item=_project_render_item_hook),
+    )
+
+
+def _project_render_item_hook(
+    type_: str, obj: Any, autogen_context: AutogenContext
+) -> str | Literal[False]:
+    """A project hook ``ferro_options(render_item=...)`` falls through to."""
+    return False
 
 
 def _project_render_item(

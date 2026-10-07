@@ -13,12 +13,12 @@ emitters agree about every artifact in the fixture model — exactly the
 property that prevents phantom drop+create diffs in real-world migration
 flows.
 
-When you add a new schema feature (a constraint, a default, a new index
-variant), extend the fixture model below to cover it. If the sentinel goes
-red, either the feature's two emitter implementations disagree (fix the
-disagreement) or the feature legitimately falls outside Alembic's
-introspection precision (filter that op kind out of the diff with a clear
-comment).
+Since ADR-0041 the bridge has one decider: autogenerate reads the live
+database through the reconciliation pass's converter and asks the one
+planner, so an empty autogenerate and "no drift" are the same statement and
+no diff is ever filtered here. When you add a new schema feature, extend the
+fixture model below to cover it; if the sentinel goes red, the planner and
+the create pass disagree — fix them.
 """
 
 import datetime
@@ -43,6 +43,7 @@ from ferro import (
     reset_engine,
 )
 from ferro.migrations import get_metadata
+from tests._alembic_harness import autogen_opts
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -109,33 +110,6 @@ def _build_fixture_models() -> None:
     return Org, Member, Project
 
 
-def _flatten_diff(diff: list) -> list:
-    """``compare_metadata`` returns a mix of bare op tuples and sublists.
-
-    Column-level alterations get grouped in a sublist (so they can be applied
-    as a batched ``ALTER TABLE``). Flatten so each filter sees a single op.
-    """
-    flat = []
-    for entry in diff:
-        if isinstance(entry, list):
-            flat.extend(entry)
-        else:
-            flat.append(entry)
-    return flat
-
-
-def _ignore_unreliable_alembic_diffs(diff: list, metadata: sa.MetaData) -> list:
-    """Filter pre-existing divergences with tracked issues.
-
-    ZERO filters since FF-B B5 — the function stays as the policy anchor: any
-    future entry MUST cite a tracked issue under ``docs/solutions/issues/``
-    and explain why the diff is known-equivalent SQL rather than real
-    cross-emitter drift. Do not add filters silently; fix the emitters.
-    """
-    del metadata  # kept in the signature for future filters
-    return _flatten_diff(diff)
-
-
 @pytest.mark.asyncio
 async def test_alembic_autogen_against_rust_migrated_db_is_idempotent(
     db_url, postgres_base_url, db_schema_name
@@ -190,15 +164,12 @@ async def test_alembic_autogen_against_rust_migrated_db_is_idempotent(
         with engine.connect() as conn:
             if search_path_schema is not None:
                 conn.execute(sa.text(f'SET search_path TO "{search_path_schema}"'))
-            ctx = MigrationContext.configure(
-                conn,
-                opts={"compare_type": True, "compare_server_default": True},
-            )
+            ctx = MigrationContext.configure(conn, opts=autogen_opts())
             diff = compare_metadata(ctx, metadata)
     finally:
         engine.dispose()
 
-    significant = _ignore_unreliable_alembic_diffs(diff, metadata)
+    significant = diff
     assert significant == [], (
         "Cross-emitter DDL parity violation: Alembic compare_metadata against "
         "a Rust-migrated database returned a non-empty diff. The two emitters "
@@ -279,15 +250,12 @@ async def test_alembic_autogen_after_migrate_updates_is_idempotent(db_url):
     engine = sa.create_engine(f"sqlite:///{db_path}")
     try:
         with engine.connect() as conn:
-            ctx = MigrationContext.configure(
-                conn,
-                opts={"compare_type": True, "compare_server_default": True},
-            )
+            ctx = MigrationContext.configure(conn, opts=autogen_opts())
             diff = compare_metadata(ctx, metadata)
     finally:
         engine.dispose()
 
-    significant = _ignore_unreliable_alembic_diffs(diff, metadata)
+    significant = diff
     assert significant == [], (
         "Cross-emitter DDL parity violation on the migrate_updates path: a "
         "database migrated forward from an older model shape differs from "
@@ -296,24 +264,78 @@ async def test_alembic_autogen_after_migrate_updates_is_idempotent(db_url):
     )
 
 
+def _provider_envelope(labels: list[str]) -> dict:
+    """A one-table modelset whose ``provider`` column is a native enum."""
+    column = {
+        "logical_type": "string",
+        "nullable": False,
+        "primary_key": False,
+        "autoincrement": False,
+        "unique": False,
+        "index": False,
+        "default": None,
+        "format": None,
+    }
+    return {
+        "ir_kind": "schema",
+        "ir_version": 2,
+        "payload": {
+            "dialect_agnostic": True,
+            "models": [
+                {
+                    "model_name": "app.Link",
+                    "table_name": "link",
+                    "columns": [
+                        {
+                            **column,
+                            "name": "id",
+                            "logical_type": "integer",
+                            "primary_key": True,
+                        },
+                        {
+                            **column,
+                            "name": "provider",
+                            "enum_values": labels,
+                            "enum_type_name": "provider",
+                        },
+                    ],
+                    "foreign_keys": [],
+                    "indexes": [],
+                    "uniques": [],
+                    "checks": [],
+                    "table_checks": [],
+                }
+            ],
+        },
+    }
+
+
 def test_label_addition_statement_parity_pin():
     """Cross-language golden pin for label addition (AGENTS.md § I-1 item 11).
 
-    The FFI returns the Rust-rendered ``ADD VALUE IF NOT EXISTS`` statement
+    The one planner renders the ``ADD VALUE IF NOT EXISTS`` statement
     byte-for-byte — the same literal is pinned in ferro-ddl-lowering's unit
-    tests, and the Alembic comparator executes it verbatim. If either side
-    drifts, the two migration doors would run different SQL for the same
-    model; this pin fails first.
+    tests, the reconciliation pass executes it, and the Alembic bridge writes
+    it verbatim (ADR-0041). If any side drifts, the migration doors would run
+    different SQL for the same model; this pin fails first.
     """
     import json
 
-    from ferro._core import _plan_enum_label_addition
+    from ferro._core import _plan_from_ir
 
     plan = json.loads(
-        _plan_enum_label_addition("provider", ["plaid", "mx"], ["plaid", "legacy"])
+        _plan_from_ir(
+            json.dumps(_provider_envelope(["plaid", "legacy"])),
+            json.dumps(_provider_envelope(["plaid", "mx"])),
+            "postgres",
+            json.dumps({"destructive": True}),
+            True,
+        )
     )
-    assert plan["statements"] == ["ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"]
-    assert plan["extra_labels"] == ["legacy"]
+    assert [(op["kind"], op["statements"]) for op in plan["operations"]] == [
+        ("AddEnumLabel", ["ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"])
+    ]
+    assert any("legacy" in warning for warning in plan["warnings"])
 
 
 def test_enum_type_provenance_parity_pin():
@@ -323,8 +345,8 @@ def test_enum_type_provenance_parity_pin():
     The FFI returns the Rust-rendered ``DROP TYPE`` — and, for a type only
     ``add_column`` introduces, the guarded ``CREATE TYPE`` the auto-migrate
     create pass executes (#439) — byte-for-byte: the same literals are
-    pinned in ferro-ddl-lowering's unit tests, and the Alembic comparator
-    renders them verbatim into ``downgrade()`` / ``upgrade()``. The decision
+    pinned in ferro-ddl-lowering's unit tests, and the planner's enum ops
+    render the same statements on every door. The decision
     is pinned alongside, one verdict per touched type: a type is the
     revision's (``introduced``: created on upgrade, dropped on downgrade)
     when every column declaring it is one the revision adds; a type with an

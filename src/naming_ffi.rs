@@ -6,8 +6,16 @@
 //! 63-char truncation guards, and the `(logical_type, format, db_type, enum)`
 //! → storage decision live only in `ferro-ddl-lowering` (AGENTS.md § I-1).
 
-use ferro_ddl_lowering::{ConstraintMode, Dialect, ResolvedStorage};
+use ferro_ddl_lowering::{Dialect, ResolvedStorage};
 use pyo3::prelude::*;
+
+/// The names of the two tracking tables (`_ferro_migrations`,
+/// `_ferro_migrations_format`): what the Alembic bridge's object filter hides
+/// from Alembic's own comparator.
+#[pyfunction]
+pub fn _tracking_table_names() -> (&'static str, &'static str) {
+    (crate::run::TRACKING_TABLE, crate::run::FORMAT_TABLE)
+}
 
 #[pyfunction]
 pub fn _ddl_single_index_name(table: String, column: String) -> String {
@@ -191,123 +199,95 @@ pub fn _plan_enum_type_provenance(
     Ok(serde_json::Value::Array(verdicts).to_string())
 }
 
-/// The check-addition decision over FFI (ADR-0013): given one model's compiled
-/// SchemaIR and the CHECK constraint names its live table already carries,
-/// return the Rust-rendered Postgres `ADD` statements (in declared order —
-/// table checks, then column checks) and the constraint names they add.
+/// What each planner op needs to run on `dialect` in a file turning
+/// `before_json` into `after_json`: the generator's step-assignment verdict
+/// (`ferro_migrate::generate::columns::assign`), read by the Alembic bridge
+/// so a revision refuses, marks and gates exactly what `ferro migrate new`
+/// would (never a second table in Python).
 ///
-/// The Alembic autogenerate comparator consumes this instead of re-deriving the
-/// diff or re-rendering the SQL (AGENTS.md § I-1): the generated revision and
-/// the auto-migrate reconciliation pass execute byte-identical statements.
-/// Postgres-only, like the reconciliation pass itself (ADR-0014).
+/// `direction` is `"up"` or `"down"`; `operations_json` is a list of planner
+/// ops (`_plan_from_ir`'s `operations`; extra keys are ignored). Returns one
+/// JSON object per op: `{"needs": "native" | "rebuild" | "backfill" |
+/// "refused", "refusal": <text> | null, "primary_key": bool, "drops_data":
+/// bool}`. `refusal` is the generator's own text for a refused op (a
+/// primary-key change names ticket #536's recipe); `drops_data` is the
+/// generator's `destructive` test.
+///
+/// # Errors
+/// `ValueError` when an argument is malformed or an op is not a planner op.
 #[pyfunction]
-pub fn _plan_check_addition(
-    table: String,
-    model_ir_json: String,
-    live_names: Vec<String>,
+pub fn _plan_step_verdicts(
+    before_json: String,
+    after_json: String,
+    dialect: String,
+    direction: String,
+    operations_json: String,
 ) -> PyResult<String> {
-    let model: ferro_schema_ir::SchemaModel =
-        serde_json::from_str(&model_ir_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
-        })?;
-    let names = ferro_ddl_lowering::missing_check_names(&model, &live_names);
-    let mut statements = Vec::with_capacity(names.len());
-    for name in &names {
-        let emission = ferro_ddl_lowering::render_check_addition(
-            &table,
-            &model,
-            name,
-            Dialect::Postgres,
-            ConstraintMode::Plain,
-        )
-        .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "CHECK constraint '{name}' is missing from table '{table}' but has no \
-                         declared artifact in the model IR"
-            ))
-        })?;
-        if let Some(statement) = emission.statement {
-            statements.push(statement);
+    use ferro_migrate::MigrationOp;
+    use ferro_migrate::generate::GenerateError;
+    use ferro_migrate::generate::columns::{Needs, PlanContext, PlanDirection, Refusal, assign};
+    use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
+    let invalid = |what: &str, e: serde_json::Error| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid {what}: {e}"))
+    };
+    let before: IrEnvelope<SchemaIrPayload> =
+        serde_json::from_str(&before_json).map_err(|e| invalid("before_json", e))?;
+    let after: IrEnvelope<SchemaIrPayload> =
+        serde_json::from_str(&after_json).map_err(|e| invalid("after_json", e))?;
+    let dialect = match dialect.as_str() {
+        "postgres" => Dialect::Postgres,
+        "sqlite" => Dialect::Sqlite,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown dialect '{other}'"
+            )));
         }
-    }
-    Ok(serde_json::json!({ "statements": statements, "names": names }).to_string())
-}
-
-/// The check-rebuild decision over FFI (ADR-0015): given one model's compiled
-/// SchemaIR and the live CHECK names + catalog definitions, return the
-/// Rust-rendered Postgres `DROP` + bare `ADD` statements (in declared order)
-/// and the constraint names they rebuild.
-///
-/// The Alembic autogenerate comparator consumes this instead of re-deriving
-/// the diff or re-rendering the SQL (AGENTS.md § I-1). Postgres-only
-/// (ADR-0014). There is no `migrate_updates` gate — running autogenerate is
-/// itself the request for a diff.
-#[pyfunction]
-pub fn _plan_check_rebuild(
-    table: String,
-    model_ir_json: String,
-    live: Vec<(String, String)>,
-) -> PyResult<String> {
-    let model: ferro_schema_ir::SchemaModel =
-        serde_json::from_str(&model_ir_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
-        })?;
-    let names = ferro_ddl_lowering::drifted_check_names(&model, &live);
-    let mut statements = Vec::with_capacity(names.len().saturating_mul(2));
-    for name in &names {
-        let emission = ferro_ddl_lowering::render_check_rebuild(
-            &table,
-            &model,
-            name,
-            Dialect::Postgres,
-            ConstraintMode::Plain,
-        )
-        .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "CHECK constraint '{name}' drifted on table '{table}' but has no \
-                         declared artifact in the model IR"
-            ))
-        })?;
-        statements.extend(emission.statements);
-    }
-    Ok(serde_json::json!({ "statements": statements, "names": names }).to_string())
-}
-
-/// The leftover-CHECK drop decision over FFI (ADR-0013): given one model's
-/// compiled SchemaIR and the live ferro-owned CHECK names, return the
-/// Rust-rendered Postgres `DROP CONSTRAINT` statements (in live order) and
-/// the names they drop.
-///
-/// The Alembic autogenerate comparator consumes this instead of re-deriving
-/// the diff or re-rendering the SQL (AGENTS.md § I-1). Postgres-only
-/// (ADR-0014). There is no `migrate_destructive` gate — running autogenerate
-/// is itself the request for a diff; the destructive flag is connect-time
-/// safety only.
-#[pyfunction]
-pub fn _plan_check_drop(
-    table: String,
-    model_ir_json: String,
-    live_ferro_owned_names: Vec<String>,
-) -> PyResult<String> {
-    let model: ferro_schema_ir::SchemaModel =
-        serde_json::from_str(&model_ir_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
-        })?;
-    let declared: Vec<String> = model
-        .table_checks
+    };
+    let direction = match direction.as_str() {
+        "up" => PlanDirection::Up,
+        "down" => PlanDirection::Down,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "direction must be 'up' or 'down', not '{other}'"
+            )));
+        }
+    };
+    let operations: Vec<MigrationOp> =
+        serde_json::from_str(&operations_json).map_err(|e| invalid("operations_json", e))?;
+    let verdicts: Vec<serde_json::Value> = operations
         .iter()
-        .map(|check| check.name.clone())
-        .chain(model.checks.iter().map(|check| check.name.clone()))
+        .map(|op| {
+            let ctx = PlanContext::of(op, &before, &after, dialect, direction);
+            let needs = assign(op, &ctx).needs;
+            let (tag, refusal, primary_key) = match &needs {
+                Needs::Native => ("native", None, false),
+                Needs::Rebuild => ("rebuild", None, false),
+                Needs::Backfill => ("backfill", None, false),
+                Needs::Refused(Refusal::PrimaryKeyChange) => {
+                    let table = op.table().unwrap_or_default().to_string();
+                    (
+                        "refused",
+                        Some(GenerateError::PrimaryKeyChange { table }.to_string()),
+                        true,
+                    )
+                }
+                // A live-only op (validate, an invalid index's rebuild) is the
+                // live door's own; an op a later generator ticket generates is
+                // the pass's statement on the live door, and one the renderer
+                // has no statement for is refused by its rendering's warning.
+                Needs::Refused(Refusal::Ticket(_)) | Needs::Refused(Refusal::LiveOnly) => {
+                    ("native", None, false)
+                }
+            };
+            serde_json::json!({
+                "needs": tag,
+                "refusal": refusal,
+                "primary_key": primary_key,
+                "drops_data": ferro_migrate::generate::downs::drops_data(op),
+            })
+        })
         .collect();
-    let names = ferro_ddl_lowering::extra_check_names(&declared, &live_ferro_owned_names);
-    let mut statements = Vec::with_capacity(names.len());
-    for name in &names {
-        let emission = ferro_ddl_lowering::render_check_drop(&table, name, Dialect::Postgres);
-        if let Some(statement) = emission.statement {
-            statements.push(statement);
-        }
-    }
-    Ok(serde_json::json!({ "statements": statements, "names": names }).to_string())
+    Ok(serde_json::Value::Array(verdicts).to_string())
 }
 
 /// Render the shared `db_check` CHECK body (`"col" IN (v1, v2, ...)`) —

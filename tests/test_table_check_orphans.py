@@ -27,10 +27,11 @@ from ferro import (
     engines,
     reset_engine,
 )
-from ferro._core import _plan_check_drop, _render_migration_sql_for_test
+from ferro._core import _render_migration_sql_for_test
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
+from tests._alembic_harness import planner_statements as _planner_statements
 
 SIDE_CHECK_NAME = "ck_orphan_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -258,24 +259,17 @@ def test_without_migrate_updates_no_leftover_is_planned():
 
 
 def test_check_drop_statement_parity_pin():
-    """The FFI the Alembic comparator consumes renders the same bytes the
+    """The planner the Alembic bridge translates renders the same bytes the
     reconciliation pass executes under ``migrate_destructive``."""
     _define_orphan(with_check=False)
-    live_names = [SIDE_CHECK_NAME]
-    plan = json.loads(
-        _plan_check_drop("orphan", json.dumps(_model_ir("orphan")), live_names)
-    )
-    assert plan["names"] == [SIDE_CHECK_NAME]
-    assert plan["statements"] == [SIDE_CHECK_DROP]
+    live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
+    statements = _planner_statements("orphan", live, destructive=True)
+    assert statements == [SIDE_CHECK_DROP]
 
     runtime, _ = _render(
-        "orphan",
-        ORPHAN_LIVE_COLUMNS,
-        [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")],
-        "postgres",
-        destructive=True,
+        "orphan", ORPHAN_LIVE_COLUMNS, live, "postgres", destructive=True
     )
-    assert plan["statements"] == runtime
+    assert statements == runtime
 
 
 # ---------------------------------------------------------------------------

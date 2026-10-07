@@ -85,7 +85,7 @@ def _rendered_argument(rendered: str):
 
 @pytest.mark.sqlite_only
 def test_rendered_execute_is_a_ddl_construct_with_percent_doubled() -> None:
-    from ferro.migrations.alembic import _render_execute
+    from ferro.migrations.translate import _execute_line as _render_execute
 
     assert (
         _render_execute("SELECT ':admin'") == "op.execute(sa.DDL(\"SELECT ':admin'\"))"
@@ -106,7 +106,7 @@ def test_rendered_execute_reaches_postgres_byte_identical(
 ) -> None:
     """Executed through a real ``Operations`` the way a revision runs, the
     label Postgres stores is the label the Rust statement carried."""
-    from ferro.migrations.alembic import _render_execute
+    from ferro.migrations.translate import _execute_line as _render_execute
 
     statement = 'CREATE TYPE "probe" AS ENUM (\'' + label.replace("'", "''") + "')"
     engine = sa.create_engine(sync_url(postgres_base_url))

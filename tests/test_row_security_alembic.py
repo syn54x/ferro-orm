@@ -1,22 +1,21 @@
 """Alembic autogenerate for row security (#414, PRD #406).
 
-The checks family is the template end to end: a custom autogenerate
-operation consumes the SAME FFI decision the runtime reconciliation pass
-executes (AGENTS.md § I-1 entries 15/16) and renders byte-identical
-statements, so a reviewed-migration user gets exactly what ``auto_migrate``
-would have done.
+Since ADR-0041 the bridge writes what the one planner decides: the row
+security ops of a generated revision are the planner's, rendered as the
+byte-identical statements the reconciliation pass executes (AGENTS.md § I-1
+entries 15/16), so a reviewed-migration user gets exactly what
+``auto_migrate`` would have done.
 
-Two things ADR-0019 makes different from the checks family, on purpose:
+Two postures ADR-0019 sets, on purpose:
 
 * Removed declarations and orphaned ``rls_*`` policies are proposed for
-  DROP by autogenerate with **no** destructive gate — the same posture
-  ``_plan_check_drop`` takes (ADR-0013): the ``migrate_destructive`` flag is
-  connect-time safety, a generated revision is reviewed before it runs.
+  DROP with **no** destructive gate: autogenerate plans with destructive
+  changes on, since a generated revision is reviewed before it runs; the
+  ``migrate_destructive`` flag is connect-time safety.
 * A **foreign** policy and an **unverifiable** raw-body drift never become
-  an op at all, silently: the checks family has no comment-op precedent for
-  either shape (see ``src/ferro/migrations/alembic.py``'s comparator
-  docstring), so autogenerate says nothing and the runtime's own
-  connect-time warnings remain the only word on them.
+  an op at all: the planner reports them in ``always_warnings`` and plans
+  nothing, so autogenerate says nothing and the runtime's own connect-time
+  warnings remain the only word on them.
 """
 
 import json
@@ -42,7 +41,6 @@ from tests._alembic_harness import (
     assert_statement_in_code as _assert_statement_in_code,
     autogen_upgrade_and_downgrade_code as _autogen_upgrade_and_downgrade_code,
     autogen_upgrade_code as _autogen_upgrade_code,
-    produce_migration_script as _produce_migration_script,
     run_generated_code as _run_generated_code,
 )
 
@@ -435,23 +433,33 @@ async def test_autogenerate_is_empty_after_migrate_updates_reconciled_it(
 # ---------------------------------------------------------------------------
 
 
-def test_sqlite_comparator_emits_nothing():
-    from alembic.autogenerate import comparators
-    from alembic.autogenerate.api import AutogenContext
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_sqlite_autogenerate_writes_no_row_security(db_url):
+    """A new SQLite table declaring row security is created without it, as
+    the create pass creates it (one warning at connect, no DDL)."""
+    import sqlalchemy as sa
+    from alembic.autogenerate import produce_migrations, render_python_code
     from alembic.migration import MigrationContext
-    from alembic.operations.ops import UpgradeOps
-    from sqlalchemy.dialects.sqlite.base import SQLiteDialect
+
+    from ferro.migrations import get_metadata
+    from tests._alembic_harness import autogen_opts
 
     _define_ledger_row()
-    from ferro.migrations import get_metadata
+    await connect(db_url)
 
-    metadata = get_metadata()
-    migration_context = MigrationContext.configure(dialect=SQLiteDialect())
-    autogen_context = AutogenContext(migration_context, metadata=metadata)
-    upgrade_ops = UpgradeOps(ops=[])
-
-    comparators.dispatch("schema")(autogen_context, upgrade_ops, [None])
-    assert upgrade_ops.ops == []
+    engine = sa.create_engine(f"sqlite:///{db_url.split(':', 1)[1].split('?')[0]}")
+    try:
+        with engine.connect() as conn:
+            script = produce_migrations(
+                MigrationContext.configure(conn, opts=autogen_opts()), get_metadata()
+            )
+    finally:
+        engine.dispose()
+    code = render_python_code(script.upgrade_ops)
+    assert "op.create_table('ledgerrow'" in code, code
+    assert "POLICY" not in code.upper(), code
+    assert "ROW LEVEL SECURITY" not in code.upper(), code
 
 
 # ---------------------------------------------------------------------------
@@ -588,15 +596,6 @@ def test_the_reconcile_seam_the_comparator_consumes_is_directly_pinned():
 # ---------------------------------------------------------------------------
 
 
-def test_teardown_flag_labels_names_a_flag_only_tail():
-    from ferro.migrations.alembic import _teardown_flag_labels
-
-    assert _teardown_flag_labels([NO_FORCE_SQL]) == ["force"]
-    assert _teardown_flag_labels([DISABLE_SQL]) == ["enabled"]
-    assert _teardown_flag_labels([NO_FORCE_SQL, DISABLE_SQL]) == ["force", "enabled"]
-    assert _teardown_flag_labels([DROP_POLICY_SQL]) == []
-
-
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
@@ -605,8 +604,8 @@ async def test_force_only_flip_proposes_a_narrow_drop_op_labeled_force(
 ):
     """A live-declared model whose declaration still exists but no longer
     asks for ``force=True`` proposes just ``NO FORCE ROW LEVEL SECURITY`` —
-    no orphaned policy, no removed declaration — and the diff tuple names
-    the flag instead of carrying an empty tuple next to real DDL."""
+    no orphaned policy, no removed declaration — and the downgrade, the
+    planner run back to the live database, forces it again."""
     _define_ledger_row(force=True)
     await connect(db_url, auto_migrate=True)
     _rewind_registry()
@@ -614,19 +613,20 @@ async def test_force_only_flip_proposes_a_narrow_drop_op_labeled_force(
     _define_ledger_row(force=False)
     await connect(db_url, migrate_updates=True)  # warns; never clears FORCE itself
 
-    from ferro.migrations.alembic import FerroRowSecurityDropOp
+    upgrade_code, downgrade_code = _autogen_upgrade_and_downgrade_code(
+        postgres_base_url, db_schema_name
+    )
+    _assert_statement_in_code(NO_FORCE_SQL, upgrade_code)
+    assert "POLICY" not in upgrade_code.upper(), upgrade_code
+    assert "DISABLE" not in upgrade_code, upgrade_code
+    _assert_statement_in_code(FORCE_SQL, downgrade_code)
 
-    script = _produce_migration_script(postgres_base_url, db_schema_name)
-    drop_ops = [
-        op for op in script.upgrade_ops.ops if isinstance(op, FerroRowSecurityDropOp)
-    ]
-    assert len(drop_ops) == 1, script.upgrade_ops.ops
-    op = drop_ops[0]
-    assert op.statements == [NO_FORCE_SQL]
-    assert op.names == ["force"]
-    # And its reverse is the same deliberate no-op as any other
-    # FerroRowSecurityDropOp: restoring FORCE is a reviewed edit.
-    assert op.reverse().statements == []
+    _run_generated_code(upgrade_code, postgres_base_url, db_schema_name)
+    async with engines.session():
+        assert (await _pg_flags("ledgerrow"))["relforcerowsecurity"] is False
+    _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
+    async with engines.session():
+        assert (await _pg_flags("ledgerrow"))["relforcerowsecurity"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -641,9 +641,8 @@ async def test_generated_revision_round_trips(
     db_url, postgres_base_url, db_schema_name
 ):
     """Upgrade applies (live catalog carries the flags/policy); downgrade
-    reverts (they are gone again) — the exact `add`-op reverse
-    ``FerroRowSecurityOp.reverse()`` computes via
-    ``_teardown_row_security_statements``."""
+    reverts (they are gone again) — the planner run back to the live
+    database, which held neither (ADR-0041)."""
     _define_ledger_row(declared=False)
     await connect(db_url, auto_migrate=True)
     _rewind_registry()
@@ -734,9 +733,9 @@ async def test_generated_teardown_revision_round_trips(
     db_url, postgres_base_url, db_schema_name
 ):
     """The removed-declaration teardown side: upgrade drops the policy and
-    the flags; downgrade is an intentional no-op (ADR-0019 — recreating a
-    dropped policy's live body is a reviewed edit, mirroring
-    ``FerroCheckDropOp``), so the catalog stays torn down either way."""
+    the flags; the downgrade is the planner run back to the live database
+    (ADR-0041), so it turns the flags back on and recreates the policy from
+    the body the catalog printed for it."""
     _define_ledger_row()
     await connect(db_url, auto_migrate=True)
     _rewind_registry()
@@ -759,5 +758,6 @@ async def test_generated_teardown_revision_round_trips(
     _run_generated_code(downgrade_code, postgres_base_url, db_schema_name)
     async with engines.session():
         flags = await _pg_flags("ledgerrow")
-        assert flags["relrowsecurity"] is False
-        assert await _pg_policy_names("ledgerrow") == []
+        assert flags["relrowsecurity"] is True
+        assert flags["relforcerowsecurity"] is True
+        assert await _pg_policy_names("ledgerrow") == [POLICY_NAME]
