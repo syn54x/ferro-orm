@@ -35,10 +35,11 @@ import pytest_asyncio
 
 import ferro
 from ferro import _core
+from ferro.migrations import runner
 from ferro.migrations.errors import MigrationRefused
 from ferro.migrations.testing import Harness, RoundTripResult, harness
 from ferro.registry import SwappedOutModelError
-from ferro.settings import FerroSettings
+from ferro.settings import FerroSettings, SettingsError
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     isolated_imports,
     pkg,
@@ -89,6 +90,22 @@ async def up(ctx):
 
 
 @nothing_to_reverse("slugs are derived; nothing to put back")
+def down(ctx): ...
+"""
+
+
+TELLS_ITS_PATH = """\
+from pathlib import Path
+
+from ferro.migrations import atomic, nothing_to_reverse
+
+
+@atomic
+async def up(ctx):
+    raise RuntimeError(f"ran from {Path(__file__).resolve()}")
+
+
+@nothing_to_reverse("nothing was written")
 def down(ctx): ...
 """
 
@@ -224,6 +241,48 @@ async def test_models_at_is_that_one_snapshot_and_reaches_join_tables(connected)
 
     async with h.models_at("0003") as models:
         assert "slug" in models.Author.model_fields
+
+
+async def test_apply_through_runs_the_real_directorys_files_and_stops_at_its_target(
+    chain, connected, pkg
+):
+    write_models(chain, pkg, WITH_SLUG + "    bio: str | None = None\n")
+    new("add_bio", "--data-step", "Author")
+    (step,) = migration_dir(chain, "0004").glob("*.py")
+    step.write_text(TELLS_ITS_PATH)
+    await ferro.connect(connected.url)  # write_models reset the engine
+    h = harness()
+
+    report = await h.apply_through("0003")
+
+    assert sorted({step.migration for step in report.applied}) == [
+        "0001_create_author",
+        "0002_index_name",
+        "0003_add_slug",
+    ]
+    assert {m for m, _ in applied(connected)} == {1, 2, 3}
+    with pytest.raises(MigrationRefused) as refused:
+        await h.apply_through("0004")
+    assert f"ran from {step.resolve()}" in str(refused.value)
+
+
+async def test_runner_up_through_refuses_a_migration_the_directory_lacks_and_a_step(
+    connected,
+):
+    settings = FerroSettings()
+    database = settings.database()
+
+    report = await runner.up(
+        settings, database, using=_core._default_connection_name(), through="0009"
+    )
+
+    assert report.refusal == (
+        f"ferro migrate: there is no migration 0009 in {database.directory}. "
+        f"Nothing was applied."
+    )
+    assert report.applied == []
+    with pytest.raises(SettingsError, match="0007:02"):
+        await runner.up(settings, database, through="0002:01")
 
 
 # -- refusals -----------------------------------------------------------------------

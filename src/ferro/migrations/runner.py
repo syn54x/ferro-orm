@@ -226,6 +226,7 @@ async def up(
     lock_timeout: str | float = "30s",
     allow_ahead: bool = False,
     progress: Callable[[str], Any] | None = None,
+    through: str | None = None,
 ) -> RunReport:
     """Apply every pending step of every pending migration, in order, under
     the run lock.
@@ -238,11 +239,18 @@ async def up(
     and one per attempt a step makes while it waits for a table lock under
     ``database.ddl_lock_timeout``.
 
+    ``through`` (``"0007"``, a migration number) stops the run after that
+    migration: only pending steps of migrations up to and including it run.
+    It is the test harness's target (ADR-0045); the application's ``up()``
+    has none (ADR-0040). A number the directory lacks is refused; a step
+    (``"0007:02"``) is not a target.
+
     Returns a :class:`RunReport`; a refusal or a failed step is reported in
     ``refusal``, not raised.
     """
     del settings  # the database carries its project; kept for API symmetry
     timeout = parse_lock_timeout(lock_timeout)
+    last = _parse_through(through)
     report = RunReport()
     say = progress or (lambda _line: None)
     async with _connection(database, using, url) as name:
@@ -255,7 +263,15 @@ async def up(
             return report
         try:
             await _run(
-                name, database, dialect, tracking, handle, allow_ahead, report, say
+                name,
+                database,
+                dialect,
+                tracking,
+                handle,
+                allow_ahead,
+                report,
+                say,
+                last,
             )
         except RunRefused as refused:
             report.refusal = str(refused)
@@ -273,6 +289,7 @@ async def _run(
     allow_ahead: bool,
     report: RunReport,
     say: Callable[[str], Any],
+    through: int | None = None,
 ) -> None:
     state = json.loads(await _core._read_records(name, tracking))
     if state["refusal"] is not None:
@@ -290,7 +307,7 @@ async def _run(
         )
     )
     report.ahead = list(plan["ahead"])
-    steps = plan["steps"]
+    steps = _bounded(plan["steps"], database, through)
     if not steps:
         return
     loaded = _load_data_steps(steps, "up")
@@ -351,6 +368,35 @@ async def _run(
                 AppliedStep(step["migration_name"], stem, outcome["ms"])
             )
             line(f"applied ({outcome['ms']} ms)")
+
+
+def _parse_through(through: str | None) -> int | None:
+    """``up``'s ``through``: a migration number (``"0007"``)."""
+    if through is None:
+        return None
+    if re.fullmatch(r"\d{4}", through.strip()) is None:
+        raise SettingsError(
+            f"through={through!r} is not a migration; write a migration number "
+            f"(0007). A step (0007:02) is not a target: no snapshot describes the "
+            f"state between two steps"
+        )
+    return int(through)
+
+
+def _bounded(
+    steps: list[dict[str, Any]], database: DatabaseSettings, through: int | None
+) -> list[dict[str, Any]]:
+    """The planned steps of migrations up to and including ``through``,
+    refused when the directory holds no migration ``through``."""
+    if through is None:
+        return steps
+    directory = json.loads(_core._read_migrations_dir(str(database.directory)))
+    if through not in {m["number"] for m in directory["migrations"]}:
+        raise RunRefused(
+            f"ferro migrate: there is no migration {through:04} in "
+            f"{database.directory}. Nothing was applied."
+        )
+    return [step for step in steps if step["migration"] <= through]
 
 
 # -- data steps -------------------------------------------------------------------

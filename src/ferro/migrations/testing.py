@@ -51,8 +51,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -332,17 +330,11 @@ class Harness:
     async def _up_through(
         self, name: str, chain: list[_Migration], target: int
     ) -> RunReport:
-        """``up`` over the chain as it stood when ``chain[target]`` was its
-        head: a copy of the directory holding only the migrations through it,
-        so the runner plans and runs exactly their pending steps, byte for
-        byte the files on disk, under its own lock and records."""
-        with tempfile.TemporaryDirectory(prefix="ferro-harness-") as tmp:
-            through = Path(tmp) / self._database.directory.name
-            through.mkdir()
-            for migration in chain[: target + 1]:
-                shutil.copytree(migration.dir, through / migration.name)
-            database = self._database.model_copy(update={"directory": through})
-            report = await runner.up(self._settings, database, using=name)
+        """``up`` bounded to ``chain[target]``: the runner plans the whole
+        directory and runs only the pending steps of migrations through it."""
+        report = await runner.up(
+            self._settings, self._database, using=name, through=chain[target].short
+        )
         if report.refusal is not None:
             raise MigrationRefused(report.refusal)
         return report
