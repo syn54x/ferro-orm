@@ -5,7 +5,7 @@
 
 use ferro_migrate::directory::MigrationsDir;
 use ferro_migrate::snapshot::{Snapshot, encode_checksum};
-use ferro_migrate::{Dialect, check_migrations, generate};
+use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -88,7 +88,8 @@ fn snapshot_json(snapshot: &Snapshot) -> serde_json::Value {
 /// `parent_ir_json` is the head migration's `ir.json` text exactly as stored
 /// (its checksum is the new snapshot's parent link), or `None` before the
 /// first migration. Returns the JSON of the `GeneratedMigration`, or `None`
-/// when nothing renders DDL (no schema change).
+/// when nothing renders DDL (no schema change). `options_json` carries
+/// `ferro migrate new`'s options: `{"no_backfill": ["<table>.<column>", ...]}`.
 ///
 /// # Errors
 /// `ValueError` naming the refusal: a change this generator does not generate
@@ -96,18 +97,25 @@ fn snapshot_json(snapshot: &Snapshot) -> serde_json::Value {
 /// snapshot, an unknown dialect, or an op that cannot render.
 #[pyfunction]
 #[pyo3(name = "_generate_migration")]
-#[pyo3(signature = (parent_ir_json, target_ir_json, dialects))]
+#[pyo3(signature = (parent_ir_json, target_ir_json, dialects, options_json = None))]
 pub fn _generate_migration(
     parent_ir_json: Option<String>,
     target_ir_json: String,
     dialects: Vec<String>,
+    options_json: Option<String>,
 ) -> PyResult<Option<String>> {
     let dialects = parse_dialects(&dialects)?;
     let target = parse_target(&target_ir_json)?;
     let parent = parent_ir_json
         .map(|json| load_snapshot(json.as_bytes(), "the head snapshot"))
         .transpose()?;
-    let generated = generate(parent.as_ref(), &target, &dialects)
+    // `{"no_backfill": ["author.slug"]}` (`ferro migrate new --no-backfill`).
+    let options: GenerateOptions = options_json
+        .map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(|err| PyValueError::new_err(format!("the generate options: {err}")))?
+        .unwrap_or_default();
+    let generated = generate_with(parent.as_ref(), &target, &dialects, &options)
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
     generated.as_ref().map(to_json).transpose()
 }

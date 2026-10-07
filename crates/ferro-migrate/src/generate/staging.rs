@@ -301,6 +301,7 @@ pub fn index_step(op: &IndexOp, dialects: &[Dialect]) -> GeneratedStep {
         name: op.name().to_string(),
         kind: StepKind::Ddl,
         renderings,
+        data: None,
     }
 }
 
@@ -430,5 +431,6 @@ pub fn validate_step(constraints: &[StagedConstraint], dialects: &[Dialect]) -> 
         name: "validate".to_string(),
         kind: StepKind::Ddl,
         renderings,
+        data: None,
     }
 }

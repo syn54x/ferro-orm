@@ -27,7 +27,10 @@ pub use directory::{
 };
 pub use emit::{CreateTableEmission, order_models_for_create, render_create_table};
 pub use ferro_ddl_lowering::Dialect;
-pub use generate::{CheckReport, GenerateError, GeneratedMigration, check_migrations, generate};
+pub use generate::{
+    CheckReport, GenerateError, GenerateOptions, GeneratedMigration, check_migrations, generate,
+    generate_with,
+};
 pub use order::order_by_dependencies;
 pub use plan::{
     Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OldSide, PlanError, live_hints,
