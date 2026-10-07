@@ -24,11 +24,13 @@ use crate::backend::{
 };
 use crate::ddl_exec::{Attempt, DdlError, DdlExecutor, StatementError, pool_connection};
 use ferro_ddl_lowering::Dialect;
+use ferro_migrate::generate::rebuild::rebuilt_tables;
 use ferro_migrate::run_plan::{
     Direction, ExecMode, Origin, PlannedStep, RecordKind, StepRecord, TRACKING_FORMAT,
     check_format, run_lock_key, split_statements,
 };
 use ferro_migrate::snapshot::{encode_checksum, sha384};
+use ferro_schema_ir::SchemaModel;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use sqlx::{Connection, Row};
@@ -296,6 +298,159 @@ pub async fn live_tables(engine: &EngineHandle) -> PyResult<Vec<String>> {
         .await
         .map_err(|e| db_error("reading the catalog", e))?;
     Ok(rows.iter().filter_map(|row| text(column(row, 0))).collect())
+}
+
+// -- the pre-rebuild live check (ADR-0034) ---------------------------------------------
+
+/// What a SQLite table rebuild of `table` would discard: each live object the
+/// table holds that `parent` (the table as the step's file finds it in the
+/// schema snapshot) does not declare, as one line naming it and its fix.
+async fn rebuild_obstacles(
+    engine: &EngineHandle,
+    table: &str,
+    parent: &SchemaModel,
+) -> PyResult<Vec<String>> {
+    let mut out = Vec::new();
+    for live in crate::introspect::live_table_columns(engine, table)
+        .await?
+        .unwrap_or_default()
+    {
+        if !parent.columns.iter().any(|col| col.name == live.name) {
+            out.push(format!(
+                "column {}: declare it on the model in a migration, or drop it",
+                quote_ident(&live.name)
+            ));
+        }
+    }
+    for index in crate::introspect::sqlite_foreign_indexes(engine, table).await? {
+        out.push(format!(
+            "index {}: drop it, or declare it on the model in a migration (ferro builds the \
+             indexes it declares, named idx_/uq_)",
+            quote_ident(&index)
+        ));
+    }
+    for trigger in crate::introspect::sqlite_table_triggers(engine, table).await? {
+        out.push(format!(
+            "trigger {}: drop it; a rebuild's DROP TABLE would drop it, and ferro cannot \
+             carry it across",
+            quote_ident(&trigger)
+        ));
+    }
+    Ok(out)
+}
+
+/// The refusal for a rebuild of `table` over `obstacles` (its lines), when
+/// there are any.
+fn rebuild_refusal(table: &str, obstacles: &[String]) -> Option<String> {
+    if obstacles.is_empty() {
+        return None;
+    }
+    let mut text = format!(
+        "ferro migrate: a SQLite rebuild of table {} copies only the columns and recreates \
+         only the indexes the schema snapshot declares, and the live table also holds:",
+        quote_ident(table)
+    );
+    for line in obstacles {
+        text.push_str(&format!("\n  - {line}"));
+    }
+    text.push_str("\nNothing was applied.");
+    Some(text)
+}
+
+/// Refuse a SQLite table rebuild of `table` while the live table holds
+/// anything `parent` (the table as the rebuilding file finds it in the
+/// schema snapshot) does not declare: an undeclared column, an index ferro
+/// does not own, a trigger. Each is named with its fix; nothing is carried
+/// and there is no override (ADR-0034).
+///
+/// # Errors
+/// `RunRefused` naming each object; a database error.
+pub async fn check_rebuild_preconditions(
+    engine: &EngineHandle,
+    table: &str,
+    parent: &SchemaModel,
+) -> PyResult<()> {
+    let obstacles = rebuild_obstacles(engine, table, parent).await?;
+    match rebuild_refusal(table, &obstacles) {
+        Some(text) => Err(refused(text)),
+        None => Ok(()),
+    }
+}
+
+/// The schema snapshot a step's file starts from: going up, the parent
+/// migration's (`None` before the first migration); going down, the step's
+/// own migration's.
+fn starting_snapshot(
+    step: &PlannedStep,
+    down: bool,
+) -> PyResult<Option<IrEnvelope<SchemaIrPayload>>> {
+    let shown = format!("{}/{}", step.migration_name, step.file);
+    let directory = step
+        .path
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| {
+            refused(format!(
+                "ferro migrate: cannot find the migrations directory of {shown}. Nothing was \
+                 applied."
+            ))
+        })?;
+    let dir = MigrationsDir::read(directory)
+        .map_err(|err| refused(format!("ferro migrate: {err}. Nothing was applied.")))?;
+    let number = if down {
+        Some(step.migration)
+    } else {
+        step.migration.checked_sub(1).filter(|n| *n > 0)
+    };
+    Ok(number.and_then(|number| {
+        dir.migrations
+            .into_iter()
+            .find(|migration| migration.number == number)
+            .map(|migration| migration.snapshot.ir)
+    }))
+}
+
+/// Before a SQLite `foreign-keys-off` step, check every table its file
+/// rebuilds (each `CREATE TABLE "_ferro_new_<table>"` it holds) against the
+/// schema snapshot the file starts from ([`check_rebuild_preconditions`]),
+/// in the file's order. Any other step passes.
+///
+/// # Errors
+/// `RunRefused` naming each undeclared column, foreign index and trigger of
+/// the first table holding one, or a rebuilt table the snapshot does not
+/// declare; a database error.
+pub async fn check_rebuild_step(
+    engine: &EngineHandle,
+    step: &PlannedStep,
+    sql: &str,
+    down: bool,
+) -> PyResult<()> {
+    if step.mode != ExecMode::ForeignKeysOff
+        || engine.backend() != Dialect::Sqlite
+        || (down && step.nothing_to_reverse.is_some())
+    {
+        return Ok(());
+    }
+    let tables = rebuilt_tables(&split_statements(sql));
+    if tables.is_empty() {
+        return Ok(());
+    }
+    let shown = format!("{}/{}", step.migration_name, step.file);
+    let snapshot = starting_snapshot(step, down)?;
+    for table in tables {
+        let model = snapshot
+            .as_ref()
+            .and_then(|ir| ir.payload.models.iter().find(|m| m.table_name == table))
+            .ok_or_else(|| {
+                refused(format!(
+                    "ferro migrate: {shown} rebuilds table {}, which the schema snapshot it \
+                     starts from does not declare. Nothing was applied.",
+                    quote_ident(&table)
+                ))
+            })?;
+        check_rebuild_preconditions(engine, &table, model).await?;
+    }
+    Ok(())
 }
 
 // -- the run lock --------------------------------------------------------------------
@@ -1681,6 +1836,24 @@ mod tests {
         let (outcome, close) =
             foreign_keys_off_outcome(Err(StepFailure("boom".to_string())), Ok(()));
         assert!(outcome.is_err() && close);
+    }
+
+    #[test]
+    fn a_rebuild_refusal_names_each_object_per_table_and_nothing_when_clean() {
+        assert_eq!(rebuild_refusal("post", &[]), None);
+        let found = [
+            "index \"my_idx\": drop it".to_string(),
+            "trigger \"t\": drop it".to_string(),
+        ];
+        assert_eq!(
+            rebuild_refusal("post", &found).as_deref(),
+            Some(
+                "ferro migrate: a SQLite rebuild of table \"post\" copies only the columns and \
+                 recreates only the indexes the schema snapshot declares, and the live table \
+                 also holds:\n  - index \"my_idx\": drop it\n  - trigger \"t\": drop it\n\
+                 Nothing was applied."
+            )
+        );
     }
 
     #[test]

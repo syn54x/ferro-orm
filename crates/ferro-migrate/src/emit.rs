@@ -12,7 +12,8 @@ use ferro_ddl_lowering::{
 };
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
 use sea_query::{
-    Alias, ColumnDef, Expr, ForeignKey, Index, PostgresQueryBuilder, SqliteQueryBuilder, Table,
+    Alias, ColumnDef, Expr, ForeignKey, Index, PostgresQueryBuilder, QueryBuilder,
+    SqliteQueryBuilder, Table,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -160,10 +161,27 @@ pub fn render_create_table(
     model: &SchemaModel,
     dialect: Dialect,
 ) -> Result<CreateTableEmission, EmissionError> {
+    render_create_table_as(model, dialect, None)
+}
+
+/// [`render_create_table`], with the `CREATE TABLE` statement naming
+/// `table_name_override` instead of the model's table when one is given — a
+/// SQLite table rebuild creates `_ferro_new_<table>` in the model's shape
+/// (ADR-0034). Only the created table's name changes: every constraint and
+/// index name, every `REFERENCES` target, and every post-create statement
+/// still name the model's table, which the rebuild renames the new table to.
+///
+/// # Errors
+/// As [`render_create_table`].
+pub fn render_create_table_as(
+    model: &SchemaModel,
+    dialect: Dialect,
+    table_name_override: Option<&str>,
+) -> Result<CreateTableEmission, EmissionError> {
     let ld = dialect;
     let table_lower = model.table_name.as_str();
     let mut table_stmt = Table::create()
-        .table(Alias::new(table_lower))
+        .table(Alias::new(table_name_override.unwrap_or(table_lower)))
         .if_not_exists()
         .to_owned();
 
@@ -531,6 +549,35 @@ pub(crate) fn emit_add_column(
     }
 
     Ok(result)
+}
+
+/// The SQL value existing rows get for a `NOT NULL` column that is new to
+/// them, decided as [`emit_add_column`] decides its backfill `DEFAULT`: a
+/// JSON container rendered for the column's storage, else the scalar literal.
+/// `None` for a nullable column, or one with no literal default (rows then
+/// get no value, and a `NOT NULL` column refuses them).
+///
+/// # Errors
+/// The column's storage cannot be resolved.
+pub(crate) fn backfill_value_sql(
+    col: &SchemaColumn,
+    dialect: Dialect,
+) -> Result<Option<String>, EmissionError> {
+    if col.nullable {
+        return Ok(None);
+    }
+    let Some(default) = &col.default else {
+        return Ok(None);
+    };
+    let storage =
+        resolve_column_storage(col, dialect).map_err(|message| EmissionError { message })?;
+    if let Some(json) = render_json_backfill_default(default, &storage, dialect) {
+        return Ok(Some(json));
+    }
+    Ok(literal_default_value(default).map(|value| match dialect {
+        Dialect::Sqlite => SqliteQueryBuilder.value_to_string(&value),
+        Dialect::Postgres => PostgresQueryBuilder.value_to_string(&value),
+    }))
 }
 
 /// `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... ON DELETE ...` for one
