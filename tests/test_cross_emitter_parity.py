@@ -854,26 +854,7 @@ class Finding:
     dialects: frozenset[str] = frozenset(DIALECTS)
 
 
-FINDINGS = {
-    "F2-a-rename-and-a-type-change": Finding(
-        "finding (#538): the reconciliation pass refuses a rename hint plus a type "
-        "change of the renamed column (\"column 'author.full_name' not found in IR "
-        'context"), from two snapshots and on connect(migrate_updates=True); the '
-        "generator renders it",
-        ValueError,
-        frozenset({"a", "f"}),
-    ),
-    "D3-rename-a-label": Finding(
-        "finding (#538): on SQLite the live side carries no enum labels, so the "
-        "pass plans no RenameEnumLabel for a __ferro_renamed_labels__ hint: "
-        "connect(migrate_updates=True) leaves every 'canceled' row as it is and "
-        "warns nothing, while autogenerate refuses naming `ferro migrate new` and "
-        "the generator relabels the rows",
-        AssertionError,
-        frozenset({"f"}),
-        frozenset({"sqlite"}),
-    ),
-}
+FINDINGS: dict[str, Finding] = {}
 
 
 def expect_finding(request, case_id: str, dialect: str, pin: str) -> None:
@@ -1536,6 +1517,17 @@ def _pass_declines(url: str) -> bool:
     return any("ferro migrate new" in str(w.message) for w in caught)
 
 
+ROWS_HELD = {
+    "D3-rename-a-label": (
+        "INSERT INTO \"enmorder\" (\"status\") VALUES ('canceled')",
+        'SELECT "status" FROM "enmorder"',
+    ),
+}
+"""Rows pin (f) seeds into both databases where a case is only live while
+rows hold something: a label rename on SQLite is live while a row holds the
+old label (ADR-0032), and inert, on both doors' word, otherwise."""
+
+
 @pytest.mark.parametrize("case_id", CASE_IDS)
 def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
     request,
@@ -1567,6 +1559,15 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
     before = project.register(case.before)
     auto_migrate(db_url)
     auto_migrate(second, name="p538_pass")
+    seed, rows_of = ROWS_HELD.get(case_id, (None, None))
+    databases = [
+        Db(db_url, db_backend, postgres_base_url, db_schema_name),
+        Db(second, db_backend, postgres_base_url, second_schema),
+    ]
+    if seed:
+        for db in databases:
+            db.execute(seed)
+    held = [db.rows(rows_of) for db in databases] if rows_of else None
     after = project.register(case.after)
     tables = _tables(before) | _tables(after)
     live, facts = asyncio.run(_read_live(db_url, tables))
@@ -1583,6 +1584,10 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
         assert "autogenerate refused" in str(refusal), refusal
         assert "`ferro migrate new`" in str(refusal), refusal
         assert _pass_declines(second), str(refusal)
+        if rows_of:
+            # Neither door changed a row: the relabel is the generated
+            # migration's.
+            assert [db.rows(rows_of) for db in databases] == held
         return
     if planned is None:
         assert "# ferro: data-dependent" in upgrade, upgrade

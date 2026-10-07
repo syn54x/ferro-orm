@@ -631,6 +631,46 @@ pub fn render_label_update(table: &str, column: &str, from: &str, to: &str) -> S
     )
 }
 
+/// Whether any row of `table` still holds `label` in `column`: one existence
+/// query, the liveness read for a label rename on a column that keeps its
+/// labels as text in its rows (ADR-0032: a hint is live while the old name is
+/// held).
+pub fn render_label_held_probe(table: &str, column: &str, label: &str) -> String {
+    format!(
+        "SELECT 1 FROM {} WHERE {} = {} LIMIT 1",
+        quote_ident(table),
+        quote_ident(column),
+        quote_label(label),
+    )
+}
+
+/// Whether the CHECK `definition` (as the catalog holds it) lists `label`:
+/// it carries the label's SQL literal ([`quote_label`]).
+pub fn check_lists_label(definition: &str, label: &str) -> bool {
+    let literal = quote_label(label);
+    definition.match_indices(&literal).any(|(at, _)| {
+        // A literal opened by a doubled quote is the tail of a longer one.
+        !definition[..at].ends_with('\'') && !definition[at + literal.len()..].starts_with('\'')
+    })
+}
+
+/// The reconciliation pass's warning for a live label rename on SQLite
+/// (`__ferro_renamed_labels__`): rows of `table.column` (or its `db_check`)
+/// still hold `old`, which the model now declares as `new`. The pass changes
+/// the schema and never rows (ADR-0014), so the relabel is a generated
+/// migration's. Emitted verbatim; never re-derived.
+pub fn stranded_label_rename_warning(table: &str, column: &str, old: &str, new: &str) -> String {
+    format!(
+        "Column '{table}.{column}' still holds the enum label {old_q}, which the model \
+         now declares as {new_q} (__ferro_renamed_labels__). SQLite keeps enum labels as \
+         text in the rows, and auto-migrate changes the schema, never the rows: they keep \
+         {old_q}, which the model no longer reads or writes. Generate the migration that \
+         relabels them with `ferro migrate new`.",
+        old_q = quote_label(old),
+        new_q = quote_label(new),
+    )
+}
+
 /// The value a SQLite table rebuild copies into a text-stored enum column
 /// whose labels the same step renames: each `(from, to)` pair relabelled, every
 /// other value as it stands. The rebuild's copy is where the rows meet the
@@ -4948,6 +4988,32 @@ mod tests {
         assert_eq!(
             render_pg_enum_add_value("od'd", "it's"),
             "ALTER TYPE \"od'd\" ADD VALUE IF NOT EXISTS 'it''s'"
+        );
+    }
+
+    #[test]
+    fn a_label_rename_the_rows_still_hold_is_probed_and_warned_naming_the_command() {
+        assert_eq!(
+            render_label_held_probe("order", "status", "canceled"),
+            "SELECT 1 FROM \"order\" WHERE \"status\" = 'canceled' LIMIT 1"
+        );
+        assert_eq!(
+            render_label_held_probe("o\"rder", "st", "it's"),
+            "SELECT 1 FROM \"o\"\"rder\" WHERE \"st\" = 'it''s' LIMIT 1"
+        );
+        // A check lists a label as its SQL literal, never as a bare substring.
+        let check = "CHECK (\"status\" IN ('paid', 'canceled'))";
+        assert!(check_lists_label(check, "canceled"));
+        assert!(!check_lists_label(check, "cancel"));
+        assert!(!check_lists_label(check, "cancelled"));
+        assert!(check_lists_label("CHECK (\"st\" IN ('it''s'))", "it's"));
+        assert_eq!(
+            stranded_label_rename_warning("order", "status", "canceled", "cancelled"),
+            "Column 'order.status' still holds the enum label 'canceled', which the \
+             model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps \
+             enum labels as text in the rows, and auto-migrate changes the schema, never \
+             the rows: they keep 'canceled', which the model no longer reads or writes. \
+             Generate the migration that relabels them with `ferro migrate new`."
         );
     }
 

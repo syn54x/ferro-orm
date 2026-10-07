@@ -4723,6 +4723,53 @@ mod renames {
     }
 
     #[test]
+    fn a_rename_and_a_type_change_render_from_two_snapshots_against_the_renamed_before() {
+        // The type change names the column as the rename leaves it; it renders
+        // from the parent as the renames leave it, never the parent as written
+        // (#538, F2).
+        let mut changed = target();
+        changed.payload.models[0].columns[1].db_type = Some("varchar(80)".to_string());
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            let rendered = render_plan(
+                &MigrationPlan {
+                    operations: plan(&parent(), &changed, dialect),
+                    ..MigrationPlan::default()
+                },
+                &parent(),
+                &changed,
+                dialect,
+            )
+            .expect("renders");
+            let last = rendered.last().expect("a type change");
+            assert_eq!(
+                last.op,
+                MigrationOp::AlterColumnType {
+                    table: "author".to_string(),
+                    column: "full_name".to_string(),
+                }
+            );
+            if dialect == Dialect::Postgres {
+                assert_eq!(
+                    last.statements,
+                    [
+                        "ALTER TABLE \"author\" ALTER COLUMN \"full_name\" TYPE varchar(80) \
+                      USING \"full_name\"::varchar(80)"
+                    ]
+                );
+            }
+        }
+        // Rendering against the renamed before is rendering against the
+        // parent: the renamed before holds no live hint, so it is its own.
+        let parent = parent();
+        let before = crate::plan::planned_before(&parent, &changed, Dialect::Postgres);
+        assert_ne!(before.as_ref(), &parent);
+        assert_eq!(
+            crate::plan::planned_before(&before, &changed, Dialect::Postgres).as_ref(),
+            before.as_ref()
+        );
+    }
+
+    #[test]
     fn an_inert_hint_plans_nothing() {
         assert_eq!(plan(&target(), &target(), Dialect::Postgres), vec![]);
         let mut deleted = target();
