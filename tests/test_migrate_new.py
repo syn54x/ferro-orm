@@ -376,7 +376,10 @@ def test_a_change_new_cannot_generate_yet_is_refused_naming_its_ticket(
 
     assert run("migrate", "new", "status_text") == 1
 
-    assert "(ticket #536)" in capsys.readouterr().err
+    assert (
+        'changing "author"."status" to or from a native enum type is not generated: '
+        "add a column of the new type"
+    ) in capsys.readouterr().err
     assert listing(project / "migrations") == before
 
 

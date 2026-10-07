@@ -92,8 +92,10 @@ def test_a_change_new_cannot_generate_yet_is_still_ungenerated(project, pkg, cap
     assert run("migrate", "check") == 3
 
     err = capsys.readouterr().err
-    assert "cannot generate it: not generated yet:" in err, err
-    assert "(ticket #536)" in err, err
+    assert (
+        'cannot generate it: changing "author"."status" to or from a native enum type '
+        "is not generated"
+    ) in err, err
 
 
 def test_no_migration_yet_is_an_ungenerated_change(project, pkg, capsys):
