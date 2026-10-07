@@ -402,29 +402,10 @@ pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a Schema
     )
 }
 
-/// How [`crate::render::render_plan_in`] renders a change to a table that
-/// already exists: every door's plain statements ([`RenderModes::PASS`]), or
-/// the generator's online shapes on an existing table (ADR-0043, ADR-0044).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RenderModes {
-    /// How a foreign key or check is added.
-    pub constraints: ConstraintMode,
-    /// Whether an added column's own index and unique ride its `ADD COLUMN`
-    /// (every door) or are left to the generator's index steps.
-    pub column_indexes_inline: bool,
-}
-
-impl RenderModes {
-    /// The statements every door executes.
-    pub const PASS: RenderModes = RenderModes {
-        constraints: ConstraintMode::Plain,
-        column_indexes_inline: true,
-    };
-}
-
-/// The single-column index and unique an `ADD COLUMN` of `col` builds, as
-/// `(name, columns, unique)`: the standalone named `uq_` unique index and
-/// `idx_` index fresh-create emits (FF-B B4/D1), unique first.
+/// The single-column index and unique a column's own `unique` / `index` flag
+/// declares, as `(name, columns, unique)`: the standalone named `uq_` unique
+/// index and `idx_` index fresh-create emits (FF-B B4/D1), unique first. What
+/// an `ADD COLUMN` of `col` builds.
 pub(crate) fn added_column_indexes(table: &str, col: &SchemaColumn) -> Vec<(String, Vec<String>, bool)> {
     let mut out = Vec::new();
     if col.unique {
@@ -447,16 +428,16 @@ pub(crate) fn added_column_indexes(table: &str, col: &SchemaColumn) -> Vec<(Stri
 /// `types_created_by_plan` names its type — that plan's `CreateEnumType` op
 /// already created it.
 ///
-/// `modes` is [`RenderModes::PASS`] on every door but the generator, which
-/// adds the column's foreign key and check `NOT VALID` on an existing Postgres
-/// table and leaves its indexes ([`added_column_indexes`]) to index steps.
+/// `constraints` is [`ConstraintMode::Plain`] on every door but the
+/// generator, which adds the column's foreign key and check `NOT VALID` on an
+/// existing Postgres table (ADR-0043).
 pub(crate) fn emit_add_column(
     table: &str,
     column: &str,
     model: &SchemaModel,
     dialect: Dialect,
     types_created_by_plan: &BTreeSet<String>,
-    modes: RenderModes,
+    constraints: ConstraintMode,
 ) -> Result<EmissionResult, EmissionError> {
     let col = find_column(model, column)?;
     let ld = dialect;
@@ -520,7 +501,7 @@ pub(crate) fn emit_add_column(
         .checks
         .iter()
         .filter(|check| check.name == owned_check)
-        .map(|check| (check, render_db_check(table, check, dialect, modes.constraints)))
+        .map(|check| (check, render_db_check(table, check, dialect, constraints)))
         .collect();
     append_inline_checks(&mut col_def, &check_emissions, table, column);
 
@@ -562,17 +543,15 @@ pub(crate) fn emit_add_column(
         ));
     }
 
-    if modes.column_indexes_inline {
-        for (name, columns, unique) in added_column_indexes(table, col) {
-            result.statements.push(render_index_sql(
-                table,
-                &name,
-                &columns,
-                unique,
-                dialect,
-                IndexMode::Plain,
-            ));
-        }
+    for (name, columns, unique) in added_column_indexes(table, col) {
+        result.statements.push(render_index_sql(
+            table,
+            &name,
+            &columns,
+            unique,
+            dialect,
+            IndexMode::Plain,
+        ));
     }
 
     for (_, emission) in check_emissions {
@@ -586,7 +565,7 @@ pub(crate) fn emit_add_column(
 
     if let Some(fk) = fk {
         match dialect {
-            Dialect::Postgres => result.statements.push(render_add_fk_sql(table, fk, modes.constraints)),
+            Dialect::Postgres => result.statements.push(render_add_fk_sql(table, fk, constraints)),
             Dialect::Sqlite if sqlite_inline_fk => {}
             Dialect::Sqlite => result.warnings.push(format!(
                 "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint: SQLite's \

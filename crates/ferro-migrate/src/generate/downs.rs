@@ -28,13 +28,13 @@
 //!                                             ALTER TABLE "author" ALTER COLUMN "bio" SET NOT NULL;
 //! ```
 
-use super::columns::{self, PlanContext, PlanDirection};
+use super::columns::{self, Phase, PlanContext, PlanDirection};
 use super::rebuild;
 use super::{DESTRUCTIVE, GenerateError, refuse_unrendered, step_text};
 use crate::directory::Headers;
-use crate::{
-    Dialect, LiveFacts, MigrationOp, MigrationPlan, RenderedOp, plan_from_ir, render_plan,
-};
+use crate::render::render_plan_in;
+use crate::{Dialect, LiveFacts, MigrationOp, MigrationPlan, RenderedOp, plan_from_ir};
+use ferro_ddl_lowering::ConstraintMode;
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use std::collections::BTreeSet;
 
@@ -95,10 +95,16 @@ fn recreates(op: &MigrationOp, new: &IrEnvelope<SchemaIrPayload>) -> bool {
     }
 }
 
-/// Whether `op`'s statements can fail on the rows the table holds: a cast,
-/// a `SET NOT NULL`, a unique over existing values, or a `NOT NULL` column
-/// added with no value to give them.
-fn may_fail_on_rows(op: &MigrationOp, new: &IrEnvelope<SchemaIrPayload>) -> bool {
+/// Whether `op`'s statements, its constraints added in `constraints` mode,
+/// can fail on the rows the table holds: a cast, a `SET NOT NULL`, a unique
+/// over existing values, a `NOT NULL` column added with no value to give
+/// them, or a check or foreign key validated as it is added (one added
+/// `NOT VALID` scans nothing; its validate step is the data-dependent one).
+fn may_fail_on_rows(
+    op: &MigrationOp,
+    new: &IrEnvelope<SchemaIrPayload>,
+    constraints: ConstraintMode,
+) -> bool {
     let column = target_column(op, new);
     match op {
         MigrationOp::AlterColumnType { .. } => true,
@@ -109,7 +115,7 @@ fn may_fail_on_rows(op: &MigrationOp, new: &IrEnvelope<SchemaIrPayload>) -> bool
         MigrationOp::AddCheck { .. }
         | MigrationOp::RebuildCheck { .. }
         | MigrationOp::AddForeignKey { .. }
-        | MigrationOp::RebuildForeignKey { .. } => true,
+        | MigrationOp::RebuildForeignKey { .. } => constraints == ConstraintMode::Plain,
         MigrationOp::AddColumn { .. } => {
             column.is_some_and(|col| columns::needs_values(col) || (!col.nullable && col.unique))
         }
@@ -170,12 +176,13 @@ fn rendered(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
+    constraints: ConstraintMode,
 ) -> Result<Vec<RenderedOp>, GenerateError> {
     let plan = MigrationPlan {
         operations: ops,
         ..MigrationPlan::default()
     };
-    Ok(render_plan(&plan, old, new, dialect)?)
+    Ok(render_plan_in(&plan, old, new, dialect, constraints)?)
 }
 
 /// Each of `ops`' statements on `dialect`, planned `old → new`, op by op. A
@@ -188,15 +195,16 @@ fn native_statements(
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     restore: bool,
+    constraints: ConstraintMode,
 ) -> Result<Vec<Vec<String>>, GenerateError> {
     let (relaxed, tighten) = if restore {
         relaxed(&ops, new, dialect)
     } else {
         (new.clone(), Vec::new())
     };
-    let ops_rendered = rendered(ops, old, &relaxed, dialect)?;
+    let ops_rendered = rendered(ops, old, &relaxed, dialect, constraints)?;
     refuse_unrendered(&ops_rendered, dialect)?;
-    let tighten_rendered = rendered(tighten, &relaxed, new, dialect)?;
+    let tighten_rendered = rendered(tighten, &relaxed, new, dialect, constraints)?;
     refuse_unrendered(&tighten_rendered, dialect)?;
     let mut out = Vec::new();
     for op in ops_rendered {
@@ -232,8 +240,15 @@ fn statements(
     let rebuilt = rebuild::tables_to_rebuild(&ops, old, new, dialect, direction);
     let folded = |op: &MigrationOp| op.table().is_some_and(|table| rebuilt.contains(table));
     let native: Vec<MigrationOp> = ops.iter().filter(|op| !folded(op)).cloned().collect();
-    let mut native =
-        native_statements(native, old, new, dialect, direction == PlanDirection::Down)?.into_iter();
+    let mut native = native_statements(
+        native,
+        old,
+        new,
+        dialect,
+        direction == PlanDirection::Down,
+        columns::constraint_mode(dialect, direction),
+    )?
+    .into_iter();
     let mut out = Vec::new();
     let mut written = BTreeSet::new();
     for op in &ops {
@@ -254,7 +269,12 @@ fn statements(
 /// One generated step on `dialect`, both directions: the up file renders
 /// `step_ops` (planned `before → after`), and the down file renders the
 /// inverse — [`plan_from_ir`]`(after, before)` with every drop planned,
-/// restricted to the tables and enum types `step_ops` touch.
+/// restricted to the tables and enum types `step_ops` touch and to the ops
+/// [`columns::assign`] puts in the step's `phase`.
+///
+/// On Postgres the up adds every foreign key and check `NOT VALID`
+/// ([`columns::constraint_mode`], ADR-0043); the down restores the step's
+/// pre-state with plain statements.
 ///
 /// The up's headers: `destructive` when it drops a table, a column or an
 /// enum type; `data-dependent` when its statements can fail on existing rows.
@@ -272,6 +292,7 @@ pub fn render_down(
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
+    phase: Phase,
 ) -> Result<Rendering, GenerateError> {
     let subjects: BTreeSet<Subject> = step_ops.iter().filter_map(subject).collect();
     let inverse: Vec<MigrationOp> =
@@ -282,23 +303,26 @@ pub fn render_down(
             .filter(|op| {
                 let ctx = PlanContext::of(op, after, before, dialect, PlanDirection::Down);
                 !columns::carried_by_its_column_drop(op, &ctx)
+                    && columns::assign(op, &ctx).phase == phase
             })
             .collect();
 
+    let up_mode = columns::constraint_mode(dialect, PlanDirection::Up);
     let (up_statements, up_rebuilds) =
         statements(step_ops.to_vec(), before, after, dialect, PlanDirection::Up)?;
     let headers = Headers {
         foreign_keys_off: up_rebuilds,
         destructive: !up_statements.is_empty() && step_ops.iter().any(drops_data),
         data_dependent: !up_statements.is_empty()
-            && step_ops.iter().any(|op| may_fail_on_rows(op, after)),
+            && step_ops.iter().any(|op| may_fail_on_rows(op, after, up_mode)),
         not_applicable: up_statements.is_empty(),
         ..Headers::default()
     };
 
+    let down_mode = columns::constraint_mode(dialect, PlanDirection::Down);
     let data_dependent = inverse
         .iter()
-        .any(|op| recreates(op, before) || may_fail_on_rows(op, before));
+        .any(|op| recreates(op, before) || may_fail_on_rows(op, before, down_mode));
     let (down_statements, down_rebuilds) =
         statements(inverse, after, before, dialect, PlanDirection::Down)?;
     let down_headers = Headers {
@@ -343,7 +367,7 @@ mod tests {
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
     ) -> Rendering {
-        render_down(&up_ops(before, after, dialect), before, after, dialect).expect("render")
+        render_down(&up_ops(before, after, dialect), before, after, dialect, Phase::Schema).expect("render")
     }
 
     #[test]
@@ -443,13 +467,13 @@ mod tests {
             .into_iter()
             .filter(|op| op.table() == Some("tag"))
             .collect();
-        let r = render_down(&ops, &before, &after, Dialect::Sqlite).expect("render");
+        let r = render_down(&ops, &before, &after, Dialect::Sqlite, Phase::Schema).expect("render");
         assert_eq!(r.down, "DROP TABLE \"tag\";\n");
     }
 
     #[test]
     fn a_step_with_nothing_on_a_dialect_is_not_applicable_both_ways() {
-        let r = render_down(&[], &ir(vec![]), &ir(vec![]), Dialect::Sqlite).expect("render");
+        let r = render_down(&[], &ir(vec![]), &ir(vec![]), Dialect::Sqlite, Phase::Schema).expect("render");
         assert_eq!(r.up, "-- ferro: not-applicable\n");
         assert_eq!(r.down, "-- ferro: not-applicable\n");
         assert!(r.headers.not_applicable && r.down_headers.not_applicable);

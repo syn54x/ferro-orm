@@ -11,7 +11,9 @@
 //! [`assign`] is the one decision every generator ticket fills in per
 //! direction and dialect: the plain `ALTER TABLE` edits of an existing table
 //! (add and drop a column, a Postgres type change and nullability relaxation,
-//! SQLite indexes), SQLite's table rebuilds (whose native-or-rebuild table is
+//! a Postgres foreign key or check staged `NOT VALID` ([`stages_constraints`])),
+//! an index step for each index change ([`is_index_step`]), SQLite's table
+//! rebuilds (whose native-or-rebuild table is
 //! [`super::rebuild::needs_rebuild`]), and every shape it cannot render yet
 //! answered with the ticket that will. It decides where an op goes, never
 //! what it says: every statement still comes from [`crate::render_plan`] or
@@ -20,7 +22,7 @@
 use super::rebuild;
 use crate::emit::standalone_indexes;
 use crate::{Dialect, MigrationOp};
-use ferro_ddl_lowering::{ResolvedStorage, resolve_column_storage};
+use ferro_ddl_lowering::{ConstraintMode, ResolvedStorage, resolve_column_storage};
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 
 /// The phase step an op lands in, in the order a migration's steps run.
@@ -208,17 +210,68 @@ pub fn carried_by_its_column_drop(op: &MigrationOp, ctx: &PlanContext<'_>) -> bo
         && goes_with_a_dropped_column(op, ctx)
 }
 
+/// Whether `op` builds an index over a column the same file adds: a down
+/// putting back a column the up dropped together with its index, which goes
+/// back with the column, as it went.
+fn goes_with_an_added_column(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
+    let (Some(before), Some(after)) = (ctx.before, ctx.after) else {
+        return false;
+    };
+    let MigrationOp::AddIndex { columns, .. } = op else {
+        return false;
+    };
+    columns
+        .iter()
+        .any(|name| column(before, name).is_none() && column(after, name).is_some())
+}
+
+/// Whether `op` builds or drops an index on a table that exists before and
+/// after the file — its own index step on every dialect (ADR-0044) — rather
+/// than riding the table's or the column's own statement in the schema step.
+pub fn is_index_step(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
+    matches!(op, MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. })
+        && ctx.on_existing_table()
+        && !goes_with_a_dropped_column(op, ctx)
+        && !(ctx.direction == PlanDirection::Down && goes_with_an_added_column(op, ctx))
+}
+
+/// Whether the file stages `op`'s foreign keys and checks: added `NOT VALID`
+/// in its step and validated by a later one (ADR-0043). Every up file on
+/// Postgres does for a table that already exists; a down never does (a down
+/// restores its step's pre-state in that step), nor does SQLite, which has no
+/// unvalidated constraint (a rebuild validates by copying).
+pub fn stages_constraints(ctx: &PlanContext<'_>) -> bool {
+    constraint_mode(ctx.dialect, ctx.direction) == ConstraintMode::NotValid
+        && ctx.on_existing_table()
+}
+
+/// The mode a file going `direction` on `dialect` adds its foreign keys and
+/// checks in: `NOT VALID` in every Postgres up file, where each one is on a
+/// table that already exists (a new table's ride its `CREATE TABLE`), and
+/// plain everywhere else ([`stages_constraints`]).
+pub fn constraint_mode(dialect: Dialect, direction: PlanDirection) -> ConstraintMode {
+    if dialect == Dialect::Postgres && direction == PlanDirection::Up {
+        ConstraintMode::NotValid
+    } else {
+        ConstraintMode::Plain
+    }
+}
+
 /// Which step `op` lands in and what it needs, for the file and dialect
 /// `ctx` describes.
 pub fn assign(op: &MigrationOp, ctx: &PlanContext<'_>) -> StepAssignment {
+    let phase = if is_index_step(op, ctx) {
+        Phase::Index
+    } else {
+        Phase::Schema
+    };
     StepAssignment {
-        phase: Phase::Schema,
+        phase,
         needs: needs(op, ctx),
     }
 }
 
 fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
-    let sqlite = ctx.dialect == Dialect::Sqlite;
     let refused = |ticket| Needs::Refused(Refusal::Ticket(ticket));
     let primary_key = Needs::Refused(Refusal::PrimaryKeyChange);
     // SQLite's native-or-rebuild decision is the one table in
@@ -286,29 +339,19 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
                 Needs::Native
             }
         }
-        MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. } => {
-            if sqlite || !ctx.on_existing_table() || goes_with_a_dropped_column(op, ctx) {
-                Needs::Native
-            } else {
-                // An index on an existing Postgres table is its own
-                // concurrent step (ADR-0044).
-                refused(527)
-            }
-        }
+        // On an existing table, its own index step ([`is_index_step`]): the
+        // plain statement on SQLite, built concurrently on Postgres.
+        MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. } => Needs::Native,
         MigrationOp::DropCheck { .. } if goes_with_a_dropped_column(op, ctx) => Needs::Native,
+        // On Postgres a foreign key or check added to an existing table is
+        // added `NOT VALID` and validated by a later step
+        // ([`stages_constraints`], ADR-0043); its drop is the plain
+        // `DROP CONSTRAINT`. SQLite rebuilds the table.
         MigrationOp::AddCheck { .. }
         | MigrationOp::RebuildCheck { .. }
         | MigrationOp::DropCheck { .. }
         | MigrationOp::AddForeignKey { .. }
-        | MigrationOp::RebuildForeignKey { .. } => {
-            if rebuild {
-                Needs::Rebuild
-            } else {
-                // Constraints on an existing Postgres table are staged
-                // `NOT VALID` and validated (ADR-0043).
-                refused(527)
-            }
-        }
+        | MigrationOp::RebuildForeignKey { .. } => native_or_rebuild,
         MigrationOp::ValidateConstraint { .. } | MigrationOp::RebuildIndex { .. } => {
             Needs::Refused(Refusal::LiveOnly)
         }
@@ -369,11 +412,24 @@ mod tests {
         dialect: Dialect,
         direction: PlanDirection,
     ) -> Needs {
+        assignment_for(op, before, after, dialect, direction).needs
+    }
+
+    fn assignment_for(
+        op: &MigrationOp,
+        before: &SchemaModel,
+        after: &SchemaModel,
+        dialect: Dialect,
+        direction: PlanDirection,
+    ) -> StepAssignment {
         let (before, after) = (ir(vec![before.clone()]), ir(vec![after.clone()]));
         let ctx = PlanContext::of(op, &before, &after, dialect, direction);
         let assignment = assign(op, &ctx);
-        assert_eq!(assignment.phase, Phase::Schema);
-        assignment.needs
+        let indexed = matches!(op, MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. });
+        if !indexed {
+            assert_eq!(assignment.phase, Phase::Schema, "{op:?}");
+        }
+        assignment
     }
 
     fn add(column: &str) -> MigrationOp {
@@ -750,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn indexes_are_native_on_sqlite_and_their_own_step_on_an_existing_postgres_table() {
+    fn an_index_on_an_existing_table_is_its_own_index_step_on_every_dialect() {
         let index = SchemaIndex {
             name: "idx_author_name_bio".into(),
             columns: vec!["name".into(), "bio".into()],
@@ -771,24 +827,42 @@ mod tests {
             table: "author".into(),
             name: "idx_author_name_bio".into(),
         };
-        for direction in DIRECTIONS {
-            assert_eq!(
-                needs_for(&add, &plain, &indexed, Dialect::Sqlite, direction),
-                Needs::Native
-            );
-            assert_eq!(
-                needs_for(&drop_index, &indexed, &plain, Dialect::Sqlite, direction),
-                Needs::Native
-            );
-            assert_eq!(
-                needs_for(&add, &plain, &indexed, Dialect::Postgres, direction),
-                Needs::Refused(Refusal::Ticket(527))
-            );
-            assert_eq!(
-                needs_for(&drop_index, &indexed, &plain, Dialect::Postgres, direction),
-                Needs::Refused(Refusal::Ticket(527))
-            );
+        for dialect in DIALECTS {
+            for direction in DIRECTIONS {
+                let expected = StepAssignment {
+                    phase: Phase::Index,
+                    needs: Needs::Native,
+                };
+                assert_eq!(
+                    assignment_for(&add, &plain, &indexed, dialect, direction),
+                    expected
+                );
+                assert_eq!(
+                    assignment_for(&drop_index, &indexed, &plain, dialect, direction),
+                    expected
+                );
+            }
         }
+        // A down putting back a column the up dropped with its index puts the
+        // index back with it, in the schema step; an up's new index over a
+        // new column is still its own step.
+        let without_bio = author(vec![]);
+        let restore = assignment_for(
+            &add,
+            &without_bio,
+            &indexed,
+            Dialect::Postgres,
+            PlanDirection::Down,
+        );
+        assert_eq!(restore.phase, Phase::Schema);
+        let build = assignment_for(
+            &add,
+            &without_bio,
+            &indexed,
+            Dialect::Postgres,
+            PlanDirection::Up,
+        );
+        assert_eq!(build.phase, Phase::Index);
         // On a table the same file creates or drops, the index rides the
         // table's own statement on every dialect.
         let (empty, with) = (ir(vec![]), ir(vec![indexed.clone()]));
@@ -816,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_columns_own_check_goes_with_it_and_any_other_check_change_is_staged() {
+    fn a_dropped_columns_own_check_goes_with_it_and_any_other_check_change_is_native_on_postgres() {
         let check = SchemaCheck {
             name: "ck_author_tier".into(),
             column: "tier".into(),
@@ -859,7 +933,7 @@ mod tests {
                 Dialect::Postgres,
                 PlanDirection::Up
             ),
-            Needs::Refused(Refusal::Ticket(527))
+            Needs::Native
         );
         let staged = [
             MigrationOp::AddCheck {
@@ -888,7 +962,7 @@ mod tests {
                 );
                 assert_eq!(
                     needs_for(op, &checked, &checked, Dialect::Postgres, direction),
-                    Needs::Refused(Refusal::Ticket(527))
+                    Needs::Native
                 );
             }
         }
