@@ -105,6 +105,42 @@ def test_after_up_there_is_no_drift_against_the_head(project, pkg, db, capsys):
     report.raise_for_problems()
 
 
+TEMPORAL = (
+    AUTHOR
+    + """
+
+import datetime as dt
+import uuid
+from decimal import Decimal
+
+
+class Event(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    seen: dt.datetime
+    day: dt.date
+    at: dt.time
+    ref: uuid.UUID
+    amount: Decimal
+"""
+)
+
+
+def test_same_storage_types_are_not_drift_after_up(project, pkg, db, capsys):
+    """A live SQLite ``DATETIME`` reads back as token ``timestamp`` while a
+    ``datetime`` field declares ``timestamptz``; both store as ``DATETIME``,
+    so a database ``up`` just created has nothing to report on either
+    dialect (no phantom ``event.seen has type timestamp, snapshot says
+    timestamptz``)."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, TEMPORAL)
+    new("create_event")
+    assert run("migrate", "up", "--url", db.url) == 0
+    capsys.readouterr()
+
+    assert drift_cli(db, capsys) == (0, "no drift against 0001_create_event\n", "")
+    assert drift_api(db).lines == []
+
+
 def test_a_column_dropped_by_hand_is_one_line_and_exit_4(project, pkg, db, capsys):
     applied(project, pkg, db, capsys)
     db.execute('ALTER TABLE "team" DROP COLUMN "name"')

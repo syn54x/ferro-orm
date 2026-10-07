@@ -321,18 +321,34 @@ pub fn schema_columns_storage_drift(
     };
     match (scalar(old_col), scalar(new_col)) {
         (Ok(old_c), Ok(new_c)) => {
-            // Compare by storage token, not raw canonical: on SQLite both `Uuid`
-            // and `Char(32)` map to "uuid" (and `DateTime`/`Timestamp` to
-            // "timestamp"), so a derived model column does not read as drifted
-            // against the token-round-tripped live column. Real changes
-            // (int → bigint) still differ. (See #141.)
-            canonical_to_db_type_token(old_c, dialect) != canonical_to_db_type_token(new_c, dialect)
+            // Compare the storage the dialect actually renders, not the token
+            // or the raw canonical: two canonicals that store identically are
+            // the same column. On SQLite `Uuid`/`Char(32)` both store as
+            // `CHAR(32)` (#141) and `DateTime`/`Timestamp`/`TimestampTz` all
+            // store as `DATETIME`, so a declared `datetime` (`timestamptz`)
+            // does not drift against the live `DATETIME` (token `timestamp`).
+            // Real changes (int → bigint everywhere; timestamp → timestamptz
+            // on Postgres) render different storage and still differ.
+            rendered_storage_type(old_c, dialect) != rendered_storage_type(new_c, dialect)
         }
         // Reached only when canonical resolution fails for both columns. At runtime
         // both sides come from producers that always populate Some(...), so this
         // Option comparison is behavior-equivalent to the old String comparison.
         _ => old_col.db_type != new_col.db_type,
     }
+}
+
+/// The column type a canonical renders to on `dialect` — the spelling the
+/// emitters write ([`sqlite_declared_type`] on SQLite, [`pg_alter_type_target`]
+/// on Postgres), folded to lowercase because SQL type names are
+/// case-insensitive (`CHAR(32)` from `Uuid` is `char(32)` from `Char(32)`).
+/// Two canonicals with equal rendered storage are the same column type.
+fn rendered_storage_type(canonical: CanonicalType, dialect: Dialect) -> String {
+    match dialect {
+        Dialect::Sqlite => sqlite_declared_type(canonical),
+        Dialect::Postgres => pg_alter_type_target(canonical),
+    }
+    .to_ascii_lowercase()
 }
 
 /// Resolve a model property's `(logical_type, format, db_type)` to a canonical
@@ -3632,6 +3648,57 @@ mod tests {
         // Model derived IR: logical_type "uuid" (Python SchemaIR compiler).
         let model = col_with_db_type("id", "uuid", None, None);
         assert!(!schema_columns_storage_drift(&live, &model, Dialect::Sqlite));
+    }
+
+    /// Drift compares rendered storage, not tokens. A `datetime` field resolves
+    /// to `TimestampTz` (token `timestamptz`) and a live SQLite `DATETIME`
+    /// column decodes to token `timestamp`, but both store as `DATETIME`, so
+    /// on SQLite nothing changed. On Postgres `timestamp` vs `timestamptz` are
+    /// different storage and stay a change; `int` vs `bigint` is a change on
+    /// both dialects.
+    #[test]
+    fn same_storage_columns_are_not_drift_and_different_storage_is() {
+        let live_datetime = col_with_db_type(
+            "seen",
+            "unknown",
+            None,
+            Some(&information_schema_to_db_type_token(
+                "DATETIME",
+                None,
+                Dialect::Sqlite,
+            )),
+        );
+        let model = col_with_db_type("seen", "datetime", None, None);
+        assert!(!schema_columns_storage_drift(
+            &live_datetime,
+            &model,
+            Dialect::Sqlite
+        ));
+
+        let live_timestamp = col_with_db_type(
+            "seen",
+            "unknown",
+            None,
+            Some(&information_schema_to_db_type_token(
+                "timestamp without time zone",
+                None,
+                Dialect::Postgres,
+            )),
+        );
+        assert!(schema_columns_storage_drift(
+            &live_timestamp,
+            &model,
+            Dialect::Postgres
+        ));
+
+        let int_col = col_with_db_type("n", "unknown", None, Some("int"));
+        let bigint_col = col_with_db_type("n", "unknown", None, Some("bigint"));
+        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+            assert!(
+                schema_columns_storage_drift(&int_col, &bigint_col, dialect),
+                "int -> bigint is a storage change ({dialect:?})"
+            );
+        }
     }
 
     /// An enum stores as `varchar(<longest label>)` on SQLite; the live column
