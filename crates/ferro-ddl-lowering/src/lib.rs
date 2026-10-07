@@ -955,6 +955,64 @@ pub fn render_drop_constraint(table: &str, name: &str) -> String {
     )
 }
 
+/// `ALTER TABLE "old" RENAME TO "new"` — a declared table rename (ADR-0032).
+/// Native on both dialects; SQLite (3.26+) rewrites the foreign keys of every
+/// table that references it.
+pub fn render_rename_table(old: &str, new: &str) -> String {
+    format!(
+        "ALTER TABLE {} RENAME TO {}",
+        quote_ident(old),
+        quote_ident(new)
+    )
+}
+
+/// `ALTER TABLE "t" RENAME COLUMN "old" TO "new"` — a declared column rename
+/// (ADR-0032). Native on both dialects; SQLite (3.25+) rewrites the indexes
+/// and checks that name the column.
+pub fn render_rename_column(table: &str, old: &str, new: &str) -> String {
+    format!(
+        "ALTER TABLE {} RENAME COLUMN {} TO {}",
+        quote_ident(table),
+        quote_ident(old),
+        quote_ident(new)
+    )
+}
+
+/// `ALTER INDEX "old" RENAME TO "new"` — an `idx_` / `uq_` name a rename
+/// drags (ADR-0032). Postgres only: SQLite has no index rename, so it drops
+/// the index and creates it under the new name.
+pub fn render_rename_index(old: &str, new: &str) -> String {
+    format!(
+        "ALTER INDEX {} RENAME TO {}",
+        quote_ident(old),
+        quote_ident(new)
+    )
+}
+
+/// `ALTER TABLE "t" RENAME CONSTRAINT "old" TO "new"` — a `ck_` / `fk_` name
+/// a rename drags (ADR-0032). Postgres only: SQLite renames a table
+/// constraint by rebuilding the table (ADR-0046).
+pub fn render_rename_constraint(table: &str, old: &str, new: &str) -> String {
+    format!(
+        "ALTER TABLE {} RENAME CONSTRAINT {} TO {}",
+        quote_ident(table),
+        quote_ident(old),
+        quote_ident(new)
+    )
+}
+
+/// `ALTER POLICY "old" ON "t" RENAME TO "new"` — an `rls_` name a table rename
+/// drags (ADR-0032). Postgres only, like every row-security statement
+/// (ADR-0014).
+pub fn render_rename_policy(table: &str, old: &str, new: &str) -> String {
+    format!(
+        "ALTER POLICY {} ON {} RENAME TO {}",
+        quote_ident(old),
+        quote_ident(table),
+        quote_ident(new)
+    )
+}
+
 /// The outcome of emitting one CHECK constraint for one dialect.
 ///
 /// At most one of `statement` / `inline` is set: a standalone statement the
@@ -1379,6 +1437,20 @@ fn truncate_identifier_bytes(raw: &str, suffix: &str) -> String {
 /// the name this returns — never on the un-truncated suffix.
 pub fn row_policy_name(table_lower: &str, name: &str) -> String {
     truncate_identifier_bytes(&format!("rls_{table_lower}_{name}"), "_rls")
+}
+
+/// The short name `row_policy_name(table_lower, name)` was built from, read
+/// back off `name` by the same function (`None` when `name` is not one of
+/// `table_lower`'s). A truncated name yields its truncated tail.
+pub fn row_policy_short_name<'a>(table_lower: &str, name: &'a str) -> Option<&'a str> {
+    name.strip_prefix(row_policy_name(table_lower, "").as_str())
+}
+
+/// The suffix `table_check_constraint_name(table_lower, suffix)` was built
+/// from, read back off `name` by the same function (`None` when `name` is not
+/// one of `table_lower`'s). A truncated name yields its truncated tail.
+pub fn table_check_suffix<'a>(table_lower: &str, name: &'a str) -> Option<&'a str> {
+    name.strip_prefix(table_check_constraint_name(table_lower, "").as_str())
 }
 
 /// Whether a live policy name follows the ferro row-policy convention — the
@@ -3156,6 +3228,7 @@ mod tests {
         checks: Vec<ferro_schema_ir::SchemaCheck>,
     ) -> ferro_schema_ir::SchemaModel {
         ferro_schema_ir::SchemaModel {
+            renamed_from: None,
             model_name: "transfer".to_string(),
             table_name: "transfer".to_string(),
             columns: Vec::new(),
@@ -3531,6 +3604,51 @@ mod tests {
     }
 
     #[test]
+    fn a_check_suffix_and_a_policy_short_name_read_back_through_their_naming_function() {
+        assert_eq!(
+            table_check_suffix("writer", "ck_writer_named"),
+            Some("named")
+        );
+        assert_eq!(table_check_suffix("writer", "ck_author_named"), None);
+        assert_eq!(row_policy_short_name("writer", "rls_writer_id"), Some("id"));
+        assert_eq!(row_policy_short_name("writer", "uq_writer_id"), None);
+    }
+
+    #[test]
+    fn the_five_rename_renderers_are_one_statement_each() {
+        assert_eq!(
+            render_rename_table("writer", "author"),
+            "ALTER TABLE \"writer\" RENAME TO \"author\""
+        );
+        assert_eq!(
+            render_rename_column("author", "name", "full_name"),
+            "ALTER TABLE \"author\" RENAME COLUMN \"name\" TO \"full_name\""
+        );
+        assert_eq!(
+            render_rename_index("idx_writer_name", "idx_author_full_name"),
+            "ALTER INDEX \"idx_writer_name\" RENAME TO \"idx_author_full_name\""
+        );
+        assert_eq!(
+            render_rename_constraint(
+                "book",
+                "fk_book_writer_id_writer",
+                "fk_book_writer_id_author"
+            ),
+            "ALTER TABLE \"book\" RENAME CONSTRAINT \"fk_book_writer_id_writer\" TO \
+             \"fk_book_writer_id_author\""
+        );
+        assert_eq!(
+            render_rename_policy("author", "rls_writer_owner", "rls_author_owner"),
+            "ALTER POLICY \"rls_writer_owner\" ON \"author\" RENAME TO \"rls_author_owner\""
+        );
+        // Identifiers are quoted by the one quoting rule.
+        assert_eq!(
+            render_rename_table("a\"b", "c"),
+            "ALTER TABLE \"a\"\"b\" RENAME TO \"c\""
+        );
+    }
+
+    #[test]
     fn render_validate_constraint_is_one_alter_table_statement() {
         assert_eq!(
             render_validate_constraint("post", "fk_post_author_id_author"),
@@ -3839,6 +3957,7 @@ mod tests {
 
     fn drift_col(name: &str, db_type: &str) -> SchemaColumn {
         SchemaColumn {
+            renamed_from: None,
             name: name.to_string(),
             logical_type: "unknown".to_string(),
             db_type: Some(db_type.to_string()),
@@ -3864,6 +3983,7 @@ mod tests {
         db_type: Option<&str>,
     ) -> SchemaColumn {
         SchemaColumn {
+            renamed_from: None,
             name: name.to_string(),
             logical_type: logical_type.to_string(),
             db_type: db_type.map(str::to_string),
@@ -4107,6 +4227,7 @@ mod tests {
     #[test]
     fn logical_canonical_from_schema_column_ignores_explicit_db_type() {
         let col = SchemaColumn {
+            renamed_from: None,
             name: "external_id".to_string(),
             logical_type: "uuid".to_string(),
             db_type: Some("text".to_string()),
@@ -4135,6 +4256,7 @@ mod tests {
     #[test]
     fn logical_canonical_from_schema_column_errors_on_unknown() {
         let col = SchemaColumn {
+            renamed_from: None,
             name: "mystery".to_string(),
             logical_type: "bogus".to_string(),
             db_type: None,
@@ -4255,6 +4377,7 @@ mod tests {
     #[test]
     fn render_sqlite_add_column_references_renders_the_column_reference_clause() {
         let fk = ferro_schema_ir::SchemaForeignKey {
+            renamed_from: None,
             column: "author_id".to_string(),
             to_table: "author".to_string(),
             to_column: "id".to_string(),
@@ -4775,6 +4898,7 @@ mod tests {
 
     fn rls_model(columns: Vec<SchemaColumn>) -> ferro_schema_ir::SchemaModel {
         ferro_schema_ir::SchemaModel {
+            renamed_from: None,
             model_name: "LedgerRow".to_string(),
             table_name: "ledgerrow".to_string(),
             columns,

@@ -75,6 +75,7 @@ fn live_table_model(table: LiveTable, dialect: Dialect) -> SchemaModel {
         .columns
         .iter()
         .map(|col| SchemaColumn {
+            renamed_from: None,
             name: col.name.clone(),
             logical_type: "unknown".to_string(),
             db_type: Some(information_schema_to_db_type_token(
@@ -100,6 +101,7 @@ fn live_table_model(table: LiveTable, dialect: Dialect) -> SchemaModel {
         .foreign_keys
         .iter()
         .map(|fk| SchemaForeignKey {
+            renamed_from: None,
             column: fk.column.clone(),
             to_table: fk.to_table.clone(),
             to_column: fk.to_column.clone(),
@@ -109,6 +111,7 @@ fn live_table_model(table: LiveTable, dialect: Dialect) -> SchemaModel {
         .collect();
     foreign_keys.sort_by(|a, b| a.column.cmp(&b.column));
     SchemaModel {
+        renamed_from: None,
         model_name: table.name.clone(),
         table_name: table.name,
         columns,

@@ -59,6 +59,8 @@ fn column<'a>(model: Option<&'a SchemaModel>, name: &str) -> Option<&'a SchemaCo
 /// | Op | Up | Down |
 /// | :-- | :-- | :-- |
 /// | add/drop a table, an enum type or label, an index | native | native |
+/// | rename a table, a column, an index (drop + create), a policy | native | native |
+/// | rename a constraint (a `ck_` / `fk_` name a rename drags) | rebuild | rebuild |
 /// | add an optional column, or a required one with a literal default | native | native |
 /// | add a required column with no default | (backfill) | rebuild |
 /// | add a required foreign-key column (SQLite's `REFERENCES` needs a NULL default) | rebuild | rebuild |
@@ -95,7 +97,13 @@ pub fn needs_rebuild(op: &MigrationOp, direction: PlanDirection, ctx: &PlanConte
         | MigrationOp::EnableRowSecurity { .. }
         | MigrationOp::ForceRowSecurity { .. }
         | MigrationOp::DisableRowSecurity { .. }
-        | MigrationOp::NoForceRowSecurity { .. } => false,
+        | MigrationOp::NoForceRowSecurity { .. }
+        | MigrationOp::RenameTable { .. }
+        | MigrationOp::RenameColumn { .. }
+        | MigrationOp::RenameIndex { .. }
+        | MigrationOp::RenamePolicy { .. } => false,
+        // A table constraint's name lives in `CREATE TABLE` (ADR-0046).
+        MigrationOp::RenameConstraint { .. } => true,
         MigrationOp::AddColumn { column: name, .. } => {
             let Some(col) = column(ctx.after, name) else {
                 return false;
@@ -480,6 +488,7 @@ mod tests {
 
     fn with_fk(mut model: SchemaModel, col: &str) -> SchemaModel {
         model.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
             column: col.into(),
             to_table: "team".into(),
             to_column: "id".into(),
@@ -873,6 +882,7 @@ mod tests {
         );
         // A self-reference names the table the new one is renamed to.
         after.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
             column: "mentor_id".into(),
             to_table: "author".into(),
             to_column: "id".into(),

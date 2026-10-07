@@ -27,7 +27,11 @@ Each vector is one JSON file with this envelope:
 Rules:
 
 - `domain` and `ir.ir_kind` must match.
-- `ir.ir_version` must equal `1` for `schema` and `codec` vectors. `query`
+- `schema` vectors are on `ir_version` 1 or 2. v2 (#528, ADR-0032) adds the
+  optional rename hints — `renamed_from` on a model, a column and a foreign
+  key, each omitted when undeclared — and is what ferro writes; every shipped
+  v1 vector stays and keeps loading through `Snapshot::load` (ADR-0023).
+  `codec` vectors are on `ir_version` 1. `query`
   vectors are on `ir_version: 14` (#395 — optional `before` position bound on
   fetch payloads; omitted when unset; `after` from v13 still omitted when
   unset; every `order_by` term still carries explicit `nulls`; every payload
@@ -39,8 +43,8 @@ Rules:
   2 hops M2M), `where` the ordinary inner condition tree, `[]` = bare test);
   there is no earlier `query` vector left.
 - `expect_valid` currently supports only `true` fixtures (negative vectors can be added later).
-- Fixture file names use `<domain>_<scenario>_v<version>.json` (matching that
-  domain's current `ir_version`).
+- Fixture file names use `<domain>_<scenario>_v<version>.json`, where
+  `<version>` is the vector's own `ir.ir_version`.
 
 ## Coverage requirements (Phase 0 minimum)
 
