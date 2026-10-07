@@ -1,0 +1,1 @@
+verified 2026-10-07T04:19:06Z: cargo test -p ferro-schema-ir -p ferro-ddl-lowering -p ferro-migrate (149+228+43 ok); cargo test --no-default-features --features testing (323 ok); maturin develop; pytest renames/ir_vectors/schema/alembic_autogenerate/generate_columns/migrate_drift/pass_recording --db-backends=sqlite,postgres (133 passed, 3 sqlite-only skips)
