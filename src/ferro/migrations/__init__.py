@@ -6,6 +6,10 @@ await ferro.migrations.up()                # a desktop app with no deploy step
 await ferro.migrations.require_applied()   # a server that migrates in its deploy step
 ```
 
+A data step declares its shape with ``atomic`` / ``chunked`` (and its down
+with ``irreversible`` / ``nothing_to_reverse``), and marks what only a
+person can supply with ``todo("…")`` (ADR-0035).
+
 ``get_metadata`` and ``render_item`` (the Alembic bridge) are loaded on
 first use, so the migration calls never import Alembic.
 """
@@ -18,6 +22,7 @@ from .api import check, require_applied, status, up
 from .baseline import BaselineReport, baseline, remove_baseline
 from .drift import DriftReport, drift, render_op
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
+from .steps import atomic, chunked, irreversible, nothing_to_reverse, todo
 
 if TYPE_CHECKING:
     from .alembic import get_metadata, render_item
@@ -28,15 +33,20 @@ __all__ = [
     "DriftReport",
     "MigrationRefused",
     "PendingMigrationsError",
+    "atomic",
     "baseline",
     "check",
+    "chunked",
     "drift",
     "get_metadata",
+    "irreversible",
+    "nothing_to_reverse",
     "remove_baseline",
     "render_item",
     "render_op",
     "require_applied",
     "status",
+    "todo",
     "up",
 ]
 

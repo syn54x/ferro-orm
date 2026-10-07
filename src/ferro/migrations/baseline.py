@@ -32,7 +32,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from .. import _core
 from ..settings import SettingsError
@@ -41,6 +42,7 @@ from .api import _connection, _resolve
 from .drift import _DESTRUCTIVE, DriftReport, _describe, render_op
 from .errors import MigrationRefused
 from .report import RunRefused
+from .steps import declared_up_kind
 
 if TYPE_CHECKING:
     from ..settings import DatabaseSettings, FerroSettings
@@ -142,6 +144,20 @@ async def _locked(
     return dialect, tracking, handle
 
 
+def _record_declared_kinds(directory: Path, records: list[dict[str, Any]]) -> None:
+    """Give each data step's record the shape its ``up`` declares
+    (``atomic`` / ``chunked``), read from the file's syntax tree: a baseline
+    never runs a data step, so its file is never executed (ADR-0035).
+
+    Raises:
+        StepRefused: a data step whose ``up`` is undeclared or misdeclared.
+    """
+    for record in records:
+        if record["file"].endswith(".py"):
+            path = directory / record["migration_name"] / record["file"]
+            record["kind"] = declared_up_kind(path)
+
+
 async def _record(
     name: str,
     database: DatabaseSettings,
@@ -162,6 +178,7 @@ async def _record(
                 runner._ferro_version(),
             )
         )
+        _record_declared_kinds(database.directory, plan["records"])
         drift = await _against(name, plan["target"], plan["snapshot"], dialect)
         if not drift.clean:
             return BaselineReport(
