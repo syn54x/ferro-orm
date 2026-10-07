@@ -4655,7 +4655,9 @@ mod enum_renames {
         // On SQLite the column is text as wide as its longest label: the
         // longer spelling widens every column of the type too.
         let widened = || {
-            columns().into_iter().map(|(table, column)| MigrationOp::AlterColumnType { table, column })
+            columns()
+                .into_iter()
+                .map(|(table, column)| MigrationOp::AlterColumnType { table, column })
         };
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
             let plan = plan(&parent(), &relabelled(), dialect);
@@ -4668,11 +4670,7 @@ mod enum_renames {
             if dialect == Dialect::Sqlite {
                 expected.extend(widened());
             }
-            assert_eq!(
-                plan.operations,
-                expected,
-                "{dialect:?}"
-            );
+            assert_eq!(plan.operations, expected, "{dialect:?}");
             assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
             assert!(
                 plan.always_warnings.is_empty(),

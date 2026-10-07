@@ -2095,8 +2095,14 @@ mod tests {
         assert_eq!(step_names(&migration), ["01_schema"]);
         assert_eq!(migration.summary, "renamed enum labels: status.live → open");
         let pg = step(&migration, "01_schema", Dialect::Postgres);
-        assert_eq!(pg.up, "ALTER TYPE \"status\" RENAME VALUE 'live' TO 'open';\n");
-        assert_eq!(pg.down, "ALTER TYPE \"status\" RENAME VALUE 'open' TO 'live';\n");
+        assert_eq!(
+            pg.up,
+            "ALTER TYPE \"status\" RENAME VALUE 'live' TO 'open';\n"
+        );
+        assert_eq!(
+            pg.down,
+            "ALTER TYPE \"status\" RENAME VALUE 'open' TO 'live';\n"
+        );
         let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
         assert_eq!(
             sqlite.up,
@@ -2127,13 +2133,17 @@ mod tests {
         );
         assert!(sqlite.up.contains("\"status\" varchar(9)"), "{}", sqlite.up);
         assert!(
-            sqlite
-                .down
-                .contains("UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'published'"),
+            sqlite.down.contains(
+                "UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'published'"
+            ),
             "{}",
             sqlite.down
         );
-        assert!(sqlite.down.contains("\"status\" varchar(5)"), "{}", sqlite.down);
+        assert!(
+            sqlite.down.contains("\"status\" varchar(5)"),
+            "{}",
+            sqlite.down
+        );
     }
 
     #[test]
