@@ -745,10 +745,12 @@ def test_an_unparseable_ddl_lock_timeout_is_refused_naming_the_forms(
     message = str(exc.value)
     assert "ddl_lock_timeout" in message
     assert '"500ms"' in message and '"5s"' in message and '"1m"' in message
+    assert '"0"' in message
 
 
 @pytest.mark.parametrize(
-    "value, seconds", [("250ms", 0.25), ("2s", 2.0), ("1.5s", 1.5), ("1m", 60.0)]
+    "value, seconds",
+    [("250ms", 0.25), ("2s", 2.0), ("1.5s", 1.5), ("1m", 60.0), ("0", 0.0)],
 )
 def test_ddl_lock_timeout_forms(project: Path, value: str, seconds: float):
     _write(

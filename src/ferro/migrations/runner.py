@@ -13,6 +13,13 @@ the ordered pending steps (or the refusal that stops the run), and calls
 file and writes its step record. Nothing here decides which step runs, how,
 or whether a file may run at all.
 
+Each step waits for table locks under the database's ``ddl_lock_timeout``
+(ADR-0044); a step that times out is retried from its first statement, and
+each attempt is a progress line::
+
+    0003_add_slug  01_expand  waiting for a lock on "author" (attempt 1 of 10, retry in 1s)
+    0003_add_slug  01_expand  applied (2214 ms)
+
 :func:`down` walks back (ADR-0033): the same loop over ``_run_plan``'s
 ``Down`` plan, each step's ``.down`` file run by the same executor, which
 removes the step's record in the down's own transaction::
@@ -194,7 +201,9 @@ async def up(
     ``url``) is connected for the run and closed after. A second run waits
     up to ``lock_timeout``, saying so on stderr at once. ``allow_ahead`` lets
     a database holding migrations the directory lacks through (ADR-0038).
-    ``progress`` receives each line as the run goes (one per applied step).
+    ``progress`` receives each line as the run goes: one per applied step,
+    and one per attempt a step makes while it waits for a table lock under
+    ``database.ddl_lock_timeout``.
 
     Returns a :class:`RunReport`; a refusal or a failed step is reported in
     ``refusal``, not raised.
@@ -272,9 +281,18 @@ async def _run(
                 f"ferro migrate: cannot read {shown} ({err}). Nothing more was applied."
             ) from None
         record = {**step["record"], "ferro_version": ferro_version}
+        line = _step_line(step, name_width, stem_width, say)
         outcome = json.loads(
             await _execute_sql_step(
-                name, json.dumps(step), sql, json.dumps(record), tracking, handle
+                name,
+                json.dumps(step),
+                sql,
+                json.dumps(record),
+                tracking,
+                handle,
+                None,
+                database.ddl_lock_timeout_seconds,
+                line,
             )
         )
         if not outcome["ok"]:
@@ -282,10 +300,22 @@ async def _run(
             return
         stem = _stem(step["file"])
         report.applied.append(AppliedStep(step["migration_name"], stem, outcome["ms"]))
-        say(
-            f"{step['migration_name']:<{name_width}}  {stem:<{stem_width}}  "
-            f"applied ({outcome['ms']} ms)"
-        )
+        line(f"applied ({outcome['ms']} ms)")
+
+
+def _step_line(
+    step: dict[str, Any], name_width: int, stem_width: int, say: Callable[[str], Any]
+) -> Callable[[str], None]:
+    """Say ``text`` as one of ``step``'s progress lines:
+    ``<migration>  <step>  <text>``."""
+    prefix = (
+        f"{step['migration_name']:<{name_width}}  {_stem(step['file']):<{stem_width}}  "
+    )
+
+    def line(text: str) -> None:
+        say(prefix + text)
+
+    return line
 
 
 async def status(
@@ -512,7 +542,16 @@ async def down(
                     "down` again to see the plan as it stands now."
                 )
             else:
-                await _revert(name, direction, tracking, handle, steps, report, say)
+                await _revert(
+                    name,
+                    direction,
+                    tracking,
+                    handle,
+                    steps,
+                    report,
+                    say,
+                    database.ddl_lock_timeout_seconds,
+                )
         except RunRefused as refused:
             report.refusal = str(refused)
         finally:
@@ -528,6 +567,7 @@ async def _revert(
     steps: list[dict[str, Any]],
     report: RunReport,
     say: Callable[[str], Any],
+    ddl_lock_timeout: float,
 ) -> None:
     name_width = max(len(step["migration_name"]) for step in steps)
     stem_width = max(len(_stem(step["file"])) for step in steps)
@@ -540,6 +580,7 @@ async def _revert(
             raise RunRefused(
                 f"ferro migrate: cannot read {shown} ({err}). Nothing more was reverted."
             ) from None
+        line = _step_line(step, name_width, stem_width, say)
         outcome = json.loads(
             await _execute_sql_step(
                 name,
@@ -549,6 +590,8 @@ async def _revert(
                 tracking,
                 handle,
                 direction_json,
+                ddl_lock_timeout,
+                line,
             )
         )
         if not outcome["ok"]:
@@ -556,9 +599,8 @@ async def _revert(
             return
         stem = _stem(step["file"])
         report.reverted.append(AppliedStep(step["migration_name"], stem, outcome["ms"]))
-        done = (
+        line(
             f"nothing to reverse: {step['nothing_to_reverse']}"
             if step["nothing_to_reverse"] is not None
             else f"reverted ({outcome['ms']} ms)"
         )
-        say(f"{step['migration_name']:<{name_width}}  {stem:<{stem_width}}  {done}")

@@ -16,11 +16,13 @@ import pytest
 import ferro
 from ferro import _core
 from ferro.migrations import runner
+from ferro.migrations.report import RunRefused
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     isolated_imports,
     pkg,
     project,
+    run,
     write_models,
 )
 from tests.test_migrate_up import (  # noqa: F401 - fixtures
@@ -142,3 +144,42 @@ async def test_a_lock_connection_lost_between_steps_stops_the_run(
     assert report.refusal is not None
     assert "the run lock was lost" in report.refusal
     assert "second" not in db.tables()
+
+
+async def test_lock_timeout_zero_from_the_cli_refuses_at_once_without_waiting(
+    project, pkg, db, capsys
+):
+    _project(project, pkg, db)
+    handle = await _hold(db)
+    capsys.readouterr()
+    try:
+        code = await asyncio.to_thread(
+            run, "migrate", "up", "--url", db.url, "--lock-timeout", "0"
+        )
+    finally:
+        await _core._release_run_lock(handle)
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "longer than the lock timeout (0s)" in captured.err
+    assert WAITING not in captured.err
+    assert captured.out == ""
+    assert "author" not in db.tables()
+
+
+async def test_a_session_that_never_took_the_lock_fails_the_first_check_as_a_pooler(
+    project, pkg, db
+):
+    if db.backend != "postgres":
+        pytest.skip("only a Postgres lock is checked on its session")
+    _project(project, pkg, db)
+    await ferro.connect(db.url, name="pooled")
+    handle = await _core._unacquired_run_lock_for_test("pooled")
+    try:
+        with pytest.raises(RunRefused) as refused:
+            await _core._verify_run_lock(handle)
+    finally:
+        await _core._release_run_lock(handle)
+
+    assert "migrations need a direct or session-mode connection" in str(refused.value)
+    assert "Nothing was applied." in str(refused.value)
