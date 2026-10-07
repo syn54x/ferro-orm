@@ -296,10 +296,26 @@ def _with_data_steps(
             steps.append(step)
             continue
         model, table = data["model"], data["table"]
-        columns = [column["name"] for column in data["columns"]]
+        # A column appears once per reason: a removed enum label (D2) is a
+        # reason of its own, one per label.
+        columns = list(dict.fromkeys(column["name"] for column in data["columns"]))
+        removed: dict[str, list[str]] = {}
+        nulls: set[str] = set()
+        for column in data["columns"]:
+            reason = column["reason"]
+            if reason["kind"] == "label_removed":
+                removed.setdefault(column["name"], []).append(reason["label"])
+            else:
+                nulls.add(column["name"])
         name = step.name
         if data["guard"]:
-            text = backfill_scaffold.guard(model, columns, template_dir=template_dir)
+            text = backfill_scaffold.guard(
+                model,
+                columns,
+                template_dir=template_dir,
+                removed=removed,
+                nulls=nulls,
+            )
         else:
             skip = " ".join(f"--no-backfill {table}.{c}" for c in columns)
             chunked = data["driver"] == "chunked"
@@ -325,8 +341,10 @@ def _with_data_steps(
                 key=data.get("key"),
                 reverse=data["reverse"],
                 skip=skip,
+                removed=removed,
+                nulls=nulls,
             )
-            if len(prefill) < len(columns):
+            if removed or len(prefill) < len(columns):
                 notes.append(
                     f"{step.ordinal:02d}_{name}.py needs writing where it says todo(...); "
                     f"if no {model.lower()} needs a value, delete {migration.dir_name}/ and "

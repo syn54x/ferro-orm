@@ -3436,6 +3436,95 @@ fn label_addition_precedes_every_table_op_including_the_tables_using_the_type() 
     );
 }
 
+/// Between two declared snapshots (the generator) a label the old snapshot
+/// declares and the new one drops is a `RemoveEnumLabel` over every column of
+/// the type, on both dialects (#536, ADR-0037: the removal's backfill is
+/// scaffolded identically everywhere), and no warning; the pass renders it as
+/// a warning only, the generator owns its statements.
+#[test]
+fn a_label_dropped_between_two_snapshots_is_a_removal_on_both_dialects() {
+    let old = envelope(parent_child_models(&["draft", "canceled", "live"]));
+    let new = envelope(parent_child_models(&["draft", "live"]));
+    let removal = MigrationOp::RemoveEnumLabel {
+        type_name: "status".into(),
+        label: "canceled".into(),
+        columns: vec![("child".into(), "status".into())],
+    };
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan =
+            plan_from_ir(&old, &new, dialect, &LiveFacts::declared(), destructive()).expect("plan");
+        assert!(
+            plan.operations.contains(&removal),
+            "{dialect:?} {:?}",
+            plan.operations
+        );
+        assert!(plan.warnings.is_empty(), "{dialect:?} {:?}", plan.warnings);
+        let rendered = render_plan(&plan, &old, &new, dialect).expect("render");
+        let op = rendered.iter().find(|r| r.op == removal).expect("rendered");
+        assert!(op.statements.is_empty());
+        assert_eq!(
+            op.warnings,
+            [
+                "Enum type 'status' has label(s) 'canceled' that the model no longer declares. \
+                 Label addition is append-only: ferro never removes enum labels (existing rows \
+                 may still hold them). Remove or rename labels with a reviewed Alembic \
+                 migration."
+            ]
+        );
+    }
+    // A label a declared hint renames is a rename, never a removal.
+    let mut renamed = parent_child_models(&["draft", "cancelled", "live"]);
+    renamed[0].columns[2].enum_renamed_labels = Some(ferro_schema_ir::SchemaRenamedLabels {
+        enum_class: "Status".into(),
+        labels: [("cancelled".to_string(), "canceled".to_string())].into(),
+    });
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan = plan_from_ir(
+            &old,
+            &envelope(renamed.clone()),
+            dialect,
+            &LiveFacts::declared(),
+            destructive(),
+        )
+        .expect("plan");
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|op| matches!(op, MigrationOp::RemoveEnumLabel { .. })),
+            "{dialect:?} {:?}",
+            plan.operations
+        );
+    }
+}
+
+/// The live side keeps ADR-0011's warn-never-act: a live label the model
+/// dropped is a warning and never an op (#536 pins both sides).
+#[test]
+fn a_label_dropped_against_a_live_database_only_warns() {
+    let models = envelope(parent_child_models(&["draft", "live"]));
+    let mut live = envelope(parent_child_models(&["draft", "canceled", "live"]));
+    let mut facts = LiveFacts::live(Default::default(), Default::default());
+    for model in &mut live.payload.models {
+        facts.tables.entry(model.table_name.clone()).or_default();
+        for col in &mut model.columns {
+            col.postgres_native_enum = col.enum_values.is_some();
+        }
+    }
+    let plan =
+        plan_from_ir(&live, &models, Dialect::Postgres, &facts, destructive()).expect("plan");
+    assert!(
+        !plan
+            .operations
+            .iter()
+            .any(|op| matches!(op, MigrationOp::RemoveEnumLabel { .. })),
+        "{:?}",
+        plan.operations
+    );
+    assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+    assert!(plan.warnings[0].contains("'canceled'"));
+}
+
 #[test]
 fn live_labels_come_from_the_facts_and_extras_only_warn() {
     let models = envelope(parent_child_models(&["draft", "archived"]));

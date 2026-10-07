@@ -302,6 +302,10 @@ _EXECUTED = {
 }
 """Ops with no Alembic twin: the revision runs the planner's statements."""
 
+_SNAPSHOT_ONLY = {"RemoveEnumLabel"}
+"""Ops planned only between two declared snapshots (a label removal, #536):
+the bridge diffs a live database, so meeting one is a bug, refused loudly."""
+
 
 def _executed(
     op: dict[str, Any], statements: list[str] | None = None
@@ -462,6 +466,12 @@ def translate(
     if direction == "up":
         out.extend(FerroWarningOp(warning) for warning in plan.get("warnings") or [])
     for op in plan["operations"]:
+        if op["kind"] in _SNAPSHOT_ONLY:
+            raise RuntimeError(
+                f"ferro: the plan carries a {op['kind']} op, which only two declared "
+                "snapshots plan (`ferro migrate new`), never the live database the "
+                "Alembic bridge diffs; this is a ferro bug, please file an issue"
+            )
         irreversible = op.get("irreversible")
         if irreversible is not None:
             out.append(FerroIrreversibleOp(irreversible["reason"]))
