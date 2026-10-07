@@ -152,20 +152,47 @@ def new(
             )
         ),
     ] = None,
+    data_step: Annotated[
+        str | None,
+        Parameter(
+            help=(
+                "Also add a Python data step NN_backfill_<model>.py over this model "
+                "(its class name), to be written where it says todo(...)."
+            )
+        ),
+    ] = None,
+    data_only: Annotated[
+        bool,
+        Parameter(
+            help=(
+                "Write only the --data-step: no DDL, and a full copy of the previous "
+                "migration's snapshot."
+            ),
+            negative="",
+        ),
+    ] = False,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Write the next migration from the models' difference with the last one.
 
     Diffs the declared models against the newest migration's schema snapshot
     (never a database) and writes NNNN_<name>/ with one rendering per target
-    dialect. A change that renders no DDL writes nothing.
+    dialect. A change that renders no DDL writes nothing, unless a step was
+    asked for.
     """
     from ..migrations.generate import prepare, write
 
     _refuse_url(glob, "new")
     settings = FerroSettings(config=glob.config)
     database = settings.database(glob.database)
-    migration = prepare(settings, database, name, sql_step=sql_step)
+    migration = prepare(
+        settings,
+        database,
+        name,
+        sql_step=sql_step,
+        data_step=data_step,
+        data_only=data_only,
+    )
     if migration is None:
         print("no schema change: nothing written")
         return exit_codes.OK
@@ -188,7 +215,8 @@ def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
 
     Exits 0 when it is, 3 naming each problem otherwise: an ungenerated
     model change, a broken snapshot chain, a duplicate or missing number, a
-    step missing a target dialect's rendering.
+    step missing a target dialect's rendering, a data step still holding
+    todo(...).
     """
     from ..migrations.generate import check as generate_check
 

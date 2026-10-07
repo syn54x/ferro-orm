@@ -141,7 +141,13 @@ def test_an_auto_migrated_database_is_baselined_and_up_applies_only_the_next(
 def test_data_steps_are_recorded_without_running_and_listed(project, pkg, db, capsys):
     auto_migrated(project, pkg, db)
     data_step = migrations(project) / "0001_create_author/02_backfill_author.py"
-    data_step.write_text("raise SystemExit('a baseline never runs a data step')\n")
+    data_step.write_text(
+        "raise SystemExit('a baseline never runs a data step')\n\n\n"
+        "@chunked(lambda models: models.Author.select(), batch_size=100)\n"
+        "async def up(ctx, batch): ...\n\n\n"
+        '@nothing_to_reverse("derived")\n'
+        "def down(ctx): ...\n"
+    )
     capsys.readouterr()
 
     code, out, _ = cli(capsys, "baseline", "--url", db.url)
@@ -159,6 +165,23 @@ def test_data_steps_are_recorded_without_running_and_listed(project, pkg, db, ca
         (1, 2, "baseline"),
         (2, 1, "baseline"),
     ]
+    # The step's declared shape, read from its file without running it.
+    assert db.rows(
+        "SELECT kind FROM _ferro_migrations WHERE migration = 1 AND step = 2"
+    ) == [("chunked",)]
+
+
+def test_an_undeclared_data_step_refuses_the_baseline(project, pkg, db, capsys):
+    auto_migrated(project, pkg, db)
+    data_step = migrations(project) / "0001_create_author/02_backfill_author.py"
+    data_step.write_text("async def up(ctx): ...\n\n\ndef down(ctx): ...\n")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, "baseline", "--url", db.url)
+
+    assert code == 1
+    assert "0001_create_author/02_backfill_author.py: up() has no declaration" in err
+    assert "_ferro_migrations" not in db.tables() or origins(db) == []
 
 
 def test_the_in_process_call_returns_its_report(project, pkg, db):

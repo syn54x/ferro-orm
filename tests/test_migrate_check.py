@@ -189,6 +189,30 @@ def test_a_hand_written_step_is_not_a_problem(project, pkg, capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_an_unwritten_data_step_exits_3_naming_each_todo(project, pkg, capsys):
+    _generated(project, pkg)
+    assert run("migrate", "new", "backfill", "--data-step", "Author") == 0
+    capsys.readouterr()
+
+    assert run("migrate", "check") == 3
+
+    assert capsys.readouterr().err.splitlines() == [
+        "unwritten_step: 0002_backfill/01_backfill_author.py:7: not written yet: "
+        "write this step",
+        "unwritten_step: 0002_backfill/01_backfill_author.py:12: not written yet: "
+        "write this step",
+    ]
+
+    step = project / "migrations" / "0002_backfill" / "01_backfill_author.py"
+    step.write_text(
+        "from ferro.migrations import atomic, nothing_to_reverse\n\n\n"
+        "@atomic\nasync def up(ctx):\n    pass\n\n\n"
+        '@nothing_to_reverse("nothing was changed")\ndef down(ctx): ...\n'
+    )
+    assert run("migrate", "check") == 0
+    assert capsys.readouterr().out == "ok: models match 0002_backfill\n"
+
+
 def test_a_config_without_dialects_is_refused_with_the_line_to_add(
     project, pkg, capsys
 ):

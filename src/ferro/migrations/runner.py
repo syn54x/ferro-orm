@@ -28,28 +28,55 @@ removes the step's record in the down's own transaction::
     Revert 0002_add_teams (1 step)? [y/N] y
     0002_add_teams  01_schema  reverted (8 ms)
 
+A data step (``NN_<name>.py``, ADR-0024) is Python's to run: every planned
+one is loaded before anything runs (its checksum checked, its declarations
+read, every ``todo`` refused by file and line), then each runs on the run's
+connection inside one transaction under its migration's historical models
+(:meth:`ferro.registry.Registry.swap`), its record committed inside it::
+
+    0011_backfill_slugs  01_backfill_author  applied (40 ms)
+
 :func:`status` reads the same records with no lock and creates nothing.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from .. import _core
 from .._core import _acquire_run_lock, _execute_sql_step
+from ..models import transaction
+from ..registry import REGISTRY
 from ..settings import _DURATION, _DURATION_UNITS, SettingsError
+from ..state import resolve_operation_scope
+from . import historical
+from .context import HistoricalModels, StepContext
+from .historical import HistoricalModelError
 from .report import RunRefused, StatusReport
+from .steps import (
+    Chunked,
+    Irreversible,
+    LoadedStep,
+    NothingToReverse,
+    StepRefused,
+    load_step,
+    unwritten,
+)
 
 if TYPE_CHECKING:
+    from ..raw import Transaction
     from ..settings import DatabaseSettings, FerroSettings
 
 __all__ = [
@@ -67,7 +94,7 @@ __all__ = [
 ]
 
 _UP = json.dumps({"direction": "up"})
-_STEP_STEM = re.compile(r"\.(up|down)(\.[a-z]+)?\.sql$")
+_STEP_STEM = re.compile(r"(\.(up|down)(\.[a-z]+)?\.sql|\.py)$")
 _TARGET = re.compile(r"(\d{4})(?::(\d{2}))?")
 
 
@@ -260,47 +287,293 @@ async def _run(
     steps = plan["steps"]
     if not steps:
         return
+    loaded = _load_data_steps(steps, "up")
     await _core._ensure_tracking_tables(name, tracking)
     name_width = max(len(step["migration_name"]) for step in steps)
     stem_width = max(len(_stem(step["file"])) for step in steps)
     ferro_version = _ferro_version()
+    with _HistoricalSwaps(database.directory) as swaps:
+        for step in steps:
+            shown = f"{step['migration_name']}/{step['file']}"
+            if step["edited"] is not None:
+                note = (
+                    f"{shown} changed since its unfinished attempt "
+                    f"(sha384:{step['edited']['recorded']}); running the file as it "
+                    f"is now and re-recording its checksum (sha384:{step['checksum']})"
+                )
+                report.notes.append(note)
+                say(note)
+            record = {**step["record"], "ferro_version": ferro_version}
+            line = _step_line(step, name_width, stem_width, say)
+            if step["data"]:
+                step_ctx = _DataStep(name, tracking, handle, dialect, step, line)
+                outcome = await step_ctx.up(
+                    loaded[_key(step)], swaps.models_for(step), record
+                )
+            else:
+                swaps.leave(step)
+                try:
+                    sql = Path(step["path"]).read_bytes().decode("utf-8")
+                except (OSError, UnicodeDecodeError) as err:
+                    raise RunRefused(
+                        f"ferro migrate: cannot read {shown} ({err}). Nothing more "
+                        f"was applied."
+                    ) from None
+                outcome = json.loads(
+                    await _execute_sql_step(
+                        name,
+                        json.dumps(step),
+                        sql,
+                        json.dumps(record),
+                        tracking,
+                        handle,
+                        None,
+                        database.ddl_lock_timeout_seconds,
+                        line,
+                    )
+                )
+            if not outcome["ok"]:
+                report.refusal = outcome["message"]
+                return
+            stem = _stem(step["file"])
+            report.applied.append(
+                AppliedStep(step["migration_name"], stem, outcome["ms"])
+            )
+            line(f"applied ({outcome['ms']} ms)")
+
+
+# -- data steps -------------------------------------------------------------------
+
+
+def _key(step: dict[str, Any]) -> tuple[int, int]:
+    return step["migration"], step["step"]
+
+
+def _load_data_steps(
+    steps: list[dict[str, Any]], direction: str
+) -> dict[tuple[int, int], LoadedStep]:
+    """Load every planned data step before anything runs, refusing the run
+    on a file that does not load, an unwritten step (every ``todo`` named by
+    file, line and message), a ``chunked`` step, or (going down) an
+    irreversible one. A ``nothing_to_reverse`` down marks its step so."""
+    nothing = "applied" if direction == "up" else "reverted"
+    loaded: dict[tuple[int, int], LoadedStep] = {}
+    todos: list[str] = []
     for step in steps:
+        if not step["data"] or step["nothing_to_reverse"] is not None:
+            continue
+        path = Path(step["path"])
         shown = f"{step['migration_name']}/{step['file']}"
-        if step["edited"] is not None:
-            note = (
-                f"{shown} changed since its unfinished attempt "
-                f"(sha384:{step['edited']['recorded']}); running the file as it is "
-                f"now and re-recording its checksum (sha384:{step['checksum']})"
-            )
-            report.notes.append(note)
-            say(note)
         try:
-            sql = Path(step["path"]).read_bytes().decode("utf-8")
-        except (OSError, UnicodeDecodeError) as err:
+            this = load_step(path, step["checksum"])
+        except StepRefused as refused:
+            raise RunRefused(f"{refused}. Nothing was {nothing}.") from None
+        todos += unwritten(path, this.todos)
+        declared = this.up if direction == "up" else this.down
+        shape = declared.shape
+        if isinstance(shape, Chunked):
             raise RunRefused(
-                f"ferro migrate: cannot read {shown} ({err}). Nothing more was applied."
-            ) from None
-        record = {**step["record"], "ferro_version": ferro_version}
-        line = _step_line(step, name_width, stem_width, say)
-        outcome = json.loads(
-            await _execute_sql_step(
-                name,
-                json.dumps(step),
-                sql,
-                json.dumps(record),
-                tracking,
-                handle,
-                None,
-                database.ddl_lock_timeout_seconds,
-                line,
+                f"ferro migrate: {shown}: chunked steps run in ticket #532. "
+                f"Nothing was {nothing}."
             )
+        if isinstance(shape, Irreversible):
+            raise RunRefused(
+                f"ferro migrate: {step['migration']:04}:{step['step']:02} is "
+                f"irreversible: {shape.reason}\nThere is no flag to skip it: to revert "
+                f"past it, write the step's down in place of the declaration. Nothing "
+                f"was reverted."
+            )
+        if isinstance(shape, NothingToReverse):
+            step["nothing_to_reverse"] = shape.reason
+        loaded[_key(step)] = this
+    if todos:
+        raise RunRefused(
+            "\n".join(todos)
+            + f"\nWrite each step where it says todo(...), then run `ferro migrate "
+            f"{direction}` again. Nothing was {nothing}."
         )
-        if not outcome["ok"]:
-            report.refusal = outcome["message"]
-            return
-        stem = _stem(step["file"])
-        report.applied.append(AppliedStep(step["migration_name"], stem, outcome["ms"]))
-        line(f"applied ({outcome['ms']} ms)")
+    return loaded
+
+
+class _HistoricalSwaps:
+    """The registry swap of the migration whose data step is running: one
+    swap per migration with data steps, held until the run leaves that
+    migration (ADR-0035), restored on exit, error and cancellation."""
+
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+        self._stack = ExitStack()
+        self._migration: int | None = None
+        self._installed: HistoricalModels | None = None
+        self._snapshots: dict[int, dict[str, Any]] | None = None
+
+    def __enter__(self) -> _HistoricalSwaps:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._stack.close()
+
+    def leave(self, step: dict[str, Any]) -> None:
+        """Restore today's registry when ``step`` belongs to another migration."""
+        if self._migration is not None and step["migration"] != self._migration:
+            self._stack.close()
+            self._migration = None
+            self._installed = None
+
+    def models_for(self, step: dict[str, Any]) -> HistoricalModels:
+        """The historical models of ``step``'s migration, installed."""
+        self.leave(step)
+        if self._installed is None:
+            models = self._build(step)
+            self._stack.enter_context(REGISTRY.swap(models))
+            self._migration, self._installed = step["migration"], models
+        return self._installed
+
+    def _build(self, step: dict[str, Any]) -> HistoricalModels:
+        if self._snapshots is None:
+            raw = json.loads(_core._read_migrations_dir(str(self._directory)))
+            self._snapshots = {m["number"]: m["snapshot"] for m in raw["migrations"]}
+        own = self._snapshots[step["migration"]]
+        if own["checksum"] != step["snapshot_checksum"]:
+            raise RunRefused(
+                f"ferro migrate: {step['migration_name']}/ir.json changed while this "
+                f"run was in progress. Run `ferro migrate up` again. Nothing more was "
+                f"applied."
+            )
+        parent = self._snapshots.get(step["migration"] - 1)
+        try:
+            return historical.build(
+                parent["ir"] if parent is not None else None,
+                own["ir"],
+                rev=step["migration_name"],
+            )
+        except HistoricalModelError as refused:
+            raise RunRefused(f"{refused} Nothing more was run.") from None
+
+
+def _now() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class _DataStep:
+    """Run one planned data step and settle its record (ADR-0024): an atomic
+    step is one transaction on the run's connection, its record finished
+    (going up) or removed (going down) inside that transaction. A failure
+    rolls the transaction back and records ``failed_at`` and the error in a
+    transaction of its own."""
+
+    def __init__(
+        self,
+        name: str,
+        tracking: str | None,
+        handle: int,
+        dialect: str,
+        step: dict[str, Any],
+        line: Callable[[str], None],
+    ) -> None:
+        self._name = name
+        self._tracking = tracking
+        self._handle = handle
+        self._dialect = dialect
+        self._step = step
+        self._line = line
+
+    @property
+    def _shown(self) -> str:
+        return f"{self._step['migration_name']}/{self._step['file']}"
+
+    def _context(self, models: HistoricalModels, tx: Transaction) -> StepContext:
+        stem = _stem(self._step["file"])
+        log = logging.getLogger(f"ferro.migrations.{self._step['migration']:04}.{stem}")
+        return StepContext(models, tx, self._dialect, log)
+
+    async def _write(self, record: dict[str, Any], *, in_step: bool = False) -> None:
+        """Write ``record``: inside the step's open transaction when
+        ``in_step`` (it commits with the step), else on its own."""
+        route = resolve_operation_scope(using=None, session=None) if in_step else None
+        await _core._write_record(self._name, json.dumps(record), self._tracking, route)
+
+    async def up(
+        self, loaded: LoadedStep, models: HistoricalModels, record: dict[str, Any]
+    ) -> dict[str, Any]:
+        await _core._verify_run_lock(self._handle)
+        started = {
+            **record,
+            "kind": loaded.up.shape.kind,
+            "started_at": _now(),
+            "finished_at": None,
+            "failed_at": None,
+            "error": None,
+            "duration_ms": 0,
+        }
+        await self._write(started)
+        clock = time.monotonic()
+        try:
+            async with transaction(using=self._name) as tx:
+                await loaded.up.fn(self._context(models, tx))
+                ms = _elapsed(clock)
+                await self._write(
+                    {**started, "finished_at": _now(), "duration_ms": ms}, in_step=True
+                )
+        except Exception as err:
+            ms = _elapsed(clock)
+            error = _error_text(err)
+            await self._write(
+                {**started, "failed_at": _now(), "error": error, "duration_ms": ms}
+            )
+            return {
+                "ok": False,
+                "ms": ms,
+                "message": (
+                    f"ferro migrate: {self._shown} failed: {error}\nThe step was rolled "
+                    f"back; fix the file or the database and run `ferro migrate up` "
+                    f"again to resume at it. Nothing after it ran."
+                ),
+            }
+        return {"ok": True, "ms": ms}
+
+    async def down(
+        self, loaded: LoadedStep | None, models: HistoricalModels | None
+    ) -> dict[str, Any]:
+        await _core._verify_run_lock(self._handle)
+        standing = self._step["record"]
+        clock = time.monotonic()
+        try:
+            async with transaction(using=self._name) as tx:
+                if loaded is not None and models is not None:
+                    await loaded.down.fn(self._context(models, tx))
+                route = resolve_operation_scope(using=None, session=None)
+                await _core._remove_record(
+                    route, standing["migration"], standing["step"], self._tracking
+                )
+        except Exception as err:
+            ms = _elapsed(clock)
+            error = _error_text(err)
+            # The upsert adds duration_ms: a failed down adds nothing to the
+            # time the step took to apply.
+            await self._write(
+                {**standing, "failed_at": _now(), "error": error, "duration_ms": 0}
+            )
+            return {
+                "ok": False,
+                "ms": ms,
+                "message": (
+                    f"ferro migrate: {self._shown} failed: {error}\nThe down was rolled "
+                    f"back and the step's record stands; fix the file or the database "
+                    f"and run `ferro migrate down` again to resume at it. Nothing after "
+                    f"it ran."
+                ),
+            }
+        return {"ok": True, "ms": _elapsed(clock)}
+
+
+def _elapsed(clock: float) -> int:
+    return int((time.monotonic() - clock) * 1000)
+
+
+def _error_text(err: BaseException) -> str:
+    text = str(err)
+    return f"{type(err).__name__}: {text}" if text else type(err).__name__
 
 
 def _step_line(
@@ -442,6 +715,9 @@ async def _plan_down(
                 False,
             )
         )
+        # A data step's down declares itself in Python: an irreversible one
+        # refuses here, before any lock; a nothing-to-reverse one says so.
+        _load_data_steps(plan["steps"], "down")
     except RunRefused as refused:
         return [], str(refused)
     return plan["steps"], None
@@ -544,13 +820,14 @@ async def down(
             else:
                 await _revert(
                     name,
+                    database,
+                    dialect,
                     direction,
                     tracking,
                     handle,
                     steps,
                     report,
                     say,
-                    database.ddl_lock_timeout_seconds,
                 )
         except RunRefused as refused:
             report.refusal = str(refused)
@@ -561,46 +838,59 @@ async def down(
 
 async def _revert(
     name: str,
+    database: DatabaseSettings,
+    dialect: str,
     direction: dict[str, Any],
     tracking: str | None,
     handle: int,
     steps: list[dict[str, Any]],
     report: RunReport,
     say: Callable[[str], Any],
-    ddl_lock_timeout: float,
 ) -> None:
+    loaded = _load_data_steps(steps, "down")
     name_width = max(len(step["migration_name"]) for step in steps)
     stem_width = max(len(_stem(step["file"])) for step in steps)
     direction_json = json.dumps(direction)
-    for step in steps:
-        shown = f"{step['migration_name']}/{step['file']}"
-        try:
-            sql = Path(step["path"]).read_bytes().decode("utf-8")
-        except (OSError, UnicodeDecodeError) as err:
-            raise RunRefused(
-                f"ferro migrate: cannot read {shown} ({err}). Nothing more was reverted."
-            ) from None
-        line = _step_line(step, name_width, stem_width, say)
-        outcome = json.loads(
-            await _execute_sql_step(
-                name,
-                json.dumps(step),
-                sql,
-                json.dumps(step["record"]),
-                tracking,
-                handle,
-                direction_json,
-                ddl_lock_timeout,
-                line,
+    with _HistoricalSwaps(database.directory) as swaps:
+        for step in steps:
+            shown = f"{step['migration_name']}/{step['file']}"
+            line = _step_line(step, name_width, stem_width, say)
+            if step["data"]:
+                this = loaded.get(_key(step))
+                models = swaps.models_for(step) if this is not None else None
+                runner = _DataStep(name, tracking, handle, dialect, step, line)
+                outcome = await runner.down(this, models)
+            else:
+                swaps.leave(step)
+                try:
+                    sql = Path(step["path"]).read_bytes().decode("utf-8")
+                except (OSError, UnicodeDecodeError) as err:
+                    raise RunRefused(
+                        f"ferro migrate: cannot read {shown} ({err}). Nothing more "
+                        f"was reverted."
+                    ) from None
+                outcome = json.loads(
+                    await _execute_sql_step(
+                        name,
+                        json.dumps(step),
+                        sql,
+                        json.dumps(step["record"]),
+                        tracking,
+                        handle,
+                        direction_json,
+                        database.ddl_lock_timeout_seconds,
+                        line,
+                    )
+                )
+            if not outcome["ok"]:
+                report.refusal = outcome["message"]
+                return
+            stem = _stem(step["file"])
+            report.reverted.append(
+                AppliedStep(step["migration_name"], stem, outcome["ms"])
             )
-        )
-        if not outcome["ok"]:
-            report.refusal = outcome["message"]
-            return
-        stem = _stem(step["file"])
-        report.reverted.append(AppliedStep(step["migration_name"], stem, outcome["ms"]))
-        line(
-            f"nothing to reverse: {step['nothing_to_reverse']}"
-            if step["nothing_to_reverse"] is not None
-            else f"reverted ({outcome['ms']} ms)"
-        )
+            line(
+                f"nothing to reverse: {step['nothing_to_reverse']}"
+                if step["nothing_to_reverse"] is not None
+                else f"reverted ({outcome['ms']} ms)"
+            )

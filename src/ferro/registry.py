@@ -17,6 +17,10 @@ so their agreement invariants have exactly one home:
   ``clear_registry`` guarded by a warning comment).
 - A test reset or snapshot/restore covers every store and counter in one
   call (:meth:`Registry.reset_for_test`, :meth:`Registry.snapshot`).
+- A modelset that must never mix with today's (a data step's historical
+  models) is built against an empty registry (:meth:`Registry.capture`) and
+  installed for a block (:meth:`Registry.swap`), which restores today's on
+  exit, error and cancellation.
 
 Ordering caveat (unchanged from the pre-Registry design, closed by a future
 atomic register→persist step): defining model classes concurrently with
@@ -29,6 +33,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -82,6 +88,73 @@ class RegistrySnapshot:
     modelset_fingerprint: str | None
     registration_generation: int
     resolved_generation: int
+
+
+class SwappableModelset(Protocol):
+    """What :meth:`Registry.swap` installs (``ferro.migrations.context.HistoricalModels``)."""
+
+    @property
+    def registry_state(self) -> RegistrySnapshot:
+        """The registry state holding exactly the modelset's classes."""
+        ...
+
+    def unreachable(self, cls: FerroModelClass) -> str:
+        """Why today's ``cls`` cannot be queried while the modelset is installed."""
+        ...
+
+
+class SwappedOutModelError(RuntimeError):
+    """A model class from the codebase was queried while :meth:`Registry.swap`
+    had a different modelset installed (inside a data step: use
+    ``ctx.models.<Name>``)."""
+
+
+class _SwappedOut:
+    """Stands in for one entry point of a swapped-out model class; any access
+    (``Author.where``, ``author.save``) raises with the modelset's text."""
+
+    __slots__ = ("_text",)
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __get__(self, instance: object, owner: type | None = None) -> Any:
+        raise SwappedOutModelError(self._text)
+
+
+def _entry_points() -> list[str]:
+    """Every public query and persistence entry point a model class has: the
+    callables ``ferro.models.Model`` itself defines."""
+    from .models import Model
+
+    return [
+        name
+        for name, value in vars(Model).items()
+        if not name.startswith("_")
+        and callable(getattr(value, "__func__", value))
+        and name != "model_config"
+    ]
+
+
+def _guard(cls: FerroModelClass, text: str) -> list[tuple[FerroModelClass, str, Any]]:
+    """Shadow every entry point of ``cls`` with a :class:`_SwappedOut`;
+    return what to put back."""
+    placed: list[tuple[FerroModelClass, str, Any]] = []
+    for name in _entry_points():
+        placed.append((cls, name, cls.__dict__.get(name, _UNSET)))
+        setattr(cls, name, _SwappedOut(text))
+    return placed
+
+
+def _install_in_rust(state: RegistrySnapshot) -> None:
+    """Install ``state``'s assembled modelset in the Rust runtime (through
+    the fingerprint gate), or clear it when the state has none."""
+    from . import _core
+
+    if state.modelset is None or state.modelset_fingerprint is None:
+        _core.clear_registry()
+        return
+    _core._install_registration(json.dumps(state.modelset), state.modelset_fingerprint)
 
 
 class Registry:
@@ -278,6 +351,56 @@ class Registry:
         return self._registration_generation != self._resolved_generation or bool(
             self._pending_relations
         )
+
+    # -- scoped modelsets -----------------------------------------------------------
+
+    def capture[T](self, define: Callable[[], T]) -> tuple[T, RegistrySnapshot]:
+        """Run ``define`` against an empty registry and return its result with
+        the registry state it left, restoring this registry's own state
+        whatever happens.
+
+        How a modelset that must never mix with today's is built: classes
+        ``define`` creates register (through the metaclass) into the empty
+        registry, and the returned :class:`RegistrySnapshot` holds exactly
+        them, ready for :meth:`swap`.
+        """
+        today = self.snapshot()
+        try:
+            self.reset_for_test()
+            result = define()
+            return result, self.snapshot()
+        finally:
+            self.restore(today)
+
+    @contextmanager
+    def swap(self, modelset: SwappableModelset) -> Iterator[None]:
+        """Install ``modelset`` as the registry, in Python and in the Rust
+        runtime, for the block; restore today's on exit, error and
+        cancellation.
+
+        While it is installed, every query and persistence entry point of
+        today's model classes (``Author.where``, ``author.save``, ...) raises
+        :class:`SwappedOutModelError` with ``modelset.unreachable(cls)``, so
+        a data step can never query today's table shape by mistake. The Rust
+        side is installed through the fingerprint gate, once on entry and
+        once on exit.
+        """
+        today = self.snapshot()
+        guarded: list[tuple[FerroModelClass, str, Any]] = []
+        try:
+            for cls in today.models.values():
+                guarded.extend(_guard(cls, modelset.unreachable(cls)))
+            self.restore(modelset.registry_state)
+            _install_in_rust(modelset.registry_state)
+            yield
+        finally:
+            self.restore(today)
+            for cls, name, previous in reversed(guarded):
+                if previous is _UNSET:
+                    delattr(cls, name)
+                else:
+                    setattr(cls, name, previous)
+            _install_in_rust(today)
 
     # -- test surface ------------------------------------------------------------
 
