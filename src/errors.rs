@@ -384,23 +384,50 @@ pub(crate) async fn violation_count(
     Ok(first_count(&engine.fetch_all_sql_unprepared(&sql).await?))
 }
 
-/// The counted message for `failure`, with the recipe resuming at
-/// `resume_at` (`<migration>:<step>`), or `None` when the count cannot be
-/// read (the caller keeps the database's own message).
+/// The failure text for `failure` given what counting it gave (`counted`):
+/// the counted message with the recipe resuming at `resume_at`
+/// (`<migration>:<step>`); when the count could not be read, the database's
+/// own `original` message with why the count is missing chained after it,
+/// so neither is hidden.
+pub(crate) fn counted_failure_text(
+    failure: &CountedFailure,
+    counted: Result<Option<i64>, String>,
+    original: &str,
+    resume_at: &str,
+) -> String {
+    let name = match failure {
+        CountedFailure::Validate { constraint, .. } => constraint,
+        CountedFailure::UniqueBuild { index, .. } => index,
+    };
+    match counted {
+        Ok(Some(count)) => match failure {
+            CountedFailure::Validate { .. } => validate_failure_message(name, count, resume_at),
+            CountedFailure::UniqueBuild { .. } => {
+                unique_build_failure_message(name, count, resume_at)
+            }
+        },
+        Ok(None) => format!(
+            "{original} (the offending rows could not be counted: the catalog no longer \
+             describes \"{name}\"); fix them and run ferro migrate up to resume at {resume_at}"
+        ),
+        Err(err) => format!(
+            "{original} (counting the offending rows failed: {err}); fix them and run ferro \
+             migrate up to resume at {resume_at}"
+        ),
+    }
+}
+
+/// [`counted_failure_text`] for `failure`, counted on `engine` now.
 pub(crate) async fn counted_failure_message(
     engine: &crate::backend::EngineHandle,
     failure: &CountedFailure,
+    original: &str,
     resume_at: &str,
-) -> Option<String> {
-    let count = violation_count(engine, failure).await.ok()??;
-    Some(match failure {
-        CountedFailure::Validate { constraint, .. } => {
-            validate_failure_message(constraint, count, resume_at)
-        }
-        CountedFailure::UniqueBuild { index, .. } => {
-            unique_build_failure_message(index, count, resume_at)
-        }
-    })
+) -> String {
+    let counted = violation_count(engine, failure)
+        .await
+        .map_err(|err| err.to_string());
+    counted_failure_text(failure, counted, original, resume_at)
 }
 
 #[cfg(test)]
@@ -487,6 +514,35 @@ mod counted_failure_tests {
             "SELECT count(*) FROM (SELECT 1 FROM \"author\" WHERE \"email\" IS NOT NULL AND \
              \"team_id\" IS NOT NULL GROUP BY \"email\", \"team_id\" HAVING count(*) > 1) AS \
              duplicates"
+        );
+    }
+
+    #[test]
+    fn a_count_that_cannot_be_read_chains_onto_the_databases_own_message() {
+        let failure = CountedFailure::Validate {
+            table: "author".into(),
+            constraint: "ck_author_email_nonempty".into(),
+        };
+        let original = "check constraint \"ck_author_email_nonempty\" of relation \"author\" \
+                        is violated by some row";
+        assert_eq!(
+            counted_failure_text(&failure, Ok(Some(3)), original, "0005_x:03"),
+            validate_failure_message("ck_author_email_nonempty", 3, "0005_x:03")
+        );
+        assert_eq!(
+            counted_failure_text(
+                &failure,
+                Err("connection reset".into()),
+                original,
+                "0005_x:03"
+            ),
+            format!(
+                "{original} (counting the offending rows failed: connection reset); fix them \
+                 and run ferro migrate up to resume at 0005_x:03"
+            )
+        );
+        assert!(
+            counted_failure_text(&failure, Ok(None), original, "0005_x:03").starts_with(original)
         );
     }
 

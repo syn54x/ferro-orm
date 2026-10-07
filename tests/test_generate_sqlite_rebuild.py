@@ -565,6 +565,12 @@ def test_a_type_change_and_a_new_index_on_one_table_copy_it_once(project, pkg, d
     ]
     assert sum(s.startswith("CREATE TABLE") for s in up) == 1
     assert not any('"idx_author_email"' in s for s in up)
+    # The index the table already had is recreated once, after the rename.
+    kept = [s for s in up if '"uq_author_name"' in s]
+    assert len(kept) == 1
+    assert up.index(kept[0]) > up.index(
+        'ALTER TABLE "_ferro_new_author" RENAME TO "author"'
+    )
     index_step = migration_dir(project, number) / "02_idx_author_email.up.sqlite.sql"
     assert statements(index_step) == [built]
     round_trip(project, db, number)
