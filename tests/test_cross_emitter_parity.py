@@ -45,16 +45,20 @@ fixture model below to cover it; if the sentinel goes red, the planner and
 the create pass disagree — fix them.
 """
 
+import ast
+import asyncio
 import contextlib
 import dataclasses
 import datetime
 import decimal
+import importlib
 import io
 import json
 import re
 import shutil
 import sys
 import uuid
+import warnings
 from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -76,14 +80,16 @@ from ferro import (
     _core,
     clear_registry,
     connect,
+    ensure_resolved_modelset,
     reset_engine,
 )
+from ferro.migrations import drift as migrations_drift
 from ferro.migrations import get_metadata
-from tests._alembic_harness import autogen_opts
+from tests._alembic_harness import autogen_opts, autogenerate, run_revision
 from tests._casebook import CASES, Case
 from tests.test_migrate_down import migration_dir
 from tests.test_migrate_new import statements, write_config, write_models
-from tests.test_migrate_up import new
+from tests.test_migrate_up import Db, new
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -835,35 +841,69 @@ def assert_door_is_the_pass(door: Door, dialect: str) -> None:
         )
 
 
-# A rename hint and a type change in one plan: the pass cannot render it from
-# two snapshots (nor from a live database: `connect(migrate_updates=True)`
-# refuses with the same error), while the generator writes it.
-_PASS_CANNOT_RENDER = {
-    "F2-a-rename-and-a-type-change": (
+@dataclass(frozen=True)
+class Finding:
+    """A pin this ticket found failing against merged behaviour. It is
+    reported, not patched (#538 changes no production code): the pin runs
+    and must fail exactly this way (``xfail(strict=True)``), so the fix
+    turns it green and the strict xfail makes the fix remove this entry."""
+
+    reason: str
+    raises: type[BaseException]
+    pins: frozenset[str]
+    dialects: frozenset[str] = frozenset(DIALECTS)
+
+
+FINDINGS = {
+    "F2-a-rename-and-a-type-change": Finding(
         "finding (#538): the reconciliation pass refuses a rename hint plus a type "
-        "change of the renamed column ('column \\'author.full_name\\' not found in "
-        "IR context'); the generator renders it"
+        "change of the renamed column (\"column 'author.full_name' not found in IR "
+        'context"), from two snapshots and on connect(migrate_updates=True); the '
+        "generator renders it",
+        ValueError,
+        frozenset({"a", "f"}),
+    ),
+    "A4-drop-a-required-column": Finding(
+        "finding (#538): autogenerate raises the planner's ValueError (\"Cannot add "
+        "NOT NULL column 'author.nickname' …\") rendering the downgrade of a dropped "
+        "required column, instead of a revision whose downgrade is data-dependent "
+        "(the generator's down) or a refusal",
+        ValueError,
+        frozenset({"f"}),
+    ),
+    "B2-drop-a-model": Finding(
+        "finding (#538): a dropped model is Alembic's own drop_table (ferro's "
+        "comparator plans only the declared tables), so the revision never runs "
+        'the pass\'s DropEnumType (DROP TYPE "kind") and leaves the type behind',
+        AssertionError,
+        frozenset({"f"}),
+        frozenset({"postgres"}),
+    ),
+    "D3-rename-a-label": Finding(
+        "finding (#538): on SQLite the live side carries no enum labels, so the "
+        "pass plans no RenameEnumLabel for a __ferro_renamed_labels__ hint: "
+        "connect(migrate_updates=True) leaves every 'canceled' row as it is and "
+        "warns nothing, while autogenerate refuses naming `ferro migrate new` and "
+        "the generator relabels the rows",
+        AssertionError,
+        frozenset({"f"}),
+        frozenset({"sqlite"}),
     ),
 }
 
 
-def _xfail_where_the_pass_cannot_render(case_ids: list[str]) -> list:
-    return [
-        pytest.param(
-            case_id,
-            marks=pytest.mark.xfail(
-                strict=True, raises=ValueError, reason=_PASS_CANNOT_RENDER[case_id]
-            ),
+def expect_finding(request, case_id: str, dialect: str, pin: str) -> None:
+    finding = FINDINGS.get(case_id)
+    if finding and pin in finding.pins and dialect in finding.dialects:
+        request.applymarker(
+            pytest.mark.xfail(strict=True, raises=finding.raises, reason=finding.reason)
         )
-        if case_id in _PASS_CANNOT_RENDER
-        else case_id
-        for case_id in case_ids
-    ]
 
 
 @pytest.mark.parametrize("dialect", DIALECTS)
-@pytest.mark.parametrize("case_id", _xfail_where_the_pass_cannot_render(CASE_IDS))
-def test_pin_a_the_generated_steps_are_the_pass_plan(doors, case_id, dialect):
+@pytest.mark.parametrize("case_id", CASE_IDS)
+def test_pin_a_the_generated_steps_are_the_pass_plan(request, doors, case_id, dialect):
+    expect_finding(request, case_id, dialect, "a")
     assert_door_is_the_pass(doors(case_id), dialect)
 
 
@@ -1216,3 +1256,314 @@ def test_pin_d_the_type_creation_is_the_pass_statement(doors, case_id, dialect):
     planned = _pass_statements_of(door, dialect, "CreateEnumType")
     assert created == planned
     assert bool(planned) is (dialect == "postgres")
+
+
+# -- the database pins: a project, a second database, the live schema ----------------
+
+
+@dataclass(frozen=True)
+class Project:
+    root: Path
+    pkg: str
+
+    def register(self, body: str) -> dict:
+        """Declare ``body``'s models in this process; returns their envelope."""
+        write_models(self.root, self.pkg, body)
+        importlib.import_module(f"{self.pkg}.models")
+        return ensure_resolved_modelset()
+
+
+@pytest.fixture
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request):
+    """A ferro project under ``tmp_path``, the working directory; its package
+    is forgotten afterwards."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    monkeypatch.delenv("FERRO_CONFIG", raising=False)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys, "path", [str(root), *sys.path])
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    pkg = "ferro_p538_" + uuid.uuid4().hex[:12]
+    yield Project(root, pkg)
+    for name in [m for m in sys.modules if m == pkg or m.startswith(pkg + ".")]:
+        del sys.modules[name]
+    _rewind_registry()
+
+
+@pytest.fixture
+def second_db(tmp_path: Path, db_backend: str, postgres_base_url: str | None):
+    """A second, empty database of the same backend: ``(url, schema)``."""
+    if db_backend == "sqlite":
+        yield f"sqlite:{tmp_path / 'second.db'}?mode=rwc", None
+        return
+    import psycopg
+
+    from tests.db_backends import build_postgres_test_url
+
+    assert postgres_base_url is not None
+    schema = f"p538_{uuid.uuid4().hex[:16]}"
+    with psycopg.connect(postgres_base_url, autocommit=True) as conn:
+        conn.execute(f'CREATE SCHEMA "{schema}"')
+    try:
+        yield build_postgres_test_url(postgres_base_url, schema), schema
+    finally:
+        reset_engine()
+        with psycopg.connect(postgres_base_url, autocommit=True) as conn:
+            conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
+def _cli(*argv: str) -> int:
+    from ferro.cli import main
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        return main(list(argv))
+
+
+def migrate_through(
+    project: Project, case: Case, url: str, backend: str
+) -> Path | None:
+    """``0001`` creates ``case.before`` and is applied; ``0002`` is the edit,
+    each backfill's ``todo(...)`` written as ``None`` (the tables are empty,
+    so no row asks for one), and is applied. Returns ``0002``, or ``None``
+    where the edit changes nothing on ``backend`` (row security or an enum
+    type on SQLite: ``new`` writes no migration)."""
+    write_config(project.root, project.pkg, f'["{backend}"]')
+    write_models(project.root, project.pkg, case.before)
+    new("create")
+    assert _cli("migrate", "up", "--url", url) == 0
+    write_models(project.root, project.pkg, case.after)
+    new("edit")
+    if not list((project.root / "migrations").glob("0002_*")):
+        return None
+    migration = migration_dir(project.root, 2)
+    for scaffold in migration.glob("*.py"):
+        scaffold.write_text(_TODO.sub("None", scaffold.read_text()))
+    assert _cli("migrate", "up", "--url", url) == 0
+    return migration
+
+
+async def _read_live(url: str, tables: set[str]) -> tuple[str, str]:
+    name = f"p538_{uuid.uuid4().hex}"
+    await connect(url, name=name)
+    try:
+        return await _core._live_schema_ir(name, json.dumps(sorted(tables)))
+    finally:
+        await _core._disconnect(name)
+
+
+def _canonical(value):
+    """``value`` with every list of objects sorted: the live schema's
+    catalog order (which index was built first) is not schema."""
+    if isinstance(value, dict):
+        return {k: _canonical(v) for k, v in value.items()}
+    if isinstance(value, list):
+        items = [_canonical(v) for v in value]
+        if all(isinstance(v, dict) for v in items):
+            return sorted(items, key=lambda v: json.dumps(v, sort_keys=True))
+        return items
+    return value
+
+
+def live_schema(url: str, tables: set[str]) -> dict:
+    """The live schema and facts as the reconciliation pass reads them."""
+    live, facts = asyncio.run(_read_live(url, tables))
+    return _canonical({"schema": json.loads(live), "facts": json.loads(facts)})
+
+
+def auto_migrate(url: str, name: str | None = None) -> None:
+    """``connect(url, auto_migrate=True)``. SQLite's one warning for a table
+    declaring row security (ADR-0014) is expected here, not reported."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message=r"ferro auto-migrate: Table '\w+' declares __ferro_rls__"
+        )
+        asyncio.run(connect(url, name=name, auto_migrate=True))
+
+
+def _tables(envelope: dict) -> set[str]:
+    return {m["table_name"] for m in envelope["payload"]["models"]}
+
+
+def _empty_autogenerate(url: str, base: str | None, schema: str | None) -> None:
+    upgrade, downgrade = autogenerate(url, base, schema)
+    assert "op." not in upgrade, upgrade
+    assert "op." not in downgrade, downgrade
+
+
+# -- pin (d), validate: the validate step is the pass's VALIDATE ----------------------
+
+
+@pytest.mark.parametrize("case_id", VALIDATE_CASES)
+def test_pin_d_the_validate_step_is_the_pass_statement(
+    project, case_id, db_url, db_backend
+):
+    """Between the ``NOT VALID`` add and the validate step the database holds
+    an unvalidated constraint; the pass, reading it live, plans exactly the
+    validate step's ``VALIDATE CONSTRAINT`` (``render_validate_constraint``,
+    ADR-0043)."""
+    if db_backend == "sqlite":
+        pytest.skip(
+            "SQLite adds every foreign key and check validated: the generator "
+            "writes no validate step there and the pass plans none"
+        )
+    migration = migrate_through(project, CASEBOOK[case_id], db_url, db_backend)
+    assert _cli("migrate", "down", "--yes", "--to", "0002:01", "--url", db_url) == 0
+    target = json.loads((migration / "ir.json").read_text())
+
+    live, facts = asyncio.run(_read_live(db_url, _tables(target)))
+    plan = json.loads(
+        _core._plan_from_ir(
+            live, json.dumps(target), "postgres", DESTRUCTIVE, True, facts
+        )
+    )["operations"]
+
+    assert {op["kind"] for op in plan} == {"ValidateConstraint"}
+    assert [sql for op in plan for sql in op["statements"]] == statements(
+        migration / "02_validate.up.postgres.sql"
+    )
+
+
+# -- pin (e): a migrated database is an auto-migrated one -----------------------------
+
+
+@pytest.mark.parametrize("case_id", CASE_IDS)
+def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
+    project, second_db, case_id, db_url, db_backend, postgres_base_url, db_schema_name
+):
+    """The chain ``0001`` → ``0002`` leaves no drift; a second database
+    ``connect(auto_migrate=True)`` builds from the same models has the same
+    live schema, facts included; Alembic autogenerate writes nothing against
+    the auto-migrated one. Against the migrated one it refuses, by design:
+    a database the tracking table marks is ``ferro migrate new``'s, and the
+    bridge reads the very live schema just shown equal, so it has nothing
+    to say there either."""
+    case = CASEBOOK[case_id]
+    migrate_through(project, case, db_url, db_backend)
+
+    report = asyncio.run(migrations_drift(url=db_url))
+    assert (report.refusal, report.lines) == (None, []), report
+    second, second_schema = second_db
+    after = project.register(case.after)
+    auto_migrate(second)
+
+    tables = _tables(after)
+    assert live_schema(db_url, tables) == live_schema(second, tables)
+    _empty_autogenerate(second, postgres_base_url, second_schema)
+    with pytest.raises(RuntimeError, match="tracked by ferro's in-house migrations"):
+        autogenerate(db_url, postgres_base_url, db_schema_name)
+
+
+# -- pin (f): the bridge's revision runs the pass's DDL -------------------------------
+
+
+def _executed_literals(code: str) -> list[str]:
+    """Every statement a revision body runs as ``op.execute(sa.DDL('…'))``."""
+    tree = ast.parse("def upgrade():\n" + code)
+    return [
+        node.args[0].value.replace("%%", "%")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "DDL"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    ]
+
+
+def _plan_live(live: str, envelope: dict, dialect: str, facts: str) -> list[dict]:
+    return json.loads(
+        _core._plan_from_ir(
+            live, json.dumps(envelope), dialect, DESTRUCTIVE, True, facts
+        )
+    )["operations"]
+
+
+def _run_statements(
+    url: str, backend: str, base: str | None, schema: str | None, sql: list[str]
+) -> None:
+    db = Db(url, backend, base, schema)
+    for statement in sql:
+        db.execute(statement)
+
+
+def _pass_declines(url: str) -> bool:
+    """Whether the reconciliation pass, run for real, declines the change
+    and points at ``ferro migrate new``: it refuses so, or it warns so and
+    leaves the table as it is (ADR-0014's SQLite posture)."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            asyncio.run(
+                connect(
+                    url,
+                    name="p538_pass_run",
+                    migrate_updates=True,
+                    migrate_destructive=True,
+                )
+            )
+        except Exception as refusal:  # noqa: BLE001 - the refusal is the answer
+            return "ferro migrate new" in str(refusal)
+    return any("ferro migrate new" in str(w.message) for w in caught)
+
+
+@pytest.mark.parametrize("case_id", CASE_IDS)
+def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
+    request,
+    project,
+    second_db,
+    case_id,
+    db_url,
+    db_backend,
+    postgres_base_url,
+    db_schema_name,
+):
+    """Two databases at ``case.before``. One runs the revision Alembic
+    autogenerate writes for ``case.after``; the other runs the statements the
+    reconciliation pass plans from the same live database (every table of
+    either modelset, destructive changes on). Every statement the revision
+    runs as written is one of the pass's, and the two databases end with the
+    same live schema, facts included.
+
+    Where the pass carries no change out, neither does the bridge: a value
+    existing rows lack is the plain op marked ``# ferro: data-dependent``
+    (the pass refuses naming ``ferro migrate new``), and a change SQLite can
+    only make by a table rebuild is refused naming ``ferro migrate new``
+    (the pass declines it too, by a warning or a refusal naming the same
+    command)."""
+    expect_finding(request, case_id, db_backend, "f")
+    case = CASEBOOK[case_id]
+    second, second_schema = second_db
+    write_config(project.root, project.pkg, f'["{db_backend}"]')
+    before = project.register(case.before)
+    auto_migrate(db_url)
+    auto_migrate(second, name="p538_pass")
+    after = project.register(case.after)
+    tables = _tables(before) | _tables(after)
+    live, facts = asyncio.run(_read_live(db_url, tables))
+    try:
+        planned = _plan_live(live, after, db_backend, facts)
+    except ValueError as refusal:
+        if "ferro migrate new" not in str(refusal):
+            raise
+        planned = None
+
+    try:
+        upgrade, _ = autogenerate(db_url, postgres_base_url, db_schema_name)
+    except RuntimeError as refusal:
+        assert "autogenerate refused" in str(refusal), refusal
+        assert "`ferro migrate new`" in str(refusal), refusal
+        assert _pass_declines(second), str(refusal)
+        return
+    if planned is None:
+        assert "# ferro: data-dependent" in upgrade, upgrade
+        return
+
+    statements_planned = [sql for op in planned for sql in op["statements"]]
+    for statement in _executed_literals(upgrade):
+        assert statement in statements_planned, (statement, statements_planned)
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    _run_statements(
+        second, db_backend, postgres_base_url, second_schema, statements_planned
+    )
+    assert live_schema(db_url, tables) == live_schema(second, tables)
