@@ -126,6 +126,16 @@ def _plan_reverse_from_ir(
     ``DropForeignKey``."""
     ...
 
+def _render_plan_ops(
+    old_ir_json: str, new_ir_json: str, dialect: str, operations_json: str
+) -> str:
+    """Render the planner ops ``operations_json`` (a plan's ``operations``)
+    as one plan from ``old_ir_json`` to ``new_ir_json`` on ``dialect``, in
+    order, through the same renderer ``_plan_from_ir(..., render=True)``
+    uses. Returns the JSON list of ops, each with ``statements`` and
+    ``warnings`` (an ``AddTable`` also ``row_security_statements``)."""
+    ...
+
 def _plan_from_ir(
     old_ir_json: str,
     new_ir_json: str,

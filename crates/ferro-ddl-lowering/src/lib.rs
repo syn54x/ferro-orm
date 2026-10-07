@@ -1221,6 +1221,20 @@ pub fn render_check_addition(
     })
 }
 
+/// `ALTER TABLE … ADD CONSTRAINT <name> <definition>` for a CHECK put back
+/// with the body the catalog printed for it (`pg_get_constraintdef`, which
+/// is already `CHECK (…)`): the sibling of [`render_check_addition`] for a
+/// constraint whose body is the live database's, not a declaration — the
+/// reverse of a plan that dropped or rebuilt it (ADR-0041). Postgres only.
+pub fn render_check_restore(table: &str, name: &str, definition: &str) -> String {
+    format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} {}",
+        quote_ident(table),
+        quote_ident(name),
+        definition
+    )
+}
+
 /// The table-check half of [`render_check_addition`].
 fn render_add_table_check(
     table: &str,
@@ -4151,6 +4165,14 @@ mod tests {
                 }),
             }),
             "NOT (\"deleted_at\" IS NOT NULL)"
+        );
+    }
+
+    #[test]
+    fn a_restored_check_keeps_the_catalog_body_verbatim() {
+        assert_eq!(
+            render_check_restore("card", "ck_card_legacy", "CHECK ((id > 0))"),
+            "ALTER TABLE \"card\" ADD CONSTRAINT \"ck_card_legacy\" CHECK ((id > 0))"
         );
     }
 

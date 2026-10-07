@@ -447,6 +447,34 @@ async def test_autogenerate_without_ferro_options_is_refused_naming_the_line(
 
 
 @pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_refused_rename_hint_refuses_autogenerate(
+    db_url, postgres_base_url, db_schema_name
+):
+    """A rename hint whose old name the models still declare is refused by
+    the planner (ADR-0032); autogenerate refuses with its words rather than
+    write a revision that ignores the hint."""
+    _card_v1()
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    class Tr533Card(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+
+    class Tr533Deck(Model):
+        __ferro_renamed_from__: ClassVar[str] = "tr533card"
+
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+
+    with pytest.raises(RuntimeError) as refused:
+        autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert "rename hint refused" in str(refused.value)
+    assert "tr533card" in str(refused.value)
+
+
+@pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_a_primary_key_change_is_refused_with_the_recipe(
@@ -569,8 +597,26 @@ async def test_an_async_env_py_reads_the_live_database(tmp_path):
         name: str
         note: str | None = None
 
-    asyncio.get_running_loop()  # the shape under test
-    code = _autogenerate_sqlite_file(path)
+    from alembic.autogenerate import produce_migrations, render_python_code
+    from alembic.migration import MigrationContext
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from ferro.migrations import get_metadata
+    from tests._alembic_harness import autogen_opts
+
+    def do_run_migrations(connection) -> str:
+        """The synchronous half of Alembic's async ``env.py`` template."""
+        script = produce_migrations(
+            MigrationContext.configure(connection, opts=autogen_opts()), get_metadata()
+        )
+        return render_python_code(script.upgrade_ops)
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    try:
+        async with engine.connect() as connection:
+            code = await connection.run_sync(do_run_migrations)
+    finally:
+        await engine.dispose()
     assert "op.add_column('tr533card', sa.Column('note'" in code, code
     assert "create_table" not in code, code
 

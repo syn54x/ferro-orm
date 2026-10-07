@@ -599,6 +599,9 @@ def _upgrade_plan(
             live.schema_ir, declared_json, dialect, _DESTRUCTIVE, False, live.facts
         )
     )
+    # The planner reports a refused hint only as text (`plan_from_ir` pushes
+    # "rename hint refused: …" into `always_warnings`; the plan carries no
+    # structured kind for it), so its own prefix is what is matched.
     for warning in plan["always_warnings"]:
         if warning.startswith("rename hint refused"):
             raise _refuse(warning)

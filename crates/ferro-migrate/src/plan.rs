@@ -2994,7 +2994,8 @@ pub fn render_reverse_plan(
     dialect: Dialect,
 ) -> Result<Vec<RenderedReverseOp>, crate::EmissionError> {
     use ferro_ddl_lowering::{
-        quote_ident, render_create_row_policy, render_drop_constraint, render_drop_row_policy,
+        render_check_restore, render_create_row_policy, render_drop_constraint,
+        render_drop_row_policy,
     };
     // Every planned step but the renames renders in one call, so a type the
     // reverse creates is created once, and each table and column it reads is
@@ -3041,12 +3042,7 @@ pub fn render_reverse_plan(
                 if *replace {
                     statements.push(render_drop_constraint(table, name));
                 }
-                statements.push(format!(
-                    "ALTER TABLE {} ADD CONSTRAINT {} {}",
-                    quote_ident(table),
-                    quote_ident(name),
-                    definition
-                ));
+                statements.push(render_check_restore(table, name, definition));
                 (statements, Vec::new())
             }
             ReverseOp::RestoreRowPolicy {

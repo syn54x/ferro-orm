@@ -1,22 +1,21 @@
 """Alembic autogenerate for row security (#414, PRD #406).
 
-The checks family is the template end to end: a custom autogenerate
-operation consumes the SAME FFI decision the runtime reconciliation pass
-executes (AGENTS.md § I-1 entries 15/16) and renders byte-identical
-statements, so a reviewed-migration user gets exactly what ``auto_migrate``
-would have done.
+Since ADR-0041 the bridge writes what the one planner decides: the row
+security ops of a generated revision are the planner's, rendered as the
+byte-identical statements the reconciliation pass executes (AGENTS.md § I-1
+entries 15/16), so a reviewed-migration user gets exactly what
+``auto_migrate`` would have done.
 
-Two things ADR-0019 makes different from the checks family, on purpose:
+Two postures ADR-0019 sets, on purpose:
 
 * Removed declarations and orphaned ``rls_*`` policies are proposed for
-  DROP by autogenerate with **no** destructive gate — the same posture
-  ``_plan_check_drop`` takes (ADR-0013): the ``migrate_destructive`` flag is
-  connect-time safety, a generated revision is reviewed before it runs.
+  DROP with **no** destructive gate: autogenerate plans with destructive
+  changes on, since a generated revision is reviewed before it runs; the
+  ``migrate_destructive`` flag is connect-time safety.
 * A **foreign** policy and an **unverifiable** raw-body drift never become
-  an op at all, silently: the checks family has no comment-op precedent for
-  either shape (see ``src/ferro/migrations/alembic.py``'s comparator
-  docstring), so autogenerate says nothing and the runtime's own
-  connect-time warnings remain the only word on them.
+  an op at all: the planner reports them in ``always_warnings`` and plans
+  nothing, so autogenerate says nothing and the runtime's own connect-time
+  warnings remain the only word on them.
 """
 
 import json
@@ -642,9 +641,8 @@ async def test_generated_revision_round_trips(
     db_url, postgres_base_url, db_schema_name
 ):
     """Upgrade applies (live catalog carries the flags/policy); downgrade
-    reverts (they are gone again) — the exact `add`-op reverse
-    ``FerroRowSecurityOp.reverse()`` computes via
-    ``_teardown_row_security_statements``."""
+    reverts (they are gone again) — the planner run back to the live
+    database, which held neither (ADR-0041)."""
     _define_ledger_row(declared=False)
     await connect(db_url, auto_migrate=True)
     _rewind_registry()

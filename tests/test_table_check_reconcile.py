@@ -27,10 +27,11 @@ from ferro import (
     engines,
     reset_engine,
 )
-from ferro._core import _plan_from_ir, _render_migration_sql_for_test
+from ferro._core import _render_migration_sql_for_test
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
+from tests._alembic_harness import planner_statements as _planner_statements
 
 SIDE_CHECK_NAME = "ck_reconcile_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -267,30 +268,6 @@ def test_a_new_column_lands_before_the_check_that_references_it():
 # ---------------------------------------------------------------------------
 # Cross-emitter parity (AGENTS.md § I-1)
 # ---------------------------------------------------------------------------
-
-
-def _planner_statements(
-    table: str, live_checks: list[dict], *, destructive: bool
-) -> list[str]:
-    """What the one planner renders for ``table`` against a live table that
-    holds its columns and ``live_checks`` — the statements the Alembic bridge
-    writes into a revision (ADR-0041)."""
-    declared = compile_registry_schema_ir()
-    model = next(m for m in declared["payload"]["models"] if m["table_name"] == table)
-    live_model = {**model, "checks": [], "table_checks": [], "row_security": None}
-    live = {**declared, "payload": {**declared["payload"], "models": [live_model]}}
-    declared_one = {**declared, "payload": {**declared["payload"], "models": [model]}}
-    plan = json.loads(
-        _plan_from_ir(
-            json.dumps(live),
-            json.dumps(declared_one),
-            "postgres",
-            json.dumps({"destructive": destructive}),
-            True,
-            json.dumps({"tables": {table: {"checks": live_checks}}}),
-        )
-    )
-    return [statement for op in plan["operations"] for statement in op["statements"]]
 
 
 def test_check_addition_statement_parity_pin():
