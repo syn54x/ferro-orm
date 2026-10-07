@@ -62,8 +62,8 @@ Keep service-role credentials server-side, and never make an elevated connection
 | `default` | `False` | Make this named connection the default for unqualified operations. |
 | `pool` | `None` | A [`PoolConfig`](#connection-pooling); defaults apply when omitted. |
 | `identity_map` | `True` | Keep a per-connection [identity map](../concepts/identity-map.md) so one primary key maps to one Python instance. `False` trades the `a is b` guarantee for lower memory use. |
-| `migrate_updates` | `False` | Also `ALTER` existing tables to match the models (implies `auto_migrate`). See [Schema Migrations](migrations.md#applying-column-changes-with-migrate_updates). *Added in 0.11.0.* |
-| `migrate_destructive` | `False` | Also drop live columns removed from the models (implies `migrate_updates`). See [Schema Migrations](migrations.md#destructive-drops-with-migrate_destructive). *Added in 0.11.0.* |
+| `migrate_updates` | `False` | Also `ALTER` existing tables to match the models (implies `auto_migrate`). See [Auto-migrate](schema/auto-migrate.md#applying-column-changes-with-migrate_updates). *Added in 0.11.0.* |
+| `migrate_destructive` | `False` | Also drop live columns removed from the models (implies `migrate_updates`). See [Auto-migrate](schema/auto-migrate.md#destructive-drops-with-migrate_destructive). *Added in 0.11.0.* |
 
 ## Connection Pooling
 
@@ -218,7 +218,7 @@ See [Testing](../howto/testing.md) for a ready-made pytest fixture.
 
 ## See Also
 
-- [Schema Migrations](migrations.md) — `auto_migrate` flags and Alembic
+- [Schema Management](schema/overview.md) — auto-migrate, migrations and Alembic
 - [Transactions](transactions.md) — connection affinity
 - [Multiple Databases](../howto/multiple-databases.md) — multi-connection patterns
 - [Testing](../howto/testing.md) — test database setup

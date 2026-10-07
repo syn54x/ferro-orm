@@ -56,7 +56,7 @@ from ferro import create_tables
 await create_tables(using="analytics")
 ```
 
-Don't run schema creation concurrently through multiple names that point at the same physical database. For production schema changes, prefer one migration-capable connection and the [Alembic bridge](../guide/migrations.md).
+Don't run schema creation concurrently through multiple names that point at the same physical database. For production schema changes, use [migrations](../guide/schema/migrations.md): a project whose models live in separate databases [configures each one](../reference/configuration.md#several-databases) with its own migrations directory, and every command names it with `--database` ([Deploying migrations](../guide/schema/deploying.md#several-databases)).
 
 ## Practical Notes
 

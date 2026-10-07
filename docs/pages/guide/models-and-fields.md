@@ -116,7 +116,7 @@ When the inferred type isn't what you want — for example `varchar(255)` instea
 Valid values are the `DbTypeToken` literals — `"text"`, `"smallint"`, `"int"`, `"bigint"`, `"uuid"`, `"timestamp"`, `"timestamptz"`, `"date"`, `"time"`, `"json"`, `"jsonb"` — plus `varchar(n)` built with `ferro.varchar`. Prefer `varchar(255)` over the raw string `"varchar(255)"` so type checkers see a deliberate vocabulary choice. The override is validated against the Python annotation at class-definition time — on both declaration styles and on raw `json_schema_extra` declarations alike — so an incompatible combination fails immediately.
 
 !!! note "Enum storage"
-    `enum.Enum` fields are stored as text on SQLite and as named native `ENUM` types on PostgreSQL (via the [Alembic bridge](migrations.md)). For closed-domain string columns with a DB-side `CHECK` constraint, combine `db_type` with `db_check=True`.
+    `enum.Enum` fields are stored as text on SQLite and as named native `ENUM` types on PostgreSQL (created by every schema door: auto-migrate, [migrations](schema/migrations.md) and the [Alembic bridge](schema/alembic.md)). For closed-domain string columns with a DB-side `CHECK` constraint, combine `db_type` with `db_check=True`.
 
 ### JSON storage: `json` and `jsonb`
 
@@ -172,7 +172,7 @@ Declaring `db_type="jsonb"` on anything outside the json family (an `int`, a `se
 
 **Round-trip contract is value equality, not byte fidelity.** PostgreSQL's `jsonb` does not preserve dict key order (keys come back sorted), duplicate keys, or whitespace — that's inherent to the storage type, not Ferro. Values compare equal with Python `==` (dict equality ignores order), but if you iterate keys and need insertion order — or need the stored text byte-for-byte — opt out with `db_type="json"`.
 
-**Migrating between `json` and `jsonb` is a declaration edit.** With [`migrate_updates`](migrations.md) enabled, a storage change emits exactly one `ALTER TABLE ... TYPE ... USING ...` on PostgreSQL in either direction (existing values survive the cast). The [Alembic bridge](migrations.md) renders the same DDL. On SQLite the same edit is a no-op.
+**Migrating between `json` and `jsonb` is a declaration edit.** With [`migrate_updates`](schema/auto-migrate.md) enabled, a storage change emits exactly one `ALTER TABLE ... TYPE ... USING ...` on PostgreSQL in either direction (existing values survive the cast). A [migration](schema/migrations.md) and the [Alembic bridge](schema/alembic.md) render the same DDL. On SQLite the same edit is a no-op.
 
 !!! warning "Upgrading from a pre-JSONB-default release"
     Databases created before the JSONB default carry plain `json` columns for derived `dict`/`list` fields. On your first connect with `migrate_updates=True`, each such column upgrades in place with one `ALTER ... TYPE jsonb USING ...` — values survive, but dict key order stops being preserved. To keep a column as plain `json`, add `db_type="json"` to its declaration **before** upgrading; the diff is then zero operations.
@@ -191,10 +191,11 @@ Database options accepted by `Field()` (and `FerroField()`):
 | `unique` | `bool` | `False` | Single-column uniqueness constraint. For multi-column uniqueness see [Composite Constraints](#composite-constraints). |
 | `index` | `bool` | `False` | Create a non-unique index on this column. |
 | `nullable` | `"infer" \| bool` | `"infer"` | Column nullability. `"infer"` follows whether the annotation allows `None`; `True`/`False` force it (useful when the Python type diverges from the column on purpose). |
-| `default` | any | — | Pydantic default value. Also used to backfill when [`migrate_updates`](migrations.md) adds a NOT NULL column — including a JSON object or array on a json-family field. |
+| `default` | any | — | Pydantic default value. Also used to backfill when [`migrate_updates`](schema/auto-migrate.md) adds a NOT NULL column — including a JSON object or array on a json-family field. |
 | `default_factory` | callable | — | Pydantic default factory, e.g. `default_factory=datetime.now`. On json-family fields (`dict` / `list` / nested model), `default_factory=dict` / `list` is snapshotted once as a backfill literal; `uuid4` and `datetime.now` are not. |
 | `db_type` | `DbType \| None` | `None` | Column-type override (see above). |
 | `db_check` | `bool` | `False` | Emit a DB-side `CHECK` constraint for closed-domain types; only valid with `db_type`. |
+| `renamed_from` | `str \| None` | `None` | The column's previous name: a rename hint. `ferro migrate new` writes `RENAME COLUMN` instead of a drop and an add, so every row keeps its value; `ForeignKey(..., renamed_from=...)` does the same for a relation's `*_id` column. Inert once its migration is generated. See [Renames](schema/migrations.md#renames). |
 
 On top of these, every Pydantic validation option works in the same call: `min_length`, `max_length`, `pattern`, `gt`, `ge`, `lt`, `le`, `multiple_of`, `decimal_places`, `description`, and the rest — see [Pydantic's Field docs](https://docs.pydantic.dev/latest/api/fields/#pydantic.fields.Field).
 
@@ -398,7 +399,7 @@ For non-unique multi-column indexes — read-path optimization on common filter 
 
 Validation mirrors composite uniques: at least two columns per tuple, columns must exist, and **order is preserved** (it matters for leftmost-prefix optimization). For single-column indexes use `Field(index=True)`. Declaring the same ordered tuple in both `__ferro_composite_uniques__` and `__ferro_composite_indexes__` emits a `UserWarning` and drops the redundant index.
 
-Both ClassVars flow through to [Alembic autogenerate](migrations.md) as matching `UniqueConstraint` / `Index` objects.
+Both ClassVars flow through to [migrations](schema/migrations.md) and to [Alembic autogenerate](schema/alembic.md) as matching `UniqueConstraint` / `Index` objects.
 
 ### Table checks
 
@@ -424,7 +425,7 @@ For a single-column closed domain (for example a `StrEnum` stored as text with `
 
 - Each `Check` suffix must be a lowercase identifier (`[a-z][a-z0-9_]*`), unique per model, and must not collide with a column-check name (`ck_<table>_<col>`).
 - Unknown columns, duplicate suffixes, and unsupported predicate forms raise at model registration time.
-- Table checks are emitted **inline in `CREATE TABLE`** on both PostgreSQL and SQLite. See [migrations](migrations.md) for how they reconcile on existing tables.
+- Table checks are emitted **inline in `CREATE TABLE`** on both PostgreSQL and SQLite. See [Auto-migrate](schema/auto-migrate.md) for how they reconcile on existing tables, and [Migrations](schema/migrations.md#sqlite-table-rebuilds) for the SQLite table rebuild.
 
 A violating insert raises `CheckViolationError` (PostgreSQL also sets `exc.constraint` to the live `ck_*` name):
 
@@ -630,5 +631,5 @@ The few repeated field lines are deliberate: each concrete model owns its full s
 - [Relationships](relationships.md) — foreign keys, one-to-many, many-to-many
 - [Queries](queries.md) — fetching and filtering data
 - [Mutations](mutations.md) — creating, updating, and deleting records
-- [Schema Migrations](migrations.md) — how fields become DDL
+- [Schema Management](schema/overview.md) — how fields become DDL, and how a change reaches the database
 - [Identity Map](../concepts/identity-map.md) — instance caching semantics

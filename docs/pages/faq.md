@@ -36,12 +36,12 @@ SQLite and PostgreSQL (including hosted providers such as Supabase). MySQL and o
 
 ### What's the migrations story?
 
-Two tiers:
+Two doors, one per database:
 
-- **Auto-migration at connect time** — `connect(url, auto_migrate=True)` creates missing tables. As of 0.11.0, `migrate_updates=True` also adds missing columns (and reconciles type, nullability, and foreign-key `on_delete` drift on PostgreSQL), and `migrate_destructive=True` drops model-removed columns. Great for development and simple deployments.
-- **Alembic bridge** — for versioned, reviewable production migrations and anything auto-migrate can't express (renames, primary-key changes, complex transforms). Install with `pip install "ferro-orm[alembic]"`.
+- **Auto-migrate at connect time** — `connect(url, auto_migrate=True)` creates missing tables; `migrate_updates=True` also alters existing ones as far as an in-place statement can, and `migrate_destructive=True` drops model-removed columns. Great for tests and development.
+- **Migrations** — `ferro migrate new` writes each change as a numbered, reviewable directory of SQL (one rendering per target dialect) and Python data steps, and `ferro migrate up` applies it. Renames, backfills, SQLite table rebuilds and a way back down live here. Install with `pip install "ferro-orm[cli]"`.
 
-See [Migrations](guide/migrations.md).
+A project already on Alembic can keep it: the [Alembic bridge](guide/schema/alembic.md) writes revisions from the same planner. See [Schema Management](guide/schema/overview.md).
 
 ### Does Ferro support multiple databases?
 

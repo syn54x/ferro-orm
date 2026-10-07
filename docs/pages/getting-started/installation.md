@@ -21,21 +21,23 @@
 
 ### Migration support
 
-Schema migrations use Alembic. Install the optional extra to get it:
+Reviewed schema migrations (`ferro migrate init`, `new`, `up`) need the `cli` extra, which installs the `ferro` command line:
 
 === "uv"
 
     ```bash
-    uv add "ferro-orm[alembic]"
+    uv add "ferro-orm[cli]"
     ```
 
 === "pip"
 
     ```bash
-    pip install "ferro-orm[alembic]"
+    pip install "ferro-orm[cli]"
     ```
 
-This pulls in Alembic (and SQLAlchemy, which Alembic uses for migration generation only — Ferro never uses it at runtime). See [Migrations](../guide/migrations.md) for the workflow.
+See [Schema Management](../guide/schema/overview.md) for how migrations and auto-migrate fit together, and [Migrations](../guide/schema/migrations.md) for the workflow.
+
+A project that already runs Alembic can keep it with the `alembic` extra instead (`pip install "ferro-orm[alembic]"`), which adds Alembic and SQLAlchemy for generating revisions only; Ferro never uses SQLAlchemy at runtime. See [Alembic](../guide/schema/alembic.md).
 
 ## Database Drivers
 

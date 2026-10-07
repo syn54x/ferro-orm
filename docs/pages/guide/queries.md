@@ -401,7 +401,7 @@ When you want the relation-less rows *kept* rather than filtered out, opt into a
 A bare `left_join` on a path also traversed by `where()` lifts the shared edge to LEFT — an explicit LEFT always beats an implicit INNER on the same edge (declaring `join` **and** `left_join` on one edge is a build-time `ValueError`).
 
 !!! note "NULL ordering defaults to last unless you override it"
-    Relation-less rows under `left_join` land as `NULL` sort keys on a related column — omitted `nulls=` still means last. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for dialect-default placement — see [Ordering, Limit & Offset](#ordering-limit--offset).
+    Relation-less rows under `left_join` land as `NULL` sort keys on a related column — omitted `nulls=` still means last. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for dialect-default placement — see [Ordering, Limit & Offset](#ordering-limit-offset).
 
 ### Two foreign keys to the same table
 
