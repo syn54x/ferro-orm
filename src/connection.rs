@@ -196,6 +196,11 @@ async fn connect_engine_handle(
 ///         only when an auto-migrate flag is set. The auto-migrate guard
 ///         (ADR-0038) looks for tracking tables there as well as in the
 ///         current schema and the catalog's format tables.
+///     ddl_lock_timeout_s (float): The project's `ddl_lock_timeout` in
+///         seconds, read by `ferro.connect` from `FerroSettings` with the
+///         tracking schemas: how long each reconciliation statement waits for
+///         a table lock on Postgres before its table's plan is retried
+///         (ADR-0044). `0` disables; the default is the setting's, 5 seconds.
 ///
 /// # Errors
 /// Returns a `PyErr` if the connection fails or if auto-migration fails.
@@ -204,7 +209,7 @@ async fn connect_engine_handle(
 /// `reset_engine()` first or pass a distinct `name` to register an additional
 /// connection.
 #[pyfunction]
-#[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0, identity_map=true, migrate_updates=false, migrate_destructive=false, settings_delivery="transaction".to_string(), tracking_schemas=Vec::new()))]
+#[pyo3(signature = (url, auto_migrate=false, name=None, default=false, max_connections=5, min_connections=0, identity_map=true, migrate_updates=false, migrate_destructive=false, settings_delivery="transaction".to_string(), tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0))]
 #[allow(clippy::too_many_arguments)]
 pub fn connect(
     py: Python<'_>,
@@ -219,8 +224,11 @@ pub fn connect(
     migrate_destructive: bool,
     settings_delivery: String,
     tracking_schemas: Vec<String>,
+    ddl_lock_timeout_s: f64,
 ) -> PyResult<Bound<'_, PyAny>> {
     let settings_delivery = SettingsDelivery::parse(&settings_delivery)?;
+    let opts = MigrateOptions::laddered(migrate_updates, migrate_destructive)
+        .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?;
     let (connection_url, search_path) = split_search_path(&url);
     let redacted_url = redact_connection_url(&connection_url);
     let backend = dialect_from_url(&connection_url).map_err(|e| {
@@ -280,7 +288,6 @@ pub fn connect(
         // having run first. The passes run under the run lock, behind the
         // guard that refuses a database governed by ferro migrations
         // (ADR-0038), before the connection is registered.
-        let opts = MigrateOptions::laddered(migrate_updates, migrate_destructive);
         if auto_migrate || opts.updates {
             internal_migrate(
                 engine_handle.clone(),

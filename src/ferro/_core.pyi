@@ -37,15 +37,19 @@ async def connect(
     migrate_destructive: bool = False,
     settings_delivery: str = "transaction",
     tracking_schemas: list[str] = ...,
+    ddl_lock_timeout_s: float = 5.0,
 ) -> None: ...
 async def create_tables(
-    using: Optional[str] = None, tracking_schemas: list[str] = ...
+    using: Optional[str] = None,
+    tracking_schemas: list[str] = ...,
+    ddl_lock_timeout_s: float = 5.0,
 ) -> None: ...
 async def migrate(
     using: Optional[str] = None,
     updates: bool = True,
     destructive: bool = False,
     tracking_schemas: list[str] = ...,
+    ddl_lock_timeout_s: float = 5.0,
 ) -> None:
     """Run the auto-migrate pass against a connected engine.
 
@@ -53,7 +57,9 @@ async def migrate(
     model columns to existing tables and reconciles type/nullability drift on
     Postgres; with ``destructive`` it also drops live columns no longer on the
     model. ``destructive`` implies ``updates``. The pool is refreshed after any
-    DDL so no cached statement observes the pre-migration schema.
+    DDL so no cached statement observes the pre-migration schema. On Postgres
+    each reconciliation statement waits for a table lock under
+    ``ddl_lock_timeout_s`` seconds (``0`` disables; ADR-0044).
     """
     ...
 
@@ -223,7 +229,8 @@ async def _verify_run_lock(handle: int) -> None:
     ...
 
 async def _release_run_lock(handle: int) -> None:
-    """Release the lock behind ``handle``."""
+    """Release the lock behind ``handle``. Refused (``RuntimeError``), with
+    the handle kept for a retry, while another call holds the lock."""
     ...
 
 async def _run_lock_is_held(
@@ -234,6 +241,12 @@ async def _run_lock_is_held(
 
 async def _close_run_lock_connection_for_test(handle: int) -> None:
     """Close the Postgres lock connection without releasing it (tests only)."""
+    ...
+
+async def _unacquired_run_lock_for_test(using: str | None = None) -> int:
+    """Register a never-acquired, never-verified Postgres run lock, as a
+    transaction-mode pooler would hand back; its first ``_verify_run_lock``
+    raises the pooler refusal (tests only)."""
     ...
 
 async def _ensure_tracking_tables(
@@ -263,6 +276,8 @@ async def _execute_sql_step(
     tracking_schema: str | None = None,
     lock: int | None = None,
     direction_json: str | None = None,
+    ddl_lock_timeout_s: float = 5.0,
+    on_attempt: Callable[[str], object] | None = None,
 ) -> str:
     """Run one planned SQL step and settle its record; JSON ``{"ok", "ms",
     "error", "message"}``.
@@ -271,7 +286,13 @@ async def _execute_sql_step(
     omitted). Going up ``sql`` is the up file and the record is written when
     the step finishes; going down ``sql`` is the down file and the standing
     record is removed in the down's transaction (kept, with ``failed_at`` and
-    ``error``, when the down fails)."""
+    ``error``, when the down fails).
+
+    On Postgres the step waits for table locks under ``ddl_lock_timeout_s``
+    seconds (``0`` disables; ADR-0044); a step that times out is re-run from
+    its first statement, up to ten attempts, and ``on_attempt`` hears each
+    one as ``waiting for a lock on "author" (attempt 1 of 10, retry in
+    1s)``."""
     ...
 
 async def _tracking_tables_for(using: str | None, schema: str | None = None) -> str:

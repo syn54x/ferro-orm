@@ -25,6 +25,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_release_run_lock, m)?)?;
     m.add_function(wrap_pyfunction!(_run_lock_is_held, m)?)?;
     m.add_function(wrap_pyfunction!(_close_run_lock_connection_for_test, m)?)?;
+    m.add_function(wrap_pyfunction!(_unacquired_run_lock_for_test, m)?)?;
     m.add_function(wrap_pyfunction!(_ensure_tracking_tables, m)?)?;
     m.add_function(wrap_pyfunction!(_read_records, m)?)?;
     m.add_function(wrap_pyfunction!(_write_record, m)?)?;
@@ -295,21 +296,17 @@ pub fn _verify_run_lock(py: Python<'_>, handle: u64) -> PyResult<Bound<'_, PyAny
     })
 }
 
-/// Release the lock behind `handle`.
+/// Release the lock behind `handle`. While another call holds the lock the
+/// release is refused and the handle kept, so it can be retried.
 ///
 /// # Errors
-/// `ValueError` for an unknown handle.
+/// `ValueError` for an unknown handle; `RuntimeError` while the lock is in
+/// use.
 #[pyfunction]
 #[pyo3(name = "_release_run_lock")]
 pub fn _release_run_lock(py: Python<'_>, handle: u64) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let lock = crate::run::unregister_lock(handle)?;
-        let lock = std::sync::Arc::try_unwrap(lock).map_err(|_| {
-            PyRuntimeError::new_err(
-                "the run lock is in use by another call; release it after that call returns",
-            )
-        })?;
-        lock.into_inner().release().await
+        crate::run::unregister_lock(handle)?.release().await
     })
 }
 
@@ -347,6 +344,26 @@ pub fn _close_run_lock_connection_for_test(
         let lock = crate::run::registered_lock(handle)?;
         lock.lock().await.close_connection().await;
         Ok(())
+    })
+}
+
+/// Register a Postgres run lock on a fresh connection that never took the
+/// advisory lock and was never verified, as a transaction-mode pooler would
+/// hand back; `_verify_run_lock` on its handle takes the first-check branch.
+/// Test-only.
+///
+/// # Errors
+/// `RunRefused` for a non-Postgres connection; a database error.
+#[pyfunction]
+#[pyo3(name = "_unacquired_run_lock_for_test")]
+#[pyo3(signature = (using=None))]
+pub fn _unacquired_run_lock_for_test(
+    py: Python<'_>,
+    using: Option<String>,
+) -> PyResult<Bound<'_, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = crate::state::engine_for_connection(using)?;
+        crate::run::register_lock(crate::run::RunLock::unacquired_for_test(&engine).await?)
     })
 }
 
@@ -414,15 +431,22 @@ pub fn _write_record(
 /// the plan's record with `ferro_version` set, written when the step
 /// finishes; going down `sql` is the down file's text and `record_json` the
 /// standing record, removed in the down's transaction. With `lock`, the run
-/// lock behind that handle is verified first. Returns JSON `{"ok", "ms",
-/// "error", "message"}`.
+/// lock behind that handle is verified first.
+///
+/// The step runs under the DDL lock timeout (ADR-0044):
+/// `ddl_lock_timeout_s` seconds per attempt on Postgres (`0` sets none and
+/// never retries), and `on_attempt(text)` hears each attempt that timed
+/// out, as `waiting for a lock on "author" (attempt 1 of 10, retry in 1s)`.
+/// Returns JSON `{"ok", "ms", "error", "message"}`.
 ///
 /// # Errors
 /// `RunRefused` when the lock was lost or the file changed since it was
-/// planned; a database error writing a record.
+/// planned; `ValueError` for a negative or non-finite timeout; a database
+/// error writing a record; the first exception `on_attempt` raised, once
+/// the step has settled its record.
 #[pyfunction]
 #[pyo3(name = "_execute_sql_step")]
-#[pyo3(signature = (using, planned_step_json, sql, record_json, tracking_schema=None, lock=None, direction_json=None))]
+#[pyo3(signature = (using, planned_step_json, sql, record_json, tracking_schema=None, lock=None, direction_json=None, ddl_lock_timeout_s=5.0, on_attempt=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn _execute_sql_step(
     py: Python<'_>,
@@ -433,7 +457,10 @@ pub fn _execute_sql_step(
     tracking_schema: Option<String>,
     lock: Option<u64>,
     direction_json: Option<String>,
+    ddl_lock_timeout_s: f64,
+    on_attempt: Option<Py<PyAny>>,
 ) -> PyResult<Bound<'_, PyAny>> {
+    let ddl = crate::ddl_exec::DdlExecutor::from_seconds(ddl_lock_timeout_s)?;
     let step: ferro_migrate::PlannedStep = parse_json(&planned_step_json, "planned_step_json")?;
     let record: ferro_migrate::StepRecord = parse_json(&record_json, "record_json")?;
     let direction = match direction_json {
@@ -449,6 +476,10 @@ pub fn _execute_sql_step(
                 .verify()
                 .await?;
         }
+        // A callback that raises is the caller's bug: its first error is
+        // raised once the step has settled its record (stopping mid-step
+        // would leave the record started with nothing running).
+        let mut callback_error: Option<PyErr> = None;
         let outcome = crate::run::execute_sql_step(
             &engine,
             tracking_schema.as_deref(),
@@ -456,8 +487,20 @@ pub fn _execute_sql_step(
             &sql,
             record,
             direction,
+            &ddl,
+            |attempt| {
+                if let Some(callback) = &on_attempt
+                    && callback_error.is_none()
+                {
+                    let text = attempt.describe(ddl.max_attempts);
+                    callback_error = Python::attach(|py| callback.call1(py, (text,)).err());
+                }
+            },
         )
         .await?;
+        if let Some(err) = callback_error {
+            return Err(err);
+        }
         to_json(&outcome)
     })
 }

@@ -123,12 +123,15 @@ class SettingsError(FerroError):
 
 
 def parse_ddl_lock_timeout(value: str) -> timedelta:
-    """Parse a ``ddl_lock_timeout`` duration (``"500ms"``, ``"5s"``, ``"1m"``)."""
+    """Parse a ``ddl_lock_timeout`` duration (``"500ms"``, ``"5s"``, ``"1m"``),
+    or ``"0"``, which turns the timeout and its retries off (ADR-0044)."""
+    if value == "0":
+        return timedelta(0)
     match = _DURATION.match(value) if isinstance(value, str) else None
     if match is None or float(match.group(1)) <= 0:
         raise ValueError(
             f"ddl_lock_timeout must be a positive duration written as "
-            f"{_DURATION_FORMS}; got {value!r}"
+            f'{_DURATION_FORMS}, or "0" to wait without a limit; got {value!r}'
         )
     return timedelta(**{_DURATION_UNITS[match.group(2)]: float(match.group(1))})
 
@@ -184,7 +187,7 @@ class DatabaseSettings(BaseModel):
 
     @property
     def ddl_lock_timeout_seconds(self) -> float:
-        """``ddl_lock_timeout`` in seconds."""
+        """``ddl_lock_timeout`` in seconds; ``0.0`` when it is off."""
         return parse_ddl_lock_timeout(self.ddl_lock_timeout).total_seconds()
 
     def url_for(self, override: str | None = None) -> str:
