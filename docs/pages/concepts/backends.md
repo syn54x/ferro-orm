@@ -78,7 +78,7 @@ SQLite's flexible affinity usually needs no casts. Either way: if you want typed
 `connect(auto_migrate=True)` creates missing tables identically on both backends, and `migrate_updates=True` adds missing columns on both. Beyond that, capabilities diverge with what each database can do in place:
 
 - **PostgreSQL** supports in-place column **type changes** (`ALTER COLUMN ... TYPE ... USING` cast) and **nullability changes** (`SET`/`DROP NOT NULL`) when the live column disagrees with the model.
-- **SQLite** cannot alter column types or nullability in place. Ferro emits a `UserWarning` naming the drifted column and pointing you at the [Alembic bridge](../guide/migrations.md). In practice SQLite's type affinity makes declared-type drift mostly cosmetic.
+- **SQLite** cannot alter column types, nullability or constraints in place. Auto-migrate emits a `UserWarning` naming the drifted column and changes nothing; [migrations](../guide/schema/migrations.md#sqlite-table-rebuilds) generate the change as a reviewed table rebuild (the [Alembic bridge](../guide/schema/alembic.md#what-autogenerate-refuses) refuses it, naming `ferro migrate new`). In practice SQLite's type affinity makes declared-type drift mostly cosmetic.
 
 `migrate_destructive=True` drops model-removed columns on both backends (dependency-aware: covering indexes are dropped first; primary-key or constraint-enforced columns fail with a clear error instead). After any schema change the pool is refreshed so no cached statement observes the pre-migration schema.
 
@@ -98,10 +98,10 @@ SQLite's affinity hides type mismatches that PostgreSQL enforces. In raw SQL, ad
 
 ### Type or nullability drift warning on SQLite
 
-`migrate_updates=True` detected that a live column's declared type or nullability disagrees with your model, and SQLite can't change it in place. Use the [Alembic bridge](../guide/migrations.md) for a table-rebuild migration, or ignore it if the drift is cosmetic.
+`migrate_updates=True` detected that a live column's declared type or nullability disagrees with your model, and SQLite can't change it in place. Generate the change with `ferro migrate new`, which writes it as a [table rebuild](../guide/schema/migrations.md#sqlite-table-rebuilds), or ignore it if the drift is cosmetic. The Alembic bridge refuses SQLite table rebuilds.
 
 ## See Also
 
 - [Architecture](architecture.md) — how the backend layer fits into the engine
-- [Migrations](../guide/migrations.md) — `auto_migrate` flags and the Alembic bridge
+- [Schema Management](../guide/schema/overview.md) — auto-migrate, migrations and the Alembic bridge on each backend
 - [Queries](../guide/queries.md) — the query builder and raw SQL escape hatch

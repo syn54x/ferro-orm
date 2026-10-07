@@ -37,11 +37,13 @@ Ferro is distributed as pre-compiled wheels for macOS, Linux, and Windows.
 
 ```bash
 pip install ferro-orm
-# Or with migration support
+# Or with the migrations CLI (ferro migrate)
+pip install "ferro-orm[cli]"
+# Or with the Alembic bridge
 pip install "ferro-orm[alembic]"
 ```
 
-Ferro currently supports SQLite and PostgreSQL. Register multiple named connections with `connect(..., name="...")` when a process needs more than one database — see the [connections guide](https://ferro-orm.x54.sh/guide/connections/).
+Schema changes go through auto-migrate while you develop and reviewed migrations (`ferro migrate new`, `ferro migrate up`) in production — see [Schema Management](https://ferro-orm.x54.sh/guide/schema/overview/). Ferro currently supports SQLite and PostgreSQL. Register multiple named connections with `connect(..., name="...")` when a process needs more than one database — see the [connections guide](https://ferro-orm.x54.sh/guide/connections/).
 
 ## Quick Start
 

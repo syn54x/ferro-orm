@@ -680,63 +680,56 @@ completely alone by all of it — no warning accusing anyone of removing a
 declaration nobody wrote, and no flag a destructive run for an unrelated
 column could take with it (ADR-0019).
 
-## Alembic
+## Migrations and Alembic
 
-With the [Alembic bridge](migrations.md#alembic-for-production) installed,
-`alembic revision --autogenerate` emits the same DDL the runtime
-reconciliation pass would, from the same drift comparison, as two custom
-autogenerate operations (row security has no `SQLAlchemy` metadata construct
-to carry it, the same reason table checks use one):
+Row security is schema like any other, so every door writes the same
+statements the auto-migrate pass runs (`ENABLE` / `FORCE ROW LEVEL SECURITY`,
+`CREATE POLICY`), byte for byte.
 
-- **The add operation** carries a table's missing policies, its ferro-owned
-  policies rebuilt for metadata drift, and the `ENABLE`/`FORCE` flags it
-  needs turned on — a rebuild rides this same op, not a separate one.
-- **The drop operation** carries orphaned ferro-owned policies, and the
-  teardown statements for a removed declaration or a `force=True` →
-  `force=False` flip.
+**[Migrations](schema/migrations.md).** `ferro migrate new` writes a declaration
+added to an existing table as one schema step, and its down tears it down:
+
+```text
+0002_order_rls/
+  01_schema.up.postgres.sql     ALTER TABLE "rlsorder" ENABLE ROW LEVEL SECURITY;
+                                ALTER TABLE "rlsorder" FORCE ROW LEVEL SECURITY;
+                                CREATE POLICY "rls_rlsorder_tenant_id" ON "rlsorder" … USING (…);
+  01_schema.down.postgres.sql   DROP POLICY "rls_rlsorder_tenant_id" ON "rlsorder";
+                                ALTER TABLE "rlsorder" NO FORCE ROW LEVEL SECURITY;
+                                ALTER TABLE "rlsorder" DISABLE ROW LEVEL SECURITY;
+  01_schema.up.sqlite.sql       -- ferro: not-applicable
+```
+
+A changed body (shorthand or raw) is dropped and recreated, and its down puts
+the previous migration's body back; a removed declaration is dropped and torn
+down, and its down recreates it. A migration diffs two declarations, never a
+live database, so a raw body is compared as you wrote it and the
+[unverifiable-body](#raw-policies-and-drift) case does not arise. A project
+targeting only SQLite gets nothing to write.
+
+**[Alembic](schema/alembic.md).** A generated revision holds what the planner
+decides against the live database, so it proposes exactly what
+`migrate_destructive=True` would do: missing policies, rebuilt ones, the flags,
+and the drops for removed declarations and orphaned `rls_*` policies (with no
+destructive gate, since a revision is reviewed before it runs). Its
+`downgrade()` is the planner run back to the database as it was, under the
+same ownership gate: row security that predates Ferro's declaration (a DBA's
+own fence) is never disabled by a downgrade.
 
 **Autogenerate is silent exactly where the runtime pass only warns.** Raw
 (`using=`/`with_check=`) policies whose body ferro cannot verify, and
 policies ferro does not own at all, are things the runtime reconciliation
 pass reports with a `UserWarning` on every connect (see
-[Raw policies and drift](#raw-policies-and-drift)) — autogenerate does not
-carry either of those into the generated revision as a DDL op or a comment.
-Reading the revision's diff is not a substitute for watching your
-`migrate_updates` warnings for those two cases.
-
-Downgrade semantics are deliberately asymmetric, matching the one-way flags
-above — and narrower than "add reverses to drop" in two places worth knowing
-before you trust a downgrade blindly:
-
-- A **newly added** policy's downgrade drops exactly that policy — a clean
-  reverse.
-- A **rebuilt** policy's downgrade is an intentional no-op: its old body was
-  either raw SQL ferro never rendered, or the server's own re-spelling of
-  what ferro already writes, and reconstructing either is a reviewed edit.
-  **This means a table whose add op mixes new policies with rebuilt ones
-  downgrades to the new policies gone and the rebuilt ones still in their
-  post-upgrade bodies** — the op's reverse only undoes what it added, never
-  what it rebuilt.
-- **A flags-only add op** (every policy already existed; only `ENABLE`/
-  `FORCE` needed turning on) has an **empty** downgrade — there is no policy
-  add to reverse, and turning a flag back off is the same reviewed-edit call
-  as the point below.
-- A **removed declaration**'s downgrade is an intentional no-op: recreating a
-  dropped or orphaned policy's exact live body from a downgrade path is a
-  reviewed edit, not something autogenerate should reconstruct.
-- A **flag-only** change (`force=True` → `force=False`) downgrades to
-  nothing: restoring `FORCE ROW LEVEL SECURITY` is a decision for a human,
-  not an automatic reverse.
-- Flags and policies that predate Ferro's declaration (a DBA's own fence) are
-  never touched by either the upgrade or the downgrade — the same ownership
-  gate that protects them at runtime protects them here.
+[Raw policies and drift](#raw-policies-and-drift)); autogenerate carries
+neither into the revision. Reading the revision's diff is not a substitute
+for watching your `migrate_updates` warnings for those two cases.
 
 ## See Also
 
 - [Session settings](#session-settings) — `engines.session(settings=...)`,
   `current_session()`
-- [Schema Migrations](migrations.md) — `migrate_updates`, `migrate_destructive`,
-  and the Alembic bridge in general
+- [Schema Management](schema/overview.md) — auto-migrate, migrations and the
+  Alembic bridge
 - [Connections & Databases](connections.md) — `PoolConfig` and named
   connections
 - [Transactions](transactions.md) — connection affinity and `using=` routing
