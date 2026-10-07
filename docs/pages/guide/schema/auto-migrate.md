@@ -49,7 +49,7 @@ What it covers depends on what each backend can do in place:
 | Rename an enum label declared with `__ferro_renamed_labels__` | ✅ nothing to do | ✅ `ALTER TYPE ... RENAME VALUE` |
 | Remove an enum label | ✅ nothing to do | ⚠️ `UserWarning`, no DDL. [Migrations](migrations.md) generate it with its [backfill](data-steps.md#removing-an-enum-label) |
 | Inline single-column `UNIQUE` on an existing column, index option changes | ❌ never here; [migrations](migrations.md) generate it | ❌ never here; migrations generate it |
-| Rename a table | ❌ never here: the create pass builds the new name as a new, empty table. [Migrations](migrations.md#renames) generate the rename from `__ferro_renamed_from__` | ❌ same |
+| Rename a table | ✅ `RENAME TABLE` under `migrate_updates` when the database holds the old name from `__ferro_renamed_from__` and not the new one; derived index and check names follow. Without `migrate_updates` a `UserWarning` names the table, the hint and both doors, and nothing is created. [Migrations](migrations.md#renames) are the reviewed path | ✅ same |
 | Drop a table | ❌ never here; [migrations](migrations.md#reading-a-migration) generate it, marked destructive | ❌ same |
 | Change a primary key | ❌ never; no door generates it. Migrations refuse it with [the recipe](migrations.md#changing-a-primary-key) | ❌ same |
 
