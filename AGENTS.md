@@ -135,7 +135,7 @@ For a single model, every emitter must agree on:
 ### The migrations door's six pins
 
 `tests/test_cross_emitter_parity.py` pins the migrations door against the
-pass over every casebook change (`tests/_casebook.py`, cases A1–F4, built
+pass over every casebook change (`tests/_casebook.py`, cases A–F, built
 from the generator tests' own models) on both dialects:
 
 - **(a)** the statements of the generated DDL steps, headers stripped and the

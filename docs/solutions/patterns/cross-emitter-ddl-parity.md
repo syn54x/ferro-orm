@@ -89,7 +89,7 @@ token × dialect plus `ck_<table>_<col>` parity).
 only decides which step an op lands in. Some of what it writes is an *online
 shape* the pass, inside its one transaction, never needs. Each is pinned to
 the pass's rendering in `tests/test_cross_emitter_parity.py`, over every
-casebook change in `tests/_casebook.py` (A1–F4, built from the generator
+casebook change in `tests/_casebook.py` (cases A–F, built from the generator
 tests' own models), on both dialects:
 
 | Pin | The migrations door writes | Pinned to the pass's |

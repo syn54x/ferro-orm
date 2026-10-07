@@ -1,4 +1,4 @@
-"""The model-change casebook (A1–F4) as before/after modelsets.
+"""The model-change casebook (cases A–F) as before/after modelsets.
 
 Each case is the pair of ``models.py`` bodies a generator test
 (``tests/test_generate_*.py``, tickets #524–#536) migrates between, built
