@@ -1204,8 +1204,23 @@ mod tests {
             .post_create_sqls
     }
 
+    /// The check a rebuild runs on a retyped column of `author`.
+    fn guarded(column: &str, target: &str, class: &str) -> Vec<String> {
+        vec![
+            format!(
+                "CREATE TEMP TABLE \"_ferro_rebuild_guard\" (\"value\", CONSTRAINT \
+                 \"ferro: author.{column} has a value that cannot become {target}\" CHECK (0))"
+            ),
+            format!(
+                "INSERT INTO \"_ferro_rebuild_guard\" (\"value\") SELECT \"{column}\" FROM \
+                 \"_ferro_new_author\" WHERE typeof(\"{column}\") NOT IN ({class}, 'null')"
+            ),
+            "DROP TABLE \"_ferro_rebuild_guard\"".to_string(),
+        ]
+    }
+
     #[test]
-    fn a_sqlite_type_change_is_a_table_rebuild_copying_with_a_cast_both_ways() {
+    fn a_sqlite_type_change_is_a_table_rebuild_copying_as_it_stands_and_checked_both_ways() {
         let mut before = with_columns(vec![column("age", "integer")]);
         before.columns[1].unique = true;
         before.uniques.push(ferro_schema_ir::SchemaUnique {
@@ -1219,11 +1234,14 @@ mod tests {
         let mut up = vec![
             created_as_new(&after),
             "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"status\", \"age\") \
-             SELECT \"id\", \"name\", \"status\", CAST(\"age\" AS varchar) FROM \"author\""
+             SELECT \"id\", \"name\", \"status\", \"age\" FROM \"author\""
                 .to_string(),
+        ];
+        up.extend(guarded("age", "varchar", "'text'"));
+        up.extend([
             "DROP TABLE \"author\"".to_string(),
             "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
-        ];
+        ]);
         up.extend(create_pass_indexes(&after));
         assert_eq!(
             sqlite.up,
@@ -1236,11 +1254,14 @@ mod tests {
         let mut down = vec![
             created_as_new(&before),
             "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"status\", \"age\") \
-             SELECT \"id\", \"name\", \"status\", CAST(\"age\" AS integer) FROM \"author\""
+             SELECT \"id\", \"name\", \"status\", \"age\" FROM \"author\""
                 .to_string(),
+        ];
+        down.extend(guarded("age", "integer", "'integer'"));
+        down.extend([
             "DROP TABLE \"author\"".to_string(),
             "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
-        ];
+        ]);
         down.extend(create_pass_indexes(&before));
         assert_eq!(
             sqlite.down,
@@ -1289,7 +1310,7 @@ mod tests {
             &[Dialect::Sqlite],
         );
         let sqlite = rendering(&migration, StepDialect::Sqlite);
-        let cast = [("age", "CAST(\"age\" AS varchar)")];
+        let cast: [(&str, &str); 0] = [];
         let mut up = rebuild_of(&author_before, &author_after, &cast);
         up.extend(rebuild_of(&post_before, &post_after, &cast));
         assert_eq!(
@@ -1319,7 +1340,7 @@ mod tests {
             &[Dialect::Sqlite],
         );
         let sqlite = rendering(&migration, StepDialect::Sqlite);
-        let up = rebuild_of(&before, &after, &[("age", "CAST(\"age\" AS varchar)")]);
+        let up = rebuild_of(&before, &after, &[]);
         assert_eq!(
             sqlite.up,
             file(
@@ -1332,7 +1353,7 @@ mod tests {
         let rename = sqlite.up.find("RENAME TO").expect("rename");
         assert!(sqlite.up.find("\"idx_author_email\"").expect("index") > rename);
         // Its down copies back without the index.
-        let down = rebuild_of(&after, &before, &[("age", "CAST(\"age\" AS integer)")]);
+        let down = rebuild_of(&after, &before, &[]);
         assert_eq!(
             sqlite.down,
             file(

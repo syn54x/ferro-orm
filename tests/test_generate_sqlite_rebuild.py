@@ -9,7 +9,12 @@ $ ferro migrate new author_age_text
     01_schema.up.sqlite.sql     -- ferro: foreign-keys-off
                                 -- ferro: data-dependent
                                 CREATE TABLE IF NOT EXISTS "_ferro_new_author" (…as the step leaves it…);
-                                INSERT INTO "_ferro_new_author" (…) SELECT …, CAST("age" AS varchar) FROM "author";
+                                INSERT INTO "_ferro_new_author" (…) SELECT "age", … FROM "author";
+                                -- every copied "age" must now be stored as text,
+                                -- or the step fails naming the column:
+                                CREATE TEMP TABLE "_ferro_rebuild_guard" (…CHECK (0));
+                                INSERT INTO "_ferro_rebuild_guard" … WHERE typeof("age") NOT IN ('text', 'null');
+                                DROP TABLE "_ferro_rebuild_guard";
                                 DROP TABLE "author";
                                 ALTER TABLE "_ferro_new_author" RENAME TO "author";
                                 CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name");
@@ -116,9 +121,25 @@ def fresh_create(project: Path, number: int, table: str) -> tuple[str, list[str]
     return create, indexes
 
 
-def rebuild_of(project: Path, number: int, table: str, copy: str) -> list[str]:
+def checked_copy(table: str, column: str, target: str, storage: str) -> list[str]:
+    """The check a rebuild runs after copying a retyped ``column``: every
+    value whose storage class is not ``storage`` fails the step, naming the
+    column and its new type."""
+    return [
+        'CREATE TEMP TABLE "_ferro_rebuild_guard" ("value", CONSTRAINT '
+        f'"ferro: {table}.{column} has a value that cannot become {target}" CHECK (0))',
+        f'INSERT INTO "_ferro_rebuild_guard" ("value") SELECT "{column}" FROM '
+        f"\"_ferro_new_{table}\" WHERE typeof(\"{column}\") NOT IN ('{storage}', 'null')",
+        'DROP TABLE "_ferro_rebuild_guard"',
+    ]
+
+
+def rebuild_of(
+    project: Path, number: int, table: str, copy: str, checks: list[str] | None = None
+) -> list[str]:
     """The rebuild of ``table`` into migration ``number``'s shape, copying
-    ``copy`` (the ``INSERT``'s column list and ``SELECT`` list, as text)."""
+    ``copy`` (the ``INSERT``'s column list and ``SELECT`` list, as text)
+    as it stands, then running ``checks`` (from ``checked_copy``)."""
     create, indexes = fresh_create(project, number, table)
     return [
         create.replace(
@@ -127,6 +148,7 @@ def rebuild_of(project: Path, number: int, table: str, copy: str) -> list[str]:
             1,
         ),
         f'INSERT INTO "_ferro_new_{table}" {copy} FROM "{table}"',
+        *(checks or []),
         f'DROP TABLE "{table}"',
         f'ALTER TABLE "_ferro_new_{table}" RENAME TO "{table}"',
         *indexes,
@@ -203,15 +225,18 @@ def test_a6_a_type_change_rebuilds_copying_with_a_cast_and_round_trips(
         project,
         number,
         "author",
-        f'{COLUMNS} SELECT CAST("age" AS varchar), "id", "name", "status"',
+        f'{COLUMNS} SELECT "age", "id", "name", "status"',
+        checked_copy("author", "age", "varchar", "text"),
     )
     assert down.read_text().startswith(REBUILD + DATA_DEPENDENT + "\n")
     assert statements(down) == rebuild_of(
         project,
         number - 1,
         "author",
-        f'{COLUMNS} SELECT CAST("age" AS integer), "id", "name", "status"',
+        f'{COLUMNS} SELECT "age", "id", "name", "status"',
+        checked_copy("author", "age", "integer", "integer"),
     )
+    assert "CAST(" not in up.read_text() + down.read_text()
 
     assert run("migrate", "up", "--url", db.url) == 0
     assert db.rows("SELECT name, age, typeof(age) FROM author") == [
@@ -528,7 +553,8 @@ def test_a_type_change_and_a_new_index_on_one_table_copy_it_once(project, pkg, d
         number,
         "author",
         '("age", "email", "id", "name", "status") '
-        'SELECT CAST("age" AS varchar), "email", "id", "name", "status"',
+        'SELECT "age", "email", "id", "name", "status"',
+        checked_copy("author", "age", "varchar", "text"),
     )
     assert sum(s.startswith("CREATE TABLE") for s in up) == 1
     built = [s for s in up if '"idx_author_email"' in s]
@@ -636,3 +662,149 @@ def test_a_down_that_rebuilds_checks_the_table_as_its_migration_left_it(
     db.execute("DROP TRIGGER t1")
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert clean(db, project, 1, 2)
+
+
+# -- a retyped column's values: copied as they stand, checked, never CAST ------------
+
+CODE_TEXT = AUTHOR + "    code: str | None = None\n"
+CODE_INT = AUTHOR + "    code: int | None = None\n"
+
+
+@sqlite_only
+def test_text_that_reads_as_an_integer_becomes_one(project, pkg, db):
+    start(project, pkg, db, CODE_TEXT)
+    db.execute("INSERT INTO author (name, status, code) VALUES ('ada', 'draft', '12')")
+
+    number = generate(project, pkg, CODE_INT, "code_int")
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert db.rows("SELECT code, typeof(code) FROM author") == [(12, "integer")]
+    assert clean(db, project, number, number - 1)
+
+
+@sqlite_only
+@pytest.mark.parametrize(
+    ("before", "after", "value", "target"),
+    [
+        (CODE_TEXT, CODE_INT, "'abc'", "integer"),
+        (CODE_TEXT, CODE_INT, "'12abc'", "integer"),
+        (
+            AUTHOR + "    code: float | None = None\n",
+            CODE_INT,
+            "1.9",
+            "integer",
+        ),
+    ],
+    ids=["abc", "12abc", "1.9"],
+)
+def test_a_value_that_does_not_become_the_new_type_fails_the_step_and_rolls_back(
+    project, pkg, db, capsys, before, after, value, target
+):
+    start(project, pkg, db, before)
+    db.execute(
+        f"INSERT INTO author (name, status, code) VALUES ('ada', 'draft', {value})"
+    )
+    stored = db.rows("SELECT code, typeof(code) FROM author")
+
+    number = generate(project, pkg, after, "code_retyped")
+    capsys.readouterr()
+    assert run("migrate", "up", "--url", db.url) == 1
+
+    err = capsys.readouterr().err
+    assert (
+        "CHECK constraint failed: ferro: author.code has a value that cannot become "
+        f"{target}"
+    ) in err
+    record = db.records()[-1]
+    assert record[0] == number and record[9] is None and record[10] is not None
+    assert db.rows("SELECT code, typeof(code) FROM author") == stored
+    assert "_ferro_new_author" not in db.tables()
+    assert fresh_foreign_keys(db) == 1
+
+
+@sqlite_only
+def test_the_down_of_a_type_change_fails_on_a_value_it_cannot_take_back(
+    project, pkg, db, capsys
+):
+    start(project, pkg, db, AGE_INT)
+    generate(project, pkg, AGE_TEXT, "author_age_text")
+    assert run("migrate", "up", "--url", db.url) == 0
+    db.execute("INSERT INTO author (name, status, age) VALUES ('ada', 'draft', 'abc')")
+    capsys.readouterr()
+
+    assert run("migrate", "down", "--yes", "--url", db.url) == 1
+
+    assert "author.age has a value that cannot become integer" in (
+        capsys.readouterr().err
+    )
+    assert keys(db) == [(1, 1), (2, 1)], "the step's record stands"
+    assert db.rows("SELECT age FROM author") == [("abc",)]
+
+
+DATETIME_HEADER = "from datetime import datetime\n"
+
+
+@sqlite_only
+def test_a_datetime_column_copied_by_a_rebuild_keeps_its_bytes(project, pkg, db):
+    required = DATETIME_HEADER + AUTHOR + "    seen: datetime\n"
+    optional = DATETIME_HEADER + AUTHOR + "    seen: datetime | None = None\n"
+    start(project, pkg, db, required)
+    # A SQLite datetime column reads back as drift straight after a fresh
+    # create (this predates #526): the rebuild must add none of its own.
+    fresh = plan_against(db, snapshot(project, 1), snapshot(project, 1))
+    db.execute(
+        "INSERT INTO author (name, status, seen) "
+        "VALUES ('ada', 'draft', '2026-03-01T15:00:00Z')"
+    )
+    stored = [("2026-03-01T15:00:00Z", "text")]
+
+    number = generate(project, pkg, optional, "seen_optional")
+
+    assert "CAST(" not in step_file(project, number, "up", "sqlite").read_text()
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert db.rows("SELECT seen, typeof(seen) FROM author") == stored
+    assert plan_against(db, snapshot(project, number), snapshot(project, 1)) == fresh
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert db.rows("SELECT seen, typeof(seen) FROM author") == stored
+    assert plan_against(db, snapshot(project, 1), snapshot(project, number)) == fresh
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "change"),
+    [
+        (
+            AUTHOR + "    seen: str | None = None\n",
+            DATETIME_HEADER + AUTHOR + "    seen: datetime | None = None\n",
+            "from varchar to DATETIME",
+        ),
+        (
+            # Its down would be the change above.
+            DATETIME_HEADER + AUTHOR + "    seen: datetime | None = None\n",
+            AUTHOR + "    seen: str | None = None\n",
+            "from varchar to DATETIME",
+        ),
+        (
+            "from datetime import date\n" + AUTHOR + "    seen: date | None = None\n",
+            DATETIME_HEADER + AUTHOR + "    seen: datetime | None = None\n",
+            "from DATE to DATETIME",
+        ),
+    ],
+    ids=["str-to-datetime", "datetime-to-str", "date-to-datetime"],
+)
+def test_a_type_change_sqlite_cannot_check_is_refused_naming_the_column(
+    project, pkg, capsys, before, after, change
+):
+    (project / "ferro.toml").write_text(
+        f'models = ["{pkg}.models"]\ndialects = ["sqlite"]\n'
+    )
+    write_models(project, pkg, before)
+    new("create")
+    write_models(project, pkg, after)
+    capsys.readouterr()
+
+    assert run("migrate", "new", "seen") == 1
+
+    err = capsys.readouterr().err
+    assert f"a SQLite rebuild cannot change author.seen {change}" in err
+    assert "fill it in a data step" in err
+    assert not list((project / "migrations").glob("0002_*"))

@@ -613,7 +613,8 @@ def test_a6_on_sqlite_is_a_rebuild(project, pkg):
         AUTHOR + "    age: str | None = None\n",
     )
     assert up.startswith(REBUILD + "-- ferro: data-dependent\n")
-    assert 'CAST("age" AS varchar)' in up
+    assert "WHERE typeof(\"age\") NOT IN ('text', 'null')" in up
+    assert "CAST(" not in up
     assert down.startswith(REBUILD + "-- ferro: data-dependent\n")
 
 

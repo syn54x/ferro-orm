@@ -240,7 +240,7 @@ fn statements(
         match op.table().filter(|table| rebuilt.contains(*table)) {
             Some(table) => {
                 if written.insert(table) {
-                    out.extend(rebuild::render_table(table, &ops, old, new)?);
+                    out.extend(rebuild::render_table(table, old, new)?);
                 }
             }
             None => out.extend(native.next().ok_or_else(|| {

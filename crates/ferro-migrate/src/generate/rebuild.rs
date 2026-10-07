@@ -7,7 +7,10 @@
 //!     age: str  # was int  ──▶  -- ferro: foreign-keys-off
 //!                               -- ferro: data-dependent
 //!                               CREATE TABLE IF NOT EXISTS "_ferro_new_author" (…, "age" varchar NOT NULL );
-//!                               INSERT INTO "_ferro_new_author" ("id", …, "age") SELECT "id", …, CAST("age" AS varchar) FROM "author";
+//!                               INSERT INTO "_ferro_new_author" ("age", …) SELECT "age", … FROM "author";
+//!                               CREATE TEMP TABLE "_ferro_rebuild_guard" ("value", CONSTRAINT "ferro: author.age has a value that cannot become varchar" CHECK (0));
+//!                               INSERT INTO "_ferro_rebuild_guard" ("value") SELECT "age" FROM "_ferro_new_author" WHERE typeof("age") NOT IN ('text', 'null');
+//!                               DROP TABLE "_ferro_rebuild_guard";
 //!                               DROP TABLE "author";
 //!                               ALTER TABLE "_ferro_new_author" RENAME TO "author";
 //!                               CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name");
@@ -26,7 +29,7 @@ use super::columns::{PlanContext, PlanDirection, goes_with_a_dropped_column, nee
 use crate::emit::{backfill_value_sql, render_create_table_as};
 use crate::{Dialect, EmissionError, MigrationOp};
 use ferro_ddl_lowering::{
-    ResolvedStorage, quote_ident, resolve_column_storage, sqlite_declared_type,
+    CanonicalType, ResolvedStorage, quote_ident, resolve_column_storage, sqlite_declared_type,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use std::collections::BTreeSet;
@@ -137,16 +140,14 @@ pub fn tables_to_rebuild(
         .collect()
 }
 
-/// [`render`] for `table` in a file turning `old` into `new`, the values
-/// copied from `ops`: a `CAST` for each column an `AlterColumnType` of `ops`
-/// changes, the backfill literal for each `NOT NULL` column new to the rows.
+/// [`render`] for `table` in a file turning `old` into `new`, copying the
+/// backfill literal into each `NOT NULL` column new to the rows.
 ///
 /// # Errors
 /// `table` is missing from either side (a rebuild is of a table that exists
 /// before and after the file), or its rendering fails.
 pub fn render_table(
     table: &str,
-    ops: &[MigrationOp],
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
 ) -> Result<Vec<String>, EmissionError> {
@@ -163,69 +164,201 @@ pub fn render_table(
             })
     };
     let (before, after) = (find(old, "old")?, find(new, "new")?);
-    let mut casts = Vec::new();
+    let mut values = Vec::new();
     for col in &after.columns {
-        let type_changed = ops.iter().any(|op| {
-            matches!(op, MigrationOp::AlterColumnType { table: t, column }
-                if t == table && column == &col.name)
-        });
-        if let Some(value) = copy_value(col, &before, type_changed)? {
-            casts.push((col.name.clone(), value));
+        if let Some(value) = copy_value(col, &before)? {
+            values.push((col.name.clone(), value));
         }
     }
-    render(table, &after, &before, &casts)
+    render(table, &after, &before, &values)
 }
 
-/// The value a rebuild copies into `col` of the new table, when it is not
-/// the old column as it stands: a type change's `CAST`, or the literal
-/// default a `NOT NULL` column new to the rows takes (as `ADD COLUMN`'s
-/// backfill `DEFAULT` would give them).
+/// The value a rebuild copies into `col` of the new table when the old table
+/// has no such column: the literal default a `NOT NULL` column new to the
+/// rows takes, as `ADD COLUMN`'s backfill `DEFAULT` would give them. `None`
+/// for a column the old table holds (copied as it stands) or one with no
+/// literal default.
 ///
 /// # Errors
 /// The column's storage cannot be resolved.
 pub fn copy_value(
     col: &SchemaColumn,
     before: &SchemaModel,
-    type_changed: bool,
 ) -> Result<Option<String>, EmissionError> {
     if before.columns.iter().any(|old| old.name == col.name) {
-        if !type_changed {
-            return Ok(None);
-        }
-        let storage = resolve_column_storage(col, Dialect::Sqlite)
-            .map_err(|message| EmissionError { message })?;
-        let ResolvedStorage::Scalar(canonical) = storage else {
-            return Err(EmissionError {
-                message: format!(
-                    "column '{}' resolves to a native enum type on SQLite",
-                    col.name
-                ),
-            });
-        };
-        return Ok(Some(format!(
-            "CAST({} AS {})",
-            quote_ident(&col.name),
-            sqlite_declared_type(canonical)
-        )));
+        return Ok(None);
     }
     backfill_value_sql(col, Dialect::Sqlite)
+}
+
+/// How SQLite stores a column's values, for deciding whether a rebuild can
+/// move them from one declared type to another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stored {
+    /// `integer`, `smallint`, `bigint`: INTEGER affinity.
+    Integer,
+    /// `boolean`: 0 and 1.
+    Boolean,
+    /// `double`: REAL affinity.
+    Real,
+    /// `NUMERIC`.
+    Decimal,
+    /// `text`, `varchar`, `char`: TEXT affinity.
+    Text,
+    /// `JSON` text.
+    Json,
+    /// `CHAR(32)` hex.
+    Uuid,
+    /// ISO text under `DATETIME`, `DATE` or `TIME`.
+    Temporal,
+    /// `blob`.
+    Blob,
+}
+
+fn sqlite_canonical(col: &SchemaColumn) -> Result<CanonicalType, EmissionError> {
+    match resolve_column_storage(col, Dialect::Sqlite)
+        .map_err(|message| EmissionError { message })?
+    {
+        ResolvedStorage::Scalar(canonical) => Ok(canonical),
+        ResolvedStorage::PgEnum { .. } => Err(EmissionError {
+            message: format!(
+                "column '{}' resolves to a native enum type on SQLite",
+                col.name
+            ),
+        }),
+    }
+}
+
+fn stored(canonical: CanonicalType) -> Stored {
+    match canonical {
+        CanonicalType::Integer | CanonicalType::SmallInt | CanonicalType::BigInt => Stored::Integer,
+        CanonicalType::Boolean => Stored::Boolean,
+        CanonicalType::Double => Stored::Real,
+        CanonicalType::Decimal => Stored::Decimal,
+        CanonicalType::Text | CanonicalType::Varchar(_) | CanonicalType::Char(_) => Stored::Text,
+        CanonicalType::Json | CanonicalType::Jsonb => Stored::Json,
+        CanonicalType::Uuid => Stored::Uuid,
+        CanonicalType::DateTime
+        | CanonicalType::Timestamp
+        | CanonicalType::TimestampTz
+        | CanonicalType::Date
+        | CanonicalType::Time => Stored::Temporal,
+        CanonicalType::Blob => Stored::Blob,
+    }
+}
+
+/// The rows a rebuild must refuse after copying `old` into `new` of `table`:
+/// a SQL condition over the new table's `new.name` column, true for each
+/// value that did not become `new`'s type. `None` when the storage did not
+/// change.
+///
+/// The copy never `CAST`s: SQLite's `CAST` never fails (`CAST('abc' AS
+/// integer)` is `0`, `CAST('2026-03-01T15:00:00Z' AS DATETIME)` is `2026`).
+/// The value is copied as it stands and the new column's affinity converts
+/// it only where the conversion is lossless (`'12'` becomes `12`; `'12abc'`
+/// and `1.9` stay what they were), so a value that did not convert is one
+/// whose storage class is still wrong, and the step fails on it, as
+/// Postgres's `USING` cast fails on the same row.
+///
+/// # Errors
+/// A change SQLite has no conversion for that this check can verify row by
+/// row (to or from a timestamp, a UUID, a boolean or a blob; a number into
+/// a decimal): the refusal names the column and the way to make the change.
+pub fn conversion_guard(
+    table: &str,
+    old: &SchemaColumn,
+    new: &SchemaColumn,
+) -> Result<Option<String>, EmissionError> {
+    let (from, to) = (sqlite_canonical(old)?, sqlite_canonical(new)?);
+    if from == to {
+        return Ok(None);
+    }
+    let col = quote_ident(&new.name);
+    let class_is = |classes: &str| format!("typeof({col}) NOT IN ({classes}, 'null')");
+    let guard = match (stored(from), stored(to)) {
+        (
+            Stored::Integer | Stored::Boolean | Stored::Real | Stored::Decimal | Stored::Text,
+            Stored::Integer,
+        ) => Some(class_is("'integer'")),
+        (Stored::Integer | Stored::Real | Stored::Decimal | Stored::Text, Stored::Real) => {
+            Some(class_is("'real'"))
+        }
+        (Stored::Integer, Stored::Decimal) => Some(class_is("'integer'")),
+        (
+            Stored::Integer
+            | Stored::Real
+            | Stored::Decimal
+            | Stored::Text
+            | Stored::Json
+            | Stored::Temporal,
+            Stored::Text,
+        ) => Some(class_is("'text'")),
+        (Stored::Text | Stored::Json, Stored::Json) => Some(format!("NOT json_valid({col})")),
+        _ => None,
+    };
+    guard.map(Some).ok_or_else(|| EmissionError {
+        message: format!(
+            "a SQLite rebuild cannot change {table}.{} from {} to {}: SQLite has no \
+             conversion between them that ferro can check row by row, so the copy could \
+             rewrite values silently. Add the new column beside the old one, fill it in a \
+             data step, then drop the old column",
+            new.name,
+            sqlite_declared_type(from),
+            sqlite_declared_type(to)
+        ),
+    })
+}
+
+/// The temporary table a rebuild's conversion check inserts each refused
+/// row into; its one constraint always fails, naming the column and type.
+const GUARD_TABLE: &str = "_ferro_rebuild_guard";
+
+/// The statements that fail the step when a row of `new_table` holds a value
+/// `bad_rows` (a [`conversion_guard`] condition) refuses: `CHECK` failing as
+/// `ferro: <table>.<col> has a value that cannot become <type>`.
+fn guard_statements(
+    table: &str,
+    new_table: &str,
+    col: &SchemaColumn,
+    bad_rows: &str,
+) -> Result<Vec<String>, EmissionError> {
+    let guard = quote_ident(GUARD_TABLE);
+    let target = sqlite_declared_type(sqlite_canonical(col)?);
+    Ok(vec![
+        format!(
+            "CREATE TEMP TABLE {guard} (\"value\", CONSTRAINT {} CHECK (0))",
+            quote_ident(&format!(
+                "ferro: {table}.{} has a value that cannot become {target}",
+                col.name
+            ))
+        ),
+        format!(
+            "INSERT INTO {guard} (\"value\") SELECT {} FROM {} WHERE {bad_rows}",
+            quote_ident(&col.name),
+            quote_ident(new_table)
+        ),
+        format!("DROP TABLE {guard}"),
+    ])
 }
 
 /// The statements that rebuild `table` from `shape_before` into
 /// `shape_after` on SQLite: `CREATE TABLE "_ferro_new_<table>"` as the create
 /// pass writes `shape_after`; `INSERT … SELECT` of every column both shapes
-/// hold, and of each column `casts` names (`(column, sql_expr)`: the value
-/// to copy, a `CAST` for a type change or a backfill literal for a new
-/// `NOT NULL` column); `DROP TABLE`; the rename; then `shape_after`'s
-/// ferro-owned indexes as the create pass builds them.
+/// hold, as it stands, and of each column `casts` names (`(column,
+/// sql_expr)`: the value to copy, such as the backfill literal for a new
+/// `NOT NULL` column); for each column whose type changed, a check that
+/// every copied value became the new type ([`conversion_guard`]); `DROP
+/// TABLE`; the rename; then `shape_after`'s ferro-owned indexes as the create
+/// pass builds them.
 ///
 /// A column only `shape_after` holds and `casts` does not name gets no
 /// value: `NULL`, which a `NOT NULL` column refuses on a populated table
 /// (ADR-0033: a down restores schema, never data).
 ///
 /// # Errors
-/// `shape_after` does not render (an unresolvable column type), or names a
-/// table other than `table`.
+/// `shape_after` does not render (an unresolvable column type), names a
+/// table other than `table`, or changes a column's type in a way SQLite
+/// cannot verify ([`conversion_guard`]).
 pub fn render(
     table: &str,
     shape_after: &SchemaModel,
@@ -244,14 +377,19 @@ pub fn render(
     let emission = render_create_table_as(shape_after, Dialect::Sqlite, Some(&new_table))?;
     let mut targets = Vec::new();
     let mut values = Vec::new();
+    let mut guards = Vec::new();
     for col in &shape_after.columns {
         let cast = casts.iter().find(|(name, _)| name == &col.name);
-        let value = match cast {
-            Some((_, expr)) => expr.clone(),
-            None if shape_before.columns.iter().any(|old| old.name == col.name) => {
+        let old = shape_before.columns.iter().find(|old| old.name == col.name);
+        let value = match (cast, old) {
+            (Some((_, expr)), _) => expr.clone(),
+            (None, Some(old)) => {
+                if let Some(bad_rows) = conversion_guard(table, old, col)? {
+                    guards.extend(guard_statements(table, &new_table, col, &bad_rows)?);
+                }
                 quote_ident(&col.name)
             }
-            None => continue,
+            (None, None) => continue,
         };
         targets.push(quote_ident(&col.name));
         values.push(value);
@@ -267,6 +405,7 @@ pub fn render(
             quote_ident(table)
         ));
     }
+    out.extend(guards);
     out.push(format!("DROP TABLE {}", quote_ident(table)));
     out.push(format!(
         "ALTER TABLE {} RENAME TO {}",
@@ -684,13 +823,7 @@ mod tests {
         });
         let mut after = before.clone();
         after.columns[2] = nullable("age", "string");
-        let statements = render(
-            "author",
-            &after,
-            &before,
-            &[("age".into(), "CAST(\"age\" AS varchar)".into())],
-        )
-        .expect("render");
+        let statements = render("author", &after, &before, &[]).expect("render");
         let create = render_create_table(&after, Dialect::Sqlite).expect("create");
         // The I-1 pin: byte-identical to the create pass apart from the name.
         assert_eq!(
@@ -701,18 +834,20 @@ mod tests {
         );
         assert!(statements[0].starts_with("CREATE TABLE IF NOT EXISTS \"_ferro_new_author\" ("));
         assert_eq!(
-            statements[1..4],
+            statements[1],
+            "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"age\", \"email\") \
+             SELECT \"id\", \"name\", \"age\", \"email\" FROM \"author\""
+        );
+        assert_eq!(
+            statements[5..7],
             [
-                "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"age\", \"email\") \
-                 SELECT \"id\", \"name\", CAST(\"age\" AS varchar), \"email\" FROM \"author\""
-                    .to_string(),
                 "DROP TABLE \"author\"".to_string(),
                 "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
             ]
         );
-        assert_eq!(statements[4..], create.post_create_sqls[..]);
+        assert_eq!(statements[7..], create.post_create_sqls[..]);
         assert_eq!(
-            statements[4],
+            statements[7],
             "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_author_email\" ON \"author\" (\"email\")"
         );
         assert_eq!(rebuilt_tables(&statements), ["author"]);
@@ -772,20 +907,108 @@ mod tests {
             ..column("team_id", "integer")
         };
         assert_eq!(
-            copy_value(&required_fk, &before, false).expect("value"),
+            copy_value(&required_fk, &before).expect("value"),
             Some("1".into())
         );
         assert_eq!(
-            copy_value(&column("name", "string"), &before, false).expect("value"),
-            None
+            copy_value(&column("name", "integer"), &before).expect("value"),
+            None,
+            "a column the old table holds is copied as it stands, never CAST"
         );
         assert_eq!(
-            copy_value(&column("name", "integer"), &before, true).expect("value"),
-            Some("CAST(\"name\" AS integer)".into())
-        );
-        assert_eq!(
-            copy_value(&nullable("bio", "string"), &before, false).expect("value"),
+            copy_value(&nullable("bio", "string"), &before).expect("value"),
             None
+        );
+    }
+
+    /// `conversion_guard` from a column of `from` to one of `to`.
+    fn guard(from: SchemaColumn, to: SchemaColumn) -> Result<Option<String>, String> {
+        conversion_guard("author", &from, &to).map_err(|err| err.message)
+    }
+
+    fn typed(logical: &str, format: Option<&str>) -> SchemaColumn {
+        SchemaColumn {
+            format: format.map(str::to_string),
+            ..nullable("x", logical)
+        }
+    }
+
+    #[test]
+    fn the_conversion_check_for_every_storage_pair() {
+        let int = || typed("integer", None);
+        let text = || typed("string", None);
+        let real = || typed("number", None);
+        let json = || typed("json", None);
+        let datetime = || typed("datetime", None);
+        let date = || typed("date", None);
+        let uuid = || typed("uuid", None);
+        let integer = Some("typeof(\"x\") NOT IN ('integer', 'null')".to_string());
+        let textual = Some("typeof(\"x\") NOT IN ('text', 'null')".to_string());
+        let realish = Some("typeof(\"x\") NOT IN ('real', 'null')".to_string());
+        assert_eq!(guard(int(), int()), Ok(None));
+        assert_eq!(guard(text(), int()), Ok(integer.clone()));
+        assert_eq!(guard(real(), int()), Ok(integer));
+        assert_eq!(guard(int(), text()), Ok(textual.clone()));
+        assert_eq!(guard(datetime(), text()), Ok(textual));
+        assert_eq!(guard(text(), real()), Ok(realish.clone()));
+        assert_eq!(guard(int(), real()), Ok(realish));
+        assert_eq!(
+            guard(text(), json()),
+            Ok(Some("NOT json_valid(\"x\")".to_string()))
+        );
+        // No conversion SQLite can verify: refused, naming the column.
+        for (from, to) in [
+            (text(), datetime()),
+            (date(), datetime()),
+            (int(), datetime()),
+            (text(), uuid()),
+            (uuid(), text()),
+        ] {
+            let err = guard(from, to).expect_err("refused");
+            assert!(
+                err.starts_with("a SQLite rebuild cannot change author.x from "),
+                "{err}"
+            );
+            assert!(err.contains("fill it in a data step"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_type_change_copies_the_value_as_it_stands_and_checks_it_converted() {
+        let before = author(vec![nullable("age", "string")]);
+        let after = author(vec![nullable("age", "integer")]);
+        let statements = render("author", &after, &before, &[]).expect("render");
+        assert_eq!(
+            statements[1..7],
+            [
+                "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"age\") \
+                 SELECT \"id\", \"name\", \"age\" FROM \"author\""
+                    .to_string(),
+                "CREATE TEMP TABLE \"_ferro_rebuild_guard\" (\"value\", CONSTRAINT \
+                 \"ferro: author.age has a value that cannot become integer\" CHECK (0))"
+                    .to_string(),
+                "INSERT INTO \"_ferro_rebuild_guard\" (\"value\") SELECT \"age\" FROM \
+                 \"_ferro_new_author\" WHERE typeof(\"age\") NOT IN ('integer', 'null')"
+                    .to_string(),
+                "DROP TABLE \"_ferro_rebuild_guard\"".to_string(),
+                "DROP TABLE \"author\"".to_string(),
+                "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
+            ]
+        );
+        assert!(!statements.iter().any(|s| s.contains("CAST(")));
+        let refused = render(
+            "author",
+            &author(vec![typed("datetime", None)]),
+            &author(vec![typed("string", None)]),
+            &[],
+        )
+        .expect_err("refused");
+        assert!(
+            refused
+                .message
+                .contains("author.x from varchar to DATETIME"),
+            "{}",
+            refused.message
         );
     }
 
