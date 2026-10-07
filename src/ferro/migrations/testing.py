@@ -330,6 +330,12 @@ class Harness:
             state = migration.state
             if state in _APPLIED and at == index - 1:
                 at = index
+            elif state == "running" and verb is not None:
+                raise MigrationRefused(
+                    f"harness.{verb}: another migration run holds the run lock on "
+                    f"this database and is applying {migration.name}; nothing was "
+                    f"applied. Let that run finish first."
+                )
             elif state not in _APPLIED and state != "pending" and verb is not None:
                 raise MigrationRefused(
                     f"harness.{verb}: {migration.name} is {state}; nothing was "

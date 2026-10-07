@@ -243,7 +243,9 @@ async def up(
     migration: only pending steps of migrations up to and including it run.
     It is the test harness's target (ADR-0045); the application's ``up()``
     has none (ADR-0040). A number the directory lacks is refused; a step
-    (``"0007:02"``) is not a target.
+    (``"0007:02"``) is not a target. A ``through`` at or below the last
+    applied migration has nothing pending to run: the run applies nothing
+    and reverts nothing (going down is :func:`down`'s).
 
     Returns a :class:`RunReport`; a refusal or a failed step is reported in
     ``refusal``, not raised.

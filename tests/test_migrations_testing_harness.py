@@ -25,6 +25,8 @@ Postgres):
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import importlib
 import json
 import re
@@ -127,6 +129,18 @@ def build_chain(project: Path, pkg: str, backend: str) -> None:
 def migration_dir(project: Path, prefix: str) -> Path:
     (found,) = migrations(project).glob(f"{prefix}_*")
     return found
+
+
+def step_files(migration: Path, backend: str) -> list[Path]:
+    """The files ``up`` runs from ``migration`` on ``backend``."""
+    return sorted(
+        [*migration.glob(f"*.up.{backend}.sql"), *migration.glob("*.up.sql")]
+        + list(migration.glob("*.py"))
+    )
+
+
+def sha384(path: Path) -> str:
+    return hashlib.sha384(path.read_bytes()).hexdigest()
 
 
 def todays(pkg: str, name: str) -> type:
@@ -285,10 +299,27 @@ async def test_runner_up_through_refuses_a_migration_the_directory_lacks_and_a_s
         await runner.up(settings, database, through="0002:01")
 
 
+async def test_runner_up_through_below_the_head_applies_and_reverts_nothing(
+    connected,
+):
+    settings = FerroSettings()
+    database = settings.database()
+    await harness().apply_through("0003")
+    before = connected.records()
+
+    report = await runner.up(
+        settings, database, using=_core._default_connection_name(), through="0001"
+    )
+
+    assert report.applied == [] and report.reverted == []
+    assert report.refusal is None
+    assert connected.records() == before
+
+
 # -- refusals -----------------------------------------------------------------------
 
 
-async def test_apply_refuses_unless_the_database_stands_at_the_parent(connected):
+async def test_apply_refuses_unless_the_database_stands_at_the_parent(chain, connected):
     h = harness()
     await h.apply_through("0001")
 
@@ -303,6 +334,13 @@ async def test_apply_refuses_unless_the_database_stands_at_the_parent(connected)
     report = await h.apply("0003")
 
     assert {step.migration for step in report.applied} == {"0003_add_slug"}
+    # The records name the real directory's files, byte for byte.
+    real = migration_dir(chain, "0003")
+    assert {
+        (file, checksum)
+        for migration, _, _, file, _, checksum, *_ in connected.records()
+        if migration == 3
+    } == {(path.name, sha384(path)) for path in step_files(real, connected.backend)}
 
 
 async def test_apply_on_an_empty_database_refuses_a_migration_with_a_parent(connected):
@@ -362,6 +400,51 @@ async def test_the_harness_creates_no_tracking_tables_until_it_mutates(connected
     await h.apply("0001")
 
     assert await tracking_exists()
+
+
+async def probe_lock(url: str) -> bool:
+    """Whether a run holds the lock, asked on a connection of its own."""
+    await ferro.connect(url, name="hrn_probe")
+    try:
+        return await _core._run_lock_is_held("hrn_probe")
+    finally:
+        await _core._disconnect("hrn_probe")
+
+
+async def test_only_the_mutating_verbs_take_the_run_lock(connected, monkeypatch):
+    h = harness()
+    async with h.models_at("0001"):
+        assert await probe_lock(connected.url) is False
+    with pytest.raises(MigrationRefused, match="stands at no migration"):
+        await h.apply("0003")
+    assert await probe_lock(connected.url) is False
+
+    execute = runner._execute_sql_step
+    seen: list[bool] = []
+
+    async def observed(*args):
+        seen.append(await asyncio.create_task(probe_lock(connected.url)))
+        return await execute(*args)
+
+    monkeypatch.setattr(runner, "_execute_sql_step", observed)
+    await h.apply_through("0002")
+
+    assert seen and all(seen)
+    assert await probe_lock(connected.url) is False
+
+
+async def test_the_read_only_path_never_waits_on_a_held_lock(connected):
+    await ferro.connect(connected.url, name="hrn_holder")
+    handle = await _core._acquire_run_lock("hrn_holder", None, 0.0, print)
+    try:
+        h = harness()
+        async with h.models_at("0002") as models:
+            assert models.rev == "0002_index_name"
+        with pytest.raises(MigrationRefused, match="another migration run holds"):
+            await h.apply("0002")
+    finally:
+        await _core._release_run_lock(handle)
+        await _core._disconnect("hrn_holder")
 
 
 # -- round trip ---------------------------------------------------------------------
