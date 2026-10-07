@@ -456,7 +456,7 @@ pub async fn check_rebuild_step(
     {
         return Ok(());
     }
-    let tables = rebuilt_tables(&split_statements(sql));
+    let tables = rebuilt_tables(&split_statements(sql, engine.backend()));
     if tables.is_empty() {
         return Ok(());
     }
@@ -1863,7 +1863,7 @@ pub async fn execute_sql_step(
             record.migration, record.step
         )));
     }
-    let mut statements = split_statements(sql);
+    let mut statements = split_statements(sql, engine.backend());
     if down && step.nothing_to_reverse.is_some() {
         if step.headers.nothing_to_reverse.is_some() && !statements.is_empty() {
             return Err(refused(format!(
