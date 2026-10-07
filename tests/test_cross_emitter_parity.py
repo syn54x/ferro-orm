@@ -1495,7 +1495,7 @@ def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
     tables = _tables(after)
     assert live_schema(db_url, tables) == live_schema(second, tables)
     _empty_autogenerate(second, postgres_base_url, second_schema)
-    with pytest.raises(RuntimeError, match="tracked by ferro's in-house migrations"):
+    with pytest.raises(RuntimeError, match="tracked by ferro migrations"):
         autogenerate(db_url, postgres_base_url, db_schema_name)
 
 
