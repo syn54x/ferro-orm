@@ -116,19 +116,31 @@ def start(project: Path, pkg: str, db, body: str) -> None:
     assert run("migrate", "up", "--url", db.url) == 0
 
 
-def edit(project: Path, pkg: str, db, body: str, name: str) -> tuple[Path, Path]:
+def edit(
+    project: Path, pkg: str, db, body: str, name: str, validates: bool = False
+) -> tuple[Path, Path]:
     """Generate ``0002`` for ``body`` and pin its up file to the pass's
-    statements over the live schema. Returns its up and down files."""
+    statements over the live schema. Returns its up and down files.
+
+    On Postgres a foreign key or check added to the existing table is staged
+    (#527): added ``NOT VALID`` (the pass's statement plus that one token) and
+    validated by a ``02_validate`` step, which ``validates`` expects."""
     write_models(project, pkg, body)
     new(name)
+    validate = (
+        [f"02_validate.down.{db.backend}.sql", f"02_validate.up.{db.backend}.sql"]
+        if validates and db.backend == "postgres"
+        else []
+    )
     assert sorted(p.name for p in migration_dir(project, 2).iterdir()) == [
         f"01_schema.down.{db.backend}.sql",
         f"01_schema.up.{db.backend}.sql",
+        *validate,
         "ir.json",
     ]
     up = schema_file(project, 2, "up", db.backend)
-    assert statements(up) == pass_statements(
-        db, snapshot(project, 2), snapshot(project, 1)
+    assert [sql.replace(" NOT VALID", "") for sql in statements(up)] == (
+        pass_statements(db, snapshot(project, 2), snapshot(project, 1))
     )
     return up, schema_file(project, 2, "down", db.backend)
 
@@ -142,7 +154,7 @@ def round_trip(project: Path, db) -> None:
     assert keys(db) == [(1, 1)]
     assert plan_against(db, snapshot(project, 1), snapshot(project, 2)) == []
     assert run("migrate", "up", "--url", db.url) == 0
-    assert keys(db) == [(1, 1), (2, 1)]
+    assert keys(db)[:2] == [(1, 1), (2, 1)]
 
 
 def refused(project: Path, pkg: str, dialect: str, before: str, after: str) -> str:
@@ -252,7 +264,7 @@ def test_a1_an_optional_checked_column_carries_its_check(project, pkg, db):
         + " = None\n"
     )
 
-    up, down = edit(project, pkg, db, body, "author_mood")
+    up, down = edit(project, pkg, db, body, "author_mood", validates=True)
 
     sql = statements(up)
     check = "CHECK (\"mood\" IN ('calm', 'loud'))"
@@ -264,7 +276,7 @@ def test_a1_an_optional_checked_column_carries_its_check(project, pkg, db):
         assert statements(down) == ['ALTER TABLE "author" DROP COLUMN "mood"']
     else:
         assert sql[0] == 'ALTER TABLE "author" ADD COLUMN "mood" text'
-        assert check in sql[1]
+        assert f"{check} NOT VALID;" in sql[1]
         assert statements(down) == [
             'ALTER TABLE "author" DROP CONSTRAINT "ck_author_mood"',
             'ALTER TABLE "author" DROP COLUMN "mood"',
@@ -290,7 +302,7 @@ def test_a1_an_optional_foreign_key_round_trips(project, pkg, db):
         'on_delete="SET NULL")] = None\n'
     )
 
-    up, down = edit(project, pkg, db, body, "author_team")
+    up, down = edit(project, pkg, db, body, "author_team", validates=True)
 
     sql = statements(up)
     if db.backend == "sqlite":
@@ -306,10 +318,11 @@ def test_a1_an_optional_foreign_key_round_trips(project, pkg, db):
             'CREATE TABLE IF NOT EXISTS "_ferro_new_author"'
         )
     else:
-        # Today the plain ADD CONSTRAINT; ticket #527 stages it NOT VALID.
+        # Staged NOT VALID and validated by 02_validate (#527).
         assert sql[-1] == (
             'ALTER TABLE "author" ADD CONSTRAINT "fk_author_team_id_team" '
-            'FOREIGN KEY ("team_id") REFERENCES "team" ("id") ON DELETE SET NULL'
+            'FOREIGN KEY ("team_id") REFERENCES "team" ("id") ON DELETE SET NULL '
+            "NOT VALID"
         )
         assert statements(down) == ['ALTER TABLE "author" DROP COLUMN "team_id"']
     round_trip(project, db)
@@ -489,44 +502,8 @@ def test_a7b_relaxing_not_null_and_its_down_sets_it_again(project, pkg, db):
 
 
 # -- A9: indexes ---------------------------------------------------------------------------
-
-EMAIL = AUTHOR + "    email: str | None = None\n"
-UNIQUE_EMAIL = (
-    AUTHOR + "    email: Annotated[str | None, FerroField(unique=True)] = None\n"
-)
-
-
-@pytest.mark.sqlite_only
-def test_a9_a_unique_on_an_existing_sqlite_table_is_built_in_the_schema_step(
-    project, pkg, db
-):
-    start(project, pkg, db, EMAIL)
-
-    up, down = edit(project, pkg, db, UNIQUE_EMAIL, "email_unique")
-
-    # A duplicate fails it: data-dependent.
-    assert up.read_text() == (
-        "-- ferro: data-dependent\n\n"
-        'CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_email" ON "author" ("email");\n'
-    )
-    assert down.read_text() == 'DROP INDEX IF EXISTS "uq_author_email";\n'
-    round_trip(project, db)
-
-    # And dropped again: the down rebuilds it.
-    write_models(project, pkg, EMAIL)
-    new("email_plain")
-    assert statements(schema_file(project, 3, "up", "sqlite")) == [
-        'DROP INDEX IF EXISTS "uq_author_email"'
-    ]
-    assert run("migrate", "up", "--url", db.url) == 0
-    assert run("migrate", "down", "--yes", "--url", db.url) == 0
-    assert plan_against(db, snapshot(project, 2), snapshot(project, 3)) == []
-
-
-def test_a9_an_index_on_an_existing_postgres_table_is_its_own_step(project, pkg):
-    err = refused(project, pkg, "postgres", EMAIL, UNIQUE_EMAIL)
-    assert err == "not generated yet: AddIndex on author (ticket #527)\n"
-
+# An index on an existing table is its own index step on every dialect:
+# tests/test_generate_postgres_staging.py (#527).
 
 TAG = """
 class Tag(Model):
