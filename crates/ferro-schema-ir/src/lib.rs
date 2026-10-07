@@ -184,6 +184,13 @@ pub struct SchemaColumn {
     /// same hints. Absent when undeclared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enum_renamed_labels: Option<SchemaRenamedLabels>,
+    /// The field's Python `default_factory`, as `module.qualname`
+    /// (`uuid.uuid4`): never a server default, but what a generated
+    /// backfill gives the rows a new required column finds (ticket #534).
+    /// Absent when the field declares none, so an envelope without one is
+    /// byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_factory: Option<String>,
 }
 
 /// An enum class's `__ferro_renamed_labels__` declaration.

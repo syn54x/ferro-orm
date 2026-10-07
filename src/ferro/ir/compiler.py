@@ -73,6 +73,25 @@ def declared_rename_hints(model_cls: type[Any]) -> RenameHints:
         foreign_keys=foreign_keys,
     )
 
+def declared_default_factories(model_cls: type[Any]) -> dict[str, str]:
+    """Each field's ``default_factory`` as ``module.qualname``.
+
+    ``id: UUID = Field(default_factory=uuid.uuid4)`` gives
+    ``{"id": "uuid.uuid4"}``. A factory never reaches DDL; a generated
+    backfill pre-fills a standard-library one and names any other in its
+    ``todo`` (#534).
+    """
+    factories: dict[str, str] = {}
+    for name, info in (getattr(model_cls, "model_fields", None) or {}).items():
+        factory = getattr(info, "default_factory", None)
+        if factory is None or not callable(factory):
+            continue
+        module = getattr(factory, "__module__", None) or "builtins"
+        qualname = getattr(factory, "__qualname__", None) or type(factory).__qualname__
+        factories[name] = f"{module}.{qualname}"
+    return factories
+
+
 # Test-only counter bumped at the single SchemaIR compile choke point (#245).
 _SCHEMA_IR_COMPILE_COUNT_FOR_TEST = 0
 
@@ -214,6 +233,7 @@ def compile_schema_ir_payload(
     table_checks: Sequence[TableCheckSpec] = (),
     row_security: RowSecurity | None = None,
     rename_hints: RenameHints | None = None,
+    default_factories: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compile column specs into a SchemaIR payload object (locked shape).
 
@@ -230,6 +250,9 @@ def compile_schema_ir_payload(
             :func:`ferro.rowsecurity.compile_row_security`).
         rename_hints: The model's declared rename hints, recorded as
             ``renamed_from`` on the model, its columns and its foreign keys.
+        default_factories: Column name to its field's ``default_factory``
+            (``uuid.uuid4``), recorded as ``default_factory`` on a column no
+            server default stands in for (:func:`declared_default_factories`).
 
     Returns:
         A SchemaIR payload object ready to be wrapped in an IR envelope.
@@ -253,6 +276,12 @@ def compile_schema_ir_payload(
         previous = hints.columns.get(entry["name"])
         if previous is not None:
             entry["renamed_from"] = previous
+        # Absent when undeclared, or when a server default already gives the
+        # existing rows their value: every other envelope stays byte-identical.
+        # A generated backfill reads it (#534).
+        factory = (default_factories or {}).get(entry["name"])
+        if factory is not None and entry["default"] is None:
+            entry["default_factory"] = factory
 
     foreign_keys: list[dict[str, Any]] = []
     indexes: list[dict[str, Any]] = []
@@ -378,6 +407,7 @@ def _compile_and_persist_model_envelope(
     table_checks: Sequence[TableCheckSpec] = (),
     row_security: RowSecurity | None = None,
     rename_hints: RenameHints | None = None,
+    default_factories: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compile one model or join table to SchemaIR and persist its envelope.
 
@@ -395,6 +425,7 @@ def _compile_and_persist_model_envelope(
         table_checks=table_checks,
         row_security=row_security,
         rename_hints=rename_hints,
+        default_factories=default_factories,
     )
     envelope = wrap_schema_ir(payload)
     _persist_schema_ir_envelope(model_name, envelope)
@@ -483,6 +514,7 @@ def compile_model_schema_ir(
         table_checks=table_checks,
         row_security=row_security,
         rename_hints=declared_rename_hints(model_cls),
+        default_factories=declared_default_factories(model_cls),
     )
     # Publish specs onto the class only after compile + persist succeed, so a
     # composite-validation or persist failure leaves the prior specs in place
