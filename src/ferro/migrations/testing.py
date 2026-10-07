@@ -247,6 +247,11 @@ class Harness:
         A step whose down is declared irreversible ends the downward walk at
         its migration: the result reports it (``irreversible``,
         ``reverted_to``) and the walk back up completes; it is not a failure.
+
+        With every migration reverted the database has no records, so
+        :func:`~ferro.migrations.drift` has no snapshot to compare with and
+        refuses; that one stop instead checks that none of the first
+        migration's tables remain (``author table is extra``).
         """
         chain = self._chain()
         name = _connection(self._using)
