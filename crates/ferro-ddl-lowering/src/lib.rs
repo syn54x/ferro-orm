@@ -3217,7 +3217,9 @@ mod tests {
             "transfer",
             &model,
             "ck_transfer_at_most_one_outflow",
-            Dialect::Postgres, ConstraintMode::Plain,)
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        )
         .expect("declared table check must resolve");
         assert_eq!(
             emission.statement.as_deref(),
@@ -3237,7 +3239,9 @@ mod tests {
             "transfer",
             &model,
             "ck_transfer_at_most_one_outflow",
-            Dialect::Sqlite, ConstraintMode::Plain,)
+            Dialect::Sqlite,
+            ConstraintMode::Plain,
+        )
         .expect("declared table check must resolve");
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
         let warning = emission.warning.expect("SQLite must never skip silently");
@@ -3255,9 +3259,14 @@ mod tests {
         // without a table rebuild, so the inline fragment has nowhere to go.
         let check = account_role_column_check();
         let model = transfer_model_with_checks(vec![], vec![check]);
-        let emission =
-            render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Sqlite, ConstraintMode::Plain)
-                .expect("declared column check must resolve");
+        let emission = render_check_addition(
+            "transfer",
+            &model,
+            "ck_transfer_kind",
+            Dialect::Sqlite,
+            ConstraintMode::Plain,
+        )
+        .expect("declared column check must resolve");
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
         assert!(
             emission.inline.is_none(),
@@ -3273,9 +3282,14 @@ mod tests {
     fn render_check_addition_column_check_reuses_the_idempotent_do_block() {
         let check = account_role_column_check();
         let model = transfer_model_with_checks(vec![], vec![check.clone()]);
-        let emission =
-            render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Postgres, ConstraintMode::Plain)
-                .expect("declared column check must resolve");
+        let emission = render_check_addition(
+            "transfer",
+            &model,
+            "ck_transfer_kind",
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        )
+        .expect("declared column check must resolve");
         assert_eq!(
             emission.statement,
             render_db_check("transfer", &check, Dialect::Postgres, ConstraintMode::Plain).statement,
@@ -3308,9 +3322,15 @@ mod tests {
         let check = account_role_column_check();
         let model = transfer_model_with_checks(vec![], vec![check.clone()]);
         let add = |mode| {
-            render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Postgres, mode)
-                .and_then(|emission| emission.statement)
-                .expect("declared")
+            render_check_addition(
+                "transfer",
+                &model,
+                "ck_transfer_kind",
+                Dialect::Postgres,
+                mode,
+            )
+            .and_then(|emission| emission.statement)
+            .expect("declared")
         };
         let plain = add(ConstraintMode::Plain);
         assert_eq!(
@@ -3327,10 +3347,19 @@ mod tests {
         );
         // SQLite has no unvalidated constraint: the mode changes nothing.
         let sqlite = |mode| {
-            render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Sqlite, mode)
-                .and_then(|emission| emission.warning)
+            render_check_addition(
+                "transfer",
+                &model,
+                "ck_transfer_kind",
+                Dialect::Sqlite,
+                mode,
+            )
+            .and_then(|emission| emission.warning)
         };
-        assert_eq!(sqlite(ConstraintMode::NotValid), sqlite(ConstraintMode::Plain));
+        assert_eq!(
+            sqlite(ConstraintMode::NotValid),
+            sqlite(ConstraintMode::Plain)
+        );
     }
 
     #[test]
@@ -3381,8 +3410,14 @@ mod tests {
     fn render_check_addition_returns_none_for_an_undeclared_name() {
         let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
         assert!(
-            render_check_addition("transfer", &model, "ck_transfer_nope", Dialect::Postgres, ConstraintMode::Plain)
-                .is_none()
+            render_check_addition(
+                "transfer",
+                &model,
+                "ck_transfer_nope",
+                Dialect::Postgres,
+                ConstraintMode::Plain
+            )
+            .is_none()
         );
     }
 
@@ -3540,7 +3575,9 @@ mod tests {
             "transfer",
             &model,
             "ck_transfer_at_most_one_outflow",
-            Dialect::Postgres, ConstraintMode::Plain,)
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        )
         .expect("declared table check must resolve");
         assert_eq!(
             emission.statements,
@@ -3564,9 +3601,14 @@ mod tests {
     fn render_check_rebuild_column_check_is_also_a_bare_add() {
         let check = account_role_column_check();
         let model = transfer_model_with_checks(vec![], vec![check]);
-        let emission =
-            render_check_rebuild("transfer", &model, "ck_transfer_kind", Dialect::Postgres, ConstraintMode::Plain)
-                .expect("declared column check must resolve");
+        let emission = render_check_rebuild(
+            "transfer",
+            &model,
+            "ck_transfer_kind",
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        )
+        .expect("declared column check must resolve");
         assert_eq!(
             emission.statements,
             vec![
@@ -3585,7 +3627,9 @@ mod tests {
             "transfer",
             &model,
             "ck_transfer_at_most_one_outflow",
-            Dialect::Sqlite, ConstraintMode::Plain,)
+            Dialect::Sqlite,
+            ConstraintMode::Plain,
+        )
         .expect("declared table check must resolve");
         assert!(emission.statements.is_empty(), "ADR-0014: no SQLite ALTER");
         let warning = emission.warning.expect("SQLite must never skip silently");
@@ -3601,8 +3645,14 @@ mod tests {
     fn render_check_rebuild_returns_none_for_an_undeclared_name() {
         let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
         assert!(
-            render_check_rebuild("transfer", &model, "ck_transfer_nope", Dialect::Postgres, ConstraintMode::Plain)
-                .is_none()
+            render_check_rebuild(
+                "transfer",
+                &model,
+                "ck_transfer_nope",
+                Dialect::Postgres,
+                ConstraintMode::Plain
+            )
+            .is_none()
         );
     }
 
@@ -4141,7 +4191,12 @@ mod tests {
 
     #[test]
     fn render_db_check_postgres_is_idempotent_and_wraps_the_bare_alter() {
-        let e = render_db_check("account", &sample_check(), Dialect::Postgres, ConstraintMode::Plain);
+        let e = render_db_check(
+            "account",
+            &sample_check(),
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        );
         // The idempotent guard: only ADD CONSTRAINT when pg_constraint lacks it,
         // so a re-run against an already-migrated schema is a no-op (G6, #176).
         assert_eq!(
@@ -4165,13 +4220,23 @@ mod tests {
 
     #[test]
     fn render_db_check_postgres_has_no_inline_fragment() {
-        let e = render_db_check("account", &sample_check(), Dialect::Postgres, ConstraintMode::Plain);
+        let e = render_db_check(
+            "account",
+            &sample_check(),
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        );
         assert!(e.inline.is_none(), "Postgres keeps the post-create ALTER");
     }
 
     #[test]
     fn render_db_check_sqlite_renders_the_named_inline_column_constraint() {
-        let e = render_db_check("account", &sample_check(), Dialect::Sqlite, ConstraintMode::Plain);
+        let e = render_db_check(
+            "account",
+            &sample_check(),
+            Dialect::Sqlite,
+            ConstraintMode::Plain,
+        );
         assert!(e.statement.is_none(), "SQLite has no ADD CONSTRAINT");
         assert!(e.warning.is_none(), "the constraint is emitted, not elided");
         assert_eq!(

@@ -314,7 +314,9 @@ pub fn render_down(
         foreign_keys_off: up_rebuilds,
         destructive: !up_statements.is_empty() && step_ops.iter().any(drops_data),
         data_dependent: !up_statements.is_empty()
-            && step_ops.iter().any(|op| may_fail_on_rows(op, after, up_mode)),
+            && step_ops
+                .iter()
+                .any(|op| may_fail_on_rows(op, after, up_mode)),
         not_applicable: up_statements.is_empty(),
         ..Headers::default()
     };
@@ -367,7 +369,14 @@ mod tests {
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
     ) -> Rendering {
-        render_down(&up_ops(before, after, dialect), before, after, dialect, Phase::Schema).expect("render")
+        render_down(
+            &up_ops(before, after, dialect),
+            before,
+            after,
+            dialect,
+            Phase::Schema,
+        )
+        .expect("render")
     }
 
     #[test]
@@ -473,7 +482,14 @@ mod tests {
 
     #[test]
     fn a_step_with_nothing_on_a_dialect_is_not_applicable_both_ways() {
-        let r = render_down(&[], &ir(vec![]), &ir(vec![]), Dialect::Sqlite, Phase::Schema).expect("render");
+        let r = render_down(
+            &[],
+            &ir(vec![]),
+            &ir(vec![]),
+            Dialect::Sqlite,
+            Phase::Schema,
+        )
+        .expect("render");
         assert_eq!(r.up, "-- ferro: not-applicable\n");
         assert_eq!(r.down, "-- ferro: not-applicable\n");
         assert!(r.headers.not_applicable && r.down_headers.not_applicable);

@@ -3,13 +3,12 @@
 use crate::{Dialect, EmissionError, EmissionResult};
 use ferro_ddl_lowering::{
     self, CheckEmission, ConstraintMode, IndexMode, ResolvedStorage, apply_canonical_type_for,
-    canonical_from_schema_column,
-    canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
-    fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
-    refused_conversion_warning, render_db_check, render_json_backfill_default,
-    render_pg_enum_create_type, render_sqlite_add_column_references, render_table_check_body,
-    resolve_column_storage, row_security_statements, single_index_name, single_unique_index_name,
-    sqlite_declared_type, sqlite_type_storage_drift,
+    canonical_from_schema_column, canonical_to_db_type_token, db_check_constraint_name,
+    fk_action_from_str, fk_action_sql, fk_name, literal_default_value, pg_alter_type_target,
+    quote_ident, refused_conversion, refused_conversion_warning, render_db_check,
+    render_json_backfill_default, render_pg_enum_create_type, render_sqlite_add_column_references,
+    render_table_check_body, resolve_column_storage, row_security_statements, single_index_name,
+    single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
 use sea_query::{
@@ -191,7 +190,12 @@ pub fn render_create_table_as(
     let check_emissions: Vec<(&ferro_schema_ir::SchemaCheck, CheckEmission)> = model
         .checks
         .iter()
-        .map(|check| (check, render_db_check(table_lower, check, dialect, ConstraintMode::Plain)))
+        .map(|check| {
+            (
+                check,
+                render_db_check(table_lower, check, dialect, ConstraintMode::Plain),
+            )
+        })
         .collect();
     if let Some((orphan, _)) = check_emissions.iter().find(|(check, emission)| {
         emission.inline.is_some()
@@ -355,7 +359,14 @@ fn post_create_artifacts(
     let mut warnings = Vec::new();
 
     for (name, columns, unique) in standalone_indexes(model) {
-        statements.push(render_index_sql(table_lower, &name, &columns, unique, dialect, IndexMode::Plain));
+        statements.push(render_index_sql(
+            table_lower,
+            &name,
+            &columns,
+            unique,
+            dialect,
+            IndexMode::Plain,
+        ));
     }
 
     // Inline fragments already rode their column in the CREATE TABLE.
@@ -406,7 +417,10 @@ pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a Schema
 /// declares, as `(name, columns, unique)`: the standalone named `uq_` unique
 /// index and `idx_` index fresh-create emits (FF-B B4/D1), unique first. What
 /// an `ADD COLUMN` of `col` builds.
-pub(crate) fn added_column_indexes(table: &str, col: &SchemaColumn) -> Vec<(String, Vec<String>, bool)> {
+pub(crate) fn added_column_indexes(
+    table: &str,
+    col: &SchemaColumn,
+) -> Vec<(String, Vec<String>, bool)> {
     let mut out = Vec::new();
     if col.unique {
         out.push((
@@ -416,7 +430,11 @@ pub(crate) fn added_column_indexes(table: &str, col: &SchemaColumn) -> Vec<(Stri
         ));
     }
     if col.index {
-        out.push((single_index_name(table, &col.name), vec![col.name.clone()], false));
+        out.push((
+            single_index_name(table, &col.name),
+            vec![col.name.clone()],
+            false,
+        ));
     }
     out
 }
@@ -565,7 +583,9 @@ pub(crate) fn emit_add_column(
 
     if let Some(fk) = fk {
         match dialect {
-            Dialect::Postgres => result.statements.push(render_add_fk_sql(table, fk, constraints)),
+            Dialect::Postgres => result
+                .statements
+                .push(render_add_fk_sql(table, fk, constraints)),
             Dialect::Sqlite if sqlite_inline_fk => {}
             Dialect::Sqlite => result.warnings.push(format!(
                 "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint: SQLite's \

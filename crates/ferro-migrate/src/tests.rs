@@ -2287,7 +2287,12 @@ fn render_db_check_postgres_emits_quoted_alter_no_warning() {
         column: "role".to_string(),
         values: vec!["'admin'".to_string(), "'user'".to_string()],
     };
-    let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Postgres, ferro_ddl_lowering::ConstraintMode::Plain);
+    let e = ferro_ddl_lowering::render_db_check(
+        "account",
+        &check,
+        Dialect::Postgres,
+        ferro_ddl_lowering::ConstraintMode::Plain,
+    );
     assert_eq!(e.statement.as_deref(), Some(PG_DB_CHECK_ACCOUNT_ROLE));
     assert!(e.warning.is_none());
 }
@@ -2299,7 +2304,12 @@ fn render_db_check_sqlite_renders_inline_without_warning() {
         column: "role".to_string(),
         values: vec!["'admin'".to_string(), "'user'".to_string()],
     };
-    let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Sqlite, ferro_ddl_lowering::ConstraintMode::Plain);
+    let e = ferro_ddl_lowering::render_db_check(
+        "account",
+        &check,
+        Dialect::Sqlite,
+        ferro_ddl_lowering::ConstraintMode::Plain,
+    );
     assert!(e.statement.is_none());
     assert!(e.warning.is_none());
     assert_eq!(
@@ -4053,7 +4063,10 @@ fn a_not_valid_foreign_key_is_the_passs_add_plus_the_one_token() {
 
 #[test]
 fn the_passs_index_statements_are_byte_unchanged_by_the_modes() {
-    let old_ir = envelope(vec![schema_model("post", vec![pk_col("id", "int"), col("slug", "text", true)])]);
+    let old_ir = envelope(vec![schema_model(
+        "post",
+        vec![pk_col("id", "int"), col("slug", "text", true)],
+    )]);
     let new_ir = envelope(vec![post_model_with_constraints()]);
     let plan = plan_from_ir(
         &old_ir,
@@ -4065,10 +4078,15 @@ fn the_passs_index_statements_are_byte_unchanged_by_the_modes() {
     let pg = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(
         pg.statements.contains(
-            &"CREATE UNIQUE INDEX IF NOT EXISTS \"uq_post_slug\" ON \"post\" (\"slug\")".to_string()
+            &"CREATE UNIQUE INDEX IF NOT EXISTS \"uq_post_slug\" ON \"post\" (\"slug\")"
+                .to_string()
         ),
         "{:?}",
         pg.statements
     );
-    assert!(!pg.statements.iter().any(|sql| sql.contains("CONCURRENTLY") || sql.contains("NOT VALID")));
+    assert!(
+        !pg.statements
+            .iter()
+            .any(|sql| sql.contains("CONCURRENTLY") || sql.contains("NOT VALID"))
+    );
 }

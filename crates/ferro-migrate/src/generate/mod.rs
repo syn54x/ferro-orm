@@ -622,11 +622,7 @@ pub fn generate(
     for &phase in phases.iter().filter(|&&phase| phase < Phase::Index) {
         push_phase(phase, &mut steps)?;
     }
-    steps.extend(
-        index_ops
-            .iter()
-            .map(|op| staging::index_step(op, dialects)),
-    );
+    steps.extend(index_ops.iter().map(|op| staging::index_step(op, dialects)));
     for &phase in phases.iter().filter(|&&phase| phase > Phase::Index) {
         push_phase(phase, &mut steps)?;
     }
@@ -1401,8 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_columns_index_unique_check_and_foreign_key_are_staged_on_an_existing_postgres_table()
-    {
+    fn a_new_columns_index_unique_check_and_foreign_key_are_staged_on_an_existing_postgres_table() {
         let team = model("Team", vec![pk()]);
         let mut after = with_columns(vec![SchemaColumn {
             unique: true,

@@ -229,8 +229,10 @@ fn goes_with_an_added_column(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
 /// after the file — its own index step on every dialect (ADR-0044) — rather
 /// than riding the table's or the column's own statement in the schema step.
 pub fn is_index_step(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
-    matches!(op, MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. })
-        && ctx.on_existing_table()
+    matches!(
+        op,
+        MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. }
+    ) && ctx.on_existing_table()
         && !goes_with_a_dropped_column(op, ctx)
         && !(ctx.direction == PlanDirection::Down && goes_with_an_added_column(op, ctx))
 }
@@ -425,7 +427,10 @@ mod tests {
         let (before, after) = (ir(vec![before.clone()]), ir(vec![after.clone()]));
         let ctx = PlanContext::of(op, &before, &after, dialect, direction);
         let assignment = assign(op, &ctx);
-        let indexed = matches!(op, MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. });
+        let indexed = matches!(
+            op,
+            MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. }
+        );
         if !indexed {
             assert_eq!(assignment.phase, Phase::Schema, "{op:?}");
         }

@@ -3,15 +3,15 @@
 //! `ferro_ddl_lowering` renderers the reconciliation pass has always used.
 
 use crate::emit::{
-    emit_add_column, emit_alter_column_nullability, emit_alter_column_type,
-    find_column, find_foreign_key, find_model, render_add_fk_sql, render_index_sql,
+    emit_add_column, emit_alter_column_nullability, emit_alter_column_type, find_column,
+    find_foreign_key, find_model, render_add_fk_sql, render_index_sql,
 };
 use crate::plan::index_models;
 use crate::{Dialect, EmissionError, MigrationOp, MigrationPlan, render_create_table};
 use ferro_ddl_lowering::{
     ConstraintMode, IndexMode, ResolvedStorage, fk_action_from_str, fk_action_sql, quote_ident,
-    render_check_addition, render_drop_constraint, render_drop_index_sql,
-    render_check_drop, render_check_rebuild, render_create_row_policy, render_disable_row_security,
+    render_check_addition, render_check_drop, render_check_rebuild, render_create_row_policy,
+    render_disable_row_security, render_drop_constraint, render_drop_index_sql,
     render_drop_row_policy, render_enable_row_security, render_force_row_security,
     render_no_force_row_security, render_pg_enum_add_value, render_pg_enum_create_type,
     render_pg_enum_drop_type, render_validate_constraint, resolve_column_storage,
@@ -151,8 +151,14 @@ pub(crate) fn render_plan_in(
             }
             MigrationOp::AddColumn { table, column } => {
                 let model = find_model(&new_models, table)?;
-                let emission =
-                    emit_add_column(table, column, model, dialect, &types_created_by_plan, constraints)?;
+                let emission = emit_add_column(
+                    table,
+                    column,
+                    model,
+                    dialect,
+                    &types_created_by_plan,
+                    constraints,
+                )?;
                 out.statements.extend(emission.statements);
                 out.warnings.extend(emission.warnings);
             }
@@ -207,8 +213,14 @@ pub(crate) fn render_plan_in(
                 columns,
                 unique,
             } => {
-                out.statements
-                    .push(render_index_sql(table, name, columns, *unique, dialect, IndexMode::Plain));
+                out.statements.push(render_index_sql(
+                    table,
+                    name,
+                    columns,
+                    *unique,
+                    dialect,
+                    IndexMode::Plain,
+                ));
             }
             // DROP INDEX is schema-scoped (not table-qualified) on both
             // dialects, so only the index name is needed.
@@ -227,8 +239,14 @@ pub(crate) fn render_plan_in(
             } => {
                 out.statements
                     .push(format!("DROP INDEX {}", quote_ident(name)));
-                out.statements
-                    .push(render_index_sql(table, name, columns, *unique, dialect, IndexMode::Plain));
+                out.statements.push(render_index_sql(
+                    table,
+                    name,
+                    columns,
+                    *unique,
+                    dialect,
+                    IndexMode::Plain,
+                ));
             }
             MigrationOp::ValidateConstraint { table, name } => match dialect {
                 Dialect::Postgres => out.statements.push(render_validate_constraint(table, name)),
@@ -246,7 +264,10 @@ pub(crate) fn render_plan_in(
                 let model = find_model(&new_models, table)?;
                 let fk = find_foreign_key(model, table, column)?;
                 match dialect {
-                    Dialect::Postgres => out.statements.push(render_add_fk_sql(table, fk, constraints)),
+                    Dialect::Postgres => {
+                        out.statements
+                            .push(render_add_fk_sql(table, fk, constraints))
+                    }
                     Dialect::Sqlite => out.warnings.push(format!(
                         "Declared FOREIGN KEY on '{}.{}' (on_delete {}) has no live \
                          constraint, and SQLite cannot add table constraints to an \
@@ -268,9 +289,9 @@ pub(crate) fn render_plan_in(
                 let fk = find_foreign_key(model, table, column)?;
                 match dialect {
                     Dialect::Postgres => {
+                        out.statements.push(render_drop_constraint(table, old_name));
                         out.statements
-                            .push(render_drop_constraint(table, old_name));
-                        out.statements.push(render_add_fk_sql(table, fk, constraints));
+                            .push(render_add_fk_sql(table, fk, constraints));
                     }
                     Dialect::Sqlite => {
                         let live_action = find_model(&old_models, table)
@@ -297,30 +318,26 @@ pub(crate) fn render_plan_in(
             }
             MigrationOp::AddCheck { table, name } => {
                 let model = find_model(&new_models, table)?;
-                let emission =
-                    render_check_addition(table, model, name, dialect, constraints).ok_or_else(|| {
-                        EmissionError {
-                            message: format!(
-                                "Check-addition operation for '{}' on table '{}' has no matching \
+                let emission = render_check_addition(table, model, name, dialect, constraints)
+                    .ok_or_else(|| EmissionError {
+                        message: format!(
+                            "Check-addition operation for '{}' on table '{}' has no matching \
                              CHECK constraint in the declared IR",
-                                name, table
-                            ),
-                        }
+                            name, table
+                        ),
                     })?;
                 out.statements.extend(emission.statement);
                 out.warnings.extend(emission.warning);
             }
             MigrationOp::RebuildCheck { table, name } => {
                 let model = find_model(&new_models, table)?;
-                let emission =
-                    render_check_rebuild(table, model, name, dialect, constraints).ok_or_else(|| {
-                        EmissionError {
-                            message: format!(
-                                "Check-rebuild operation for '{}' on table '{}' has no matching \
+                let emission = render_check_rebuild(table, model, name, dialect, constraints)
+                    .ok_or_else(|| EmissionError {
+                        message: format!(
+                            "Check-rebuild operation for '{}' on table '{}' has no matching \
                              CHECK constraint in the declared IR",
-                                name, table
-                            ),
-                        }
+                            name, table
+                        ),
                     })?;
                 out.statements.extend(emission.statements);
                 out.warnings.extend(emission.warning);
