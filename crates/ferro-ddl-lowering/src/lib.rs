@@ -582,11 +582,70 @@ pub fn extra_enum_labels_warning(type_name: &str, extra: &[String]) -> Option<St
 /// every supported Postgres version and the label is committed before any
 /// table plan that references it.
 pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
+    render_pg_enum_add_value_at(type_name, label, None)
+}
+
+/// Where an added label goes among a type's labels: Postgres's
+/// `ADD VALUE … BEFORE` / `AFTER`. No position appends it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnumLabelPosition {
+    /// Right before this label.
+    Before(String),
+    /// Right after this label.
+    After(String),
+}
+
+/// One `ALTER TYPE … ADD VALUE IF NOT EXISTS`, at `position` when there is
+/// one. The one renderer of a label addition: [`render_pg_enum_add_value`]
+/// (the reconciliation pass's append) is this without a position.
+pub fn render_pg_enum_add_value_at(
+    type_name: &str,
+    label: &str,
+    position: Option<&EnumLabelPosition>,
+) -> String {
+    let at = match position {
+        None => String::new(),
+        Some(EnumLabelPosition::Before(anchor)) => format!(" BEFORE {}", quote_label(anchor)),
+        Some(EnumLabelPosition::After(anchor)) => format!(" AFTER {}", quote_label(anchor)),
+    };
     format!(
-        "ALTER TYPE {} ADD VALUE IF NOT EXISTS '{}'",
+        "ALTER TYPE {} ADD VALUE IF NOT EXISTS {}{at}",
         quote_ident(type_name),
-        label.replace('\'', "''"),
+        quote_label(label),
     )
+}
+
+/// The labels of `declared` a type holding only `present` lacks, in declared
+/// order, each with the position that puts it back where `declared` has it
+/// once the ones before it are back: after the declared label before it, or,
+/// for a first label, before the first declared label present. Appended
+/// only when nothing present anchors it. A removed label's down restores the
+/// parent's order this way (ADR-0033), where an append would reorder the
+/// type's comparisons and `ORDER BY`.
+pub fn positioned_missing_enum_labels(
+    declared: &[String],
+    present: &[String],
+) -> Vec<(String, Option<EnumLabelPosition>)> {
+    let mut held: Vec<&String> = declared
+        .iter()
+        .filter(|label| present.contains(label))
+        .collect();
+    let mut out = Vec::new();
+    for (i, label) in declared.iter().enumerate() {
+        if held.contains(&label) {
+            continue;
+        }
+        let position = match i.checked_sub(1).map(|prev| &declared[prev]) {
+            Some(prev) => Some(EnumLabelPosition::After(prev.clone())),
+            None => declared[1..]
+                .iter()
+                .find(|next| held.contains(next))
+                .map(|next| EnumLabelPosition::Before(next.clone())),
+        };
+        held.push(label);
+        out.push((label.clone(), position));
+    }
+    out
 }
 
 /// One enum label as a SQL string literal: single-quoted, every `'` doubled.
@@ -4989,6 +5048,60 @@ mod tests {
             render_pg_enum_add_value("od'd", "it's"),
             "ALTER TYPE \"od'd\" ADD VALUE IF NOT EXISTS 'it''s'"
         );
+        assert_eq!(
+            render_pg_enum_add_value_at(
+                "od'd",
+                "it's",
+                Some(&EnumLabelPosition::Before("l'e".into()))
+            ),
+            "ALTER TYPE \"od'd\" ADD VALUE IF NOT EXISTS 'it''s' BEFORE 'l''e'"
+        );
+        assert_eq!(
+            render_pg_enum_add_value_at(
+                "status",
+                "gone",
+                Some(&EnumLabelPosition::After("live".into()))
+            ),
+            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone' AFTER 'live'"
+        );
+        assert_eq!(
+            render_pg_enum_add_value_at("provider", "mx", None),
+            render_pg_enum_add_value("provider", "mx")
+        );
+    }
+
+    #[test]
+    fn restored_labels_land_where_the_declaration_puts_them() {
+        let labels = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let before = |l: &str| Some(EnumLabelPosition::Before(l.into()));
+        let after = |l: &str| Some(EnumLabelPosition::After(l.into()));
+        // A middle label goes back after the label before it.
+        assert_eq!(
+            positioned_missing_enum_labels(
+                &labels(&["draft", "gone", "live"]),
+                &labels(&["draft", "live"])
+            ),
+            vec![("gone".to_string(), after("draft"))]
+        );
+        // A first label has nothing before it: before the first label present.
+        assert_eq!(
+            positioned_missing_enum_labels(&labels(&["a", "b", "c"]), &labels(&["c"])),
+            vec![
+                ("a".to_string(), before("c")),
+                ("b".to_string(), after("a"))
+            ]
+        );
+        // Trailing labels each follow the one restored before them.
+        assert_eq!(
+            positioned_missing_enum_labels(&labels(&["a", "b", "c"]), &labels(&["a"])),
+            vec![("b".to_string(), after("a")), ("c".to_string(), after("b"))]
+        );
+        // Nothing present to anchor to: appended.
+        assert_eq!(
+            positioned_missing_enum_labels(&labels(&["a"]), &[]),
+            vec![("a".to_string(), None)]
+        );
+        assert!(positioned_missing_enum_labels(&labels(&["a"]), &labels(&["a"])).is_empty());
     }
 
     #[test]

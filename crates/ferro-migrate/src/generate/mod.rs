@@ -2838,7 +2838,20 @@ mod tests {
         assert_eq!(pg.up, format!("-- ferro: data-dependent\n{expected}"));
         assert_eq!(
             pg.down,
-            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone';\n"
+            // Back where the parent declares it, never appended (ADR-0033).
+            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone' AFTER 'draft';\n"
+        );
+        // A first label goes back before the first one left, and the next
+        // removed one after it.
+        let firsts = edit(
+            with_status(&["draft", "gone", "live"], false),
+            with_status(&["live"], false),
+            &BOTH,
+        );
+        assert_eq!(
+            step(&firsts, "02_contract", Dialect::Postgres).down,
+            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'draft' BEFORE 'live';\n\n\
+             ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone' AFTER 'draft';\n"
         );
         // SQLite stores the label as text in a column as wide as the longest
         // label, which stays: nothing beyond the backfill.

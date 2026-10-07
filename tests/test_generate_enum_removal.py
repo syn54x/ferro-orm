@@ -17,7 +17,7 @@ $ ferro migrate new drop_canceled
     02_contract               Postgres: CREATE TYPE "rmlorderstatus_new" …; ALTER COLUMN … TYPE
                               "rmlorderstatus_new" USING "status"::text::"rmlorderstatus_new";
                               DROP TYPE "rmlorderstatus"; ALTER TYPE … RENAME TO "rmlorderstatus"
-                              (its down: ADD VALUE IF NOT EXISTS 'canceled')
+                              (its down: ADD VALUE IF NOT EXISTS 'canceled' AFTER 'paid')
                               SQLite: not-applicable (labels are text in the rows)
 ```
 
@@ -205,7 +205,7 @@ def test_d2_a_removed_label_is_backfilled_then_contracted_and_round_trips(
         "-- ferro: data-dependent\n\n" + "\n\n".join(f"{s};" for s in SWAP) + "\n"
     )
     assert text(migration, "02_contract.down.postgres.sql") == (
-        "ALTER TYPE \"rmlorderstatus\" ADD VALUE IF NOT EXISTS 'canceled';\n"
+        "ALTER TYPE \"rmlorderstatus\" ADD VALUE IF NOT EXISTS 'canceled' AFTER 'paid';\n"
     )
     for direction in ("up", "down"):
         assert (
@@ -238,7 +238,12 @@ def test_d2_a_removed_label_is_backfilled_then_contracted_and_round_trips(
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert keys(db) == [(1, 1)]
     if db.backend == "postgres":
-        assert sorted(labels_of(db)) == sorted(ALL)
+        # Where the parent declares it, not appended: the type's order (its
+        # comparisons, ``ORDER BY status``) is the parent's again.
+        assert labels_of(db) == list(ALL)
+        assert db.rows("SELECT enum_range(NULL::rmlorderstatus)::text") == [
+            ("{paid,canceled,refunded}",)
+        ]
     assert clean(db, project, 1, 2)
     seed(db, "rmlorder", ["canceled"])
     assert run("migrate", "up", "--url", db.url) == 0
