@@ -1,4 +1,35 @@
 {
+  "tests/test_auto_migrate.py::test_a_hinted_table_whose_new_name_is_also_live_is_inert[sqlite]": {
+    "statements": [
+      "'trnwriter': CREATE TABLE IF NOT EXISTS \"trnwriter\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'trnwriter': CREATE INDEX IF NOT EXISTS \"idx_trnwriter_name\" ON \"trnwriter\" (\"name\")",
+      "'trnauthor': CREATE TABLE IF NOT EXISTS \"trnauthor\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'trnauthor': CREATE INDEX IF NOT EXISTS \"idx_trnauthor_name\" ON \"trnauthor\" (\"name\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_a_hinted_table_without_migrate_updates_is_left_alone_and_warns[sqlite]": {
+    "statements": [
+      "'trnwriter': CREATE TABLE IF NOT EXISTS \"trnwriter\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'trnwriter': CREATE INDEX IF NOT EXISTS \"idx_trnwriter_name\" ON \"trnwriter\" (\"name\")"
+    ],
+    "warnings": [
+      "table \"trnauthor\" declares __ferro_renamed_from__ = \"trnwriter\", and the database holds \"trnwriter\" and no \"trnauthor\": \"trnauthor\" was not created. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_new_table_referencing_a_renamed_one_is_created_after_the_rename[sqlite]": {
+    "statements": [
+      "'trnwriter': CREATE TABLE IF NOT EXISTS \"trnwriter\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'trnwriter': CREATE INDEX IF NOT EXISTS \"idx_trnwriter_name\" ON \"trnwriter\" (\"name\")",
+      "'trnauthor': ALTER TABLE \"trnwriter\" RENAME TO \"trnauthor\"",
+      "'trnauthor': DROP INDEX IF EXISTS \"idx_trnwriter_name\"",
+      "'trnauthor': CREATE INDEX IF NOT EXISTS \"idx_trnauthor_name\" ON \"trnauthor\" (\"name\")",
+      "'trnbook': CREATE TABLE IF NOT EXISTS \"trnbook\" ( \"author_id\" integer NOT NULL, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"title\" varchar NOT NULL, CONSTRAINT \"fk_trnbook_author_id_trnauthor\" FOREIGN KEY (\"author_id\") REFERENCES \"trnauthor\" (\"id\") ON DELETE CASCADE )"
+    ],
+    "warnings": [
+      "table \"trnauthor\" declares __ferro_renamed_from__ = \"trnwriter\", and the database holds \"trnwriter\" and no \"trnauthor\": \"trnauthor\" was not created, nor \"trnbook\", which reference it. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new."
+    ]
+  },
   "tests/test_auto_migrate.py::test_added_indexed_and_unique_columns_get_their_indexes[sqlite]": {
     "statements": [
       "'migindexed': ALTER TABLE \"migindexed\" ADD COLUMN \"slug\" varchar",
@@ -149,6 +180,16 @@
       "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it."
     ]
   },
+  "tests/test_auto_migrate.py::test_migrate_updates_renames_a_hinted_table_with_its_rows_and_index[sqlite]": {
+    "statements": [
+      "'trnwriter': CREATE TABLE IF NOT EXISTS \"trnwriter\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'trnwriter': CREATE INDEX IF NOT EXISTS \"idx_trnwriter_name\" ON \"trnwriter\" (\"name\")",
+      "'trnauthor': ALTER TABLE \"trnwriter\" RENAME TO \"trnauthor\"",
+      "'trnauthor': DROP INDEX IF EXISTS \"idx_trnwriter_name\"",
+      "'trnauthor': CREATE INDEX IF NOT EXISTS \"idx_trnauthor_name\" ON \"trnauthor\" (\"name\")"
+    ],
+    "warnings": []
+  },
   "tests/test_auto_migrate.py::test_migrate_updates_validates_a_not_valid_constraint_in_place[sqlite-ck_vfpost_title_set]": {
     "statements": [
       "'vfauthor': CREATE TABLE IF NOT EXISTS \"vfauthor\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
@@ -218,6 +259,16 @@
     "statements": [],
     "warnings": [
       "Column 'migdrift.count' is declared 'varchar' in the database but the model expects 'integer'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_two_tables_claiming_one_live_old_name_refuse_and_change_nothing[sqlite]": {
+    "statements": [
+      "'trnwriter': CREATE TABLE IF NOT EXISTS \"trnwriter\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'trnwriter': CREATE INDEX IF NOT EXISTS \"idx_trnwriter_name\" ON \"trnwriter\" (\"name\")"
+    ],
+    "warnings": [
+      "rename hint refused: tables \"trnauthor\" and \"trnpoet\" all declare __ferro_renamed_from__ = \"trnwriter\": one table becomes one table; keep the hint on the model \"trnwriter\" became",
+      "rename hint refused: tables \"trnauthor\" and \"trnpoet\" all declare __ferro_renamed_from__ = \"trnwriter\": one table becomes one table; keep the hint on the model \"trnwriter\" became"
     ]
   },
   "tests/test_auto_migrate.py::test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability[sqlite]": {
