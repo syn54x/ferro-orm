@@ -115,6 +115,21 @@ pub enum MigrationOp {
         /// the names the plan's table and column renames leave them.
         columns: Vec<(String, String)>,
     },
+    /// A label the old snapshot's enum declares and the new one drops, with
+    /// no hint renaming it (#536). Planned only between two declared
+    /// snapshots (the generator): against a live database a dropped label is
+    /// ADR-0011's warn-never-act. Rows may hold the label, so the generator
+    /// answers it with a backfill and, on Postgres, the swap-type contract
+    /// (`generate::enums::render_swap_type`); the pass renders it as the
+    /// warning only.
+    RemoveEnumLabel {
+        /// Enum type name.
+        type_name: String,
+        /// The label dropped.
+        label: String,
+        /// Every `(table, column)` of the new snapshot declaring the type.
+        columns: Vec<(String, String)>,
+    },
     /// An enum type every one of whose columns now declares one and the same
     /// new type (ADR-0032: inferred from the columns, no hint) — `ALTER TYPE
     /// … RENAME TO`. Postgres only: SQLite has no enum types.
@@ -375,6 +390,7 @@ impl MigrationOp {
             | MigrationOp::CreateEnumType { .. }
             | MigrationOp::DropEnumType { .. }
             | MigrationOp::RenameEnumLabel { .. }
+            | MigrationOp::RemoveEnumLabel { .. }
             | MigrationOp::RenameEnumType { .. } => None,
             MigrationOp::RenameTable { new, .. } => Some(new),
             MigrationOp::RenameColumn { table, .. }

@@ -58,6 +58,7 @@ fn subject(op: &MigrationOp) -> Option<Subject> {
         | MigrationOp::DropEnumType { type_name }
         | MigrationOp::AddEnumLabel { type_name, .. }
         | MigrationOp::RenameEnumLabel { type_name, .. }
+        | MigrationOp::RemoveEnumLabel { type_name, .. }
         | MigrationOp::RenameEnumType { new: type_name, .. } => {
             Some(Subject::EnumType(type_name.clone()))
         }

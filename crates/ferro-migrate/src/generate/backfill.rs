@@ -26,17 +26,24 @@
 
 use super::columns::{self, PlanContext, PlanDirection};
 use super::staging::StagedConstraint;
-use super::{GenerateError, GeneratedStep, Rendering, rebuild, step_text};
+use super::{GenerateError, GeneratedStep, Rendering, enums, rebuild, step_text};
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::order::order_by_dependencies;
+use crate::plan::enum_declaration;
 use crate::{Dialect, MigrationOp, MigrationPlan, render_plan};
-use ferro_ddl_lowering::{quote_ident, render_drop_constraint, render_validate_constraint};
+use ferro_ddl_lowering::{
+    ResolvedStorage, quote_ident, quote_label, render_drop_constraint, render_validate_constraint,
+    resolve_column_storage,
+};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::BTreeMap;
 
 /// Why the rows a table holds need a value for a column.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "kind", content = "factory", rename_all = "snake_case")]
+///
+/// On the wire (the scaffold's input): `{"kind": "no_default"}`,
+/// `{"kind": "default_factory", "factory": "uuid.uuid4"}`,
+/// `{"kind": "label_removed", "type_name": "orderstatus", "label": "canceled"}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reason {
     /// A3: a new required column with no default.
     NoDefault,
@@ -47,6 +54,44 @@ pub enum Reason {
     NowNotNull,
     /// C1: a new required foreign-key column.
     RequiredFk,
+    /// D2 (#536): the column's enum dropped `label`, which its rows may
+    /// still hold; the backfill gives each such row another label.
+    LabelRemoved {
+        /// The enum type.
+        type_name: String,
+        /// The label removed.
+        label: String,
+    },
+}
+
+impl serde::Serialize for Reason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            Reason::NoDefault => map.serialize_entry("kind", "no_default")?,
+            Reason::DefaultFactory(factory) => {
+                map.serialize_entry("kind", "default_factory")?;
+                map.serialize_entry("factory", factory)?;
+            }
+            Reason::NowNotNull => map.serialize_entry("kind", "now_not_null")?,
+            Reason::RequiredFk => map.serialize_entry("kind", "required_fk")?,
+            Reason::LabelRemoved { type_name, label } => {
+                map.serialize_entry("kind", "label_removed")?;
+                map.serialize_entry("type_name", type_name)?;
+                map.serialize_entry("label", label)?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl Reason {
+    /// Whether the rows hold `NULL` where they need a value (every reason
+    /// but a removed label, whose rows hold the label).
+    pub fn fills_nulls(&self) -> bool {
+        !matches!(self, Reason::LabelRemoved { .. })
+    }
 }
 
 /// How a generated backfill runs (ADR-0024).
@@ -124,9 +169,50 @@ pub fn demands(
     })
 }
 
+/// The demands a [`MigrationOp::RemoveEnumLabel`] makes in the up file
+/// turning `before` into `after` (D2): one per column of the type whose rows
+/// may hold the label — a column `before` already declares with the type (a
+/// column the same file adds holds no row yet). Empty for any other op.
+pub fn label_demands(
+    op: &MigrationOp,
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+) -> Vec<Demand> {
+    let MigrationOp::RemoveEnumLabel {
+        type_name,
+        label,
+        columns,
+    } = op
+    else {
+        return Vec::new();
+    };
+    columns
+        .iter()
+        .filter_map(|(table, column)| {
+            let held = find_model(before, table)?
+                .columns
+                .iter()
+                .find(|col| &col.name == column)
+                .and_then(enum_declaration)
+                .is_some_and(|(declared, _)| &declared == type_name);
+            let model = find_model(after, table)?;
+            held.then(|| Demand {
+                table: table.clone(),
+                column: column.clone(),
+                reason: Reason::LabelRemoved {
+                    type_name: type_name.clone(),
+                    label: label.clone(),
+                },
+                driver: driver_of(model),
+            })
+        })
+        .collect()
+}
+
 /// Every demand `ops` make (an op per dialect's plan may repeat one), each
 /// once, tables in foreign-key order (parents first, as `after` declares
-/// them), columns in the order the model declares them.
+/// them), columns in the order the model declares them; a column's removed
+/// labels in the order the plan removes them.
 pub fn collect(
     ops: &[MigrationOp],
     before: &IrEnvelope<SchemaIrPayload>,
@@ -134,12 +220,13 @@ pub fn collect(
 ) -> Vec<Demand> {
     let mut found: Vec<Demand> = Vec::new();
     for op in ops {
-        if let Some(demand) = demands(op, before, after)
-            && !found
-                .iter()
-                .any(|d| d.table == demand.table && d.column == demand.column)
+        for demand in demands(op, before, after)
+            .into_iter()
+            .chain(label_demands(op, before, after))
         {
-            found.push(demand);
+            if !found.contains(&demand) {
+                found.push(demand);
+            }
         }
     }
     let models: Vec<&SchemaModel> = order_by_dependencies(
@@ -186,17 +273,109 @@ pub fn relax_columns(
     relaxed
 }
 
-/// `ir` with every demanded column nullable: the schema between the expand
-/// and the contract, which the backfill fills in.
+/// `ir` with every column a demand fills `NULL`s of nullable: the schema
+/// between the expand and the contract, which the backfill fills in.
 pub fn relaxed(
     ir: &IrEnvelope<SchemaIrPayload>,
     demands: &[Demand],
 ) -> IrEnvelope<SchemaIrPayload> {
     let columns: Vec<(String, String)> = demands
         .iter()
+        .filter(|d| d.reason.fills_nulls())
         .map(|d| (d.table.clone(), d.column.clone()))
         .collect();
     relax_columns(ir, &columns)
+}
+
+/// Each `(type, label)` a [`MigrationOp::RemoveEnumLabel`] of `ops` removes,
+/// once, in plan order — whether or not a row can hold it (a type only new
+/// columns carry still swaps on Postgres).
+pub fn label_removals(ops: &[MigrationOp]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for op in ops {
+        if let MigrationOp::RemoveEnumLabel {
+            type_name, label, ..
+        } = op
+        {
+            let pair = (type_name.clone(), label.clone());
+            if !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+    }
+    out
+}
+
+/// `ir` with every label of `removals` still declared, at its place in
+/// `before`'s declaration, on every column of its type: the schema between
+/// the backfill and the contract, where a row may still hold the label (the
+/// historical model's union, ADR-0025). Labels `ir` adds follow `before`'s.
+pub fn with_removed_labels(
+    ir: &IrEnvelope<SchemaIrPayload>,
+    before: &IrEnvelope<SchemaIrPayload>,
+    removals: &[(String, String)],
+) -> IrEnvelope<SchemaIrPayload> {
+    let mut restored = ir.clone();
+    if removals.is_empty() {
+        return restored;
+    }
+    let old_labels = |type_name: &str| {
+        before
+            .payload
+            .models
+            .iter()
+            .flat_map(|model| &model.columns)
+            .find_map(|col| enum_declaration(col).filter(|(declared, _)| declared == type_name))
+            .map(|(_, labels)| labels)
+            .unwrap_or_default()
+    };
+    for model in &mut restored.payload.models {
+        let mut restored_checks: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+        for col in &mut model.columns {
+            let Some((type_name, labels)) = enum_declaration(col) else {
+                continue;
+            };
+            let removed: Vec<&String> = removals
+                .iter()
+                .filter(|(t, _)| *t == type_name)
+                .map(|(_, label)| label)
+                .collect();
+            if removed.is_empty() {
+                continue;
+            }
+            let old = old_labels(&type_name);
+            let union: Vec<String> = old
+                .iter()
+                .filter(|label| labels.contains(label) || removed.contains(label))
+                .chain(labels.iter().filter(|label| !old.contains(label)))
+                .cloned()
+                .collect();
+            col.enum_values = Some(
+                union
+                    .iter()
+                    .map(|label| serde_json::Value::String(label.clone()))
+                    .collect(),
+            );
+            restored_checks.push((col.name.clone(), labels, union));
+        }
+        // A `db_check` over the column lists one literal per label (the IR
+        // compiler's `IN (…)`): the removed labels are allowed again too.
+        for (column, labels, union) in restored_checks {
+            for check in &mut model.checks {
+                if check.column != column || check.values.len() != labels.len() {
+                    continue;
+                }
+                check.values = union
+                    .iter()
+                    .map(|label| match labels.iter().position(|l| l == label) {
+                        Some(at) => check.values[at].clone(),
+                        None => quote_label(label),
+                    })
+                    .collect();
+            }
+        }
+    }
+    restored
 }
 
 /// The prefix of every [`staged_not_null_name`]: what the runner reads a
@@ -396,11 +575,22 @@ pub fn name_reverse(steps: &mut [GeneratedStep]) {
         let Some(data) = step.data.as_mut() else {
             continue;
         };
-        let (made_required, added): (Vec<&DemandedColumn>, Vec<&DemandedColumn>) = data
+        let (relabelled, filled): (Vec<&DemandedColumn>, Vec<&DemandedColumn>) = data
             .columns
             .iter()
+            .partition(|col| !col.reason.fills_nulls());
+        let (made_required, added): (Vec<&DemandedColumn>, Vec<&DemandedColumn>) = filled
+            .into_iter()
             .partition(|col| col.reason == Reason::NowNotNull);
         let mut clauses = Vec::new();
+        if !relabelled.is_empty() {
+            let labels = if relabelled.len() == 1 {
+                "the label"
+            } else {
+                "the labels"
+            };
+            clauses.push(format!("the contract's down restores {labels}"));
+        }
         if let (Some(expand), false) = (&expand, added.is_empty()) {
             let what = if added.len() == 1 {
                 "the column"
@@ -449,6 +639,12 @@ fn rendering(up: (Vec<String>, Headers), down: (Vec<String>, Headers)) -> Render
 /// SQLite the one-line `-- ferro: not-applicable` both ways. `None` when no
 /// configured dialect stages (a SQLite-only project), or nothing is demanded.
 pub fn add_constraint_step(demands: &[Demand], dialects: &[Dialect]) -> Option<GeneratedStep> {
+    let demands: Vec<Demand> = demands
+        .iter()
+        .filter(|d| d.reason.fills_nulls())
+        .cloned()
+        .collect();
+    let demands = demands.as_slice();
     if demands.is_empty() || !dialects.contains(&Dialect::Postgres) {
         return None;
     }
@@ -520,6 +716,13 @@ fn nullability(
 /// target shape, whose copy fails on a row that still holds `NULL`; its down
 /// rebuilds it back.
 ///
+/// A removed enum label (D2) is the rest of `relaxed_target` → `target`
+/// ([`label_contract`]): on Postgres the swap-type recipe for a native type
+/// and the pass's own statements for the rest (a text enum's check rebuilt
+/// to the new labels), the down putting each label back; on SQLite a rebuild
+/// only of a table whose shape changes (its check, or a column narrowed to
+/// the longest label left), else nothing.
+///
 /// # Errors
 /// A demanded table missing from either side, or a statement that does not
 /// render.
@@ -530,6 +733,12 @@ pub fn contract_step(
     target: &IrEnvelope<SchemaIrPayload>,
     dialects: &[Dialect],
 ) -> Result<GeneratedStep, GenerateError> {
+    let demands: Vec<Demand> = demands
+        .iter()
+        .filter(|d| d.reason.fills_nulls())
+        .cloned()
+        .collect();
+    let demands = demands.as_slice();
     let mut renderings = BTreeMap::new();
     for &dialect in dialects {
         let rendering = match dialect {
@@ -553,6 +762,11 @@ pub fn contract_step(
                         &d.table,
                         &staged_not_null_name(&d.table, &d.column),
                     ));
+                }
+                let (labels_up, labels_down) = label_contract(relaxed_target, target)?;
+                up.extend(labels_up);
+                down.extend(labels_down);
+                for d in demands {
                     down.push(render_staged_not_null(d));
                 }
                 for d in demands {
@@ -569,15 +783,24 @@ pub fn contract_step(
                 rendering((up, up_headers), (down, Headers::default()))
             }
             Dialect::Sqlite => {
-                let mut tables: Vec<&str> = Vec::new();
+                let mut tables: Vec<String> = Vec::new();
                 for d in demands {
-                    if !tables.contains(&d.table.as_str()) {
-                        tables.push(&d.table);
+                    if !tables.contains(&d.table) {
+                        tables.push(d.table.clone());
+                    }
+                }
+                // A table a removed label reshapes (its check, or a column
+                // narrowed to the longest label left).
+                for op in super::plan(relaxed_target, target, Dialect::Sqlite)?.operations {
+                    if let Some(table) = op.table()
+                        && !tables.iter().any(|t| t == table)
+                    {
+                        tables.push(table.to_string());
                     }
                 }
                 let mut up = Vec::new();
                 let mut down = Vec::new();
-                for table in tables {
+                for table in &tables {
                     let side = |ir, which: &str| {
                         find_model(ir, table).ok_or_else(|| {
                             GenerateError::Render(format!(
@@ -612,6 +835,85 @@ pub fn contract_step(
         renderings,
         data: None,
     })
+}
+
+/// The removed labels' half of the Postgres contract, up and down: every op
+/// planning `relaxed_target` → `target` but the nullability the staged
+/// `NOT NULL` owns. A native type's removals are one swap per type
+/// ([`enums::render_swap_type`], over every column the target stores as that
+/// type); anything else (a text enum's check rebuilt to the labels left) is
+/// the pass's statement, added validated. The down is the planner run back:
+/// `ADD VALUE IF NOT EXISTS` for each label of a native type (ADR-0011's
+/// statement) and the check rebuilt over the labels again.
+fn label_contract(
+    relaxed_target: &IrEnvelope<SchemaIrPayload>,
+    target: &IrEnvelope<SchemaIrPayload>,
+) -> Result<(Vec<String>, Vec<String>), GenerateError> {
+    let rest = |ops: Vec<MigrationOp>| -> Vec<MigrationOp> {
+        ops.into_iter()
+            .filter(|op| {
+                !matches!(
+                    op,
+                    MigrationOp::AlterColumnNullability { .. }
+                        | MigrationOp::RemoveEnumLabel { .. }
+                )
+            })
+            .collect()
+    };
+    let rendered = |ops: Vec<MigrationOp>, old, new| -> Result<Vec<String>, GenerateError> {
+        let plan = MigrationPlan {
+            operations: ops,
+            ..MigrationPlan::default()
+        };
+        let rendered = render_plan(&plan, old, new, Dialect::Postgres)?;
+        super::refuse_unrendered(&rendered, Dialect::Postgres)?;
+        Ok(rendered.into_iter().flat_map(|op| op.statements).collect())
+    };
+    let forward = super::plan(relaxed_target, target, Dialect::Postgres)?.operations;
+    let mut up = Vec::new();
+    let mut swapped: Vec<&str> = Vec::new();
+    for op in &forward {
+        let MigrationOp::RemoveEnumLabel {
+            type_name, columns, ..
+        } = op
+        else {
+            continue;
+        };
+        if swapped.contains(&type_name.as_str()) {
+            continue;
+        }
+        swapped.push(type_name);
+        let mut labels_after = Vec::new();
+        let mut native = Vec::new();
+        for (table, column) in columns {
+            let Some(col) = find_model(target, table)
+                .and_then(|model| model.columns.iter().find(|col| &col.name == column))
+            else {
+                continue;
+            };
+            if let Ok(ResolvedStorage::PgEnum { labels, .. }) =
+                resolve_column_storage(col, Dialect::Postgres)
+            {
+                labels_after = labels;
+                native.push(enums::SwapColumn {
+                    table: table.clone(),
+                    column: column.clone(),
+                    default: col
+                        .default
+                        .as_ref()
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+        }
+        if !native.is_empty() {
+            up.extend(enums::render_swap_type(type_name, &labels_after, &native));
+        }
+    }
+    up.extend(rendered(rest(forward), relaxed_target, target)?);
+    let backward = super::plan(target, relaxed_target, Dialect::Postgres)?.operations;
+    let down = rendered(rest(backward), target, relaxed_target)?;
+    Ok((up, down))
 }
 
 #[cfg(test)]
@@ -695,6 +997,58 @@ mod tests {
 
     fn demand_of(op: &MigrationOp, before: SchemaModel, after: SchemaModel) -> Option<Demand> {
         demands(op, &ir(vec![before]), &ir(vec![after]))
+    }
+
+    fn status(labels: &[&str]) -> SchemaColumn {
+        SchemaColumn {
+            enum_values: Some(labels.iter().map(|l| serde_json::json!(l)).collect()),
+            enum_type_name: Some("status".into()),
+            ..column("status", "string")
+        }
+    }
+
+    #[test]
+    fn a_removed_label_demands_a_value_of_every_column_that_held_it_before() {
+        let before = ir(vec![author(vec![status(&["draft", "gone"])])]);
+        // `previous` is new in this file: it holds no row yet.
+        let mut previous = status(&["draft"]);
+        previous.name = "previous".into();
+        let after = ir(vec![author(vec![status(&["draft"]), previous])]);
+        let op = MigrationOp::RemoveEnumLabel {
+            type_name: "status".into(),
+            label: "gone".into(),
+            columns: vec![
+                ("author".into(), "status".into()),
+                ("author".into(), "previous".into()),
+            ],
+        };
+        assert_eq!(demands(&op, &before, &after), None);
+        assert_eq!(
+            collect(&[op.clone(), op], &before, &after),
+            [Demand {
+                table: "author".into(),
+                column: "status".into(),
+                reason: Reason::LabelRemoved {
+                    type_name: "status".into(),
+                    label: "gone".into(),
+                },
+                driver: Driver::Chunked,
+            }]
+        );
+        // Between the backfill and the contract every column of the type
+        // still declares the label, at its old place.
+        let removals = label_removals(&[MigrationOp::RemoveEnumLabel {
+            type_name: "status".into(),
+            label: "gone".into(),
+            columns: vec![],
+        }]);
+        let restored = with_removed_labels(&after, &before, &removals);
+        for col in &restored.payload.models[0].columns[2..] {
+            assert_eq!(
+                col.enum_values,
+                Some(vec![serde_json::json!("draft"), serde_json::json!("gone")])
+            );
+        }
     }
 
     #[test]
