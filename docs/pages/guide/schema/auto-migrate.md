@@ -43,7 +43,7 @@ What it covers depends on what each backend can do in place:
 | Add missing FK constraint to an existing column | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD CONSTRAINT` |
 | Change a foreign key's `on_delete` (or target) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
 | Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic); migrations generate the table rebuild | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
-| Change nullability | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `SET NOT NULL` / `DROP NOT NULL` |
+| Change nullability | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `SET NOT NULL` / `DROP NOT NULL`. `SET NOT NULL` backfills nothing, whatever the default: it fails the connect if any row holds `NULL`. A [migration](data-steps.md) writes the backfill first |
 | Drop orphaned Ferro-named index (`idx_*` / `uq_*`) | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
 | Add a missing enum label (a `StrEnum` grew a member) | ✅ nothing to do — enums store as text | ✅ `ALTER TYPE ... ADD VALUE` *0.18.0+* |
 | Rename an enum label declared with `__ferro_renamed_labels__` | ✅ nothing to do | ✅ `ALTER TYPE ... RENAME VALUE` |

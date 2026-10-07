@@ -64,7 +64,9 @@ The rule is per database, not per project. A throwaway test database built with 
 | Rename a table (`__ferro_renamed_from__`) | ❌ the create pass builds the new name as a new, empty table | ✅ | ✅ |
 | Drop a column | with `migrate_destructive` | ✅ marked `-- ferro: destructive` | ✅ marked `# ferro: destructive` |
 | Drop a table | ❌ | ✅ marked `-- ferro: destructive` | ✅ marked `# ferro: destructive` |
-| A change existing rows need a value for (a required column, nullable to required, a removed enum label) | a required column or nullable to required: only with a literal default; a removed enum label: warns, no DDL | ✅ [expand, backfill, contract](data-steps.md) generated | ⚠️ the plain op, marked `# ferro: data-dependent`; the backfill is yours to write |
+| Add a new required column to a table with rows | only with a literal default (backfills existing rows) | ✅ [expand, backfill, contract](data-steps.md) generated | ⚠️ the plain op, marked `# ferro: data-dependent`; the backfill is yours to write |
+| Make a nullable column required | Postgres: `SET NOT NULL`, fails if any row is `NULL` (write it as a migration with a backfill); SQLite: warns, no DDL | ✅ expand, backfill, contract generated | ⚠️ the plain op, marked `# ferro: data-dependent` |
+| Remove an enum label rows may hold | warns, no DDL | ✅ [backfill and contract](data-steps.md#removing-an-enum-label) generated | ❌ not written; [Migrations](data-steps.md#removing-an-enum-label) generate it |
 | Python data steps over the models as they were | ❌ | ✅ [data steps](data-steps.md) | hand-written `op.execute(...)` |
 | Change a primary key | ❌ | refused, with [the recipe](migrations.md#changing-a-primary-key) | ❌ refused, with the same recipe |
 
