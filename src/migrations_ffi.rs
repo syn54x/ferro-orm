@@ -29,6 +29,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_ensure_tracking_tables, m)?)?;
     m.add_function(wrap_pyfunction!(_read_records, m)?)?;
     m.add_function(wrap_pyfunction!(_write_record, m)?)?;
+    m.add_function(wrap_pyfunction!(_remove_record, m)?)?;
     m.add_function(wrap_pyfunction!(_execute_sql_step, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
     m.add_function(wrap_pyfunction!(_live_tables, m)?)?;
@@ -408,23 +409,93 @@ pub fn _read_records(
     })
 }
 
-/// Write one step record as given (upsert on migration and step).
+/// The live connection of the transaction `route` names (a
+/// `ferro.transaction()` block's route), refused when it has none.
+fn transaction_slot(
+    route: &crate::state::RouteHandle,
+) -> PyResult<crate::state::TransactionConnection> {
+    let refused = || {
+        PyRuntimeError::new_err(
+            "a step record written in a transaction needs that transaction's route; this \
+             route has no open transaction",
+        )
+    };
+    let tx_id = route.tx_id.as_deref().ok_or_else(refused)?;
+    let handle = match route.session_id.as_deref() {
+        Some(session_id) => crate::state::session_state(session_id)?
+            .transaction_registry
+            .get(tx_id)
+            .map(|entry| entry.value().clone()),
+        None => crate::state::TRANSACTION_REGISTRY
+            .get(tx_id)
+            .map(|entry| entry.value().clone()),
+    };
+    handle.map(|handle| handle.conn).ok_or_else(refused)
+}
+
+/// Write one step record as given (upsert on migration and step). With
+/// `route` (an open `ferro.transaction()` block's), the record is written on
+/// that transaction's connection and commits with it: how a data step's
+/// finished record lands inside the step's own transaction (ADR-0024).
 ///
 /// # Errors
-/// `ValueError` for a malformed record; a database error.
+/// `ValueError` for a malformed record; `RuntimeError` for a route with no
+/// open transaction; a database error.
 #[pyfunction]
 #[pyo3(name = "_write_record")]
-#[pyo3(signature = (using, record_json, tracking_schema=None))]
+#[pyo3(signature = (using, record_json, tracking_schema=None, route=None))]
 pub fn _write_record(
     py: Python<'_>,
     using: Option<String>,
     record_json: String,
     tracking_schema: Option<String>,
+    route: Option<Py<crate::state::RouteHandle>>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let record: ferro_migrate::StepRecord = parse_json(&record_json, "record_json")?;
+    let slot = route
+        .map(|route| transaction_slot(route.get()))
+        .transpose()?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;
-        crate::run::write_record(&engine, tracking_schema.as_deref(), &record, None).await
+        let schema = tracking_schema.as_deref();
+        match slot {
+            Some(slot) => {
+                let mut guard = slot.lock().await;
+                let conn = guard
+                    .live()
+                    .map_err(|e| crate::errors::map_db_error("writing the step record", e))?;
+                crate::run::write_record(&engine, schema, &record, Some(conn)).await
+            }
+            None => crate::run::write_record(&engine, schema, &record, None).await,
+        }
+    })
+}
+
+/// Remove the record of `(migration, step)` inside the transaction `route`
+/// names, so the record goes exactly when that transaction commits: how a
+/// data step's down settles its record (ADR-0033).
+///
+/// # Errors
+/// `RuntimeError` for a route with no open transaction; a database error.
+#[pyfunction]
+#[pyo3(name = "_remove_record")]
+#[pyo3(signature = (route, migration, step, tracking_schema=None))]
+pub fn _remove_record(
+    py: Python<'_>,
+    route: Py<crate::state::RouteHandle>,
+    migration: u16,
+    step: u8,
+    tracking_schema: Option<String>,
+) -> PyResult<Bound<'_, PyAny>> {
+    let slot = transaction_slot(route.get())?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let mut guard = slot.lock().await;
+        let conn = guard
+            .live()
+            .map_err(|e| crate::errors::map_db_error("removing the step record", e))?;
+        crate::run::remove_record(conn, tracking_schema.as_deref(), migration, step)
+            .await
+            .map_err(|e| crate::errors::map_db_error("removing the step record", e))
     })
 }
 

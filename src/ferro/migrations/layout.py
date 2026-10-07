@@ -11,6 +11,7 @@ A database's migrations directory holds one directory per migration::
         01_schema.down.sqlite.sql
         02_fix_rows.up.sql               a hand-written step: unsuffixed, serves every dialect
         02_fix_rows.down.sql
+        03_backfill_author.py            a data step: Python, up() and down() in one file
         ir.json                          the schema snapshot (ADR-0023)
 
 The directory is read and verified by the Rust core (numbers dense from
@@ -77,7 +78,8 @@ class GeneratedStep:
     ordinal: int
     name: str
     kind: str
-    """``ddl`` (one rendering per target dialect) or ``portable_sql``."""
+    """``ddl`` (one rendering per target dialect), ``portable_sql`` or
+    ``data`` (a Python data step)."""
     files: dict[str, str] = field(default_factory=dict)
     """File name to its exact text."""
 
@@ -135,6 +137,20 @@ class GeneratedMigration:
                 f"{stem}.down.sql": SQL_STEP_PLACEHOLDER,
             },
         )
+        return GeneratedMigration(
+            number=self.number,
+            name=self.name,
+            steps=(*self.steps, step),
+            snapshot_json=self.snapshot_json,
+            summary=self.summary,
+            warnings=self.warnings,
+        )
+
+    def with_data_step(self, name: str, text: str) -> GeneratedMigration:
+        """This migration with a Python data step ``NN_<name>.py`` holding
+        ``text`` appended."""
+        ordinal = len(self.steps) + 1
+        step = GeneratedStep(ordinal, name, "data", {f"{ordinal:02d}_{name}.py": text})
         return GeneratedMigration(
             number=self.number,
             name=self.name,
