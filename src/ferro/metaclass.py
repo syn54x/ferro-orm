@@ -78,6 +78,12 @@ class ModelMetaclass(type(BaseModel)):
 
         cls.__ferro_identity__ = f"{cls.__module__}.{cls.__qualname__}"
         cls.__ferro_table__ = mcs._resolve_table_name(name, namespace)
+        # Private seam for IR-derived classes (``migrations.historical``): read
+        # from the class's own namespace only, never inherited, always set so
+        # ``build_column_specs`` can tell a user model from a historical one.
+        setattr(
+            cls, "__ferro_historical__", namespace.get("__ferro_historical__") is True
+        )
         cls.__ferro_renamed_from__ = mcs._resolve_renamed_from(name, namespace)
         for field_name, metadata in pending_relations:
             REGISTRY.defer_relation(cls.__ferro_identity__, field_name, metadata)

@@ -205,15 +205,15 @@ def _is_json_family(hint: Any) -> bool:
         return True
     if get_origin(hint) in (dict, list):
         return True
-    if get_origin(hint) in (Union, types.UnionType):
-        # ``dict[str, Any] | list[Any]``: a JSON column that may hold either.
-        members = [arg for arg in get_args(hint) if arg is not type(None)]
-        return bool(members) and all(_is_json_family(arg) for arg in members)
     return isinstance(hint, type) and issubclass(hint, pydantic.BaseModel)
 
 
 def validate_db_type_declaration(
-    field_name: str, db_type: Any, annotation: Any
+    field_name: str,
+    db_type: Any,
+    annotation: Any,
+    *,
+    check_compatibility: bool = True,
 ) -> str | None:
     """Validate a ``db_type`` declaration from either declaration path (ADR-0003).
 
@@ -225,6 +225,11 @@ def validate_db_type_declaration(
     Returns the normalized token, or ``None`` when the declaration is absent.
     An empty string is not "absent" — it is a declaration that does nothing,
     and do-nothing declarations fail loudly (#260 story 14).
+
+    ``check_compatibility=False`` skips only the annotation-compatibility half
+    (ADR-0004: what an *author* may declare). It is for classes derived from a
+    stored IR snapshot that already passed that check (ADR-0035); the
+    token-vocabulary half always runs.
     """
     if db_type is None:
         return None
@@ -239,7 +244,11 @@ def validate_db_type_declaration(
             f"Field '{field_name}' db_type={db_type!r} is not in the "
             f"canonical vocabulary. Valid tokens: {valid}, varchar(N)."
         )
-    if annotation is not None and not db_type_is_compatible(db_type, annotation):
+    if (
+        check_compatibility
+        and annotation is not None
+        and not db_type_is_compatible(db_type, annotation)
+    ):
         raise TypeError(
             f"Field '{field_name}' db_type={db_type!r} is incompatible "
             f"with annotation {annotation!r}. See the canonical "
@@ -254,10 +263,6 @@ def db_type_is_compatible(token: str, annotation: Any) -> bool:
     Caller must have already verified ``is_valid_db_type_token(token)``.
     """
     hint = _strip_optional_and_annotated(annotation)
-    if hint is Any:
-        # An ``Any``-typed column's storage is wholly its ``db_type``; its value
-        # is the wire-close primitive (ADR-0035).
-        return True
     if token in _STRING_FAMILY_TOKENS or _VARCHAR_RE.match(token):
         return _is_string_family(hint)
     if token in {"smallint", "int", "bigint"}:
