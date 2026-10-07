@@ -195,10 +195,9 @@ pub fn copy_value(
 /// move them from one declared type to another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stored {
-    /// `integer`, `smallint`, `bigint`: INTEGER affinity.
+    /// `integer`, `smallint`, `bigint`, and `boolean` (SQLite lowers it to
+    /// `integer`): INTEGER affinity.
     Integer,
-    /// `boolean`: 0 and 1.
-    Boolean,
     /// `double`: REAL affinity.
     Real,
     /// `NUMERIC`.
@@ -232,7 +231,7 @@ fn sqlite_canonical(col: &SchemaColumn) -> Result<CanonicalType, EmissionError> 
 fn stored(canonical: CanonicalType) -> Stored {
     match canonical {
         CanonicalType::Integer | CanonicalType::SmallInt | CanonicalType::BigInt => Stored::Integer,
-        CanonicalType::Boolean => Stored::Boolean,
+        CanonicalType::Boolean => Stored::Integer,
         CanonicalType::Double => Stored::Real,
         CanonicalType::Decimal => Stored::Decimal,
         CanonicalType::Text | CanonicalType::Varchar(_) | CanonicalType::Char(_) => Stored::Text,
@@ -262,8 +261,9 @@ fn stored(canonical: CanonicalType) -> Stored {
 ///
 /// # Errors
 /// A change SQLite has no conversion for that this check can verify row by
-/// row (to or from a timestamp, a UUID, a boolean or a blob; a number into
-/// a decimal): the refusal names the column and the way to make the change.
+/// row (to or from a timestamp, a UUID, JSON or a blob; into a boolean; a
+/// non-integer into a decimal): the refusal names the column and the way to
+/// make the change.
 pub fn conversion_guard(
     table: &str,
     old: &SchemaColumn,
@@ -275,25 +275,31 @@ pub fn conversion_guard(
     }
     let col = quote_ident(&new.name);
     let class_is = |classes: &str| format!("typeof({col}) NOT IN ({classes}, 'null')");
+    // SQLite stores a boolean as an integer, so its storage cannot tell one
+    // from the other; the declaration can. Postgres has no `boolean` to
+    // `double` cast and renders `boolean::text` as `'true'`, where SQLite's
+    // copy would keep `1`.
+    let boolean = |c: &SchemaColumn| {
+        matches!(
+            resolve_column_storage(c, Dialect::Postgres),
+            Ok(ResolvedStorage::Scalar(CanonicalType::Boolean))
+        )
+    };
     let guard = match (stored(from), stored(to)) {
-        (
-            Stored::Integer | Stored::Boolean | Stored::Real | Stored::Decimal | Stored::Text,
-            Stored::Integer,
-        ) => Some(class_is("'integer'")),
+        _ if boolean(old) || boolean(new) => None,
+        (Stored::Integer | Stored::Real | Stored::Decimal | Stored::Text, Stored::Integer) => {
+            Some(class_is("'integer'"))
+        }
         (Stored::Integer | Stored::Real | Stored::Decimal | Stored::Text, Stored::Real) => {
             Some(class_is("'real'"))
         }
         (Stored::Integer, Stored::Decimal) => Some(class_is("'integer'")),
         (
-            Stored::Integer
-            | Stored::Real
-            | Stored::Decimal
-            | Stored::Text
-            | Stored::Json
-            | Stored::Temporal,
+            Stored::Integer | Stored::Real | Stored::Decimal | Stored::Text | Stored::Temporal,
             Stored::Text,
         ) => Some(class_is("'text'")),
-        (Stored::Text | Stored::Json, Stored::Json) => Some(format!("NOT json_valid({col})")),
+        // Everything else, JSON included: SQLite's `JSON` column has NUMERIC
+        // affinity, so `'00123'` would land as `123` and still be valid JSON.
         _ => None,
     };
     guard.map(Some).ok_or_else(|| EmissionError {
@@ -933,43 +939,98 @@ mod tests {
         }
     }
 
+    /// A column `conversion_guard` sees as each storage, two for the
+    /// temporal storage (different declared types). The match is exhaustive,
+    /// so a new storage cannot be added without a representative here.
+    fn representatives(kind: Stored) -> Vec<(&'static str, SchemaColumn)> {
+        match kind {
+            Stored::Integer => vec![
+                ("integer", typed("integer", None)),
+                ("boolean", typed("boolean", None)),
+            ],
+            Stored::Real => vec![("real", typed("number", None))],
+            Stored::Decimal => vec![("decimal", typed("string", Some("decimal")))],
+            Stored::Text => vec![("text", typed("string", None))],
+            Stored::Json => vec![("json", typed("json", None))],
+            Stored::Uuid => vec![("uuid", typed("uuid", None))],
+            Stored::Temporal => vec![
+                ("datetime", typed("datetime", None)),
+                ("date", typed("date", None)),
+            ],
+            Stored::Blob => vec![("blob", typed("binary", None))],
+        }
+    }
+
+    const STORAGES: [Stored; 8] = [
+        Stored::Integer,
+        Stored::Real,
+        Stored::Decimal,
+        Stored::Text,
+        Stored::Json,
+        Stored::Uuid,
+        Stored::Temporal,
+        Stored::Blob,
+    ];
+
+    /// Every change a rebuild copies and checks, `(from, to, storage class
+    /// each copied value must have)`. Every other change between different
+    /// columns is refused.
+    const CHECKED: [(&str, &str, &str); 12] = [
+        ("real", "integer", "integer"),
+        ("decimal", "integer", "integer"),
+        ("text", "integer", "integer"),
+        ("integer", "real", "real"),
+        ("decimal", "real", "real"),
+        ("text", "real", "real"),
+        ("integer", "decimal", "integer"),
+        ("integer", "text", "text"),
+        ("real", "text", "text"),
+        ("decimal", "text", "text"),
+        ("datetime", "text", "text"),
+        ("date", "text", "text"),
+    ];
+
     #[test]
     fn the_conversion_check_for_every_storage_pair() {
-        let int = || typed("integer", None);
-        let text = || typed("string", None);
-        let real = || typed("number", None);
-        let json = || typed("json", None);
-        let datetime = || typed("datetime", None);
-        let date = || typed("date", None);
-        let uuid = || typed("uuid", None);
-        let integer = Some("typeof(\"x\") NOT IN ('integer', 'null')".to_string());
-        let textual = Some("typeof(\"x\") NOT IN ('text', 'null')".to_string());
-        let realish = Some("typeof(\"x\") NOT IN ('real', 'null')".to_string());
-        assert_eq!(guard(int(), int()), Ok(None));
-        assert_eq!(guard(text(), int()), Ok(integer.clone()));
-        assert_eq!(guard(real(), int()), Ok(integer));
-        assert_eq!(guard(int(), text()), Ok(textual.clone()));
-        assert_eq!(guard(datetime(), text()), Ok(textual));
-        assert_eq!(guard(text(), real()), Ok(realish.clone()));
-        assert_eq!(guard(int(), real()), Ok(realish));
-        assert_eq!(
-            guard(text(), json()),
-            Ok(Some("NOT json_valid(\"x\")".to_string()))
-        );
-        // No conversion SQLite can verify: refused, naming the column.
-        for (from, to) in [
-            (text(), datetime()),
-            (date(), datetime()),
-            (int(), datetime()),
-            (text(), uuid()),
-            (uuid(), text()),
-        ] {
-            let err = guard(from, to).expect_err("refused");
-            assert!(
-                err.starts_with("a SQLite rebuild cannot change author.x from "),
-                "{err}"
-            );
-            assert!(err.contains("fill it in a data step"), "{err}");
+        let columns: Vec<(&str, SchemaColumn)> =
+            STORAGES.into_iter().flat_map(representatives).collect();
+        for kind in STORAGES {
+            for (_, col) in representatives(kind) {
+                let canonical = sqlite_canonical(&col).expect("resolves");
+                assert_eq!(stored(canonical), kind, "{col:?}");
+            }
+        }
+        assert_eq!(columns.len(), 10);
+        // A boolean and an integer column are the same column on SQLite.
+        let same = |a: &str, b: &str| {
+            a == b || matches!((a, b), ("integer", "boolean") | ("boolean", "integer"))
+        };
+        for (from_name, from) in &columns {
+            for (to_name, to) in &columns {
+                let verdict = guard(from.clone(), to.clone());
+                if same(from_name, to_name) {
+                    assert_eq!(verdict, Ok(None), "{from_name} → {to_name}");
+                    continue;
+                }
+                match CHECKED
+                    .iter()
+                    .find(|(f, t, _)| f == from_name && t == to_name)
+                {
+                    Some((_, _, class)) => assert_eq!(
+                        verdict,
+                        Ok(Some(format!("typeof(\"x\") NOT IN ('{class}', 'null')"))),
+                        "{from_name} → {to_name}"
+                    ),
+                    None => {
+                        let err = verdict.expect_err(&format!("{from_name} → {to_name} refused"));
+                        assert!(
+                            err.starts_with("a SQLite rebuild cannot change author.x from "),
+                            "{err}"
+                        );
+                        assert!(err.contains("fill it in a data step"), "{err}");
+                    }
+                }
+            }
         }
     }
 

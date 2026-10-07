@@ -788,8 +788,25 @@ def test_a_datetime_column_copied_by_a_rebuild_keeps_its_bytes(project, pkg, db)
             DATETIME_HEADER + AUTHOR + "    seen: datetime | None = None\n",
             "from DATE to DATETIME",
         ),
+        (
+            # SQLite's JSON column would store '00123' as 123, valid JSON.
+            AUTHOR + "    seen: str | None = None\n",
+            AUTHOR + "    seen: dict | None = None\n",
+            "from varchar to JSON",
+        ),
+        (
+            AUTHOR + "    seen: dict | None = None\n",
+            AUTHOR + "    seen: str | None = None\n",
+            "from JSON to varchar",
+        ),
     ],
-    ids=["str-to-datetime", "datetime-to-str", "date-to-datetime"],
+    ids=[
+        "str-to-datetime",
+        "datetime-to-str",
+        "date-to-datetime",
+        "str-to-json",
+        "json-to-str",
+    ],
 )
 def test_a_type_change_sqlite_cannot_check_is_refused_naming_the_column(
     project, pkg, capsys, before, after, change
