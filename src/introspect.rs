@@ -42,6 +42,11 @@ pub struct LiveColumn {
     /// Such columns are Alembic-managed and excluded from type reconciliation.
     #[serde(default)]
     pub is_enum_udt: bool,
+    /// Postgres: the native enum type's name when [`is_enum_udt`](Self::is_enum_udt)
+    /// (`pg_type.typname`), so the live converter can name the type the
+    /// column declares. `None` everywhere else.
+    #[serde(default)]
+    pub enum_type_name: Option<String>,
 }
 
 /// One live standalone index that Ferro owns (its name follows the `idx_`/`uq_`
@@ -379,6 +384,7 @@ async fn sqlite_table_columns(engine: &EngineHandle, table: &str) -> PyResult<Ve
                 is_primary_key: row_opt_i64(row, "pk").unwrap_or(0) > 0,
                 char_max_len: None,
                 is_enum_udt: false,
+                enum_type_name: None,
             })
         })
         .collect())
@@ -402,6 +408,17 @@ async fn postgres_table_columns(engine: &EngineHandle, table: &str) -> PyResult<
                   AND a.attname = c.column_name
                   AND t.typtype = 'e'
             ) AS is_enum_udt,
+            (
+                SELECT t.typname::text
+                FROM pg_attribute a
+                JOIN pg_class cl ON a.attrelid = cl.oid
+                JOIN pg_namespace n ON cl.relnamespace = n.oid
+                JOIN pg_type t ON a.atttypid = t.oid
+                WHERE n.nspname = c.table_schema
+                  AND cl.relname = c.table_name
+                  AND a.attname = c.column_name
+                  AND t.typtype = 'e'
+            ) AS enum_type_name,
             EXISTS (
                 SELECT 1
                 FROM pg_index i
@@ -435,6 +452,7 @@ async fn postgres_table_columns(engine: &EngineHandle, table: &str) -> PyResult<
                 is_primary_key: row_bool(row, "is_primary_key"),
                 char_max_len: row_opt_i64(row, "char_max_len"),
                 is_enum_udt: row_bool(row, "is_enum_udt"),
+                enum_type_name: row_string(row, "enum_type_name"),
             })
         })
         .collect())

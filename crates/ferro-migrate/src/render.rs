@@ -18,6 +18,7 @@ use ferro_ddl_lowering::{
     render_pg_enum_rename_value, render_rename_column, render_rename_constraint,
     render_rename_index, render_rename_policy, render_rename_table, render_validate_constraint,
     resolve_column_storage, row_policy_clauses, row_policy_rebuild_statements,
+    row_security_statements,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeSet, HashSet};
@@ -31,6 +32,11 @@ pub struct RenderedOp {
     pub statements: Vec<String>,
     /// Warnings rendering raised (a backend limitation that skips the op).
     pub warnings: Vec<String>,
+    /// For an `AddTable`, the row-security statements among `statements`
+    /// (its flags and policies, last): what a consumer that creates the
+    /// table its own way still executes as written (the Alembic bridge's
+    /// `create_table`). Empty for every other op.
+    pub row_security_statements: Vec<String>,
 }
 
 impl RenderedOp {
@@ -39,6 +45,7 @@ impl RenderedOp {
             op: op.clone(),
             statements: Vec::new(),
             warnings: Vec::new(),
+            row_security_statements: Vec::new(),
         }
     }
 }
@@ -221,6 +228,11 @@ pub(crate) fn render_plan_in(
                 out.statements.push(emission.create_sql);
                 out.statements.extend(emission.post_create_sqls);
                 out.warnings.extend(emission.warnings);
+                // The same statements the emission ends with, from the one
+                // function it takes them from.
+                out.row_security_statements = row_security_statements(model, dialect)
+                    .map_err(|message| EmissionError { message })?
+                    .statements;
             }
             MigrationOp::DropTable { table } => {
                 out.statements

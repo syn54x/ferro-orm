@@ -49,7 +49,7 @@ pub(crate) fn live_tables_to_schema_ir(
         .into_iter()
         .map(|table| {
             facts.tables.insert(table.name.clone(), table_facts(&table));
-            live_table_model(table, dialect)
+            live_table_model(table, &facts.enum_labels, dialect)
         })
         .collect();
     let envelope = IrEnvelope {
@@ -65,9 +65,17 @@ pub(crate) fn live_tables_to_schema_ir(
 
 /// The IR a live table reads as: its columns with the storage token
 /// introspection reports (`logical_type` unknown — the token decides), its
-/// ferro-owned indexes and its foreign keys. CHECKs and row security are
-/// facts, not IR: their bodies are the catalog's rendering.
-fn live_table_model(table: LiveTable, dialect: Dialect) -> SchemaModel {
+/// ferro-owned indexes and its foreign keys. A native-enum column names its
+/// type and carries the type's live labels (`enum_labels`, in enum sort
+/// order), so it resolves to the same `PgEnum` storage a declaration of that
+/// type does — the shape a plan run back to the live database restores.
+/// CHECKs and row security are facts, not IR: their bodies are the catalog's
+/// rendering.
+fn live_table_model(
+    table: LiveTable,
+    enum_labels: &BTreeMap<String, Vec<String>>,
+    dialect: Dialect,
+) -> SchemaModel {
     let mut columns: Vec<SchemaColumn> = table
         .columns
         .iter()
@@ -88,8 +96,10 @@ fn live_table_model(table: LiveTable, dialect: Dialect) -> SchemaModel {
             index: false,
             default: None,
             format: None,
-            enum_values: None,
-            enum_type_name: None,
+            enum_values: native_enum_type(col)
+                .and_then(|name| enum_labels.get(name))
+                .map(|labels| labels.iter().cloned().map(serde_json::Value::String).collect()),
+            enum_type_name: native_enum_type(col).map(str::to_string),
             postgres_native_enum: col.is_enum_udt,
             enum_renamed_labels: Default::default(),
             default_factory: None,
@@ -129,6 +139,11 @@ fn live_table_model(table: LiveTable, dialect: Dialect) -> SchemaModel {
         table_checks: Vec::new(),
         row_security: None,
     }
+}
+
+/// The native enum type a live column declares, when it is one.
+fn native_enum_type(col: &LiveColumn) -> Option<&str> {
+    col.enum_type_name.as_deref().filter(|_| col.is_enum_udt)
 }
 
 fn table_facts(table: &LiveTable) -> LiveTableFacts {
@@ -274,6 +289,7 @@ mod tests {
             is_primary_key: pk,
             char_max_len: None,
             is_enum_udt: false,
+            enum_type_name: None,
         }
     }
 
@@ -365,6 +381,40 @@ mod tests {
         assert_eq!(post.foreign_keys[0].on_delete.as_deref(), Some("CASCADE"));
         assert!(post.checks.is_empty() && post.table_checks.is_empty());
         assert!(post.row_security.is_none(), "row security is a live fact");
+    }
+
+    #[test]
+    fn a_native_enum_column_names_its_type_and_carries_its_live_labels() {
+        let mut status = column("status", "USER-DEFINED", false, false);
+        status.is_enum_udt = true;
+        status.enum_type_name = Some("poststatus".to_string());
+        let table = LiveTable {
+            name: "post".to_string(),
+            columns: vec![column("id", "integer", false, true), status],
+            ..LiveTable::default()
+        };
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "poststatus".to_string(),
+            vec!["draft".to_string(), "live".to_string()],
+        );
+        let (envelope, _) = live_tables_to_schema_ir(vec![table], labels, Dialect::Postgres);
+        let status = envelope.payload.models[0]
+            .columns
+            .iter()
+            .find(|col| col.name == "status")
+            .expect("status column");
+        assert_eq!(status.enum_type_name.as_deref(), Some("poststatus"));
+        assert!(status.postgres_native_enum);
+        assert_eq!(
+            ferro_ddl_lowering::resolve_column_storage(status, Dialect::Postgres),
+            Ok(ferro_ddl_lowering::ResolvedStorage::PgEnum {
+                type_name: "poststatus".to_string(),
+                labels: vec!["draft".to_string(), "live".to_string()],
+            })
+        );
+        let id = &envelope.payload.models[0].columns[0];
+        assert!(id.enum_type_name.is_none() && id.enum_values.is_none());
     }
 
     #[test]

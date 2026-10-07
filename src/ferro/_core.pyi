@@ -108,6 +108,34 @@ def _render_migration_sql_for_test(
     """
     ...
 
+def _plan_reverse_from_ir(
+    live_json: str,
+    declared_json: str,
+    dialect: str,
+    options_json: str,
+    facts_json: str,
+    render: bool = True,
+) -> str:
+    """The reverse of the live-origin plan (``_plan_from_ir(live_json,
+    declared_json, ..., facts_json)``): what turns the database it leaves
+    back into the live one (ADR-0041). Same JSON shape as ``_plan_from_ir``
+    plus ``before`` (the live envelope under the forward plan's renames); a
+    step nothing undoes carries ``irreversible: {"reason": ...}``, a check or
+    policy put back from the catalog is a ``RestoreCheck`` /
+    ``RestoreRowPolicy``, a foreign key the forward plan added comes off as
+    ``DropForeignKey``."""
+    ...
+
+def _render_plan_ops(
+    old_ir_json: str, new_ir_json: str, dialect: str, operations_json: str
+) -> str:
+    """Render the planner ops ``operations_json`` (a plan's ``operations``)
+    as one plan from ``old_ir_json`` to ``new_ir_json`` on ``dialect``, in
+    order, through the same renderer ``_plan_from_ir(..., render=True)``
+    uses. Returns the JSON list of ops, each with ``statements`` and
+    ``warnings`` (an ``AddTable`` also ``row_security_statements``)."""
+    ...
+
 def _plan_from_ir(
     old_ir_json: str,
     new_ir_json: str,
@@ -524,41 +552,23 @@ def _plan_enum_label_addition(
     """
     ...
 
-def _plan_check_addition(table: str, model_ir_json: str, live_names: list[str]) -> str:
-    """The check-addition decision (ADR-0013) for one table.
-
-    Returns JSON: ``{"statements": [...], "names": [...]}`` — the Rust-rendered
-    Postgres ``ADD`` statements for declared CHECK constraints (table checks,
-    then column checks) that no live constraint of that name covers, plus those
-    names. Byte-identical to what the reconciliation pass executes (I-1).
-    """
+def _plan_step_verdicts(
+    before_json: str,
+    after_json: str,
+    dialect: str,
+    direction: str,
+    operations_json: str,
+) -> str:
+    """What each planner op needs on ``dialect`` in a file turning
+    ``before_json`` into ``after_json`` (``direction`` ``"up"`` / ``"down"``):
+    the generator's step-assignment verdict. Returns a JSON list, one
+    ``{"needs": "native" | "rebuild" | "backfill" | "refused", "refusal":
+    str | None, "primary_key": bool, "drops_data": bool}`` per op."""
     ...
 
-def _plan_check_rebuild(
-    table: str, model_ir_json: str, live: list[tuple[str, str]]
-) -> str:
-    """The check-rebuild decision (ADR-0015) for one table.
-
-    Returns JSON: ``{"statements": [...], "names": [...]}`` — the Rust-rendered
-    Postgres ``DROP CONSTRAINT`` + bare ``ADD CONSTRAINT … CHECK`` statements
-    for declared CHECK constraints whose live catalog body normalizes unequal
-    to the canonical rendering, plus those names. Byte-identical to what the
-    reconciliation pass executes (I-1).
-    """
-    ...
-
-def _plan_check_drop(
-    table: str, model_ir_json: str, live_ferro_owned_names: list[str]
-) -> str:
-    """The leftover-CHECK drop decision (ADR-0013) for one table.
-
-    Returns JSON: ``{"statements": [...], "names": [...]}`` — the Rust-rendered
-    Postgres ``DROP CONSTRAINT`` statements for live ferro-owned CHECK names
-    the model no longer declares, plus those names. Byte-identical to what
-    the reconciliation pass executes under ``migrate_destructive`` (I-1).
-    There is no destructive gate here: running autogenerate is itself the
-    request for a diff.
-    """
+def _tracking_table_names() -> tuple[str, str]:
+    """The tracking tables' names: ``("_ferro_migrations",
+    "_ferro_migrations_format")``."""
     ...
 
 def _ddl_row_policy_name(table: str, name: str) -> str:

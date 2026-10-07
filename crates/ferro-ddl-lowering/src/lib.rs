@@ -247,7 +247,7 @@ pub fn information_schema_to_db_type_token(
             Dialect::Sqlite => "int",
             Dialect::Postgres => "boolean",
         },
-        "double precision" | "real" => "double",
+        "double precision" | "double" | "real" => "double",
         "numeric" => "numeric",
         "json" => "json",
         // Honest introspection (ADR-0004): live jsonb reads back as jsonb on
@@ -1219,6 +1219,20 @@ pub fn render_check_addition(
             )),
         },
     })
+}
+
+/// `ALTER TABLE … ADD CONSTRAINT <name> <definition>` for a CHECK put back
+/// with the body the catalog printed for it (`pg_get_constraintdef`, which
+/// is already `CHECK (…)`): the sibling of [`render_check_addition`] for a
+/// constraint whose body is the live database's, not a declaration — the
+/// reverse of a plan that dropped or rebuilt it (ADR-0041). Postgres only.
+pub fn render_check_restore(table: &str, name: &str, definition: &str) -> String {
+    format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} {}",
+        quote_ident(table),
+        quote_ident(name),
+        definition
+    )
 }
 
 /// The table-check half of [`render_check_addition`].
@@ -4155,6 +4169,14 @@ mod tests {
     }
 
     #[test]
+    fn a_restored_check_keeps_the_catalog_body_verbatim() {
+        assert_eq!(
+            render_check_restore("card", "ck_card_legacy", "CHECK ((id > 0))"),
+            "ALTER TABLE \"card\" ADD CONSTRAINT \"ck_card_legacy\" CHECK ((id > 0))"
+        );
+    }
+
+    #[test]
     fn information_schema_to_db_type_token_maps_live_spellings() {
         assert_eq!(
             information_schema_to_db_type_token("INTEGER", None, Dialect::Sqlite),
@@ -4163,6 +4185,12 @@ mod tests {
         assert_eq!(
             information_schema_to_db_type_token("DATETIME", None, Dialect::Sqlite),
             "timestamp"
+        );
+        // The create pass declares a SQLite float column `double`; it reads
+        // back as the token it was created from, not as text.
+        assert_eq!(
+            information_schema_to_db_type_token("double", None, Dialect::Sqlite),
+            "double"
         );
         assert_eq!(
             information_schema_to_db_type_token("character varying", Some(40), Dialect::Postgres),

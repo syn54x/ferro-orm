@@ -27,13 +27,13 @@ from ferro import (
     reset_engine,
 )
 from ferro._core import (
-    _plan_check_rebuild,
     _render_migration_sql_for_test,
     _render_table_check_body,
 )
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
+from tests._alembic_harness import planner_statements as _planner_statements
 
 SIDE_CHECK_NAME = "ck_rebuild_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -268,23 +268,15 @@ def test_undeclared_live_ck_is_not_a_rebuild():
 
 
 def test_check_rebuild_statement_parity_pin():
-    """The FFI the Alembic comparator consumes renders the same bytes the
+    """The planner the Alembic bridge translates renders the same bytes the
     reconciliation pass executes."""
     _define_rebuild(both=True)
-    live = [(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
-    plan = json.loads(
-        _plan_check_rebuild("rebuild", json.dumps(_model_ir("rebuild")), live)
-    )
-    assert plan["names"] == [SIDE_CHECK_NAME]
-    assert plan["statements"] == [SIDE_CHECK_DROP, SIDE_CHECK_ADD_AND]
+    live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
+    statements = _planner_statements("rebuild", live, destructive=True)
+    assert statements == [SIDE_CHECK_DROP, SIDE_CHECK_ADD_AND]
 
-    runtime, _ = _render(
-        "rebuild",
-        REBUILD_LIVE_COLUMNS,
-        [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")],
-        "postgres",
-    )
-    assert plan["statements"] == runtime
+    runtime, _ = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
+    assert statements == runtime
 
 
 # ---------------------------------------------------------------------------

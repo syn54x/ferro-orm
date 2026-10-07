@@ -557,6 +557,8 @@ async def test_autogenerate_against_a_rust_bootstrapped_db_is_empty(
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
 
+    from ferro.migrations import ferro_options
+
     _build_transfer_models()
     await connect(db_url, auto_migrate=True)
 
@@ -581,7 +583,12 @@ async def test_autogenerate_against_a_rust_bootstrapped_db_is_empty(
             if search_path_schema is not None:
                 conn.execute(sa.text(f'SET search_path TO "{search_path_schema}"'))
             ctx = MigrationContext.configure(
-                conn, opts={"compare_type": True, "compare_server_default": True}
+                conn,
+                opts={
+                    "compare_type": True,
+                    "compare_server_default": True,
+                    **ferro_options(),
+                },
             )
             diff = compare_metadata(ctx, metadata)
     finally:

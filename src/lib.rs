@@ -191,6 +191,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(migrate::_plan_from_ir, m)?)?;
+    m.add_function(wrap_pyfunction!(migrate::_plan_reverse_from_ir, m)?)?;
+    m.add_function(wrap_pyfunction!(migrate::_render_plan_ops, m)?)?;
     m.add_function(wrap_pyfunction!(live_ir::_live_schema_ir, m)?)?;
     migrations_ffi::register(m)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_index_name, m)?)?;
@@ -208,9 +210,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_render_table_check_body, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_enum_label_addition, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_enum_type_provenance, m)?)?;
-    m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_addition, m)?)?;
-    m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_rebuild, m)?)?;
-    m.add_function(wrap_pyfunction!(naming_ffi::_plan_check_drop, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_plan_step_verdicts, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_tracking_table_names, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_row_policy_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_rls_command_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_rls_shorthand_cast, m)?)?;

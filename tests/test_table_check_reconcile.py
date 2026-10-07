@@ -27,10 +27,11 @@ from ferro import (
     engines,
     reset_engine,
 )
-from ferro._core import _plan_check_addition, _render_migration_sql_for_test
+from ferro._core import _render_migration_sql_for_test
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
+from tests._alembic_harness import planner_statements as _planner_statements
 
 SIDE_CHECK_NAME = "ck_reconcile_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -270,21 +271,15 @@ def test_a_new_column_lands_before_the_check_that_references_it():
 
 
 def test_check_addition_statement_parity_pin():
-    """The FFI the Alembic comparator consumes renders the same bytes the
+    """The planner the Alembic bridge translates renders the same bytes the
     reconciliation pass executes. If either side drifts, the two migration
     doors would run different SQL for the same model."""
     _define_reconcile_with_check()
-    model_ir = next(
-        model
-        for model in compile_registry_schema_ir()["payload"]["models"]
-        if model["table_name"] == "reconcile"
-    )
-    plan = json.loads(_plan_check_addition("reconcile", json.dumps(model_ir), []))
-    assert plan["names"] == [SIDE_CHECK_NAME]
-    assert plan["statements"] == [SIDE_CHECK_ADD]
+    statements = _planner_statements("reconcile", [], destructive=True)
+    assert statements == [SIDE_CHECK_ADD]
 
     runtime, _ = _render("reconcile", RECONCILE_LIVE_COLUMNS, [], "postgres")
-    assert plan["statements"] == runtime
+    assert statements == runtime
 
 
 # ---------------------------------------------------------------------------
