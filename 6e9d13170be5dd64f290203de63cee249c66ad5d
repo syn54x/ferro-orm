@@ -1,0 +1,1 @@
+verified 2026-10-07T01:25:16Z: cargo test --no-default-features --features testing (317 passed); CARGO_PROFILE_RELEASE_STRIP=none uv run maturin develop; pytest tests/test_migrate_baseline.py tests/test_migrate_drift.py tests/test_migrate_down.py tests/test_migrate_status.py --db-backends=sqlite,postgres (92 passed, 4 sqlite-only skips)
