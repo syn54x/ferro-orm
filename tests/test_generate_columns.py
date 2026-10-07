@@ -636,8 +636,9 @@ def test_a_primary_key_change_is_refused_with_the_recipe(project, pkg, dialect):
     )
     assert moved != AUTHOR
     err = refused(project, pkg, dialect, AUTHOR, moved)
+    # Every shape, on both dialects: tests/test_generate_primary_key_refusal.py.
     assert err == (
-        "not generated yet: a primary-key change on author (ticket "
-        "#536): a table's primary key cannot change in place; declare a new model "
-        "with the new key, copy the rows across, then drop the old model\n"
+        'changing the primary key of "author" is not generated: write it as a new '
+        "table (ferro migrate new --data-step …), a backfill of parent and children, "
+        "and a drop; see the Migrations docs § Changing a primary key\n"
     )

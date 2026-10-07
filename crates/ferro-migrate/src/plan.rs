@@ -122,11 +122,24 @@ pub enum PlanError {
         /// The table.
         table: String,
     },
+    /// A live plan to reverse carries an op only two declared snapshots
+    /// plan ([`MigrationOp::RemoveEnumLabel`]): it was not decided from the
+    /// live database it claims to reverse.
+    SnapshotOnlyOp {
+        /// The op kind.
+        op: String,
+    },
 }
 
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PlanError::SnapshotOnlyOp { op } => write!(
+                f,
+                "the plan to reverse carries {op}, which only two declared snapshots plan \
+                 (`ferro migrate new`), never a live database: reverse the plan \
+                 `plan_from_ir` decided from the live facts"
+            ),
             PlanError::MissingLiveFacts { table } => write!(
                 f,
                 "the live facts carry no entry for table '{table}', which the live schema \
@@ -636,6 +649,9 @@ fn plan_named(
         plan_enum_label_additions(old, new, facts, &mut plan);
         plan_enum_type_creation(old, new, &old_models, facts, &mut plan);
     }
+    if facts.side == OldSide::Snapshot {
+        plan_enum_label_removals(old, new, &mut plan);
+    }
 
     for model in emit::order_models_for_create(&added) {
         plan.operations.push(MigrationOp::AddTable {
@@ -993,7 +1009,9 @@ fn enum_type_of(col: &ferro_schema_ir::SchemaColumn) -> Option<(String, Vec<Stri
 /// The enum `col` declares, how ever it is stored: the type name and labels
 /// it would have as a native type (`resolve_column_storage` with the storage
 /// override set aside, so the name and label spelling have one source).
-fn enum_declaration(col: &ferro_schema_ir::SchemaColumn) -> Option<(String, Vec<String>)> {
+pub(crate) fn enum_declaration(
+    col: &ferro_schema_ir::SchemaColumn,
+) -> Option<(String, Vec<String>)> {
     if col.db_type_explicit != Some(true) {
         return enum_type_of(col);
     }
@@ -1074,14 +1092,54 @@ fn plan_enum_label_additions(
         else {
             continue;
         };
+        // Between two snapshots a dropped label is a removal the generator
+        // answers ([`plan_enum_label_removals`]); live, it only warns.
         let extra = extra_enum_labels(labels, existing);
-        if let Some(warning) = extra_enum_labels_warning(type_name, &extra) {
+        if facts.side == OldSide::Live
+            && let Some(warning) = extra_enum_labels_warning(type_name, &extra)
+        {
             plan.warnings.push(warning);
         }
         for label in missing_enum_labels(labels, existing) {
             plan.operations.push(MigrationOp::AddEnumLabel {
                 type_name: type_name.clone(),
                 label,
+            });
+        }
+    }
+}
+
+/// Label removal between two declared snapshots (#536; never on the live
+/// side, where ADR-0011 warns and never acts): every label an enum of `old`
+/// declares that the same enum in `new` drops, how ever it is stored, unless
+/// a declared hint renames it ([`enum_rename_ops`] owns that). One op per
+/// label, over every column of `new` declaring the type. Planned on every
+/// dialect: the backfill a removal asks for is the same everywhere
+/// (ADR-0037); only Postgres's contract has a statement for it.
+fn plan_enum_label_removals(
+    old: &IrEnvelope<SchemaIrPayload>,
+    new: &IrEnvelope<SchemaIrPayload>,
+    plan: &mut MigrationPlan,
+) {
+    let before = declared_enum_labels(&old.payload.models);
+    let after = declared_enum_labels(&new.payload.models);
+    for (type_name, labels) in &after.labels {
+        let Some(old_labels) = before.labels.get(type_name) else {
+            continue;
+        };
+        let renamed_away: Vec<&String> = after
+            .renamed_labels
+            .get(type_name)
+            .map(|hints| hints.labels.values().collect())
+            .unwrap_or_default();
+        for label in extra_enum_labels(labels, old_labels) {
+            if renamed_away.contains(&&label) {
+                continue;
+            }
+            plan.operations.push(MigrationOp::RemoveEnumLabel {
+                type_name: type_name.clone(),
+                label,
+                columns: after.declaring.get(type_name).cloned().unwrap_or_default(),
             });
         }
     }
@@ -2795,6 +2853,12 @@ pub fn reverse_live_plan(
             MigrationOp::RenameEnumLabel { .. } | MigrationOp::RenameEnumType { .. } => {
                 operations.push(planned(swapped(op)))
             }
+            // Planned only between two snapshots (#536): never in a live plan.
+            MigrationOp::RemoveEnumLabel { .. } => {
+                return Err(PlanError::SnapshotOnlyOp {
+                    op: "RemoveEnumLabel".to_string(),
+                });
+            }
             MigrationOp::AddTable { table } => operations.push(planned(MigrationOp::DropTable {
                 table: table.clone(),
             })),
@@ -3221,6 +3285,29 @@ mod reverse_tests {
         )
         .expect("reverse plan");
         assert!(reverse.operations.is_empty());
+    }
+
+    #[test]
+    fn a_snapshot_only_op_in_a_live_plan_is_refused_naming_it() {
+        let live = envelope(vec![card(vec![column("id", "int", false)])]);
+        let facts = live_facts(LiveTableFacts::default());
+        let forward = MigrationPlan {
+            operations: vec![MigrationOp::RemoveEnumLabel {
+                type_name: "status".into(),
+                label: "gone".into(),
+                columns: vec![],
+            }],
+            ..MigrationPlan::default()
+        };
+        let err = reverse_live_plan(&forward, &live, &facts, &live, Dialect::Postgres)
+            .expect_err("refused");
+        assert_eq!(
+            err,
+            PlanError::SnapshotOnlyOp {
+                op: "RemoveEnumLabel".into()
+            }
+        );
+        assert!(err.to_string().contains("RemoveEnumLabel"), "{err}");
     }
 
     #[test]

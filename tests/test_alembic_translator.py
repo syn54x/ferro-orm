@@ -493,8 +493,13 @@ async def test_a_primary_key_change_is_refused_with_the_recipe(
 
     with pytest.raises(RuntimeError) as refused:
         autogenerate(db_url, postgres_base_url, db_schema_name)
-    assert "primary-key change on tr533card (ticket #536)" in str(refused.value)
-    assert "copy the rows across" in str(refused.value)
+    # The generator's refusal, word for word (`GenerateError::PrimaryKeyChange`).
+    assert str(refused.value) == (
+        'ferro: autogenerate refused: changing the primary key of "tr533card" is not '
+        "generated: write it as a new table (ferro migrate new --data-step …), a "
+        "backfill of parent and children, and a drop; see the Migrations docs § "
+        "Changing a primary key"
+    )
 
 
 @pytest.mark.backend_matrix

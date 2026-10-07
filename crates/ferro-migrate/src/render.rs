@@ -154,6 +154,17 @@ pub(crate) fn render_plan_in(
                 require_postgres(op, dialect)?;
                 out.statements.push(render_pg_enum_drop_type(type_name));
             }
+            // ADR-0011's warning only: the generator renders a removal's
+            // backfill and swap-type contract (`generate::enums`).
+            MigrationOp::RemoveEnumLabel {
+                type_name, label, ..
+            } => {
+                out.warnings
+                    .extend(ferro_ddl_lowering::extra_enum_labels_warning(
+                        type_name,
+                        std::slice::from_ref(label),
+                    ));
+            }
             MigrationOp::RenameEnumLabel {
                 type_name,
                 old,

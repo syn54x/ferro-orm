@@ -135,6 +135,10 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "RenameEnumLabel": lambda op: (
         f"{op['type_name']} enum label {op['old']} is named {op['new']} in the snapshot"
     ),
+    # Planned only between two snapshots; drift's live side never meets it.
+    "RemoveEnumLabel": lambda op: (
+        f"{op['type_name']} enum type has label {op['label']} the snapshot removes"
+    ),
     "RenameEnumType": lambda op: (
         f"{op['old']} enum type is named {op['new']} in the snapshot"
     ),

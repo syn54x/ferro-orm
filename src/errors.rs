@@ -178,6 +178,18 @@ pub(crate) enum CountedFailure {
         /// The staged check, when the error names it (Postgres).
         constraint: Option<String>,
     },
+    /// A label removal's swap-type contract (D2) met a row still holding a
+    /// removed label: the `ALTER COLUMN … TYPE "<type>_new" USING …` cast
+    /// refused it (`22P02`, `invalid input value for enum <type>_new:
+    /// "<label>"`).
+    RemovedLabel {
+        /// The table.
+        table: String,
+        /// The column.
+        column: String,
+        /// The label the row holds.
+        label: String,
+    },
 }
 
 // The staged `NOT NULL` check's and the rebuild table's name prefixes are the
@@ -248,8 +260,66 @@ pub(crate) fn not_null_copy_failure_of(statement: &str, message: &str) -> Option
     })
 }
 
-/// [`counted_failure_of`] (or, on SQLite, [`not_null_copy_failure_of`])
-/// for the database error `err` that `statement` raised.
+/// The swap-type contract failure `statement` raised with `sqlstate` and
+/// `message`: `ALTER TABLE "<table>" ALTER COLUMN "<column>" TYPE
+/// "<type>_new" USING …` (`generate::enums::render_swap_type`) refused with
+/// `invalid input value for enum <type>_new: "<label>"`, or `None`.
+pub(crate) fn removed_label_failure_of(
+    statement: &str,
+    sqlstate: Option<&str>,
+    message: &str,
+) -> Option<CountedFailure> {
+    if sqlstate? != "22P02" {
+        return None;
+    }
+    let code = statement
+        .lines()
+        .skip_while(|line| line.trim().is_empty() || line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (table, rest) = unquote_ident(code.strip_prefix("ALTER TABLE ")?)?;
+    let (column, rest) = unquote_ident(rest.strip_prefix(" ALTER COLUMN ")?)?;
+    let (staged, rest) = unquote_ident(rest.strip_prefix(" TYPE ")?)?;
+    if !rest.starts_with(" USING ") || !staged.ends_with("_new") {
+        return None;
+    }
+    // Postgres names the type as `format_type` prints it (quoted when it
+    // must be): the label is what follows its last `: "`.
+    let label = message
+        .strip_prefix("invalid input value for enum ")?
+        .rsplit_once(": \"")?
+        .1
+        .strip_suffix('"')?;
+    Some(CountedFailure::RemovedLabel {
+        table,
+        column,
+        label: label.to_string(),
+    })
+}
+
+/// A leading `"…"` identifier of `text` (doubled quotes undone) and the rest.
+fn unquote_ident(text: &str) -> Option<(String, &str)> {
+    let body = text.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = body.char_indices().peekable();
+    while let Some((at, ch)) = chars.next() {
+        if ch != '"' {
+            out.push(ch);
+            continue;
+        }
+        if matches!(chars.peek(), Some((_, '"'))) {
+            chars.next();
+            out.push('"');
+            continue;
+        }
+        return Some((out, &body[at + 1..]));
+    }
+    None
+}
+
+/// [`counted_failure_of`] (or, on SQLite, [`not_null_copy_failure_of`]; or
+/// a label removal's [`removed_label_failure_of`]) for the database error
+/// `err` that `statement` raised.
 pub(crate) fn counted_failure_of_error(
     statement: Option<&str>,
     err: &sqlx::Error,
@@ -260,6 +330,7 @@ pub(crate) fn counted_failure_of_error(
     let statement = statement?;
     counted_failure_of(statement, db.code().as_deref(), db.table(), db.constraint())
         .or_else(|| not_null_copy_failure_of(statement, db.message()))
+        .or_else(|| removed_label_failure_of(statement, db.code().as_deref(), db.message()))
 }
 
 fn quoted(ident: &str) -> String {
@@ -381,14 +452,57 @@ pub(crate) fn map_contract_failure(
     } else {
         ("rows", "have")
     };
-    let target = if expand_step == 0 {
-        format!("{:04}", migration.saturating_sub(1))
-    } else {
-        format!("{migration:04}:{expand_step:02}")
-    };
+    let target = rerun_target(migration, expand_step);
     format!(
         "{count} {rows} still {have} NULL \"{column}\" in \"{table}\"; run ferro migrate down \
          --to {target} then ferro migrate up to re-run the backfill"
+    )
+}
+
+/// What `ferro migrate down --to` reverts to so `up` re-runs the backfill
+/// after `expand_step` of `migration` (the migration before it when the
+/// backfill is the first step).
+fn rerun_target(migration: u16, expand_step: u8) -> String {
+    if expand_step == 0 {
+        format!("{:04}", migration.saturating_sub(1))
+    } else {
+        format!("{migration:04}:{expand_step:02}")
+    }
+}
+
+/// `2 rows still hold 'canceled' in "status" of "order"; run ferro migrate
+/// down --to 0011 then ferro migrate up to re-run the backfill`: a label
+/// removal's contract that met rows written behind its backfill (D2), with
+/// [`map_contract_failure`]'s recipe.
+pub(crate) fn map_removed_label_failure(
+    table: &str,
+    column: &str,
+    label: &str,
+    count: i64,
+    migration: u16,
+    expand_step: u8,
+) -> String {
+    let (rows, hold) = if count == 1 {
+        ("row", "holds")
+    } else {
+        ("rows", "hold")
+    };
+    format!(
+        "{count} {rows} still {hold} {} in \"{column}\" of \"{table}\"; run ferro migrate down \
+         --to {} then ferro migrate up to re-run the backfill",
+        ferro_ddl_lowering::quote_label(label),
+        rerun_target(migration, expand_step)
+    )
+}
+
+/// The rows of `table` whose `column` holds `label`, read as text (the
+/// column's type is the enum still declaring it).
+pub(crate) fn removed_label_count_sql(table: &str, column: &str, label: &str) -> String {
+    format!(
+        "SELECT count(*) FROM {} WHERE {}::text = {}",
+        quoted(table),
+        quoted(column),
+        ferro_ddl_lowering::quote_label(label)
     )
 }
 
@@ -486,6 +600,11 @@ pub(crate) async fn violation_count(
         CountedFailure::NotNull { table, .. } => not_null_column(engine, failure)
             .await?
             .map(|column| not_null_count_sql(table, &column)),
+        CountedFailure::RemovedLabel {
+            table,
+            column,
+            label,
+        } => Some(removed_label_count_sql(table, column, label)),
     };
     let Some(sql) = sql else {
         return Ok(None);
@@ -549,7 +668,7 @@ pub(crate) fn counted_failure_text(
     let name = match failure {
         CountedFailure::Validate { constraint, .. } => constraint,
         CountedFailure::UniqueBuild { index, .. } => index,
-        CountedFailure::NotNull { table, .. } => table,
+        CountedFailure::NotNull { table, .. } | CountedFailure::RemovedLabel { table, .. } => table,
     };
     match counted {
         Ok(Some(count)) => match failure {
@@ -560,6 +679,11 @@ pub(crate) fn counted_failure_text(
             CountedFailure::NotNull { .. } => format!(
                 "{original} ({count} rows of \"{name}\" still hold NULL); give them a value and \
                  run ferro migrate up to resume at {resume_at}"
+            ),
+            CountedFailure::RemovedLabel { column, label, .. } => format!(
+                "{original} ({count} rows still hold {} in \"{column}\" of \"{name}\"); give \
+                 them another label and run ferro migrate up to resume at {resume_at}",
+                ferro_ddl_lowering::quote_label(label)
             ),
         },
         Ok(None) => format!(
@@ -640,6 +764,19 @@ pub(crate) async fn counted_failure_message(
     let counted = violation_count(engine, failure)
         .await
         .map_err(|err| err.to_string());
+    // A label removal's contract re-runs its backfill, as a `NULL` one does.
+    if let (
+        CountedFailure::RemovedLabel {
+            table,
+            column,
+            label,
+        },
+        Ok(Some(count)),
+        Some((migration, expand_step)),
+    ) = (failure, &counted, rerun)
+    {
+        return map_removed_label_failure(table, column, label, *count, migration, expand_step);
+    }
     counted_failure_text(failure, counted, original, resume_at)
 }
 
@@ -867,6 +1004,43 @@ mod counted_failure_tests {
         assert!(
             contract_failure_text("author", Err("gone".into()), original, "0012_x:05", None)
                 .starts_with(original)
+        );
+    }
+
+    #[test]
+    fn a_swap_type_contract_meeting_a_removed_label_is_counted_with_the_recipe() {
+        let statement = "-- ferro: data-dependent\n\nALTER TABLE \"order\" ALTER COLUMN \
+                         \"status\" TYPE \"orderstatus_new\" USING \
+                         \"status\"::text::\"orderstatus_new\"";
+        let message = "invalid input value for enum orderstatus_new: \"canceled\"";
+        let failure = CountedFailure::RemovedLabel {
+            table: "order".into(),
+            column: "status".into(),
+            label: "canceled".into(),
+        };
+        assert_eq!(
+            removed_label_failure_of(statement, Some("22P02"), message),
+            Some(failure.clone())
+        );
+        assert_eq!(
+            removed_label_failure_of(statement, Some("23514"), message),
+            None
+        );
+        assert_eq!(
+            removed_label_failure_of("UPDATE \"order\" SET x = 1", Some("22P02"), message),
+            None
+        );
+        assert_eq!(
+            removed_label_count_sql("order", "status", "canceled"),
+            "SELECT count(*) FROM \"order\" WHERE \"status\"::text = 'canceled'"
+        );
+        assert_eq!(
+            map_removed_label_failure("order", "status", "canceled", 2, 12, 0),
+            "2 rows still hold 'canceled' in \"status\" of \"order\"; run ferro migrate down \
+             --to 0011 then ferro migrate up to re-run the backfill"
+        );
+        assert!(
+            counted_failure_text(&failure, Ok(Some(1)), message, "0012_x:02").starts_with(message)
         );
     }
 

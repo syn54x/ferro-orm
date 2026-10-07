@@ -28,6 +28,20 @@ pre-filled as its call; any other is a ``todo`` naming it. A model without a
 single primary key has no keyset to page by: its backfill is one ``@atomic``
 ``update`` per column.
 
+A label removed from a ``StrEnum`` (D2) is a backfill over the rows still
+holding it, each given another label (the historical model's enum still
+declares the removed one, and the label written is looked up in it)::
+
+    @chunked(
+        lambda models: models.Order.where(lambda order: order.status == "canceled")
+        .order_by(lambda order: order.id),
+        batch_size=1000,
+    )
+    async def up(ctx, batch):
+        for order in batch:
+            order.status = type(order.status)(todo("the label to use instead of 'canceled'"))
+            await order.save()
+
 ``new --no-backfill author.slug`` writes :func:`guard` in the backfill's
 place: an ``@atomic`` step that fails the migration, naming the count, when
 any row still needs a value, so a step number is never a gap (ADR-0037).
@@ -45,7 +59,7 @@ placeholders replaced:
 from __future__ import annotations
 
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 
 __all__ = [
@@ -82,16 +96,47 @@ def _var(model: str) -> str:
     return model.lower()
 
 
-def _missing(model: str, columns: Sequence[str]) -> str:
+def _fills(
+    columns: Sequence[str],
+    removed: Mapping[str, Sequence[str]] | None,
+    nulls: Collection[str] | None,
+) -> list[tuple[str, str | None]]:
+    """What the step fills, in order: ``(column, None)`` for a column whose
+    rows hold ``NULL``, ``(column, label)`` for each removed ``label`` its
+    rows may hold. A column in ``removed`` fills its ``NULL`` rows too only
+    when ``nulls`` names it; every other column fills its ``NULL`` rows."""
+    removed = removed or {}
+    out: list[tuple[str, str | None]] = []
+    for column in columns:
+        labels = removed.get(column, ())
+        if not labels or (nulls is not None and column in nulls):
+            out.append((column, None))
+        out.extend((column, label) for label in labels)
+    return out
+
+
+def _condition(var: str, fill: tuple[str, str | None]) -> str:
+    """``author.slug == None`` or ``order.status == "canceled"``."""
+    column, label = fill
+    if label is None:
+        return f"{var}.{column} == None"
+    return f"{var}.{column} == {_literal(label)}"
+
+
+def _missing(model: str, fills: Sequence[tuple[str, str | None]]) -> str:
     """``author.slug == None``, or ``(author.slug == None) | (author.bio == None)``."""
     var = _var(model)
-    if len(columns) == 1:
-        return f"{var}.{columns[0]} == None"
-    return " | ".join(f"({var}.{column} == None)" for column in columns)
+    if len(fills) == 1:
+        return _condition(var, fills[0])
+    return " | ".join(f"({_condition(var, fill)})" for fill in fills)
 
 
-def _query(model: str, columns: Sequence[str]) -> str:
-    return f"models.{model}.where(lambda {_var(model)}: {_missing(model, columns)})"
+def _query(model: str, fills: Sequence[tuple[str, str | None]]) -> str:
+    return f"models.{model}.where(lambda {_var(model)}: {_missing(model, fills)})"
+
+
+def _label_todo(label: str) -> str:
+    return f"todo({_literal(f'the label to use instead of {label!r}')})"
 
 
 def _template(template_dir: Path | None, name: str) -> str | None:
@@ -103,11 +148,16 @@ def _template(template_dir: Path | None, name: str) -> str | None:
     return path.read_bytes().decode("utf-8")
 
 
-def _fill(template: str, model: str, columns: Sequence[str]) -> str:
+def _fill(
+    template: str,
+    model: str,
+    columns: Sequence[str],
+    fills: Sequence[tuple[str, str | None]],
+) -> str:
     return (
         template.replace("{model}", model)
         .replace("{columns}", ", ".join(columns))
-        .replace("{query}", _query(model, columns))
+        .replace("{query}", _query(model, fills))
     )
 
 
@@ -129,6 +179,8 @@ def backfill(
     key: str | None = None,
     reverse: str = "the column goes back with the expand step's down",
     skip: str | None = None,
+    removed: Mapping[str, Sequence[str]] | None = None,
+    nulls: Collection[str] | None = None,
 ) -> str:
     """The text of the backfill over ``model``'s ``columns``.
 
@@ -136,10 +188,13 @@ def backfill(
     primary key) or ``"atomic"``. ``prefill`` maps a column to the Python
     expression each row gets (a standard-library factory's call,
     :func:`prefill_for`); every other column holds ``todo(todos[column])``
-    (default: ``the <column> for an existing <model>``). ``reverse`` is the
-    down's ``@nothing_to_reverse`` reason; ``skip`` the ``--no-backfill``
-    arguments the header names for skipping the step. The project's
-    ``template_dir/backfill.py`` wins when it exists.
+    (default: ``the <column> for an existing <model>``). ``removed`` maps a
+    column to the enum labels the migration removes (D2): the rows holding
+    each get ``todo("the label to use instead of '<label>'")``, and the
+    column's ``NULL`` rows are filled too only when ``nulls`` names it.
+    ``reverse`` is the down's ``@nothing_to_reverse`` reason; ``skip`` the
+    ``--no-backfill`` arguments the header names for skipping the step. The
+    project's ``template_dir/backfill.py`` wins when it exists.
     """
     if driver not in ("chunked", "atomic"):
         raise ValueError(f"a backfill is chunked or atomic, not {driver!r}")
@@ -147,18 +202,25 @@ def backfill(
         raise ValueError(
             "a chunked backfill pages by the model's primary key: pass key="
         )
+    fills = _fills(columns, removed, nulls)
     template = _template(template_dir, BACKFILL_TEMPLATE)
     if template is not None:
-        return _fill(template, model, columns)
+        return _fill(template, model, columns, fills)
     var = _var(model)
-    value = {
-        column: prefill.get(column)
-        or f"todo({_literal((todos or {}).get(column) or f'the {column} for an existing {var}')})"
-        for column in columns
-    }
+
+    def value(fill: tuple[str, str | None]) -> str:
+        column, label = fill
+        if label is not None:
+            return _label_todo(label)
+        return prefill.get(column) or (
+            f"todo({_literal((todos or {}).get(column) or f'the {column} for an existing {var}')})"
+        )
+
     names = ["nothing_to_reverse"]
     names.append("chunked" if driver == "chunked" else "atomic")
-    unwritten = any(column not in prefill for column in columns)
+    unwritten = any(
+        label is not None or column not in prefill for column, label in fills
+    )
     lines = [f"# Gives every existing {var} a value for {', '.join(columns)}."]
     if unwritten:
         names.append("todo")
@@ -173,28 +235,42 @@ def backfill(
     if driver == "chunked":
         lines += [
             "@chunked(",
-            f"    lambda models: {_query(model, columns)}",
+            f"    lambda models: {_query(model, fills)}",
             f"    .order_by(lambda {var}: {var}.{key}),",
             f"    batch_size={BATCH_SIZE},",
             ")",
             "async def up(ctx, batch):",
             f"    for {var} in batch:",
         ]
-        for column in columns:
-            if len(columns) == 1:
-                lines.append(f"        {var}.{column} = {value[column]}")
+        for fill in fills:
+            column = fill[0]
+            # A removed label's row holds a member of the historical enum:
+            # the label written is looked up in that same enum.
+            assigned = (
+                value(fill)
+                if fill[1] is None
+                else f"type({var}.{column})({value(fill)})"
+            )
+            if len(fills) == 1:
+                lines.append(f"        {var}.{column} = {assigned}")
             else:
+                test = (
+                    f"{var}.{column} is None"
+                    if fill[1] is None
+                    else f"{var}.{column} is not None and "
+                    f"{var}.{column}.value == {_literal(fill[1])}"
+                )
                 lines += [
-                    f"        if {var}.{column} is None:",
-                    f"            {var}.{column} = {value[column]}",
+                    f"        if {test}:",
+                    f"            {var}.{column} = {assigned}",
                 ]
         lines.append(f"        await {var}.save()")
     else:
         lines += ["@atomic", "async def up(ctx):"]
-        for column in columns:
+        for fill in fills:
             lines += [
-                f"    await ctx.models.{model}.where(lambda {var}: {var}.{column} == None).update(",
-                f"        {column}={value[column]},",
+                f"    await ctx.models.{model}.where(lambda {var}: {_condition(var, fill)}).update(",
+                f"        {fill[0]}={value(fill)},",
                 "    )",
             ]
     lines += [
@@ -208,34 +284,54 @@ def backfill(
 
 
 def guard(
-    model: str, columns: Sequence[str], *, template_dir: Path | None = None
+    model: str,
+    columns: Sequence[str],
+    *,
+    template_dir: Path | None = None,
+    removed: Mapping[str, Sequence[str]] | None = None,
+    nulls: Collection[str] | None = None,
 ) -> str:
     """The text of the guard that stands in for ``model``'s backfill under
     ``new --no-backfill``: an ``@atomic`` step failing the migration, naming
-    the count, when any row still holds ``NULL`` in one of ``columns``. The
-    project's ``template_dir/guard.py`` wins when it exists."""
+    the count, when any row still holds ``NULL`` in one of ``columns`` — or,
+    for a column in ``removed``, one of the enum labels the migration
+    removes (``nulls`` as for :func:`backfill`). The project's
+    ``template_dir/guard.py`` wins when it exists."""
+    fills = _fills(columns, removed, nulls)
     template = _template(template_dir, GUARD_TEMPLATE)
     if template is not None:
-        return _fill(template, model, columns)
+        return _fill(template, model, columns, fills)
     var = _var(model)
     flags = " ".join(f"--no-backfill {var}.{column}" for column in columns)
-    what = ", ".join(columns)
+    null_columns = [column for column, label in fills if label is None]
+    held = [f"{label!r} in {column}" for column, label in fills if label is not None]
+    what = " or ".join(
+        ([f"NULL in {', '.join(null_columns)}"] if null_columns else []) + held
+    )
+    verb = "have" if null_columns else "hold"
+    claim = (
+        f"# existing {var} needs a value for {', '.join(columns)}, and this step checks it on"
+        if not held
+        else f"# existing {var} holds a removed label in {', '.join(columns)}, and this step checks it on"
+    )
     return "\n".join(
         [
             f"# Generated by `ferro migrate new {flags}`: the migration claims no",
-            f"# existing {var} needs a value for {what}, and this step checks it on",
-            "# every database before the contract makes it required.",
+            claim,
+            "# every database before the contract makes it required."
+            if not held
+            else "# every database before the contract removes the label.",
             "from ferro.migrations import MigrationRefused, atomic, nothing_to_reverse",
             "",
             "",
             "@atomic",
             "async def up(ctx):",
             f"    missing = await ctx.models.{model}.where(",
-            f"        lambda {var}: {_missing(model, columns)}",
+            f"        lambda {var}: {_missing(model, fills)}",
             "    ).count()",
             "    if missing:",
             "        raise MigrationRefused(",
-            f'            f"{{missing}} {var} rows still have NULL in {what}, which '
+            f'            f"{{missing}} {var} rows still {verb} {_in_fstring(what)}, which '
             f'{flags} said none would; "',
             '            "give them a value and run ferro migrate up again, or regenerate "',
             '            "the migration without --no-backfill to get a backfill"',
@@ -246,6 +342,17 @@ def guard(
             "def down(ctx): ...",
             "",
         ]
+    )
+
+
+def _in_fstring(text: str) -> str:
+    """``text`` inside a double-quoted f-string literal: backslashes, double
+    quotes and braces escaped."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("{", "{{")
+        .replace("}", "}}")
     )
 
 

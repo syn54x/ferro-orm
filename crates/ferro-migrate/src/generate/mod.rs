@@ -110,10 +110,22 @@ pub enum GenerateError {
         /// The ticket that generates it.
         ticket: u32,
     },
-    /// The models change a table's primary key (ticket #536).
+    /// The models change a table's primary key (B4: the key moves to other
+    /// columns, gains or loses one, or a key column's type changes). No door
+    /// changes a key in place; the refusal is the restructure recipe, and the
+    /// Alembic bridge refuses with this same text.
     PrimaryKeyChange {
         /// The table whose key changes.
         table: String,
+    },
+    /// A column of an existing table moves to or from a native Postgres enum
+    /// type (one of two columns of a type now declaring another), which no
+    /// statement converts in place; the refusal is the recipe.
+    EnumTypeMove {
+        /// The table.
+        table: String,
+        /// The column.
+        column: String,
     },
     /// The renderer has no statement for an op on a dialect, only a warning
     /// saying why (a cast the pass refuses): writing the file without it
@@ -129,8 +141,8 @@ pub enum GenerateError {
         warning: String,
     },
     /// The planner reported a change between the two snapshots that it turns
-    /// into no op (an enum label removal, a drifting foreign key ferro does
-    /// not own) — writing nothing for it would be a silent omission.
+    /// into no op (a drifting foreign key ferro does not own) — writing
+    /// nothing for it would be a silent omission.
     Unplanned {
         /// The dialect the plan was for.
         dialect: StepDialect,
@@ -158,9 +170,15 @@ impl std::fmt::Display for GenerateError {
             } => write!(f, "not generated yet: {op} on {subject} (ticket #{ticket})"),
             GenerateError::PrimaryKeyChange { table } => write!(
                 f,
-                "not generated yet: a primary-key change on {table} (ticket #536): a table's \
-                 primary key cannot change in place; declare a new model with the new key, \
-                 copy the rows across, then drop the old model"
+                "changing the primary key of \"{table}\" is not generated: write it as a new \
+                 table (ferro migrate new --data-step …), a backfill of parent and children, \
+                 and a drop; see the Migrations docs § Changing a primary key"
+            ),
+            GenerateError::EnumTypeMove { table, column } => write!(
+                f,
+                "changing \"{table}\".\"{column}\" to or from a native enum type is not \
+                 generated: add a column of the new type, copy the values across in a data step \
+                 (ferro migrate new --data-step …), then drop the old column"
             ),
             GenerateError::Unrenderable {
                 op,
@@ -218,6 +236,7 @@ fn op_subject(op: &MigrationOp) -> String {
         | MigrationOp::CreateEnumType { type_name, .. }
         | MigrationOp::DropEnumType { type_name }
         | MigrationOp::RenameEnumLabel { type_name, .. }
+        | MigrationOp::RemoveEnumLabel { type_name, .. }
         | MigrationOp::RenameEnumType { new: type_name, .. } => type_name.clone(),
         other => other.table().unwrap_or_default().to_string(),
     }
@@ -250,6 +269,9 @@ fn phase_of(
             ticket,
         }),
         Needs::Refused(Refusal::PrimaryKeyChange) => Err(GenerateError::PrimaryKeyChange { table }),
+        Needs::Refused(Refusal::EnumTypeMove { column }) => {
+            Err(GenerateError::EnumTypeMove { table, column })
+        }
         Needs::Refused(Refusal::LiveOnly) => Err(GenerateError::Render(format!(
             "{} on {table} is planned only against a live database, never between two \
              schema snapshots",
@@ -455,6 +477,7 @@ fn summarize(
     let mut types_renamed = BTreeSet::new();
     let mut labels_added = BTreeSet::new();
     let mut labels_renamed = BTreeSet::new();
+    let mut labels_removed = BTreeSet::new();
     for op in ups.iter().flatten() {
         match op {
             MigrationOp::AddTable { table } => {
@@ -483,6 +506,11 @@ fn summarize(
             } => {
                 labels_renamed.insert(format!("{type_name}.{old} → {new}"));
             }
+            MigrationOp::RemoveEnumLabel {
+                type_name, label, ..
+            } => {
+                labels_removed.insert(format!("{type_name}.{label}"));
+            }
             other => {
                 if let Some(table) = other.table() {
                     changed.insert(model_of(target, table));
@@ -499,6 +527,7 @@ fn summarize(
         ("renamed enum types", types_renamed),
         ("new enum labels", labels_added),
         ("renamed enum labels", labels_renamed),
+        ("removed enum labels", labels_removed),
     ]
     .into_iter()
     .filter(|(_, names)| !names.is_empty())
@@ -618,7 +647,7 @@ pub fn generate_with(
             before,
             dialect,
             PlanDirection::Down,
-            &enums::answered_by_labels_step(&change.operations),
+            &[],
         )?;
         for line in renames::suggestions(&change.operations, before, target) {
             if !suggestions.contains(&line) {
@@ -642,8 +671,14 @@ pub fn generate_with(
         demand_ops.extend(plan(parent_ir, &shape, dialect)?.operations);
     }
     let demands = backfill::collect(&demand_ops, before, &shape);
-    let expanded = backfill::relaxed(&shape, &demands);
-    let loose_target = backfill::relaxed(target, &demands);
+    // A removed enum label (D2) stays declared until the contract: the
+    // backfill relabels the rows holding it, the contract removes it.
+    let removals = backfill::label_removals(&demand_ops);
+    let expanded =
+        backfill::with_removed_labels(&backfill::relaxed(&shape, &demands), before, &removals);
+    let loose_target =
+        backfill::with_removed_labels(&backfill::relaxed(target, &demands), before, &removals);
+    let contracts = !demands.is_empty() || !removals.is_empty();
     let mut ups = Vec::new();
     let mut downs = Vec::new();
     for &dialect in dialects {
@@ -660,7 +695,7 @@ pub fn generate_with(
     if ups.iter().all(Vec::is_empty)
         && downs.iter().all(MigrationPlan::is_empty)
         && index_ops.is_empty()
-        && demands.is_empty()
+        && !contracts
     {
         if !skipped.is_empty() {
             backfill::data_steps(&demands, target, &skipped)?;
@@ -709,11 +744,7 @@ pub fn generate_with(
     }
 
     // With a backfill, the schema step is the expand (ADR-0040).
-    let schema_step = if demands.is_empty() {
-        "schema"
-    } else {
-        "expand"
-    };
+    let schema_step = if !contracts { "schema" } else { "expand" };
     let mut steps = Vec::new();
     let push_phase = |phase: Phase, steps: &mut Vec<GeneratedStep>| {
         let mut renderings = BTreeMap::new();
@@ -751,7 +782,7 @@ pub fn generate_with(
     for &phase in phases.iter().filter(|&&phase| phase > Phase::Index) {
         push_phase(phase, &mut steps)?;
     }
-    if demands.is_empty() {
+    if !contracts {
         // A step every configured dialect would render not-applicable is not
         // generated: only Postgres stages a constraint (ADR-0043).
         if !staged.is_empty() {
@@ -2396,18 +2427,31 @@ mod tests {
     }
 
     #[test]
-    fn a_primary_key_change_is_refused_with_the_recipe() {
+    fn a_primary_key_change_is_refused_with_the_recipe_in_each_of_its_shapes() {
+        // B4: the key moved to another column, made composite, or its
+        // column's type changed.
         let mut moved = author();
         moved.columns[0].primary_key = false;
         moved.columns[0].autoincrement = false;
         moved.columns[1].primary_key = true;
-        for dialects in [&[Dialect::Postgres][..], &[Dialect::Sqlite][..]] {
-            assert_eq!(
-                refusal(vec![author()], vec![moved.clone()], dialects),
-                "not generated yet: a primary-key change on author (ticket #536): a table's \
-                 primary key cannot change in place; declare a new model with the new key, \
-                 copy the rows across, then drop the old model"
-            );
+        let mut composite = author();
+        composite.columns[0].autoincrement = false;
+        composite.columns[1].primary_key = true;
+        let mut retyped = author();
+        retyped.columns[0] = SchemaColumn {
+            primary_key: true,
+            ..column("id", "uuid")
+        };
+        for after in [moved, composite, retyped] {
+            for dialects in [&[Dialect::Postgres][..], &[Dialect::Sqlite][..], &BOTH[..]] {
+                assert_eq!(
+                    refusal(vec![author()], vec![after.clone()], dialects),
+                    "changing the primary key of \"author\" is not generated: write it as a \
+                     new table (ferro migrate new --data-step …), a backfill of parent and \
+                     children, and a drop; see the Migrations docs § Changing a primary key",
+                    "{after:?} {dialects:?}"
+                );
+            }
         }
     }
 
@@ -2733,13 +2777,202 @@ mod tests {
         );
     }
 
+    /// `author` (and, when `editor`, an `editor` sharing its `status` type)
+    /// with `status` declaring `labels`.
+    fn with_status(labels: &[&str], editor: bool) -> Vec<SchemaModel> {
+        let mut models = vec![relabelled("status", labels, &[])];
+        if editor {
+            models.push(model("Editor", vec![pk(), status(labels)]));
+        }
+        models
+    }
+
+    const SWAP: [&str; 4] = [
+        "CREATE TYPE \"status_new\" AS ENUM ('draft', 'live')",
+        "ALTER TABLE \"author\" ALTER COLUMN \"status\" TYPE \"status_new\" USING \
+         \"status\"::text::\"status_new\"",
+        "DROP TYPE \"status\"",
+        "ALTER TYPE \"status_new\" RENAME TO \"status\"",
+    ];
+
     #[test]
-    fn a_removed_label_or_a_partial_type_move_is_refused() {
-        let removed = relabelled("status", &["draft"], &[]);
-        let err = refusal(vec![author()], vec![removed], &BOTH);
-        assert!(err.starts_with("not generated yet:"), "{err}");
+    fn d2_a_removed_label_is_a_backfill_then_the_swap_type_contract() {
+        let before = with_status(&["draft", "gone", "live"], false);
+        let after = with_status(&["draft", "live"], false);
+        let migration = edit(before, after, &BOTH);
+        assert_eq!(
+            step_names(&migration),
+            ["01_backfill_author", "02_contract"]
+        );
+        assert_eq!(migration.summary, "removed enum labels: status.gone");
+        let data = data_of(&migration, "01_backfill_author");
+        assert_eq!(
+            data.columns,
+            [backfill::DemandedColumn {
+                name: "status".into(),
+                reason: backfill::Reason::LabelRemoved {
+                    type_name: "status".into(),
+                    label: "gone".into(),
+                },
+            }]
+        );
+        assert_eq!(data.driver, backfill::Driver::Chunked);
+        assert_eq!(data.reverse, "the contract's down restores the label");
+        assert_eq!(
+            serde_json::to_value(&data.columns[0].reason).expect("json"),
+            serde_json::json!({
+                "kind": "label_removed", "type_name": "status", "label": "gone"
+            })
+        );
+        let pg = step(&migration, "02_contract", Dialect::Postgres);
+        let expected: String = SWAP.iter().map(|s| format!("\n{s};\n")).collect();
+        assert_eq!(pg.up, format!("-- ferro: data-dependent\n{expected}"));
+        assert_eq!(
+            pg.down,
+            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone';\n"
+        );
+        // SQLite stores the label as text in a column as wide as the longest
+        // label, which stays: nothing beyond the backfill.
+        let sqlite = step(&migration, "02_contract", Dialect::Sqlite);
+        assert_eq!(sqlite.up, NOT_APPLICABLE);
+        assert_eq!(sqlite.down, NOT_APPLICABLE);
+
+        // Removing the longest label narrows the SQLite column: the contract
+        // rebuilds the table into it (and back on the down).
+        let narrowed = edit(
+            with_status(&["draft", "canceled", "live"], false),
+            with_status(&["draft", "live"], false),
+            &BOTH,
+        );
+        assert_eq!(step_names(&narrowed), ["01_backfill_author", "02_contract"]);
+        let sqlite = step(&narrowed, "02_contract", Dialect::Sqlite);
+        assert!(sqlite.up.contains("\"status\" varchar(5)"), "{}", sqlite.up);
+        assert!(
+            sqlite.down.contains("\"status\" varchar(8)"),
+            "{}",
+            sqlite.down
+        );
+    }
+
+    #[test]
+    fn d2_a_type_two_tables_share_is_one_swap_and_one_backfill_per_model() {
+        let before = with_status(&["draft", "canceled", "live"], true);
+        let after = with_status(&["draft", "live"], true);
+        let migration = edit(before, after, &[Dialect::Postgres]);
+        assert_eq!(
+            step_names(&migration),
+            ["01_backfill_author", "02_backfill_editor", "03_contract"]
+        );
+        let up = statements_of(&step(&migration, "03_contract", Dialect::Postgres).up);
+        assert_eq!(
+            up,
+            [
+                SWAP[0],
+                SWAP[1],
+                "ALTER TABLE \"editor\" ALTER COLUMN \"status\" TYPE \"status_new\" USING \
+                 \"status\"::text::\"status_new\"",
+                SWAP[2],
+                SWAP[3],
+            ]
+        );
+    }
+
+    #[test]
+    fn d2_a_column_default_is_dropped_around_the_swap() {
+        let defaulted = |labels: &[&str]| {
+            let mut model = relabelled("status", labels, &[]);
+            model.columns[2].default = Some(serde_json::json!("draft"));
+            vec![model]
+        };
+        let migration = edit(
+            defaulted(&["draft", "canceled", "live"]),
+            defaulted(&["draft", "live"]),
+            &[Dialect::Postgres],
+        );
+        let up = statements_of(&step(&migration, "02_contract", Dialect::Postgres).up);
+        let alter = "ALTER TABLE \"author\" ALTER COLUMN \"status\"";
+        assert_eq!(
+            up,
+            [
+                SWAP[0].to_string(),
+                format!("{alter} DROP DEFAULT"),
+                SWAP[1].to_string(),
+                format!("{alter} SET DEFAULT 'draft'"),
+                SWAP[2].to_string(),
+                SWAP[3].to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn d2_no_backfill_writes_the_guard_and_a_label_added_beside_it_is_its_labels_step() {
+        let before = with_status(&["draft", "canceled", "live"], false);
+        let after = with_status(&["draft", "live", "archived"], false);
+        let parent = snapshot_of(&ir(before), None);
+        let options = GenerateOptions {
+            no_backfill: vec!["author.status".into()],
+        };
+        let migration = generate_with(Some(&parent), &ir(after), &BOTH, &options)
+            .expect("ok")
+            .expect("a change");
+        assert_eq!(
+            step_names(&migration),
+            ["01_labels", "02_guard_author", "03_contract"]
+        );
+        assert!(data_of(&migration, "02_guard_author").guard);
+        let up = statements_of(&step(&migration, "03_contract", Dialect::Postgres).up);
+        assert_eq!(
+            up[0],
+            "CREATE TYPE \"status_new\" AS ENUM ('draft', 'live', 'archived')"
+        );
+    }
+
+    #[test]
+    fn d2_a_text_enums_check_is_rebuilt_to_the_labels_left() {
+        let checked = |labels: &[&str]| {
+            let mut model = relabelled("status", labels, &[]);
+            model.columns[2].db_type = Some("text".into());
+            model.columns[2].db_type_explicit = Some(true);
+            model.checks.push(ferro_schema_ir::SchemaCheck {
+                name: "ck_author_status".into(),
+                column: "status".into(),
+                values: labels.iter().map(|l| format!("'{l}'")).collect(),
+            });
+            vec![model]
+        };
+        let migration = edit(
+            checked(&["draft", "canceled", "live"]),
+            checked(&["draft", "live"]),
+            &BOTH,
+        );
+        assert_eq!(
+            step_names(&migration),
+            ["01_backfill_author", "02_contract"]
+        );
+        let pg = step(&migration, "02_contract", Dialect::Postgres);
+        assert_eq!(
+            statements_of(&pg.up),
+            [
+                "ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_status\"",
+                "ALTER TABLE \"author\" ADD CONSTRAINT \"ck_author_status\" CHECK (\"status\" \
+                 IN ('draft', 'live'))",
+            ]
+        );
+        assert!(!pg.up.contains("TYPE"), "{}", pg.up);
+        assert!(
+            pg.down.contains("IN ('draft', 'canceled', 'live')"),
+            "{}",
+            pg.down
+        );
+        // SQLite rebuilds the table into the new check.
+        let sqlite = step(&migration, "02_contract", Dialect::Sqlite);
+        assert!(sqlite.up.contains("\"_ferro_new_author\""), "{}", sqlite.up);
+    }
+
+    #[test]
+    fn a_partial_type_move_is_refused_with_the_recipe() {
         // One of two columns of the type moving to a new type is a type
-        // change, the swap-type recipe's (ticket #536), never a rename.
+        // change no statement converts in place, never a rename.
         let mut before = author();
         before.columns.push(SchemaColumn {
             name: "previous".into(),
@@ -2749,8 +2982,24 @@ mod tests {
         after.columns[3].enum_type_name = Some("authorstatus".into());
         assert_eq!(
             refusal(vec![before], vec![after], &[Dialect::Postgres]),
-            "not generated yet: AlterColumnType on author (ticket #536)"
+            "changing \"author\".\"previous\" to or from a native enum type is not generated: \
+             add a column of the new type, copy the values across in a data step (ferro \
+             migrate new --data-step …), then drop the old column"
         );
+    }
+
+    /// A step file's statements, headers and blank lines left out.
+    fn statements_of(text: &str) -> Vec<String> {
+        text.split(";\n")
+            .map(|chunk| {
+                chunk
+                    .lines()
+                    .filter(|line| !line.trim().is_empty() && !line.starts_with("-- ferro:"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|statement| !statement.is_empty())
+            .collect()
     }
 
     #[test]
