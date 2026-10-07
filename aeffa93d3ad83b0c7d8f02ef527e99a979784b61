@@ -1,0 +1,1 @@
+cargo test -p ferro-ddl-lowering -p ferro-migrate: 158+252 passed; maturin develop (STRIP=none); pytest test_table_check_rebuild/reconcile/orphans, test_live_table_checks, test_migrate_drift, test_pass_recording, test_cross_emitter_parity --db-backends=sqlite,postgres: 130 passed, 3 skipped (SQLite-only); fixtures unchanged
