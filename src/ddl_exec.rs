@@ -596,84 +596,11 @@ impl DdlExecutor {
             (Next::Fail, _) => Settled::Done(Err(DdlError::Failed(err))),
         }
     }
-
-    /// Run `statements` in one transaction under the timeout, logging each
-    /// as `ferro migrate: <statement>`.
-    ///
-    /// # Errors
-    /// `OperationalError` naming [`SETTING`] after the last attempt; the
-    /// mapped database error otherwise.
-    #[allow(dead_code)] // the SQLite table rebuild (#526) runs through it
-    pub async fn run_transactional(
-        &self,
-        engine: &EngineHandle,
-        statements: &[String],
-        on_attempt: impl FnMut(Attempt),
-    ) -> PyResult<()> {
-        let log = |sql: &str| crate::log_debug(format!("ferro migrate: {sql}"));
-        self.transactional(engine, log, on_attempt, |mut conn| async move {
-            let result = run_logged(&mut conn, statements).await;
-            (conn, result)
-        })
-        .await
-        .map_err(ddl_py_error)
-    }
-
-    /// Run `statements` one at a time outside a transaction under the
-    /// timeout, logging each as `ferro migrate: <statement>`.
-    ///
-    /// # Errors
-    /// As [`Self::run_transactional`].
-    #[allow(dead_code)] // the `CONCURRENTLY` index steps (#527) run through it
-    pub async fn run_unwrapped(
-        &self,
-        engine: &EngineHandle,
-        statements: &[String],
-        on_attempt: impl FnMut(Attempt),
-    ) -> PyResult<()> {
-        let log = |sql: &str| crate::log_debug(format!("ferro migrate: {sql}"));
-        self.unwrapped(engine, log, on_attempt, |mut conn| async move {
-            let result = run_logged(&mut conn, statements).await;
-            (conn, result)
-        })
-        .await
-        .map_err(ddl_py_error)
-    }
 }
 
 enum Settled<T, E> {
     Done(Result<T, DdlError<E>>),
     RetryAfter(Duration),
-}
-
-#[allow(dead_code)] // see `run_transactional` / `run_unwrapped`
-async fn run_logged(
-    conn: &mut EngineConnection,
-    statements: &[String],
-) -> Result<(), StatementError> {
-    for statement in statements {
-        crate::log_debug(format!("ferro migrate: {statement}"));
-        conn.execute_sql_unprepared(statement)
-            .await
-            .map_err(|error| StatementError::at(statement, error))?;
-    }
-    Ok(())
-}
-
-/// [`DdlError`] as the Python exception it raises: `OperationalError`
-/// naming [`SETTING`] for a lock timeout, the mapped database error
-/// otherwise.
-pub fn ddl_py_error(err: DdlError<StatementError>) -> PyErr {
-    match err {
-        DdlError::LockTimeout(timeout) => lock_timeout_error(&timeout.to_string()),
-        DdlError::Failed(failure) => {
-            let context = match &failure.statement {
-                Some(statement) => format!("DDL failed (statement: {statement})"),
-                None => "DDL failed".to_string(),
-            };
-            crate::errors::map_db_error(&context, failure.error)
-        }
-    }
 }
 
 /// `ferro.exceptions.OperationalError(message)` with SQLSTATE `55P03`.

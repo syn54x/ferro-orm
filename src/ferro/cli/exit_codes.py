@@ -14,8 +14,10 @@ USAGE = 2
 the ``cli`` extra is not installed."""
 
 PENDING = 3
-"""``status`` only: migrations are waiting to be applied."""
+"""``status`` and ``check``: migrations are waiting to be applied."""
 
 NEEDS_ATTENTION = 4
-"""``status`` and ``drift``: a failed or reverting step, an edited file, or a
-database ahead of the checkout; a person has to look before anything runs."""
+"""``status``, ``drift`` and ``baseline``: a failed or reverting step, an
+edited file, or a database ahead of the checkout (``status``); drift between
+the models and the database (``drift``, and ``baseline`` when the adopted
+database drifts); a person has to look before anything runs."""
