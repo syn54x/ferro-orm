@@ -53,7 +53,11 @@ fn subject(op: &MigrationOp) -> Option<Subject> {
     match op {
         MigrationOp::CreateEnumType { type_name, .. }
         | MigrationOp::DropEnumType { type_name }
-        | MigrationOp::AddEnumLabel { type_name, .. } => Some(Subject::EnumType(type_name.clone())),
+        | MigrationOp::AddEnumLabel { type_name, .. }
+        | MigrationOp::RenameEnumLabel { type_name, .. }
+        | MigrationOp::RenameEnumType { new: type_name, .. } => {
+            Some(Subject::EnumType(type_name.clone()))
+        }
         other => other.table().map(|table| Subject::Table(table.to_string())),
     }
 }
@@ -123,6 +127,16 @@ fn may_fail_on_rows(
         }
         _ => false,
     }
+}
+
+/// Whether `ops` rewrite rows on `dialect`: a label rename on SQLite is an
+/// `UPDATE` of every column of the type, which the table's own constraints
+/// (a `db_check` still naming the old label) can reject.
+fn relabels_rows(ops: &[MigrationOp], dialect: Dialect) -> bool {
+    dialect == Dialect::Sqlite
+        && ops
+            .iter()
+            .any(|op| matches!(op, MigrationOp::RenameEnumLabel { .. }))
 }
 
 /// Whether `op` drops data.
@@ -361,17 +375,19 @@ pub fn render_down(
         foreign_keys_off: up_rebuilds,
         destructive: !up_statements.is_empty() && step_ops.iter().any(drops_data),
         data_dependent: !up_statements.is_empty()
-            && step_ops
-                .iter()
-                .any(|op| may_fail_on_rows(op, after, up_mode)),
+            && (relabels_rows(step_ops, dialect)
+                || step_ops
+                    .iter()
+                    .any(|op| may_fail_on_rows(op, after, up_mode))),
         not_applicable: up_statements.is_empty(),
         ..Headers::default()
     };
 
     let down_mode = columns::constraint_mode(dialect, PlanDirection::Down);
-    let data_dependent = inverse
-        .iter()
-        .any(|op| recreates(op, before) || may_fail_on_rows(op, before, down_mode));
+    let data_dependent = relabels_rows(&down_derived, dialect)
+        || inverse
+            .iter()
+            .any(|op| recreates(op, before) || may_fail_on_rows(op, before, down_mode));
     let mut down_statements: Vec<String> = native_statements(
         down_structural,
         after,
