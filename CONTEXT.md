@@ -205,7 +205,7 @@ The generated DDL step that runs before a migration's data steps. It holds only 
 _Avoid_: Pre-step, additive step, phase one
 
 **Contract step**:
-The generated DDL step that runs after a migration's data steps. It holds what the rows had to be prepared for (`NOT NULL`, the removal of an enum label) and every *destructive step* statement, so a data step can still read a column or table the same migration drops. A migration with any data step has one, whether the data step is a *backfill*, a *guard step* or one a person added.
+The generated DDL step that runs after a migration's data steps. It holds what the rows had to be prepared for (`NOT NULL`, the removal of an enum label) and every *destructive step* statement, so a data step can still read a column or table the same migration drops. A migration has one when it has a generated *backfill* or *guard step*, or when it drops a column or table behind a data step a person added; a hand-added data step with nothing to contract has none.
 _Avoid_: Post-step, cleanup step, tighten step
 
 **Staged `NOT NULL`**:

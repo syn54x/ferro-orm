@@ -42,7 +42,7 @@ ADR-0032 defines a hint as live when the *previous snapshot* holds the old name 
 - **Ignore hints in the pass and leave renames to migrations.** Rejected: the pass would create or drop where the other doors rename, and on a table rename the create pass would build an empty twin that the next migration's drift check then reports.
 - **Keep the pass append-only for labels on both dialects and warn on Postgres too.** Rejected: on Postgres the rename touches only the catalog, the same as the column renames the pass already performs, and warning there would make the pass the only door that sees a live hint and ignores it.
 - **Relabel SQLite rows on connect.** Rejected: the pass is a schema pass, and an `UPDATE` over every row on application boot is a data migration with no review, no cursor and no down.
-- **Probe SQLite rows on every connect.** Rejected: once the rows are relabelled the probe reads the whole column on every boot for as long as the hint stays, and ADR-0032 lets a hint stay forever.
+- **Probe SQLite rows on every connect, plain `auto_migrate` included, without consulting the column's check first.** Rejected: once the rows are relabelled the probe reads the whole column on every boot for as long as the hint stays, ADR-0032 lets a hint stay forever, and plain `auto_migrate` reads no rows (ADR-0011). The probe that remains runs only under `migrate_updates`, and only for a column with no `ck_` check to decide from.
 
 ## Consequences
 
