@@ -152,6 +152,18 @@
     ],
     "warnings": []
   },
+  "tests/test_auto_migrate.py::test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_in_one_unit[postgres]": {
+    "statements": [
+      "'passwriter': CREATE TABLE IF NOT EXISTS \"passwriter\" ( \"id\" serial PRIMARY KEY NOT NULL, \"kind\" text NOT NULL, \"name\" varchar NOT NULL )",
+      "'passwriter': CREATE INDEX IF NOT EXISTS \"idx_passwriter_name\" ON \"passwriter\" (\"name\")",
+      "'passwriter': DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_passwriter_kind' AND conrelid = '\"passwriter\"'::regclass) THEN ALTER TABLE \"passwriter\" ADD CONSTRAINT \"ck_passwriter_kind\" CHECK (\"kind\" IN ('novel', 'poem')); END IF; END $$",
+      "'passwriter': ALTER TABLE \"passwriter\" RENAME COLUMN \"kind\" TO \"genre\"",
+      "'passwriter': ALTER TABLE \"passwriter\" RENAME COLUMN \"name\" TO \"full_name\"",
+      "'passwriter': ALTER INDEX \"idx_passwriter_name\" RENAME TO \"idx_passwriter_full_name\"",
+      "'passwriter': ALTER TABLE \"passwriter\" RENAME CONSTRAINT \"ck_passwriter_kind\" TO \"ck_passwriter_genre\""
+    ],
+    "warnings": []
+  },
   "tests/test_auto_migrate.py::test_migrate_updates_validates_a_not_valid_constraint_in_place[postgres-ck_vfpost_title_set]": {
     "statements": [
       "'vfauthor': CREATE TABLE IF NOT EXISTS \"vfauthor\" ( \"id\" serial PRIMARY KEY NOT NULL, \"name\" varchar NOT NULL )",

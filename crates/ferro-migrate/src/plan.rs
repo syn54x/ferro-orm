@@ -278,7 +278,7 @@ pub fn plan_from_ir(
     let renamed = renamed_snapshot(old, &hints);
     let mut operations = rename_ops(old, &renamed, dialect);
     fact_renames(&mut operations, facts, old, &hints, dialect);
-    let facts = renamed_facts(facts, &operations, new);
+    let facts = renamed_facts(facts, &operations, new, dialect);
     let mut plan = plan_named(&renamed, new, dialect, &facts, options);
     operations.append(&mut plan.operations);
     plan.operations = operations;
@@ -361,12 +361,16 @@ fn fact_renames(
 /// both rewrite the bodies that name a renamed column), so on a table the
 /// renames touch each check and shorthand policy `new` declares under its
 /// renamed name reads as `new` renders it; a body that had drifted before the
-/// rename is read again, and rebuilt, on the next run. The facts of
-/// [`LiveFacts::declared`] carry no table and are returned unchanged.
+/// rename is read again, and rebuilt, on the next run. A rename the dialect
+/// cannot run in place renames no fact: on SQLite a constraint keeps its live
+/// name until a generated migration's rebuild renames it, so the plan reports
+/// the catalog as it is. The facts of [`LiveFacts::declared`] carry no table
+/// and are returned unchanged.
 fn renamed_facts(
     facts: &LiveFacts,
     ops: &[MigrationOp],
     new: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
 ) -> LiveFacts {
     if facts.tables.is_empty() || ops.is_empty() {
         return facts.clone();
@@ -388,6 +392,7 @@ fn renamed_facts(
         let renamed_name = |name: &str| {
             ops.iter()
                 .find_map(|op| match op {
+                    MigrationOp::RenameConstraint { .. } if dialect == Dialect::Sqlite => None,
                     MigrationOp::RenameIndex { table: t, old, new }
                     | MigrationOp::RenameConstraint { table: t, old, new }
                     | MigrationOp::RenamePolicy { table: t, old, new }

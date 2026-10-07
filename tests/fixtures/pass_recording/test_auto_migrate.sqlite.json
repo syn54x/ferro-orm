@@ -131,6 +131,24 @@
     ],
     "warnings": []
   },
+  "tests/test_auto_migrate.py::test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_in_one_unit[sqlite]": {
+    "statements": [
+      "'passwriter': CREATE TABLE IF NOT EXISTS \"passwriter\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"kind\" text NOT NULL CONSTRAINT \"ck_passwriter_kind\" CHECK (\"kind\" IN ('novel', 'poem')), \"name\" varchar NOT NULL )",
+      "'passwriter': CREATE INDEX IF NOT EXISTS \"idx_passwriter_name\" ON \"passwriter\" (\"name\")",
+      "'passwriter': ALTER TABLE \"passwriter\" RENAME COLUMN \"kind\" TO \"genre\"",
+      "'passwriter': ALTER TABLE \"passwriter\" RENAME COLUMN \"name\" TO \"full_name\"",
+      "'passwriter': DROP INDEX IF EXISTS \"idx_passwriter_name\"",
+      "'passwriter': CREATE INDEX IF NOT EXISTS \"idx_passwriter_full_name\" ON \"passwriter\" (\"full_name\")"
+    ],
+    "warnings": [
+      "Table 'passwriter' has CHECK constraint(s) 'ck_passwriter_kind' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+      "Constraint 'ck_passwriter_kind' on 'passwriter' is now named 'ck_passwriter_genre', and SQLite cannot rename a table constraint in place; `ferro migrate new` renames it by rebuilding the table.",
+      "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+      "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+      "Table 'passwriter' has CHECK constraint(s) 'ck_passwriter_kind' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+      "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it."
+    ]
+  },
   "tests/test_auto_migrate.py::test_migrate_updates_validates_a_not_valid_constraint_in_place[sqlite-ck_vfpost_title_set]": {
     "statements": [
       "'vfauthor': CREATE TABLE IF NOT EXISTS \"vfauthor\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
