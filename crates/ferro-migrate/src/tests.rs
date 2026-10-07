@@ -4424,6 +4424,58 @@ mod renames {
     }
 
     #[test]
+    fn a_live_check_that_drifted_before_the_rename_is_rebuilt_in_the_same_plan() {
+        // Equal to the declaration under the old names: read as renamed, no
+        // rebuild (pinned above). Unequal: kept as read, so the one drift
+        // decision rebuilds it now, not on the next run.
+        let mut facts = LiveFacts::declared();
+        facts.tables.insert(
+            "writer".to_string(),
+            crate::plan::LiveTableFacts {
+                checks: vec![crate::plan::LiveCheckFact {
+                    name: "ck_writer_genre".to_string(),
+                    definition: "CHECK (\"genre\" IN ('novel'))".to_string(),
+                    ferro_owned: true,
+                    validated: true,
+                }],
+                ..Default::default()
+            },
+        );
+        let mut live = parent();
+        for model in &mut live.payload.models {
+            model.checks.clear();
+        }
+        let ops = plan_from_ir(
+            &live,
+            &target(),
+            Dialect::Postgres,
+            &facts,
+            PlanOptions { destructive: true },
+        )
+        .operations;
+        let rename = ops
+            .iter()
+            .position(|op| {
+                op == &MigrationOp::RenameConstraint {
+                    table: "author".to_string(),
+                    old: "ck_writer_genre".to_string(),
+                    new: "ck_author_genre".to_string(),
+                }
+            })
+            .expect("the rename");
+        let rebuild = ops
+            .iter()
+            .position(|op| {
+                op == &MigrationOp::RebuildCheck {
+                    table: "author".to_string(),
+                    name: "ck_author_genre".to_string(),
+                }
+            })
+            .expect("the drifted body is rebuilt in this plan");
+        assert!(rename < rebuild, "{ops:?}");
+    }
+
+    #[test]
     fn each_tables_renames_are_one_contiguous_unit_naming_the_table() {
         // The reconciliation pass runs a table's consecutive ops in one
         // transaction: no rename op may be table-less, and one table's may

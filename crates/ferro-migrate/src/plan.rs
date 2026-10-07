@@ -22,11 +22,11 @@ use ferro_ddl_lowering::{
     enum_type_provenance, excess_row_security_flag_statements, extra_check_names,
     extra_check_names_warning, extra_enum_labels, extra_enum_labels_warning, fk_action_from_str,
     fk_action_sql, fk_name, is_ferro_fk_name, is_ferro_row_policy_name, missing_check_names,
-    missing_enum_labels, missing_row_security_flag_statements, plan_row_security_reconcile,
-    render_check_body, render_disable_row_security, render_enable_row_security,
-    render_force_row_security, render_no_force_row_security, render_table_check_body,
-    resolve_column_storage, row_policy_clauses, row_policy_command_token,
-    schema_columns_storage_drift,
+    missing_enum_labels, missing_row_security_flag_statements, normalize_check_definition,
+    normalize_row_policy_expr, plan_row_security_reconcile, render_check_body,
+    render_disable_row_security, render_enable_row_security, render_force_row_security,
+    render_no_force_row_security, render_table_check_body, resolve_column_storage,
+    row_policy_clauses, row_policy_command_token, schema_columns_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::borrow::Cow;
@@ -358,10 +358,12 @@ fn fact_renames(
 /// `facts` as the rename `ops` leave the live database: each table under its
 /// new name, every renamed check, foreign key, index and policy under its new
 /// name. A rename carries every column reference with it (Postgres and SQLite
-/// both rewrite the bodies that name a renamed column), so on a table the
-/// renames touch each check and shorthand policy `new` declares under its
-/// renamed name reads as `new` renders it; a body that had drifted before the
-/// rename is read again, and rebuilt, on the next run. A rename the dialect
+/// both rewrite the bodies that name a renamed column), so a check or
+/// shorthand policy whose live body equals its declaration rendered under the
+/// old names (the one normalizer each: `normalize_check_definition`,
+/// ADR-0015; `normalize_row_policy_expr`) reads as the declaration under the
+/// new names. Any other live body is kept as read, so the drift decision
+/// rebuilds it in this same plan. A rename the dialect
 /// cannot run in place renames no fact: on SQLite a constraint keeps its live
 /// name until a generated migration's rebuild renames it, so the plan reports
 /// the catalog as it is. The facts of [`LiveFacts::declared`] carry no table
@@ -385,6 +387,31 @@ fn renamed_facts(
         }
     }
     let touched: BTreeSet<&str> = ops.iter().filter_map(MigrationOp::table).collect();
+    // The renames run backwards, from the ops themselves: what turns the new
+    // names back into the ones the live facts were read under.
+    let old_table = |table: &str| {
+        ops.iter()
+            .find_map(|op| match op {
+                MigrationOp::RenameTable { old, new } if new == table => Some(old.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| table.to_string())
+    };
+    let reverse: Vec<Hint> = ops
+        .iter()
+        .filter_map(|op| match op {
+            MigrationOp::RenameTable { old, new } => Some(Hint::Table {
+                old: new.clone(),
+                new: old.clone(),
+            }),
+            MigrationOp::RenameColumn { table, old, new } => Some(Hint::Column {
+                table: old_table(table),
+                old: new.clone(),
+                new: old.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
     for (table, live) in &mut out.tables {
         if !touched.contains(table.as_str()) {
             continue;
@@ -405,24 +432,40 @@ fn renamed_facts(
                 .unwrap_or_else(|| name.to_string())
         };
         let declared = new_models.get(table.as_str()).copied();
+        // The declaration rendered under the names the live bodies were read
+        // with, before the renames: the side a live body is compared with.
+        let before = declared.map(|model| renamed_model(model, &Renames { hints: &reverse }));
         for check in &mut live.checks {
             check.name = renamed_name(&check.name);
-            let body = declared.and_then(|model| {
-                model
-                    .table_checks
-                    .iter()
-                    .find(|c| c.name == check.name)
-                    .map(render_table_check_body)
-                    .or_else(|| {
-                        model
-                            .checks
-                            .iter()
-                            .find(|c| c.name == check.name)
-                            .map(render_check_body)
-                    })
-            });
-            if let Some(body) = body {
-                check.definition = format!("CHECK ({body})");
+            let (Some(model), Some(before)) = (declared, before.as_ref()) else {
+                continue;
+            };
+            let bodies = model
+                .table_checks
+                .iter()
+                .position(|c| c.name == check.name)
+                .map(|i| {
+                    (
+                        render_table_check_body(&before.table_checks[i]),
+                        render_table_check_body(&model.table_checks[i]),
+                    )
+                })
+                .or_else(|| {
+                    model
+                        .checks
+                        .iter()
+                        .position(|c| c.name == check.name)
+                        .map(|i| {
+                            (
+                                render_check_body(&before.checks[i]),
+                                render_check_body(&model.checks[i]),
+                            )
+                        })
+                });
+            if let Some((was, now)) = bodies
+                && normalize_check_definition(&was) == normalize_check_definition(&check.definition)
+            {
+                check.definition = format!("CHECK ({now})");
             }
         }
         for fk in &mut live.foreign_keys {
@@ -433,22 +476,30 @@ fn renamed_facts(
         }
         for policy in &mut live.row_security.policies {
             policy.name = renamed_name(&policy.name);
-            let declared_policy = declared.and_then(|model| {
-                let declaration = model.row_security.as_ref()?;
-                let policy_ir = declaration
+            let clauses = declared.zip(before.as_ref()).and_then(|(model, before)| {
+                let i = model
+                    .row_security
+                    .as_ref()?
                     .policies
                     .iter()
-                    .find(|p| p.name == policy.name)?;
-                matches!(
-                    policy_ir.expr,
-                    ferro_schema_ir::RowPolicyExpr::Setting { .. }
-                )
-                .then(|| row_policy_clauses(model, policy_ir).ok())
-                .flatten()
+                    .position(|p| p.name == policy.name)?;
+                let now_ir = &model.row_security.as_ref()?.policies[i];
+                let was_ir = &before.row_security.as_ref()?.policies[i];
+                if !matches!(now_ir.expr, ferro_schema_ir::RowPolicyExpr::Setting { .. }) {
+                    return None;
+                }
+                Some((
+                    row_policy_clauses(before, was_ir).ok()?,
+                    row_policy_clauses(model, now_ir).ok()?,
+                ))
             });
-            if let Some((using, with_check)) = declared_policy {
-                policy.using = using;
-                policy.with_check = with_check;
+            let normalized = |expr: &Option<String>| expr.as_deref().map(normalize_row_policy_expr);
+            if let Some(((was_using, was_check), (now_using, now_check))) = clauses
+                && normalized(&was_using) == normalized(&policy.using)
+                && normalized(&was_check) == normalized(&policy.with_check)
+            {
+                policy.using = now_using;
+                policy.with_check = now_check;
             }
         }
     }

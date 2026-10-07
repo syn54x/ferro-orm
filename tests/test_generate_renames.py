@@ -468,3 +468,74 @@ def test_the_snapshot_records_every_hint(project, pkg):
         "genre": "kind",
         "id": None,
     }
+
+
+# -- the reconciliation pass: a rename beside a drifted check -----------------------
+
+
+def _define_passdrift(hinted: bool) -> None:
+    from enum import StrEnum
+
+    from ferro.base import FerroField
+
+    class PassDriftKind(StrEnum):
+        NOVEL = "novel"
+        POEM = "poem"
+
+    if hinted:
+
+        class PassDrift(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            full_name: Annotated[str, FerroField(renamed_from="name")]
+            kind: Annotated[PassDriftKind, FerroField(db_type="text", db_check=True)] = (
+                PassDriftKind.NOVEL
+            )
+
+    else:
+
+        class PassDrift(Model):  # noqa: F811
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            name: str
+            kind: Annotated[PassDriftKind, FerroField(db_type="text", db_check=True)] = (
+                PassDriftKind.NOVEL
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_a_check_that_drifted_is_rebuilt_in_the_same_run_as_a_rename_on_its_table(
+    db_url,
+):
+    """The live body of ``ck_passdrift_kind`` drifted (``kind = 'novel'``)
+    before a column of its table was renamed: the pass renames the column and
+    rebuilds the check in one run, never leaving ``'poem'`` rejected until the
+    next connect (I-6)."""
+    import ferro
+    from ferro.raw import execute
+    from tests.test_auto_migrate import _connect_logging, _rewind
+
+    _rewind()
+    _define_passdrift(hinted=False)
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await execute('ALTER TABLE "passdrift" DROP CONSTRAINT "ck_passdrift_kind"')
+        await execute(
+            'ALTER TABLE "passdrift" ADD CONSTRAINT "ck_passdrift_kind" '
+            "CHECK (\"kind\" = 'novel')"
+        )
+    _rewind()
+    _define_passdrift(hinted=True)
+
+    messages = await _connect_logging(db_url)
+    executed = [m for m in messages if "auto-migrate executing on 'passdrift'" in m]
+    assert any('RENAME COLUMN "name" TO "full_name"' in m for m in executed), executed
+    assert any('DROP CONSTRAINT "ck_passdrift_kind"' in m for m in executed), executed
+    async with ferro.engines.session():
+        await execute(
+            'INSERT INTO "passdrift" ("full_name", "kind") VALUES (\'Ann\', \'poem\')'
+        )
+
+    _rewind()
+    _define_passdrift(hinted=True)
+    again = await _connect_logging(db_url)
+    assert not [m for m in again if m.startswith("✅ Ferro Engine: Table 'passdrift'")]
