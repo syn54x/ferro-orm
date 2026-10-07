@@ -41,8 +41,29 @@ class RunRefused(MigrationRefused):
     """A migration run refused before running anything, naming the fix.
 
     Raised by the Rust core for every refusal the run planner, the run lock
-    and the tracking tables make; its message is the operator's text.
+    and the tracking tables make; its message is the operator's text. A
+    planner refusal also carries what it is about, so a caller matches on
+    ``kind`` rather than on the text: ``kind`` (``"irreversible"``,
+    ``"edited_applied"``, ``"edited_chunked"``, ...), ``migration`` and
+    ``step`` (numbers, when it names them) and ``reason`` (an irreversible
+    step's declared reason). Each is ``None`` for a refusal that is not the
+    planner's (a lost lock, a missing schema).
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str | None = None,
+        migration: int | None = None,
+        step: int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.migration = migration
+        self.step = step
+        self.reason = reason
 
 
 _WORDS = {

@@ -200,6 +200,7 @@ def _run_plan(
     direction_json: str,
     allow_ahead: bool,
     live_tables_json: str | None = None,
+    order_keys_json: str | None = None,
 ) -> str:
     """Plan a run: the JSON ``RunPlan`` (``{"steps": [...], "ahead": [...]}``).
 
@@ -211,7 +212,11 @@ def _run_plan(
     ...
 
 def _run_status(
-    directory: str, records_json: str, dialect: str, lock_held: bool
+    directory: str,
+    records_json: str,
+    dialect: str,
+    lock_held: bool,
+    order_keys_json: str | None = None,
 ) -> str:
     """``ferro migrate status`` read-only, as the JSON ``RunStatus``."""
     ...
@@ -643,6 +648,36 @@ def _is_ferro_row_policy_name(name: str) -> bool:
 
 def _default_connection_name() -> str | None:
     """The default connection's name, or ``None`` when there is none."""
+    ...
+
+# --- #537: rerecord ---
+
+def _rerecord_plan(
+    directory: str,
+    records_json: str,
+    target: str,
+    mode: str,
+    dialect: str,
+    order_keys_json: str | None = None,
+) -> str:
+    """Plan ``ferro migrate rerecord <target>`` (``mode`` ``"record"``,
+    ``"continue"`` or ``"restart"``): the JSON ``RerecordAction``
+    (``{"migration", "step", "migration_name", "recorded_file", "file",
+    "path", "old_checksum", "new_checksum", "kind", "data", "finished",
+    "clear_cursor"}``). Raises a structured ``RunRefused`` for every
+    refusal."""
+    ...
+
+async def _rerecord(
+    using: str | None,
+    action_json: str,
+    tracking_schema: str | None = None,
+    lock: int | None = None,
+) -> None:
+    """Write one planned re-record (the record's file, checksum and kind;
+    with ``clear_cursor`` its cursor and rows_done cleared) in one
+    statement, running nothing of the step. Raises ``RunRefused`` when the
+    lock was lost or the record changed since it was planned."""
     ...
 
 # --- #525: baseline ---

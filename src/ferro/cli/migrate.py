@@ -513,6 +513,77 @@ def baseline(
     return exit_codes.OK if report.drift is None else exit_codes.NEEDS_ATTENTION
 
 
+@migrate.command
+def rerecord(
+    target: Annotated[
+        str,
+        Parameter(help="The step whose edit to accept: <migration>:<step>, as 0007:01."),
+    ],
+    *,
+    continue_: Annotated[
+        bool,
+        Parameter(
+            name="--continue",
+            negative="",
+            help=(
+                "An edited chunked step with committed batches: keep those rows "
+                "and continue from the cursor (only while the edited query pages "
+                "over the same order keys)."
+            ),
+        ),
+    ] = False,
+    restart: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help=(
+                "An edited chunked step with committed batches: clear its cursor "
+                "so the next up runs every row again from the start."
+            ),
+        ),
+    ] = False,
+    lock_timeout: Annotated[
+        str,
+        Parameter(
+            help=(
+                "How long to wait for another run's lock: 30s, 500ms, 1m, or a "
+                "number of seconds (0 refuses at once)."
+            )
+        ),
+    ] = "30s",
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
+    """Accept a deliberate edit of a step this database already ran.
+
+    Changes the step's record to the file's checksum, prints both checksums
+    and runs nothing. An unfinished chunked step whose batches committed rows
+    needs --continue or --restart. A schema snapshot (ir.json) is never
+    re-recorded: restore it.
+    """
+    import asyncio
+
+    from ..migrations.rerecord import Mode
+    from ..migrations.rerecord import rerecord as run_rerecord
+
+    if continue_ and restart:
+        raise SettingsError("pass --continue or --restart, not both")
+    mode: Mode = "continue" if continue_ else "restart" if restart else "record"
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    report = asyncio.run(
+        run_rerecord(
+            settings,
+            database,
+            target,
+            mode=mode,
+            url=glob.url,
+            lock_timeout=lock_timeout,
+        )
+    )
+    print(report.render())
+    return exit_codes.OK
+
+
 def _refuse_url(glob: Global, verb: str) -> None:
     if glob.url is not None:
         raise SettingsError(

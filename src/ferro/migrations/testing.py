@@ -73,16 +73,6 @@ if TYPE_CHECKING:
 __all__ = ["Harness", "RoundTripResult", "harness"]
 
 _MIGRATION = re.compile(r"(\d{4})(_\w+)?")
-# The irreversible-step refusal, verbatim: a contract text fixed by the #469
-# resolution and rendered by `RunRefusal::Irreversible`'s `Display` (and, for a
-# data step, by the runner's loader in the same words); pinned by
-# tests/test_migrate_down.py. #537 gives `RunRefused` its kind, migration, step
-# and reason, and this match moves over to them.
-_IRREVERSIBLE_REFUSAL = re.compile(
-    r"ferro migrate: (\d{4}):(\d{2}) is irreversible: (.+)\n"
-    r"There is no flag to skip it: to revert past it, write the step's down in "
-    r"place of the declaration\. Nothing was reverted\."
-)
 _APPLIED = {"installed", "installed (baseline)", "installed (different checksum)"}
 
 
@@ -275,7 +265,7 @@ class Harness:
                 self._settings, self._database, target=below, using=name
             )
             if report.refusal is not None:
-                irreversible = _irreversible(report.refusal, chain)
+                irreversible = _irreversible(report, chain)
                 if irreversible is None:
                     raise MigrationRefused(report.refusal)
                 reverted_to = chain[at].name
@@ -428,15 +418,23 @@ def _stands(chain: list[_Migration], at: int) -> str:
     return chain[at].name if at >= 0 else "no migration (nothing is applied)"
 
 
-def _irreversible(refusal: str, chain: list[_Migration]) -> tuple[str, str, str] | None:
-    """``(migration, step, reason)`` when ``refusal`` is the runner's
-    irreversible-step refusal, else ``None``."""
-    match = _IRREVERSIBLE_REFUSAL.fullmatch(refusal)
-    if match is None:
+def _irreversible(
+    report: RunReport, chain: list[_Migration]
+) -> tuple[str, str, str] | None:
+    """``(migration, step, reason)`` when ``report`` was refused by an
+    irreversible step (the refusal's ``kind``, from the run planner or the
+    data step loader), else ``None``."""
+    refused = report.refused
+    if (
+        refused is None
+        or refused.kind != "irreversible"
+        or refused.migration is None
+        or refused.step is None
+        or refused.reason is None
+    ):
         return None
-    number, ordinal, reason = int(match.group(1)), int(match.group(2)), match.group(3)
-    migration = next(m for m in chain if m.number == number)
-    return migration.name, migration.steps[ordinal], reason
+    migration = next(m for m in chain if m.number == refused.migration)
+    return migration.name, migration.steps[refused.step], refused.reason
 
 
 def harness(

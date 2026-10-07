@@ -17,8 +17,8 @@ Over 2,500 authors the runner opens three transactions. Each reads the next
 keys), hands them to ``up(ctx, batch)``, and commits, in that same
 transaction, the step record's cursor and ``rows_done``::
 
-    batch 1  rows 1-1000      resume_cursor {"keys": [1000], "rows_done": 1000}
-    batch 2  rows 1001-2000   resume_cursor {"keys": [2000], "rows_done": 2000}
+    batch 1  rows 1-1000      resume_cursor {"keys": [1000], "order_by": ["author.id"], "rows_done": 1000}
+    batch 2  rows 1001-2000   resume_cursor {"keys": [2000], "order_by": ["author.id"], "rows_done": 2000}
     batch 3  rows 2001-2500   the finished record, rows_done 2500
 
 A batch that fails rolls back alone: the batches before it stay committed
@@ -39,7 +39,10 @@ cursor so ``up`` refuses until a ``down`` finishes it.
 
 The cursor is the last row's order-key tuple as JSON, each value in the form
 ``canonicalize_wire_scalar`` gives a query literal (I-13), so ``after()``
-compares a resumed cursor exactly as ``save()`` wrote the row.
+compares a resumed cursor exactly as ``save()`` wrote the row. It names the
+order keys it is a position in (``order_by``, :func:`order_keys`), so an
+edited step can be continued from it only while its query still pages over
+the same ones (``ferro migrate rerecord --continue``, ADR-0030).
 """
 
 from __future__ import annotations
@@ -71,6 +74,7 @@ __all__ = [
     "ChunkOutcome",
     "decode_cursor",
     "encode_cursor",
+    "order_keys",
     "run_chunked",
 ]
 
@@ -129,20 +133,40 @@ def _cursor_value(value: Any) -> Any:
     return canonical
 
 
-def encode_cursor(keys: Sequence[Any], rows_done: int) -> str:
-    """The cursor JSON for the last row's order-key values ``keys``:
-    ``{"keys": [...], "rows_done": N}``, each value in its query-literal
-    form (``canonicalize_wire_scalar``, I-13)."""
+def encode_cursor(
+    keys: Sequence[Any], rows_done: int, *, order_by: Sequence[str]
+) -> str:
+    """The cursor JSON for the last row's order-key values ``keys`` under the
+    order keys ``order_by`` (:func:`order_keys`): ``{"keys": [...],
+    "order_by": ["author.id"], "rows_done": N}``, each value in its
+    query-literal form (``canonicalize_wire_scalar``, I-13). ``order_by``
+    is what ``ferro migrate rerecord --continue`` compares an edited step's
+    query against (ADR-0030)."""
     return json.dumps(
-        {"keys": [_cursor_value(key) for key in keys], "rows_done": rows_done}
+        {
+            "keys": [_cursor_value(key) for key in keys],
+            "order_by": list(order_by),
+            "rows_done": rows_done,
+        }
     )
 
 
-def decode_cursor(text: str, types: Sequence[Any]) -> tuple[tuple[Any, ...], int]:
+def decode_cursor(
+    text: str, types: Sequence[Any], order_by: Sequence[str] | None = None
+) -> tuple[tuple[Any, ...], int]:
     """The order-key values and ``rows_done`` of cursor JSON ``text``, each
-    value validated back to its order key's annotation in ``types``."""
+    value validated back to its order key's annotation in ``types``.
+    ``order_by`` (the query's :func:`order_keys`) must be the cursor's own
+    when the cursor records them."""
     cursor = json.loads(text)
     keys = cursor["keys"]
+    recorded = cursor.get("order_by")
+    if order_by is not None and recorded is not None and list(order_by) != recorded:
+        raise StepRefused(
+            f"ferro migrate: the step's cursor was committed under the order keys "
+            f"{', '.join(recorded)}, but its query now orders by {', '.join(order_by)}; "
+            f"the step's query changed since its last committed batch"
+        )
     if len(keys) != len(types):
         raise StepRefused(
             f"ferro migrate: the step's cursor holds {len(keys)} order-key values, "
@@ -154,6 +178,25 @@ def decode_cursor(text: str, types: Sequence[Any]) -> tuple[tuple[Any, ...], int
         for annotation, value in zip(types, keys, strict=True)
     )
     return values, int(cursor["rows_done"])
+
+
+def order_keys(query: Query[Any]) -> list[str]:
+    """The order keys a chunked query pages over, as a cursor records them:
+    ``<table>.<column>``, then `` desc`` for a descending key and
+    `` nulls first`` where nulls sort first (``["author.created_at desc",
+    "author.id"]``). Two queries with the same list page in the same order,
+    so a cursor committed under one is a position in the other."""
+    model = query.model_cls
+    table = getattr(model, "__ferro_table__", None) or model.__name__.lower()
+    spelled = []
+    for entry in query.order_by_clause:
+        key = f"{table}.{entry.column}"
+        if entry.direction == "desc":
+            key += " desc"
+        if entry.nulls == "first":
+            key += " nulls first"
+        spelled.append(key)
+    return spelled
 
 
 def _order_key_types(query: Query[Any]) -> tuple[Any, ...]:
@@ -222,15 +265,18 @@ async def run_chunked(
                 route = resolve_operation_scope(using=None, session=None)
                 ctx = ctx_factory(tx)
                 query = shape.query(ctx.models)
+                order_by = order_keys(query)
                 if cursor is not None and keys is None:
-                    keys, rows_done = decode_cursor(cursor, _order_key_types(query))
+                    keys, rows_done = decode_cursor(
+                        cursor, _order_key_types(query), order_by
+                    )
                 page = query if keys is None else query.after(keys)
                 batch = await page.limit(shape.batch_size).all()
                 if batch:
                     keys = query.position_of(batch[-1])
                     await declared.fn(ctx, batch)
                     rows_done += len(batch)
-                    cursor = encode_cursor(keys, rows_done)
+                    cursor = encode_cursor(keys, rows_done, order_by=order_by)
                 last = len(batch) < shape.batch_size
                 if last and down:
                     await _core._remove_record(route, migration, step, tracking_schema)

@@ -298,6 +298,8 @@ pub enum RunRefusal {
         migration_name: String,
         /// `NNNN`.
         migration: u16,
+        /// `NN`.
+        step: u8,
         /// The file the record names.
         file: String,
         /// The recorded checksum.
@@ -419,6 +421,71 @@ pub enum RunRefusal {
         /// The reader's refusal.
         error: DirectoryError,
     },
+    /// An unfinished chunked step with committed batches whose file changed
+    /// (#466 "edited chunked step with committed batches", ADR-0030): ferro
+    /// cannot tell whether the committed rows are right under the new code,
+    /// so the developer chooses `rerecord --continue` or `--restart`.
+    EditedChunked {
+        /// `NNNN_<name>`.
+        migration_name: String,
+        /// `NNNN`.
+        migration: u16,
+        /// `NN`.
+        step: u8,
+        /// The step's file on disk.
+        file: String,
+        /// The checksum the unfinished attempt recorded.
+        recorded: String,
+        /// The checksum of the file on disk.
+        on_disk: String,
+        /// The rows its committed batches wrote.
+        rows_done: i64,
+        /// Whether `--continue` is a door: the cursor records its order keys
+        /// and the edited file (when read) pages over the same ones.
+        continue_allowed: bool,
+        /// The order keys the cursor was committed under (`author.id`);
+        /// empty when the cursor does not record them.
+        keys_recorded: Vec<String>,
+        /// The order keys the edited file pages over; `Some([])` when its
+        /// `up` is not `@chunked`, `None` when the caller did not read them.
+        keys_on_disk: Option<Vec<String>>,
+    },
+    /// `rerecord <target>` names no single step: a migration alone, the
+    /// snapshot, or something that is not `<migration>:<step>`.
+    RerecordTarget {
+        /// The target as the operator wrote it.
+        target: String,
+    },
+    /// `rerecord` names a step with nothing to re-record.
+    NothingToRerecord {
+        /// `NNNN:NN`.
+        target: String,
+        /// Why, as the end of a sentence.
+        why: String,
+    },
+    /// `rerecord --continue` / `--restart` on a step they do not apply to.
+    ModeNotApplicable {
+        /// `NNNN:NN`.
+        target: String,
+        /// `--continue` or `--restart`.
+        flag: &'static str,
+        /// What the step is (`finished`, `an unfinished atomic step`, ...).
+        state: String,
+    },
+    /// `rerecord --continue` on a step whose edited file pages over
+    /// different order keys than its cursor was committed under.
+    ContinueRefused {
+        /// `NNNN_<name>`.
+        migration_name: String,
+        /// `NNNN:NN`.
+        target: String,
+        /// The step's file on disk.
+        file: String,
+        /// The cursor's order keys (empty when it records none).
+        keys_recorded: Vec<String>,
+        /// The edited file's order keys (empty when its `up` is not chunked).
+        keys_on_disk: Vec<String>,
+    },
 }
 
 impl RunRefusal {
@@ -440,6 +507,47 @@ impl RunRefusal {
             RunRefusal::MissingRendering { .. } => "missing_rendering",
             RunRefusal::BadHeaders { .. } => "bad_headers",
             RunRefusal::Directory { .. } => "directory",
+            RunRefusal::EditedChunked { .. } => "edited_chunked",
+            RunRefusal::RerecordTarget { .. } => "rerecord_target",
+            RunRefusal::NothingToRerecord { .. } => "nothing_to_rerecord",
+            RunRefusal::ModeNotApplicable { .. } => "mode_not_applicable",
+            RunRefusal::ContinueRefused { .. } => "continue_refused",
+        }
+    }
+
+    /// The migration the refusal is about, when it names one.
+    pub fn migration(&self) -> Option<u16> {
+        match self {
+            RunRefusal::EditedApplied { migration, .. }
+            | RunRefusal::TablesExist { migration, .. }
+            | RunRefusal::Irreversible { migration, .. }
+            | RunRefusal::BelowBaseline { migration }
+            | RunRefusal::MissingRendering { migration, .. }
+            | RunRefusal::EditedChunked { migration, .. } => Some(*migration),
+            _ => None,
+        }
+    }
+
+    /// The step the refusal is about, when it names one.
+    pub fn step(&self) -> Option<u8> {
+        match self {
+            RunRefusal::EditedApplied { step, .. }
+            | RunRefusal::Irreversible { step, .. }
+            | RunRefusal::MissingRendering { step, .. }
+            | RunRefusal::EditedChunked { step, .. } => Some(*step),
+            _ => None,
+        }
+    }
+
+    /// The declared or diagnosed reason the refusal carries, when it has one
+    /// apart from its text (an irreversible step's declared reason).
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            RunRefusal::Irreversible { reason, .. } | RunRefusal::BadHeaders { reason, .. } => {
+                Some(reason)
+            }
+            RunRefusal::NothingToRerecord { why, .. } => Some(why),
+            _ => None,
         }
     }
 
@@ -459,6 +567,40 @@ fn short_time(iso: &str) -> String {
     }
 }
 
+/// `30000000` → `30,000,000`.
+fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// `author.slug, author.id`, or what stands in for an empty list.
+fn key_list(keys: &[String]) -> String {
+    if keys.is_empty() {
+        "(none)".to_string()
+    } else {
+        keys.join(", ")
+    }
+}
+
+/// Why `--continue` is not a door, given the cursor's keys and the edited
+/// file's (`None`: not read).
+fn no_continue_reason(recorded: &[String], on_disk: Option<&[String]>) -> &'static str {
+    match on_disk {
+        _ if recorded.is_empty() => {
+            "its cursor does not record the order keys it was committed under"
+        }
+        Some([]) => "the edited file's up is no longer @chunked",
+        _ => "the edited file pages over different order keys than its cursor",
+    }
+}
+
 fn and_list(items: &[String]) -> String {
     match items {
         [] => String::new(),
@@ -473,6 +615,7 @@ impl std::fmt::Display for RunRefusal {
             RunRefusal::EditedApplied {
                 migration_name,
                 migration,
+                step,
                 file,
                 applied,
                 applied_at,
@@ -487,11 +630,98 @@ impl std::fmt::Display for RunRefusal {
                     "ferro migrate: {migration_name}/{file} was edited after it was applied to \
                      this database.\n  applied   sha384:{applied}  ({})\n  on disk   {on_disk}\n\
                      An applied step is never run again. Restore the file, or accept a \
-                     deliberate edit with\n`ferro migrate rerecord {migration:04}`. Nothing was \
-                     applied.",
+                     deliberate edit with\n`ferro migrate rerecord {migration:04}:{step:02}`. \
+                     Nothing was applied.",
                     short_time(applied_at)
                 )
             }
+            RunRefusal::EditedChunked {
+                migration_name,
+                migration,
+                step,
+                file,
+                rows_done,
+                continue_allowed,
+                keys_recorded,
+                keys_on_disk,
+                ..
+            } => {
+                let target = format!("{migration:04}:{step:02}");
+                let continue_door = format!(
+                    "  ferro migrate rerecord {target} --continue   keep them, continue from the \
+                     cursor"
+                );
+                let restart_door = format!(
+                    "  ferro migrate rerecord {target} --restart    run every row again from the \
+                     start"
+                );
+                write!(
+                    f,
+                    "ferro migrate: {migration_name}/{file} was edited after {} rows were \
+                     committed.\nFerro cannot tell whether those rows are right under the new \
+                     code",
+                    thousands(*rows_done)
+                )?;
+                match (continue_allowed, keys_on_disk) {
+                    (true, Some(_)) => {
+                        write!(f, ". Choose one:\n{continue_door}\n{restart_door}\n")?;
+                    }
+                    (true, None) => write!(
+                        f,
+                        ". Choose one:\n{continue_door}\n    (only while the edited file still \
+                         pages over {})\n{restart_door}\n",
+                        key_list(keys_recorded)
+                    )?,
+                    (false, _) => write!(
+                        f,
+                        ", and {}:\n  cursor    {}\n  on disk   {}\nso the cursor is no position \
+                         in it. Restart from the first row:\n{restart_door}\n",
+                        no_continue_reason(keys_recorded, keys_on_disk.as_deref()),
+                        key_list(keys_recorded),
+                        keys_on_disk
+                            .as_deref()
+                            .map_or_else(|| "not read".to_string(), |keys| key_list(keys)),
+                    )?,
+                }
+                write!(f, "Nothing was applied.")
+            }
+            RunRefusal::RerecordTarget { target } => write!(
+                f,
+                "ferro migrate: rerecord re-records one step, named <migration>:<step> \
+                 (0007:01), not `{target}`.\nA schema snapshot (ir.json) is never re-recorded: \
+                 later migrations and historical models are built from it, so restore the \
+                 file. Nothing was changed."
+            ),
+            RunRefusal::NothingToRerecord { target, why } => write!(
+                f,
+                "ferro migrate: nothing to re-record at {target}: {why}. Nothing was changed."
+            ),
+            RunRefusal::ModeNotApplicable {
+                target,
+                flag,
+                state,
+            } => write!(
+                f,
+                "ferro migrate: {flag} applies only to an unfinished chunked step with committed \
+                 batches, and {target} is {state}.\nAccept its edit with `ferro migrate rerecord \
+                 {target}`. Nothing was changed."
+            ),
+            RunRefusal::ContinueRefused {
+                migration_name,
+                target,
+                file,
+                keys_recorded,
+                keys_on_disk,
+            } => write!(
+                f,
+                "ferro migrate: cannot continue {migration_name}/{file} from its cursor: {}.\n  \
+                 cursor    {}\n  on disk   {}\nThe cursor is no position in the edited query. \
+                 Restart it with `ferro migrate rerecord {target} --restart`. Nothing was \
+                 changed.",
+                no_continue_reason(keys_recorded, Some(keys_on_disk)),
+                key_list(keys_recorded),
+                key_list(keys_on_disk)
+            ),
             RunRefusal::SnapshotMismatch {
                 migration_name,
                 applied,
@@ -836,6 +1066,7 @@ fn check_applied(
                 return Err(RunRefusal::EditedApplied {
                     migration_name: migration.dir_name(),
                     migration: migration.number,
+                    step: step.ordinal,
                     file: record.file.clone(),
                     applied: record.checksum.clone(),
                     applied_at: record.finished_at.clone().unwrap_or_default(),
@@ -878,26 +1109,98 @@ fn check_order(dir: &MigrationsDir, by_key: &RecordMap) -> Result<(), RunRefusal
     Ok(())
 }
 
+/// The order keys each chunked data step's `up` pages over, read from its
+/// file on disk (a fact only Python can read: the query is a lambda over the
+/// migration's historical models). Each key is `<table>.<column>`, with
+/// ` desc` for a descending one (`author.id`, `author.created_at desc`); an
+/// empty list says the file's `up` is not `@chunked`.
+pub type OrderKeys = BTreeMap<(u16, u8), Vec<String>>;
+
+/// The order keys a chunked cursor was committed under: its `order_by`
+/// member (`{"keys": [...], "order_by": ["author.id"], "rows_done": N}`);
+/// empty for a cursor that does not record them.
+pub fn cursor_order_keys(cursor: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(cursor)
+        .ok()
+        .and_then(|value| {
+            value.get("order_by")?.as_array().map(|keys| {
+                keys.iter()
+                    .filter_map(|k| k.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `record` is an unfinished chunked step with committed batches
+/// (ADR-0030): its edit is refused, not accepted.
+fn has_committed_batches(record: &StepRecord) -> bool {
+    !record.is_finished() && record.kind == RecordKind::Chunked && record.resume_cursor.is_some()
+}
+
+/// The edited-chunked refusal for `record`, whose step's file on disk is
+/// `file` with checksum `on_disk`; `order_keys` (when read) decides whether
+/// continuing is a door.
+fn edited_chunked(
+    record: &StepRecord,
+    file: String,
+    on_disk: String,
+    order_keys: Option<&OrderKeys>,
+) -> RunRefusal {
+    let keys_recorded = record
+        .resume_cursor
+        .as_deref()
+        .map(cursor_order_keys)
+        .unwrap_or_default();
+    let keys_on_disk = order_keys.map(|keys| {
+        keys.get(&(record.migration, record.step))
+            .cloned()
+            .unwrap_or_default()
+    });
+    let continue_allowed = !keys_recorded.is_empty()
+        && keys_on_disk
+            .as_ref()
+            .is_none_or(|keys| *keys == keys_recorded);
+    RunRefusal::EditedChunked {
+        migration_name: record.migration_name.clone(),
+        migration: record.migration,
+        step: record.step,
+        file,
+        recorded: record.checksum.clone(),
+        on_disk,
+        rows_done: record.rows_done.unwrap_or(0),
+        continue_allowed,
+        keys_recorded,
+        keys_on_disk,
+    }
+}
+
 /// Plan a run: every pending step of every pending migration, in order, or
 /// the refusal that stops it before anything runs.
 ///
 /// A step is pending when it has no finished record. A started-but-unfinished
 /// record resumes at that step; if its file changed since, the edit is
-/// accepted and re-recorded (ADR-0030), and [`PlannedStep::edited`] says so.
+/// accepted and re-recorded (ADR-0030), and [`PlannedStep::edited`] says so —
+/// except an unfinished chunked step with committed batches, which is
+/// refused ([`RunRefusal::EditedChunked`]). `order_keys` are the edited
+/// files' order keys when the caller read them ([`OrderKeys`]); they decide
+/// whether that refusal offers `--continue` outright (`None`: it is offered
+/// on the condition that the keys did not change).
 ///
 /// # Errors
 /// A [`RunRefusal`]: a reverting record; records for migrations the directory
 /// lacks (allowed through with `allow_ahead` when they all sort above its
-/// head); a snapshot or finished step edited after it was applied; a pending
-/// migration below an applied one; a DDL step without this dialect's
-/// rendering; headers the dialect cannot honour. Going down, see
-/// [`plan_down`]'s refusals.
+/// head); a snapshot or finished step edited after it was applied; an
+/// edited chunked step with committed batches; a pending migration below an
+/// applied one; a DDL step without this dialect's rendering; headers the
+/// dialect cannot honour. Going down, see [`plan_down`]'s refusals.
 pub fn plan_run(
     dir: &MigrationsDir,
     records: &[StepRecord],
     dialect: Dialect,
     direction: Direction,
     allow_ahead: bool,
+    order_keys: Option<&OrderKeys>,
 ) -> Result<RunPlan, RunRefusal> {
     if let Direction::Down { target } = direction {
         return plan_down(dir, records, dialect, target);
@@ -927,12 +1230,16 @@ pub fn plan_run(
                 mode.record_kind()
             };
             let checksum = encode_checksum(&file.up_checksum);
-            let edited = record
-                .filter(|r| r.checksum != checksum || r.file != name)
-                .map(|r| EditedUnfinished {
-                    recorded: r.checksum.clone(),
-                    recorded_file: r.file.clone(),
-                });
+            let edited_record = record.filter(|r| r.checksum != checksum || r.file != name);
+            if let Some(r) = edited_record
+                && has_committed_batches(r)
+            {
+                return Err(edited_chunked(r, name, checksum, order_keys));
+            }
+            let edited = edited_record.map(|r| EditedUnfinished {
+                recorded: r.checksum.clone(),
+                recorded_file: r.file.clone(),
+            });
             steps.push(PlannedStep {
                 migration: migration.number,
                 migration_name: migration.dir_name(),
@@ -1187,6 +1494,206 @@ pub fn check_format(
     })
 }
 
+/// What `ferro migrate rerecord` is asked to do (#473).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RerecordMode {
+    /// Accept the edited file: the record's checksum (and file and kind)
+    /// change, nothing else.
+    Record,
+    /// `--continue`: an edited chunked step with committed batches keeps
+    /// them and resumes from its cursor.
+    Continue,
+    /// `--restart`: an edited chunked step with committed batches clears its
+    /// cursor and `rows_done`, so `up` starts from the first row.
+    Restart,
+}
+
+impl RerecordMode {
+    fn flag(self) -> &'static str {
+        match self {
+            RerecordMode::Record => "",
+            RerecordMode::Continue => "--continue",
+            RerecordMode::Restart => "--restart",
+        }
+    }
+}
+
+/// The record rewrite `rerecord` performs: one step record's `file`,
+/// `checksum` and `kind`, and with `clear_cursor` its `resume_cursor` and
+/// `rows_done`. It runs no SQL of the step.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RerecordAction {
+    /// `NNNN`.
+    pub migration: u16,
+    /// `NN`.
+    pub step: u8,
+    /// `NNNN_<name>`.
+    pub migration_name: String,
+    /// The file the record names now.
+    pub recorded_file: String,
+    /// The file on disk, which the record will name.
+    pub file: String,
+    /// That file's path (Python reads a data step's declared kind from it).
+    pub path: PathBuf,
+    /// The checksum the record holds now.
+    pub old_checksum: String,
+    /// The on-disk file's checksum, which the record will hold.
+    pub new_checksum: String,
+    /// The kind the record will hold: a SQL step's from its headers; a data
+    /// step's as recorded until Python reads its declaration (`data`).
+    pub kind: RecordKind,
+    /// A Python data step: its kind is its file's `up` declaration.
+    pub data: bool,
+    /// Whether the record finished.
+    pub finished: bool,
+    /// `--restart`: clear `resume_cursor` and set `rows_done` to 0.
+    pub clear_cursor: bool,
+}
+
+/// `0007:01` → `(7, 1)`; anything else (`0007`, `0007:ir`) is no step.
+fn parse_step_target(target: &str) -> Option<(u16, u8)> {
+    let (migration, step) = target.trim().split_once(':')?;
+    let all_digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    if !all_digits(migration, 4) || !all_digits(step, 2) {
+        return None;
+    }
+    Some((migration.parse().ok()?, step.parse().ok()?))
+}
+
+/// Plan `ferro migrate rerecord <migration>:<step> [--continue|--restart]`
+/// (ADR-0030): the record rewrite that accepts a deliberate edit of one
+/// step's file, or the refusal.
+///
+/// Only the step's own record changes, and only its `file`, `checksum` and
+/// `kind` (plus, with `--restart`, its cursor and `rows_done`); nothing is
+/// run. `order_keys` are the edited files' order keys ([`OrderKeys`]),
+/// which `--continue` and the edited-chunked refusal compare against the
+/// cursor's.
+///
+/// # Errors
+/// [`RunRefusal::RerecordTarget`] for anything but `NNNN:NN` (a migration
+/// alone, the snapshot: restore it); [`RunRefusal::NothingToRerecord`] for
+/// a step the directory lacks, one with no record (free to edit) or one
+/// whose file matches its record; [`RunRefusal::ModeNotApplicable`] for
+/// `--continue`/`--restart` on anything but an unfinished chunked step with
+/// committed batches; [`RunRefusal::EditedChunked`] for such a step with
+/// neither flag; [`RunRefusal::ContinueRefused`] for `--continue` when the
+/// edited file pages over different order keys; and the planner's own
+/// refusals about the records and the migration's snapshot.
+pub fn rerecord_plan(
+    dir: &MigrationsDir,
+    records: &[StepRecord],
+    target: &str,
+    mode: RerecordMode,
+    dialect: Dialect,
+    order_keys: &OrderKeys,
+) -> Result<RerecordAction, RunRefusal> {
+    let (number, ordinal) =
+        parse_step_target(target).ok_or_else(|| RunRefusal::RerecordTarget {
+            target: target.trim().to_string(),
+        })?;
+    let shown = format!("{number:04}:{ordinal:02}");
+    let nothing = |why: String| RunRefusal::NothingToRerecord {
+        target: shown.clone(),
+        why,
+    };
+    check_records(dir, records, true, true)?;
+    let (migration, step) = dir
+        .migrations
+        .get(usize::from(number).wrapping_sub(1))
+        .and_then(|m| Some((m, m.steps.iter().find(|s| s.ordinal == ordinal)?)))
+        .ok_or_else(|| nothing(format!("{}/ holds no such step", directory_label(dir))))?;
+    let record = records
+        .iter()
+        .find(|r| r.migration == number && r.step == ordinal)
+        .ok_or_else(|| {
+            nothing("the step has no record on this database, so its file is free to edit".into())
+        })?;
+    let snapshot = encode_checksum(&migration.snapshot.checksum);
+    if record.snapshot_checksum != snapshot {
+        return Err(RunRefusal::SnapshotMismatch {
+            migration_name: migration.dir_name(),
+            applied: record.snapshot_checksum.clone(),
+            on_disk: snapshot,
+        });
+    }
+    let file = step_file(migration, step, dialect)?;
+    let name = file_name(&file.up);
+    let checksum = encode_checksum(&file.up_checksum);
+    if record.checksum == checksum && record.file == name {
+        return Err(nothing(format!(
+            "{}/{name} matches its record (sha384:{checksum})",
+            migration.dir_name()
+        )));
+    }
+    let data = step.kind == StepKind::Data;
+    let kind = if data {
+        record.kind
+    } else {
+        exec_mode(
+            &file.headers,
+            dialect,
+            &format!("{}/{name}", migration.dir_name()),
+        )?
+        .record_kind()
+    };
+    let batches = has_committed_batches(record);
+    if mode != RerecordMode::Record && !batches {
+        let state = if record.is_finished() {
+            "finished".to_string()
+        } else {
+            format!(
+                "an unfinished {} step with no committed batch",
+                record.kind.as_str()
+            )
+        };
+        return Err(RunRefusal::ModeNotApplicable {
+            target: shown,
+            flag: mode.flag(),
+            state,
+        });
+    }
+    if batches {
+        let refusal = edited_chunked(record, name.clone(), checksum.clone(), Some(order_keys));
+        match (mode, &refusal) {
+            (RerecordMode::Record, _) => return Err(refusal),
+            (
+                RerecordMode::Continue,
+                RunRefusal::EditedChunked {
+                    continue_allowed: false,
+                    keys_recorded,
+                    keys_on_disk,
+                    ..
+                },
+            ) => {
+                return Err(RunRefusal::ContinueRefused {
+                    migration_name: migration.dir_name(),
+                    target: shown,
+                    file: name,
+                    keys_recorded: keys_recorded.clone(),
+                    keys_on_disk: keys_on_disk.clone().unwrap_or_default(),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(RerecordAction {
+        migration: number,
+        step: ordinal,
+        migration_name: migration.dir_name(),
+        recorded_file: record.file.clone(),
+        file: name,
+        path: file.up.clone(),
+        old_checksum: record.checksum.clone(),
+        new_checksum: checksum,
+        kind,
+        data,
+        finished: record.is_finished(),
+        clear_cursor: mode == RerecordMode::Restart,
+    })
+}
+
 /// One step's state, in `sqlx-cli migrate info`'s vocabulary (#466).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1282,12 +1789,14 @@ pub struct RunStatus {
 /// Answer `ferro migrate status` (#466) read-only: each step's state from its
 /// record, the file on disk and whether a run holds the lock, plus the
 /// refusal `up` would meet. `lock_held` makes the first unfinished step
-/// `running`.
+/// `running`. `order_keys` are passed through to [`plan_run`] for the
+/// refusal's text.
 pub fn run_status(
     dir: &MigrationsDir,
     records: &[StepRecord],
     dialect: Dialect,
     lock_held: bool,
+    order_keys: Option<&OrderKeys>,
 ) -> RunStatus {
     let by_key: RecordMap = records.iter().map(|r| ((r.migration, r.step), r)).collect();
     let mut running_marked = false;
@@ -1355,7 +1864,7 @@ pub fn run_status(
         .filter(|r| r.migration > head)
         .map(|r| r.migration_name.clone())
         .collect();
-    let refusal = plan_run(dir, records, dialect, Direction::Up, false).err();
+    let refusal = plan_run(dir, records, dialect, Direction::Up, false, order_keys).err();
     RunStatus {
         migrations,
         ahead: ahead.into_iter().collect(),
@@ -1627,7 +2136,7 @@ mod tests {
 
     /// The finished record `up` would have written for `(migration, step)`.
     fn finished(dir: &MigrationsDir, migration: u16, step: u8) -> StepRecord {
-        let plan = plan_run(dir, &[], Dialect::Sqlite, Direction::Up, false).expect("plan");
+        let plan = plan_run(dir, &[], Dialect::Sqlite, Direction::Up, false, None).expect("plan");
         let planned = plan
             .steps
             .into_iter()
@@ -1649,7 +2158,7 @@ mod tests {
     }
 
     fn up(dir: &MigrationsDir, records: &[StepRecord]) -> Result<RunPlan, RunRefusal> {
-        plan_run(dir, records, Dialect::Sqlite, Direction::Up, false)
+        plan_run(dir, records, Dialect::Sqlite, Direction::Up, false, None)
     }
 
     fn keys(plan: &RunPlan) -> Vec<(u16, u8)> {
@@ -1725,8 +2234,8 @@ mod tests {
                 "ferro migrate: 0001_create_author/01_schema.up.sqlite.sql was edited after it \
                  was applied to this database.\n  applied   sha384:{}  (2026-10-01 14:02 UTC)\n  \
                  on disk   sha384:{on_disk}\nAn applied step is never run again. Restore the \
-                 file, or accept a deliberate edit with\n`ferro migrate rerecord 0001`. Nothing \
-                 was applied.",
+                 file, or accept a deliberate edit with\n`ferro migrate rerecord 0001:01`. \
+                 Nothing was applied.",
                 "a".repeat(96)
             )
         );
@@ -1792,8 +2301,15 @@ mod tests {
              migrations/.\nThe directory is behind the database: check out the branch that \
              holds it. Nothing was applied."
         );
-        let plan =
-            plan_run(&behind, &records, Dialect::Sqlite, Direction::Up, true).expect("allowed");
+        let plan = plan_run(
+            &behind,
+            &records,
+            Dialect::Sqlite,
+            Direction::Up,
+            true,
+            None,
+        )
+        .expect("allowed");
         assert!(plan.steps.is_empty());
         assert_eq!(plan.ahead, ["0003_add_orgs"]);
     }
@@ -1803,8 +2319,8 @@ mod tests {
         let dir = three();
         let mut record = finished(&dir, 1, 1);
         record.migration_name = "0001_other".into();
-        let refusal =
-            plan_run(&dir, &[record], Dialect::Sqlite, Direction::Up, true).expect_err("missing");
+        let refusal = plan_run(&dir, &[record], Dialect::Sqlite, Direction::Up, true, None)
+            .expect_err("missing");
         assert_eq!(refusal.kind(), "applied_missing");
         assert!(
             refusal
@@ -1829,6 +2345,340 @@ mod tests {
             vec![ddl(1, "schema", "SELECT 1;\n"), data(2, "backfill_author")],
             &["author"],
         )])
+    }
+
+    // -- edited files and rerecord (#537, ADR-0030) ------------------------------------
+
+    const CURSOR: &str = r#"{"keys": [1000], "order_by": ["author.id"], "rows_done": 1000}"#;
+    const OTHER: &str = "0000000000000000000000000000000000000000000000000000000000000000\
+                         00000000000000000000000000000000";
+
+    fn order_keys(keys: &[&str]) -> OrderKeys {
+        BTreeMap::from([((1, 2), keys.iter().map(|k| k.to_string()).collect())])
+    }
+
+    /// `0001_backfill:02`'s record: an attempt of the chunked backfill that
+    /// committed 1,000 rows, under a file whose checksum was `OTHER`.
+    fn chunked_with_batches(dir: &MigrationsDir) -> StepRecord {
+        StepRecord {
+            kind: RecordKind::Chunked,
+            checksum: OTHER.into(),
+            resume_cursor: Some(CURSOR.into()),
+            rows_done: Some(1000),
+            ..started(dir, 1, 2)
+        }
+    }
+
+    fn edited_chunked_text(dir: &MigrationsDir) -> String {
+        let records = [finished(dir, 1, 1), chunked_with_batches(dir)];
+        plan_run(
+            dir,
+            &records,
+            Dialect::Sqlite,
+            Direction::Up,
+            false,
+            Some(&order_keys(&["author.id"])),
+        )
+        .expect_err("edited chunked")
+        .to_string()
+    }
+
+    #[test]
+    fn an_edited_chunked_step_with_committed_batches_is_refused_naming_both_doors() {
+        let dir = backfill();
+        assert_eq!(
+            edited_chunked_text(&dir),
+            "ferro migrate: 0001_backfill/02_backfill_author.py was edited after 1,000 rows \
+             were committed.\nFerro cannot tell whether those rows are right under the new \
+             code. Choose one:\n  ferro migrate rerecord 0001:02 --continue   keep them, \
+             continue from the cursor\n  ferro migrate rerecord 0001:02 --restart    run every \
+             row again from the start\nNothing was applied."
+        );
+        let refusal =
+            up(&dir, &[finished(&dir, 1, 1), chunked_with_batches(&dir)]).expect_err("unread keys");
+        assert_eq!(refusal.kind(), "edited_chunked");
+        assert_eq!((refusal.migration(), refusal.step()), (Some(1), Some(2)));
+        assert!(refusal.to_string().contains(
+            "continue from the cursor\n    (only while the edited file still pages over \
+             author.id)\n"
+        ));
+    }
+
+    #[test]
+    fn an_edited_chunked_step_over_other_order_keys_offers_only_a_restart() {
+        let dir = backfill();
+        let records = [finished(&dir, 1, 1), chunked_with_batches(&dir)];
+        let plan = |keys: &[&str]| {
+            plan_run(
+                &dir,
+                &records,
+                Dialect::Sqlite,
+                Direction::Up,
+                false,
+                Some(&order_keys(keys)),
+            )
+            .expect_err("refused")
+            .to_string()
+        };
+        assert_eq!(
+            plan(&["author.slug", "author.id"]),
+            "ferro migrate: 0001_backfill/02_backfill_author.py was edited after 1,000 rows \
+             were committed.\nFerro cannot tell whether those rows are right under the new \
+             code, and the edited file pages over different order keys than its cursor:\n  \
+             cursor    author.id\n  on disk   author.slug, author.id\nso the cursor is no \
+             position in it. Restart from the first row:\n  ferro migrate rerecord 0001:02 \
+             --restart    run every row again from the start\nNothing was applied."
+        );
+        assert!(plan(&[]).contains(
+            "and the edited file's up is no longer @chunked:\n  cursor    author.id\n  on disk   \
+             (none)\n"
+        ));
+    }
+
+    #[test]
+    fn an_edited_chunked_step_with_no_committed_batch_is_accepted_like_any_unfinished_step() {
+        let dir = backfill();
+        let attempt = StepRecord {
+            resume_cursor: None,
+            rows_done: Some(0),
+            ..chunked_with_batches(&dir)
+        };
+        let plan = up(&dir, &[finished(&dir, 1, 1), attempt]).expect("accepted");
+        assert_eq!(
+            plan.steps[0].edited.as_ref().expect("edited").recorded,
+            OTHER
+        );
+    }
+
+    #[test]
+    fn an_unedited_chunked_step_with_committed_batches_just_resumes() {
+        let dir = backfill();
+        let attempt = StepRecord {
+            checksum: encode_checksum(&sha384(b"# data")),
+            ..chunked_with_batches(&dir)
+        };
+        let plan = up(&dir, &[finished(&dir, 1, 1), attempt]).expect("resumes");
+        assert!(plan.steps[0].resumes && plan.steps[0].edited.is_none());
+    }
+
+    #[test]
+    fn a_cursor_records_the_order_keys_it_was_committed_under() {
+        assert_eq!(cursor_order_keys(CURSOR), ["author.id"]);
+        assert!(cursor_order_keys(r#"{"keys": [1], "rows_done": 1}"#).is_empty());
+        assert!(cursor_order_keys("not json").is_empty());
+    }
+
+    /// The edited record of `kind` at `0001:01` (SQL kinds) or `0001:02`
+    /// (data kinds), finished or not; `batches` gives a chunked one a cursor.
+    fn edited(dir: &MigrationsDir, kind: RecordKind, finished_: bool, batches: bool) -> StepRecord {
+        let step = if matches!(kind, RecordKind::Ddl | RecordKind::DdlNoTransaction) {
+            1
+        } else {
+            2
+        };
+        let base = finished(dir, 1, step);
+        StepRecord {
+            kind,
+            checksum: OTHER.into(),
+            finished_at: finished_.then(|| base.finished_at.clone()).flatten(),
+            resume_cursor: batches.then(|| CURSOR.to_string()),
+            rows_done: (kind == RecordKind::Chunked).then_some(if batches { 1000 } else { 0 }),
+            ..base
+        }
+    }
+
+    #[test]
+    fn rerecord_plans_every_kind_finished_and_mode() {
+        use RecordKind::*;
+        use RerecordMode::*;
+        let dir = backfill();
+        let same = order_keys(&["author.id"]);
+        let changed = order_keys(&["author.slug", "author.id"]);
+        let cases = [
+            (Ddl, false),
+            (DdlNoTransaction, false),
+            (Atomic, false),
+            (Chunked, false),
+            (Chunked, true),
+        ];
+        for (kind, batches) in cases {
+            for finished_ in [true, false] {
+                if finished_ && batches {
+                    continue; // a finished record's cursor is no committed batch
+                }
+                let record = edited(&dir, kind, finished_, batches);
+                let target = format!("0001:{:02}", record.step);
+                let mut records = vec![record.clone()];
+                if record.step == 2 {
+                    records.insert(0, finished(&dir, 1, 1));
+                }
+                let plan = |mode, keys: &OrderKeys| {
+                    rerecord_plan(&dir, &records, &target, mode, Dialect::Sqlite, keys)
+                };
+                let cell = format!("{kind:?} finished={finished_} batches={batches}");
+                let open_with_batches = batches && !finished_;
+
+                // Record: accepted, except a chunked step with committed batches.
+                match plan(Record, &same) {
+                    Ok(action) => {
+                        assert!(!open_with_batches, "{cell}: record must name both doors");
+                        assert_eq!(action.old_checksum, OTHER, "{cell}");
+                        assert_eq!(action.new_checksum, plan_step_checksum(&dir, record.step));
+                        assert!(!action.clear_cursor, "{cell}");
+                        assert_eq!(action.finished, finished_, "{cell}");
+                        assert_eq!(action.data, record.step == 2, "{cell}");
+                    }
+                    Err(refusal) => {
+                        assert!(open_with_batches, "{cell}: {refusal}");
+                        assert_eq!(refusal.kind(), "edited_chunked", "{cell}");
+                    }
+                }
+                for mode in [Continue, Restart] {
+                    let result = plan(mode, &same);
+                    if !open_with_batches {
+                        let refusal = result.expect_err(&cell);
+                        assert_eq!(refusal.kind(), "mode_not_applicable", "{cell}");
+                        continue;
+                    }
+                    let action = result.expect(&cell);
+                    assert_eq!(action.clear_cursor, mode == Restart, "{cell}");
+                }
+                if open_with_batches {
+                    let refusal = plan(Continue, &changed).expect_err("changed keys");
+                    assert_eq!(refusal.kind(), "continue_refused");
+                    assert!(plan(Restart, &changed).expect("restart").clear_cursor);
+                }
+            }
+        }
+    }
+
+    fn plan_step_checksum(dir: &MigrationsDir, step: u8) -> String {
+        finished(dir, 1, step).checksum
+    }
+
+    #[test]
+    fn rerecord_texts() {
+        let dir = backfill();
+        let records = [
+            finished(&dir, 1, 1),
+            edited(&dir, RecordKind::Chunked, false, true),
+        ];
+        let keys = order_keys(&["author.slug", "author.id"]);
+        let text = |target: &str, mode| {
+            rerecord_plan(&dir, &records, target, mode, Dialect::Sqlite, &keys)
+                .expect_err(target)
+                .to_string()
+        };
+        for target in ["0001", "0001:ir", "1:2", "0001:02:x"] {
+            assert_eq!(
+                text(target, RerecordMode::Record),
+                format!(
+                    "ferro migrate: rerecord re-records one step, named <migration>:<step> \
+                     (0007:01), not `{target}`.\nA schema snapshot (ir.json) is never \
+                     re-recorded: later migrations and historical models are built from it, so \
+                     restore the file. Nothing was changed."
+                )
+            );
+        }
+        assert_eq!(
+            text("0001:02", RerecordMode::Continue),
+            "ferro migrate: cannot continue 0001_backfill/02_backfill_author.py from its cursor: \
+             the edited file pages over different order keys than its cursor.\n  cursor    \
+             author.id\n  on disk   author.slug, author.id\nThe cursor is no position in the \
+             edited query. Restart it with `ferro migrate rerecord 0001:02 --restart`. Nothing \
+             was changed."
+        );
+        assert_eq!(
+            text("0001:01", RerecordMode::Restart),
+            "ferro migrate: nothing to re-record at 0001:01: \
+             0001_backfill/01_schema.up.sqlite.sql matches its record \
+             (sha384:"
+                .to_string()
+                + &plan_step_checksum(&dir, 1)
+                + "). Nothing was changed."
+        );
+        assert_eq!(
+            text("0001:07", RerecordMode::Record),
+            "ferro migrate: nothing to re-record at 0001:07: migrations/ holds no such step. \
+             Nothing was changed."
+        );
+        let finished_edit = [edited(&dir, RecordKind::Ddl, true, false)];
+        let refusal = rerecord_plan(
+            &dir,
+            &finished_edit,
+            "0001:01",
+            RerecordMode::Restart,
+            Dialect::Sqlite,
+            &keys,
+        )
+        .expect_err("finished");
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: --restart applies only to an unfinished chunked step with committed \
+             batches, and 0001:01 is finished.\nAccept its edit with `ferro migrate rerecord \
+             0001:01`. Nothing was changed."
+        );
+        let refusal = rerecord_plan(
+            &dir,
+            &[finished(&dir, 1, 1)],
+            "0001:02",
+            RerecordMode::Record,
+            Dialect::Sqlite,
+            &keys,
+        )
+        .expect_err("no record");
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: nothing to re-record at 0001:02: the step has no record on this \
+             database, so its file is free to edit. Nothing was changed."
+        );
+    }
+
+    #[test]
+    fn the_checksum_covers_only_this_dialects_up_file() {
+        // A step whose down and sqlite rendering changed after a Postgres
+        // database applied it: neither is a mismatch there.
+        let body = "CREATE TABLE a (id int);\n";
+        let mut step = ddl(1, "schema", body);
+        let applied = |step: &Step| {
+            let dir = dir(vec![("a", vec![step.clone()], &["a"])]);
+            let plan =
+                plan_run(&dir, &[], Dialect::Postgres, Direction::Up, false, None).expect("plan");
+            let record = StepRecord {
+                finished_at: Some("2026-10-01T14:02:33.000000Z".into()),
+                ..plan.steps[0].record.clone()
+            };
+            (dir, record)
+        };
+        let (_, record) = applied(&step);
+        let sqlite = step.files.get_mut(&StepDialect::Sqlite).expect("sqlite");
+        sqlite.up_checksum = sha384(b"CREATE TABLE a (id bigint);\n");
+        let postgres = step
+            .files
+            .get_mut(&StepDialect::Postgres)
+            .expect("postgres");
+        postgres.down_checksum = Some(sha384(b"DROP TABLE a CASCADE;\n"));
+        let (dir, _) = applied(&step);
+        let plan = plan_run(
+            &dir,
+            &[record.clone()],
+            Dialect::Postgres,
+            Direction::Up,
+            false,
+            None,
+        )
+        .expect("no mismatch");
+        assert!(plan.steps.is_empty());
+        let refusal = rerecord_plan(
+            &dir,
+            &[record],
+            "0001:01",
+            RerecordMode::Record,
+            Dialect::Postgres,
+            &OrderKeys::new(),
+        )
+        .expect_err("nothing");
+        assert_eq!(refusal.kind(), "nothing_to_rerecord");
     }
 
     #[test]
@@ -1878,6 +2728,7 @@ mod tests {
             Dialect::Sqlite,
             Direction::Down { target },
             false,
+            None,
         )
     }
 
@@ -2100,6 +2951,7 @@ mod tests {
                 target: Target::Latest,
             },
             true,
+            None,
         )
         .expect_err("ahead");
         assert_eq!(refusal.kind(), "applied_missing");
@@ -2127,7 +2979,7 @@ mod tests {
         let (dir, mut records) = three_with_steps();
         records[4].error = Some("relation \"b\" does not exist".into());
         records[4].failed_at = Some("2026-10-06T10:00:00.000000Z".into());
-        let status = run_status(&dir, &records, Dialect::Sqlite, false);
+        let status = run_status(&dir, &records, Dialect::Sqlite, false, None);
         let states: Vec<StepState> = status.migrations[2].steps.iter().map(|s| s.state).collect();
         assert_eq!(
             states,
@@ -2187,7 +3039,8 @@ mod tests {
             ],
             &["t"],
         )]);
-        let plan = plan_run(&dir, &[], Dialect::Postgres, Direction::Up, false).expect("plan");
+        let plan =
+            plan_run(&dir, &[], Dialect::Postgres, Direction::Up, false, None).expect("plan");
         assert_eq!(plan.steps[1].mode, ExecMode::NoTransaction);
         assert_eq!(plan.steps[1].record.kind, RecordKind::DdlNoTransaction);
     }
@@ -2316,7 +3169,7 @@ mod tests {
         let mut failed = started(&dir, 2, 2);
         failed.error = Some("no such table: x".into());
         let records = vec![finished(&dir, 1, 1), finished(&dir, 2, 1), failed];
-        let status = run_status(&dir, &records, Dialect::Sqlite, false);
+        let status = run_status(&dir, &records, Dialect::Sqlite, false, None);
         let states: Vec<Vec<StepState>> = status
             .migrations
             .iter()
@@ -2337,9 +3190,9 @@ mod tests {
         assert!(status.refusal.is_none());
 
         let interrupted = vec![finished(&dir, 1, 1), started(&dir, 2, 1)];
-        let status = run_status(&dir, &interrupted, Dialect::Sqlite, false);
+        let status = run_status(&dir, &interrupted, Dialect::Sqlite, false, None);
         assert_eq!(status.migrations[1].steps[0].state, StepState::Interrupted);
-        let status = run_status(&dir, &interrupted, Dialect::Sqlite, true);
+        let status = run_status(&dir, &interrupted, Dialect::Sqlite, true, None);
         assert_eq!(status.migrations[1].steps[0].state, StepState::Running);
         assert_eq!(status.migrations[1].steps[1].state, StepState::Pending);
 
@@ -2347,7 +3200,7 @@ mod tests {
         baseline.origin = Origin::Baseline;
         let mut edited = finished(&dir, 2, 1);
         edited.checksum = "c".repeat(96);
-        let status = run_status(&dir, &[baseline, edited], Dialect::Sqlite, false);
+        let status = run_status(&dir, &[baseline, edited], Dialect::Sqlite, false, None);
         assert_eq!(
             status.migrations[0].steps[0].state,
             StepState::InstalledBaseline
