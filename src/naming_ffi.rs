@@ -274,10 +274,12 @@ pub fn _plan_step_verdicts(
                 // A live-only op (validate, an invalid index's rebuild) is the
                 // live door's own; an op a later generator ticket generates is
                 // the pass's statement on the live door, and one the renderer
-                // has no statement for is refused by its rendering's warning.
-                Needs::Refused(Refusal::Ticket(_)) | Needs::Refused(Refusal::LiveOnly) => {
-                    ("native", None, false)
-                }
+                // has no statement for is refused by its rendering's warning
+                // (a column moving to or from a native enum type: the pass's
+                // refused-conversion warning, as before #536).
+                Needs::Refused(Refusal::Ticket(_))
+                | Needs::Refused(Refusal::LiveOnly)
+                | Needs::Refused(Refusal::EnumTypeMove { .. }) => ("native", None, false),
             };
             serde_json::json!({
                 "needs": tag,

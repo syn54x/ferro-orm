@@ -122,11 +122,24 @@ pub enum PlanError {
         /// The table.
         table: String,
     },
+    /// A live plan to reverse carries an op only two declared snapshots
+    /// plan ([`MigrationOp::RemoveEnumLabel`]): it was not decided from the
+    /// live database it claims to reverse.
+    SnapshotOnlyOp {
+        /// The op kind.
+        op: String,
+    },
 }
 
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PlanError::SnapshotOnlyOp { op } => write!(
+                f,
+                "the plan to reverse carries {op}, which only two declared snapshots plan \
+                 (`ferro migrate new`), never a live database: reverse the plan \
+                 `plan_from_ir` decided from the live facts"
+            ),
             PlanError::MissingLiveFacts { table } => write!(
                 f,
                 "the live facts carry no entry for table '{table}', which the live schema \
@@ -2840,6 +2853,12 @@ pub fn reverse_live_plan(
             MigrationOp::RenameEnumLabel { .. } | MigrationOp::RenameEnumType { .. } => {
                 operations.push(planned(swapped(op)))
             }
+            // Planned only between two snapshots (#536): never in a live plan.
+            MigrationOp::RemoveEnumLabel { .. } => {
+                return Err(PlanError::SnapshotOnlyOp {
+                    op: "RemoveEnumLabel".to_string(),
+                });
+            }
             MigrationOp::AddTable { table } => operations.push(planned(MigrationOp::DropTable {
                 table: table.clone(),
             })),
@@ -3266,6 +3285,29 @@ mod reverse_tests {
         )
         .expect("reverse plan");
         assert!(reverse.operations.is_empty());
+    }
+
+    #[test]
+    fn a_snapshot_only_op_in_a_live_plan_is_refused_naming_it() {
+        let live = envelope(vec![card(vec![column("id", "int", false)])]);
+        let facts = live_facts(LiveTableFacts::default());
+        let forward = MigrationPlan {
+            operations: vec![MigrationOp::RemoveEnumLabel {
+                type_name: "status".into(),
+                label: "gone".into(),
+                columns: vec![],
+            }],
+            ..MigrationPlan::default()
+        };
+        let err = reverse_live_plan(&forward, &live, &facts, &live, Dialect::Postgres)
+            .expect_err("refused");
+        assert_eq!(
+            err,
+            PlanError::SnapshotOnlyOp {
+                op: "RemoveEnumLabel".into()
+            }
+        );
+        assert!(err.to_string().contains("RemoveEnumLabel"), "{err}");
     }
 
     #[test]
