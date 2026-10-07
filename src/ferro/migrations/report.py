@@ -4,16 +4,16 @@
 $ ferro migrate status
 default (postgres) · public._ferro_migrations
 
-0006_add_teams           installed
+0006_add_teams           applied
 0007_nickname            partial, 1 of 3 steps
-  01_add_nickname.sql      installed
+  01_add_nickname.sql      applied
   02_backfill_nickname.py  failed at 30,000 rows
     ValueError: nickname too long (id=30000412)
   03_nickname_index.sql    pending
 0008_drop_legacy         pending
 ```
 
-A fully installed or fully pending migration is one line; its steps expand
+A fully applied or fully pending migration is one line; its steps expand
 where something needs attention, or everywhere with ``--steps``. Every state
 is decided in the Rust core (``_core._run_status``); this module only names
 and prints them (a chunked step's ``rows_done`` comes from its record). ``status`` exits 3 when anything is pending and 4 when
@@ -67,18 +67,18 @@ class RunRefused(MigrationRefused):
 
 
 _WORDS = {
-    "installed": "installed",
-    "installed_different_checksum": "installed (different checksum)",
-    "installed_baseline": "installed (baseline)",
+    "applied": "applied",
+    "applied_different_checksum": "applied (different checksum)",
+    "applied_baseline": "applied (baseline)",
     "pending": "pending",
     "running": "running",
     "failed": "failed",
     "interrupted": "interrupted",
     "reverting": "reverting",
 }
-_ATTENTION = {"installed (different checksum)", "failed", "interrupted", "reverting"}
-_NOT_PENDING = {"installed", "installed (different checksum)", "installed (baseline)"}
-_WHOLE = {"installed", "installed (baseline)", "pending"}
+_ATTENTION = {"applied (different checksum)", "failed", "interrupted", "reverting"}
+_NOT_PENDING = {"applied", "applied (different checksum)", "applied (baseline)"}
+_WHOLE = {"applied", "applied (baseline)", "pending"}
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,7 @@ class StepStatus:
     file: str
     """The file this database executes (or executed)."""
     state: str
-    """``installed``, ``installed (different checksum)``, ``installed
+    """``applied``, ``applied (different checksum)``, ``applied
     (baseline)``, ``pending``, ``running``, ``failed``, ``interrupted`` or
     ``reverting``."""
     error: str | None = None
@@ -129,9 +129,9 @@ class MigrationStatus:
 
     @property
     def state(self) -> str:
-        """``installed`` / ``installed (baseline)`` / ``pending`` when every
-        step agrees; ``running`` while a run is in it; ``installed (different
-        checksum)`` when every step is installed and one changed; else
+        """``applied`` / ``applied (baseline)`` / ``pending`` when every
+        step agrees; ``running`` while a run is in it; ``applied (different
+        checksum)`` when every step is applied and one changed; else
         ``partial, X of N steps``."""
         words = {step.state for step in self.steps}
         if len(words) == 1 and next(iter(words)) in _WHOLE:
@@ -139,7 +139,7 @@ class MigrationStatus:
         if "running" in words:
             return "running"
         if words <= _NOT_PENDING:
-            return "installed (different checksum)"
+            return "applied (different checksum)"
         done = sum(1 for step in self.steps if not step.pending)
         return f"partial, {done} of {len(self.steps)} steps"
 
@@ -253,7 +253,7 @@ class StatusReport:
             for step in migration.steps:
                 flags = "".join(f"  [{flag}]" for flag in step.flags)
                 lines.append(f"  {step.file:<{file_width}}  {step.shown}{flags}")
-                if step.state == "installed (different checksum)":
+                if step.state == "applied (different checksum)":
                     lines.append(f"    applied   sha384:{step.applied_checksum}")
                     lines.append(f"    on disk   sha384:{step.on_disk_checksum}")
                 elif step.error and step.state in ("failed", "running", "reverting"):

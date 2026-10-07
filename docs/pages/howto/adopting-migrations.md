@@ -73,8 +73,8 @@ $ ferro migrate up --url "$STAGING_URL"
 $ ferro migrate status
 default (sqlite) · main._ferro_migrations
 
-0001_create_author  installed (baseline)
-0002_author_slug    installed (baseline)
+0001_create_author  applied (baseline)
+0002_author_slug    applied (baseline)
 ```
 
 Baseline is refused on a database that already has migration records; `status` says where it stands.

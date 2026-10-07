@@ -403,7 +403,7 @@ def status(
 ) -> int:
     """Show which migrations this database has applied, without changing it.
 
-    Exits 0 when everything is installed, 3 when something is pending, 4 when
+    Exits 0 when everything is applied, 3 when something is pending, 4 when
     something needs attention (a failed or interrupted step, an edited file,
     a database ahead of the directory).
     """

@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 __all__ = ["DriftReport", "drift", "render_op"]
 
 _DESTRUCTIVE = json.dumps({"destructive": True})
-_INSTALLED = {"installed", "installed_different_checksum", "installed_baseline"}
+_APPLIED = {"applied", "applied_different_checksum", "applied_baseline"}
 _UNFINISHED = {"running", "failed", "interrupted", "reverting"}
 
 
@@ -275,8 +275,8 @@ def _unfinished(status: dict[str, Any]) -> str | None:
         for step, state in zip(migration["steps"], states):
             if state in _UNFINISHED:
                 return f"{migration['name']}/{step['file']} is {state}"
-        if any(s in _INSTALLED for s in states) and not all(
-            s in _INSTALLED for s in states
+        if any(s in _APPLIED for s in states) and not all(
+            s in _APPLIED for s in states
         ):
             return f"{migration['name']} is partly applied"
     return None
@@ -333,7 +333,7 @@ async def _audit(name: str, database: DatabaseSettings) -> DriftReport:
         migration
         for migration in status["migrations"]
         if migration["steps"]
-        and all(step["state"] in _INSTALLED for step in migration["steps"])
+        and all(step["state"] in _APPLIED for step in migration["steps"])
     ]
     if not applied:  # pragma: no cover - records exist, so one is applied or unfinished
         return _refused(

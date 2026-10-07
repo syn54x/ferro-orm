@@ -625,6 +625,53 @@ async def test_a_live_table_the_projects_name_filter_excludes_is_never_dropped(
     assert "bra_named" not in upgrade + downgrade, upgrade
 
 
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version_table", [None, "bra_alembic_version"])
+async def test_the_version_table_is_never_dropped(
+    db_url, postgres_base_url, db_schema_name, version_table
+):
+    """A database Alembic manages carries its version table, which no
+    metadata declares: deleting a model never drops it, under the default
+    name or the project's own ``version_table``."""
+    _bra_shop(with_order=False)
+    await connect(db_url, auto_migrate=True)
+    name = version_table or "alembic_version"
+    async with engines.session():
+        await execute(f'CREATE TABLE "{name}" ("version_num" varchar(32) NOT NULL)')
+
+    upgrade, downgrade = autogenerate(
+        db_url,
+        postgres_base_url,
+        db_schema_name,
+        extra_opts={"version_table": version_table} if version_table else None,
+    )
+    assert name not in upgrade + downgrade, upgrade
+    assert "drop_table" not in upgrade, upgrade
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_ferros_tracking_tables_are_never_dropped(
+    db_url, postgres_base_url, db_schema_name
+):
+    """The tracking tables no model declares are not tables a deleted model
+    left behind: a database carrying them is refused for
+    ``ferro migrate new``, never handed a ``drop_table`` of either."""
+    _bra_shop(with_order=False)
+    await connect(db_url, auto_migrate=True)
+    name = f"tr_{uuid.uuid4().hex}"
+    await connect(db_url, name=name)
+    try:
+        await _core._ensure_tracking_tables(name, None)
+    finally:
+        await _core._disconnect(name)
+
+    with pytest.raises(RuntimeError) as refused:
+        autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert "`ferro migrate new`" in str(refused.value)
+
+
 # ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------

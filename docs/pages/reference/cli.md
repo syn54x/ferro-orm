@@ -111,7 +111,7 @@ Show which migrations this database has applied, without changing it or taking a
 | `--steps` | Print every migration's steps, not only those needing attention. |
 | `--json` | Print the report as a JSON document. |
 
-Exit 0 when everything is installed, 3 when something is pending, 4 when something needs attention.
+Exit 0 when everything is applied, 3 when something is pending, 4 when something needs attention.
 
 ## `ferro migrate drift`
 

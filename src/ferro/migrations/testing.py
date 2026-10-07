@@ -73,7 +73,7 @@ if TYPE_CHECKING:
 __all__ = ["Harness", "RoundTripResult", "harness"]
 
 _MIGRATION = re.compile(r"(\d{4})(_\w+)?")
-_APPLIED = {"installed", "installed (baseline)", "installed (different checksum)"}
+_APPLIED = {"applied", "applied (baseline)", "applied (different checksum)"}
 
 
 @dataclass(frozen=True)

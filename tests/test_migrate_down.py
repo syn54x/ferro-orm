@@ -253,7 +253,7 @@ def test_down_to_a_migration_reverts_newest_first_and_a_failed_down_resumes(
     assert failed[10] is None and failed[11] is None
 
     assert run("migrate", "status", "--url", db.url) == 3
-    assert "0002_second         installed" in capsys.readouterr().out
+    assert "0002_second         applied" in capsys.readouterr().out
 
     second_down.write_text('DROP TABLE "second";\n')
     assert run("migrate", "down", "--to", "0001", "--yes", "--url", db.url) == 0

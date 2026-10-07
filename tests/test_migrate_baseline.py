@@ -125,8 +125,8 @@ def test_an_auto_migrated_database_is_baselined_and_up_applies_only_the_next(
 
     code, out, _ = cli(capsys, "status", "--url", db.url)
     assert code == 0
-    assert "0001_create_author  installed (baseline)" in out
-    assert "0002_add_teams      installed (baseline)" in out
+    assert "0001_create_author  applied (baseline)" in out
+    assert "0002_add_teams      applied (baseline)" in out
 
     write_models(project, pkg, ORGS)
     new("add_orgs")
@@ -229,7 +229,7 @@ def test_a_baseline_at_an_earlier_migration_ignores_the_later_tables(
 
     code, out, _ = cli(capsys, "status", "--url", db.url)
     assert code == 3
-    assert "0001_create_author  installed (baseline)" in out
+    assert "0001_create_author  applied (baseline)" in out
     assert "0002_add_teams      pending" in out
 
 
@@ -360,7 +360,7 @@ def test_remove_is_refused_under_a_run_and_undoes_the_baseline_after_down(
     assert code == 3
     for name in ("0001_create_author", "0002_add_teams", "0003_add_orgs"):
         assert f"{name}  " in out
-    assert "installed" not in out
+    assert "applied" not in out
 
     assert asyncio.run(remove_baseline(url=db.url)) == []
     assert cli(capsys, "baseline", "--remove", "--url", db.url)[1] == (
