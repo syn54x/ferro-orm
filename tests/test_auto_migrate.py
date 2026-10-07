@@ -2280,6 +2280,29 @@ async def test_migrate_updates_renames_a_hinted_table_with_its_rows_and_index(
     assert not [m for m in again if m.startswith("✅ Ferro Engine: Table 'trnauthor'")]
     assert not [str(w.message) for w in caught if "trn" in str(w.message)]
 
+    # And no drift: the live database read the way `drift` reads it (with
+    # the hinted old table) plans to nothing against the models, destructive.
+    import json
+
+    from ferro import _core
+    from ferro.ir.compiler import compile_registry_schema_ir
+
+    declared = json.dumps(compile_registry_schema_ir())
+    live_json, facts_json = await _core._live_schema_ir(
+        None, json.dumps(["trnauthor"]), declared
+    )
+    plan = json.loads(
+        _core._plan_from_ir(
+            live_json,
+            declared,
+            db_backend,
+            json.dumps({"destructive": True}),
+            False,
+            facts_json,
+        )
+    )
+    assert plan == {"operations": [], "warnings": [], "always_warnings": []}
+
 
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
@@ -2305,6 +2328,18 @@ async def test_a_hinted_table_without_migrate_updates_is_left_alone_and_warns(
     async with ferro.engines.session():
         rows = await fetch_all('SELECT "name" FROM "trnwriter" ORDER BY "id"')
         assert [r["name"] for r in rows] == ["Ann", "Bo"]
+
+        # create_tables() is the same create pass, with the same word.
+        with pytest.warns(
+            UserWarning,
+            match=(
+                r'table "trnauthor" declares __ferro_renamed_from__ = "trnwriter".*'
+                r"migrate_updates=True.*ferro migrate new"
+            ),
+        ):
+            await ferro.create_tables()
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnwriter"}
 
 
 @pytest.mark.asyncio

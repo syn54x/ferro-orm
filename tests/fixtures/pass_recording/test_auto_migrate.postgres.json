@@ -14,6 +14,7 @@
       "'trnwriter': CREATE INDEX IF NOT EXISTS \"idx_trnwriter_name\" ON \"trnwriter\" (\"name\")"
     ],
     "warnings": [
+      "table \"trnauthor\" declares __ferro_renamed_from__ = \"trnwriter\", and the database holds \"trnwriter\" and no \"trnauthor\": \"trnauthor\" was not created. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new.",
       "table \"trnauthor\" declares __ferro_renamed_from__ = \"trnwriter\", and the database holds \"trnwriter\" and no \"trnauthor\": \"trnauthor\" was not created. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new."
     ]
   },
