@@ -118,7 +118,11 @@ async def _against(name: str, target: str, snapshot: dict, dialect: str) -> Drif
     applied one: only the snapshot's tables are read, destructive changes
     count, and each op is one :func:`render_op` line."""
     tables = [model["table_name"] for model in snapshot["payload"]["models"]]
-    live_json, facts_json = await _core._live_schema_ir(name, json.dumps(tables))
+    # The old table of a live rename hint is read too (ADR-0032), as the
+    # reconciliation pass reads it.
+    live_json, facts_json = await _core._live_schema_ir(
+        name, json.dumps(tables), json.dumps(snapshot)
+    )
     plan = json.loads(
         _core._plan_from_ir(
             live_json, json.dumps(snapshot), dialect, _DESTRUCTIVE, False, facts_json

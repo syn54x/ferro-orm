@@ -289,6 +289,27 @@ def test_a_column_dropped_by_hand_is_one_line_and_exit_4(project, pkg, db, capsy
     assert [op["kind"] for op in report.operations] == ["AddColumn"]
 
 
+SQUADS = TEAMS.replace(
+    "class Team(Model):\n", 'class Squad(Model):\n    __ferro_renamed_from__ = "team"\n'
+).replace("lambda team: team.size", "lambda squad: squad.size")
+
+
+def test_a_rename_undone_by_hand_reads_the_hinted_old_table(project, pkg, db, capsys):
+    """The snapshot's ``Squad`` was ``team``; a database holding ``team`` and
+    no ``squad`` is one rename away from it, the same read the
+    reconciliation pass makes, never a missing table."""
+    applied(project, pkg, db, capsys)
+    write_models(project, pkg, SQUADS)
+    new("rename_team")
+    assert run("migrate", "up", "--url", db.url) == 0
+    capsys.readouterr()
+    db.execute('ALTER TABLE "squad" RENAME TO "team"')
+
+    report = drift_api(db)
+    assert report.lines == ["team table is named squad in the snapshot"]
+    assert [op["kind"] for op in report.operations] == ["RenameTable"]
+
+
 def test_a_changed_type_and_nullability_name_both_sides(project, pkg, db, capsys):
     if db.backend != "postgres":
         pytest.skip("SQLite cannot alter a column in place")
@@ -557,9 +578,9 @@ def test_drift_takes_no_lock_and_creates_nothing(project, pkg, db, capsys, monke
     held_while_reading: list[bool] = []
     live_schema_ir = _core._live_schema_ir
 
-    async def probing(using=None, tables_json=None):
+    async def probing(using=None, tables_json=None, declared_json=None):
         held_while_reading.append(await _core._run_lock_is_held(using))
-        return await live_schema_ir(using, tables_json)
+        return await live_schema_ir(using, tables_json, declared_json)
 
     monkeypatch.setattr(_core, "_live_schema_ir", probing)
     assert drift_api(db).clean
