@@ -7,7 +7,7 @@ default (postgres) · public._ferro_migrations
 0006_add_teams           installed
 0007_nickname            partial, 1 of 3 steps
   01_add_nickname.sql      installed
-  02_backfill_nickname.py  failed
+  02_backfill_nickname.py  failed at 30,000 rows
     ValueError: nickname too long (id=30000412)
   03_nickname_index.sql    pending
 0008_drop_legacy         pending
@@ -16,7 +16,7 @@ default (postgres) · public._ferro_migrations
 A fully installed or fully pending migration is one line; its steps expand
 where something needs attention, or everywhere with ``--steps``. Every state
 is decided in the Rust core (``_core._run_status``); this module only names
-and prints them. ``status`` exits 3 when anything is pending and 4 when
+and prints them (a chunked step's ``rows_done`` comes from its record). ``status`` exits 3 when anything is pending and 4 when
 anything needs attention (a failed, interrupted or reverting step, an edited
 file, a database ahead of the checkout, or a refusal ``up`` would meet).
 """
@@ -77,6 +77,16 @@ class StepStatus:
     on_disk_checksum: str | None = None
     flags: list[str] = field(default_factory=list)
     """``destructive`` / ``data-dependent`` headers the file carries."""
+    rows_done: int | None = None
+    """The rows a chunked step's current walk has committed."""
+
+    @property
+    def shown(self) -> str:
+        """The state as ``status`` prints it: a failed chunked step says how
+        far it got (``failed at 30,000 rows``)."""
+        if self.state == "failed" and self.rows_done is not None:
+            return f"failed at {self.rows_done:,} rows"
+        return self.state
 
     @property
     def needs_attention(self) -> bool:
@@ -168,9 +178,13 @@ class StatusReport:
         dialect: str,
         table: str,
         refusal: str | None = None,
+        rows_done: dict[tuple[int, int], int] | None = None,
     ) -> StatusReport:
         """Build the report from ``_core._run_status``'s document; ``refusal``
-        (the newer-format text) replaces the planner's when given."""
+        (the newer-format text) replaces the planner's when given;
+        ``rows_done`` holds each chunked step's committed rows by
+        ``(migration, step)``."""
+        rows_done = rows_done or {}
         migrations = [
             MigrationStatus(
                 number=m["number"],
@@ -184,6 +198,7 @@ class StatusReport:
                         applied_checksum=s["applied_checksum"],
                         on_disk_checksum=s["on_disk_checksum"],
                         flags=list(s["flags"]),
+                        rows_done=rows_done.get((m["number"], s["step"])),
                     )
                     for s in m["steps"]
                 ],
@@ -216,11 +231,11 @@ class StatusReport:
                 continue
             for step in migration.steps:
                 flags = "".join(f"  [{flag}]" for flag in step.flags)
-                lines.append(f"  {step.file:<{file_width}}  {step.state}{flags}")
+                lines.append(f"  {step.file:<{file_width}}  {step.shown}{flags}")
                 if step.state == "installed (different checksum)":
                     lines.append(f"    applied   sha384:{step.applied_checksum}")
                     lines.append(f"    on disk   sha384:{step.on_disk_checksum}")
-                elif step.error and step.state in ("failed", "running"):
+                elif step.error and step.state in ("failed", "running", "reverting"):
                     lines.extend(f"    {line}" for line in step.error.splitlines())
         for name in self.ahead:
             lines.append(f"{name:<{name_width}}  applied, not in the directory")

@@ -141,13 +141,25 @@ def evict_instance(
 
 
 @asynccontextmanager
-async def transaction(using: str | None = None, *, session: "Session | None" = None):
+async def transaction(
+    using: str | None = None,
+    *,
+    session: "Session | None" = None,
+    immediate: bool = False,
+):
     """Run database operations inside a transaction context.
 
     Yields a :class:`~ferro.raw.Transaction` handle bound to this transaction's
     connection. The handle exposes ``execute`` / ``fetch_all`` / ``fetch_one``
     for raw SQL on the same connection — useful for setting Postgres GUCs,
     advisory locks, and any one-off statement that doesn't fit a Model.
+
+    ``immediate=True`` opens a SQLite transaction with ``BEGIN IMMEDIATE``:
+    it holds the database's write lock from the start, so a transaction that
+    reads and then writes never fails with ``SQLITE_BUSY`` upgrading its
+    lock (another writer waits on the busy timeout instead). On Postgres it
+    is a plain ``BEGIN`` and changes nothing; a nested transaction (a
+    savepoint) ignores it.
 
     Examples:
         >>> async with transaction() as tx:
@@ -167,7 +179,7 @@ async def transaction(using: str | None = None, *, session: "Session | None" = N
     from .raw import Transaction
 
     route = resolve_transaction_scope(using=using, session=session)
-    tx_id = await begin_transaction(route)
+    tx_id = await begin_transaction(route, immediate)
     connection_name = transaction_connection_name(tx_id, session_id=route.session_id)
     child_route = route_for_transaction(connection_name, tx_id, route.session_id)
     token = _CURRENT_TRANSACTION.set(tx_id)

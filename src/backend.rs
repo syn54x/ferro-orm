@@ -743,10 +743,29 @@ impl EngineHandle {
     }
 
     pub async fn begin_transaction_connection(&self) -> Result<EngineConnection, sqlx::Error> {
+        self.begin_transaction_connection_with(false).await
+    }
+
+    /// Begin a transaction on a fresh pool connection. With `immediate`, a
+    /// SQLite transaction opens with `BEGIN IMMEDIATE`: it holds the
+    /// database's write lock from its first statement, so a read-then-write
+    /// transaction never meets `SQLITE_BUSY` upgrading its lock (another
+    /// writer waits on `busy_timeout` at the `BEGIN` instead). Postgres has
+    /// no such mode and needs none (row locks are taken per statement), so
+    /// `immediate` changes nothing there: it is a plain `BEGIN`.
+    pub async fn begin_transaction_connection_with(
+        &self,
+        immediate: bool,
+    ) -> Result<EngineConnection, sqlx::Error> {
         match &self.pool_snapshot() {
             BackendPool::Sqlite(pool) => {
                 let mut conn = pool.acquire().await?;
-                sqlx::query("BEGIN").execute(&mut *conn).await?;
+                let begin = if immediate {
+                    "BEGIN IMMEDIATE"
+                } else {
+                    "BEGIN"
+                };
+                sqlx::query(begin).execute(&mut *conn).await?;
                 Ok(EngineConnection::Sqlite(conn))
             }
             BackendPool::Postgres(pool) => {
@@ -1524,6 +1543,59 @@ mod tests {
             .await
             .unwrap();
         assert!(rows.is_empty());
+    }
+
+    /// Two connections to one SQLite file, waiting on no lock.
+    async fn two_connection_sqlite(name: &str) -> (EngineHandle, std::path::PathBuf) {
+        use sqlx::sqlite::SqliteConnectOptions;
+        let path = std::env::temp_dir().join(format!("{name}-{}.db", uuid::Uuid::new_v4()));
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .busy_timeout(std::time::Duration::ZERO);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let engine = EngineHandle::new_sqlite(pool);
+        engine
+            .execute_sql("CREATE TABLE claim (id integer primary key)")
+            .await
+            .unwrap();
+        (engine, path)
+    }
+
+    #[tokio::test]
+    async fn an_immediate_sqlite_transaction_holds_the_write_lock_from_begin() {
+        let (engine, path) = two_connection_sqlite("ferro-immediate").await;
+
+        // Not one statement has run in it, yet another writer is refused.
+        let mut tx = engine
+            .begin_transaction_connection_with(true)
+            .await
+            .unwrap();
+        let other = engine
+            .execute_sql("INSERT INTO claim (id) VALUES (1)")
+            .await;
+        let err = other.expect_err("the immediate transaction holds the write lock");
+        assert!(err.to_string().contains("locked"), "{err}");
+        tx.rollback().await.unwrap();
+        drop(tx);
+
+        // A deferred BEGIN takes no lock until its first statement.
+        let mut tx = engine
+            .begin_transaction_connection_with(false)
+            .await
+            .unwrap();
+        engine
+            .execute_sql("INSERT INTO claim (id) VALUES (2)")
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        drop(tx);
+        drop(engine);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

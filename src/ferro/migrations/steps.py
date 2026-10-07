@@ -53,6 +53,7 @@ __all__ = [
     "StepRefused",
     "atomic",
     "chunked",
+    "chunked_query",
     "declared_up_kind",
     "irreversible",
     "load_step",
@@ -89,7 +90,8 @@ class Atomic:
 @dataclass(frozen=True)
 class Chunked:
     """The runner pages ``query`` by keyset, ``batch_size`` rows per
-    transaction (ADR-0024; run by ticket #532)."""
+    transaction (ADR-0024; :func:`ferro.migrations.chunked.run_chunked`).
+    :func:`chunked_query` builds and checks the query."""
 
     query: Callable[[HistoricalModels], Query[Any]]
     batch_size: int
@@ -158,7 +160,18 @@ def chunked[F: Callable[..., Awaitable[Any]]](
 ) -> Callable[[F], F]:
     """Declare a step function chunked: the runner pages ``query`` (given
     ``ctx.models``) by keyset, ``batch_size`` rows per transaction, and calls
-    ``async def up(ctx, batch)`` once per batch. Run by ticket #532."""
+    ``async def up(ctx, batch)`` once per batch, committing the batch's
+    cursor with it. ``query`` orders by keys that include the model's
+    primary key, and selects only the rows that still need the step, so a
+    resumed run re-pages from its cursor::
+
+        @chunked(
+            lambda models: models.Author.where(lambda author: author.slug == None)
+            .order_by(lambda author: author.id),
+            batch_size=1000,
+        )
+        async def up(ctx, batch): ...
+    """
     if not callable(query):
         raise TypeError("@chunked takes the query as a function of ctx.models")
     if (
@@ -197,6 +210,78 @@ def nothing_to_reverse[F: Callable[..., Any]](reason: str) -> Callable[[F], F]:
         return _declare(fn, shape)
 
     return decorate
+
+
+def chunked_query(shape: Chunked, models: HistoricalModels, path: Path) -> Query[Any]:
+    """Build a ``@chunked`` step's query over ``models`` and check that the
+    runner can page it by keyset (what the run checks for every chunked step
+    before anything runs).
+
+    Raises:
+        StepRefused: the declaration does not return a query; the query pages
+            a table without a single primary key (a many-to-many join table,
+            #492); it has no ``order_by``, or its order keys leave out the
+            primary key; or it sets its own ``limit`` / ``offset`` /
+            ``after`` / ``before``. The message names the file and the fix.
+    """
+    from ..query import Query
+
+    shown = _shown(path)
+    try:
+        query = shape.query(models)
+    except Exception as err:
+        raise StepRefused(
+            f"ferro migrate: {shown}: @chunked's query does not build: "
+            f"{type(err).__name__}: {err}"
+        ) from err
+    if not isinstance(query, Query):
+        raise StepRefused(
+            f"ferro migrate: {shown}: @chunked takes a function of ctx.models that "
+            f"returns a query, and this one returned {type(query).__name__}"
+        )
+    model = query.model_cls
+    table = getattr(model, "__ferro_table__", None) or model.__name__.lower()
+    pk = getattr(model, "__ferro_pk__", None)
+    if pk is None:
+        raise StepRefused(
+            f"ferro migrate: {shown}: @chunked pages {table}, a table without a single "
+            f"primary key (a many-to-many join table), and keyset paging over a "
+            f"composite key is not built yet (#492). Instead page the parent model "
+            f"and change each parent's join rows inside the batch: @chunked over "
+            f"ctx.models.<Parent> ordered by its primary key, then "
+            f'ctx.models.table("{table}").where(...) in the step'
+        )
+    var = model.__name__.lower()
+    add_pk = f".order_by(lambda {var}: {var}.{pk})"
+    keys = [entry.column for entry in query.order_by_clause if not entry.path]
+    if not query.order_by_clause:
+        raise StepRefused(
+            f"ferro migrate: {shown}: @chunked needs an ordered query: the runner "
+            f"pages it by its order keys and commits the last row's as the cursor. "
+            f"Add {add_pk}"
+        )
+    if pk not in keys:
+        raise StepRefused(
+            f"ferro migrate: {shown}: @chunked orders {table} by {', '.join(keys)} "
+            f"without its primary key {pk}, so two rows could share a cursor. Add "
+            f"{add_pk} as the last order key"
+        )
+    bounds = [
+        name
+        for name, value in (
+            ("limit", query._limit),
+            ("offset", query._offset),
+            ("after", query._after),
+            ("before", query._before),
+        )
+        if value is not None
+    ]
+    if bounds:
+        raise StepRefused(
+            f"ferro migrate: {shown}: @chunked's query sets {', '.join(bounds)}; the "
+            f"runner pages it itself (batch_size rows after the cursor), so remove it"
+        )
+    return query
 
 
 def _reason(reason: Any, name: str) -> str:

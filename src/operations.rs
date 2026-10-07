@@ -1710,6 +1710,11 @@ fn backend_column_value_expr(
 ///     route (RouteHandle): Resolved route (FF-D D3); `route.tx_id` is the
 ///         *parent* transaction for nested savepoints, or `None` to open a
 ///         root transaction on `route.connection_name`.
+///     immediate (bool): A root SQLite transaction opens with `BEGIN
+///         IMMEDIATE`, holding the write lock from its first statement (see
+///         [`crate::backend::EngineHandle::begin_transaction_connection_with`]).
+///         A plain `BEGIN` on Postgres, where it changes nothing; ignored by
+///         a nested savepoint, which shares its parent's lock.
 ///
 /// Returns:
 ///     str: Opaque transaction id for `commit_transaction` / `rollback_transaction`.
@@ -1719,10 +1724,11 @@ fn backend_column_value_expr(
 /// settings-bearing session routes a root transaction to a non-Postgres
 /// connection, or on BEGIN/SAVEPOINT/settings-batch failure.
 #[pyfunction]
-#[pyo3(signature = (route))]
+#[pyo3(signature = (route, immediate=false))]
 pub fn begin_transaction(
     py: Python<'_>,
     route: Py<crate::state::RouteHandle>,
+    immediate: bool,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let r = route.get();
@@ -1766,6 +1772,15 @@ pub fn begin_transaction(
                 // applies the session's set_config batch before any user
                 // statement can run in this transaction. Nested savepoints
                 // need nothing — SET LOCAL is transaction-scoped.
+                // An immediate SQLite transaction: SQLite carries no session
+                // settings, so there is no `set_config` batch to apply.
+                None if immediate && engine.backend() == crate::state::Dialect::Sqlite => {
+                    let conn = engine
+                        .begin_transaction_connection_with(true)
+                        .await
+                        .map_err(|e| crate::errors::map_db_error("Failed to BEGIN IMMEDIATE", e))?;
+                    TransactionHandle::root(conn, connection_name)
+                }
                 None => {
                     let conn = begin_transaction_with_settings(
                         &engine,

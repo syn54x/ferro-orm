@@ -36,6 +36,10 @@ connection inside one transaction under its migration's historical models
 
     0011_backfill_slugs  01_backfill_author  applied (40 ms)
 
+A ``@chunked`` step runs one transaction per batch instead, its cursor
+committed with each batch (:mod:`ferro.migrations.chunked`), and its query
+is checked over the historical models before anything runs.
+
 :func:`status` reads the same records with no lock and creates nothing.
 """
 
@@ -62,6 +66,7 @@ from ..registry import REGISTRY
 from ..settings import _DURATION, _DURATION_UNITS, SettingsError
 from ..state import resolve_operation_scope
 from . import historical
+from .chunked import BatchFailed, run_chunked
 from .context import HistoricalModels, StepContext
 from .historical import HistoricalModelError
 from .report import RunRefused, StatusReport
@@ -71,6 +76,7 @@ from .steps import (
     LoadedStep,
     NothingToReverse,
     StepRefused,
+    chunked_query,
     load_step,
     unwritten,
 )
@@ -292,7 +298,9 @@ async def _run(
     name_width = max(len(step["migration_name"]) for step in steps)
     stem_width = max(len(_stem(step["file"])) for step in steps)
     ferro_version = _ferro_version()
+    standing = {(r["migration"], r["step"]): r for r in records}
     with _HistoricalSwaps(database.directory) as swaps:
+        _check_chunked(steps, loaded, swaps, "up")
         for step in steps:
             shown = f"{step['migration_name']}/{step['file']}"
             if step["edited"] is not None:
@@ -308,7 +316,10 @@ async def _run(
             if step["data"]:
                 step_ctx = _DataStep(name, tracking, handle, dialect, step, line)
                 outcome = await step_ctx.up(
-                    loaded[_key(step)], swaps.models_for(step), record
+                    loaded[_key(step)],
+                    swaps.models_for(step),
+                    record,
+                    standing.get(_key(step)),
                 )
             else:
                 swaps.leave(step)
@@ -354,8 +365,9 @@ def _load_data_steps(
 ) -> dict[tuple[int, int], LoadedStep]:
     """Load every planned data step before anything runs, refusing the run
     on a file that does not load, an unwritten step (every ``todo`` named by
-    file, line and message), a ``chunked`` step, or (going down) an
-    irreversible one. A ``nothing_to_reverse`` down marks its step so."""
+    file, line and message), or (going down) an irreversible one. A
+    ``nothing_to_reverse`` down marks its step so. A ``@chunked`` query is
+    checked once its historical models are built (:func:`_check_chunked`)."""
     nothing = "applied" if direction == "up" else "reverted"
     loaded: dict[tuple[int, int], LoadedStep] = {}
     todos: list[str] = []
@@ -363,7 +375,6 @@ def _load_data_steps(
         if not step["data"] or step["nothing_to_reverse"] is not None:
             continue
         path = Path(step["path"])
-        shown = f"{step['migration_name']}/{step['file']}"
         try:
             this = load_step(path, step["checksum"])
         except StepRefused as refused:
@@ -371,11 +382,6 @@ def _load_data_steps(
         todos += unwritten(path, this.todos)
         declared = this.up if direction == "up" else this.down
         shape = declared.shape
-        if isinstance(shape, Chunked):
-            raise RunRefused(
-                f"ferro migrate: {shown}: chunked steps run in ticket #532. "
-                f"Nothing was {nothing}."
-            )
         if isinstance(shape, Irreversible):
             raise RunRefused(
                 f"ferro migrate: {step['migration']:04}:{step['step']:02} is "
@@ -395,6 +401,29 @@ def _load_data_steps(
     return loaded
 
 
+def _check_chunked(
+    steps: list[dict[str, Any]],
+    loaded: dict[tuple[int, int], LoadedStep],
+    swaps: _HistoricalSwaps,
+    direction: str,
+) -> None:
+    """Refuse the run before anything runs when a ``@chunked`` step's query
+    cannot be paged by keyset (:func:`~ferro.migrations.steps.chunked_query`),
+    built over its migration's historical models."""
+    nothing = "applied" if direction == "up" else "reverted"
+    for step in steps:
+        this = loaded.get(_key(step))
+        if this is None:
+            continue
+        shape = (this.up if direction == "up" else this.down).shape
+        if not isinstance(shape, Chunked):
+            continue
+        try:
+            chunked_query(shape, swaps.built_for(step), Path(step["path"]))
+        except StepRefused as refused:
+            raise RunRefused(f"{refused}. Nothing was {nothing}.") from None
+
+
 class _HistoricalSwaps:
     """The registry swap of the migration whose data step is running: one
     swap per migration with data steps, held until the run leaves that
@@ -406,6 +435,7 @@ class _HistoricalSwaps:
         self._migration: int | None = None
         self._installed: HistoricalModels | None = None
         self._snapshots: dict[int, dict[str, Any]] | None = None
+        self._built: dict[int, HistoricalModels] = {}
 
     def __enter__(self) -> _HistoricalSwaps:
         return self
@@ -424,10 +454,18 @@ class _HistoricalSwaps:
         """The historical models of ``step``'s migration, installed."""
         self.leave(step)
         if self._installed is None:
-            models = self._build(step)
+            models = self.built_for(step)
             self._stack.enter_context(REGISTRY.swap(models))
             self._migration, self._installed = step["migration"], models
         return self._installed
+
+    def built_for(self, step: dict[str, Any]) -> HistoricalModels:
+        """The historical models of ``step``'s migration, built once and not
+        installed."""
+        models = self._built.get(step["migration"])
+        if models is None:
+            models = self._built[step["migration"]] = self._build(step)
+        return models
 
     def _build(self, step: dict[str, Any]) -> HistoricalModels:
         if self._snapshots is None:
@@ -456,11 +494,21 @@ def _now() -> str:
 
 
 class _DataStep:
-    """Run one planned data step and settle its record (ADR-0024): an atomic
-    step is one transaction on the run's connection, its record finished
-    (going up) or removed (going down) inside that transaction. A failure
-    rolls the transaction back and records ``failed_at`` and the error in a
-    transaction of its own."""
+    """Run one planned data step and settle its record (ADR-0024).
+
+    An atomic step is one transaction on the run's connection, its record
+    finished (going up) or removed (going down) inside that transaction. A
+    chunked step runs through :func:`~ferro.migrations.chunked.run_chunked`,
+    one transaction per batch with its cursor committed in it.
+
+    A failure rolls back what it was running and is recorded only where the
+    database moved (the tracking table says where it stands now): going up
+    the started record always carries ``failed_at`` and the error; going down
+    a record changes only when the down left part of itself committed (a
+    chunked down past its first batch, which stays ``reverting``). A down
+    that rolled back whole leaves the step applied and its record untouched:
+    the error is the run's to report.
+    """
 
     def __init__(
         self,
@@ -493,10 +541,29 @@ class _DataStep:
         route = resolve_operation_scope(using=None, session=None) if in_step else None
         await _core._write_record(self._name, json.dumps(record), self._tracking, route)
 
-    async def up(
-        self, loaded: LoadedStep, models: HistoricalModels, record: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _verify_lock(self) -> None:
         await _core._verify_run_lock(self._handle)
+
+    def _failed(self, ms: int, error: str, after: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "ms": ms,
+            "message": f"ferro migrate: {self._shown} failed: {error}\n{after} Nothing "
+            f"after it ran.",
+        }
+
+    async def up(
+        self,
+        loaded: LoadedStep,
+        models: HistoricalModels,
+        record: dict[str, Any],
+        standing: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run the step's ``up``; ``standing`` is its record from an earlier,
+        unfinished attempt, whose chunked cursor the run resumes from."""
+        await self._verify_lock()
+        chunked = isinstance(loaded.up.shape, Chunked)
+        resumed = standing is not None and standing["kind"] == "chunked"
         started = {
             **record,
             "kind": loaded.up.shape.kind,
@@ -505,9 +572,13 @@ class _DataStep:
             "failed_at": None,
             "error": None,
             "duration_ms": 0,
+            "resume_cursor": standing["resume_cursor"] if resumed else None,
+            "rows_done": standing["rows_done"] if resumed else (0 if chunked else None),
         }
         await self._write(started)
         clock = time.monotonic()
+        if chunked:
+            return await self._up_chunked(loaded, models, started, clock)
         try:
             async with transaction(using=self._name) as tx:
                 await loaded.up.fn(self._context(models, tx))
@@ -521,23 +592,65 @@ class _DataStep:
             await self._write(
                 {**started, "failed_at": _now(), "error": error, "duration_ms": ms}
             )
-            return {
-                "ok": False,
-                "ms": ms,
-                "message": (
-                    f"ferro migrate: {self._shown} failed: {error}\nThe step was rolled "
-                    f"back; fix the file or the database and run `ferro migrate up` "
-                    f"again to resume at it. Nothing after it ran."
-                ),
-            }
+            return self._failed(
+                ms,
+                error,
+                "The step was rolled back; fix the file or the database and run "
+                "`ferro migrate up` again to resume at it.",
+            )
         return {"ok": True, "ms": ms}
+
+    async def _up_chunked(
+        self,
+        loaded: LoadedStep,
+        models: HistoricalModels,
+        started: dict[str, Any],
+        clock: float,
+    ) -> dict[str, Any]:
+        try:
+            await run_chunked(
+                lambda tx: self._context(models, tx),
+                loaded.up,
+                started,
+                direction="up",
+                using=self._name,
+                tracking_schema=self._tracking,
+                verify_lock=self._verify_lock,
+            )
+        except BatchFailed as failed:
+            ms = _elapsed(clock)
+            error = _error_text(failed.error)
+            await self._write(
+                {
+                    **started,
+                    "resume_cursor": failed.cursor,
+                    "rows_done": failed.rows_done,
+                    "failed_at": _now(),
+                    "error": error,
+                    "duration_ms": ms,
+                }
+            )
+            return self._failed(
+                ms,
+                error,
+                f"The failing batch was rolled back; the {failed.rows_done:,} rows of "
+                f"the batches before it stay committed. Fix the file or the database "
+                f"and run `ferro migrate up` again to resume after them.",
+            )
+        return {"ok": True, "ms": _elapsed(clock)}
 
     async def down(
         self, loaded: LoadedStep | None, models: HistoricalModels | None
     ) -> dict[str, Any]:
-        await _core._verify_run_lock(self._handle)
+        await self._verify_lock()
         standing = self._step["record"]
         clock = time.monotonic()
+        if (
+            loaded is not None
+            and models is not None
+            and isinstance(loaded.down.shape, Chunked)
+        ):
+            return await self._down_chunked(loaded, models, standing, clock)
         try:
             async with transaction(using=self._name) as tx:
                 if loaded is not None and models is not None:
@@ -547,23 +660,65 @@ class _DataStep:
                     route, standing["migration"], standing["step"], self._tracking
                 )
         except Exception as err:
+            return self._failed(
+                _elapsed(clock),
+                _error_text(err),
+                "The down was rolled back, so the step stays applied and its record "
+                "unchanged; fix the file or the database and run `ferro migrate down` "
+                "again to revert it.",
+            )
+        return {"ok": True, "ms": _elapsed(clock)}
+
+    async def _down_chunked(
+        self,
+        loaded: LoadedStep,
+        models: HistoricalModels,
+        standing: dict[str, Any],
+        clock: float,
+    ) -> dict[str, Any]:
+        try:
+            await run_chunked(
+                lambda tx: self._context(models, tx),
+                loaded.down,
+                standing,
+                direction="down",
+                using=self._name,
+                tracking_schema=self._tracking,
+                verify_lock=self._verify_lock,
+            )
+        except BatchFailed as failed:
             ms = _elapsed(clock)
-            error = _error_text(err)
+            error = _error_text(failed.error)
+            if not failed.committed:
+                return self._failed(
+                    ms,
+                    error,
+                    "Its first batch was rolled back, so the step stays applied and "
+                    "its record unchanged; fix the file or the database and run "
+                    "`ferro migrate down` again to revert it.",
+                )
             # The upsert adds duration_ms: a failed down adds nothing to the
             # time the step took to apply.
             await self._write(
-                {**standing, "failed_at": _now(), "error": error, "duration_ms": 0}
+                {
+                    **standing,
+                    "reverting": True,
+                    "revert_cursor": failed.cursor,
+                    "rows_done": failed.rows_done,
+                    "failed_at": _now(),
+                    "error": error,
+                    "duration_ms": 0,
+                }
             )
-            return {
-                "ok": False,
-                "ms": ms,
-                "message": (
-                    f"ferro migrate: {self._shown} failed: {error}\nThe down was rolled "
-                    f"back and the step's record stands; fix the file or the database "
-                    f"and run `ferro migrate down` again to resume at it. Nothing after "
-                    f"it ran."
-                ),
-            }
+            return self._failed(
+                ms,
+                error,
+                f"The failing batch was rolled back; the {failed.rows_done:,} rows the "
+                f"down reverted before it stay reverted and the step's record stays "
+                f"reverting, so `ferro migrate up` refuses until the down finishes. Fix "
+                f"the file or the database and run `ferro migrate down` again to resume "
+                f"after them.",
+            )
         return {"ok": True, "ms": _elapsed(clock)}
 
 
@@ -624,6 +779,11 @@ async def status(
         dialect=dialect,
         table=state["table"],
         refusal=state["refusal"],
+        rows_done={
+            (r["migration"], r["step"]): r["rows_done"]
+            for r in state["records"]
+            if r["kind"] == "chunked" and r["rows_done"] is not None
+        },
     )
 
 
@@ -782,8 +942,11 @@ async def down(
     than reverted unseen. ``progress`` receives one line per reverted step.
 
     Returns a :class:`RunReport`; a refusal or a failed down is reported in
-    ``refusal``, not raised. A failed down leaves its step's record standing
-    with the error; the next ``down`` resumes at it.
+    ``refusal``, not raised. A failed down that rolled back whole leaves its
+    step applied and its record as it was; one that left part of itself
+    applied (a no-transaction SQL down, a chunked down past its first
+    batch) leaves the record carrying the error, a chunked one still
+    ``reverting`` at its cursor. The next ``down`` resumes at it.
     """
     del settings
     direction = parse_target(target, all=all)
@@ -852,6 +1015,7 @@ async def _revert(
     stem_width = max(len(_stem(step["file"])) for step in steps)
     direction_json = json.dumps(direction)
     with _HistoricalSwaps(database.directory) as swaps:
+        _check_chunked(steps, loaded, swaps, "down")
         for step in steps:
             shown = f"{step['migration_name']}/{step['file']}"
             line = _step_line(step, name_width, stem_width, say)
