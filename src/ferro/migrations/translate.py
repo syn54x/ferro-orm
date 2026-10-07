@@ -435,7 +435,7 @@ def _marker(
     subject = op.get("table") or op.get("type_name") or ""
     if verdict.get("needs") == "backfill":
         return (
-            f"data-dependent (fails while {subject} has rows; in-house migrations "
+            f"data-dependent (fails while {subject} has rows; ferro migrations "
             f"generate the backfill: `ferro migrate new`)"
         )
     if direction == "up" and verdict.get("drops_data"):

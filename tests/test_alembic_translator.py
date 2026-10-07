@@ -528,7 +528,7 @@ async def test_a_sqlite_change_needing_a_rebuild_is_refused_naming_ferro_migrate
 async def test_a_tracked_database_is_refused_naming_ferro_migrate_new(
     db_url, postgres_base_url, db_schema_name, db_backend
 ):
-    """A database ferro's in-house migrations track (it carries the tracking
+    """A database ferro migrations track (it carries the tracking
     tables) takes model changes from ``ferro migrate new``."""
     _card_v1()
     await connect(db_url, auto_migrate=True)
