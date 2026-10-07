@@ -30,16 +30,6 @@ pytestmark = pytest.mark.usefixtures("isolated_imports", "clean_registry")
 
 
 @pytest.fixture
-def isolated_imports(monkeypatch: pytest.MonkeyPatch):
-    """Restore ``sys.path`` and drop modules a test imported from ``tmp_path``."""
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    before = set(sys.modules)
-    yield
-    for name in set(sys.modules) - before:
-        del sys.modules[name]
-
-
-@pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("FERRO_CONFIG", raising=False)
     root = tmp_path / "proj"

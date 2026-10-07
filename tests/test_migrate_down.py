@@ -30,7 +30,6 @@ from ferro import _core
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     LIBRARY,
-    isolated_imports,
     pkg,
     project,
     run,

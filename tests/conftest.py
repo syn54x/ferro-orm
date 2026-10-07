@@ -1,6 +1,9 @@
 import asyncio
 import os
+import sys
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -233,6 +236,51 @@ def clean_registry():
     _wipe()
     yield
     _wipe()
+
+
+def _imported_from(module: object, root: str) -> bool:
+    """Whether ``module`` was loaded from a file (or, a namespace package,
+    a directory) under ``root``."""
+    prefix = os.path.realpath(root) + os.sep
+    locations = [getattr(module, "__file__", None)]
+    locations.extend(getattr(module, "__path__", None) or [])
+    return any(
+        isinstance(location, str) and os.path.realpath(location).startswith(prefix)
+        for location in locations
+    )
+
+
+@contextmanager
+def imports_isolated_under(root: str | os.PathLike[str]) -> Iterator[None]:
+    """Restore ``sys.path`` on exit and drop the modules imported meanwhile
+    from under ``root`` (a test's temporary projects), and only those.
+
+    A module imported meanwhile from anywhere else — ferro's own lazily
+    imported submodules, Alembic, SQLAlchemy's dialects — stays loaded.
+    Dropping it splits the process into two copies of that module: the
+    package attribute still names the old one (``ferro.migrations.alembic``
+    stays bound on ``ferro.migrations``), while the next ``import`` builds a
+    new one. When that module is ``alembic.autogenerate.compare``, the new
+    copy carries a fresh ``comparators`` dispatcher on which ferro's
+    comparator was never registered, so every later autogenerate in the
+    process silently writes stock Alembic ops for ferro's tables.
+    """
+    path = list(sys.path)
+    before = set(sys.modules)
+    try:
+        yield
+    finally:
+        sys.path[:] = path
+        for name in set(sys.modules) - before:
+            if _imported_from(sys.modules[name], os.fspath(root)):
+                del sys.modules[name]
+
+
+@pytest.fixture
+def isolated_imports(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """:func:`imports_isolated_under` every temporary directory of the session."""
+    with imports_isolated_under(tmp_path_factory.getbasetemp()):
+        yield
 
 
 @pytest.fixture(autouse=True)

@@ -41,7 +41,6 @@ from ferro.migrations import runner
 from ferro.migrations.chunked import decode_cursor, encode_cursor
 from ferro.settings import FerroSettings
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
-    isolated_imports,
     pkg,
     project,
     run,

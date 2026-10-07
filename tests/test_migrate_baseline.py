@@ -30,7 +30,6 @@ from ferro.migrations import MigrationRefused, baseline, remove_baseline
 from tests.test_migrate_drift import SQUADS, TEAMS
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
-    isolated_imports,
     pkg,
     project,
     run,

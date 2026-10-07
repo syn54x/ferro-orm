@@ -40,16 +40,6 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-@pytest.fixture
-def isolated_imports(monkeypatch: pytest.MonkeyPatch):
-    """Restore ``sys.path`` and drop modules a test imported from ``tmp_path``."""
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    before = set(sys.modules)
-    yield
-    for name in set(sys.modules) - before:
-        del sys.modules[name]
-
-
 # -- lookup --------------------------------------------------------------------
 
 

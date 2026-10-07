@@ -28,7 +28,6 @@ from ferro.base import FerroField
 from ferro.migrations import MigrationRefused
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
-    isolated_imports,
     pkg,
     project,
     write_models,
