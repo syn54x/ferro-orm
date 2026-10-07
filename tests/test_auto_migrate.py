@@ -2175,3 +2175,244 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
         warnings.simplefilter("ignore")
         again = await _connect_logging(db_url)
     assert not [m for m in again if m.startswith("✅ Ferro Engine: Table 'passwriter'")]
+
+
+# ---------------------------------------------------------------------------
+# A declared table rename in the pass (#528 follow-up, ADR-0032)
+#
+#     class TrnAuthor(Model):
+#         __ferro_renamed_from__ = "trnwriter"
+#
+# against a database holding a populated "trnwriter" and no "trnauthor" is a
+# rename, never a new empty "trnauthor" beside the old table.
+# ---------------------------------------------------------------------------
+
+
+def _define_trn_writer() -> None:
+    class TrnWriter(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: Annotated[str, FerroField(index=True)]
+
+
+def _define_trn_author() -> None:
+    class TrnAuthor(Model):
+        __ferro_renamed_from__ = "trnwriter"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: Annotated[str, FerroField(index=True)]
+
+
+async def _trn_writer_with_rows(db_url: str) -> None:
+    _define_trn_writer()
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await execute("INSERT INTO \"trnwriter\" (\"name\") VALUES ('Ann'), ('Bo')")
+    _rewind()
+
+
+async def _trn_tables(db_url: str) -> set[str]:
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        if db_url.startswith("sqlite"):
+            rows = await fetch_all(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+            names = {r["name"] for r in rows}
+        else:
+            rows = await fetch_all(
+                "SELECT table_name::text AS name FROM information_schema.tables "
+                "WHERE table_schema = current_schema()"
+            )
+            names = {r["name"] for r in rows}
+    ferro.reset_engine()
+    return {name for name in names if name.startswith("trn")}
+
+
+async def _connect_capturing_logs(db_url: str, **flags) -> list[str]:
+    logger = logging.getLogger("ferro")
+    handler = _FerroDebug()
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        await ferro.connect(db_url, **flags)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+    return handler.messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_migrate_updates_renames_a_hinted_table_with_its_rows_and_index(
+    db_url, db_backend, clean_registry
+):
+    import warnings
+
+    await _trn_writer_with_rows(db_url)
+    _define_trn_author()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        messages = await _connect_capturing_logs(db_url, migrate_updates=True)
+    assert not [str(w.message) for w in caught if "trn" in str(w.message)]
+
+    # The create pass created nothing: the table is the old one, renamed.
+    assert not [m for m in messages if m.endswith("Table 'trnauthor' created")]
+    assert [
+        m
+        for m in messages
+        if m.startswith("✅ Ferro Engine: Table 'trnauthor' migrated")
+    ]
+    async with ferro.engines.session():
+        rows = await fetch_all('SELECT "name" FROM "trnauthor" ORDER BY "id"')
+        assert [r["name"] for r in rows] == ["Ann", "Bo"]
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnauthor"}
+    names = _live_index_names(db_url, db_backend, "trnauthor")
+    assert "idx_trnauthor_name" in names and "idx_trnwriter_name" not in names
+
+    # Nothing is left to do: the hint is inert against the renamed table.
+    _rewind()
+    _define_trn_author()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        again = await _connect_capturing_logs(db_url, migrate_updates=True)
+    assert not [m for m in again if m.startswith("✅ Ferro Engine: Table 'trnauthor'")]
+    assert not [str(w.message) for w in caught if "trn" in str(w.message)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_hinted_table_without_migrate_updates_is_left_alone_and_warns(
+    db_url, clean_registry
+):
+    await _trn_writer_with_rows(db_url)
+    _define_trn_author()
+
+    with pytest.warns(
+        UserWarning,
+        match=(
+            r'table "trnauthor" declares __ferro_renamed_from__ = "trnwriter".*'
+            r"migrate_updates=True.*ferro migrate new"
+        ),
+    ):
+        messages = await _connect_capturing_logs(db_url, auto_migrate=True)
+    assert not [m for m in messages if m.endswith("Table 'trnauthor' created")]
+    ferro.reset_engine()
+    # No empty twin: the old table stands, with its rows.
+    assert await _trn_tables(db_url) == {"trnwriter"}
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        rows = await fetch_all('SELECT "name" FROM "trnwriter" ORDER BY "id"')
+        assert [r["name"] for r in rows] == ["Ann", "Bo"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_hinted_table_whose_new_name_is_also_live_is_inert(
+    db_url, clean_registry
+):
+    import warnings
+
+    await _trn_writer_with_rows(db_url)
+    _define_trn_writer()
+
+    class TrnAuthor(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: Annotated[str, FerroField(index=True)]
+
+    await ferro.connect(db_url, auto_migrate=True)
+    _rewind()
+    _define_trn_author()
+
+    # Both names live: the hint is not live (ADR-0032), so it is inert and
+    # silent, and the old table is no business of this modelset.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        messages = await _connect_capturing_logs(
+            db_url, migrate_updates=True, migrate_destructive=True
+        )
+    assert not [str(w.message) for w in caught if "trn" in str(w.message)]
+    assert not [m for m in messages if m.startswith("✅ Ferro Engine: Table 'trn")]
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnwriter", "trnauthor"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_two_tables_claiming_one_live_old_name_refuse_and_change_nothing(
+    db_url, clean_registry
+):
+    await _trn_writer_with_rows(db_url)
+
+    class TrnAuthor(Model):
+        __ferro_renamed_from__ = "trnwriter"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+    class TrnPoet(Model):
+        __ferro_renamed_from__ = "trnwriter"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+    refusal = (
+        r'rename hint refused: tables "trnauthor" and "trnpoet" all declare '
+        r'__ferro_renamed_from__ = "trnwriter"'
+    )
+    for flags in (
+        {"auto_migrate": True},
+        {"migrate_updates": True, "migrate_destructive": True},
+    ):
+        with pytest.warns(UserWarning, match=refusal):
+            messages = await _connect_capturing_logs(db_url, **flags)
+        assert not [m for m in messages if m.startswith("✅ Ferro Engine: Table 'trn")]
+        ferro.reset_engine()
+        assert await _trn_tables(db_url) == {"trnwriter"}
+
+
+def _define_trn_author_with_books() -> None:
+    from ferro import ForeignKey
+
+    class TrnAuthor(Model):
+        __ferro_renamed_from__ = "trnwriter"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: Annotated[str, FerroField(index=True)]
+        books: Relation[list["TrnBook"]] = BackRef()
+
+    class TrnBook(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        author: Annotated[TrnAuthor, ForeignKey("books")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_new_table_referencing_a_renamed_one_is_created_after_the_rename(
+    db_url, clean_registry
+):
+    await _trn_writer_with_rows(db_url)
+    _define_trn_author_with_books()
+
+    # Without migrate_updates neither is created: "trnbook" can only
+    # reference "trnauthor" once the rename has run.
+    with pytest.warns(
+        UserWarning,
+        match=r'"trnauthor" was not created, nor "trnbook", which reference it',
+    ):
+        await ferro.connect(db_url, auto_migrate=True)
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnwriter"}
+
+    _rewind()
+    _define_trn_author_with_books()
+    messages = await _connect_capturing_logs(db_url, migrate_updates=True)
+    assert not [m for m in messages if m.endswith("' created")]
+    async with ferro.engines.session():
+        await execute(
+            'INSERT INTO "trnbook" ("title", "author_id") VALUES (\'Odes\', 2)'
+        )
+        rows = await fetch_all(
+            'SELECT "trnauthor"."name" FROM "trnbook" '
+            'JOIN "trnauthor" ON "trnauthor"."id" = "trnbook"."author_id"'
+        )
+        assert [r["name"] for r in rows] == ["Bo"]
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnauthor", "trnbook"}
