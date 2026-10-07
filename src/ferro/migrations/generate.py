@@ -208,8 +208,7 @@ def prepare(
     check_name(name, "migration name")
     if sql_step is not None:
         check_name(sql_step, "--sql-step name")
-    skipped = _parse_no_backfill(no_backfill)
-    if data_only and skipped:
+    if data_only and no_backfill:
         raise MigrationsDirectoryError(
             "--no-backfill replaces a generated backfill, and --data-only generates none; "
             "drop one of them"
@@ -227,17 +226,20 @@ def prepare(
     if not data_only:
         target = declared_modelset(database)
         try:
+            # The generator decides the guard (ADR-0037): it refuses a
+            # --no-backfill it cannot honour, naming the fix.
+            # `_core.pyi` (owned by #533 in this wave) gains
+            # `options_json: str | None = None` with this change; drop the
+            # ignore when it lands.
             raw = _generate_migration(
-                parent, json.dumps(target), list(database.dialects)
+                parent,
+                json.dumps(target),
+                list(database.dialects),
+                options_json=json.dumps({"no_backfill": list(no_backfill)}),  # ty: ignore[unknown-argument]
             )
         except ValueError as err:
             raise MigrationsDirectoryError(str(err)) from None
 
-    if raw is None and skipped:
-        raise MigrationsDirectoryError(
-            f"--no-backfill {', '.join(f'{t}.{c}' for t, c in skipped)}: the models change "
-            "nothing that asks existing rows for a value, so there is no backfill to replace"
-        )
     if raw is None:
         if sql_step is None and data_step is None:
             return None
@@ -254,7 +256,6 @@ def prepare(
         migration = _with_data_steps(
             GeneratedMigration.from_generated(generated, number=number, name=name),
             generated,
-            skipped,
             directory / TEMPLATES_DIR,
         )
     if sql_step is not None:
@@ -266,22 +267,6 @@ def prepare(
             scaffold_data_step(model, template_dir=directory / TEMPLATES_DIR),
         )
     return migration
-
-
-def _parse_no_backfill(entries: Sequence[str]) -> list[tuple[str, str]]:
-    """``["author.slug"]`` → ``[("author", "slug")]``; refused unless each is
-    ``<table>.<column>``."""
-    parsed: list[tuple[str, str]] = []
-    for entry in entries:
-        table, dot, column = entry.partition(".")
-        if not dot or not table or not column or "." in column:
-            raise MigrationsDirectoryError(
-                f"--no-backfill {entry!r}: name the column as <table>.<column> "
-                f"(e.g. author.slug)"
-            )
-        if (table, column) not in parsed:
-            parsed.append((table, column))
-    return parsed
 
 
 def _todo(column: str, reason: dict[str, Any], var: str, chunked: bool) -> str | None:
@@ -300,27 +285,12 @@ def _todo(column: str, reason: dict[str, Any], var: str, chunked: bool) -> str |
 def _with_data_steps(
     migration: GeneratedMigration,
     generated: dict[str, Any],
-    skipped: list[tuple[str, str]],
     template_dir: Path,
 ) -> GeneratedMigration:
-    """``migration`` with each generated data step's file written: the
-    backfill scaffold, or (``skipped`` naming every one of its columns) the
-    guard. A ``--no-backfill`` naming a column no step fills, or only some of
-    a model's columns, is refused."""
+    """``migration`` with each generated data step's file written, as the
+    generator decided the step: the backfill scaffold, or (``guard``) the
+    guard. The step's name is the generator's."""
     by_ordinal = {step["ordinal"]: step for step in generated["steps"]}
-    demanded = [
-        (step["data"]["table"], column["name"])
-        for step in generated["steps"]
-        if step.get("data")
-        for column in step["data"]["columns"]
-    ]
-    unknown = [entry for entry in skipped if entry not in demanded]
-    if unknown:
-        listed = ", ".join(f"{t}.{c}" for t, c in demanded) or "none"
-        raise MigrationsDirectoryError(
-            f"--no-backfill {', '.join(f'{t}.{c}' for t, c in unknown)}: no generated "
-            f"backfill fills that column; the columns this migration backfills: {listed}"
-        )
     steps: list[GeneratedStep] = []
     notes: list[str] = []
     for step in migration.steps:
@@ -330,20 +300,10 @@ def _with_data_steps(
             continue
         model, table = data["model"], data["table"]
         columns = [column["name"] for column in data["columns"]]
-        named = [column for column in columns if (table, column) in skipped]
-        if named and named != columns:
-            rest = [column for column in columns if column not in named]
-            raise MigrationsDirectoryError(
-                f"--no-backfill {', '.join(f'{table}.{c}' for c in named)}: {table} also "
-                f"needs a value for {', '.join(rest)} in this migration, and one model has "
-                f"one data step; add --no-backfill for "
-                f"{', '.join(f'{table}.{c}' for c in rest)} too, or for none of them"
-            )
-        if named:
-            name = backfill_scaffold.guard_name(model)
+        name = step.name
+        if data["guard"]:
             text = backfill_scaffold.guard(model, columns, template_dir=template_dir)
         else:
-            name = step.name
             skip = " ".join(f"--no-backfill {table}.{c}" for c in columns)
             chunked = data["driver"] == "chunked"
             prefill: dict[str, str] = {}

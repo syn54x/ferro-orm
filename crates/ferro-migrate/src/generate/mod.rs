@@ -139,6 +139,8 @@ pub enum GenerateError {
     },
     /// No target dialect was given.
     NoDialects,
+    /// A `--no-backfill` the migration cannot honour, saying why and the fix.
+    NoBackfill(String),
     /// A declared rename hint `new` refuses (ADR-0032): its old name is still
     /// declared, or two hints claim one old name.
     Hint(HintError),
@@ -180,6 +182,7 @@ impl std::fmt::Display for GenerateError {
                 f,
                 "no target dialect: the database's config needs dialects = [...]"
             ),
+            GenerateError::NoBackfill(message) => f.write_str(message),
             GenerateError::Hint(err) => write!(f, "rename hint refused: {err}"),
             GenerateError::Render(message) => f.write_str(message),
         }
@@ -528,6 +531,61 @@ pub fn generate(
     target: &IrEnvelope<SchemaIrPayload>,
     dialects: &[Dialect],
 ) -> Result<Option<GeneratedMigration>, GenerateError> {
+    generate_with(parent, target, dialects, &GenerateOptions::default())
+}
+
+/// What `ferro migrate new` asks of [`generate_with`] beyond the models.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerateOptions {
+    /// `--no-backfill <table>.<column>`: each column whose backfill becomes
+    /// the model's guard step (ADR-0037).
+    #[serde(default)]
+    pub no_backfill: Vec<String>,
+}
+
+impl GenerateOptions {
+    /// `no_backfill` as `(table, column)` pairs, each once.
+    ///
+    /// # Errors
+    /// [`GenerateError::NoBackfill`] for an entry that is not
+    /// `<table>.<column>`.
+    pub fn skipped(&self) -> Result<Vec<(String, String)>, GenerateError> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for entry in &self.no_backfill {
+            let pair = entry
+                .split_once('.')
+                .filter(|(t, c)| !t.is_empty() && !c.is_empty() && !c.contains('.'))
+                .map(|(t, c)| (t.to_string(), c.to_string()))
+                .ok_or_else(|| {
+                    GenerateError::NoBackfill(format!(
+                        "--no-backfill '{entry}': name the column as <table>.<column> (e.g. \
+                         author.slug)"
+                    ))
+                })?;
+            if !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// [`generate`] with `options`: a `--no-backfill` column's backfill is its
+/// model's guard step.
+///
+/// # Errors
+/// What [`generate`] raises, and [`GenerateError::NoBackfill`] for a
+/// `--no-backfill` the migration cannot honour (malformed, naming a column
+/// nothing backfills, or only some of a model's columns, or given when the
+/// models change nothing).
+pub fn generate_with(
+    parent: Option<&Snapshot>,
+    target: &IrEnvelope<SchemaIrPayload>,
+    dialects: &[Dialect],
+    options: &GenerateOptions,
+) -> Result<Option<GeneratedMigration>, GenerateError> {
+    let skipped = options.skipped()?;
     if dialects.is_empty() {
         return Err(GenerateError::NoDialects);
     }
@@ -604,6 +662,9 @@ pub fn generate(
         && index_ops.is_empty()
         && demands.is_empty()
     {
+        if !skipped.is_empty() {
+            backfill::data_steps(&demands, target, &skipped)?;
+        }
         return Ok(None);
     }
 
@@ -685,7 +746,7 @@ pub fn generate(
     for &phase in phases.iter().filter(|&&phase| phase < Phase::Index) {
         push_phase(phase, &mut steps)?;
     }
-    steps.extend(backfill::data_steps(&demands, target));
+    steps.extend(backfill::data_steps(&demands, target, &skipped)?);
     steps.extend(index_ops.iter().map(|op| staging::index_step(op, dialects)));
     for &phase in phases.iter().filter(|&&phase| phase > Phase::Index) {
         push_phase(phase, &mut steps)?;
@@ -2073,6 +2134,7 @@ mod tests {
                 driver: backfill::Driver::Chunked,
                 key: Some("id".into()),
                 reverse: "01_expand.down.sql drops the column".into(),
+                guard: false,
             })
         );
         assert_eq!(migration.summary, "changed models: Author");
@@ -2255,6 +2317,44 @@ mod tests {
         assert_eq!(
             data_of(&migration, "02_backfill_author").reverse,
             "01_expand.down.sql drops the columns"
+        );
+    }
+
+    #[test]
+    fn no_backfill_makes_the_data_step_the_guard_under_its_number() {
+        let after = with_columns(vec![column("slug", "string")]);
+        let parent = snapshot_of(&ir(vec![author()]), None);
+        let options = GenerateOptions {
+            no_backfill: vec!["author.slug".into()],
+        };
+        let migration = generate_with(Some(&parent), &ir(vec![after.clone()]), &BOTH, &options)
+            .expect("ok")
+            .expect("a change");
+        assert_eq!(
+            step_names(&migration),
+            [
+                "01_expand",
+                "02_guard_author",
+                "03_add_constraint",
+                "04_contract"
+            ]
+        );
+        assert!(data_of(&migration, "02_guard_author").guard);
+        // Nothing to back fill: the flag has nothing to replace.
+        let malformed = GenerateOptions {
+            no_backfill: vec!["slug".into()],
+        };
+        assert_eq!(
+            generate_with(Some(&parent), &ir(vec![after]), &BOTH, &malformed)
+                .expect_err("refused")
+                .to_string(),
+            "--no-backfill 'slug': name the column as <table>.<column> (e.g. author.slug)"
+        );
+        assert!(
+            generate_with(Some(&parent), &ir(vec![author()]), &BOTH, &options)
+                .expect_err("refused")
+                .to_string()
+                .contains("the models change nothing that asks existing rows for a value")
         );
     }
 

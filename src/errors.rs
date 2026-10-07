@@ -180,13 +180,11 @@ pub(crate) enum CountedFailure {
     },
 }
 
-/// The prefix of the check that stages `NOT NULL` on Postgres; the
-/// generator's `backfill::staged_not_null_name` writes it.
-const STAGED_NOT_NULL_PREFIX: &str = "_ferro_notnull_";
-
-/// The prefix of the table a SQLite rebuild copies into; the generator's
-/// `rebuild::NEW_TABLE_PREFIX`.
-const REBUILD_TABLE_PREFIX: &str = "_ferro_new_";
+// The staged `NOT NULL` check's and the rebuild table's name prefixes are the
+// generator's own: one constant each, beside the functions that build the
+// names (`backfill::staged_not_null_name`, `rebuild::new_table_name`).
+use ferro_migrate::generate::backfill::STAGED_NOT_NULL_PREFIX;
+use ferro_migrate::generate::rebuild::NEW_TABLE_PREFIX as REBUILD_TABLE_PREFIX;
 
 /// The counted failure `statement` raised with `sqlstate`, naming `table`
 /// and `constraint` (the database's error fields), or `None` when it is no
@@ -812,6 +810,33 @@ mod counted_failure_tests {
         assert_eq!(
             not_null_count_sql("author", "slug"),
             "SELECT count(*) FROM \"author\" WHERE \"slug\" IS NULL"
+        );
+    }
+
+    #[test]
+    fn a_contract_failure_is_recognised_by_the_names_the_generator_builds() {
+        use ferro_migrate::generate::backfill::staged_not_null_name;
+        use ferro_migrate::generate::rebuild::new_table_name;
+
+        // Whatever the generator names the staging check (63-char guard
+        // included), the runner reads its failed VALIDATE as a contract's.
+        for (table, column) in [("author", "slug"), (&*"t".repeat(40), &*"c".repeat(40))] {
+            let name = staged_not_null_name(table, column);
+            let validate = format!("ALTER TABLE \"{table}\" VALIDATE CONSTRAINT \"{name}\"");
+            assert_eq!(
+                counted_failure_of(&validate, Some("23514"), Some(table), Some(&name)),
+                Some(CountedFailure::NotNull {
+                    table: table.into(),
+                    column: None,
+                    constraint: Some(name.clone()),
+                })
+            );
+        }
+        let copied = new_table_name("author");
+        let copy = format!("INSERT INTO \"{copied}\" (\"slug\") SELECT \"slug\" FROM \"author\"");
+        assert!(
+            not_null_copy_failure_of(&copy, &format!("NOT NULL constraint failed: {copied}.slug"))
+                .is_some()
         );
     }
 

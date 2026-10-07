@@ -54,7 +54,6 @@ __all__ = [
     "PLACEHOLDERS",
     "backfill",
     "guard",
-    "guard_name",
     "prefill_for",
 ]
 
@@ -64,11 +63,6 @@ PLACEHOLDERS = ("{model}", "{columns}", "{query}")
 """What a template may say; each is replaced, nothing else is touched."""
 
 BATCH_SIZE = 1000
-
-
-def guard_name(model: str) -> str:
-    """``guard_author`` for ``Author``."""
-    return f"guard_{model.lower()}"
 
 
 def prefill_for(factory: str) -> str | None:

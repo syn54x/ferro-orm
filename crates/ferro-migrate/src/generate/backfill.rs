@@ -199,6 +199,10 @@ pub fn relaxed(
     relax_columns(ir, &columns)
 }
 
+/// The prefix of every [`staged_not_null_name`]: what the runner reads a
+/// contract's failed `VALIDATE` off (`src/errors.rs`).
+pub const STAGED_NOT_NULL_PREFIX: &str = "_ferro_notnull_";
+
 /// The temporary check that stages `NOT NULL` on Postgres (ADR-0042):
 /// `_ferro_notnull_<table>_<column>`, guarded at 63 characters like every
 /// ferro name. Deliberately not `ck_*`: check reconciliation and the drift
@@ -206,7 +210,7 @@ pub fn relaxed(
 /// step and the contract leaves a check neither reads as a dropped
 /// declaration.
 pub fn staged_not_null_name(table: &str, column: &str) -> String {
-    let raw = format!("_ferro_notnull_{table}_{column}");
+    let raw = format!("{STAGED_NOT_NULL_PREFIX}{table}_{column}");
     if raw.chars().count() > 63 {
         return format!("{}_nn", raw.chars().take(60).collect::<String>());
     }
@@ -251,20 +255,95 @@ pub struct DataStep {
     /// The reason its `down` declares `@nothing_to_reverse` (ADR-0033: a
     /// generated down is never irreversible by default).
     pub reverse: String,
+    /// The step is the `--no-backfill` guard (`guard_<model>`, ADR-0037):
+    /// it checks that no row needs a value instead of writing one.
+    pub guard: bool,
 }
 
-/// One backfill step per table `demands` name, in their (foreign-key) order:
-/// `backfill_<model>`, with its scaffold's inputs and no rendering. The
-/// `reverse` reason names the expand step once the caller numbers the steps
-/// ([`name_reverse`]).
-pub fn data_steps(demands: &[Demand], target: &IrEnvelope<SchemaIrPayload>) -> Vec<GeneratedStep> {
+/// `--no-backfill <table>.<column>`: a column whose backfill the developer
+/// declares unneeded, each `(table, column)`.
+pub type NoBackfill = [(String, String)];
+
+/// The refusal of a `--no-backfill` the migration cannot honour: a column
+/// nothing backfills, or only some of one model's columns (one model has
+/// one data step).
+fn refuse_no_backfill(demands: &[Demand], skipped: &NoBackfill) -> Result<(), GenerateError> {
+    let shown = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(t, c)| format!("{t}.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let unknown: Vec<(&str, &str)> = skipped
+        .iter()
+        .filter(|(t, c)| !demands.iter().any(|d| &d.table == t && &d.column == c))
+        .map(|(t, c)| (t.as_str(), c.as_str()))
+        .collect();
+    if !unknown.is_empty() {
+        let demanded: Vec<(&str, &str)> = demands
+            .iter()
+            .map(|d| (d.table.as_str(), d.column.as_str()))
+            .collect();
+        let listed = if demanded.is_empty() {
+            "none: the models change nothing that asks existing rows for a value".to_string()
+        } else {
+            shown(&demanded)
+        };
+        return Err(GenerateError::NoBackfill(format!(
+            "--no-backfill {}: no generated backfill fills that column; the columns this \
+             migration backfills: {listed}",
+            shown(&unknown)
+        )));
+    }
+    for demand in demands {
+        let mine: Vec<&Demand> = demands.iter().filter(|d| d.table == demand.table).collect();
+        let (named, rest): (Vec<&Demand>, Vec<&Demand>) = mine
+            .into_iter()
+            .partition(|d| skipped.iter().any(|(t, c)| *t == d.table && *c == d.column));
+        if !named.is_empty() && !rest.is_empty() {
+            let pairs = |ds: &[&Demand]| {
+                ds.iter()
+                    .map(|d| format!("{}.{}", d.table, d.column))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let columns: Vec<&str> = rest.iter().map(|d| d.column.as_str()).collect();
+            return Err(GenerateError::NoBackfill(format!(
+                "--no-backfill {}: {} also needs a value for {} in this migration, and one \
+                 model has one data step; add --no-backfill for {} too, or for none of them",
+                pairs(&named),
+                demand.table,
+                columns.join(", "),
+                pairs(&rest)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// One data step per table `demands` name, in their (foreign-key) order,
+/// with its scaffold's inputs and no rendering: `backfill_<model>`, or, when
+/// `skipped` names every one of the table's demanded columns, the guard
+/// `guard_<model>` (ADR-0037). The `reverse` reason names the expand step
+/// once the caller numbers the steps ([`name_reverse`]).
+///
+/// # Errors
+/// [`GenerateError::NoBackfill`] for a `skipped` column nothing backfills,
+/// or one naming only some of a table's demanded columns.
+pub fn data_steps(
+    demands: &[Demand],
+    target: &IrEnvelope<SchemaIrPayload>,
+    skipped: &NoBackfill,
+) -> Result<Vec<GeneratedStep>, GenerateError> {
+    refuse_no_backfill(demands, skipped)?;
     let mut tables: Vec<&str> = Vec::new();
     for demand in demands {
         if !tables.contains(&demand.table.as_str()) {
             tables.push(&demand.table);
         }
     }
-    tables
+    Ok(tables
         .into_iter()
         .map(|table| {
             let mine: Vec<&Demand> = demands.iter().filter(|d| d.table == table).collect();
@@ -276,9 +355,13 @@ pub fn data_steps(demands: &[Demand], target: &IrEnvelope<SchemaIrPayload>) -> V
                 .filter(|model| driver_of(model) == Driver::Chunked)
                 .and_then(|model| model.columns.iter().find(|col| col.primary_key))
                 .map(|col| col.name.clone());
+            let guard = mine
+                .iter()
+                .all(|d| skipped.iter().any(|(t, c)| *t == d.table && *c == d.column));
+            let kind = if guard { "guard" } else { "backfill" };
             GeneratedStep {
                 ordinal: 0,
-                name: format!("backfill_{}", model.to_lowercase()),
+                name: format!("{kind}_{}", model.to_lowercase()),
                 kind: StepKind::Data,
                 renderings: BTreeMap::new(),
                 data: Some(DataStep {
@@ -294,10 +377,11 @@ pub fn data_steps(demands: &[Demand], target: &IrEnvelope<SchemaIrPayload>) -> V
                     driver: mine[0].driver,
                     key,
                     reverse: String::new(),
+                    guard,
                 }),
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Fill each data step's `reverse` reason once `steps` are numbered: a
@@ -535,6 +619,59 @@ mod tests {
     use super::super::tests::{column, ir, model, pk};
     use super::*;
     use ferro_schema_ir::{SchemaColumn, SchemaForeignKey};
+
+    fn slug_demand(table: &str, column: &str) -> Demand {
+        Demand {
+            table: table.into(),
+            column: column.into(),
+            reason: Reason::NoDefault,
+            driver: Driver::Chunked,
+        }
+    }
+
+    fn skip(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(t, c)| (t.to_string(), c.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn no_backfill_over_every_demanded_column_makes_the_step_the_guard() {
+        let target = ir(vec![author(vec![column("slug", "string")])]);
+        let demands = [slug_demand("author", "slug")];
+        let steps = data_steps(&demands, &target, &skip(&[("author", "slug")])).expect("ok");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].name, "guard_author");
+        assert!(steps[0].data.as_ref().is_some_and(|data| data.guard));
+        let steps = data_steps(&demands, &target, &[]).expect("ok");
+        assert_eq!(steps[0].name, "backfill_author");
+        assert!(steps[0].data.as_ref().is_some_and(|data| !data.guard));
+    }
+
+    #[test]
+    fn no_backfill_naming_an_undemanded_or_a_partial_set_of_columns_is_refused() {
+        let target = ir(vec![author(vec![
+            column("bio", "string"),
+            column("slug", "string"),
+        ])]);
+        let demands = [slug_demand("author", "bio"), slug_demand("author", "slug")];
+        assert_eq!(
+            data_steps(&demands, &target, &skip(&[("author", "nickname")]))
+                .expect_err("refused")
+                .to_string(),
+            "--no-backfill author.nickname: no generated backfill fills that column; the \
+             columns this migration backfills: author.bio, author.slug"
+        );
+        assert_eq!(
+            data_steps(&demands, &target, &skip(&[("author", "slug")]))
+                .expect_err("refused")
+                .to_string(),
+            "--no-backfill author.slug: author also needs a value for bio in this \
+             migration, and one model has one data step; add --no-backfill for author.bio \
+             too, or for none of them"
+        );
+    }
 
     fn author(extra: Vec<SchemaColumn>) -> SchemaModel {
         let mut columns = vec![pk(), column("name", "string")];
