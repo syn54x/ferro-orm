@@ -183,3 +183,34 @@ async def test_a_session_that_never_took_the_lock_fails_the_first_check_as_a_poo
 
     assert "migrations need a direct or session-mode connection" in str(refused.value)
     assert "Nothing was applied." in str(refused.value)
+
+
+async def test_a_lock_timeout_beyond_the_bound_is_refused_from_the_cli(
+    project, pkg, db, capsys
+):
+    _project(project, pkg, db)
+    capsys.readouterr()
+
+    code = await asyncio.to_thread(
+        run, "migrate", "up", "--url", db.url, "--lock-timeout", "100000000000000000000"
+    )
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "100000000000000000000" in captured.err
+    assert "at most" in captured.err
+    assert "Traceback" not in captured.err
+    assert "author" not in db.tables()
+
+
+def test_parse_lock_timeout_accepts_the_bound_and_refuses_beyond_it():
+    assert runner.parse_lock_timeout(runner.MAX_LOCK_TIMEOUT_S) == (
+        runner.MAX_LOCK_TIMEOUT_S
+    )
+    with pytest.raises(runner.SettingsError, match="at most"):
+        runner.parse_lock_timeout(runner.MAX_LOCK_TIMEOUT_S + 1)
+
+
+async def test_the_ffi_refuses_an_unrepresentable_timeout_without_panicking():
+    with pytest.raises(ValueError, match="1e+20"):
+        await _core._acquire_run_lock(None, None, 1e20)

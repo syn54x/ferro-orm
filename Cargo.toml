@@ -38,7 +38,7 @@ dashmap = "6.1"
 # numeric, and json wire values (FF-C C3). bigdecimal (not rust_decimal)
 # because PG `numeric` is arbitrary-precision: rust_decimal caps at 28
 # significant digits and would silently corrupt wider values.
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "any", "tls-rustls-ring-webpki", "uuid", "chrono", "bigdecimal", "json"]}
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "any", "tls-rustls-ring-webpki", "uuid", "chrono", "bigdecimal", "json"]}
 sea-query = { version = "0.32", features = ["with-uuid"] }
 tokio = { version = "1.49", features = ["full"] }
 pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
