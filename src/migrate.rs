@@ -20,7 +20,7 @@ use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
     quote_ident, sqlite_indexes_covering_column,
 };
-use crate::live_ir::{LiveTable, live_schema_ir, live_tables_to_schema_ir};
+use crate::live_ir::{LiveTable, live_schema_ir, live_table_renames, live_tables_to_schema_ir};
 use crate::run::{
     FORMAT_TABLE, RunLock, TRACKING_TABLE, governed_schema, refused, tracking_tables_for,
 };
@@ -32,7 +32,7 @@ use ferro_migrate::{
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::prelude::*;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -630,7 +630,8 @@ pub async fn internal_migrate(
 async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult<()> {
     // One lock-timeout policy for every DDL statement of both passes (ADR-0044).
     let ddl = DdlExecutor::new(opts.ddl_lock_timeout);
-    let tables_before_create = internal_create_tables(engine.clone(), opts.updates, &ddl).await?;
+    let created = internal_create_tables(engine.clone(), opts.updates, &ddl).await?;
+    let tables_before_create = &created.existing;
     if !opts.updates {
         return Ok(());
     }
@@ -650,15 +651,35 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
     // ADR-0010: the reconciliation pass owns tables that already existed. A
     // table the create pass built in this same run is already exactly the
     // model, so it is not read live: the plan sees it as an add, which the
-    // create pass has executed.
+    // create pass has executed. The old table of a live table rename hint
+    // (ADR-0032) is read too, so the planner renames it; a refused hint
+    // renames nothing, reads nothing more, and leaves every table the create
+    // pass held back for it uncreated, the planner's refusal saying why.
+    let live_names: BTreeSet<String> = tables_before_create.iter().cloned().collect();
+    let (renames, adds_after_renames) = match live_table_renames(&live_names, &modelset.payload) {
+        Ok(renames) => (renames, created.held_back.clone()),
+        Err(_) => (Vec::new(), BTreeSet::new()),
+    };
     let mut existing: Vec<String> = modelset
         .payload
         .models
         .iter()
         .map(|model| model.table_name.clone())
         .filter(|table| tables_before_create.contains(table))
+        .chain(renames.iter().map(|(old, _)| old.clone()))
         .collect();
     existing.sort();
+    // The tables this pass reconciles, by their declared names: the renamed
+    // ones under their new name.
+    let reconciled: HashSet<&str> = modelset
+        .payload
+        .models
+        .iter()
+        .map(|model| model.table_name.as_str())
+        .filter(|table| {
+            tables_before_create.contains(*table) || renames.iter().any(|(_, new)| new == table)
+        })
+        .collect();
     let (live, facts) = live_schema_ir(&engine, Some(&existing)).await?;
     let plan =
         plan_from_ir(&live, &modelset, backend, &facts, opts.plan_options()).map_err(plan_error)?;
@@ -678,7 +699,7 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
                     .row_security
                     .as_ref()
                     .is_some_and(|declaration| declaration.force)
-                    && tables_before_create.contains(&model.table_name)
+                    && reconciled.contains(model.table_name.as_str())
             })
             .map(|model| model.table_name.clone())
             .collect();
@@ -699,8 +720,10 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
     let mut index = 0;
     while index < rendered.len() {
         let current = &rendered[index];
-        // An add is the create pass's, which has already run.
-        if matches!(current.op, MigrationOp::AddTable { .. }) {
+        // An add is the create pass's, which has already run — except a
+        // table it held back for a rename, which is created here, after the
+        // renames it waits on.
+        if is_create_pass_add(&current.op, &adds_after_renames) {
             index += 1;
             continue;
         }
@@ -747,7 +770,7 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
         let group: Vec<&RenderedOp> = rendered[index..]
             .iter()
             .take_while(|op| op.op.table() == Some(table))
-            .filter(|op| !matches!(op.op, MigrationOp::AddTable { .. }))
+            .filter(|op| !is_create_pass_add(&op.op, &adds_after_renames))
             .collect();
         let consumed = rendered[index..]
             .iter()
@@ -787,6 +810,12 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
     }
 
     Ok(())
+}
+
+/// An `AddTable` the create pass executed: every add but those of the tables
+/// it held back for a rename (`after_renames`).
+fn is_create_pass_add(op: &MigrationOp, after_renames: &BTreeSet<String>) -> bool {
+    matches!(op, MigrationOp::AddTable { table } if !after_renames.contains(table))
 }
 
 /// Manually run the auto-migrate pass against a connected engine.
@@ -1032,7 +1061,10 @@ pub fn _render_plan_ops(
     Ok(serde_json::Value::Array(rendered).to_string())
 }
 
-fn parse_schema_envelope(json: &str, what: &str) -> PyResult<IrEnvelope<SchemaIrPayload>> {
+pub(crate) fn parse_schema_envelope(
+    json: &str,
+    what: &str,
+) -> PyResult<IrEnvelope<SchemaIrPayload>> {
     let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_str(json)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid {what}: {e}")))?;
     if envelope.ir_kind != "schema" {

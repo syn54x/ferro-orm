@@ -381,8 +381,7 @@ pub fn plan_from_ir(
         Ok(hints) => hints,
         Err(refusal) => {
             let mut plan = plan_named(old, new, dialect, facts, options)?;
-            plan.always_warnings
-                .push(format!("rename hint refused: {refusal}"));
+            plan.always_warnings.push(hint_refusal_warning(&refusal));
             return Ok(plan);
         }
     };
@@ -1617,19 +1616,15 @@ impl std::fmt::Display for HintError {
 
 impl std::error::Error for HintError {}
 
-/// The live rename hints `new` declares against `old` (ADR-0032), tables
-/// first, then columns, in model order.
-///
-/// A table hint is live when `old` holds the old table and lacks the new one;
-/// a column hint when the old table (the hinted table's old name, under a
-/// live table hint) holds the old column and lacks the new one. Every other
-/// hint is inert, which is every hint after its migration.
+/// Refuse the rename hints `new` declares that cannot be meant (ADR-0032),
+/// live or inert: an old name `new` still declares, and two declarations on
+/// one old name. Checked over the declarations alone, so every door that
+/// reads a hint refuses the same hints with the same text.
 ///
 /// # Errors
-/// [`HintError::OldStillDeclared`] for a hint whose old name `new` still
-/// declares, and [`HintError::Ambiguous`] for two hints on one old name —
-/// checked for every hint, live or not.
-pub fn live_hints(old: &SchemaIrPayload, new: &SchemaIrPayload) -> Result<Vec<Hint>, HintError> {
+/// The first [`HintError`] found: each model's table hint, then its column
+/// hints, in model order; then two tables on one old name; then labels.
+pub fn refuse_hints(new: &SchemaIrPayload) -> Result<(), HintError> {
     let mut table_claims: Vec<(String, Vec<String>)> = Vec::new();
     for model in &new.models {
         if let Some(previous) = &model.renamed_from {
@@ -1671,10 +1666,8 @@ pub fn live_hints(old: &SchemaIrPayload, new: &SchemaIrPayload) -> Result<Vec<Hi
             claimants,
         });
     }
-    // Label hints are checked over every enum, how ever it is stored; type
-    // renames only over the native types, the ones that exist as objects.
+    // Label hints are checked over every enum, how ever it is stored.
     let new_labels = declared_enum_labels(&new.models);
-    let new_types = declared_enum_types(&new.models);
     for (type_name, renamed) in &new_labels.renamed_labels {
         let labels = new_labels
             .labels
@@ -1702,14 +1695,94 @@ pub fn live_hints(old: &SchemaIrPayload, new: &SchemaIrPayload) -> Result<Vec<Hi
             });
         }
     }
+    Ok(())
+}
+
+/// The old name `model`'s table hint renames from, when the hint is live
+/// against a schema whose tables `holds` answers for (ADR-0032): it holds
+/// the old table and lacks the new one. `None` for an inert hint or none.
+pub fn table_rename_hint(model: &SchemaModel, holds: impl Fn(&str) -> bool) -> Option<&str> {
+    model
+        .renamed_from
+        .as_deref()
+        .filter(|previous| holds(previous) && !holds(&model.table_name))
+}
+
+/// The live table rename hints `new` declares against a live database whose
+/// table names are `live_tables`, in model order: what [`live_hints`] decides
+/// for tables when the live side is read with every hinted old table. The
+/// read side asks this before it reads, to know which undeclared live tables
+/// a plan renames and so must cover.
+///
+/// # Errors
+/// [`refuse_hints`]'s refusal, under which no hint renames anything.
+pub fn live_table_hints(
+    live_tables: &BTreeSet<String>,
+    new: &SchemaIrPayload,
+) -> Result<Vec<Hint>, HintError> {
+    refuse_hints(new)?;
+    Ok(new
+        .models
+        .iter()
+        .filter_map(|model| {
+            table_rename_hint(model, |table| live_tables.contains(table)).map(|old| Hint::Table {
+                old: old.to_string(),
+                new: model.table_name.clone(),
+            })
+        })
+        .collect())
+}
+
+/// The warning for a refused rename hint, on every door that plans without
+/// refusing outright (the reconciliation pass, `drift`): the hint renames
+/// nothing.
+pub fn hint_refusal_warning(refusal: &HintError) -> String {
+    format!("rename hint refused: {refusal}")
+}
+
+/// The warning for a live table hint on a pass that does not reconcile
+/// (`connect(auto_migrate=True)`, `create_tables()`): table `new` is neither
+/// renamed nor created beside its old self, nor is any new table in
+/// `waiting` that references it, and the two doors that rename it are named.
+pub fn pending_table_rename_warning(old: &str, new: &str, waiting: &[String]) -> String {
+    let waiting = match waiting {
+        [] => String::new(),
+        tables => {
+            let quoted: Vec<String> = tables.iter().map(|t| format!("\"{t}\"")).collect();
+            format!(", nor {}, which reference it", and_list(&quoted))
+        }
+    };
+    format!(
+        "table \"{new}\" declares __ferro_renamed_from__ = \"{old}\", and the database holds \
+         \"{old}\" and no \"{new}\": \"{new}\" was not created{waiting}. The rename runs \
+         under connect(..., migrate_updates=True) or in a migration from ferro migrate new."
+    )
+}
+
+/// The live rename hints `new` declares against `old` (ADR-0032), tables
+/// first, then columns, in model order.
+///
+/// A table hint is live when `old` holds the old table and lacks the new one;
+/// a column hint when the old table (the hinted table's old name, under a
+/// live table hint) holds the old column and lacks the new one. Every other
+/// hint is inert, which is every hint after its migration.
+///
+/// # Errors
+/// [`HintError::OldStillDeclared`] for a hint whose old name `new` still
+/// declares, and [`HintError::Ambiguous`] for two hints on one old name —
+/// checked for every hint, live or not.
+pub fn live_hints(old: &SchemaIrPayload, new: &SchemaIrPayload) -> Result<Vec<Hint>, HintError> {
+    refuse_hints(new)?;
+    // Label renames are matched over every enum, how ever it is stored; type
+    // renames only over the native types, the ones that exist as objects.
+    let new_labels = declared_enum_labels(&new.models);
+    let new_types = declared_enum_types(&new.models);
 
     let old_tables = index_models(&old.models);
     let mut tables = Vec::new();
     let mut columns = Vec::new();
     for model in &new.models {
-        let table_hint = model.renamed_from.as_deref().filter(|previous| {
-            old_tables.contains_key(*previous) && !old_tables.contains_key(&model.table_name)
-        });
+        let table_hint = table_rename_hint(model, |table| old_tables.contains_key(table));
         if let Some(previous) = table_hint {
             tables.push(Hint::Table {
                 old: previous.to_string(),
@@ -3494,6 +3567,84 @@ mod reverse_tests {
                 vec!["ALTER TABLE \"card\" DROP COLUMN \"note\"".to_string()],
                 vec!["ALTER TABLE \"card\" RENAME COLUMN \"title\" TO \"label\"".to_string()],
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_table_hint_tests {
+    use super::*;
+
+    fn model(table: &str, renamed_from: Option<&str>) -> SchemaModel {
+        SchemaModel {
+            renamed_from: renamed_from.map(str::to_string),
+            model_name: format!("app.{table}"),
+            table_name: table.into(),
+            columns: Vec::new(),
+            foreign_keys: Vec::new(),
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            checks: Vec::new(),
+            table_checks: Vec::new(),
+            row_security: None,
+        }
+    }
+
+    fn declared(models: Vec<SchemaModel>) -> SchemaIrPayload {
+        SchemaIrPayload {
+            dialect_agnostic: true,
+            models,
+        }
+    }
+
+    fn live(tables: &[&str]) -> BTreeSet<String> {
+        tables.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn a_hint_is_live_only_while_the_old_table_stands_alone() {
+        let new = declared(vec![model("author", Some("writer"))]);
+        let renamed = Hint::Table {
+            old: "writer".into(),
+            new: "author".into(),
+        };
+        assert_eq!(
+            live_table_hints(&live(&["writer"]), &new).expect("no refusal"),
+            vec![renamed]
+        );
+        for tables in [&["writer", "author"][..], &["author"], &[]] {
+            assert_eq!(
+                live_table_hints(&live(tables), &new).expect("no refusal"),
+                Vec::<Hint>::new(),
+                "{tables:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_read_side_refuses_what_the_planner_refuses_with_its_text() {
+        let twice = declared(vec![
+            model("author", Some("writer")),
+            model("poet", Some("writer")),
+        ]);
+        let refusal = live_table_hints(&live(&["writer"]), &twice).expect_err("refused");
+        assert_eq!(Err(refusal.clone()), live_hints(&twice, &twice).map(|_| ()));
+        assert_eq!(
+            hint_refusal_warning(&refusal),
+            "rename hint refused: tables \"author\" and \"poet\" all declare \
+             __ferro_renamed_from__ = \"writer\": one table becomes one table; keep the hint \
+             on the model \"writer\" became"
+        );
+    }
+
+    #[test]
+    fn the_pending_warning_names_the_tables_waiting_and_both_doors() {
+        assert_eq!(
+            pending_table_rename_warning("writer", "author", &["book".into()]),
+            "table \"author\" declares __ferro_renamed_from__ = \"writer\", and the database \
+             holds \"writer\" and no \"author\": \"author\" was not created, nor \"book\", which \
+             reference it. The rename runs under connect(..., migrate_updates=True) or in a \
+             migration from ferro migrate new."
         );
     }
 }

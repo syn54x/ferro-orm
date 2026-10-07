@@ -7,7 +7,12 @@ use crate::backend::EngineHandle;
 use crate::ddl_exec::{DdlError, DdlExecutor, StatementError};
 use crate::migrate::{log_lock_timeout_statement, pass_attempt_warning, pass_lock_timeout_error};
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
+use ferro_migrate::plan::{
+    hint_refusal_warning, pending_table_rename_warning, refuse_hints, table_rename_hint,
+};
+use ferro_schema_ir::{SchemaIrPayload, SchemaModel};
 use pyo3::prelude::*;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 /// Internal utility to create all registered tables in the database.
@@ -16,9 +21,18 @@ use std::sync::Arc;
 /// manual `create_tables()` function.
 ///
 /// Returns the tables that already existed when the pass started — the set the
-/// reconciliation pass owns (ADR-0010). A table this pass created is already
-/// exactly the model, so re-diffing it would only replay the create pass's own
+/// reconciliation pass owns (ADR-0010) — and the tables it held back for a
+/// rename ([`CreatePass`]). A table this pass created is already exactly the
+/// model, so re-diffing it would only replay the create pass's own
 /// backend-limitation warnings.
+///
+/// A declared table absent live whose `__ferro_renamed_from__` names a live
+/// table is a rename, not a creation (ADR-0032): it is not created, and
+/// neither is a new table that references it, which can only be created once
+/// the rename has run. The reconciliation pass renames it under
+/// `migrate_updates`; a pass that does not reconcile warns, naming both doors,
+/// and leaves the database as it is — never an empty twin beside the old
+/// table.
 ///
 /// On Postgres every statement runs under `ddl` (ADR-0044): a new table's
 /// `REFERENCES "parent"` takes a lock on a parent that already exists, and
@@ -33,7 +47,7 @@ pub async fn internal_create_tables(
     engine: Arc<EngineHandle>,
     reconciliation_follows: bool,
     ddl: &DdlExecutor,
-) -> PyResult<std::collections::HashSet<String>> {
+) -> PyResult<CreatePass> {
     // The runtime CREATE TABLE path is emitted from the Python-compiled SchemaIR
     // via the shared `ferro_migrate` emitter (issue #153). The modelset must have
     // been pushed by the `connect`/`create_tables` Python wrappers first — a
@@ -59,8 +73,19 @@ pub async fn internal_create_tables(
 
     let model_refs: Vec<&ferro_schema_ir::SchemaModel> =
         modelset.payload.models.iter().collect();
+    let held_back = tables_awaiting_rename(&model_refs, &existing_tables);
+    if !reconciliation_follows {
+        warn_pending_renames(&modelset.payload, &existing_tables, &held_back);
+    }
     let mut to_create = Vec::new();
     for model in ferro_migrate::order_models_for_create(&model_refs) {
+        if held_back.contains_key(&model.table_name) {
+            crate::log_debug(format!(
+                "Ferro Engine: Table '{}' waits on a table rename — not created",
+                model.table_name
+            ));
+            continue;
+        }
         if existing_tables.contains(&model.table_name) {
             crate::log_debug(format!(
                 "Ferro Engine: Table '{}' already exists — left to the reconciliation pass",
@@ -165,7 +190,97 @@ pub async fn internal_create_tables(
         crate::log_debug(format!("✅ Ferro Engine: Table '{}' created", model.table_name));
     }
 
-    Ok(existing_tables)
+    Ok(CreatePass {
+        existing: existing_tables,
+        held_back: held_back.into_keys().collect(),
+    })
+}
+
+/// What the create pass leaves to the reconciliation pass.
+pub struct CreatePass {
+    /// Every table that existed live when the pass started (ADR-0010).
+    pub existing: HashSet<String>,
+    /// The declared tables the pass did not create because they wait on a
+    /// table rename: a table whose live hint names a live table, and every
+    /// new table that references one, directly or through another.
+    pub held_back: BTreeSet<String>,
+}
+
+/// The declared tables absent live that wait on a table rename, each with
+/// the hinted tables it waits on: a table whose `__ferro_renamed_from__` hint
+/// is live against `live` ([`table_rename_hint`], the planner's own liveness
+/// rule) waits on itself, and a table absent live that references a waiting
+/// table waits on what that one waits on.
+fn tables_awaiting_rename(
+    models: &[&SchemaModel],
+    live: &HashSet<String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut waiting: BTreeMap<String, BTreeSet<String>> = models
+        .iter()
+        .filter(|model| table_rename_hint(model, |table| live.contains(table)).is_some())
+        .map(|model| {
+            (
+                model.table_name.clone(),
+                BTreeSet::from([model.table_name.clone()]),
+            )
+        })
+        .collect();
+    // A fixed point, so a reference cycle among new tables settles too.
+    loop {
+        let mut changed = false;
+        for model in models {
+            if live.contains(&model.table_name) {
+                continue;
+            }
+            let inherited: BTreeSet<String> = model
+                .foreign_keys
+                .iter()
+                .filter_map(|fk| waiting.get(&fk.to_table))
+                .flatten()
+                .cloned()
+                .collect();
+            if inherited.is_empty() {
+                continue;
+            }
+            let entry = waiting.entry(model.table_name.clone()).or_default();
+            let before = entry.len();
+            entry.extend(inherited);
+            changed |= entry.len() != before;
+        }
+        if !changed {
+            return waiting;
+        }
+    }
+}
+
+/// The create pass's word on the tables it held back when no reconciliation
+/// follows: a refused hint's refusal, once, as the planner words it; else,
+/// per live table hint, which tables wait on it and the two doors that run
+/// the rename.
+fn warn_pending_renames(
+    declared: &SchemaIrPayload,
+    live: &HashSet<String>,
+    held_back: &BTreeMap<String, BTreeSet<String>>,
+) {
+    if held_back.is_empty() {
+        return;
+    }
+    if let Err(refusal) = refuse_hints(declared) {
+        crate::emit_user_warning_always(&hint_refusal_warning(&refusal));
+        return;
+    }
+    for model in &declared.models {
+        let Some(old) = table_rename_hint(model, |table| live.contains(table)) else {
+            continue;
+        };
+        let new = &model.table_name;
+        let dependents: Vec<String> = held_back
+            .iter()
+            .filter(|(table, roots)| *table != new && roots.contains(new))
+            .map(|(table, _)| table.clone())
+            .collect();
+        crate::emit_user_warning_always(&pending_table_rename_warning(old, new, &dependents));
+    }
 }
 
 /// Execute one model's create emission — `CREATE TABLE` and every

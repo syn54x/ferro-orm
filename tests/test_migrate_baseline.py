@@ -27,7 +27,7 @@ import pytest
 import ferro
 from ferro import _core
 from ferro.migrations import MigrationRefused, baseline, remove_baseline
-from tests.test_migrate_drift import TEAMS
+from tests.test_migrate_drift import SQUADS, TEAMS
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     isolated_imports,
@@ -256,6 +256,45 @@ def test_drift_is_listed_exits_4_and_records_nothing(project, pkg, db, capsys):
     assert report.drift.lines == ["team.name column is missing"]
     with pytest.raises(MigrationRefused, match="team.name column is missing"):
         report.raise_for_problems()
+    assert no_records(db)
+
+
+def test_a_pending_table_rename_is_listed_as_drift_and_records_nothing(
+    project, pkg, db, capsys
+):
+    """The head snapshot's ``Squad`` was ``team`` (``__ferro_renamed_from__``);
+    the database still holds ``team`` and no ``squad``. Baseline reads the
+    hinted old table the way ``drift`` and the reconciliation pass do, so the
+    database is one rename short of the head — never ``squad table is
+    missing`` — and nothing is recorded: the rename is work ``up`` does.
+    The table's derived names follow it (ADR-0032); SQLite cannot rename a
+    check in place, so there the check reads as one to rebuild."""
+    auto_migrated(project, pkg, db)
+    write_models(project, pkg, SQUADS)
+    new("rename_team")
+    capsys.readouterr()
+
+    code, out, _ = cli(capsys, "baseline", "--url", db.url)
+
+    lines = [
+        "team table is named squad in the snapshot",
+        "idx_team_size index is named idx_squad_size in the snapshot",
+        "ck_team_size_ok check is named ck_squad_size_ok in the snapshot",
+    ]
+    if db.backend == "sqlite":
+        lines += ["ck_squad_size_ok check is missing", "ck_team_size_ok check is extra"]
+    assert code == 4
+    assert out == (
+        "drift against 0003_rename_team:\n"
+        + "".join(f"  {line}\n" for line in lines)
+        + "nothing was recorded\n"
+    )
+    assert no_records(db)
+    report = asyncio.run(baseline(url=db.url))
+    assert report.drift is not None
+    assert report.drift.lines == lines
+    assert report.drift.operations[0]["kind"] == "RenameTable"
+    assert "AddTable" not in [op["kind"] for op in report.drift.operations]
     assert no_records(db)
 
 

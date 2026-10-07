@@ -344,7 +344,11 @@ async def _audit(name: str, database: DatabaseSettings) -> DriftReport:
     snapshots = {m["number"]: m["snapshot"]["ir"] for m in contents["migrations"]}
     snapshot = snapshots[head["number"]]
     tables = [model["table_name"] for model in snapshot["payload"]["models"]]
-    live_json, facts_json = await _core._live_schema_ir(name, json.dumps(tables))
+    # The old table of a live rename hint is read too (ADR-0032), as the
+    # reconciliation pass reads it.
+    live_json, facts_json = await _core._live_schema_ir(
+        name, json.dumps(tables), json.dumps(snapshot)
+    )
     plan = json.loads(
         _core._plan_from_ir(
             live_json,

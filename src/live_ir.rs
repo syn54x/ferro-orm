@@ -16,12 +16,15 @@ use crate::introspect::{
     live_table_row_security,
 };
 use ferro_ddl_lowering::{Dialect, LiveRowSecurity, information_schema_to_db_type_token};
-use ferro_migrate::{LiveCheckFact, LiveFacts, LiveFkValidity, LiveIndexValidity, LiveTableFacts};
+use ferro_migrate::plan::live_table_hints;
+use ferro_migrate::{
+    Hint, HintError, LiveCheckFact, LiveFacts, LiveFkValidity, LiveIndexValidity, LiveTableFacts,
+};
 use ferro_schema_ir::{
     IrEnvelope, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload, SchemaModel,
 };
 use pyo3::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One live table as introspection reports it.
 #[derive(Clone, Debug, Default)]
@@ -235,20 +238,48 @@ pub async fn live_schema_ir(
     Ok(live_tables_to_schema_ir(live, enum_labels, dialect))
 }
 
-/// Read the database behind connection `using` into an IR envelope and its
-/// live facts, as JSON: `(ir_json, facts_json)`. `tables_json` is a JSON list
-/// of table names to read; `None` reads every live table.
+/// The live table renames `declared` asks of a database whose tables are
+/// `live`, as `(old, new)`: one per live `__ferro_renamed_from__` hint
+/// (ADR-0032), decided by the planner's own rule. A read that plans
+/// `declared` against the live database covers each `old` beside the
+/// declared tables, so the plan renames the table instead of adding an
+/// empty one.
 ///
 /// # Errors
-/// A `PyErr` when `tables_json` is not a JSON list of strings, the connection
-/// is not open, or introspection fails.
+/// The planner's refusal of a hint ([`HintError`]), under which nothing
+/// renames and nothing more is read.
+pub fn live_table_renames(
+    live: &BTreeSet<String>,
+    declared: &SchemaIrPayload,
+) -> Result<Vec<(String, String)>, HintError> {
+    Ok(live_table_hints(live, declared)?
+        .into_iter()
+        .filter_map(|hint| match hint {
+            Hint::Table { old, new } => Some((old, new)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Read the database behind connection `using` into an IR envelope and its
+/// live facts, as JSON: `(ir_json, facts_json)`. `tables_json` is a JSON list
+/// of table names to read; `None` reads every live table. With
+/// `declared_json` (the schema IR envelope the read is planned against), the
+/// old table of every live table rename hint it declares is read too
+/// ([`live_table_renames`]).
+///
+/// # Errors
+/// A `PyErr` when `tables_json` is not a JSON list of strings,
+/// `declared_json` is not a schema IR envelope, the connection is not open,
+/// or introspection fails.
 #[pyfunction]
 #[pyo3(name = "_live_schema_ir")]
-#[pyo3(signature = (using=None, tables_json=None))]
+#[pyo3(signature = (using=None, tables_json=None, declared_json=None))]
 pub fn _live_schema_ir(
     py: Python<'_>,
     using: Option<String>,
     tables_json: Option<String>,
+    declared_json: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
     let tables: Option<Vec<String>> = tables_json
         .map(|json| {
@@ -259,8 +290,25 @@ pub fn _live_schema_ir(
             })
         })
         .transpose()?;
+    let declared = declared_json
+        .map(|json| crate::migrate::parse_schema_envelope(&json, "declared_json"))
+        .transpose()?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;
+        let tables = match (tables, declared) {
+            (Some(mut tables), Some(declared)) => {
+                let live: BTreeSet<String> = live_table_names(&engine).await?.into_iter().collect();
+                if let Ok(renames) = live_table_renames(&live, &declared.payload) {
+                    for (old, _) in renames {
+                        if !tables.contains(&old) {
+                            tables.push(old);
+                        }
+                    }
+                }
+                Some(tables)
+            }
+            (tables, _) => tables,
+        };
         let (envelope, facts) = live_schema_ir(&engine, tables.as_deref()).await?;
         let to_json = |value: serde_json::Result<String>| {
             value.map_err(|e| {

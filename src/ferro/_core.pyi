@@ -358,14 +358,19 @@ async def _disconnect(name: str) -> None:
     ...
 
 async def _live_schema_ir(
-    using: str | None = None, tables_json: str | None = None
+    using: str | None = None,
+    tables_json: str | None = None,
+    declared_json: str | None = None,
 ) -> tuple[str, str]:
     """Read the database behind connection ``using`` into the planner's input.
 
     Returns ``(ir_json, facts_json)``: a ``schema`` IR envelope with one model
     per live table (only the tables in ``tables_json``, a JSON list of names,
     when given) and the live facts the IR cannot carry — CHECK and policy
-    bodies as the catalog prints them, validity flags, enum labels.
+    bodies as the catalog prints them, validity flags, enum labels. With
+    ``declared_json`` (the schema IR envelope the read is planned against),
+    the old table of every live ``__ferro_renamed_from__`` hint it declares is
+    read beside ``tables_json`` (ADR-0032).
     """
     ...
 
