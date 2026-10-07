@@ -3556,7 +3556,8 @@ fn live_labels_come_from_the_facts_and_extras_only_warn() {
 
 /// Two new tables, each introducing its own enum type: every type is created
 /// first, by type name, then the tables in dependency order — the sequence
-/// the create pass executes too (#518; AGENTS.md § I-12).
+/// the create pass executes too, and the Alembic bridge, which translates the
+/// planner's ops in this order (#518, ADR-0041; the comparator slot rule is gone).
 #[test]
 fn new_tables_create_every_enum_type_first_by_name_then_the_tables() {
     let enum_col = |name: &str, type_name: &str, labels: &[&str]| SchemaColumn {

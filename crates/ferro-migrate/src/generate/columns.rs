@@ -28,7 +28,7 @@ use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 /// The phase step an op lands in, in the order a migration's steps run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Phase {
-    /// Label additions to enum types that already exist (ADR-0011, I-12):
+    /// Label additions to enum types that already exist (ADR-0011, ADR-0041):
     /// first in the migration, so every later step may write the new label.
     Labels,
     /// The one atomic DDL step of a migration that needs no data step.

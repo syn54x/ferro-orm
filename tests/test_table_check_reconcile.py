@@ -536,7 +536,7 @@ async def test_autogenerate_is_empty_once_the_check_is_reconciled(
 async def test_autogenerate_adds_a_column_before_the_check_that_references_it(
     db_url, postgres_base_url, db_schema_name
 ):
-    """#423 / I-12: a CHECK over a newly added column must land after ADD COLUMN.
+    """#423: a CHECK over a newly added column must land after ADD COLUMN.
 
     The live table is missing ``right``. The new model adds that column and a
     table check over it. Rendered upgrade order is the seam: ``op.add_column``

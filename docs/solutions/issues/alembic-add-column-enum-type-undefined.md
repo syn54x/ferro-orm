@@ -68,10 +68,11 @@ reverse is the unchanged `DROP TYPE`. See ADR-0022.
 
 ## Gotchas
 
-- The comparator reads the revision's `CreateTableOp`s to decide inline
-  creation, so it must stay at `priority=LAST` (I-12) even though what it
-  renders is a before-tables statement; front-of-list insertion is what
-  places it, not the priority.
+- This comparator and its slot rule are gone (#533, ADR-0041): the bridge
+  now translates the one planner's ops in the planner's order, and every
+  introduced enum type is the pass's guarded `CREATE TYPE` ahead of the
+  tables, with columns rendered `create_type=False`. The story above is
+  why that order matters.
 - `render_python_code` repr-quotes each statement, so a test asserting on
   a rendered statement compares against `repr(statement)`, and a label
   inside a `DO $$ ... $$` block appears as `\'rust\'` in the file.

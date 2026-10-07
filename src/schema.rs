@@ -92,8 +92,8 @@ pub async fn internal_create_tables(
     }
 
     // Every native enum type the created tables declare comes into being
-    // ahead of every table, by type name — the one planner's order (enum type
-    // creation is a before-tables family, AGENTS.md § I-12), so a generated
+    // ahead of every table, by type name — the one planner's order (a type
+    // comes into being before any table op that uses it), so a generated
     // migration's up file and this pass execute the same sequence (I-1). Each
     // statement is the table emission's own guarded `CREATE TYPE`, run once
     // per type, in autocommit like the reconciliation pass's type statements.

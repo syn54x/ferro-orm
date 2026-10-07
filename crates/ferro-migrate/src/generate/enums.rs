@@ -18,8 +18,9 @@
 //! ```
 //!
 //! A label addition is its own `labels` step, first in the migration, so every
-//! later step can write the label once it is committed (I-12's before-tables
-//! slot). Its statement is the reconciliation pass's (`render_pg_enum_add_value`
+//! later step can write the label once it is committed (the planner's order,
+//! which the Alembic bridge translates as is; the comparator slot rule is
+//! gone, ADR-0041). Its statement is the reconciliation pass's (`render_pg_enum_add_value`
 //! through [`render_plan`]); its down reverses nothing, because Postgres cannot
 //! drop an enum label, and says so. SQLite stores labels as text: nothing to do.
 //!

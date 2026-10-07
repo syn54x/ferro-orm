@@ -14,14 +14,32 @@ covers the invariants that the architecture rests on.
 **Every DDL emission path in Ferro must produce byte-identical schema artifacts
 for the same model definition.**
 
-Today Ferro can emit DDL through:
+Take one edit, `bio: str | None = None` added to `Author`. Each door below
+runs the same statement for it, `ALTER TABLE "author" ADD COLUMN "bio"
+varchar`, because each asks the same planner and renders through the same
+functions. Today Ferro emits DDL through:
 
-- The **Alembic autogenerate bridge** (`src/ferro/migrations/alembic.py`) — used
-  when developers run `alembic revision --autogenerate`.
-- The **Rust runtime emitter** (`src/schema.rs`) — used when developers call
-  `connect(auto_migrate=True)` or generate DDL through the Rust core.
-- Any **future emitter** added to the codebase (e.g. a "dump SQL to stdout"
-  CLI, a `Ferro.to_sql()` API, an introspection-based diff tool).
+- The **reconciliation pass** (`src/schema.rs`, `src/migrate.rs` over
+  `crates/ferro-migrate`): `connect(auto_migrate=True)` and its
+  `migrate_updates` / `migrate_destructive` rungs. It reads the live database
+  (`src/live_ir.rs`, `_core._live_schema_ir`), plans with the one planner
+  (`ferro_migrate::plan_from_ir`) and runs `ferro_migrate::render_plan`; its
+  create pass is `ferro_migrate::render_create_table`.
+- The **migrations door** (`src/ferro/migrations/` +
+  `crates/ferro-migrate/src/generate/`): `ferro migrate new`. It plans between
+  two schema snapshots with the same planner and renders through the same
+  `render_plan`, once per dialect, into step files. It decides which step an
+  op lands in and which headers a file carries, never a statement. Its
+  online shapes are the pass's renderings in another mode: `NOT VALID` then a
+  validate step (`ConstraintMode`, ADR-0043), `CONCURRENTLY` (`IndexMode`,
+  ADR-0044), the `_ferro_notnull_<table>_<col>` staged `NOT NULL`
+  (`staged_not_null_name`, never `ck_*`, #534), the SQLite table rebuild
+  (ADR-0046) and the Postgres enum type swap for a removed label (#536).
+- The **Alembic autogenerate bridge** (`src/ferro/migrations/alembic.py` +
+  `src/ferro/migrations/translate.py`): `alembic revision --autogenerate`. It
+  translates the one planner's ops (ADR-0041, item 11).
+- Any **future emitter** added to the codebase (e.g. `ferro schema dump`, a
+  `Ferro.to_sql()` API, an introspection-based diff tool).
 
 For a single model, every emitter must agree on:
 
@@ -34,14 +52,15 @@ For a single model, every emitter must agree on:
    and `_db_type_to_sa_type` is only the SA *rendering* of the shared token
    vocabulary — never a second decision table. Pinned exhaustively by
    `tests/test_db_type_cross_emitter_parity.py` (every token and every
-   derived annotation × both dialects). See
+   derived annotation × both dialects, and every token through a generated
+   `ADD COLUMN`). See
    `docs/solutions/patterns/derived-type-and-naming-decision-table.md`.
 4. **Index names** — `idx_<table>_<col>` for single-column indexes,
    `idx_<table>_<col1>_<col2>...` for composite indexes.
 5. **Unique constraint names** — `uq_<table>_<col>` for single-column,
    `uq_<table>_<col1>_<col2>...` for composite.
 6. **Foreign key constraint names** — `fk_<table>_<col>_<to_table>`, always
-   emitted (both emitters render `SchemaForeignKey.name`; single-sourced in
+   emitted (every emitter renders `SchemaForeignKey.name`; single-sourced in
    `ferro_ddl_lowering::fk_name`). See
    `docs/solutions/patterns/derived-type-and-naming-decision-table.md`.
 7. **Primary key constraint names** — when explicitly named.
@@ -53,214 +72,141 @@ For a single model, every emitter must agree on:
    `table_check_constraint_name` (Rust).
 9. **Default values** — server-side defaults must serialize identically.
 10. **Nullability** — must agree.
-11. **Enum label additions** — the label-addition decision (which model-declared
-    labels a live enum type is missing, and which live labels are extra) and
-    the rendered `ALTER TYPE ... ADD VALUE IF NOT EXISTS` statement are decided
-    by ONE pair of functions: `ferro_ddl_lowering::missing_enum_labels` /
-    `extra_enum_labels` + `render_pg_enum_add_value`. The auto-migrate
-    reconciliation pass consumes them directly; the Alembic autogenerate
-    comparator consumes them over FFI (`_core._plan_enum_label_addition`) and
-    executes the byte-identical statements. Pinned by
-    `tests/test_cross_emitter_parity.py` and the ferro-ddl-lowering unit pins.
-    See ADR-0011 (append-only; update-gated; warn-never-act for extras).
-12. **Check additions** — the missing-check decision (which declared `ck_*`
-    names — table checks, then column checks — a live table does not carry)
-    and the rendered ADD are decided by ONE pair of functions:
-    `ferro_ddl_lowering::missing_check_names` / `render_check_addition`.
-    The auto-migrate reconciliation pass consumes them through
-    `ferro_migrate::plan_missing_checks`; the Alembic autogenerate
-    comparator consumes them over FFI (`_core._plan_check_addition`) and
-    executes the byte-identical statements. Pinned by
-    `tests/test_table_check_reconcile.py`. See ADR-0013 (add on
-    `migrate_updates`; name-only comparison) and ADR-0014 (SQLite warn-skip).
-13. **Check rebuilds** — the same-name body-drift decision (which declared
-    `ck_*` names exist live **and** whose catalog definition normalizes
-    unequal to the canonical rendering) and the rendered DROP + bare ADD
-    are decided by ONE pair of functions:
-    `ferro_ddl_lowering::drifted_check_names` / `render_check_rebuild`
-    (one normalizer: `normalize_check_definition`). The auto-migrate
-    reconciliation pass consumes them through
-    `ferro_migrate::plan_check_rebuilds`; the Alembic autogenerate
-    comparator consumes them over FFI (`_core._plan_check_rebuild`) and
-    executes the byte-identical statements. Pinned by
-    `tests/test_table_check_rebuild.py`. See ADR-0015 (canonical render vs
-    catalog, both through one normalizer) and ADR-0014 (SQLite warn-skip).
-14. **Check leftovers / drops** — the leftover-name decision (which live
-    ferro-owned `ck_*` names a table carries that the model no longer
-    declares) and the rendered DROP are decided by ONE trio of functions:
-    `ferro_ddl_lowering::extra_check_names` /
-    `extra_check_names_warning` / `render_check_drop`. The auto-migrate
-    reconciliation pass consumes them through
-    `ferro_migrate::plan_check_drops` (ops only under
-    `migrate_destructive`; the warning always fires on `migrate_updates`).
-    The Alembic autogenerate comparator consumes them over FFI
-    (`_core._plan_check_drop`) with **no** destructive gate and executes
-    the byte-identical statements. Pinned by
-    `tests/test_table_check_orphans.py`. See ADR-0013 (leftover warning +
-    destructive ladder) and ADR-0014 (SQLite warn-skip).
-15. **Row policy names and DDL** — the live policy name
-    (`rls_<table>_<name>`; `name` defaults to the shorthand's column), the
-    column/setting shorthand's cast (from `resolve_column_storage`; `uuid`,
-    `text`/`varchar` and the integer families only), the rendered
-    `<col> = NULLIF(current_setting('<key>', true), '')::<cast>` expression,
-    and the full `ALTER TABLE … ENABLE/FORCE ROW LEVEL SECURITY` +
-    `CREATE POLICY` statements are decided by ONE family of functions in
-    `ferro_ddl_lowering`: `row_policy_name` / `is_ferro_row_policy_name` /
-    `row_policy_shorthand_cast` / `render_row_policy_setting_expr` /
-    `row_policy_clauses` / `render_create_row_policy` /
-    `render_enable_row_security` / `render_force_row_security` /
-    `row_security_statements`, over the command table
-    `ROW_POLICY_COMMANDS` / `row_policy_command_token` /
-    `row_policy_command_takes_using` / `row_policy_command_takes_with_check`.
-    The auto-migrate create pass consumes them through
-    `ferro_migrate::render_create_table`. The Python declaration surface
-    (`src/ferro/rowsecurity.py`) consumes the name, the cast, and the command
-    table over FFI (`_core._ddl_row_policy_name`, `_core._rls_shorthand_cast`,
-    `_core._rls_command_matrix`) rather than keeping its own copies, so a
-    declaration fails at class definition for exactly the columns and clauses
-    DDL would fail for. The Alembic autogenerate operation
-    (`FerroRowSecurityOp` in `src/ferro/migrations/alembic.py`) consumes the
-    whole emission over FFI (`_core._plan_row_security`, for a table this
-    same revision creates — the seam and its byte-parity with the create pass
-    are pinned by `test_row_security_statement_parity_pin`). Pinned by
-    `tests/test_row_security_create_pass.py` and the ferro-ddl-lowering unit
-    pins. Postgres-only; SQLite gets one warning per table and no DDL
-    (ADR-0014 posture). See PRD #406.
-16. **Row-security reconciliation on a live table** — the whole decision for
-    one existing table (which declared policies are missing, which live ones
-    drifted, which raw bodies ferro cannot verify, which ferro-owned `rls_*`
-    policies are orphaned, which live policies are foreign, the one-way
-    `ENABLE`/`FORCE` statements, the `migrate_destructive` teardown, and every
-    warning) is decided by ONE function family in `ferro_ddl_lowering`, over
-    the same `LiveRowSecurity` / `LiveRowPolicy` input:
-    `plan_row_security_reconcile` — built from `missing_row_policy_names` /
-    `row_policy_drift` / `extra_row_policy_names` /
-    `missing_row_security_flag_statements` /
-    `excess_row_security_flag_statements` / `render_drop_row_policy` /
-    `row_policy_rebuild_statements`, the two ownership tests
-    (`is_default_row_policy_roles` for a policy's `TO` audience,
-    `ferro_manages_row_security` for whether ferro installed the table's row
-    security at all — the gate on every teardown and every dropped-declaration
-    warning), one normalizer (`normalize_row_policy_expr`), one catalog decoder
-    (`row_policy_command_from_catalog_code`), and the warning texts
-    (`dropped_row_security_warning`, `extra_row_policy_names_warning`,
-    `foreign_row_policy_warning`, `unverifiable_row_policy_warning`,
-    `row_policy_body_replaced_warning`, `row_security_teardown_warning`,
-    `row_security_migrator_warning`). The
-    auto-migrate reconciliation pass consumes it directly (`src/migrate.rs`,
-    after that table's column and data steps); the Alembic autogenerate
-    operation (`FerroRowSecurityOp` / `FerroRowSecurityDropOp` in
-    `src/ferro/migrations/alembic.py`) consumes it over FFI
-    (`_core._plan_row_security_reconcile`, called once non-destructive and
-    once destructive per live table — the destructive call's statements are
-    the non-destructive call's as an exact prefix, so the comparator slices
-    the tail to isolate the orphan/teardown-only statements without
-    re-deriving anything; whose byte-parity with the pass is pinned). Live
-    state comes from `src/introspect.rs` for the runtime pass
-    (`live_table_row_security`: `pg_class.relrowsecurity` /
-    `relforcerowsecurity` plus `pg_policy` — name, command, permissive, both
-    `pg_get_expr` bodies, and `polroles` resolved to role names — with
-    `ferro_owned` decided by `is_ferro_row_policy_name`) and from the
-    comparator's own equivalent `pg_class`/`pg_policy` query for the Alembic
-    side (`_live_row_security_by_table` in `src/ferro/migrations/alembic.py`,
-    the same shape `_live_check_names_by_table` uses) — the command decode
-    and the ownership test are the same two functions over FFI
-    (`_core._row_policy_command_from_catalog_code`,
-    `_core._is_ferro_row_policy_name`), never a second copy. Pinned by
-    `tests/test_row_security_reconcile.py`,
-    `tests/test_row_security_rebuild.py`,
-    `tests/test_row_security_orphans.py` and the ferro-ddl-lowering unit pins
-    (which carry real `pg_get_expr` fixtures). Postgres-only: SQLite plans
-    nothing and keeps the create pass's single warning (ADR-0014). Two
-    reported categories never become an autogenerate op, on purpose and
-    silently: a **foreign** policy (never altered on any migration door) and
-    an **unverifiable** raw body (ADR-0019: ferro cannot tell an edit from
-    Postgres's own re-spelling, so it changes nothing and only warns on
-    `migrate_updates`) — the checks family has no comment-op precedent for
-    either shape, so autogenerate stays silent and the runtime's own
-    connect-time warnings remain the only word on them. See ADR-0019
-    (rebuild the bodies ferro writes, report the bodies you write; flags are
-    one-way) and PRD #406.
-17. **Enum type provenance** — the decision of which declared native enum
-    types a generated revision *introduces* (every column declaring the
-    type is one the revision adds: a created table's column or an
-    `add_column`), how an introduced type comes into being (`Inline`: a
-    `create_table` of the revision carries it and SQLAlchemy creates it
-    with the table; `Statement`: every column of it is an `add_column`, so
-    the revision must execute the `CREATE TYPE` itself, #439), and which
-    types it merely *reuses* (an added column declares it, but so does a
-    column the downgrade leaves standing or puts back), together with the
-    rendered `CREATE TYPE` and `DROP TYPE`, are decided by ONE trio of
-    functions: `ferro_ddl_lowering::enum_type_provenance` (one
-    `Introduced { creation } | Reused` verdict per touched type) /
-    `render_pg_enum_create_type` (the runtime create pass's guarded
-    statement; never a second renderer) / `render_pg_enum_drop_type`.
-    SQLAlchemy creates the type inline with `create_table`, unconditionally,
-    and nowhere else, and Alembic has no op for it, so the rendered
-    `downgrade()` never dropped it (#438), a `create_table` reusing a live
-    type re-issued `CREATE TYPE` and failed with `DuplicateObject` (#443),
-    and an `add_column` of a new type failed with `UndefinedObject` (#439).
-    The Alembic autogenerate comparator (`FerroEnumTypeIntroducedOp` /
-    `FerroEnumTypeDropOp` in `src/ferro/migrations/alembic.py`) consumes
-    the verdicts over FFI (`_core._plan_enum_type_provenance`, which carries
-    `create_statement` and `drop_statement`): an introduced type keeps its
-    inline creation, or gets the byte-identical guarded `CREATE TYPE`
-    ahead of every table op when only `add_column`s carry it, and gets the
-    byte-identical `DROP TYPE` on downgrade, after the last `drop_table` /
-    `drop_column`; a reused type gets neither and every `create_table`
-    column of it rewritten to
-    `postgresql.ENUM(..., create_type=False)` (`add_column` never creates a
-    type, so it is left alone). SQLAlchemy's `repr` omits that flag, so it
-    is rendered by the bridge's `render_item` hook
-    (`ferro.migrations.render_item`, wired in `env.py`); a revision that
-    needs it in a context that lacks it is refused at autogenerate with the
-    line to add, never written with an upgrade that fails later. The
-    decision is made from the revision alone, never from the live catalog,
-    so the file means the same thing on every database it runs against.
-    Pinned by `tests/test_alembic_enum_type_drop.py`,
-    `test_enum_type_provenance_parity_pin` and the ferro-ddl-lowering unit
-    pins. Postgres-only (SQLite enums store as text); Alembic-only by
-    construction (auto-migrate has no downgrade door, and its create pass
-    executes the same guarded `CREATE TYPE` itself), so the single-source
-    rule applies and the create statement is the one artifact with a
-    runtime twin to pin against. Ownership is by provenance (ADR-0020);
-    the upgrade side mirrors it (ADR-0021) and completes it for the
-    `add_column`-only shape (ADR-0022).
+11. **Every change to an existing database: the Alembic bridge translates the
+    one planner's ops.** What changes and the statement that changes it are
+    decided once, by the one planner (`ferro_migrate::plan_from_ir`) and its
+    renderer (`ferro_migrate::render_plan`), over function families in
+    `ferro_ddl_lowering`. The reconciliation pass runs them directly; the
+    migrations door writes them into step files; the bridge's one comparator
+    (`dispatch_for("schema")` in `src/ferro/migrations/alembic.py`) reads the
+    live database through `_core._live_schema_ir`, plans with
+    `_core._plan_from_ir(render=True)` (the facts beside the live side),
+    renders per op through `_core._render_plan_ops`, and `translate.py`
+    writes each op as Alembic's own op where it has one and as
+    `op.execute(sa.DDL(...))` of the pass's statement, byte for byte, where
+    it does not. `downgrade()` is the planner's own `reverse_live_plan`
+    (`_core._plan_reverse_from_ir`; a check or policy put back from the
+    catalog through `render_check_restore`). The per-family comparators,
+    their slot registrations and the `_plan_check_*` FFI are gone (#533).
+    The families, each one decision consumed by every door:
+    - **Enum labels** — `missing_enum_labels` / `extra_enum_labels` +
+      `render_pg_enum_add_value` (ADR-0011: append-only, update-gated; an
+      extra live label is a warning on a live database, and between two
+      declared snapshots the migrations door's removal, #536). A label
+      rename hint is `render_pg_enum_rename_value` (`render_label_update`
+      on SQLite); an enum class rename `render_pg_enum_rename_type`.
+    - **Checks** — additions (`missing_check_names` /
+      `render_check_addition`), rebuilds (`drifted_check_names` /
+      `render_check_rebuild`) and leftovers (`extra_check_names` /
+      `extra_check_names_warning` / `render_check_drop`) (ADR-0013..0015).
+      One normalizer, `normalize_check_definition`, compares the canonical
+      rendering with the catalog's; it folds only the casts Postgres adds for
+      display (any cast on a literal, and a text-family cast on a column or
+      `ARRAY[…]`), and every other cast is drift (#563).
+    - **Row security** — the policy name, shorthand cast, rendered
+      expression and `ENABLE` / `FORCE` / `CREATE POLICY` statements
+      (`row_policy_name`, `is_ferro_row_policy_name`,
+      `row_policy_shorthand_cast`, `render_row_policy_setting_expr`,
+      `render_create_row_policy`, `row_security_statements`, over
+      `ROW_POLICY_COMMANDS`), and the reconciliation of a live table
+      (`plan_row_security_reconcile`, with `is_default_row_policy_roles`,
+      `ferro_manages_row_security`, `normalize_row_policy_expr`,
+      `row_policy_command_from_catalog_code` and its warning texts). The
+      Python declaration surface (`src/ferro/rowsecurity.py`) consumes the
+      name, the cast and the command table over FFI
+      (`_core._ddl_row_policy_name`, `_core._rls_shorthand_cast`,
+      `_core._rls_command_matrix`). A foreign policy and an unverifiable raw
+      body never become an op on any door (ADR-0019). Postgres-only; SQLite
+      gets one warning per table and no DDL (ADR-0014).
+    - **Enum types** — a type the change introduces is always the pass's
+      guarded `CREATE TYPE` (`render_pg_enum_create_type`) ahead of every
+      table op, and a type it retires is `render_pg_enum_drop_type` after
+      them; the bridge renders every enum column `create_type=False`
+      (`ferro.migrations.render_item`). This supersedes the
+      inline-vs-statement provenance of ADR-0020..0022 (ADR-0041; the ADR
+      amendment is listed for the epic's close). Postgres-only (SQLite enums
+      store as text).
+
+    `_core._plan_row_security`, `_core._plan_row_security_reconcile`,
+    `_core._plan_enum_label_addition` and `_core._plan_enum_type_provenance`
+    remain as pass-side parity pins. The item is carried by pins **(e)** and
+    **(f)** below.
+
+### The migrations door's six pins
+
+`tests/test_cross_emitter_parity.py` pins the migrations door against the
+pass over every casebook change (`tests/_casebook.py`, cases A–F, built
+from the generator tests' own models) on both dialects:
+
+- **(a)** the statements of the generated DDL steps, headers stripped and the
+  online shapes compared by their plain twins (`normalize_online_shape`: a
+  `NOT VALID` add is the plain add, `CONCURRENTLY` is gone, a validate or
+  staging statement is nothing, a rebuild is the ops it carries), equal the
+  pass's plan for the same before/after modelset
+  (`_core._plan_from_ir(..., render=True)`, two declared snapshots);
+- **(b)** a rebuild's `CREATE TABLE "_ferro_new_<t>"` is byte for byte the
+  create pass's rendering of the shape its step leaves (the relaxed shape for
+  an expand, the target for a contract), apart from the table name;
+- **(c)** a concurrent index statement equals the pass's by exactly one token
+  (`IF NOT EXISTS` against `CONCURRENTLY`);
+- **(d)** the validate, label-addition and type-creation statements are the
+  pass's, through the one renderer;
+- **(e)** a database taken through the migration chain shows no drift, has
+  the same live schema (facts included) as one `connect(auto_migrate=True)`
+  built from the same models, and Alembic autogenerate against the
+  auto-migrated one is empty (against the migrated one it refuses: a tracked
+  database is `ferro migrate new`'s);
+- **(f)** the bridge's revision runs the pass's DDL for every planner op:
+  every statement it runs as written is the pass's, and it leaves the same
+  live schema the pass's statements do.
+
+A pin that fails against merged behaviour is listed in `FINDINGS` there,
+`xfail(strict=True)` with its reason, until the fix lands and the strict
+xfail removes it.
 
 ### Why this invariant exists
 
-A user can adopt either migration strategy or switch between them. If the
-Alembic emitter and the Rust emitter disagree on _any_ schema artifact name,
-running `alembic revision --autogenerate` against a database that was bootstrapped
-by `connect(auto_migrate=True)` produces phantom diffs — Alembic sees a "missing"
-index named `idx_*` and a "spurious" index named `ix_*` and proposes a drop +
-create. The migration is technically a no-op but the diff is unreviewable noise
-and pollutes the migration history.
+A user can adopt any migration strategy or switch between them. If two doors
+disagree on _any_ schema artifact, the second one sees phantom diffs: running
+`alembic revision --autogenerate` or `ferro migrate drift` against a database
+that `connect(auto_migrate=True)` bootstrapped proposes a drop + create of an
+index named `ix_*` for one named `idx_*`. The migration is technically a
+no-op, but the diff is unreviewable noise and pollutes the migration history.
 
 Phantom diffs are the canonical symptom that this invariant has been broken.
 
 ### How this invariant is enforced
 
+- One planner, one renderer: every door plans with
+  `ferro_migrate::plan_from_ir` and renders with `render_plan`; every
+  decision lives in one `ferro_ddl_lowering` function, consumed over FFI by
+  the Python side.
 - `src/ferro/migrations/alembic.py` constructs `MetaData` with an explicit
   `naming_convention` that mirrors the Rust emitter (see `_FERRO_NAMING_CONVENTION`).
 - `src/schema.rs` hard-codes the same names via `format!("idx_{}_{}",
   table_lower, col_name)` and the helpers in `composite_index_name` /
   `composite_unique_index_name`.
-- `tests/test_alembic_autogenerate.py` and `tests/test_schema_constraints.py`
-  contain explicit parity tests (`test_index_name_matches_rust_runtime_*`) that
-  fail loudly if either side drifts.
+- `tests/test_cross_emitter_parity.py` holds the bridge sentinel (autogenerate
+  against an auto-migrated database is empty) and the migrations door's six
+  pins; `tests/test_db_type_cross_emitter_parity.py` pins every type token;
+  `tests/test_alembic_autogenerate.py` and `tests/test_schema_constraints.py`
+  pin the names (`test_index_name_matches_rust_runtime_*`).
 - `docs/solutions/patterns/cross-emitter-ddl-parity.md` documents the rule and
-  the recipe for adding a new artifact.
+  the recipes below.
 
 ### Adding a new emitter
 
-If you add a new emitter (e.g. a "dump schema to JSON" tool):
+If you add a new emitter (e.g. `ferro schema dump`):
 
-1. Read the constants in `_FERRO_NAMING_CONVENTION` and the `composite_*_name`
-   helpers — these are the source of truth.
-2. Add a parity test that compares your emitter's output against the existing
-   emitters for at least: single-column index, composite index, single-column
-   unique, composite unique, foreign key with shadow column.
+1. Plan with `ferro_migrate::plan_from_ir` and render with `render_plan`; read
+   the constants in `_FERRO_NAMING_CONVENTION` and the `composite_*_name`
+   helpers — these are the source of truth. Never a second renderer.
+2. Add a pin to `tests/test_cross_emitter_parity.py` that compares your
+   emitter's output with `_core._plan_from_ir(..., render=True)` for every
+   casebook case on both dialects, the way pin (a) does for the migrations
+   door; at least single-column index, composite index, single-column
+   unique, composite unique and foreign key with shadow column must be
+   among them.
 3. Update this AGENTS.md entry with the new emitter in the bulleted list above.
 
 ### Adding a new artifact
@@ -269,8 +215,12 @@ If you add a new schema feature (e.g. partial indexes, exclusion constraints):
 
 1. Pick the canonical name format and document it in this file under the
    numbered list above.
-2. Implement it in **both** the Alembic and Rust paths in the same PR.
-3. Add a parity test that asserts the names match.
+2. Decide it in one `ferro_ddl_lowering` function, plan it as a
+   `MigrationOp` and render it in `render_plan`, so every door gets it in the
+   same PR; give the bridge's `translate.py` its op (Alembic's own, or the
+   pass's statement).
+3. Add a casebook case (`tests/_casebook.py`) so pins (a)–(f) cover it, and a
+   parity test that asserts the names match.
 4. Do not edit `CHANGELOG.md` manually — release tooling records entries at
    release time (see I-10).
 
@@ -359,6 +309,13 @@ What this means in practice:
   something from scope (with the boundary stated and a real path for the
   excluded case, e.g. "renames are Alembic territory") is good design.
   Shipping a half-working version of something that is *in* scope is not.
+- **Every refusal names its fix.** A refusal tells the reader what to do
+  next: the command, the line or the recipe. This binds every refusal text
+  the migration doors print: the primary-key recipe, the SQLite rebuild
+  refusals (an undeclared object, a type SQLite cannot check), the
+  tracked-database refusal of `connect(auto_migrate=True)` and of Alembic
+  autogenerate, and the edited-file refusals (`ferro migrate rerecord`,
+  `--continue` / `--restart`).
 
 This rule binds human contributors and AI agents equally, and overrides any
 agent default that biases toward minimal or expedient changes.
@@ -497,55 +454,6 @@ Rules:
 This applies to brainstorming, design discussions, PR descriptions, issue
 comments, and any explanation directed at the maintainer. It governs how work is
 communicated, not what gets built.
-
----
-
-## I-12: Ferro Alembic comparators declare their slot relative to table ops
-
-Every ferro schema comparator states its position relative to Alembic's own
-table ops (`create_table` / `ModifyTableOps`) as part of its interface — not
-as a comment.
-
-A generated revision that adds a column and a table check over it must emit
-`ADD COLUMN` before `ADD CONSTRAINT`:
-
-```python
-class Card(Model):
-    flavor: str | None = None  # new this revision
-    __ferro_checks__ = (Check("flavor_set", lambda card: card.flavor != None),)
-```
-
-Default `MEDIUM` does not do that: Ferro's import-time registration runs
-before Alembic injects its table comparator into the same bucket, so check
-ops `extend` the list while it still has no table ops (#423).
-
-After-tables families (`ADD CONSTRAINT` over a new column, `CREATE POLICY`
-on a new table) register at `priority=LAST`. Before-tables families (enum
-label addition) register at `priority=FIRST` and insert at the front of the
-ops list. The enum type provenance family (#438, #439) is before-tables on
-upgrade (the `CREATE TYPE` for a type only `add_column`s carry must precede
-those `add_column`s) and after-tables on downgrade (`DROP TYPE` is only
-legal after every `drop_table` / `drop_column`); it reads the revision's
-`create_table` and `add_column` ops to decide, so it registers at
-`priority=LAST`, but inserts at the front of the ops list, and the one
-placement serves both sides: `UpgradeOps.reverse()` reverses order, so an
-op ahead of every `create_table` lands behind every `drop_table` in the
-downgrade. The priority says when a comparator runs; the insertion point
-says where its op renders. Default `MEDIUM` is an I-12 violation for
-ferro schema comparators. Alembic's own table comparator may remain
-`MEDIUM`. A same-revision pin is required for every after-tables family
-and for the before-tables upgrade statement.
-
-Pinned by the row-security comparator's LAST registration and
-`test_new_declaration_on_a_brand_new_table_lands_after_create_table`, and
-by `test_autogenerate_adds_a_column_before_the_check_that_references_it`
-(#423), for the downgrade-after-tables slot by
-`test_a_type_shared_by_two_new_tables_drops_once_after_both_tables`
-(#438), and for the before-tables type creation by
-`test_a_type_introduced_by_add_column_alone_is_created_and_dropped` and
-`test_a_type_created_by_statement_lands_before_tables_beside_label_additions`
-(#439). Architecture review: I-19 in #427. See PRD #429 and
-`docs/solutions/patterns/alembic-comparator-slot.md`.
 
 ---
 
