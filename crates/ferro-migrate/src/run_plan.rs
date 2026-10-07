@@ -260,6 +260,13 @@ pub struct PlannedStep {
     pub resumes: bool,
     /// Set when the unfinished attempt ran a different file.
     pub edited: Option<EditedUnfinished>,
+    /// A Python data step (`NN_<name>.py`, ADR-0024): Python loads the file,
+    /// checks it against `checksum`, reads its declared shape, runs it and
+    /// writes its record with that shape as the kind; `kind` and `mode` are
+    /// the atomic step's until the declaration says otherwise. Going down
+    /// `file` is the same file, whose `down` the run calls.
+    #[serde(default)]
+    pub data: bool,
     /// Going down: why the step's down runs no statement — the down file's
     /// `-- ferro: nothing-to-reverse <reason>`, or an up that never finished
     /// in a transaction and so left nothing behind. Its record is removed.
@@ -358,11 +365,6 @@ pub enum RunRefusal {
         /// `NNNN_<name>/<file>`.
         step: String,
     },
-    /// A pending data step: the data-step runner is ticket #530's.
-    NotRunnableYet {
-        /// `NNNN_<name>/<file>`.
-        file: String,
-    },
     /// A step `down` would have to revert is declared irreversible
     /// (`-- ferro: irreversible <reason>`, ADR-0033). Nothing is reverted,
     /// including the steps above it; there is no flag to skip it.
@@ -431,7 +433,6 @@ impl RunRefusal {
             RunRefusal::NewerFormat { .. } => "newer_format",
             RunRefusal::TablesExist { .. } => "tables_exist",
             RunRefusal::Reverting { .. } => "reverting",
-            RunRefusal::NotRunnableYet { .. } => "not_runnable_yet",
             RunRefusal::Irreversible { .. } => "irreversible",
             RunRefusal::BelowBaseline { .. } => "below_baseline",
             RunRefusal::NoSuchTarget { .. } => "no_such_target",
@@ -446,10 +447,7 @@ impl RunRefusal {
     /// directory (what `status` reports as needing attention), rather than a
     /// capability this ferro lacks.
     pub fn needs_attention(&self) -> bool {
-        !matches!(
-            self,
-            RunRefusal::NotRunnableYet { .. } | RunRefusal::NotImplemented { .. }
-        )
+        !matches!(self, RunRefusal::NotImplemented { .. })
     }
 }
 
@@ -603,9 +601,6 @@ impl std::fmt::Display for RunRefusal {
                  reverting).\nFinish the revert with `ferro migrate down` before running up. \
                  Nothing was applied."
             ),
-            RunRefusal::NotRunnableYet { file } => {
-                write!(f, "not runnable yet: data step {file} (ticket #530)")
-            }
             RunRefusal::Irreversible {
                 migration,
                 step,
@@ -895,8 +890,8 @@ fn check_order(dir: &MigrationsDir, by_key: &RecordMap) -> Result<(), RunRefusal
 /// lacks (allowed through with `allow_ahead` when they all sort above its
 /// head); a snapshot or finished step edited after it was applied; a pending
 /// migration below an applied one; a DDL step without this dialect's
-/// rendering; headers the dialect cannot honour; a pending data step
-/// (ticket #530). Going down, see [`plan_down`]'s refusals.
+/// rendering; headers the dialect cannot honour. Going down, see
+/// [`plan_down`]'s refusals.
 pub fn plan_run(
     dir: &MigrationsDir,
     records: &[StepRecord],
@@ -923,10 +918,14 @@ pub fn plan_run(
             let file = step_file(migration, step, dialect)?;
             let name = file_name(&file.up);
             let shown = format!("{}/{name}", migration.dir_name());
-            if step.kind == StepKind::Data {
-                return Err(RunRefusal::NotRunnableYet { file: shown });
-            }
             let mode = exec_mode(&file.headers, dialect, &shown)?;
+            let data = step.kind == StepKind::Data;
+            // A data step records the shape its file declares; Python sets it.
+            let kind = if data {
+                RecordKind::Atomic
+            } else {
+                mode.record_kind()
+            };
             let checksum = encode_checksum(&file.up_checksum);
             let edited = record
                 .filter(|r| r.checksum != checksum || r.file != name)
@@ -940,7 +939,7 @@ pub fn plan_run(
                 step: step.ordinal,
                 file: name.clone(),
                 path: file.up.clone(),
-                kind: mode.record_kind(),
+                kind,
                 checksum: checksum.clone(),
                 snapshot_checksum: snapshot_checksum.clone(),
                 headers: file.headers.clone(),
@@ -948,12 +947,13 @@ pub fn plan_run(
                 resumes: record.is_some(),
                 edited,
                 nothing_to_reverse: None,
+                data,
                 record: StepRecord {
                     migration: migration.number,
                     step: step.ordinal,
                     migration_name: migration.dir_name(),
                     file: name,
-                    kind: mode.record_kind(),
+                    kind,
                     checksum,
                     snapshot_checksum: snapshot_checksum.clone(),
                     started_at: String::new(),
@@ -1027,8 +1027,9 @@ fn down_floor(
 /// finished step edited since it was applied; a `--to` naming nothing;
 /// [`RunRefusal::BelowBaseline`] for a step a baseline recorded;
 /// [`RunRefusal::Irreversible`] for a step whose down declares it so, quoting
-/// the reason; a data step (ticket #530); down headers the dialect cannot
-/// honour.
+/// the reason; down headers the dialect cannot honour. A data step's down is
+/// its own file's `down` function: Python reads its declaration (ADR-0035)
+/// and refuses an irreversible one before the lock.
 fn plan_down(
     dir: &MigrationsDir,
     records: &[StepRecord],
@@ -1064,11 +1065,20 @@ fn plan_down(
             continue;
         };
         let file = step_file(migration, step, dialect)?;
-        let shown_up = format!("{}/{}", migration.dir_name(), file_name(&file.up));
-        let (Some(down), Some(down_checksum), StepKind::Ddl | StepKind::PortableSql) =
-            (&file.down, &file.down_checksum, step.kind)
-        else {
-            return Err(RunRefusal::NotRunnableYet { file: shown_up });
+        let data = step.kind == StepKind::Data;
+        let (down, down_checksum) = match (&file.down, &file.down_checksum, data) {
+            // A data step's down lives in the same file as its up.
+            (_, _, true) => (&file.up, &file.up_checksum),
+            (Some(down), Some(checksum), false) => (down, checksum),
+            // The directory reader refuses an up without its down.
+            _ => {
+                return Err(RunRefusal::Directory {
+                    error: DirectoryError::MissingPair {
+                        present: file.up.clone(),
+                        missing: file.up.with_extension("down.sql"),
+                    },
+                });
+            }
         };
         if let Some(reason) = &file.down_headers.irreversible {
             return Err(RunRefusal::Irreversible {
@@ -1081,7 +1091,7 @@ fn plan_down(
         let shown = format!("{}/{name}", migration.dir_name());
         let mode = exec_mode(&file.down_headers, dialect, &shown)?;
         let nothing_to_reverse = file.down_headers.nothing_to_reverse.clone().or_else(|| {
-            (!record.is_finished() && record.kind == RecordKind::Ddl)
+            (!record.is_finished() && matches!(record.kind, RecordKind::Ddl | RecordKind::Atomic))
                 .then(|| UNFINISHED_TRANSACTIONAL.to_string())
         });
         steps.push(PlannedStep {
@@ -1098,6 +1108,7 @@ fn plan_down(
             resumes: false,
             edited: None,
             nothing_to_reverse,
+            data,
             record: (*record).clone(),
         });
     }
@@ -1812,17 +1823,47 @@ mod tests {
         assert!(refusal.to_string().contains("ferro migrate down"));
     }
 
-    #[test]
-    fn a_pending_data_step_is_not_runnable_yet() {
-        let dir = dir(vec![(
+    fn backfill() -> MigrationsDir {
+        dir(vec![(
             "backfill",
             vec![ddl(1, "schema", "SELECT 1;\n"), data(2, "backfill_author")],
             &["author"],
-        )]);
-        let refusal = up(&dir, &[]).expect_err("data");
+        )])
+    }
+
+    #[test]
+    fn a_pending_data_step_is_planned_for_python_to_run() {
+        let dir = backfill();
+        let plan = up(&dir, &[]).expect("plan");
+        assert_eq!(keys(&plan), [(1, 1), (1, 2)]);
+        let step = &plan.steps[1];
+        assert!(step.data && !plan.steps[0].data);
+        assert_eq!(step.file, "02_backfill_author.py");
+        assert_eq!(step.path, PathBuf::from("/m/02_backfill_author.py"));
+        assert_eq!(step.checksum, encode_checksum(&sha384(b"# data")));
+        assert_eq!(step.record.checksum, step.checksum);
+        assert_eq!(step.mode, ExecMode::Transactional);
+        assert_eq!(step.kind, RecordKind::Atomic);
+        assert_eq!(step.record.kind, RecordKind::Atomic);
+    }
+
+    #[test]
+    fn a_data_step_reverts_through_its_own_file_and_an_unfinished_one_runs_nothing() {
+        let dir = backfill();
+        let records = [finished(&dir, 1, 1), finished(&dir, 1, 2)];
+        let plan = down(&dir, &records, Target::Latest).expect("plan");
+        assert_eq!(keys(&plan), [(1, 2), (1, 1)]);
+        let step = &plan.steps[0];
+        assert!(step.data);
+        assert_eq!(step.file, "02_backfill_author.py");
+        assert_eq!(step.checksum, encode_checksum(&sha384(b"# data")));
+        assert_eq!(step.nothing_to_reverse, None);
+
+        let failed = [finished(&dir, 1, 1), started(&dir, 1, 2)];
+        let plan = down(&dir, &failed, Target::Latest).expect("plan");
         assert_eq!(
-            refusal.to_string(),
-            "not runnable yet: data step 0001_backfill/02_backfill_author.py (ticket #530)"
+            plan.steps[0].nothing_to_reverse.as_deref(),
+            Some(UNFINISHED_TRANSACTIONAL)
         );
     }
 
@@ -2043,7 +2084,7 @@ mod tests {
     }
 
     #[test]
-    fn a_database_ahead_of_the_checkout_cannot_go_down_and_a_data_step_is_not_runnable_yet() {
+    fn a_database_ahead_of_the_checkout_cannot_go_down() {
         let (dir, records) = three_with_steps();
         let mut ahead = records.clone();
         ahead.push(StepRecord {
@@ -2062,35 +2103,6 @@ mod tests {
         )
         .expect_err("ahead");
         assert_eq!(refusal.kind(), "applied_missing");
-
-        let with_data = super::tests::dir(vec![(
-            "backfill",
-            vec![
-                ddl(1, "schema", "CREATE TABLE a (id int);\n"),
-                data(2, "backfill"),
-            ],
-            &["a"],
-        )]);
-        // The same migration without its data step: `up` cannot plan past
-        // the data step, but its snapshot (and so the record) is the same.
-        let ddl_only = super::tests::dir(vec![(
-            "backfill",
-            vec![ddl(1, "schema", "CREATE TABLE a (id int);\n")],
-            &["a"],
-        )]);
-        let mut records = vec![finished(&ddl_only, 1, 1)];
-        records.push(StepRecord {
-            step: 2,
-            file: "02_backfill.py".into(),
-            checksum: encode_checksum(&sha384(b"# data")),
-            ..records[0].clone()
-        });
-        assert_eq!(
-            down(&with_data, &records, Target::Latest)
-                .expect_err("data")
-                .kind(),
-            "not_runnable_yet"
-        );
     }
 
     #[test]

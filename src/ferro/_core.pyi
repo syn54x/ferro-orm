@@ -263,9 +263,23 @@ async def _read_records(using: str | None, tracking_schema: str | None = None) -
     ...
 
 async def _write_record(
-    using: str | None, record_json: str, tracking_schema: str | None = None
+    using: str | None,
+    record_json: str,
+    tracking_schema: str | None = None,
+    route: RouteHandle | None = None,
 ) -> None:
-    """Upsert one step record."""
+    """Upsert one step record; with ``route`` (an open ``transaction()``
+    block's), on that transaction's connection, committing with it."""
+    ...
+
+async def _remove_record(
+    route: RouteHandle,
+    migration: int,
+    step: int,
+    tracking_schema: str | None = None,
+) -> None:
+    """Delete the record of ``(migration, step)`` inside the transaction
+    ``route`` names (a data step's down)."""
     ...
 
 async def _execute_sql_step(
