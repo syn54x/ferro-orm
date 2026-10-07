@@ -1,5 +1,7 @@
 # A generated upgrade reuses the enum types it does not introduce
 
+> **Superseded in part by ADR-0041**: the bridge no longer decides type creation from the revision. On Postgres every native enum type a change needs is the planner's guarded `CREATE TYPE` (`render_pg_enum_create_type`), ahead of every table op, and every enum column renders `postgresql.ENUM(..., create_type=False)`. A type is dropped (`render_pg_enum_drop_type`, after the table ops) when the plan removes every column and table that declares it, decided by the one planner against the live database. The inline-versus-statement distinction, the *Introduced/Reused* verdicts made from the revision alone, and ownership by provenance are historical. The problems this ADR records (#438, #439, #443) stay solved, by that rule.
+
 Two models share one `StrEnum`; the first was migrated earlier, the second
 is added in a later revision:
 

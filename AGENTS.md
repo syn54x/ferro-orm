@@ -94,7 +94,8 @@ For a single model, every emitter must agree on:
       extra live label is a warning on a live database, and between two
       declared snapshots the migrations door's removal, #536). A label
       rename hint is `render_pg_enum_rename_value` (`render_label_update`
-      on SQLite); an enum class rename `render_pg_enum_rename_type`.
+      on SQLite, in a migration only; the pass warns there, ADR-0047); an
+      enum class rename `render_pg_enum_rename_type`.
     - **Checks** — additions (`missing_check_names` /
       `render_check_addition`), rebuilds (`drifted_check_names` /
       `render_check_rebuild`) and leftovers (`extra_check_names` /
@@ -122,10 +123,9 @@ For a single model, every emitter must agree on:
       guarded `CREATE TYPE` (`render_pg_enum_create_type`) ahead of every
       table op, and a type it retires is `render_pg_enum_drop_type` after
       them; the bridge renders every enum column `create_type=False`
-      (`ferro.migrations.render_item`). This supersedes the
-      inline-vs-statement provenance of ADR-0020..0022 (ADR-0041; the ADR
-      amendment is listed for the epic's close). Postgres-only (SQLite enums
-      store as text).
+      (`ferro.migrations.render_item`). This supersedes in part the
+      inline-vs-statement provenance of ADR-0020..0022 (ADR-0041).
+      Postgres-only (SQLite enums store as text).
 
     `_core._plan_row_security`, `_core._plan_row_security_reconcile`,
     `_core._plan_enum_label_addition` and `_core._plan_enum_type_provenance`

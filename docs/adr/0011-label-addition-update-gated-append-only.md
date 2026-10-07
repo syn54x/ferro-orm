@@ -1,5 +1,7 @@
 # Label addition is update-gated and append-only
 
+> **Amended by ADR-0047**: besides label addition, the reconciliation pass renames a label on Postgres when a live `__ferro_renamed_labels__` hint names it (`ALTER TYPE … RENAME VALUE`, catalog-only). Removal stays reviewed-migration territory, and an unhinted rename is still an addition plus an extra-label warning. On SQLite a live label hint is a warning, because there the rename is a change to rows.
+
 A native Postgres enum type that already exists is an existing schema object,
 so evolving its label set belongs to the **reconciliation pass**
 (`migrate_updates`), not the create pass — the same line ADR-0010 drew for

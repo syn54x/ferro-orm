@@ -1,5 +1,7 @@
 # Auto-migrate pass ownership: the create pass creates missing tables; the reconciliation pass owns every existing table
 
+> **Amended by ADR-0047**: the create pass does not create a table whose `__ferro_renamed_from__` old name is live, nor any table that depends on it, directly or transitively; the reconciliation pass renames the old table under `migrate_updates`.
+
 The auto-migrate **create pass** (`CONTEXT.md`) brings missing tables into
 existence — table, columns, indexes, constraints, together — and leaves a
 table that already exists completely untouched, whatever its shape. All DDL

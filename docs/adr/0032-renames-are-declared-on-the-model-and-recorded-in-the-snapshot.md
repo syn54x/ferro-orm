@@ -1,5 +1,7 @@
 # Renames are declared on the model and recorded in the snapshot
 
+> **Extended by ADR-0047**: the reconciliation pass honours the same hints, with liveness read from the live database (old name live, new name absent) instead of the previous snapshot.
+
 A developer renames `Author.name` to `full_name`. A diff of the two schema snapshots sees a column that vanished and a column that appeared, and the DDL for that is `DROP COLUMN "name"` plus `ADD COLUMN "full_name"`: every author's name is gone. No diff can tell that from a rename. The developer has to say so, and says so on the model:
 
 ```python

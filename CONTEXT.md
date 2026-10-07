@@ -141,11 +141,11 @@ The registry epoch after relationship resolution completes — join tables exist
 _Avoid_: Final registration, committed registry
 
 **Create pass**:
-The auto-migrate step that brings missing tables into existence — the table, its columns, its indexes and constraints, together. A table that already exists is left completely untouched by this pass, whatever its shape.
+The auto-migrate step that brings missing tables into existence — the table, its columns, its indexes and constraints, together. A table that already exists is left completely untouched by this pass, whatever its shape. A table a live *rename hint* says already exists under its old name is not missing, so the pass holds it back, and with it every table that depends on it.
 _Avoid_: Bootstrap, ensure-tables, table sync
 
 **Reconciliation pass**:
-The `migrate_updates` step that alters existing schema objects — tables and ferro-owned enum types — to match the registered models; the only authority for DDL against an object that already exists. Within one table, column changes land before the indexes and constraints that reference them; label additions land before any table's changes.
+The `migrate_updates` step that alters existing schema objects — tables and ferro-owned enum types — to match the registered models; the only authority for DDL against an object that already exists. It honours a live *rename hint* by renaming. It changes schema and never rows, so on SQLite, where an enum label lives in rows, a label hint is a warning. Within one table, column changes land before the indexes and constraints that reference them; label additions land before any table's changes.
 _Avoid_: Update pass, schema sync, drift repair
 
 **Migration** (in-house):
@@ -205,7 +205,7 @@ The generated DDL step that runs before a migration's data steps. It holds only 
 _Avoid_: Pre-step, additive step, phase one
 
 **Contract step**:
-The generated DDL step that runs after a migration's data steps. It holds what the rows had to be prepared for (`NOT NULL`, the removal of an enum label) and every *destructive step* statement, so a *backfill* can still read a column the same migration drops.
+The generated DDL step that runs after a migration's data steps. It holds what the rows had to be prepared for (`NOT NULL`, the removal of an enum label) and every *destructive step* statement, so a data step can still read a column or table the same migration drops. A migration with any data step has one, whether the data step is a *backfill*, a *guard step* or one a person added.
 _Avoid_: Post-step, cleanup step, tighten step
 
 **Staged `NOT NULL`**:
@@ -258,7 +258,8 @@ _Avoid_: Ledger, history table, version table, migration log
 
 **Step record**:
 One row of the *tracking table*: a *step* that was started on this database, the checksum of the file that was run and of its migration's *schema snapshot*, and whether it finished. A record that is started and not finished marks where the next *run* resumes; a chunked data step's record also carries its *cursor*. A chunked step being reverted keeps its record, marked as reverting and carrying the down's own cursor, until its last batch.
-_Avoid_: Migration row, version row, applied migration
+A finished record is *applied*: `status` shows `applied`, `applied (different checksum)` or `applied (baseline)`.
+_Avoid_: Migration row, version row, installed (for a finished step)
 
 **Baseline**:
 Recording migrations as applied on a database that already has their schema, built by auto-migrate or Alembic before the project had migrations. Nothing is executed: the database is checked against the *schema snapshot* of the last migration being recorded, and the *step records* are written only when it shows no *drift*. A baselined migration is never reverted by running its down steps, since it created nothing there; undoing a baseline removes the records.
@@ -285,7 +286,7 @@ A difference between two *schema snapshots* that renders DDL. A difference that 
 _Avoid_: Model change, diff, IR change
 
 **Rename hint**:
-A declaration on a model or enum saying what a column, a table or an enum label was called before. Without one, a rename is indistinguishable from a drop and an add, and generates exactly that. A hint is live only while the previous *schema snapshot* still holds the old name and lacks the new one; after its migration is generated it is inert and may be deleted. An enum type's rename needs no hint: it is read off the columns that moved to it.
+A declaration on a model or enum saying what a column, a table or an enum label was called before. Without one, a rename is indistinguishable from a drop and an add, and generates exactly that. A hint is live only while the previous *schema snapshot* still holds the old name and lacks the new one; after its migration is generated it is inert and may be deleted. The *reconciliation pass* and the *generated revision* have no snapshot and read the same rule off the live database. An enum type's rename needs no hint: it is read off the columns that moved to it.
 _Avoid_: Rename marker, rename directive, migration hint
 
 **Destructive step**:
@@ -321,11 +322,11 @@ The committed file that declares a project's *databases* to ferro's tooling: whi
 _Avoid_: Settings (alone), env config, config layers
 
 **Generated revision**:
-Alembic's unit of schema change, written by `alembic revision --autogenerate` through ferro's bridge. It holds what the *reconciliation pass* would do to the database it was generated against, with destructive changes included, since it is reviewed before it runs: nothing more, so an empty one means no *drift*. It carries schema changes only; a change that demands values of existing rows is written plain and marked, and its *backfill* belongs to a *migration*.
+Alembic's unit of schema change, written by `alembic revision --autogenerate` through ferro's bridge. It holds what the *reconciliation pass* would do to the database it was generated against, with destructive changes included, since it is reviewed before it runs, plus the drop of each live table no model declares that the context's filters admit (the table Alembic itself would drop), so that table's enum type goes with it. Nothing more: an empty one means no *drift* and no such table. Its downgrade puts a dropped table back as far as ferro can read it. It carries schema changes only; a change that demands values of existing rows is written plain and marked, and its *backfill* belongs to a *migration*.
 _Avoid_: Migration (ferro's own unit), autogenerated migration, Alembic migration
 
 **Ferro-owned artifact**:
-A schema object ferro may reconcile to match the declared model. Indexes and constraints are ferro-owned by naming (`idx_`, `uq_`, `fk_`, `ck_`); native enum types are ferro-owned by derivation — the type's name matches the name ferro derives from the model. A generated revision owns an enum type a third way, by provenance: it introduces every column of the type, so its downgrade drops the type (see *Type drop*); a type it adds a column of but does not introduce is one it reuses, never creates (see *Type reuse*). Artifacts owned none of these ways belong to the user and are never altered or dropped.
+A schema object ferro may reconcile to match the declared model. Indexes and constraints are ferro-owned by naming (`idx_`, `uq_`, `fk_`, `ck_`); native enum types are ferro-owned by derivation — the type's name matches the name ferro derives from the model. Artifacts owned neither way belong to the user and are never altered or dropped.
 _Avoid_: Managed index, system constraint, internal index
 
 **Enum label**:
@@ -333,20 +334,16 @@ One storable value of a native Postgres enum type, mirrored from a Python `StrEn
 _Avoid_: Enum value, variant, choice
 
 **Label addition**:
-The reconciliation-pass operation appending model-declared labels missing from a live ferro-owned enum type. Append-only and metadata-only: rows are never touched, and labels the database has but the model lacks are warned about loudly and never removed — removal and rename are reviewed-migration territory.
+The reconciliation-pass operation appending model-declared labels missing from a live ferro-owned enum type. Append-only and metadata-only: rows are never touched, and labels the database has but the model lacks are warned about loudly and never removed — removal is reviewed-migration territory. A rename is not a label addition: on Postgres the pass renames a label only on a live *rename hint*.
 _Avoid_: Enum sync, label reconciliation, enum evolution
 
 **Type drop**:
-The reverse of a generated revision's creation of a native enum type — inline with `create_table`, or by *Type creation* when only `add_column`s carry it: the `DROP TYPE` the revision's `downgrade()` emits, after its last `drop_table` and `drop_column`, for each native enum type the revision introduces — every column declaring it is one the revision adds, and none is one the downgrade puts back. Decided from the revision alone, never from the live catalog; the type is the revision's by provenance, not derivation (ADR-0020). Alembic core has no operation for either direction; ferro's bridge supplies the drop, and the creation for the `add_column`-only shape, so a downgrade leaves no type behind and an upgrade finds every type it needs.
+The `DROP TYPE` that follows the removal of the last column or table declaring a ferro-owned native enum type, after the table changes, on every door and in either direction: a migration's step or down, the *reconciliation pass* under `migrate_destructive`, and a generated revision's `upgrade()` or `downgrade()`. One planner decides it.
 _Avoid_: Enum cleanup, type teardown, cascade drop
 
 **Type creation**:
-The `CREATE TYPE` a generated revision's `upgrade()` executes, ahead of its table operations, for a native enum type it introduces (see *Type drop*) that no `create_table` of the revision carries — every column of it is an `add_column`, and SQLAlchemy creates a named enum type inline with `create_table` only. It is the runtime create pass's guarded statement, rendered by the same function, so both migration doors run the same SQL for the same model; a type a `create_table` carries is created inline by SQLAlchemy and gets no statement. The second axis of the one type-provenance decision (ADR-0022).
-_Avoid_: Explicit enum create, add_column type fix, pre-create
-
-**Type reuse**:
-A generated revision's use of a native enum type it does not introduce — a column the revision adds declares it, but so does a column the downgrade leaves standing or puts back — so the type already lives on every database the revision can run against. The revision's `create_table` columns of that type render as `postgresql.ENUM(..., create_type=False)` (through the bridge's `render_item` hook, since SQLAlchemy's `repr` omits the flag) and no `DROP TYPE` is emitted. The other verdict of the one type-provenance decision that also decides the type drop, made from the revision alone (ADR-0021).
-_Avoid_: Shared type, existing type, live-type exclusion
+The guarded `CREATE TYPE` that brings a native enum type into being before any table change that uses it, on every door and rendered by one function. A table operation never creates a type, so a generated revision renders every enum column `create_type=False`.
+_Avoid_: Explicit enum create, inline type creation, pre-create
 
 **Constraint rebuild**:
 Drop-and-recreate of a ferro-owned constraint whose live definition no longer matches the declared model — a foreign key's `on_delete`, its target, its columns, or a table check's predicate. Metadata-only: rows are never touched. On a backend that cannot alter constraints, ferro warns loudly and skips; it never diverges silently.
