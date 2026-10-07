@@ -2,13 +2,13 @@
 
 use crate::{Dialect, EmissionError, EmissionResult};
 use ferro_ddl_lowering::{
-    self, CheckEmission, ResolvedStorage, apply_canonical_type_for, canonical_from_schema_column,
-    canonical_to_db_type_token, db_check_constraint_name, fk_action_from_str, fk_action_sql,
-    fk_name, literal_default_value, pg_alter_type_target, quote_ident, refused_conversion,
-    refused_conversion_warning, render_db_check, render_json_backfill_default,
-    render_pg_enum_create_type, render_sqlite_add_column_references, render_table_check_body,
-    resolve_column_storage, row_security_statements, single_index_name, single_unique_index_name,
-    sqlite_declared_type, sqlite_type_storage_drift,
+    self, CheckEmission, ConstraintMode, IndexMode, ResolvedStorage, apply_canonical_type_for,
+    canonical_from_schema_column, canonical_to_db_type_token, db_check_constraint_name,
+    fk_action_from_str, fk_action_sql, fk_name, literal_default_value, pg_alter_type_target,
+    quote_ident, refused_conversion, refused_conversion_warning, render_db_check,
+    render_json_backfill_default, render_pg_enum_create_type, render_sqlite_add_column_references,
+    render_table_check_body, resolve_column_storage, row_security_statements, single_index_name,
+    single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
 };
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
 use sea_query::{
@@ -190,7 +190,12 @@ pub fn render_create_table_as(
     let check_emissions: Vec<(&ferro_schema_ir::SchemaCheck, CheckEmission)> = model
         .checks
         .iter()
-        .map(|check| (check, render_db_check(table_lower, check, dialect)))
+        .map(|check| {
+            (
+                check,
+                render_db_check(table_lower, check, dialect, ConstraintMode::Plain),
+            )
+        })
         .collect();
     if let Some((orphan, _)) = check_emissions.iter().find(|(check, emission)| {
         emission.inline.is_some()
@@ -270,17 +275,23 @@ pub fn render_create_table_as(
     })
 }
 
+/// `CREATE [UNIQUE] INDEX` for one index: the one renderer of every door's
+/// index (the create pass, the reconciliation pass, the generator).
+///
+/// `mode` is the token after `INDEX` ([`IndexMode`]): `IF NOT EXISTS` for
+/// every door's plain statement, `CONCURRENTLY` for the generator's Postgres
+/// index step (ADR-0044). The two renderings differ by that token only.
 pub(crate) fn render_index_sql(
     table_lower: &str,
     name: &str,
     columns: &[String],
     unique: bool,
     dialect: Dialect,
+    mode: IndexMode,
 ) -> String {
     let mut stmt = Index::create()
         .name(name)
         .table(Alias::new(table_lower))
-        .if_not_exists()
         .to_owned();
     if unique {
         stmt.unique();
@@ -288,9 +299,19 @@ pub(crate) fn render_index_sql(
     for col in columns {
         stmt.col(Alias::new(col));
     }
-    match dialect {
+    let bare = match dialect {
         Dialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
         Dialect::Postgres => stmt.to_string(PostgresQueryBuilder),
+    };
+    let head = if unique {
+        "CREATE UNIQUE INDEX "
+    } else {
+        "CREATE INDEX "
+    };
+    match bare.strip_prefix(head) {
+        Some(rest) => format!("{head}{} {rest}", mode.create_token()),
+        // sea-query always opens with `head`; never reached.
+        None => bare,
     }
 }
 
@@ -338,7 +359,14 @@ fn post_create_artifacts(
     let mut warnings = Vec::new();
 
     for (name, columns, unique) in standalone_indexes(model) {
-        statements.push(render_index_sql(table_lower, &name, &columns, unique, dialect));
+        statements.push(render_index_sql(
+            table_lower,
+            &name,
+            &columns,
+            unique,
+            dialect,
+            IndexMode::Plain,
+        ));
     }
 
     // Inline fragments already rode their column in the CREATE TABLE.
@@ -385,18 +413,49 @@ pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a Schema
     )
 }
 
+/// The single-column index and unique a column's own `unique` / `index` flag
+/// declares, as `(name, columns, unique)`: the standalone named `uq_` unique
+/// index and `idx_` index fresh-create emits (FF-B B4/D1), unique first. What
+/// an `ADD COLUMN` of `col` builds.
+pub(crate) fn added_column_indexes(
+    table: &str,
+    col: &SchemaColumn,
+) -> Vec<(String, Vec<String>, bool)> {
+    let mut out = Vec::new();
+    if col.unique {
+        out.push((
+            single_unique_index_name(table, &col.name),
+            vec![col.name.clone()],
+            true,
+        ));
+    }
+    if col.index {
+        out.push((
+            single_index_name(table, &col.name),
+            vec![col.name.clone()],
+            false,
+        ));
+    }
+    out
+}
+
 /// The `ALTER TABLE … ADD COLUMN` emission for one new column of an existing
 /// table, with everything that rides it: its backfill-default drop, its
 /// single-column unique/index, its column check and its foreign key. A native
 /// enum column carries the idempotent type guard ahead of the add unless
 /// `types_created_by_plan` names its type — that plan's `CreateEnumType` op
 /// already created it.
+///
+/// `constraints` is [`ConstraintMode::Plain`] on every door but the
+/// generator, which adds the column's foreign key and check `NOT VALID` on an
+/// existing Postgres table (ADR-0043).
 pub(crate) fn emit_add_column(
     table: &str,
     column: &str,
     model: &SchemaModel,
     dialect: Dialect,
     types_created_by_plan: &BTreeSet<String>,
+    constraints: ConstraintMode,
 ) -> Result<EmissionResult, EmissionError> {
     let col = find_column(model, column)?;
     let ld = dialect;
@@ -460,7 +519,7 @@ pub(crate) fn emit_add_column(
         .checks
         .iter()
         .filter(|check| check.name == owned_check)
-        .map(|check| (check, render_db_check(table, check, dialect)))
+        .map(|check| (check, render_db_check(table, check, dialect, constraints)))
         .collect();
     append_inline_checks(&mut col_def, &check_emissions, table, column);
 
@@ -502,25 +561,14 @@ pub(crate) fn emit_add_column(
         ));
     }
 
-    // The canonical single-column unique shape on both dialects: the same
-    // standalone named `uq_` unique index fresh-create emits (FF-B B4/D1).
-    if col.unique {
+    for (name, columns, unique) in added_column_indexes(table, col) {
         result.statements.push(render_index_sql(
             table,
-            &single_unique_index_name(table, column),
-            &[column.to_string()],
-            true,
+            &name,
+            &columns,
+            unique,
             dialect,
-        ));
-    }
-
-    if col.index {
-        result.statements.push(render_index_sql(
-            table,
-            &single_index_name(table, column),
-            &[column.to_string()],
-            false,
-            dialect,
+            IndexMode::Plain,
         ));
     }
 
@@ -535,7 +583,9 @@ pub(crate) fn emit_add_column(
 
     if let Some(fk) = fk {
         match dialect {
-            Dialect::Postgres => result.statements.push(render_add_fk_sql(table, fk)),
+            Dialect::Postgres => result
+                .statements
+                .push(render_add_fk_sql(table, fk, constraints)),
             Dialect::Sqlite if sqlite_inline_fk => {}
             Dialect::Sqlite => result.warnings.push(format!(
                 "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint: SQLite's \
@@ -584,15 +634,22 @@ pub(crate) fn backfill_value_sql(
 /// IR foreign key. Postgres-only — SQLite cannot add table constraints to an
 /// existing table: a nullable added column carries
 /// `render_sqlite_add_column_references` inline, and every other shape warns.
-pub(crate) fn render_add_fk_sql(table: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> String {
+/// `mode` appends ` NOT VALID` for the generator's staged foreign key on an
+/// existing Postgres table ([`ConstraintMode`], ADR-0043).
+pub(crate) fn render_add_fk_sql(
+    table: &str,
+    fk: &ferro_schema_ir::SchemaForeignKey,
+    mode: ConstraintMode,
+) -> String {
     format!(
-        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}{}",
         quote_ident(table),
         quote_ident(&fk_constraint_name(table, fk)),
         quote_ident(&fk.column),
         quote_ident(&fk.to_table),
         quote_ident(&fk.to_column),
         fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+        mode.suffix(),
     )
 }
 

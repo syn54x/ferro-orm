@@ -19,13 +19,17 @@
 //! introduce or retire, and everything a `CREATE TABLE` carries), the plain
 //! `ALTER TABLE` edits of an existing table where the dialect has a native
 //! statement, and on SQLite a table rebuild for every change `ALTER TABLE`
-//! cannot express ([`rebuild`]), in the same step as its Postgres twin.
+//! cannot express ([`rebuild`]), in the same step as its Postgres twin. On a
+//! table that already exists ([`staging`]) every index change is its own
+//! index step, after the others, and on Postgres every foreign key and check
+//! is added `NOT VALID` and validated by a last `validate` step.
 //! [`columns::assign`] decides each op's step; every other change is refused
 //! naming the ticket that generates it.
 
 pub mod columns;
 pub mod downs;
 pub mod rebuild;
+pub mod staging;
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
 use crate::snapshot::{Snapshot, SnapshotError};
@@ -512,80 +516,123 @@ pub fn generate(
     let empty = empty_modelset(target);
     let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
 
-    let mut ups = Vec::new();
-    let mut downs = Vec::new();
+    let mut changes = Vec::new();
     for &dialect in dialects {
-        let up = plan(parent_ir, target, dialect);
+        let change = plan(parent_ir, target, dialect);
         refuse_unsupported(
-            &up,
+            &change,
             &plan(target, target, dialect),
             parent_ir,
             target,
             dialect,
             PlanDirection::Up,
         )?;
-        let down = plan(target, parent_ir, dialect);
         refuse_unsupported(
-            &down,
+            &plan(target, parent_ir, dialect),
             &plan(parent_ir, parent_ir, dialect),
             target,
             parent_ir,
             dialect,
             PlanDirection::Down,
         )?;
+        changes.push(change.operations);
+    }
+
+    // The index steps come after every other step but the validate step,
+    // and turn `shape` into the target; every earlier step turns the parent
+    // into `shape` (ADR-0044, ADR-0046).
+    let index_ops = staging::index_ops(parent_ir, target);
+    let shape = staging::schema_shape(parent_ir, target, &index_ops);
+    let mut ups = Vec::new();
+    let mut downs = Vec::new();
+    for &dialect in dialects {
+        let up = plan(parent_ir, &shape, dialect);
         ups.push(rendered_ops(
             &up,
             parent_ir,
-            target,
+            &shape,
             dialect,
             PlanDirection::Up,
         ));
-        downs.push(down);
+        downs.push(plan(&shape, parent_ir, dialect));
     }
-    if ups.iter().all(Vec::is_empty) && downs.iter().all(MigrationPlan::is_empty) {
+    if ups.iter().all(Vec::is_empty)
+        && downs.iter().all(MigrationPlan::is_empty)
+        && index_ops.is_empty()
+    {
         return Ok(None);
     }
 
     let mut phases = BTreeSet::new();
     for (&dialect, (up, down)) in dialects.iter().zip(ups.iter().zip(&downs)) {
         for op in up {
-            phases.insert(phase_of(op, parent_ir, target, dialect, PlanDirection::Up)?);
+            phases.insert(phase_of(op, parent_ir, &shape, dialect, PlanDirection::Up)?);
         }
         for op in &down.operations {
             phases.insert(phase_of(
                 op,
-                target,
+                &shape,
                 parent_ir,
                 dialect,
                 PlanDirection::Down,
             )?);
         }
     }
-    let mut warnings = Vec::new();
-    for (&dialect, up) in dialects.iter().zip(&ups) {
-        render_warnings(up, parent_ir, target, dialect, &mut warnings)?;
+    if phases.contains(&Phase::Index) {
+        return Err(GenerateError::Render(
+            "an index change on an existing table reached a phase step; it is its own index \
+             step"
+                .to_string(),
+        ));
     }
+    let mut warnings = Vec::new();
+    let mut staged = Vec::new();
+    for (&dialect, up) in dialects.iter().zip(&ups) {
+        render_warnings(up, parent_ir, &shape, dialect, &mut warnings)?;
+        for constraint in staging::staged_constraints(up, parent_ir, &shape, dialect)? {
+            if !staged.contains(&constraint) {
+                staged.push(constraint);
+            }
+        }
+    }
+
     let mut steps = Vec::new();
-    for (ordinal, phase) in (1u8..).zip(phases) {
+    let push_phase = |phase: Phase, steps: &mut Vec<GeneratedStep>| {
         let mut renderings = BTreeMap::new();
         for (&dialect, up) in dialects.iter().zip(&ups) {
             let mut step_ops = Vec::new();
             for op in up {
-                if phase_of(op, parent_ir, target, dialect, PlanDirection::Up)? == phase {
+                if phase_of(op, parent_ir, &shape, dialect, PlanDirection::Up)? == phase {
                     step_ops.push(op.clone());
                 }
             }
             renderings.insert(
                 StepDialect::from(dialect),
-                downs::render_down(&step_ops, parent_ir, target, dialect)?,
+                downs::render_down(&step_ops, parent_ir, &shape, dialect, phase)?,
             );
         }
         steps.push(GeneratedStep {
-            ordinal,
+            ordinal: 0,
             name: phase.step_name().to_string(),
             kind: StepKind::Ddl,
             renderings,
         });
+        Ok::<(), GenerateError>(())
+    };
+    for &phase in phases.iter().filter(|&&phase| phase < Phase::Index) {
+        push_phase(phase, &mut steps)?;
+    }
+    steps.extend(index_ops.iter().map(|op| staging::index_step(op, dialects)));
+    for &phase in phases.iter().filter(|&&phase| phase > Phase::Index) {
+        push_phase(phase, &mut steps)?;
+    }
+    // A step every configured dialect would render not-applicable is not
+    // generated: only Postgres stages a constraint (ADR-0043).
+    if !staged.is_empty() {
+        steps.push(staging::validate_step(&staged, dialects));
+    }
+    for (ordinal, step) in (1u8..).zip(&mut steps) {
+        step.ordinal = ordinal;
     }
 
     let bytes = Snapshot::store(target, parent.map(|snapshot| snapshot.checksum))?;
@@ -597,7 +644,7 @@ pub fn generate(
         steps,
         snapshot,
         snapshot_json,
-        summary: summarize(&ups, parent_ir, target),
+        summary: summarize(&changes, parent_ir, target),
         warnings,
     }))
 }
@@ -1139,27 +1186,306 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_unique_on_an_existing_sqlite_table_is_built_in_the_schema_step() {
-        let mut after = author();
+    /// The step names of `migration`, `NN_name`, in order.
+    fn step_names(migration: &GeneratedMigration) -> Vec<String> {
+        migration
+            .steps
+            .iter()
+            .map(|step| format!("{:02}_{}", step.ordinal, step.name))
+            .collect()
+    }
+
+    /// The rendering of the step named `NN_name` on `dialect`.
+    fn step<'a>(migration: &'a GeneratedMigration, name: &str, dialect: Dialect) -> &'a Rendering {
+        let step = migration
+            .steps
+            .iter()
+            .find(|step| format!("{:02}_{}", step.ordinal, step.name) == name)
+            .unwrap_or_else(|| panic!("no step {name} in {:?}", step_names(migration)));
+        &step.renderings[&StepDialect::from(dialect)]
+    }
+
+    fn unique_name(model: &SchemaModel) -> SchemaModel {
+        let mut after = model.clone();
         after.columns[1].unique = true;
         after.uniques.push(ferro_schema_ir::SchemaUnique {
             name: "uq_author_name".into(),
             columns: vec!["name".into()],
         });
-        let migration = edit(vec![author()], vec![after.clone()], &[Dialect::Sqlite]);
-        let sqlite = rendering(&migration, StepDialect::Sqlite);
-        // A duplicate fails it: data-dependent.
+        after
+    }
+
+    const NOT_APPLICABLE: &str = "-- ferro: not-applicable\n";
+
+    #[test]
+    fn a_unique_on_an_existing_table_is_its_own_index_step_on_every_dialect() {
+        let after = unique_name(&author());
+        let migration = edit(vec![author()], vec![after.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_uq_author_name"]);
+        assert_eq!(migration.summary, "changed models: Author");
+        // Postgres: built concurrently outside a transaction, exact from the
+        // top; a duplicate fails it, so it is the data-dependent step.
+        let pg = step(&migration, "01_uq_author_name", Dialect::Postgres);
+        assert_eq!(
+            pg.up,
+            "-- ferro: no-transaction\n-- ferro: data-dependent\n\n\
+             DROP INDEX CONCURRENTLY IF EXISTS \"uq_author_name\";\n\n\
+             CREATE UNIQUE INDEX CONCURRENTLY \"uq_author_name\" ON \"author\" (\"name\");\n"
+        );
+        assert!(pg.headers.no_transaction && pg.headers.data_dependent);
+        assert_eq!(
+            pg.down,
+            "-- ferro: no-transaction\n\n\
+             DROP INDEX CONCURRENTLY IF EXISTS \"uq_author_name\";\n"
+        );
+        // SQLite: the plain statement, in a transaction, under the same step.
+        let sqlite = step(&migration, "01_uq_author_name", Dialect::Sqlite);
         assert_eq!(
             sqlite.up,
             "-- ferro: data-dependent\n\n\
              CREATE UNIQUE INDEX IF NOT EXISTS \"uq_author_name\" ON \"author\" (\"name\");\n"
         );
         assert_eq!(sqlite.down, "DROP INDEX IF EXISTS \"uq_author_name\";\n");
-        // On an existing Postgres table an index is its own concurrent step.
+        // A SQLite-only project gets the same step.
+        let migration = edit(vec![author()], vec![after], &[Dialect::Sqlite]);
+        assert_eq!(step_names(&migration), ["01_uq_author_name"]);
+    }
+
+    #[test]
+    fn dropping_an_index_on_an_existing_table_is_the_reverse_index_step() {
+        let before = unique_name(&author());
+        let migration = edit(vec![before], vec![author()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_uq_author_name"]);
+        let pg = step(&migration, "01_uq_author_name", Dialect::Postgres);
         assert_eq!(
-            refusal(vec![author()], vec![after], &BOTH),
-            "not generated yet: AddIndex on author (ticket #527)"
+            pg.up,
+            "-- ferro: no-transaction\n\n\
+             DROP INDEX CONCURRENTLY IF EXISTS \"uq_author_name\";\n"
+        );
+        assert!(!pg.headers.destructive, "an index holds no data");
+        assert_eq!(
+            pg.down,
+            "-- ferro: no-transaction\n-- ferro: data-dependent\n\n\
+             DROP INDEX CONCURRENTLY IF EXISTS \"uq_author_name\";\n\n\
+             CREATE UNIQUE INDEX CONCURRENTLY \"uq_author_name\" ON \"author\" (\"name\");\n"
+        );
+        let sqlite = step(&migration, "01_uq_author_name", Dialect::Sqlite);
+        assert_eq!(sqlite.up, "DROP INDEX IF EXISTS \"uq_author_name\";\n");
+        assert_eq!(
+            sqlite.down,
+            "-- ferro: data-dependent\n\n\
+             CREATE UNIQUE INDEX IF NOT EXISTS \"uq_author_name\" ON \"author\" (\"name\");\n"
+        );
+    }
+
+    #[test]
+    fn a_redefined_index_is_built_over_the_old_one_and_its_down_builds_the_old_one_back() {
+        let index = |columns: &[&str]| ferro_schema_ir::SchemaIndex {
+            name: "idx_author_lookup".into(),
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            unique: false,
+        };
+        let mut before = author();
+        before.indexes.push(index(&["name"]));
+        let mut after = author();
+        after.indexes.push(index(&["name", "status"]));
+        let migration = edit(vec![before], vec![after], &[Dialect::Postgres]);
+        assert_eq!(step_names(&migration), ["01_idx_author_lookup"]);
+        let pg = step(&migration, "01_idx_author_lookup", Dialect::Postgres);
+        assert_eq!(
+            pg.up,
+            "-- ferro: no-transaction\n\n\
+             DROP INDEX CONCURRENTLY IF EXISTS \"idx_author_lookup\";\n\n\
+             CREATE INDEX CONCURRENTLY \"idx_author_lookup\" ON \"author\" (\"name\", \"status\");\n"
+        );
+        assert_eq!(
+            pg.down,
+            "-- ferro: no-transaction\n\n\
+             DROP INDEX CONCURRENTLY IF EXISTS \"idx_author_lookup\";\n\n\
+             CREATE INDEX CONCURRENTLY \"idx_author_lookup\" ON \"author\" (\"name\");\n"
+        );
+    }
+
+    /// `author` with an optional `email`, unique when `unique`, and the table
+    /// check `ck_author_email_nonempty` when `checked`.
+    fn author_email(unique: bool, checked: bool) -> SchemaModel {
+        let mut model = with_columns(vec![SchemaColumn {
+            unique,
+            ..optional("email", "string")
+        }]);
+        if unique {
+            model.uniques.push(ferro_schema_ir::SchemaUnique {
+                name: "uq_author_email".into(),
+                columns: vec!["email".into()],
+            });
+        }
+        if checked {
+            model.table_checks.push(ferro_schema_ir::SchemaTableCheck {
+                name: "ck_author_email_nonempty".into(),
+                predicate: ferro_schema_ir::CheckExpr::IsNotNull {
+                    column: "email".into(),
+                },
+            });
+        }
+        model
+    }
+
+    #[test]
+    fn a_check_on_an_existing_postgres_table_is_added_not_valid_and_validated_in_its_own_step() {
+        let (before, after) = (author_email(false, false), author_email(false, true));
+        let migration = edit(vec![before.clone()], vec![after.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_schema", "02_validate"]);
+        let add = "ALTER TABLE \"author\" ADD CONSTRAINT \"ck_author_email_nonempty\" \
+                   CHECK (\"email\" IS NOT NULL)";
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        // NOT VALID takes its lock for no scan: nothing in it fails on rows.
+        assert_eq!(pg.up, format!("{add} NOT VALID;\n"));
+        assert_eq!(pg.headers, Headers::default());
+        assert_eq!(
+            pg.down,
+            "ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_email_nonempty\";\n"
+        );
+        let validate = step(&migration, "02_validate", Dialect::Postgres);
+        assert_eq!(
+            validate.up,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" VALIDATE CONSTRAINT \"ck_author_email_nonempty\";\n"
+        );
+        // There is no un-validate: the down drops it and puts it back
+        // NOT VALID, the state its parent step left (ADR-0043).
+        assert_eq!(
+            validate.down,
+            format!(
+                "ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_email_nonempty\";\n\n\
+                 {add} NOT VALID;\n"
+            )
+        );
+        // SQLite rebuilds in the schema step, and its validate step is the
+        // one-line not-applicable file both ways.
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert_eq!(
+            sqlite.up,
+            file(&rebuild_of(&before, &after, &[]), &sqlite.headers.render())
+        );
+        let sqlite_validate = step(&migration, "02_validate", Dialect::Sqlite);
+        assert_eq!(sqlite_validate.up, NOT_APPLICABLE);
+        assert_eq!(sqlite_validate.down, NOT_APPLICABLE);
+        // A SQLite-only project gets no validate step at all.
+        let migration = edit(vec![before], vec![after], &[Dialect::Sqlite]);
+        assert_eq!(step_names(&migration), ["01_schema"]);
+    }
+
+    #[test]
+    fn the_ticket_transcript_schema_then_index_step_then_validate() {
+        let (before, after) = (author_email(false, false), author_email(true, true));
+        let migration = edit(vec![before], vec![after], &BOTH);
+        assert_eq!(
+            step_names(&migration),
+            ["01_schema", "02_uq_author_email", "03_validate"]
+        );
+        assert_eq!(
+            step(&migration, "02_uq_author_email", Dialect::Postgres).up,
+            "-- ferro: no-transaction\n-- ferro: data-dependent\n\n\
+             DROP INDEX CONCURRENTLY IF EXISTS \"uq_author_email\";\n\n\
+             CREATE UNIQUE INDEX CONCURRENTLY \"uq_author_email\" ON \"author\" (\"email\");\n"
+        );
+        assert!(
+            !step(&migration, "01_schema", Dialect::Postgres)
+                .up
+                .contains("uq_author_email")
+        );
+    }
+
+    #[test]
+    fn a_new_columns_index_unique_check_and_foreign_key_are_staged_on_an_existing_postgres_table() {
+        let team = model("Team", vec![pk()]);
+        let mut after = with_columns(vec![SchemaColumn {
+            unique: true,
+            ..optional("team_id", "integer")
+        }]);
+        after.uniques.push(ferro_schema_ir::SchemaUnique {
+            name: "uq_author_team_id".into(),
+            columns: vec!["team_id".into()],
+        });
+        after.foreign_keys.push(SchemaForeignKey {
+            column: "team_id".into(),
+            to_table: "team".into(),
+            to_column: "id".into(),
+            on_delete: Some("SET NULL".into()),
+            name: Some("fk_author_team_id_team".into()),
+        });
+        let migration = edit(
+            vec![team.clone(), author()],
+            vec![team, after.clone()],
+            &BOTH,
+        );
+        assert_eq!(
+            step_names(&migration),
+            ["01_schema", "02_uq_author_team_id", "03_validate"]
+        );
+        let fk = "ALTER TABLE \"author\" ADD CONSTRAINT \"fk_author_team_id_team\" FOREIGN KEY \
+                  (\"team_id\") REFERENCES \"team\" (\"id\") ON DELETE SET NULL";
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        assert_eq!(
+            pg.up,
+            format!("ALTER TABLE \"author\" ADD COLUMN \"team_id\" integer;\n\n{fk} NOT VALID;\n")
+        );
+        // The unique is the index step's; the schema step's down never
+        // meets it.
+        assert_eq!(pg.down, "ALTER TABLE \"author\" DROP COLUMN \"team_id\";\n");
+        assert_eq!(
+            step(&migration, "03_validate", Dialect::Postgres).up,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" VALIDATE CONSTRAINT \"fk_author_team_id_team\";\n"
+        );
+        // SQLite: the inline REFERENCES, the plain unique in its index step,
+        // and no validation to do.
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert!(sqlite.up.contains("REFERENCES \"team\""), "{}", sqlite.up);
+        assert!(!sqlite.up.contains("uq_author_team_id"), "{}", sqlite.up);
+        assert_eq!(
+            step(&migration, "02_uq_author_team_id", Dialect::Sqlite).up,
+            "-- ferro: data-dependent\n\n\
+             CREATE UNIQUE INDEX IF NOT EXISTS \"uq_author_team_id\" ON \"author\" (\"team_id\");\n"
+        );
+        assert_eq!(
+            step(&migration, "03_validate", Dialect::Sqlite).up,
+            NOT_APPLICABLE
+        );
+    }
+
+    #[test]
+    fn a_retargeted_foreign_key_on_postgres_drops_adds_not_valid_and_validates() {
+        let team = model("Team", vec![pk()]);
+        let club = model("Club", vec![pk()]);
+        let fk = |to: &str| SchemaForeignKey {
+            column: "team_id".into(),
+            to_table: to.into(),
+            to_column: "id".into(),
+            on_delete: Some("CASCADE".into()),
+            name: Some(format!("fk_author_team_id_{to}")),
+        };
+        let mut on_team = with_columns(vec![optional("team_id", "integer")]);
+        on_team.foreign_keys.push(fk("team"));
+        let mut on_club = on_team.clone();
+        on_club.foreign_keys = vec![fk("club")];
+        let migration = edit(
+            vec![team.clone(), club.clone(), on_team],
+            vec![team, club, on_club],
+            &[Dialect::Postgres],
+        );
+        assert_eq!(step_names(&migration), ["01_schema", "02_validate"]);
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        assert_eq!(
+            pg.up,
+            "ALTER TABLE \"author\" DROP CONSTRAINT \"fk_author_team_id_team\";\n\n\
+             ALTER TABLE \"author\" ADD CONSTRAINT \"fk_author_team_id_club\" FOREIGN KEY \
+             (\"team_id\") REFERENCES \"club\" (\"id\") ON DELETE CASCADE NOT VALID;\n"
+        );
+        assert_eq!(
+            step(&migration, "02_validate", Dialect::Postgres).up,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" VALIDATE CONSTRAINT \"fk_author_team_id_club\";\n"
         );
     }
 
@@ -1323,12 +1649,13 @@ mod tests {
     }
 
     #[test]
-    fn a_type_change_and_a_new_index_on_one_table_copy_it_once_and_build_the_index_once() {
+    fn a_type_change_and_a_new_index_on_one_table_copy_it_once_and_build_the_index_after() {
         let before = with_columns(vec![
             optional("age", "integer"),
             optional("email", "string"),
         ]);
-        let mut after = with_columns(vec![optional("age", "string"), optional("email", "string")]);
+        let shape = with_columns(vec![optional("age", "string"), optional("email", "string")]);
+        let mut after = shape.clone();
         after.indexes.push(ferro_schema_ir::SchemaIndex {
             name: "idx_author_email".into(),
             columns: vec!["email".into()],
@@ -1339,29 +1666,32 @@ mod tests {
             vec![after.clone()],
             &[Dialect::Sqlite],
         );
-        let sqlite = rendering(&migration, StepDialect::Sqlite);
-        let up = rebuild_of(&before, &after, &[]);
+        assert_eq!(step_names(&migration), ["01_schema", "02_idx_author_email"]);
+        // The rebuild recreates the table as it stands after its step; the
+        // index step builds the index once, over the copied rows (ADR-0046).
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
         assert_eq!(
             sqlite.up,
             file(
-                &up,
+                &rebuild_of(&before, &shape, &[]),
                 "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n"
             )
         );
         assert_eq!(sqlite.up.matches("CREATE TABLE").count(), 1);
-        assert_eq!(sqlite.up.matches("\"idx_author_email\"").count(), 1);
-        let rename = sqlite.up.find("RENAME TO").expect("rename");
-        assert!(sqlite.up.find("\"idx_author_email\"").expect("index") > rename);
-        // Its down copies back without the index.
-        let down = rebuild_of(&after, &before, &[]);
+        assert!(!sqlite.up.contains("idx_author_email"));
         assert_eq!(
             sqlite.down,
             file(
-                &down,
+                &rebuild_of(&shape, &before, &[]),
                 "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n"
             )
         );
-        assert!(!sqlite.down.contains("idx_author_email"));
+        let index = step(&migration, "02_idx_author_email", Dialect::Sqlite);
+        assert_eq!(
+            index.up,
+            "CREATE INDEX IF NOT EXISTS \"idx_author_email\" ON \"author\" (\"email\");\n"
+        );
+        assert_eq!(index.down, "DROP INDEX IF EXISTS \"idx_author_email\";\n");
     }
 
     #[test]
@@ -1379,20 +1709,24 @@ mod tests {
         let free = checked(&["'free'"]);
         let pro = checked(&["'free'", "'pro'"]);
         for (before, after) in [(&plain, &free), (&free, &pro), (&free, &plain)] {
-            // Postgres stages it NOT VALID (ticket #527).
-            assert_eq!(
-                refusal(vec![before.clone()], vec![after.clone()], &BOTH),
-                format!(
-                    "not generated yet: {} on author (ticket #527)",
-                    if before.checks.is_empty() {
-                        "AddCheck"
-                    } else if after.checks.is_empty() {
-                        "DropCheck"
-                    } else {
-                        "RebuildCheck"
-                    }
-                )
-            );
+            // Postgres stages an added or changed check NOT VALID and
+            // validates it in its own step; a drop needs no validation.
+            let both = edit(vec![before.clone()], vec![after.clone()], &BOTH);
+            if after.checks.is_empty() {
+                assert_eq!(step_names(&both), ["01_schema"]);
+            } else {
+                assert_eq!(step_names(&both), ["01_schema", "02_validate"]);
+                assert!(
+                    step(&both, "01_schema", Dialect::Postgres)
+                        .up
+                        .contains("CHECK (\"tier\" IN ('free'")
+                );
+                assert!(
+                    step(&both, "01_schema", Dialect::Postgres)
+                        .up
+                        .contains("NOT VALID")
+                );
+            }
             let migration = edit(
                 vec![before.clone()],
                 vec![after.clone()],

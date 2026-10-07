@@ -1344,25 +1344,28 @@ fn error_text(err: &sqlx::Error) -> String {
     }
 }
 
-/// A failure inside a step: its text, for the record and the operator.
-struct StepFailure(String);
+/// A failure inside a step: its text, for the record and the operator, and
+/// what a failed validate or unique index step was stopped by, which the
+/// runner counts after the failure (ADR-0043, ADR-0044).
+struct StepFailure(String, Option<crate::errors::CountedFailure>);
 
 impl From<sqlx::Error> for StepFailure {
     fn from(err: sqlx::Error) -> Self {
-        StepFailure(error_text(&err))
+        StepFailure(error_text(&err), None)
     }
 }
 
 impl From<StatementError> for StepFailure {
     fn from(err: StatementError) -> Self {
-        StepFailure(error_text(&err.error))
+        let counted = crate::errors::counted_failure_of_error(err.statement.as_deref(), &err.error);
+        StepFailure(error_text(&err.error), counted)
     }
 }
 
 impl From<DdlError<StatementError>> for StepFailure {
     fn from(err: DdlError<StatementError>) -> Self {
         match err {
-            DdlError::LockTimeout(timeout) => StepFailure(timeout.to_string()),
+            DdlError::LockTimeout(timeout) => StepFailure(timeout.to_string(), None),
             DdlError::Failed(failure) => failure.into(),
         }
     }
@@ -1475,6 +1478,7 @@ async fn foreign_keys_off(
     if read.first().and_then(|row| int(column(row, 0))) != Some(0) {
         return Err(StepFailure(
             "PRAGMA foreign_keys = OFF did not take effect on the step's connection".to_string(),
+            None,
         ));
     }
     conn.execute_sql_unprepared("BEGIN IMMEDIATE").await?;
@@ -1483,10 +1487,13 @@ async fn foreign_keys_off(
         .fetch_all_sql_unprepared_with_binds("PRAGMA foreign_key_check", &[])
         .await?;
     if !violations.is_empty() {
-        return Err(StepFailure(format!(
-            "PRAGMA foreign_key_check found rows that violate a foreign key: {}",
-            describe_fk_violations(&violations)
-        )));
+        return Err(StepFailure(
+            format!(
+                "PRAGMA foreign_key_check found rows that violate a foreign key: {}",
+                describe_fk_violations(&violations)
+            ),
+            None,
+        ));
     }
     settle(conn, tracking_schema, finished()).await?;
     conn.execute_sql_unprepared("COMMIT").await?;
@@ -1720,7 +1727,17 @@ pub async fn execute_sql_step(
                 message: None,
             })
         }
-        Err(StepFailure(error)) => {
+        Err(StepFailure(error, counted)) => {
+            // A failed validate or unique step names its count and where
+            // `up` resumes; counted only now, never on the success path.
+            let error = match counted {
+                Some(failure) if !down => {
+                    let resume_at = format!("{}:{:02}", step.migration_name, step.step);
+                    crate::errors::counted_failure_message(engine, &failure, &error, &resume_at)
+                        .await
+                }
+                _ => error,
+            };
             let failed = StepRecord {
                 failed_at: Some(now_iso()),
                 error: Some(error.clone()),
@@ -1834,7 +1851,7 @@ mod tests {
         let (outcome, close) = foreign_keys_off_outcome(Ok(()), Ok(()));
         assert!(outcome.is_ok() && !close);
         let (outcome, close) =
-            foreign_keys_off_outcome(Err(StepFailure("boom".to_string())), Ok(()));
+            foreign_keys_off_outcome(Err(StepFailure("boom".to_string(), None)), Ok(()));
         assert!(outcome.is_err() && close);
     }
 
