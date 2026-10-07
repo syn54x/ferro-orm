@@ -32,6 +32,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_execute_sql_step, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
     m.add_function(wrap_pyfunction!(_live_tables, m)?)?;
+    m.add_function(wrap_pyfunction!(_plan_baseline, m)?)?;
+    m.add_function(wrap_pyfunction!(_write_baseline_records, m)?)?;
+    m.add_function(wrap_pyfunction!(_remove_baseline_records, m)?)?;
     Ok(())
 }
 
@@ -535,5 +538,99 @@ pub fn _live_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_,
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;
         to_json(&crate::run::live_tables(&engine).await?)
+    })
+}
+
+// -- baseline (#525) ----------------------------------------------------------------
+
+/// Plan `ferro migrate baseline` over the migrations directory against the
+/// records `_read_records` found: `target` is `None` (the head), a number
+/// (`"0006"`) or a full name (`"0006_add_teams"`). Returns the JSON of the
+/// `BaselinePlan`: `{"target", "snapshot", "records", "recorded",
+/// "data_steps"}`, the records stamped now with `ferro_version`.
+///
+/// # Errors
+/// `RunRefused`: records already exist (naming `ferro migrate status`), the
+/// target is not in the directory, the directory is unreadable, a step has
+/// no rendering for `dialect`; `ValueError` for malformed arguments.
+#[pyfunction]
+#[pyo3(name = "_plan_baseline")]
+#[pyo3(signature = (directory, records_json, dialect, target=None, ferro_version=String::new()))]
+pub fn _plan_baseline(
+    directory: String,
+    records_json: String,
+    dialect: String,
+    target: Option<String>,
+    ferro_version: String,
+) -> PyResult<String> {
+    use ferro_migrate::run_plan::{StepRecord, read_for_run};
+    let records: Vec<StepRecord> = parse_json(&records_json, "records_json")?;
+    let dialect = parse_dialect(&dialect)?;
+    let dir = read_for_run(Path::new(&directory))
+        .map_err(|refusal| crate::run::refused(refusal.to_string()))?;
+    let plan =
+        crate::run::plan_baseline_now(&dir, &records, dialect, target.as_deref(), &ferro_version)
+            .map_err(crate::run::refused)?;
+    to_json(&plan)
+}
+
+/// Write a baseline's records (`_plan_baseline`'s `records`) in one
+/// transaction, creating the tracking tables where missing. With `lock`,
+/// the run lock behind that handle is verified first.
+///
+/// # Errors
+/// `RunRefused` when the lock was lost or a record is not a finished
+/// baseline record; `ValueError` for malformed records; a database error.
+#[pyfunction]
+#[pyo3(name = "_write_baseline_records")]
+#[pyo3(signature = (using, records_json, tracking_schema=None, lock=None))]
+pub fn _write_baseline_records(
+    py: Python<'_>,
+    using: Option<String>,
+    records_json: String,
+    tracking_schema: Option<String>,
+    lock: Option<u64>,
+) -> PyResult<Bound<'_, PyAny>> {
+    let records: Vec<ferro_migrate::StepRecord> = parse_json(&records_json, "records_json")?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = crate::state::engine_for_connection(using)?;
+        if let Some(handle) = lock {
+            crate::run::registered_lock(handle)?
+                .lock()
+                .await
+                .verify()
+                .await?;
+        }
+        crate::run::write_baseline_records(&engine, tracking_schema.as_deref(), &records).await
+    })
+}
+
+/// Delete every baseline-origin record. With `lock`, the run lock behind
+/// that handle is verified first. Returns JSON `[[migration, step], ...]`
+/// of the records removed (empty when there was no baseline).
+///
+/// # Errors
+/// `RunRefused` when a run-origin migration stands above the baseline
+/// (naming it), on a newer tracking format, or when the lock was lost; a
+/// database error.
+#[pyfunction]
+#[pyo3(name = "_remove_baseline_records")]
+#[pyo3(signature = (using, tracking_schema=None, lock=None))]
+pub fn _remove_baseline_records(
+    py: Python<'_>,
+    using: Option<String>,
+    tracking_schema: Option<String>,
+    lock: Option<u64>,
+) -> PyResult<Bound<'_, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = crate::state::engine_for_connection(using)?;
+        if let Some(handle) = lock {
+            crate::run::registered_lock(handle)?
+                .lock()
+                .await
+                .verify()
+                .await?;
+        }
+        to_json(&crate::run::remove_baseline_records(&engine, tracking_schema.as_deref()).await?)
     })
 }
