@@ -94,6 +94,7 @@ fn live_table_model(table: LiveTable, dialect: Dialect) -> SchemaModel {
             enum_values: None,
             enum_type_name: None,
             postgres_native_enum: col.is_enum_udt,
+            enum_renamed_labels: Default::default(),
         })
         .collect();
     columns.sort_by(|a, b| a.name.cmp(&b.name));

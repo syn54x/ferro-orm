@@ -4012,6 +4012,7 @@ mod tests {
             enum_values: None,
             enum_type_name: None,
             postgres_native_enum: false,
+            enum_renamed_labels: Default::default(),
         }
     }
 
@@ -4038,6 +4039,7 @@ mod tests {
             enum_values: None,
             enum_type_name: None,
             postgres_native_enum: false,
+            enum_renamed_labels: Default::default(),
         }
     }
 
@@ -4282,6 +4284,7 @@ mod tests {
             enum_values: None,
             enum_type_name: None,
             postgres_native_enum: false,
+            enum_renamed_labels: Default::default(),
         };
         assert_eq!(
             logical_canonical_from_schema_column(&col, Dialect::Postgres),
@@ -4311,6 +4314,7 @@ mod tests {
             enum_values: None,
             enum_type_name: None,
             postgres_native_enum: false,
+            enum_renamed_labels: Default::default(),
         };
         assert!(logical_canonical_from_schema_column(&col, Dialect::Postgres).is_err());
     }

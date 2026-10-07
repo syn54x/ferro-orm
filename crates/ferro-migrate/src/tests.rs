@@ -86,6 +86,7 @@ fn col(name: &str, db_type: &str, nullable: bool) -> SchemaColumn {
         enum_values: None,
         enum_type_name: None,
         postgres_native_enum: false,
+        enum_renamed_labels: Default::default(),
     }
 }
 
@@ -142,6 +143,7 @@ fn ir_col(
         enum_values: None,
         enum_type_name: None,
         postgres_native_enum: false,
+        enum_renamed_labels: Default::default(),
     }
 }
 
@@ -1656,6 +1658,7 @@ fn emit_alter_refuses_varchar_to_enum_and_varchar_to_time() {
 fn emit_alter_native_enum_live_is_noop() {
     let live = SchemaColumn {
         postgres_native_enum: true,
+        enum_renamed_labels: Default::default(),
         ..col("status", "varchar", false)
     };
     let model_col = SchemaColumn {
@@ -1771,6 +1774,7 @@ fn render_create_table_unknown_logical_type_errors() {
         enum_values: None,
         enum_type_name: None,
         postgres_native_enum: false,
+        enum_renamed_labels: Default::default(),
     };
     let model = schema_model("widget", vec![col]);
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
