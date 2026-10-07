@@ -6,17 +6,18 @@ use crate::emit::{
     emit_add_column, emit_alter_column_nullability, emit_alter_column_type, find_column,
     find_foreign_key, find_model, render_add_fk_sql, render_index_sql, standalone_indexes,
 };
-use crate::plan::index_models;
+use crate::plan::{index_models, relabels_rows};
 use crate::{Dialect, EmissionError, MigrationOp, MigrationPlan, render_create_table};
 use ferro_ddl_lowering::{
     ConstraintMode, IndexMode, ResolvedStorage, fk_action_from_str, fk_action_sql, quote_ident,
     render_check_addition, render_check_drop, render_check_rebuild, render_create_row_policy,
     render_disable_row_security, render_drop_constraint, render_drop_index_sql,
     render_drop_row_policy, render_enable_row_security, render_force_row_security,
-    render_no_force_row_security, render_pg_enum_add_value, render_pg_enum_create_type,
-    render_pg_enum_drop_type, render_rename_column, render_rename_constraint, render_rename_index,
-    render_rename_policy, render_rename_table, render_validate_constraint, resolve_column_storage,
-    row_policy_clauses, row_policy_rebuild_statements,
+    render_label_update, render_no_force_row_security, render_pg_enum_add_value,
+    render_pg_enum_create_type, render_pg_enum_drop_type, render_pg_enum_rename_type,
+    render_pg_enum_rename_value, render_rename_column, render_rename_constraint,
+    render_rename_index, render_rename_policy, render_rename_table, render_validate_constraint,
+    resolve_column_storage, row_policy_clauses, row_policy_rebuild_statements,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeSet, HashSet};
@@ -103,6 +104,10 @@ pub(crate) fn render_plan_in(
     validate_schema_ir(new)?;
     let old_models = index_models(&old.payload.models);
     let new_models = index_models(&new.payload.models);
+    // A type this plan creates, or that `old` already declares, needs no
+    // guarded `CREATE TYPE` beside a table or column of it (ADR-0021: a reused
+    // type is neither created nor dropped). A live `old` declares no enum
+    // type — introspection reads none — so the pass keeps every guard.
     let types_created_by_plan: BTreeSet<String> = plan
         .operations
         .iter()
@@ -110,6 +115,16 @@ pub(crate) fn render_plan_in(
             MigrationOp::CreateEnumType { type_name, .. } => Some(type_name.clone()),
             _ => None,
         })
+        .chain(
+            old.payload
+                .models
+                .iter()
+                .flat_map(|model| &model.columns)
+                .filter_map(|col| match resolve_column_storage(col, Dialect::Postgres) {
+                    Ok(ResolvedStorage::PgEnum { type_name, .. }) => Some(type_name),
+                    _ => None,
+                }),
+        )
         .collect();
     // Enum types shared across new tables: each idempotent guard once.
     let mut emitted_type_guards: HashSet<String> = HashSet::new();
@@ -131,6 +146,67 @@ pub(crate) fn render_plan_in(
             MigrationOp::DropEnumType { type_name } => {
                 require_postgres(op, dialect)?;
                 out.statements.push(render_pg_enum_drop_type(type_name));
+            }
+            MigrationOp::RenameEnumLabel {
+                type_name,
+                old,
+                new,
+                columns,
+            } => {
+                // A native type renames its label once and its rows follow;
+                // a column that keeps the label as text in its rows (every
+                // enum on SQLite, a `db_type="text"` one on Postgres) has its
+                // rows rewritten ([`relabels_rows`], the one decider).
+                let mut native = false;
+                let mut updates = Vec::new();
+                for (table, column) in columns {
+                    let model = find_model(&old_models, table)?;
+                    if relabels_rows(find_column(model, column)?, dialect) {
+                        updates.push((table, column, model));
+                    } else {
+                        native = true;
+                    }
+                }
+                if native {
+                    out.statements
+                        .push(render_pg_enum_rename_value(type_name, old, new));
+                }
+                for (table, column, model) in updates {
+                    let update = render_label_update(table, column, old, new);
+                    // On Postgres a `db_check` over the column still allows
+                    // only the old label: dropped before the rows change and
+                    // added back (validated) over the new labels after.
+                    let check = (dialect == Dialect::Postgres)
+                        .then(|| model.checks.iter().find(|check| check.column == *column))
+                        .flatten();
+                    match check {
+                        Some(check) => {
+                            let rebuilt = render_check_rebuild(
+                                table,
+                                find_model(&new_models, table)?,
+                                &check.name,
+                                dialect,
+                                ConstraintMode::Plain,
+                            )
+                            .ok_or_else(|| EmissionError {
+                                message: format!(
+                                    "Label rename on '{table}.{column}' has no CHECK '{}' in \
+                                     the declared IR",
+                                    check.name
+                                ),
+                            })?;
+                            let mut statements = rebuilt.statements.into_iter();
+                            out.statements.extend(statements.next());
+                            out.statements.push(update);
+                            out.statements.extend(statements);
+                        }
+                        None => out.statements.push(update),
+                    }
+                }
+            }
+            MigrationOp::RenameEnumType { old, new } => {
+                require_postgres(op, dialect)?;
+                out.statements.push(render_pg_enum_rename_type(old, new));
             }
             MigrationOp::AddTable { table } => {
                 let model = find_model(&new_models, table)?;

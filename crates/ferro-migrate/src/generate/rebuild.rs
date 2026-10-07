@@ -29,7 +29,8 @@ use super::columns::{PlanContext, PlanDirection, goes_with_a_dropped_column, nee
 use crate::emit::{backfill_value_sql, render_create_table_as};
 use crate::{Dialect, EmissionError, MigrationOp};
 use ferro_ddl_lowering::{
-    CanonicalType, ResolvedStorage, quote_ident, resolve_column_storage, sqlite_declared_type,
+    CanonicalType, ResolvedStorage, quote_ident, render_relabel_copy, resolve_column_storage,
+    sqlite_declared_type,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 use std::collections::BTreeSet;
@@ -87,6 +88,8 @@ pub fn needs_rebuild(op: &MigrationOp, direction: PlanDirection, ctx: &PlanConte
         | MigrationOp::CreateEnumType { .. }
         | MigrationOp::DropEnumType { .. }
         | MigrationOp::AddEnumLabel { .. }
+        | MigrationOp::RenameEnumLabel { .. }
+        | MigrationOp::RenameEnumType { .. }
         | MigrationOp::AddIndex { .. }
         | MigrationOp::DropIndex { .. }
         | MigrationOp::RebuildIndex { .. }
@@ -149,7 +152,9 @@ pub fn tables_to_rebuild(
 }
 
 /// [`render`] for `table` in a file turning `old` into `new`, copying the
-/// backfill literal into each `NOT NULL` column new to the rows.
+/// backfill literal into each `NOT NULL` column new to the rows, and each
+/// `(column, from, to)` of `relabels` relabelled as it is copied (a label
+/// rename of the same step, ADR-0032).
 ///
 /// # Errors
 /// `table` is missing from either side (a rebuild is of a table that exists
@@ -158,6 +163,7 @@ pub fn render_table(
     table: &str,
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
+    relabels: &[(String, String, String)],
 ) -> Result<Vec<String>, EmissionError> {
     let find = |ir: &'_ IrEnvelope<SchemaIrPayload>, side: &str| {
         ir.payload
@@ -176,6 +182,15 @@ pub fn render_table(
     for col in &after.columns {
         if let Some(value) = copy_value(col, &before)? {
             values.push((col.name.clone(), value));
+            continue;
+        }
+        let renames: Vec<(String, String)> = relabels
+            .iter()
+            .filter(|(column, _, _)| *column == col.name)
+            .map(|(_, from, to)| (from.clone(), to.clone()))
+            .collect();
+        if !renames.is_empty() {
+            values.push((col.name.clone(), render_relabel_copy(&col.name, &renames)));
         }
     }
     render(table, &after, &before, &values)

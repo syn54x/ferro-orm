@@ -462,6 +462,7 @@ pub fn infer_test_schema_columns(schema: &serde_json::Value) -> Vec<ferro_schema
             enum_values,
             enum_type_name: enum_type_name.map(str::to_string),
             postgres_native_enum: false,
+            enum_renamed_labels: Default::default(),
         });
     }
     columns
