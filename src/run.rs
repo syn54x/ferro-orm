@@ -24,14 +24,13 @@ use crate::backend::{
 };
 use crate::ddl_exec::{Attempt, DdlError, DdlExecutor, StatementError, pool_connection};
 use ferro_ddl_lowering::Dialect;
-use ferro_migrate::directory::MigrationsDir;
 use ferro_migrate::generate::rebuild::rebuilt_tables;
 use ferro_migrate::run_plan::{
     Direction, ExecMode, Origin, PlannedStep, RecordKind, StepRecord, TRACKING_FORMAT,
     check_format, run_lock_key, split_statements,
 };
 use ferro_migrate::snapshot::{encode_checksum, sha384};
-use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
+use ferro_schema_ir::SchemaModel;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use sqlx::{Connection, Row};
