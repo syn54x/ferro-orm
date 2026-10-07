@@ -79,6 +79,8 @@ The bridge does not compare schemas itself. Autogenerate reads the live database
 
 Where Alembic has an op of its own (a table, a column, its type and nullability, an index, a foreign key, a rename), the revision uses it. Everything else is the statement the auto-migrate pass would run, byte for byte, as `op.execute(sa.DDL(...))`.
 
+One change goes beyond the pass: deleting a model drops its live table (`op.drop_table`, marked destructive), the same table Alembic would drop, followed by `DROP TYPE` for any native enum type only that table used. Alembic's version table, ferro's tracking tables and any table your `include_object` or `include_name` filters exclude are never dropped, and the `downgrade()` puts the type and the table back as far as ferro can read them (columns, types, nullability, indexes, foreign keys, checks and policies; not server defaults or comments).
+
 ```bash
 alembic revision --autogenerate -m "add nickname"
 alembic upgrade head
