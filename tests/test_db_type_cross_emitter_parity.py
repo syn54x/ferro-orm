@@ -396,6 +396,55 @@ def test_no_db_type_keeps_default_emitter_behavior():
 
 
 # ---------------------------------------------------------------------------
+# The migrations door (#538): a token through a generated ADD COLUMN.
+# ---------------------------------------------------------------------------
+
+
+def _modelset(annotation: type | None, token: str) -> dict:
+    """The resolved modelset of ``ParityModel``, with ``x: annotation | None``
+    under ``db_type=token`` unless ``annotation`` is None."""
+    from ferro import ensure_resolved_modelset
+    from ferro.registry import REGISTRY
+
+    REGISTRY.reset_for_test()
+    reset_engine()
+    clear_registry()
+    annotations: dict = {"id": int | None}
+    namespace: dict = {"id": Field(default=None, primary_key=True)}
+    if annotation is not None:
+        annotations["x"] = annotation | None
+        namespace["x"] = Field(default=None, db_type=token)
+    type("ParityModel", (Model,), {"__annotations__": annotations, **namespace})
+    return ensure_resolved_modelset()
+
+
+@pytest.mark.parametrize("dialect", ["postgres", "sqlite"])
+@pytest.mark.parametrize("token,annotation,expected", _TOKEN_CASES)
+def test_a_generated_add_column_carries_the_pass_storage_for_every_token(
+    token: str, annotation: type, expected: dict[str, str], dialect: str
+):
+    """``ferro migrate new`` adding a ``db_type`` column writes the very
+    ``ALTER TABLE … ADD COLUMN`` the reconciliation pass runs for it: one
+    decision (``resolve_column_storage``), one rendering (AGENTS.md § I-1)."""
+    from ferro._core import _generate_migration, _plan_from_ir
+
+    before = json.dumps(_modelset(None, token))
+    after = json.dumps(_modelset(annotation, token))
+    parent = json.loads(_generate_migration(None, before, [dialect]))["snapshot_json"]
+    generated = json.loads(_generate_migration(parent, after, [dialect]))
+
+    [step] = generated["steps"]
+    up = step["renderings"][dialect]["up"]
+    written = [s.strip() for s in up.split(";\n") if s.strip()]
+    planned = json.loads(
+        _plan_from_ir(before, after, dialect, '{"destructive": true}', True)
+    )["operations"]
+    assert written == [sql for op in planned for sql in op["statements"]]
+    assert written[0].startswith('ALTER TABLE "paritymodel" ADD COLUMN "x" ')
+    assert expected[dialect] in written[0].upper()
+
+
+# ---------------------------------------------------------------------------
 # Task 4 / issue #153: fail loud on unknown logical_type (regression pin).
 #
 # The Python SchemaIR compiler's `_logical_type` returns `"unknown"` only for
