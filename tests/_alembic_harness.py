@@ -22,16 +22,16 @@ def sync_url(postgres_base_url: str) -> str:
 
 def autogen_opts(extra_opts: dict | None = None) -> dict:
     """The ``context.configure(...)`` options the documented env.py recipe
-    uses: type and server-default comparison, and ferro's ``render_item``,
-    which is what renders a reused enum type's ``create_type=False`` (#443).
-    ``extra_opts`` (``include_object``, or a ``render_item`` override for the
-    unwired case) wins over the defaults."""
-    from ferro.migrations import render_item
+    uses: type and server-default comparison, and ``**ferro_options()``
+    (ferro's object filter and ``render_item``). ``extra_opts`` wins over
+    them (an ``include_object`` of the project's, or a context without
+    ferro's options for the refusal)."""
+    from ferro.migrations import ferro_options
 
     return {
         "compare_type": True,
         "compare_server_default": True,
-        "render_item": render_item,
+        **ferro_options(),
         **(extra_opts or {}),
     }
 

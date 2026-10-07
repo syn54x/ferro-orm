@@ -27,7 +27,7 @@ from ferro import (
     reset_engine,
 )
 from ferro._core import (
-    _plan_check_rebuild,
+    _plan_from_ir,
     _render_migration_sql_for_test,
     _render_table_check_body,
 )
@@ -267,24 +267,40 @@ def test_undeclared_live_ck_is_not_a_rebuild():
 # ---------------------------------------------------------------------------
 
 
+def _planner_statements(
+    table: str, live_checks: list[dict], *, destructive: bool
+) -> list[str]:
+    """What the one planner renders for ``table`` against a live table that
+    holds its columns and ``live_checks`` — the statements the Alembic bridge
+    writes into a revision (ADR-0041)."""
+    declared = compile_registry_schema_ir()
+    model = next(m for m in declared["payload"]["models"] if m["table_name"] == table)
+    live_model = {**model, "checks": [], "table_checks": [], "row_security": None}
+    live = {**declared, "payload": {**declared["payload"], "models": [live_model]}}
+    declared_one = {**declared, "payload": {**declared["payload"], "models": [model]}}
+    plan = json.loads(
+        _plan_from_ir(
+            json.dumps(live),
+            json.dumps(declared_one),
+            "postgres",
+            json.dumps({"destructive": destructive}),
+            True,
+            json.dumps({"tables": {table: {"checks": live_checks}}}),
+        )
+    )
+    return [statement for op in plan["operations"] for statement in op["statements"]]
+
+
 def test_check_rebuild_statement_parity_pin():
-    """The FFI the Alembic comparator consumes renders the same bytes the
+    """The planner the Alembic bridge translates renders the same bytes the
     reconciliation pass executes."""
     _define_rebuild(both=True)
-    live = [(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
-    plan = json.loads(
-        _plan_check_rebuild("rebuild", json.dumps(_model_ir("rebuild")), live)
-    )
-    assert plan["names"] == [SIDE_CHECK_NAME]
-    assert plan["statements"] == [SIDE_CHECK_DROP, SIDE_CHECK_ADD_AND]
+    live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
+    statements = _planner_statements("rebuild", live, destructive=True)
+    assert statements == [SIDE_CHECK_DROP, SIDE_CHECK_ADD_AND]
 
-    runtime, _ = _render(
-        "rebuild",
-        REBUILD_LIVE_COLUMNS,
-        [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")],
-        "postgres",
-    )
-    assert plan["statements"] == runtime
+    runtime, _ = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
+    assert statements == runtime
 
 
 # ---------------------------------------------------------------------------

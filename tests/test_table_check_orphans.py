@@ -27,7 +27,7 @@ from ferro import (
     engines,
     reset_engine,
 )
-from ferro._core import _plan_check_drop, _render_migration_sql_for_test
+from ferro._core import _plan_from_ir, _render_migration_sql_for_test
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
@@ -257,25 +257,42 @@ def test_without_migrate_updates_no_leftover_is_planned():
 # ---------------------------------------------------------------------------
 
 
+def _planner_statements(
+    table: str, live_checks: list[dict], *, destructive: bool
+) -> list[str]:
+    """What the one planner renders for ``table`` against a live table that
+    holds its columns and ``live_checks`` — the statements the Alembic bridge
+    writes into a revision (ADR-0041)."""
+    declared = compile_registry_schema_ir()
+    model = next(m for m in declared["payload"]["models"] if m["table_name"] == table)
+    live_model = {**model, "checks": [], "table_checks": [], "row_security": None}
+    live = {**declared, "payload": {**declared["payload"], "models": [live_model]}}
+    declared_one = {**declared, "payload": {**declared["payload"], "models": [model]}}
+    plan = json.loads(
+        _plan_from_ir(
+            json.dumps(live),
+            json.dumps(declared_one),
+            "postgres",
+            json.dumps({"destructive": destructive}),
+            True,
+            json.dumps({"tables": {table: {"checks": live_checks}}}),
+        )
+    )
+    return [statement for op in plan["operations"] for statement in op["statements"]]
+
+
 def test_check_drop_statement_parity_pin():
-    """The FFI the Alembic comparator consumes renders the same bytes the
+    """The planner the Alembic bridge translates renders the same bytes the
     reconciliation pass executes under ``migrate_destructive``."""
     _define_orphan(with_check=False)
-    live_names = [SIDE_CHECK_NAME]
-    plan = json.loads(
-        _plan_check_drop("orphan", json.dumps(_model_ir("orphan")), live_names)
-    )
-    assert plan["names"] == [SIDE_CHECK_NAME]
-    assert plan["statements"] == [SIDE_CHECK_DROP]
+    live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
+    statements = _planner_statements("orphan", live, destructive=True)
+    assert statements == [SIDE_CHECK_DROP]
 
     runtime, _ = _render(
-        "orphan",
-        ORPHAN_LIVE_COLUMNS,
-        [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")],
-        "postgres",
-        destructive=True,
+        "orphan", ORPHAN_LIVE_COLUMNS, live, "postgres", destructive=True
     )
-    assert plan["statements"] == runtime
+    assert statements == runtime
 
 
 # ---------------------------------------------------------------------------

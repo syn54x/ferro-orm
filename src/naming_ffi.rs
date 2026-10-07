@@ -9,6 +9,14 @@
 use ferro_ddl_lowering::{Dialect, ResolvedStorage};
 use pyo3::prelude::*;
 
+/// The names of the two tracking tables (`_ferro_migrations`,
+/// `_ferro_migrations_format`): what the Alembic bridge's object filter hides
+/// from Alembic's own comparator.
+#[pyfunction]
+pub fn _tracking_table_names() -> (&'static str, &'static str) {
+    (crate::run::TRACKING_TABLE, crate::run::FORMAT_TABLE)
+}
+
 #[pyfunction]
 pub fn _ddl_single_index_name(table: String, column: String) -> String {
     ferro_ddl_lowering::single_index_name(&table, &column)

@@ -247,7 +247,7 @@ pub fn information_schema_to_db_type_token(
             Dialect::Sqlite => "int",
             Dialect::Postgres => "boolean",
         },
-        "double precision" | "real" => "double",
+        "double precision" | "double" | "real" => "double",
         "numeric" => "numeric",
         "json" => "json",
         // Honest introspection (ADR-0004): live jsonb reads back as jsonb on
@@ -4163,6 +4163,12 @@ mod tests {
         assert_eq!(
             information_schema_to_db_type_token("DATETIME", None, Dialect::Sqlite),
             "timestamp"
+        );
+        // The create pass declares a SQLite float column `double`; it reads
+        // back as the token it was created from, not as text.
+        assert_eq!(
+            information_schema_to_db_type_token("double", None, Dialect::Sqlite),
+            "double"
         );
         assert_eq!(
             information_schema_to_db_type_token("character varying", Some(40), Dialect::Postgres),

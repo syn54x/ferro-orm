@@ -210,6 +210,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_enum_label_addition, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_enum_type_provenance, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_plan_step_verdicts, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_tracking_table_names, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_row_policy_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_rls_command_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_rls_shorthand_cast, m)?)?;

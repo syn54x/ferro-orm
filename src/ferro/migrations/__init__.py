@@ -10,7 +10,7 @@ A data step declares its shape with ``atomic`` / ``chunked`` (and its down
 with ``irreversible`` / ``nothing_to_reverse``), and marks what only a
 person can supply with ``todo("…")`` (ADR-0035).
 
-``get_metadata`` and ``render_item`` (the Alembic bridge) are loaded on
+``get_metadata``, ``ferro_options`` and ``render_item`` (the Alembic bridge) are loaded on
 first use, so the migration calls never import Alembic.
 """
 
@@ -25,7 +25,7 @@ from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 from .steps import atomic, chunked, irreversible, nothing_to_reverse, todo
 
 if TYPE_CHECKING:
-    from .alembic import get_metadata, render_item
+    from .alembic import ferro_options, get_metadata, render_item
 
 __all__ = [
     "BaselineReport",
@@ -38,6 +38,7 @@ __all__ = [
     "check",
     "chunked",
     "drift",
+    "ferro_options",
     "get_metadata",
     "irreversible",
     "nothing_to_reverse",
@@ -50,7 +51,7 @@ __all__ = [
     "up",
 ]
 
-_ALEMBIC_NAMES = ("get_metadata", "render_item")
+_ALEMBIC_NAMES = ("ferro_options", "get_metadata", "render_item")
 
 
 def __getattr__(name: str) -> Any:
