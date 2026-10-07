@@ -61,7 +61,7 @@ The rule is per database, not per project. A throwaway test database built with 
 | Add a check, a foreign key, change a type or nullability, on Postgres | ✅ | ✅ | ✅ |
 | The same on SQLite (needs a table rebuild) | ⚠️ warns, no DDL | ✅ generated [table rebuild](migrations.md#sqlite-table-rebuilds) | ❌ refused at autogenerate |
 | Rename a column (`renamed_from`) or an enum label (`__ferro_renamed_labels__`) | ✅ | ✅ [declared on the model](migrations.md#renames) | ✅ same hints |
-| Rename a table (`__ferro_renamed_from__`) | ❌ the create pass builds the new name as a new, empty table | ✅ | ✅ |
+| Rename a table (`__ferro_renamed_from__`) | ✅ `RENAME TABLE` under `migrate_updates`, indexes and checks renamed with it; without `migrate_updates` the pass warns and creates nothing | ✅ | ✅ |
 | Drop a column | with `migrate_destructive` | ✅ marked `-- ferro: destructive` | ✅ marked `# ferro: destructive` |
 | Drop a table | ❌ | ✅ marked `-- ferro: destructive` | ✅ marked `# ferro: destructive` |
 | Add a new required column to a table with rows | only with a literal default (backfills existing rows) | ✅ [expand, backfill, contract](data-steps.md) generated | ⚠️ the plain op, marked `# ferro: data-dependent`; the backfill is yours to write |
