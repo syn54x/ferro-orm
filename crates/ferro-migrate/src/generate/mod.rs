@@ -16,10 +16,12 @@
 //! carries, never a statement (AGENTS.md § I-1).
 //!
 //! It generates new and dropped models (their tables, the enum types they
-//! introduce or retire, and everything a `CREATE TABLE` carries) and the
-//! plain `ALTER TABLE` edits of an existing table where the dialect has a
-//! native statement. [`columns::assign`] decides each op's step; every other
-//! change is refused naming the ticket that generates it.
+//! introduce or retire, and everything a `CREATE TABLE` carries), the plain
+//! `ALTER TABLE` edits of an existing table where the dialect has a native
+//! statement, and on SQLite a table rebuild for every change `ALTER TABLE`
+//! cannot express ([`rebuild`]), in the same step as its Postgres twin.
+//! [`columns::assign`] decides each op's step; every other change is refused
+//! naming the ticket that generates it.
 
 pub mod columns;
 pub mod downs;
@@ -1470,6 +1472,34 @@ mod tests {
             file(
                 &rebuild_of(&on_team, &plain, &[]),
                 "-- ferro: foreign-keys-off\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_column_a_table_check_names_is_dropped_with_its_check_in_one_rebuild() {
+        let mut before = with_columns(vec![optional("age", "integer")]);
+        before.table_checks.push(ferro_schema_ir::SchemaTableCheck {
+            name: "ck_author_age_positive".into(),
+            predicate: ferro_schema_ir::CheckExpr::IsNotNull {
+                column: "age".into(),
+            },
+        });
+        let migration = edit(vec![before.clone()], vec![author()], &[Dialect::Sqlite]);
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        assert!(sqlite.headers.foreign_keys_off && sqlite.headers.destructive);
+        assert_eq!(
+            sqlite.up,
+            file(
+                &rebuild_of(&before, &author(), &[]),
+                &sqlite.headers.render()
+            )
+        );
+        assert_eq!(
+            sqlite.down,
+            file(
+                &rebuild_of(&author(), &before, &[]),
+                &sqlite.down_headers.render()
             )
         );
     }
