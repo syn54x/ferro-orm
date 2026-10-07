@@ -41,13 +41,13 @@ from .scaffold import data_step as scaffold_data_step
 from .steps import StepRefused, scan_todos, unwritten
 from .layout import (
     SNAPSHOT_FILE,
-    SQL_STEP_PLACEHOLDER,
     GeneratedMigration,
     GeneratedStep,
     MigrationsDirectoryError,
     check_name,
     ensure_gitattributes,
     read_migrations,
+    portable_sql_step,
     write_migration,
 )
 
@@ -306,18 +306,7 @@ def _with_data_steps(
     for step in migration.steps:
         if step.kind == "portable_sql":
             # A --sql-step the generator placed: its placeholder files.
-            stem = f"{step.ordinal:02d}_{step.name}"
-            steps.append(
-                GeneratedStep(
-                    step.ordinal,
-                    step.name,
-                    "portable_sql",
-                    {
-                        f"{stem}.up.sql": SQL_STEP_PLACEHOLDER,
-                        f"{stem}.down.sql": SQL_STEP_PLACEHOLDER,
-                    },
-                )
-            )
+            steps.append(portable_sql_step(step.ordinal, step.name))
             continue
         hand = by_ordinal[step.ordinal].get("hand_model")
         if hand is not None:
