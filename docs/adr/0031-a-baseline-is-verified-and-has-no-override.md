@@ -33,3 +33,5 @@ There is no flag that records past a non-empty report. The report is the list of
 - A step record carries its origin, `run` or `baseline`. `status` shows `installed (baseline)`. `down` stops at a baselined migration, because its down steps would drop tables the migration never created.
 - `up` against a database with no step records, where a table of the first pending migration's snapshot already exists, refuses before running anything and names `baseline`.
 - Adoption is a cutover per database: bring it to the old door's head, baseline it, stop using the old door there. A change the old door makes afterwards is drift. Ferro adds no interlock between itself and Alembic.
+
+Amended at the epic's close (2026-10-07, #577): `status` says `applied (baseline)`, and a run-origin step `applied`, matching the glossary's *Step record*; *installed* is no longer a status word.
