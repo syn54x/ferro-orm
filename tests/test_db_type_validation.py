@@ -429,3 +429,26 @@ def test_jsonb_on_optional_dict_is_accepted():
         data: dict | None = Field(default=None, db_type="jsonb")
 
     assert Doc.__ferro_columns__["data"].db_type == "jsonb"
+
+
+# ---------------------------------------------------------------------------
+# The public surface stays narrow (ADR-0004): Any and dict | list are not
+# json-family annotations for a user model, whatever the historical builder
+# (ADR-0035) is allowed to construct.
+# ---------------------------------------------------------------------------
+
+
+def test_jsonb_on_any_raises():
+    with pytest.raises(TypeError, match="payload.*incompatible.*annotation"):
+
+        class Event(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            payload: Any = Field(db_type="jsonb")
+
+
+def test_jsonb_on_dict_or_list_union_raises():
+    with pytest.raises(TypeError, match="extra.*incompatible.*annotation"):
+
+        class Event(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            extra: dict | list = Field(db_type="jsonb")
