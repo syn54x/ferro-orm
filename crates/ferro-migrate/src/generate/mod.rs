@@ -16,13 +16,16 @@
 //! carries, never a statement (AGENTS.md § I-1).
 //!
 //! It generates new and dropped models (their tables, the enum types they
-//! introduce or retire, and everything a `CREATE TABLE` carries) and the
-//! plain `ALTER TABLE` edits of an existing table where the dialect has a
-//! native statement. [`columns::assign`] decides each op's step; every other
-//! change is refused naming the ticket that generates it.
+//! introduce or retire, and everything a `CREATE TABLE` carries), the plain
+//! `ALTER TABLE` edits of an existing table where the dialect has a native
+//! statement, and on SQLite a table rebuild for every change `ALTER TABLE`
+//! cannot express ([`rebuild`]), in the same step as its Postgres twin.
+//! [`columns::assign`] decides each op's step; every other change is refused
+//! naming the ticket that generates it.
 
 pub mod columns;
 pub mod downs;
+pub mod rebuild;
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
 use crate::snapshot::{Snapshot, SnapshotError};
@@ -92,13 +95,6 @@ pub enum GenerateError {
         /// The ticket that generates it.
         ticket: u32,
     },
-    /// The op needs a SQLite table rebuild (ticket #526).
-    NeedsRebuild {
-        /// The op kind (`AlterColumnType`, …).
-        op: String,
-        /// The table it changes.
-        table: String,
-    },
     /// The op needs values for existing rows (ticket #534).
     NeedsBackfill {
         /// The op kind (`AddColumn`, …).
@@ -149,10 +145,6 @@ impl std::fmt::Display for GenerateError {
                 subject,
                 ticket,
             } => write!(f, "not generated yet: {op} on {subject} (ticket #{ticket})"),
-            GenerateError::NeedsRebuild { op, table } => write!(
-                f,
-                "not generated yet: {op} on {table} needs a table rebuild (ticket #526)"
-            ),
             GenerateError::NeedsBackfill { op, table, .. } => write!(
                 f,
                 "not generated yet: {op} on {table} needs a backfill (ticket #534)"
@@ -247,11 +239,9 @@ fn phase_of(
     let StepAssignment { phase, needs } = columns::assign(op, &ctx);
     let table = op_subject(op);
     match needs {
-        Needs::Native => Ok(phase),
-        Needs::Rebuild => Err(GenerateError::NeedsRebuild {
-            op: op_kind(op),
-            table,
-        }),
+        // A rebuild sits in the phase step its Postgres twin's change does
+        // (ADR-0046).
+        Needs::Native | Needs::Rebuild => Ok(phase),
         Needs::Backfill => Err(GenerateError::NeedsBackfill {
             op: op_kind(op),
             table,
@@ -404,7 +394,8 @@ fn step_text(headers: &Headers, statements: &[String]) -> String {
 
 /// Every warning rendering `ops` raises on `dialect` (a backend limitation a
 /// dialect skips, such as row security on SQLite), each once, into
-/// `warnings`; an op the renderer leaves out with a warning is refused.
+/// `warnings`; an op the renderer leaves out with a warning is refused. An op
+/// on a table SQLite rebuilds is not rendered alone: its rebuild carries it.
 fn render_warnings(
     ops: &[MigrationOp],
     old: &IrEnvelope<SchemaIrPayload>,
@@ -412,8 +403,13 @@ fn render_warnings(
     dialect: Dialect,
     warnings: &mut Vec<String>,
 ) -> Result<(), GenerateError> {
+    let rebuilt = rebuild::tables_to_rebuild(ops, old, new, dialect, PlanDirection::Up);
     let plan = MigrationPlan {
-        operations: ops.to_vec(),
+        operations: ops
+            .iter()
+            .filter(|op| !op.table().is_some_and(|table| rebuilt.contains(table)))
+            .cloned()
+            .collect(),
         ..MigrationPlan::default()
     };
     let rendered = render_plan(&plan, old, new, dialect)?;
@@ -499,7 +495,7 @@ fn summarize(
 /// method) is not a schema change (ADR-0027).
 ///
 /// # Errors
-/// [`GenerateError::NotGeneratedYet`], [`GenerateError::NeedsRebuild`],
+/// [`GenerateError::NotGeneratedYet`],
 /// [`GenerateError::NeedsBackfill`] and [`GenerateError::PrimaryKeyChange`]
 /// for a change this generator does not generate yet,
 /// [`GenerateError::Unrenderable`] for an op the renderer leaves out with a
@@ -1044,10 +1040,29 @@ mod tests {
         );
         assert!(pg.down_headers.data_dependent && !pg.down_headers.destructive);
         // SQLite has no SET NOT NULL and refuses a NOT NULL ADD COLUMN with
-        // no default: the down is a rebuild.
+        // no default: the down is a rebuild, its copy giving the column no
+        // value, so a populated table fails it (ADR-0033).
+        let migration = edit(vec![before.clone()], vec![author()], &BOTH);
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
         assert_eq!(
-            refusal(vec![before], vec![author()], &BOTH),
-            "not generated yet: AddColumn on author needs a table rebuild (ticket #526)"
+            sqlite.up,
+            "-- ferro: destructive\n\nALTER TABLE \"author\" DROP COLUMN \"bio\";\n"
+        );
+        let mut down = vec![
+            created_as_new(&before),
+            "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"status\") \
+             SELECT \"id\", \"name\", \"status\" FROM \"author\""
+                .to_string(),
+            "DROP TABLE \"author\"".to_string(),
+            "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
+        ];
+        down.extend(create_pass_indexes(&before));
+        assert_eq!(
+            sqlite.down,
+            file(
+                &down,
+                "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n"
+            )
         );
     }
 
@@ -1173,14 +1188,375 @@ mod tests {
         }
     }
 
+    /// What the create pass writes for `model` on SQLite, its `CREATE TABLE`
+    /// naming `_ferro_new_<table>`: a rebuild's first statement (ADR-0034).
+    fn created_as_new(model: &SchemaModel) -> String {
+        let emission = render_create_table(model, Dialect::Sqlite).expect("create");
+        let table = format!("\"{}\"", model.table_name);
+        let renamed = format!("\"_ferro_new_{}\"", model.table_name);
+        emission.create_sql.replacen(&table, &renamed, 1)
+    }
+
+    /// The indexes the create pass builds for `model` after its table.
+    fn create_pass_indexes(model: &SchemaModel) -> Vec<String> {
+        render_create_table(model, Dialect::Sqlite)
+            .expect("create")
+            .post_create_sqls
+    }
+
+    /// The check a rebuild runs on a retyped column of `author`.
+    fn guarded(column: &str, target: &str, class: &str) -> Vec<String> {
+        vec![
+            format!(
+                "CREATE TEMP TABLE \"_ferro_rebuild_guard\" (\"value\", CONSTRAINT \
+                 \"ferro: author.{column} has a value that cannot become {target}\" CHECK (0))"
+            ),
+            format!(
+                "INSERT INTO \"_ferro_rebuild_guard\" (\"value\") SELECT \"{column}\" FROM \
+                 \"_ferro_new_author\" WHERE typeof(\"{column}\") NOT IN ({class}, 'null')"
+            ),
+            "DROP TABLE \"_ferro_rebuild_guard\"".to_string(),
+        ]
+    }
+
+    #[test]
+    fn a_sqlite_type_change_is_a_table_rebuild_copying_as_it_stands_and_checked_both_ways() {
+        let mut before = with_columns(vec![column("age", "integer")]);
+        before.columns[1].unique = true;
+        before.uniques.push(ferro_schema_ir::SchemaUnique {
+            name: "uq_author_name".into(),
+            columns: vec!["name".into()],
+        });
+        let mut after = before.clone();
+        after.columns[3] = column("age", "string");
+        let migration = edit(vec![before.clone()], vec![after.clone()], &BOTH);
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        let mut up = vec![
+            created_as_new(&after),
+            "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"status\", \"age\") \
+             SELECT \"id\", \"name\", \"status\", \"age\" FROM \"author\""
+                .to_string(),
+        ];
+        up.extend(guarded("age", "varchar", "'text'"));
+        up.extend([
+            "DROP TABLE \"author\"".to_string(),
+            "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
+        ]);
+        up.extend(create_pass_indexes(&after));
+        assert_eq!(
+            sqlite.up,
+            file(
+                &up,
+                "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n"
+            )
+        );
+        assert!(sqlite.headers.foreign_keys_off && sqlite.headers.data_dependent);
+        let mut down = vec![
+            created_as_new(&before),
+            "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"status\", \"age\") \
+             SELECT \"id\", \"name\", \"status\", \"age\" FROM \"author\""
+                .to_string(),
+        ];
+        down.extend(guarded("age", "integer", "'integer'"));
+        down.extend([
+            "DROP TABLE \"author\"".to_string(),
+            "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
+        ]);
+        down.extend(create_pass_indexes(&before));
+        assert_eq!(
+            sqlite.down,
+            file(
+                &down,
+                "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n"
+            )
+        );
+        assert!(!sqlite.down_headers.destructive);
+        // Postgres: byte-unchanged from #524.
+        let pg = rendering(&migration, StepDialect::Postgres);
+        assert_eq!(
+            pg.up,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" ALTER COLUMN \"age\" TYPE varchar USING \"age\"::varchar;\n"
+        );
+        assert!(!pg.headers.foreign_keys_off);
+    }
+
+    /// The rebuild statements of `table` from `before` into `after` with
+    /// `values` copied: what the generator folds a table's changes into.
+    fn rebuild_of(
+        before: &SchemaModel,
+        after: &SchemaModel,
+        values: &[(&str, &str)],
+    ) -> Vec<String> {
+        let casts: Vec<(String, String)> = values
+            .iter()
+            .map(|(column, value)| (column.to_string(), value.to_string()))
+            .collect();
+        rebuild::render(&after.table_name, after, before, &casts).expect("rebuild")
+    }
+
+    #[test]
+    fn two_tables_rebuilt_in_one_phase_share_one_step_and_one_header() {
+        let age = |logical: &str| optional("age", logical);
+        let author_before = with_columns(vec![age("integer")]);
+        let author_after = with_columns(vec![age("string")]);
+        let mut post_before = post();
+        post_before.columns.push(age("integer"));
+        let mut post_after = post();
+        post_after.columns.push(age("string"));
+        let migration = edit(
+            vec![author_before.clone(), post_before.clone()],
+            vec![author_after.clone(), post_after.clone()],
+            &[Dialect::Sqlite],
+        );
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        let cast: [(&str, &str); 0] = [];
+        let mut up = rebuild_of(&author_before, &author_after, &cast);
+        up.extend(rebuild_of(&post_before, &post_after, &cast));
+        assert_eq!(
+            sqlite.up,
+            file(
+                &up,
+                "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_type_change_and_a_new_index_on_one_table_copy_it_once_and_build_the_index_once() {
+        let before = with_columns(vec![
+            optional("age", "integer"),
+            optional("email", "string"),
+        ]);
+        let mut after = with_columns(vec![optional("age", "string"), optional("email", "string")]);
+        after.indexes.push(ferro_schema_ir::SchemaIndex {
+            name: "idx_author_email".into(),
+            columns: vec!["email".into()],
+            unique: false,
+        });
+        let migration = edit(
+            vec![before.clone()],
+            vec![after.clone()],
+            &[Dialect::Sqlite],
+        );
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        let up = rebuild_of(&before, &after, &[]);
+        assert_eq!(
+            sqlite.up,
+            file(
+                &up,
+                "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n"
+            )
+        );
+        assert_eq!(sqlite.up.matches("CREATE TABLE").count(), 1);
+        assert_eq!(sqlite.up.matches("\"idx_author_email\"").count(), 1);
+        let rename = sqlite.up.find("RENAME TO").expect("rename");
+        assert!(sqlite.up.find("\"idx_author_email\"").expect("index") > rename);
+        // Its down copies back without the index.
+        let down = rebuild_of(&after, &before, &[]);
+        assert_eq!(
+            sqlite.down,
+            file(
+                &down,
+                "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n"
+            )
+        );
+        assert!(!sqlite.down.contains("idx_author_email"));
+    }
+
+    #[test]
+    fn a_check_added_changed_or_dropped_on_sqlite_is_a_rebuild_carrying_it_inline() {
+        let plain = with_columns(vec![optional("tier", "string")]);
+        let checked = |values: &[&str]| {
+            let mut model = plain.clone();
+            model.checks.push(ferro_schema_ir::SchemaCheck {
+                name: "ck_author_tier".into(),
+                column: "tier".into(),
+                values: values.iter().map(|v| v.to_string()).collect(),
+            });
+            model
+        };
+        let free = checked(&["'free'"]);
+        let pro = checked(&["'free'", "'pro'"]);
+        for (before, after) in [(&plain, &free), (&free, &pro), (&free, &plain)] {
+            // Postgres stages it NOT VALID (ticket #527).
+            assert_eq!(
+                refusal(vec![before.clone()], vec![after.clone()], &BOTH),
+                format!(
+                    "not generated yet: {} on author (ticket #527)",
+                    if before.checks.is_empty() {
+                        "AddCheck"
+                    } else if after.checks.is_empty() {
+                        "DropCheck"
+                    } else {
+                        "RebuildCheck"
+                    }
+                )
+            );
+            let migration = edit(
+                vec![before.clone()],
+                vec![after.clone()],
+                &[Dialect::Sqlite],
+            );
+            let sqlite = rendering(&migration, StepDialect::Sqlite);
+            assert!(sqlite.headers.foreign_keys_off);
+            assert_eq!(
+                sqlite.up,
+                file(&rebuild_of(before, after, &[]), &sqlite.headers.render())
+            );
+            assert_eq!(
+                sqlite.up.contains("CONSTRAINT \"ck_author_tier\""),
+                !after.checks.is_empty()
+            );
+            assert_eq!(
+                sqlite.down,
+                file(
+                    &rebuild_of(after, before, &[]),
+                    &sqlite.down_headers.render()
+                )
+            );
+            // Adding or changing a check can fail on the rows; dropping one
+            // cannot.
+            assert_eq!(sqlite.headers.data_dependent, !after.checks.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_foreign_key_column_dropped_or_retargeted_on_sqlite_is_a_rebuild() {
+        let team = model("Team", vec![pk()]);
+        let club = model("Club", vec![pk()]);
+        let fk = |to: &str| SchemaForeignKey {
+            column: "team_id".into(),
+            to_table: to.into(),
+            to_column: "id".into(),
+            on_delete: Some("CASCADE".into()),
+            name: Some(format!("fk_author_team_id_{to}")),
+        };
+        let mut on_team = with_columns(vec![optional("team_id", "integer")]);
+        on_team.foreign_keys.push(fk("team"));
+        let mut on_club = on_team.clone();
+        on_club.foreign_keys = vec![fk("club")];
+        // C3: retarget.
+        let migration = edit(
+            vec![team.clone(), club.clone(), on_team.clone()],
+            vec![team.clone(), club.clone(), on_club.clone()],
+            &[Dialect::Sqlite],
+        );
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        assert_eq!(
+            sqlite.up,
+            file(
+                &rebuild_of(&on_team, &on_club, &[]),
+                &sqlite.headers.render()
+            )
+        );
+        assert!(sqlite.up.contains("REFERENCES \"club\""), "{}", sqlite.up);
+        assert!(
+            sqlite.down.contains("REFERENCES \"team\""),
+            "{}",
+            sqlite.down
+        );
+        // C2: drop the column, and its down puts it back by a rebuild too.
+        let plain = author();
+        let migration = edit(
+            vec![team.clone(), on_team.clone()],
+            vec![team.clone(), plain.clone()],
+            &[Dialect::Sqlite],
+        );
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        assert!(sqlite.headers.destructive && sqlite.headers.foreign_keys_off);
+        assert_eq!(
+            sqlite.up,
+            file(&rebuild_of(&on_team, &plain, &[]), &sqlite.headers.render())
+        );
+        // Its down puts the column back natively, an inline REFERENCES.
+        assert_eq!(
+            sqlite.down,
+            "ALTER TABLE \"author\" ADD COLUMN \"team_id\" integer REFERENCES \"team\"(\"id\") \
+             ON DELETE CASCADE;\n"
+        );
+        // A1 with a foreign key: native up, rebuilt down.
+        let migration = edit(
+            vec![team.clone(), plain.clone()],
+            vec![team, on_team.clone()],
+            &[Dialect::Sqlite],
+        );
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        assert!(!sqlite.headers.foreign_keys_off);
+        assert!(
+            sqlite
+                .up
+                .starts_with("ALTER TABLE \"author\" ADD COLUMN \"team_id\"")
+        );
+        assert_eq!(
+            sqlite.down,
+            file(
+                &rebuild_of(&on_team, &plain, &[]),
+                "-- ferro: foreign-keys-off\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_column_a_table_check_names_is_dropped_with_its_check_in_one_rebuild() {
+        let mut before = with_columns(vec![optional("age", "integer")]);
+        before.table_checks.push(ferro_schema_ir::SchemaTableCheck {
+            name: "ck_author_age_positive".into(),
+            predicate: ferro_schema_ir::CheckExpr::IsNotNull {
+                column: "age".into(),
+            },
+        });
+        let migration = edit(vec![before.clone()], vec![author()], &[Dialect::Sqlite]);
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        assert!(sqlite.headers.foreign_keys_off && sqlite.headers.destructive);
+        assert_eq!(
+            sqlite.up,
+            file(
+                &rebuild_of(&before, &author(), &[]),
+                &sqlite.headers.render()
+            )
+        );
+        assert_eq!(
+            sqlite.down,
+            file(
+                &rebuild_of(&author(), &before, &[]),
+                &sqlite.down_headers.render()
+            )
+        );
+    }
+
+    #[test]
+    fn a_required_foreign_key_column_with_a_default_copies_the_default_into_its_rows() {
+        let team = model("Team", vec![pk()]);
+        let mut after = with_columns(vec![SchemaColumn {
+            default: Some(serde_json::json!(1)),
+            ..column("team_id", "integer")
+        }]);
+        after.foreign_keys.push(SchemaForeignKey {
+            column: "team_id".into(),
+            to_table: "team".into(),
+            to_column: "id".into(),
+            on_delete: Some("CASCADE".into()),
+            name: Some("fk_author_team_id_team".into()),
+        });
+        let migration = edit(
+            vec![team.clone(), author()],
+            vec![team, after.clone()],
+            &[Dialect::Sqlite],
+        );
+        let sqlite = rendering(&migration, StepDialect::Sqlite);
+        assert_eq!(
+            sqlite.up,
+            file(
+                &rebuild_of(&author(), &after, &[("team_id", "1")]),
+                &sqlite.headers.render()
+            )
+        );
+        assert!(sqlite.headers.foreign_keys_off);
+    }
+
     #[test]
     fn shapes_this_generator_cannot_render_yet_are_refused_naming_their_ticket() {
-        let age_int = with_columns(vec![column("age", "integer")]);
-        let age_text = with_columns(vec![column("age", "string")]);
-        assert_eq!(
-            refusal(vec![age_int], vec![age_text], &BOTH),
-            "not generated yet: AlterColumnType on author needs a table rebuild (ticket #526)"
-        );
         assert_eq!(
             refusal(
                 vec![author()],

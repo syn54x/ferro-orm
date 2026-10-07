@@ -479,6 +479,10 @@ pub fn _execute_sql_step(
                 .verify()
                 .await?;
         }
+        // A SQLite table rebuild refuses a live table holding what its
+        // snapshot does not declare, before the step records anything.
+        let down = matches!(direction, ferro_migrate::Direction::Down { .. });
+        crate::run::check_rebuild_step(&engine, &step, &sql, down).await?;
         // A callback that raises is the caller's bug: its first error is
         // raised once the step has settled its record (stopping mid-step
         // would leave the record started with nothing running).

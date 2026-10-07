@@ -480,6 +480,46 @@ pub async fn sqlite_indexes_covering_column(
     Ok(covering)
 }
 
+/// Live SQLite indexes on `table` that Ferro does not own: every index a
+/// `CREATE INDEX` made (`origin == "c"`) whose name is not `idx_`/`uq_`, in
+/// name order. A table rebuild recreates only the indexes the snapshot
+/// declares, so it refuses a table holding one of these (ADR-0034). A
+/// constraint's autoindex is the table definition's own and is never one.
+pub async fn sqlite_foreign_indexes(engine: &EngineHandle, table: &str) -> PyResult<Vec<String>> {
+    let list_sql = format!("PRAGMA index_list({})", quote_ident(table));
+    let rows = engine
+        .fetch_all_sql_unprepared(&list_sql)
+        .await
+        .map_err(|e| introspection_error("PRAGMA index_list", table, e))?;
+    let mut out: Vec<String> = rows
+        .iter()
+        .filter(|row| row_string(row, "origin").as_deref() == Some("c"))
+        .filter_map(|row| row_string(row, "name"))
+        .filter(|name| !is_ferro_index_name(name))
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+/// The names of the live SQLite triggers on `table`, in name order. A table
+/// rebuild's `DROP TABLE` would drop them, so it refuses a table holding one
+/// (ADR-0034).
+pub async fn sqlite_table_triggers(engine: &EngineHandle, table: &str) -> PyResult<Vec<String>> {
+    let sql = format!(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = '{}' \
+         ORDER BY name",
+        table.replace('\'', "''")
+    );
+    let rows = engine
+        .fetch_all_sql_unprepared(&sql)
+        .await
+        .map_err(|e| introspection_error("sqlite_master triggers", table, e))?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row_string(row, "name"))
+        .collect())
+}
+
 /// Live standalone indexes Ferro owns on `table`, normalized across backends.
 pub async fn live_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveIndex>> {
     match engine.backend() {

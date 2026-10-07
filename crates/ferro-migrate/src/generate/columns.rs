@@ -5,17 +5,19 @@
 //! class Author(Model):              ferro migrate new author_bio
 //!     bio: str | None = None   ──▶  AddColumn  author.bio  → schema, native
 //!     name: str                ──▶  AddColumn  author.name → needs a backfill (ticket #534)
-//!     age: str  # was int      ──▶  AlterColumnType on SQLite → needs a table rebuild (ticket #526)
+//!     age: str  # was int      ──▶  AlterColumnType on SQLite → schema, a table rebuild
 //! ```
 //!
 //! [`assign`] is the one decision every generator ticket fills in per
-//! direction and dialect: this slice renders the plain `ALTER TABLE` edits of
-//! an existing table (add and drop a column, a Postgres type change and
-//! nullability relaxation, SQLite indexes), and answers every shape it cannot
-//! render yet with the ticket that will. It decides where an op goes, never
-//! what it says: every statement still comes from [`crate::render_plan`]
-//! (AGENTS.md § I-1).
+//! direction and dialect: the plain `ALTER TABLE` edits of an existing table
+//! (add and drop a column, a Postgres type change and nullability relaxation,
+//! SQLite indexes), SQLite's table rebuilds (whose native-or-rebuild table is
+//! [`super::rebuild::needs_rebuild`]), and every shape it cannot render yet
+//! answered with the ticket that will. It decides where an op goes, never
+//! what it says: every statement still comes from [`crate::render_plan`] or
+//! [`super::rebuild::render`] (AGENTS.md § I-1).
 
+use super::rebuild;
 use crate::emit::standalone_indexes;
 use crate::{Dialect, MigrationOp};
 use ferro_ddl_lowering::{ResolvedStorage, resolve_column_storage};
@@ -73,7 +75,7 @@ pub enum Refusal {
 pub enum Needs {
     /// The dialect's own statement, as [`crate::render_plan`] renders it.
     Native,
-    /// A SQLite table rebuild (ticket #526).
+    /// A SQLite table rebuild ([`super::rebuild`]), in the same phase step.
     Rebuild,
     /// Values for existing rows (ticket #534).
     Backfill,
@@ -161,10 +163,6 @@ fn column<'a>(model: &'a SchemaModel, name: &str) -> Option<&'a SchemaColumn> {
     model.columns.iter().find(|col| col.name == name)
 }
 
-fn has_foreign_key(model: Option<&SchemaModel>, column: &str) -> bool {
-    model.is_some_and(|model| model.foreign_keys.iter().any(|fk| fk.column == column))
-}
-
 /// Whether existing rows need a value for `col` that no statement supplies:
 /// it is `NOT NULL` and declares no default to backfill them with.
 pub fn needs_values(col: &SchemaColumn) -> bool {
@@ -223,6 +221,15 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
     let sqlite = ctx.dialect == Dialect::Sqlite;
     let refused = |ticket| Needs::Refused(Refusal::Ticket(ticket));
     let primary_key = Needs::Refused(Refusal::PrimaryKeyChange);
+    // SQLite's native-or-rebuild decision is the one table in
+    // [`rebuild::needs_rebuild`]; this match keeps the refusals that win over
+    // it and Postgres's own staging.
+    let rebuild = rebuild::needs_rebuild(op, ctx.direction, ctx);
+    let native_or_rebuild = if rebuild {
+        Needs::Rebuild
+    } else {
+        Needs::Native
+    };
     match op {
         MigrationOp::AddTable { .. }
         | MigrationOp::DropTable { .. }
@@ -238,44 +245,27 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
             };
             if col.primary_key {
                 primary_key
-            } else if needs_values(col) {
-                match (ctx.direction, ctx.dialect) {
-                    (PlanDirection::Up, _) => Needs::Backfill,
-                    // A down putting back a dropped `NOT NULL` column: added
-                    // nullable then `SET NOT NULL`, which fails while the
-                    // table has rows (ADR-0033). SQLite has no `SET NOT NULL`.
-                    (PlanDirection::Down, Dialect::Postgres) => Needs::Native,
-                    (PlanDirection::Down, Dialect::Sqlite) => Needs::Rebuild,
-                }
-            } else if sqlite && !col.nullable && has_foreign_key(ctx.after, column) {
-                // SQLite's ADD COLUMN takes REFERENCES only with a NULL
-                // default; this column backfills a value.
-                Needs::Rebuild
+            } else if needs_values(col) && ctx.direction == PlanDirection::Up {
+                Needs::Backfill
             } else {
-                Needs::Native
+                // A down putting back a dropped `NOT NULL` column on Postgres:
+                // added nullable then `SET NOT NULL`, which fails while the
+                // table has rows (ADR-0033).
+                native_or_rebuild
             }
         }
         MigrationOp::DropColumn { column, .. } => {
             if ctx.column_before(column).is_some_and(|col| col.primary_key) {
                 primary_key
-            } else if sqlite
-                && ctx.direction == PlanDirection::Up
-                && has_foreign_key(ctx.before, column)
-            {
-                // SQLite refuses to drop a column a table-level FOREIGN KEY
-                // names, the shape CREATE TABLE writes. A down drops the
-                // column its own up added with an inline REFERENCES, which it
-                // can.
-                Needs::Rebuild
             } else {
-                Needs::Native
+                native_or_rebuild
             }
         }
         MigrationOp::AlterColumnType { column, .. } => {
             let (old, new) = (ctx.column_before(column), ctx.column_after(column));
             if old.is_some_and(|col| col.primary_key) || new.is_some_and(|col| col.primary_key) {
                 primary_key
-            } else if sqlite {
+            } else if rebuild {
                 Needs::Rebuild
             } else if old.is_some_and(native_enum) || new.is_some_and(native_enum) {
                 refused(529)
@@ -287,7 +277,7 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
             let (old, new) = (ctx.column_before(column), ctx.column_after(column));
             if old.is_some_and(|col| col.primary_key) || new.is_some_and(|col| col.primary_key) {
                 primary_key
-            } else if sqlite {
+            } else if rebuild {
                 Needs::Rebuild
             } else if new.is_some_and(|col| !col.nullable) && ctx.direction == PlanDirection::Up {
                 // ADR-0042: NOT NULL on Postgres is staged after a backfill.
@@ -311,7 +301,7 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
         | MigrationOp::DropCheck { .. }
         | MigrationOp::AddForeignKey { .. }
         | MigrationOp::RebuildForeignKey { .. } => {
-            if sqlite {
+            if rebuild {
                 Needs::Rebuild
             } else {
                 // Constraints on an existing Postgres table are staged
@@ -614,12 +604,13 @@ mod tests {
                 );
             }
         }
-        // C2: an FK column CREATE TABLE wrote. SQLite cannot drop it in place;
-        // a down drops the inline REFERENCES column its up added.
+        // C2: an FK column. SQLite cannot drop a table-level FOREIGN KEY's
+        // column in place, the shape every rebuild writes, so a down dropping
+        // the column its up added rebuilds too.
         let before = with_fk(author(vec![nullable("team_id", "integer")]), "team_id");
         let expect = [
             (Dialect::Sqlite, PlanDirection::Up, Needs::Rebuild),
-            (Dialect::Sqlite, PlanDirection::Down, Needs::Native),
+            (Dialect::Sqlite, PlanDirection::Down, Needs::Rebuild),
             (Dialect::Postgres, PlanDirection::Up, Needs::Native),
             (Dialect::Postgres, PlanDirection::Down, Needs::Native),
         ];
