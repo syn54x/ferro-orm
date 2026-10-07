@@ -2071,6 +2071,7 @@ mod tests {
                     reason: backfill::Reason::NoDefault,
                 }],
                 driver: backfill::Driver::Chunked,
+                key: Some("id".into()),
                 reverse: "01_expand.down.sql drops the column".into(),
             })
         );

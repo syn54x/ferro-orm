@@ -245,6 +245,9 @@ pub struct DataStep {
     pub columns: Vec<DemandedColumn>,
     /// How it runs.
     pub driver: Driver,
+    /// The model's one primary-key column, which a chunked backfill pages
+    /// by; `None` for an atomic one.
+    pub key: Option<String>,
     /// The reason its `down` declares `@nothing_to_reverse` (ADR-0033: a
     /// generated down is never irreversible by default).
     pub reverse: String,
@@ -265,9 +268,14 @@ pub fn data_steps(demands: &[Demand], target: &IrEnvelope<SchemaIrPayload>) -> V
         .into_iter()
         .map(|table| {
             let mine: Vec<&Demand> = demands.iter().filter(|d| d.table == table).collect();
-            let model = find_model(target, table)
+            let declared = find_model(target, table);
+            let model = declared
                 .map(|model| super::short_model_name(&model.model_name).to_string())
                 .unwrap_or_else(|| table.to_string());
+            let key = declared
+                .filter(|model| driver_of(model) == Driver::Chunked)
+                .and_then(|model| model.columns.iter().find(|col| col.primary_key))
+                .map(|col| col.name.clone());
             GeneratedStep {
                 ordinal: 0,
                 name: format!("backfill_{}", model.to_lowercase()),
@@ -284,6 +292,7 @@ pub fn data_steps(demands: &[Demand], target: &IrEnvelope<SchemaIrPayload>) -> V
                         })
                         .collect(),
                     driver: mine[0].driver,
+                    key,
                     reverse: String::new(),
                 }),
             }

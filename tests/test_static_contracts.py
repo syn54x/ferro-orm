@@ -2,6 +2,8 @@ import ast
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 def test_wire_module_is_the_only_query_payload_serializer():
     """The QueryIR payload has one compiler and one envelope serializer
@@ -286,3 +288,28 @@ def test_ferro_migrations_publishes_the_calls_and_their_exceptions():
     assert "def _default_connection_name() -> str | None:" in stub
     assert stub.count("tracking_schemas: list[str] = ...") == 3
     assert callable(_core._default_connection_name)
+
+
+def test_up_and_require_applied_take_no_target():
+    """A migration is applied whole (ADR-0040): neither application call
+    takes a target, so a contract cannot be held back by an address in code."""
+    import inspect
+
+    from ferro.migrations import require_applied, up
+
+    assert list(inspect.signature(up).parameters) == [
+        "settings",
+        "database",
+        "using",
+        "lock_timeout",
+        "allow_ahead",
+    ]
+    assert list(inspect.signature(require_applied).parameters) == [
+        "settings",
+        "database",
+        "using",
+        "allow_ahead",
+    ]
+    for call in (up, require_applied):
+        with pytest.raises(TypeError, match="target"):
+            call(target="0002")  # ty: ignore[unknown-argument]

@@ -73,6 +73,7 @@ def declared_rename_hints(model_cls: type[Any]) -> RenameHints:
         foreign_keys=foreign_keys,
     )
 
+
 def declared_default_factories(model_cls: type[Any]) -> dict[str, str]:
     """Each field's ``default_factory`` as ``module.qualname``.
 
@@ -86,10 +87,19 @@ def declared_default_factories(model_cls: type[Any]) -> dict[str, str]:
         factory = getattr(info, "default_factory", None)
         if factory is None or not callable(factory):
             continue
-        module = getattr(factory, "__module__", None) or "builtins"
-        qualname = getattr(factory, "__qualname__", None) or type(factory).__qualname__
-        factories[name] = f"{module}.{qualname}"
+        factories[name] = _dotted_name(factory)
     return factories
+
+
+def _dotted_name(factory: Any) -> str:
+    """``uuid.uuid4``; ``datetime.datetime.now`` for a method bound to its
+    class (a builtin one carries no ``__module__`` of its own)."""
+    owner = getattr(factory, "__self__", None)
+    if isinstance(owner, type):
+        return f"{owner.__module__}.{owner.__qualname__}.{factory.__name__}"
+    module = getattr(factory, "__module__", None) or "builtins"
+    qualname = getattr(factory, "__qualname__", None) or type(factory).__qualname__
+    return f"{module}.{qualname}"
 
 
 # Test-only counter bumped at the single SchemaIR compile choke point (#245).

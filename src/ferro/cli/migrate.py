@@ -171,6 +171,17 @@ def new(
             negative="",
         ),
     ] = False,
+    no_backfill: Annotated[
+        list[str] | None,
+        Parameter(
+            help=(
+                "Replace the generated backfill of this column (<table>.<column>, "
+                "repeatable) with a guard step that fails the migration while any "
+                "row still needs a value."
+            ),
+            negative="",
+        ),
+    ] = None,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Write the next migration from the models' difference with the last one.
@@ -178,7 +189,9 @@ def new(
     Diffs the declared models against the newest migration's schema snapshot
     (never a database) and writes NNNN_<name>/ with one rendering per target
     dialect. A change that renders no DDL writes nothing, unless a step was
-    asked for.
+    asked for. A change that asks existing rows for values (a new required
+    column, a column made required) is written as expand, a backfill per
+    model, and contract.
     """
     from ..migrations.generate import prepare, write
 
@@ -192,6 +205,7 @@ def new(
         sql_step=sql_step,
         data_step=data_step,
         data_only=data_only,
+        no_backfill=no_backfill or (),
     )
     if migration is None:
         print("no schema change: nothing written")
