@@ -3582,6 +3582,68 @@ fn live_check(name: &str, definition: &str) -> LiveCheckFact {
     }
 }
 
+#[test]
+fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
+    // `Check("named", lambda t: t.name != "")` over a varchar column: ferro
+    // renders `"name" <> ''`, `pg_get_constraintdef` prints the text casts
+    // Postgres inserted. Same predicate, so no RebuildCheck on every connect.
+    let model = SchemaModel {
+        table_checks: vec![SchemaTableCheck {
+            name: "ck_cknamed_named".to_string(),
+            predicate: CheckExpr::Cmp {
+                column: "name".to_string(),
+                op: ferro_schema_ir::CheckCmpOp::Ne,
+                other: ferro_schema_ir::CheckOperand::Literal {
+                    token: "''".to_string(),
+                },
+            },
+        }],
+        ..schema_model(
+            "cknamed",
+            vec![pk_col("id", "int"), col("name", "varchar", false)],
+        )
+    };
+    let declared = envelope(vec![model]);
+    let facts_with = |definition: &str| {
+        let mut facts = LiveFacts::declared();
+        facts.tables.insert(
+            "cknamed".into(),
+            LiveTableFacts {
+                checks: vec![live_check("ck_cknamed_named", definition)],
+                foreign_keys: vec![],
+                indexes: vec![],
+                row_security: ferro_ddl_lowering::LiveRowSecurity::default(),
+            },
+        );
+        facts
+    };
+
+    let clean = plan_from_ir(
+        &declared,
+        &declared,
+        Dialect::Postgres,
+        &facts_with("CHECK (((name)::text <> ''::text))"),
+        updates_only(),
+    );
+    assert!(clean.operations.is_empty(), "{:?}", clean.operations);
+
+    let drifted = plan_from_ir(
+        &declared,
+        &declared,
+        Dialect::Postgres,
+        &facts_with("CHECK (((name)::text <> 'x'::text))"),
+        updates_only(),
+    );
+    assert_eq!(
+        drifted.operations,
+        vec![MigrationOp::RebuildCheck {
+            table: "cknamed".into(),
+            name: "ck_cknamed_named".into(),
+        }],
+        "a changed literal is still drift"
+    );
+}
+
 fn live_policy(name: &str, using: &str) -> ferro_ddl_lowering::LiveRowPolicy {
     ferro_ddl_lowering::LiveRowPolicy {
         name: name.into(),

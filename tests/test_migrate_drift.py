@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import re
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -139,6 +141,138 @@ def test_same_storage_types_are_not_drift_after_up(project, pkg, db, capsys):
 
     assert drift_cli(db, capsys) == (0, "no drift against 0001_create_event\n", "")
     assert drift_api(db).lines == []
+
+
+NAMED = """
+from ferro import Check
+
+
+class Ckn_Named(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str
+    __ferro_checks__ = (Check("named", lambda named: named.name != ""),)
+"""
+
+
+class _ReconcileStatements(logging.Handler):
+    """Collect the DDL the reconciliation pass logs for one table."""
+
+    def __init__(self, table: str):
+        super().__init__(level=logging.DEBUG)
+        self.prefix = f"Ferro Engine: auto-migrate executing on '{table}': "
+        self.statements: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if message.startswith(self.prefix):
+            self.statements.append(message[len(self.prefix) :])
+
+
+def migrate_updates_statements(url: str, table: str) -> list[str]:
+    """``connect(migrate_updates=True)``; the statements the pass executed
+    for ``table``."""
+    ferro.reset_engine()
+    logger = logging.getLogger("ferro")
+    handler = _ReconcileStatements(table)
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        asyncio.run(ferro.connect(url, migrate_updates=True))
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+    return handler.statements
+
+
+def test_a_text_comparison_check_is_not_drift_after_up(project, pkg, db, capsys):
+    """``name != ""`` over a ``str`` column: ferro renders ``"name" <> ''``,
+    Postgres prints ``CHECK (((name)::text <> ''::text))``. Same predicate,
+    so ``drift()`` reports no ``ck_ckn_named_named check body differs``.
+    SQLite keeps the body as written and is clean too."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, NAMED)
+    new("create_named")
+    assert run("migrate", "up", "--url", db.url) == 0
+    capsys.readouterr()
+
+    report = drift_api(db)
+    assert report.lines == [] and report.clean, report.lines
+    assert report.operations == []
+
+
+def test_a_text_comparison_check_is_not_rebuilt_on_every_connect(project, pkg, db):
+    """The reconciliation pass reads the same catalog body through the same
+    normalizer: after ``connect(auto_migrate=True)`` creates the table, each
+    ``connect(migrate_updates=True)`` executes nothing for it."""
+    write_models(project, pkg, NAMED)
+    sys.path.insert(0, str(project))
+    importlib.import_module(f"{pkg}.models")
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    if db.backend == "postgres":
+        assert db.rows(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_ckn_named_named' "
+            f"AND connamespace = '{db.schema}'::regnamespace"
+        ) == [("CHECK (((name)::text <> ''::text))",)], (
+            "the pin is only meaningful if Postgres prints the text casts"
+        )
+
+    assert migrate_updates_statements(db.url, "ckn_named") == []
+    assert migrate_updates_statements(db.url, "ckn_named") == []
+
+
+PRICED = """
+from decimal import Decimal
+
+from ferro import Check
+
+
+class Ckn_Priced(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    price: Decimal
+    __ferro_checks__ = (Check("priced", lambda priced: priced.price > 10),)
+"""
+
+
+def test_a_cast_ferro_did_not_write_is_rebuilt(project, pkg, db):
+    """Declared ``price > 10`` prints as ``CHECK ((price > (10)::numeric))``:
+    that literal coercion is display, so a connect changes nothing. A hand
+    edit to ``price::integer > 10`` prints as ``CHECK (((price)::integer >
+    10))``: that cast is predicate, so ``migrate_updates`` rebuilds the
+    declared body."""
+    if db.backend != "postgres":
+        pytest.skip("SQLite cannot alter a check in place (ADR-0014)")
+    write_models(project, pkg, PRICED)
+    sys.path.insert(0, str(project))
+    importlib.import_module(f"{pkg}.models")
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+
+    def constraintdef() -> str:
+        rows = db.rows(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_ckn_priced_priced' "
+            f"AND connamespace = '{db.schema}'::regnamespace"
+        )
+        assert len(rows) == 1, rows
+        return rows[0][0]
+
+    assert constraintdef() == "CHECK ((price > (10)::numeric))"
+    assert migrate_updates_statements(db.url, "ckn_priced") == []
+
+    db.execute('ALTER TABLE "ckn_priced" DROP CONSTRAINT "ck_ckn_priced_priced"')
+    db.execute(
+        'ALTER TABLE "ckn_priced" ADD CONSTRAINT "ck_ckn_priced_priced" '
+        'CHECK ("price"::integer > 10)'
+    )
+    assert constraintdef() == "CHECK (((price)::integer > 10))"
+
+    assert migrate_updates_statements(db.url, "ckn_priced") == [
+        'ALTER TABLE "ckn_priced" DROP CONSTRAINT "ck_ckn_priced_priced"',
+        'ALTER TABLE "ckn_priced" ADD CONSTRAINT "ck_ckn_priced_priced" '
+        'CHECK ("price" > 10)',
+    ]
+    assert constraintdef() == "CHECK ((price > (10)::numeric))"
 
 
 def test_a_column_dropped_by_hand_is_one_line_and_exit_4(project, pkg, db, capsys):
