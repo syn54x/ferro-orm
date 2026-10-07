@@ -29,6 +29,7 @@
 //! ```
 
 use super::columns::{self, PlanContext, PlanDirection};
+use super::rebuild;
 use super::{DESTRUCTIVE, GenerateError, refuse_unrendered, step_text};
 use crate::directory::Headers;
 use crate::{
@@ -103,6 +104,12 @@ fn may_fail_on_rows(op: &MigrationOp, new: &IrEnvelope<SchemaIrPayload>) -> bool
         MigrationOp::AlterColumnType { .. } => true,
         MigrationOp::AlterColumnNullability { .. } => column.is_some_and(|col| !col.nullable),
         MigrationOp::AddIndex { unique, .. } => *unique,
+        // A check or a foreign key over rows already there (a SQLite rebuild
+        // copies them under it).
+        MigrationOp::AddCheck { .. }
+        | MigrationOp::RebuildCheck { .. }
+        | MigrationOp::AddForeignKey { .. }
+        | MigrationOp::RebuildForeignKey { .. } => true,
         MigrationOp::AddColumn { .. } => {
             column.is_some_and(|col| columns::needs_values(col) || (!col.nullable && col.unique))
         }
@@ -171,17 +178,17 @@ fn rendered(
     Ok(render_plan(&plan, old, new, dialect)?)
 }
 
-/// The statements `ops` render to on `dialect`, planned `old → new`. A down
-/// (`restore`) adds a `NOT NULL` column with no default nullable and sets it
-/// `NOT NULL` right after its own statements; an up never meets one
+/// Each of `ops`' statements on `dialect`, planned `old → new`, op by op. A
+/// down (`restore`) adds a `NOT NULL` column with no default nullable and
+/// sets it `NOT NULL` right after its own statements; an up never meets one
 /// ([`columns::assign`] sends it to a backfill).
-fn statements(
+fn native_statements(
     ops: Vec<MigrationOp>,
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     restore: bool,
-) -> Result<Vec<String>, GenerateError> {
+) -> Result<Vec<Vec<String>>, GenerateError> {
     let (relaxed, tighten) = if restore {
         relaxed(&ops, new, dialect)
     } else {
@@ -193,9 +200,9 @@ fn statements(
     refuse_unrendered(&tighten_rendered, dialect)?;
     let mut out = Vec::new();
     for op in ops_rendered {
-        out.extend(op.statements);
+        let mut statements = op.statements;
         if let MigrationOp::AddColumn { table, column } = &op.op {
-            out.extend(
+            statements.extend(
                 tighten_rendered
                     .iter()
                     .filter(|t| {
@@ -205,8 +212,43 @@ fn statements(
                     .flat_map(|t| t.statements.iter().cloned()),
             );
         }
+        out.push(statements);
     }
     Ok(out)
+}
+
+/// The statements `ops` render to on `dialect` in a file going `direction`
+/// from `old` to `new`, and whether any table is rebuilt. On SQLite every op
+/// on a table that needs a rebuild folds into that table's one
+/// [`rebuild::render_table`], placed where the table's first op stands;
+/// every other op renders natively, in the planner's order (ADR-0046).
+fn statements(
+    ops: Vec<MigrationOp>,
+    old: &IrEnvelope<SchemaIrPayload>,
+    new: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+    direction: PlanDirection,
+) -> Result<(Vec<String>, bool), GenerateError> {
+    let rebuilt = rebuild::tables_to_rebuild(&ops, old, new, dialect, direction);
+    let folded = |op: &MigrationOp| op.table().is_some_and(|table| rebuilt.contains(table));
+    let native: Vec<MigrationOp> = ops.iter().filter(|op| !folded(op)).cloned().collect();
+    let mut native =
+        native_statements(native, old, new, dialect, direction == PlanDirection::Down)?.into_iter();
+    let mut out = Vec::new();
+    let mut written = BTreeSet::new();
+    for op in &ops {
+        match op.table().filter(|table| rebuilt.contains(*table)) {
+            Some(table) => {
+                if written.insert(table) {
+                    out.extend(rebuild::render_table(table, &ops, old, new)?);
+                }
+            }
+            None => out.extend(native.next().ok_or_else(|| {
+                GenerateError::Render(format!("{op:?} rendered no statement group"))
+            })?),
+        }
+    }
+    Ok((out, !rebuilt.is_empty()))
 }
 
 /// One generated step on `dialect`, both directions: the up file renders
@@ -243,8 +285,10 @@ pub fn render_down(
             })
             .collect();
 
-    let up_statements = statements(step_ops.to_vec(), before, after, dialect, false)?;
+    let (up_statements, up_rebuilds) =
+        statements(step_ops.to_vec(), before, after, dialect, PlanDirection::Up)?;
     let headers = Headers {
+        foreign_keys_off: up_rebuilds,
         destructive: !up_statements.is_empty() && step_ops.iter().any(drops_data),
         data_dependent: !up_statements.is_empty()
             && step_ops.iter().any(|op| may_fail_on_rows(op, after)),
@@ -255,8 +299,10 @@ pub fn render_down(
     let data_dependent = inverse
         .iter()
         .any(|op| recreates(op, before) || may_fail_on_rows(op, before));
-    let down_statements = statements(inverse, after, before, dialect, true)?;
+    let (down_statements, down_rebuilds) =
+        statements(inverse, after, before, dialect, PlanDirection::Down)?;
     let down_headers = Headers {
+        foreign_keys_off: down_rebuilds,
         data_dependent: !down_statements.is_empty() && data_dependent,
         not_applicable: down_statements.is_empty(),
         ..Headers::default()
