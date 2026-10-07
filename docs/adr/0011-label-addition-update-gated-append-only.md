@@ -1,7 +1,5 @@
 # Label addition is update-gated and append-only
 
-> **Amended by ADR-0047**: besides label addition, the reconciliation pass renames a label on Postgres when a live `__ferro_renamed_labels__` hint names it (`ALTER TYPE … RENAME VALUE`, catalog-only). Removal stays reviewed-migration territory, and an unhinted rename is still an addition plus an extra-label warning. On SQLite a live label hint is a warning, because there the rename is a change to rows.
-
 A native Postgres enum type that already exists is an existing schema object,
 so evolving its label set belongs to the **reconciliation pass**
 (`migrate_updates`), not the create pass — the same line ADR-0010 drew for
@@ -15,6 +13,8 @@ the model (enum types carry no `idx_`/`uq_`-style prefix, so prefix doctrine
 cannot apply). The additive-only scope is what makes derivation-based
 ownership safe: the worst misattribution appends a label; it never drops or
 rewrites anything.
+
+Amended by ADR-0047 (2026-10-07): besides label addition, the reconciliation pass renames a label on Postgres when a live `__ferro_renamed_labels__` hint names it (`ALTER TYPE … RENAME VALUE`, catalog-only). Removal stays reviewed-migration territory, and an unhinted rename is still an addition plus an extra-label warning. On SQLite a live label hint is a warning, because there the rename is a change to rows.
 
 Both migration doors consume one decision: the label diff (model labels +
 live `pg_enum` labels → additions + warnings) lives in the Rust core and is

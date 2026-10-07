@@ -1,7 +1,5 @@
 # Auto-migrate pass ownership: the create pass creates missing tables; the reconciliation pass owns every existing table
 
-> **Amended by ADR-0047**: the create pass does not create a table whose `__ferro_renamed_from__` old name is live, nor any table that depends on it, directly or transitively; the reconciliation pass renames the old table under `migrate_updates`.
-
 The auto-migrate **create pass** (`CONTEXT.md`) brings missing tables into
 existence — table, columns, indexes, constraints, together — and leaves a
 table that already exists completely untouched, whatever its shape. All DDL
@@ -13,6 +11,8 @@ enforced one: previously the create pass also fired `CREATE INDEX IF NOT
 EXISTS` at existing tables, which crashed the single-deploy shape of adding
 columns plus a composite unique over them — the index DDL ran before the
 reconciliation pass could add the columns (#324).
+
+Amended by ADR-0047 (2026-10-07): the create pass does not create a table whose `__ferro_renamed_from__` old name is live, nor any table that depends on it, directly or transitively; the reconciliation pass renames the old table under `migrate_updates`.
 
 Decision by owner (2026-07-19), grilling #324/#325.
 
