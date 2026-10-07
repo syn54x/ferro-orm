@@ -685,8 +685,11 @@ async def test_ferros_tracking_tables_are_never_dropped(
                 conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
             live = set(sa.inspect(conn).get_table_names())
             assert tracking <= live, live
-            context = MigrationContext.configure(conn, opts=autogen_opts())
-            autogen = AutogenContext(context, get_metadata(), opts=autogen_opts())
+            # No ferro object filter: it also hides the tracking tables, so
+            # only the finder's own skip is under test.
+            opts = autogen_opts({"include_object": None})
+            context = MigrationContext.configure(conn, opts=opts)
+            autogen = AutogenContext(context, get_metadata(), opts=opts)
             dropped = bridge._dropped_tables(autogen)
     finally:
         engine.dispose()
