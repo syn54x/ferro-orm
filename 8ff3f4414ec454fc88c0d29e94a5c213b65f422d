@@ -1,0 +1,1 @@
+verified 2026-10-07T05:10:18Z: cargo test -p ferro-schema-ir -p ferro-ddl-lowering -p ferro-migrate (150+231+43 ok); cargo test --no-default-features --features testing (323 ok); maturin develop; pytest renames/auto_migrate/pass_recording/table_check_reconcile/table_check_rebuild/row_security_reconcile --db-backends=sqlite,postgres (170 passed, fixtures unchanged)
