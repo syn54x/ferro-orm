@@ -679,3 +679,23 @@ async def _remove_baseline_records(
     of those removed. Raises ``RunRefused`` naming a run-origin migration
     applied above the baseline."""
     ...
+
+# --- #532: chunked ---
+
+async def _write_cursor(
+    using: str | None,
+    migration: int,
+    step: int,
+    cursor_json: str | None,
+    rows_done: int,
+    reverting: bool,
+    tracking_schema: str | None = None,
+    route: RouteHandle | None = None,
+) -> None:
+    """Commit one batch of a chunked step on its record: ``cursor_json``
+    (``{"keys": [...], "rows_done": N}``, ``None`` before any row) into
+    ``resume_cursor``, or with ``reverting`` into ``revert_cursor`` with the
+    record marked reverting, plus ``rows_done``; clears the last failure.
+    With ``route`` (the batch's ``transaction()`` block) it commits with the
+    batch. Raises ``RunRefused`` when the step has no record."""
+    ...

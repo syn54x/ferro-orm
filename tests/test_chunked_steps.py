@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -214,7 +215,9 @@ async def down(**kwargs: Any) -> runner.RunReport:
 
 async def paused_at(probe: Any, task: asyncio.Task) -> None:
     waiter = asyncio.ensure_future(probe.paused.wait())
-    done, _ = await asyncio.wait({waiter, task}, timeout=60, return_when="FIRST_COMPLETED")
+    done, _ = await asyncio.wait(
+        {waiter, task}, timeout=60, return_when="FIRST_COMPLETED"
+    )
     assert waiter in done, task.result() if task in done else "never paused"
 
 
@@ -292,9 +295,7 @@ def failed_at_batch_two(project: Path, pkg: str, db) -> Any:
     return probe
 
 
-def test_a_failed_batch_rolls_back_alone_and_up_resumes_at_the_cursor(
-    project, pkg, db
-):
+def test_a_failed_batch_rolls_back_alone_and_up_resumes_at_the_cursor(project, pkg, db):
     probe = failed_at_batch_two(project, pkg, db)
 
     assert slugged(db) == 1000, "batch 1 committed, batch 2 rolled back"
@@ -333,7 +334,7 @@ def test_status_shows_how_far_a_failed_chunked_step_got(project, pkg, db, capsys
     assert run("migrate", "status", "--url", db.url) == 4
 
     out = capsys.readouterr().out
-    assert "  02_backfill_author.py  failed at 1,000 rows\n" in out
+    assert re.search(r"\n  02_backfill_author\.py +failed at 1,000 rows\n", out)
     assert "    RuntimeError: batch 2 gave up\n" in out
 
 
@@ -377,7 +378,9 @@ def test_a_chunked_down_reverts_in_batches_and_an_interrupted_one_blocks_up(
         "reverted" in capsys.readouterr().err
     )
     assert run("migrate", "status", "--url", db.url) == 4
-    assert "  02_backfill_author.py  reverting" in capsys.readouterr().out
+    assert re.search(
+        r"\n  02_backfill_author\.py +reverting\n", capsys.readouterr().out
+    )
 
     probe.reset()
     report = asyncio.run(down(target="0002:01", url=db.url))
@@ -410,7 +413,7 @@ def test_a_chunked_down_that_fails_after_a_batch_stays_reverting_with_the_error(
     capsys.readouterr()
     assert run("migrate", "status", "--url", db.url) == 4
     out = capsys.readouterr().out
-    assert "  02_backfill_author.py  reverting\n" in out
+    assert re.search(r"\n  02_backfill_author\.py +reverting\n", out)
     assert "    RuntimeError: batch 2 gave up\n" in out
 
 
@@ -473,7 +476,7 @@ def test_a_query_over_a_join_table_is_refused_naming_the_parent_model_recipe(
         pkg,
         db,
         capsys,
-        'models.table("author_tags").order_by(lambda link: link.author_id)',
+        'models.table("author_tags").select().order_by(lambda link: link.author_id)',
     )
 
     assert "0002_add_slug/02_backfill_author.py: @chunked pages author_tags" in err
@@ -490,9 +493,7 @@ def test_a_query_without_order_by_is_refused(project, pkg, db, capsys):
         "models.Author.where(lambda author: author.slug == None)",
     )
 
-    assert (
-        "0002_add_slug/02_backfill_author.py: @chunked needs an ordered query" in err
-    )
+    assert "0002_add_slug/02_backfill_author.py: @chunked needs an ordered query" in err
     assert ".order_by(lambda author: author.id)" in err
 
 

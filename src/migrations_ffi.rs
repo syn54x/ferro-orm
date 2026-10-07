@@ -30,6 +30,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_read_records, m)?)?;
     m.add_function(wrap_pyfunction!(_write_record, m)?)?;
     m.add_function(wrap_pyfunction!(_remove_record, m)?)?;
+    m.add_function(wrap_pyfunction!(_write_cursor, m)?)?;
     m.add_function(wrap_pyfunction!(_execute_sql_step, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
     m.add_function(wrap_pyfunction!(_live_tables, m)?)?;
@@ -496,6 +497,96 @@ pub fn _remove_record(
         crate::run::remove_record(conn, tracking_schema.as_deref(), migration, step)
             .await
             .map_err(|e| crate::errors::map_db_error("removing the step record", e))
+    })
+}
+
+/// Refuse a cursor that is not `{"keys": [...], "rows_done": rows_done}`:
+/// the record's two copies of the count never disagree.
+fn check_cursor_json(cursor_json: &str, rows_done: i64) -> PyResult<()> {
+    let bad = |why: &str| {
+        PyValueError::new_err(format!(
+            "cursor_json must be {{\"keys\": [...], \"rows_done\": {rows_done}}} ({why}): \
+             {cursor_json}"
+        ))
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(cursor_json).map_err(|e| bad(&e.to_string()))?;
+    let object = value.as_object().ok_or_else(|| bad("not an object"))?;
+    if !object.get("keys").is_some_and(serde_json::Value::is_array) {
+        return Err(bad("no keys array"));
+    }
+    if object.get("rows_done").and_then(serde_json::Value::as_i64) != Some(rows_done) {
+        return Err(bad("its rows_done differs"));
+    }
+    if object.len() != 2 {
+        return Err(bad("unexpected members"));
+    }
+    Ok(())
+}
+
+/// Commit one batch of a chunked step on its record (ADR-0024): the batch's
+/// cursor (`{"keys": [...order-key values...], "rows_done": N}`, `None`
+/// before any row) and `rows_done`; `reverting` says the batch belongs to
+/// the step's down, whose cursor is `revert_cursor` and which marks the
+/// record reverting (ADR-0033). With `route` (the batch's
+/// `ferro.transaction()` block), it is written on that transaction's
+/// connection and commits with the batch; without, on its own.
+///
+/// # Errors
+/// `ValueError` for a malformed cursor; `RuntimeError` for a route with no
+/// open transaction; `RunRefused` when the step has no record; a database
+/// error.
+#[pyfunction]
+#[pyo3(name = "_write_cursor")]
+#[pyo3(signature = (using, migration, step, cursor_json, rows_done, reverting, tracking_schema=None, route=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn _write_cursor(
+    py: Python<'_>,
+    using: Option<String>,
+    migration: u16,
+    step: u8,
+    cursor_json: Option<String>,
+    rows_done: i64,
+    reverting: bool,
+    tracking_schema: Option<String>,
+    route: Option<Py<crate::state::RouteHandle>>,
+) -> PyResult<Bound<'_, PyAny>> {
+    if rows_done < 0 {
+        return Err(PyValueError::new_err(format!(
+            "rows_done must be zero or more, not {rows_done}"
+        )));
+    }
+    if let Some(cursor) = &cursor_json {
+        check_cursor_json(cursor, rows_done)?;
+    }
+    let slot = route
+        .map(|route| transaction_slot(route.get()))
+        .transpose()?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let schema = tracking_schema.as_deref();
+        let cursor = cursor_json.as_deref();
+        match slot {
+            Some(slot) => {
+                let mut guard = slot.lock().await;
+                let conn = guard.live().map_err(|e| {
+                    crate::errors::map_db_error("writing the chunked step's cursor", e)
+                })?;
+                crate::run::write_cursor(
+                    conn, schema, migration, step, cursor, rows_done, reverting,
+                )
+                .await
+            }
+            None => {
+                let engine = crate::state::engine_for_connection(using)?;
+                let mut conn = crate::ddl_exec::pool_connection(&engine).await.map_err(|e| {
+                    crate::errors::map_db_error("writing the chunked step's cursor", e)
+                })?;
+                crate::run::write_cursor(
+                    &mut conn, schema, migration, step, cursor, rows_done, reverting,
+                )
+                .await
+            }
+        }
     })
 }
 
