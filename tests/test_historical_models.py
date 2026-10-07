@@ -248,3 +248,39 @@ async def test_a_live_enum_label_neither_snapshot_declares_fails_hydration(
         async with ferro.transaction(using="ds_hist"):
             with pytest.raises(Exception, match="ds_mood holds the label 'archived'"):
                 await models.DsPerson.all()
+
+
+def test_a_historical_json_column_is_a_dict_or_list_union_and_hydrates():
+    own = snapshot(
+        model(
+            "event",
+            pk(),
+            col("payload", "unknown", db_type="jsonb", db_type_explicit=True),
+            col("tags", "json", db_type="jsonb", db_type_explicit=True),
+        )
+    )
+
+    event = historical.build_single(own, "0001_events").Event
+
+    assert fields(event)["payload"] is typing.Any
+    assert fields(event)["tags"] == dict[str, Any] | list[Any]
+    row = event(id=1, payload={"a": 1}, tags=[1, 2])
+    assert row.payload == {"a": 1}
+    assert row.tags == [1, 2]
+    assert event.__ferro_columns__["tags"].logical_type == "json"
+
+
+def test_the_historical_marker_does_not_leak_to_user_models():
+    own = snapshot(model("event", pk(), col("n", "integer")))
+    historical.build_single(own, "0001_events")
+
+    with pytest.raises(TypeError, match="incompatible"):
+
+        class Event(ferro.Model):
+            id: int | None = ferro.Field(default=None, primary_key=True)
+            payload: Any = ferro.Field(db_type="jsonb")
+
+    class Plain(ferro.Model):
+        id: int | None = ferro.Field(default=None, primary_key=True)
+
+    assert Plain.__dict__.get("__ferro_historical__") is False

@@ -240,6 +240,9 @@ def _model_class(model: dict[str, Any], module: str, shared_name: bool) -> type:
         # takes its table name so each identity stays unique.
         "__qualname__": model["table_name"] if shared_name else name,
         "__ferro_table__": model["table_name"],
+        # Private metaclass seam: annotations are derived from an IR that already
+        # passed the author-facing db_type check (ADR-0004), so skip it (ADR-0035).
+        "__ferro_historical__": True,
         "model_config": _CONFIG,
     }
     annotations: dict[str, Any] = {}

@@ -454,11 +454,18 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
         # Path-blind db_type validation (ADR-0003): both declaration paths
         # converge here, so token validity and annotation compatibility are
         # checked once, syntax-blind, at class-definition time.
+        # A class derived from an IR snapshot (``__ferro_historical__``) skips
+        # the author-facing compatibility half only; the token half still runs.
+        compat = not model_cls.__dict__.get("__ferro_historical__", False)
         if declared is not None:
-            db_type = validate_db_type_declaration(field_name, declared.db_type, ann)
+            db_type = validate_db_type_declaration(
+                field_name, declared.db_type, ann, check_compatibility=compat
+            )
             db_check = bool(declared.db_check)
         else:
-            db_type = validate_db_type_declaration(field_name, prop.get("db_type"), ann)
+            db_type = validate_db_type_declaration(
+                field_name, prop.get("db_type"), ann, check_compatibility=compat
+            )
             db_check = prop.get("db_check") is True
 
         fmt = "decimal" if annotation_is_decimal(ann) else prop.get("format")
