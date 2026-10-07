@@ -1,0 +1,1 @@
+verified 2026-10-07T07:58:36Z on 6a07f2e: cargo test -p ferro-migrate (264 passed); maturin develop; pytest test_generate_row_security/test_row_security_create_pass/test_rls_end_to_end/test_pass_recording/test_migrate_drift --db-backends=sqlite,postgres (129 passed + 1 pass_recording contention flake, rerun 20/20 twice; 4 SQLite skips by design)
