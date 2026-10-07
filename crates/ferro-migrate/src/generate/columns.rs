@@ -372,13 +372,14 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
         MigrationOp::ValidateConstraint { .. } | MigrationOp::RebuildIndex { .. } => {
             Needs::Refused(Refusal::LiveOnly)
         }
+        // Postgres-only; the planner plans none on SQLite ([`super::row_security`]).
         MigrationOp::AddRowPolicy { .. }
         | MigrationOp::RebuildRowPolicy { .. }
         | MigrationOp::DropRowPolicy { .. }
         | MigrationOp::EnableRowSecurity { .. }
         | MigrationOp::ForceRowSecurity { .. }
         | MigrationOp::DisableRowSecurity { .. }
-        | MigrationOp::NoForceRowSecurity { .. } => refused(531),
+        | MigrationOp::NoForceRowSecurity { .. } => Needs::Native,
     }
 }
 
@@ -1038,47 +1039,46 @@ mod tests {
     }
 
     #[test]
-    fn row_security_and_live_only_ops_are_refused_naming_their_owner() {
+    fn row_security_ops_are_native_in_the_schema_step() {
+        let a = author(vec![]);
+        let table = || "author".to_string();
+        let ops = [
+            MigrationOp::AddRowPolicy {
+                table: table(),
+                name: "p".into(),
+            },
+            MigrationOp::RebuildRowPolicy {
+                table: table(),
+                name: "p".into(),
+            },
+            MigrationOp::DropRowPolicy {
+                table: table(),
+                name: "p".into(),
+            },
+            MigrationOp::EnableRowSecurity { table: table() },
+            MigrationOp::ForceRowSecurity { table: table() },
+            MigrationOp::DisableRowSecurity { table: table() },
+            MigrationOp::NoForceRowSecurity { table: table() },
+        ];
+        for op in &ops {
+            for direction in DIRECTIONS {
+                assert_eq!(
+                    assignment_for(op, &a, &a, Dialect::Postgres, direction),
+                    StepAssignment {
+                        phase: Phase::Schema,
+                        needs: Needs::Native,
+                    },
+                    "{op:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_only_ops_are_refused_naming_why() {
         let a = author(vec![]);
         let table = || "author".to_string();
         let cases = [
-            (
-                MigrationOp::AddRowPolicy {
-                    table: table(),
-                    name: "p".into(),
-                },
-                Refusal::Ticket(531),
-            ),
-            (
-                MigrationOp::RebuildRowPolicy {
-                    table: table(),
-                    name: "p".into(),
-                },
-                Refusal::Ticket(531),
-            ),
-            (
-                MigrationOp::DropRowPolicy {
-                    table: table(),
-                    name: "p".into(),
-                },
-                Refusal::Ticket(531),
-            ),
-            (
-                MigrationOp::EnableRowSecurity { table: table() },
-                Refusal::Ticket(531),
-            ),
-            (
-                MigrationOp::ForceRowSecurity { table: table() },
-                Refusal::Ticket(531),
-            ),
-            (
-                MigrationOp::DisableRowSecurity { table: table() },
-                Refusal::Ticket(531),
-            ),
-            (
-                MigrationOp::NoForceRowSecurity { table: table() },
-                Refusal::Ticket(531),
-            ),
             (
                 MigrationOp::ValidateConstraint {
                     table: table(),

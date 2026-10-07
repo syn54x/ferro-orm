@@ -8,7 +8,7 @@
 //!                                                CREATE TYPE "status" …; CREATE TABLE "author" (…)
 //! ```
 //!
-//! Every statement comes from [`render_plan`] over [`plan_from_ir`]`(after,
+//! Every statement comes from [`render_plan`] over [`crate::plan_from_ir`]`(after,
 //! before)`: no statement is built here (AGENTS.md § I-1). The down restores
 //! schema, never data, so a down that recreates a dropped table or `NOT NULL`
 //! column carries `-- ferro: data-dependent`, as does one whose statements
@@ -31,13 +31,13 @@
 use super::columns::{self, Phase, PlanContext, PlanDirection};
 use super::rebuild;
 use super::renames;
-use super::{DESTRUCTIVE, GenerateError, refuse_unrendered, step_text};
+use super::{GenerateError, refuse_unrendered, step_text};
 use crate::directory::Headers;
 use crate::plan::{
     self, Hint, rename_ops, renamed_snapshot, renamed_table, reverse_hints, storage_hints,
 };
 use crate::render::render_plan_in;
-use crate::{Dialect, LiveFacts, MigrationOp, MigrationPlan, RenderedOp, plan_from_ir};
+use crate::{Dialect, MigrationOp, MigrationPlan, RenderedOp};
 use ferro_ddl_lowering::ConstraintMode;
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use std::collections::{BTreeMap, BTreeSet};
@@ -324,7 +324,7 @@ fn statements(
 
 /// One generated step on `dialect`, both directions: the up file renders
 /// `step_ops` (planned `before → after`), and the down file renders the
-/// inverse — [`plan_from_ir`]`(after, before)` with every drop planned,
+/// inverse — [`crate::plan_from_ir`]`(after, before)` with every drop planned,
 /// restricted to the tables and enum types `step_ops` touch and to the ops
 /// [`columns::assign`] puts in the step's `phase`.
 ///
@@ -384,21 +384,16 @@ pub fn render_down(
             other => other,
         })
         .collect();
-    let inverse: Vec<MigrationOp> = plan_from_ir(
-        &planned_after,
-        before,
-        dialect,
-        &LiveFacts::declared(),
-        DESTRUCTIVE,
-    )
-    .operations
-    .into_iter()
-    .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
-    .filter(|op| {
-        let ctx = PlanContext::of(op, &planned_after, before, dialect, PlanDirection::Down);
-        !columns::carried_by_its_column_drop(op, &ctx) && columns::assign(op, &ctx).phase == phase
-    })
-    .collect();
+    let inverse: Vec<MigrationOp> = super::plan(&planned_after, before, dialect)?
+        .operations
+        .into_iter()
+        .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
+        .filter(|op| {
+            let ctx = PlanContext::of(op, &planned_after, before, dialect, PlanDirection::Down);
+            !columns::carried_by_its_column_drop(op, &ctx)
+                && columns::assign(op, &ctx).phase == phase
+        })
+        .collect();
 
     let up_mode = columns::constraint_mode(dialect, PlanDirection::Up);
     let mut up_statements: Vec<String> = native_statements(
@@ -472,7 +467,7 @@ pub fn render_down(
 mod tests {
     use super::super::tests::{author, create_pass, file, ir, model, pk, post};
     use super::*;
-    use crate::PlanOptions;
+    use crate::{LiveFacts, PlanOptions, plan_from_ir};
     use ferro_schema_ir::{RowPolicyCommand, RowPolicyExpr, SchemaRowPolicy, SchemaRowSecurity};
 
     fn up_ops(
@@ -487,6 +482,7 @@ mod tests {
             &LiveFacts::declared(),
             PlanOptions { destructive: true },
         )
+        .expect("plan")
         .operations
     }
 

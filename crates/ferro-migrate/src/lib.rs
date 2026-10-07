@@ -30,8 +30,9 @@ pub use ferro_ddl_lowering::Dialect;
 pub use generate::{CheckReport, GenerateError, GeneratedMigration, check_migrations, generate};
 pub use order::order_by_dependencies;
 pub use plan::{
-    Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, live_hints, plan_check_drops,
-    plan_check_rebuilds, plan_from_ir, plan_index_rebuilds, plan_missing_checks, plan_validations,
+    Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OldSide, PlanError, live_hints,
+    plan_check_drops, plan_check_rebuilds, plan_from_ir, plan_index_rebuilds, plan_missing_checks,
+    plan_validations,
 };
 pub use render::{RenderedOp, render_plan, validate_schema_ir};
 pub use run_plan::{
