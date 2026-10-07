@@ -9,7 +9,12 @@ from pydantic.fields import Field as PydanticField
 from pydantic.fields import _EmptyKwargs, _Unset
 from pydantic_core import PydanticUndefined
 
-from .base import DbType, FerroNullable, _validate_nullable_option
+from .base import (
+    DbType,
+    FerroNullable,
+    _validate_nullable_option,
+    _validate_renamed_from,
+)
 
 if TYPE_CHECKING:
     import re
@@ -39,6 +44,7 @@ def Field(
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
+    renamed_from: str | None = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -92,6 +98,7 @@ def Field(
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
+    renamed_from: str | None = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -145,6 +152,7 @@ def Field(
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
+    renamed_from: str | None = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -197,6 +205,7 @@ def Field(
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
+    renamed_from: str | None = ...,
     default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -250,6 +259,7 @@ def Field(
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
+    renamed_from: str | None = ...,
     default_factory: Callable[[], _T] | Callable[[dict[str, Any]], _T],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -303,6 +313,7 @@ def Field(
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
+    renamed_from: str | None = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -356,6 +367,7 @@ def Field(
     nullable: FerroNullable | Any = _Unset,
     db_type: DbType | None | Any = _Unset,
     db_check: bool | Any = _Unset,
+    renamed_from: str | None | Any = _Unset,
     default_factory: Callable[[], Any]
     | Callable[[dict[str, Any]], Any]
     | None = _Unset,
@@ -412,6 +424,10 @@ def Field(
         through: Optional join table name used by many-to-many relationships.
         nullable: Alembic ``Column.nullable`` override for :func:`~ferro.migrations.get_metadata`.
             ``\"infer\"`` (default) derives nullability from the field annotation.
+        renamed_from: The column's previous name. ``ferro migrate new`` renders
+            ``RENAME COLUMN`` (and renames every index and check named after the
+            column) while the previous migration still holds that name; after
+            that migration the hint is inert and may stay or be deleted.
         default_factory: A callable to generate the default value. The callable can either take 0 arguments
             (in which case it is called as is) or a single argument containing the already validated data.
         alias: The name to use for the attribute when validating or serializing by alias.
@@ -505,6 +521,8 @@ def Field(
         ferro_kwargs["db_type"] = db_type
     if db_check is not _Unset:
         ferro_kwargs["db_check"] = db_check
+    if renamed_from is not _Unset:
+        ferro_kwargs["renamed_from"] = _validate_renamed_from(renamed_from, "Field")
 
     schema_extra = json_schema_extra
     if ferro_kwargs:

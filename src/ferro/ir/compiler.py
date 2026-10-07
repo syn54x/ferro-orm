@@ -7,7 +7,8 @@ individual models and full model sets.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from .._core import (
@@ -19,6 +20,7 @@ from .._core import (
     _ddl_single_unique_name,
     _ddl_table_check_constraint_name,
 )
+from ..base import ForeignKey
 from ..checks import TableCheckSpec, compile_table_checks
 from ..columns import (
     ColumnSpec,
@@ -32,7 +34,44 @@ from ..composite_uniques import normalized_composite_uniques
 from ..registry import REGISTRY, ir_fingerprint
 from ..rowsecurity import RowSecurity, _declared_row_security, compile_row_security
 
-_IR_VERSION = 1
+# Schema IR v2 records rename hints (`renamed_from`, ADR-0032); a v1 snapshot
+# is the same shape without them and keeps loading (ADR-0023).
+_IR_VERSION = 2
+
+
+@dataclass(frozen=True)
+class RenameHints:
+    """A model's declared rename hints (ADR-0032).
+
+    ``table`` is ``__ferro_renamed_from__``; ``columns`` maps each column to
+    the name it had before (a ``ForeignKey`` hint's shadow column included);
+    ``foreign_keys`` maps a foreign key's shadow column to the relation field
+    it was declared under before.
+    """
+
+    table: str | None = None
+    columns: Mapping[str, str] = field(default_factory=dict)
+    foreign_keys: Mapping[str, str] = field(default_factory=dict)
+
+
+def declared_rename_hints(model_cls: type[Any]) -> RenameHints:
+    """Collect ``model_cls``'s rename hints from its declarations."""
+    columns: dict[str, str] = {}
+    foreign_keys: dict[str, str] = {}
+    for field_name, meta in (getattr(model_cls, "ferro_fields", {}) or {}).items():
+        previous = getattr(meta, "renamed_from", None)
+        if previous is not None:
+            columns[field_name] = previous
+    for field_name, meta in (getattr(model_cls, "ferro_relations", {}) or {}).items():
+        previous = getattr(meta, "renamed_from", None)
+        if isinstance(meta, ForeignKey) and previous is not None:
+            columns[f"{field_name}_id"] = f"{previous}_id"
+            foreign_keys[f"{field_name}_id"] = previous
+    return RenameHints(
+        table=getattr(model_cls, "__ferro_renamed_from__", None),
+        columns=columns,
+        foreign_keys=foreign_keys,
+    )
 
 # Test-only counter bumped at the single SchemaIR compile choke point (#245).
 _SCHEMA_IR_COMPILE_COUNT_FOR_TEST = 0
@@ -144,6 +183,7 @@ def compile_schema_ir_payload(
     composite_indexes: Sequence[Sequence[str]] = (),
     table_checks: Sequence[TableCheckSpec] = (),
     row_security: RowSecurity | None = None,
+    rename_hints: RenameHints | None = None,
 ) -> dict[str, Any]:
     """Compile column specs into a SchemaIR payload object (locked shape).
 
@@ -158,6 +198,8 @@ def compile_schema_ir_payload(
         row_security: The model's declared ``__ferro_rls__``, validated and
             lowered here against this pass's column IR (see
             :func:`ferro.rowsecurity.compile_row_security`).
+        rename_hints: The model's declared rename hints, recorded as
+            ``renamed_from`` on the model, its columns and its foreign keys.
 
     Returns:
         A SchemaIR payload object ready to be wrapped in an IR envelope.
@@ -173,7 +215,14 @@ def compile_schema_ir_payload(
         deduped[spec.name] = spec
     ordered = sorted(deduped.values(), key=lambda spec: spec.name)
 
+    hints = rename_hints or RenameHints()
     column_entries = [_column_ir_from_spec(spec) for spec in ordered]
+    # Rename hints ride as absent-not-null keys, so a model that declares none
+    # keeps a byte-identical payload (ADR-0032).
+    for entry in column_entries:
+        previous = hints.columns.get(entry["name"])
+        if previous is not None:
+            entry["renamed_from"] = previous
 
     foreign_keys: list[dict[str, Any]] = []
     indexes: list[dict[str, Any]] = []
@@ -182,17 +231,19 @@ def compile_schema_ir_payload(
 
     for spec in ordered:
         if spec.foreign_key is not None and spec.foreign_key.to_table:
-            foreign_keys.append(
-                {
-                    "column": spec.name,
-                    "to_table": spec.foreign_key.to_table,
-                    "to_column": "id",
-                    "on_delete": spec.foreign_key.on_delete,
-                    "name": _fk_name(
-                        resolved_table_name, spec.name, spec.foreign_key.to_table
-                    ),
-                }
-            )
+            fk_entry: dict[str, Any] = {
+                "column": spec.name,
+                "to_table": spec.foreign_key.to_table,
+                "to_column": "id",
+                "on_delete": spec.foreign_key.on_delete,
+                "name": _fk_name(
+                    resolved_table_name, spec.name, spec.foreign_key.to_table
+                ),
+            }
+            previous_field = hints.foreign_keys.get(spec.name)
+            if previous_field is not None:
+                fk_entry["renamed_from"] = previous_field
+            foreign_keys.append(fk_entry)
         if spec.index:
             indexes.append(
                 {
@@ -272,6 +323,8 @@ def compile_schema_ir_payload(
     )
     if row_security_entry is not None:
         model_payload["row_security"] = row_security_entry
+    if hints.table is not None:
+        model_payload["renamed_from"] = hints.table
     return {"dialect_agnostic": True, "models": [model_payload]}
 
 
@@ -294,6 +347,7 @@ def _compile_and_persist_model_envelope(
     composite_indexes: Sequence[Sequence[str]] = (),
     table_checks: Sequence[TableCheckSpec] = (),
     row_security: RowSecurity | None = None,
+    rename_hints: RenameHints | None = None,
 ) -> dict[str, Any]:
     """Compile one model or join table to SchemaIR and persist its envelope.
 
@@ -310,6 +364,7 @@ def _compile_and_persist_model_envelope(
         composite_indexes=composite_indexes,
         table_checks=table_checks,
         row_security=row_security,
+        rename_hints=rename_hints,
     )
     envelope = wrap_schema_ir(payload)
     _persist_schema_ir_envelope(model_name, envelope)
@@ -393,6 +448,7 @@ def compile_model_schema_ir(
         composite_indexes=indexes,
         table_checks=table_checks,
         row_security=row_security,
+        rename_hints=declared_rename_hints(model_cls),
     )
     # Publish specs onto the class only after compile + persist succeed, so a
     # composite-validation or persist failure leaves the prior specs in place

@@ -1498,6 +1498,7 @@ mod tests {
                 models: tables
                     .iter()
                     .map(|t| SchemaModel {
+                        renamed_from: None,
                         model_name: t.to_string(),
                         table_name: t.to_string(),
                         columns: Vec::new(),

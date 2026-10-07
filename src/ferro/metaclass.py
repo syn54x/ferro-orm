@@ -78,6 +78,7 @@ class ModelMetaclass(type(BaseModel)):
 
         cls.__ferro_identity__ = f"{cls.__module__}.{cls.__qualname__}"
         cls.__ferro_table__ = mcs._resolve_table_name(name, namespace)
+        cls.__ferro_renamed_from__ = mcs._resolve_renamed_from(name, namespace)
         for field_name, metadata in pending_relations:
             REGISTRY.defer_relation(cls.__ferro_identity__, field_name, metadata)
 
@@ -118,6 +119,30 @@ class ModelMetaclass(type(BaseModel)):
                 "matching [A-Za-z_][A-Za-z0-9_]*"
             )
         return configured
+
+    @staticmethod
+    def _resolve_renamed_from(name: str, namespace: dict) -> str | None:
+        """Resolve a model's table rename hint (ADR-0032).
+
+        ``__ferro_renamed_from__`` names the table this model's table was
+        called before. Like ``__ferro_table__`` it is honored only in the
+        class's own body: a subclass never inherits its parent's rename.
+        """
+        declared = namespace.get("__ferro_renamed_from__")
+        if declared is None:
+            return None
+        if not isinstance(declared, str):
+            raise TypeError(
+                f"__ferro_renamed_from__ on model '{name}' must be a str, "
+                f"got {type(declared).__name__}"
+            )
+        if len(declared) > 63 or not _TABLE_NAME_RE.match(declared):
+            raise ValueError(
+                f"__ferro_renamed_from__ {declared!r} on model '{name}' is not a "
+                "valid table name: expected a 1-63 character identifier "
+                "matching [A-Za-z_][A-Za-z0-9_]*"
+            )
+        return declared
 
     @staticmethod
     def _field_ferro_payload(obj: Any) -> dict[str, Any]:
@@ -457,6 +482,7 @@ class ModelMetaclass(type(BaseModel)):
                             "nullable",
                             "db_type",
                             "db_check",
+                            "renamed_from",
                         )
                         if key in wrapped_payload
                     }

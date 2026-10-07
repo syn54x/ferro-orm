@@ -56,6 +56,7 @@ fn empty_envelope() -> IrEnvelope<SchemaIrPayload> {
 
 fn schema_model(table: &str, cols: Vec<SchemaColumn>) -> SchemaModel {
     SchemaModel {
+        renamed_from: None,
         model_name: table.to_string(),
         table_name: table.to_string(),
         columns: cols,
@@ -70,6 +71,7 @@ fn schema_model(table: &str, cols: Vec<SchemaColumn>) -> SchemaModel {
 
 fn col(name: &str, db_type: &str, nullable: bool) -> SchemaColumn {
     SchemaColumn {
+        renamed_from: None,
         name: name.to_string(),
         logical_type: "string".to_string(),
         db_type: Some(db_type.to_string()),
@@ -125,6 +127,7 @@ fn ir_col(
     index: bool,
 ) -> SchemaColumn {
     SchemaColumn {
+        renamed_from: None,
         name: name.to_string(),
         logical_type: logical_type.to_string(),
         db_type: None,
@@ -199,6 +202,7 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
         ],
         foreign_keys: vec![
             SchemaForeignKey {
+                renamed_from: None,
                 column: "org_id".to_string(),
                 to_table: "organization".to_string(),
                 to_column: "id".to_string(),
@@ -206,6 +210,7 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
                 name: Some("fk_account_org_id_organization".to_string()),
             },
             SchemaForeignKey {
+                renamed_from: None,
                 column: "owner_id".to_string(),
                 to_table: "organization".to_string(),
                 to_column: "id".to_string(),
@@ -644,6 +649,7 @@ fn emit_sql_with_ir_add_column_fk_postgres() {
     let parent = schema_model("team", vec![col("id", "int", false)]);
     let child = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
             column: "team_id".to_string(),
             to_table: "team".to_string(),
             to_column: "id".to_string(),
@@ -679,6 +685,7 @@ fn emit_sql_with_ir_add_column_nullable_fk_sqlite_references_inline() {
     let parent = schema_model("team", vec![col("id", "int", false)]);
     let child = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
             column: "team_id".to_string(),
             to_table: "team".to_string(),
             to_column: "id".to_string(),
@@ -718,6 +725,7 @@ fn emit_sql_with_ir_add_column_not_null_fk_with_default_sqlite_warns_naming_migr
     let parent = schema_model("team", vec![col("id", "int", false)]);
     let child = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
             column: "team_id".to_string(),
             to_table: "team".to_string(),
             to_column: "id".to_string(),
@@ -834,6 +842,7 @@ fn sqlite_warn_skips_name_migrations_not_alembic() {
     let type_new = envelope(vec![schema_model("user", vec![col("name", "int", true)])]);
     let null_new = envelope(vec![schema_model("user", vec![col("name", "text", false)])]);
     let fk = SchemaForeignKey {
+        renamed_from: None,
         column: "team_id".to_string(),
         to_table: "team".to_string(),
         to_column: "id".to_string(),
@@ -1130,6 +1139,7 @@ fn emit_sql_multi_op_ordering() {
     let parent = schema_model("team", vec![col("id", "int", false)]);
     let child = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
             column: "team_id".to_string(),
             to_table: "team".to_string(),
             to_column: "id".to_string(),
@@ -1675,6 +1685,7 @@ fn emit_alter_native_enum_live_is_noop() {
 fn render_create_table_fk_none_on_delete_defaults_cascade() {
     let child = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
             column: "team_id".to_string(),
             to_table: "team".to_string(),
             to_column: "id".to_string(),
@@ -1745,6 +1756,7 @@ fn plan_from_ir_single_column_new_index_is_skipped() {
 #[test]
 fn render_create_table_unknown_logical_type_errors() {
     let col = SchemaColumn {
+        renamed_from: None,
         name: "mystery".to_string(),
         logical_type: "bogus".to_string(),
         db_type: None,
@@ -2378,6 +2390,7 @@ fn order_models_for_create_self_fk_is_not_an_ordering_constraint() {
     // the component from the dependency order.
     let znode = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
             column: "parent_id".to_string(),
             to_table: "znode".to_string(),
             to_column: "id".to_string(),
@@ -2388,6 +2401,7 @@ fn order_models_for_create_self_fk_is_not_an_ordering_constraint() {
     };
     let areferrer = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
             column: "node_id".to_string(),
             to_table: "znode".to_string(),
             to_column: "id".to_string(),
@@ -2414,6 +2428,7 @@ fn fk(
     name: Option<&str>,
 ) -> SchemaForeignKey {
     SchemaForeignKey {
+        renamed_from: None,
         column: column.to_string(),
         to_table: to_table.to_string(),
         to_column: "id".to_string(),
@@ -2905,6 +2920,7 @@ fn add_table_pass_carries_row_security_through_emit_sql_with_ir() {
 fn post_model_with_constraints() -> SchemaModel {
     SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
             column: "author_id".to_string(),
             to_table: "author".to_string(),
             to_column: "id".to_string(),
@@ -3432,6 +3448,7 @@ fn new_tables_create_every_enum_type_first_by_name_then_the_tables() {
     );
     let post = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
+            renamed_from: None,
             column: "author_id".to_string(),
             to_table: "author".to_string(),
             to_column: "id".to_string(),

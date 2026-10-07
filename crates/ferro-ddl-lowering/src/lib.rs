@@ -3156,6 +3156,7 @@ mod tests {
         checks: Vec<ferro_schema_ir::SchemaCheck>,
     ) -> ferro_schema_ir::SchemaModel {
         ferro_schema_ir::SchemaModel {
+            renamed_from: None,
             model_name: "transfer".to_string(),
             table_name: "transfer".to_string(),
             columns: Vec::new(),
@@ -3839,6 +3840,7 @@ mod tests {
 
     fn drift_col(name: &str, db_type: &str) -> SchemaColumn {
         SchemaColumn {
+            renamed_from: None,
             name: name.to_string(),
             logical_type: "unknown".to_string(),
             db_type: Some(db_type.to_string()),
@@ -3864,6 +3866,7 @@ mod tests {
         db_type: Option<&str>,
     ) -> SchemaColumn {
         SchemaColumn {
+            renamed_from: None,
             name: name.to_string(),
             logical_type: logical_type.to_string(),
             db_type: db_type.map(str::to_string),
@@ -4107,6 +4110,7 @@ mod tests {
     #[test]
     fn logical_canonical_from_schema_column_ignores_explicit_db_type() {
         let col = SchemaColumn {
+            renamed_from: None,
             name: "external_id".to_string(),
             logical_type: "uuid".to_string(),
             db_type: Some("text".to_string()),
@@ -4135,6 +4139,7 @@ mod tests {
     #[test]
     fn logical_canonical_from_schema_column_errors_on_unknown() {
         let col = SchemaColumn {
+            renamed_from: None,
             name: "mystery".to_string(),
             logical_type: "bogus".to_string(),
             db_type: None,
@@ -4255,6 +4260,7 @@ mod tests {
     #[test]
     fn render_sqlite_add_column_references_renders_the_column_reference_clause() {
         let fk = ferro_schema_ir::SchemaForeignKey {
+            renamed_from: None,
             column: "author_id".to_string(),
             to_table: "author".to_string(),
             to_column: "id".to_string(),
@@ -4775,6 +4781,7 @@ mod tests {
 
     fn rls_model(columns: Vec<SchemaColumn>) -> ferro_schema_ir::SchemaModel {
         ferro_schema_ir::SchemaModel {
+            renamed_from: None,
             model_name: "LedgerRow".to_string(),
             table_name: "ledgerrow".to_string(),
             columns,

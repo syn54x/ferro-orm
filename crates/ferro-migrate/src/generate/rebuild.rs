@@ -480,6 +480,7 @@ mod tests {
 
     fn with_fk(mut model: SchemaModel, col: &str) -> SchemaModel {
         model.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
             column: col.into(),
             to_table: "team".into(),
             to_column: "id".into(),
@@ -873,6 +874,7 @@ mod tests {
         );
         // A self-reference names the table the new one is renamed to.
         after.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
             column: "mentor_id".into(),
             to_table: "author".into(),
             to_column: "id".into(),

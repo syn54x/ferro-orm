@@ -398,6 +398,7 @@ mod tests {
 
     fn with_fk(mut model: SchemaModel, col: &str) -> SchemaModel {
         model.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
             column: col.into(),
             to_table: "team".into(),
             to_column: "id".into(),

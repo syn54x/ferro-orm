@@ -1041,6 +1041,7 @@ mod install_registration_tests {
 
     fn id_col() -> SchemaColumn {
         SchemaColumn {
+            renamed_from: None,
             name: "id".to_string(),
             logical_type: "integer".to_string(),
             db_type: None,
@@ -1060,11 +1061,13 @@ mod install_registration_tests {
 
     fn model(name: &str, logical_type: &str) -> SchemaModel {
         SchemaModel {
+            renamed_from: None,
             model_name: name.to_string(),
             table_name: name.to_lowercase(),
             columns: vec![
                 id_col(),
                 SchemaColumn {
+                    renamed_from: None,
                     name: "value".to_string(),
                     logical_type: logical_type.to_string(),
                     db_type: None,
@@ -1181,6 +1184,7 @@ mod model_meta_tests {
     #[test]
     fn from_columns_no_primary_key_yields_none_and_default_autoincrement() {
         let meta = ModelMeta::from_columns(&[SchemaColumn {
+            renamed_from: None,
             name: "name".to_string(),
             logical_type: "string".to_string(),
             db_type: None,
@@ -1203,6 +1207,7 @@ mod model_meta_tests {
     #[test]
     fn from_columns_pk_without_autoincrement_key_defaults_true() {
         let meta = ModelMeta::from_columns(&[SchemaColumn {
+            renamed_from: None,
             name: "id".to_string(),
             logical_type: "integer".to_string(),
             db_type: None,
@@ -1225,6 +1230,7 @@ mod model_meta_tests {
     #[test]
     fn from_columns_pk_with_autoincrement_false_is_preserved() {
         let meta = ModelMeta::from_columns(&[SchemaColumn {
+            renamed_from: None,
             name: "id".to_string(),
             logical_type: "string".to_string(),
             db_type: None,
@@ -1248,6 +1254,7 @@ mod model_meta_tests {
     fn from_columns_first_flagged_column_in_declaration_order_wins() {
         let meta = ModelMeta::from_columns(&[
             SchemaColumn {
+                renamed_from: None,
                 name: "b_id".to_string(),
                 logical_type: "integer".to_string(),
                 db_type: None,
@@ -1264,6 +1271,7 @@ mod model_meta_tests {
                 postgres_native_enum: false,
             },
             SchemaColumn {
+                renamed_from: None,
                 name: "a_id".to_string(),
                 logical_type: "integer".to_string(),
                 db_type: None,

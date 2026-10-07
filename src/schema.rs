@@ -447,6 +447,7 @@ pub fn infer_test_schema_columns(schema: &serde_json::Value) -> Vec<ferro_schema
             false
         };
         columns.push(SchemaColumn {
+            renamed_from: None,
             name: name.clone(),
             logical_type,
             db_type: db_type.map(str::to_string),

@@ -12,8 +12,10 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
 # `query` is on ir_version 14 (#395 — optional `before` position bound);
-# `schema`/`codec` remain v1.
-SUPPORTED_IR_VERSIONS = {"schema": 1, "query": 14, "codec": 1}
+# `codec` remains v1. `schema` is on v2 (rename hints, ADR-0032), and every
+# shipped v1 schema vector keeps loading (ADR-0023).
+SUPPORTED_IR_VERSIONS = {"schema": {1, 2}, "query": {14}, "codec": {1}}
+CURRENT_SCHEMA_IR_VERSION = 2
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -441,9 +443,13 @@ def test_ir_vectors_match_phase0_contract_envelope() -> None:
         assert ir["ir_kind"] == vector["domain"], (
             f"{label}.ir.ir_kind ({ir['ir_kind']!r}) must match domain ({vector['domain']!r})"
         )
-        expected_version = SUPPORTED_IR_VERSIONS[vector["domain"]]
-        assert ir["ir_version"] == expected_version, (
-            f"{label}.ir.ir_version must equal {expected_version} for domain {vector['domain']!r}"
+        expected_versions = SUPPORTED_IR_VERSIONS[vector["domain"]]
+        assert ir["ir_version"] in expected_versions, (
+            f"{label}.ir.ir_version must be one of {sorted(expected_versions)} "
+            f"for domain {vector['domain']!r}"
+        )
+        assert label.endswith(f"_v{ir['ir_version']}.json"), (
+            f"{label} must be named for its ir_version (v{ir['ir_version']})"
         )
         assert isinstance(ir["payload"], dict), f"{label}.ir.payload must be object"
         _validate_domain_payload(vector["domain"], ir["payload"], f"{label}.ir.payload")
@@ -471,8 +477,42 @@ def test_phase1_schema_compiler_matches_snapshot(clean_model_registry: None) -> 
     compiled = compile_registry_schema_ir()
     snapshot = _load_vector(VECTORS_DIR / "schema_phase1_fixture_models_v1.json")
 
-    assert compiled == snapshot["ir"]
-    assert schema_ir_fingerprint(compiled) == snapshot["fingerprint"]
+    # Hint-free models compile to the shipped v1 payload byte for byte; schema
+    # v2 changed only the envelope's version (ADR-0023).
+    assert compiled["ir_version"] == CURRENT_SCHEMA_IR_VERSION
+    as_v1 = {**compiled, "ir_version": 1}
+    assert as_v1 == snapshot["ir"]
+    assert schema_ir_fingerprint(as_v1) == snapshot["fingerprint"]
+
+
+def test_rename_hint_schema_compiler_matches_v2_vector(
+    clean_model_registry: None,
+) -> None:
+    """The v2 golden vector pins the hints' wire shape: ``renamed_from`` on
+    the model, on each hinted column (a ``ForeignKey`` hint's shadow column
+    as ``<field>_id``) and on the foreign key (the old field name)."""
+    from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
+    from ferro.relations import resolve_relationships
+    from tests.test_generate_renames import build_rename_hint_models
+
+    build_rename_hint_models()
+    resolve_relationships()
+
+    compiled = compile_registry_schema_ir()
+    vector = _load_vector(VECTORS_DIR / "schema_rename_hints_v2.json")
+
+    assert compiled == vector["ir"]
+    assert schema_ir_fingerprint(compiled) == vector["fingerprint"]
+    book = next(m for m in compiled["payload"]["models"] if m["table_name"] == "book")
+    assert book["renamed_from"] == "volume"
+    hints = {c["name"]: c.get("renamed_from") for c in book["columns"]}
+    assert hints == {
+        "full_name": "name",
+        "house_id": "press_id",
+        "id": None,
+        "subtitle": "tagline",
+    }
+    assert [fk.get("renamed_from") for fk in book["foreign_keys"]] == ["press"]
 
 
 def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> None:
@@ -640,7 +680,10 @@ def test_raw_path_non_integer_pk_autoincrement_false_unified(
     ir = wrap_schema_ir(payload)
 
     fixture = _load_vector(VECTORS_DIR / "schema_raw_str_pk_autoincrement_v1.json")
-    assert ir == fixture["ir"]
+    # A model with no rename hint compiles to the v1 payload unchanged; only
+    # the envelope's version moved (schema v2 added the hints).
+    assert ir["ir_version"] == CURRENT_SCHEMA_IR_VERSION
+    assert {**ir, "ir_version": 1} == fixture["ir"]
 
     id_col = next(c for c in payload["models"][0]["columns"] if c["name"] == "id")
     assert id_col["primary_key"] is True

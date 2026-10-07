@@ -746,6 +746,7 @@ mod tests {
 
     pub(super) fn column(name: &str, logical_type: &str) -> SchemaColumn {
         SchemaColumn {
+            renamed_from: None,
             name: name.into(),
             logical_type: logical_type.into(),
             db_type: None,
@@ -781,6 +782,7 @@ mod tests {
 
     pub(super) fn model(name: &str, columns: Vec<SchemaColumn>) -> SchemaModel {
         SchemaModel {
+            renamed_from: None,
             model_name: format!("myapp.models.{name}"),
             table_name: name.to_lowercase(),
             columns,
@@ -803,6 +805,7 @@ mod tests {
     pub(super) fn post() -> SchemaModel {
         SchemaModel {
             foreign_keys: vec![SchemaForeignKey {
+                renamed_from: None,
                 column: "author_id".into(),
                 to_table: "author".into(),
                 to_column: "id".into(),
@@ -1408,6 +1411,7 @@ mod tests {
             columns: vec!["team_id".into()],
         });
         after.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
             column: "team_id".into(),
             to_table: "team".into(),
             to_column: "id".into(),
@@ -1459,6 +1463,7 @@ mod tests {
         let team = model("Team", vec![pk()]);
         let club = model("Club", vec![pk()]);
         let fk = |to: &str| SchemaForeignKey {
+            renamed_from: None,
             column: "team_id".into(),
             to_table: to.into(),
             to_column: "id".into(),
@@ -1760,6 +1765,7 @@ mod tests {
         let team = model("Team", vec![pk()]);
         let club = model("Club", vec![pk()]);
         let fk = |to: &str| SchemaForeignKey {
+            renamed_from: None,
             column: "team_id".into(),
             to_table: to.into(),
             to_column: "id".into(),
@@ -1867,6 +1873,7 @@ mod tests {
             ..column("team_id", "integer")
         }]);
         after.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
             column: "team_id".into(),
             to_table: "team".into(),
             to_column: "id".into(),

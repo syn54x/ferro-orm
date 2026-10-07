@@ -30,8 +30,10 @@ impl std::fmt::Display for SnapshotError {
 
 impl std::error::Error for SnapshotError {}
 
-/// The schema `ir_version` this ferro writes.
-pub const CURRENT_SCHEMA_IR_VERSION: u32 = 1;
+/// The schema `ir_version` this ferro writes. Version 2 added the rename
+/// hints (`renamed_from` on a model, a column and a foreign key; ADR-0032);
+/// version 1 is the same shape without them.
+pub const CURRENT_SCHEMA_IR_VERSION: u32 = 2;
 
 /// The key beside the envelope's own that links a snapshot to its parent.
 const PARENT_CHECKSUM_KEY: &str = "parent_checksum";
@@ -82,8 +84,9 @@ impl Snapshot {
             .and_then(|v| v.as_u64())
             .ok_or_else(|| fail("has no numeric ir_version".to_string()))?;
         let ir = match version {
-            1 => serde_json::from_value::<IrEnvelope<SchemaIrPayload>>(document)
-                .map_err(|err| fail(format!("is not a valid schema IR v1 envelope ({err})")))?,
+            1 => load_v1(document).map_err(fail)?,
+            2 => serde_json::from_value::<IrEnvelope<SchemaIrPayload>>(document)
+                .map_err(|err| fail(format!("is not a valid schema IR v2 envelope ({err})")))?,
             other => {
                 return Err(fail(format!(
                     "has ir_version {other}, which this ferro cannot read (it reads schema \
@@ -130,6 +133,30 @@ impl Snapshot {
         bytes.push(b'\n');
         Ok(bytes)
     }
+}
+
+/// Schema IR v1: today's shape with no rename hint anywhere. A `renamed_from`
+/// in a v1 document is not a v1 snapshot, so it is refused rather than read
+/// as a hint no v1 ferro could have written.
+fn load_v1(document: serde_json::Value) -> Result<IrEnvelope<SchemaIrPayload>, String> {
+    let ir = serde_json::from_value::<IrEnvelope<SchemaIrPayload>>(document)
+        .map_err(|err| format!("is not a valid schema IR v1 envelope ({err})"))?;
+    let hinted = ir.payload.models.iter().find(|model| {
+        model.renamed_from.is_some()
+            || model.columns.iter().any(|col| col.renamed_from.is_some())
+            || model
+                .foreign_keys
+                .iter()
+                .any(|fk| fk.renamed_from.is_some())
+    });
+    if let Some(model) = hinted {
+        return Err(format!(
+            "is a schema IR v1 envelope whose model '{}' carries renamed_from, which only \
+             schema ir_version 2 records",
+            model.model_name
+        ));
+    }
+    Ok(ir)
 }
 
 /// `value` with every object's keys in sorted order, whatever map
@@ -248,6 +275,51 @@ mod tests {
         let child = String::from_utf8(Snapshot::store(&ir, Some([0xab; 48])).expect("store"))
             .expect("utf-8");
         assert!(child.contains(&format!("\"parent_checksum\": \"{}\"", "ab".repeat(48))));
+    }
+
+    #[test]
+    fn a_v1_snapshot_and_a_v2_snapshot_with_rename_hints_both_load() {
+        let version = |bytes: &[u8]| {
+            serde_json::from_slice::<serde_json::Value>(bytes).expect("json")["ir_version"]
+                .as_u64()
+                .expect("numeric ir_version")
+        };
+        let vectors = schema_vectors();
+        assert!(vectors.iter().any(|(_, b)| version(b) == 1), "a v1 vector");
+        let (name, bytes) = vectors
+            .iter()
+            .find(|(_, b)| version(b) == 2)
+            .expect("a v2 vector is pinned");
+        let ir = Snapshot::load(bytes)
+            .unwrap_or_else(|err| panic!("{name} must load: {}", err.message))
+            .ir;
+        assert_eq!(u64::from(CURRENT_SCHEMA_IR_VERSION), 2);
+        let models = &ir.payload.models;
+        assert!(
+            models.iter().any(|m| m.renamed_from.is_some()),
+            "table hint"
+        );
+        assert!(
+            models
+                .iter()
+                .flat_map(|m| &m.columns)
+                .any(|c| c.renamed_from.is_some()),
+            "column hint"
+        );
+        assert!(
+            models
+                .iter()
+                .flat_map(|m| &m.foreign_keys)
+                .any(|fk| fk.renamed_from.is_some()),
+            "foreign-key hint"
+        );
+    }
+
+    #[test]
+    fn a_v1_snapshot_carrying_a_rename_hint_is_refused() {
+        let v1 = br#"{"ir_kind": "schema", "ir_version": 1, "payload": {"dialect_agnostic": true, "models": [{"model_name": "Author", "table_name": "author", "renamed_from": "writer", "columns": [], "foreign_keys": [], "indexes": [], "uniques": [], "checks": []}]}}"#;
+        let err = Snapshot::load(v1).expect_err("v1 cannot carry hints");
+        assert!(err.message.contains("renamed_from"), "{}", err.message);
     }
 
     #[test]
