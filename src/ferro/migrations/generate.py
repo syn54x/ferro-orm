@@ -228,14 +228,11 @@ def prepare(
         try:
             # The generator decides the guard (ADR-0037): it refuses a
             # --no-backfill it cannot honour, naming the fix.
-            # `_core.pyi` (owned by #533 in this wave) gains
-            # `options_json: str | None = None` with this change; drop the
-            # ignore when it lands.
             raw = _generate_migration(
                 parent,
                 json.dumps(target),
                 list(database.dialects),
-                options_json=json.dumps({"no_backfill": list(no_backfill)}),  # ty: ignore[unknown-argument]
+                options_json=json.dumps({"no_backfill": list(no_backfill)}),
             )
         except ValueError as err:
             raise MigrationsDirectoryError(str(err)) from None
