@@ -601,6 +601,30 @@ async def test_a_live_table_the_projects_filter_excludes_is_never_dropped(
     assert "bra_foreign" not in upgrade + downgrade, upgrade
 
 
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_live_table_the_projects_name_filter_excludes_is_never_dropped(
+    db_url, postgres_base_url, db_schema_name
+):
+    """The same for the project's ``include_name``: a table it keeps out of
+    reflection is never one ferro drops."""
+    _bra_shop(with_order=False)
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await execute('CREATE TABLE "bra_named" ("id" integer PRIMARY KEY)')
+
+    def include_name(name, type_, parent_names):
+        return not (type_ == "table" and name == "bra_named")
+
+    upgrade, downgrade = autogenerate(
+        db_url,
+        postgres_base_url,
+        db_schema_name,
+        extra_opts={"include_name": include_name},
+    )
+    assert "bra_named" not in upgrade + downgrade, upgrade
+
+
 # ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------
