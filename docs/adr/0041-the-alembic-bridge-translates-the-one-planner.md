@@ -20,7 +20,7 @@ def upgrade():
 
 **Native where Alembic has a twin, the pass's statement where it does not.** Create and drop table, add and drop column, type and nullability changes, indexes, foreign keys, and table and column renames are written as Alembic's own ops, built from the same `sa.Column` the bridge builds today. Everything else (label addition, check rebuilds, row security, renames of owned names, enum label renames) is `op.execute` of the byte-identical statement the pass would run. The destructive and data-dependent markers the in-house generator writes as `-- ferro:` headers are Python comments above the op.
 
-**The bridge sees exactly what the reconciliation pass sees.** It plans with destructive changes on, since a revision is reviewed before it runs. An empty autogenerate and "no drift" are the same statement. Anything on a ferro table that ferro never declared (a hand-set server default, a comment, a foreign constraint) is no longer proposed. A live table no model declares stays Alembic's, as do a project's own SQLAlchemy tables, which keep Alembic's full comparison.
+**The bridge sees exactly what the reconciliation pass sees.** It plans with destructive changes on, since a revision is reviewed before it runs. An empty autogenerate and "no drift" are the same statement. Anything on a ferro table that ferro never declared (a hand-set server default, a comment, a foreign constraint) is no longer proposed. A live table no model declares stays Alembic's, as do a project's own SQLAlchemy tables, which keep Alembic's full comparison. (Amended 2026-10-07: a dropped model's table is the planner's drop; see "Amended at the epic's close" below.)
 
 **Alembic is told to leave ferro tables alone, in `env.py`, and autogenerate refuses when it was not.**
 
@@ -58,7 +58,19 @@ A primary-key change is refused, as it is in-house until the restructure scaffol
 
 ## Consequences
 
-- AGENTS.md I-1: the "Alembic comparator consumes … over FFI" clauses of items 11–16 collapse into "the bridge translates the one planner's ops", carried by two pins: every planner op translates to a revision whose executed DDL matches the pass's, and the existing type-rendering parity test. Item 17 (enum type provenance) stays its own rule: it is decided from the revision alone and has no runtime twin.
+- AGENTS.md I-1: the "Alembic comparator consumes … over FFI" clauses of items 11–16 collapse into "the bridge translates the one planner's ops", carried by two pins: every planner op translates to a revision whose executed DDL matches the pass's, and the existing type-rendering parity test. Item 17 (enum type provenance) stays its own rule: it is decided from the revision alone and has no runtime twin. (Amended 2026-10-07; see "Amended at the epic's close" below.)
 - AGENTS.md I-12: the slot rules go. Ferro registers one comparator, and the translator never reorders the planner's ops.
 - The switch ships in one release, after the planner and the live converter grow; the bridge keeps its per-family comparators until then.
 - An existing `env.py` is refused on its next autogenerate with the `ferro_options()` line to add.
+
+## Amended at the epic's close (2026-10-07, #577)
+
+**A dropped model's table is the planner's drop.** A project deletes `class Tag(Model)`, and the live database still holds `tag` with a native enum `tagkind` that only `tag` uses. Stock Alembic writes `drop_table('tag')` and never drops `tagkind`, so the type outlives the revision. The bridge therefore adds to the planner's table list every live table of the default schema that `target_metadata` does not declare and that the context's name and object filters admit. That is exactly the set Alembic's own comparison would drop, found the same way. The planner drops those tables, the `DROP TYPE` for a type only they used follows, and the downgrade puts back the type and then the table, with its checks and policies.
+
+- Alembic's version table and ferro's tracking tables are never candidates. A table the context's filters exclude stays untouched.
+- The downgrade restores what the live converter reads (columns, types, nullability, indexes, foreign keys, checks, policies), the same limit this ADR already accepts for a re-added column. Anything else on the table, such as a hand-set server default or a comment, is not put back. This applies to a removed SQLAlchemy-only table too, where Alembic's reflection would have restored more.
+- A generated revision is therefore the reconciliation pass's changes plus these drops. The pass never drops a whole table.
+
+Rejected: leaving `drop_table` to Alembic and appending only the `DROP TYPE`, which brings back two deciders and the cross-op ordering rules I-12 carried; and restricting the drop to tables lineage shows were ferro's, which the bridge cannot do because it has no snapshot and a tracked database refuses autogenerate.
+
+**Item 17 folds into item 11.** On every door an enum type is the planner's guarded `CREATE TYPE` and its `DROP TYPE`, and the bridge renders every enum column `create_type=False`; the type decision is the one planner's, made against the live database, not a separate rule decided from the revision alone. ADR-0020..0022 are superseded in part.

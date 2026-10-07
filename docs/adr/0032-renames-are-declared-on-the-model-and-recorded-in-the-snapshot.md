@@ -14,6 +14,8 @@ class Status(StrEnum):
 
 A rename hint is part of the declared modelset, so the migration's schema snapshot carries it and nothing else records the rename. One liveness rule serves the generator and the historical-model builder: a hint is **live** when the previous snapshot holds the old name and lacks the new one. A live hint renders `RENAME`; any other hint is inert, in the migration that follows and in every later one, so it can be left in the code or deleted without generating anything.
 
+Amended by ADR-0047 (2026-10-07): the reconciliation pass honours the same hints, with liveness read from the live database (old name live, new name absent) instead of the previous snapshot.
+
 A drop and an add with no hint are rendered as a drop and an add, marked destructive, and the generator's summary names `renamed_from`. The generator never matches a vanished column to a new one by type.
 
 An enum type's rename takes no hint. When every column of a vanished type now declares one and the same new type, `ALTER TYPE "status" RENAME TO "authorstatus"` and the swap-type recipe end in the identical schema and data, so rendering the rename is no guess about intent.
