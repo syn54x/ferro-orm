@@ -1890,8 +1890,98 @@ enum Lexical {
     Code,
     Single,
     Double,
+    /// A SQLite back-quoted identifier (`` `end` ``).
+    Backtick,
+    /// A SQLite bracket-quoted identifier (`[my end]`).
+    Bracket,
     LineComment,
     BlockComment,
+}
+
+/// Where a statement stands on a compound body: one whose own `;`s end
+/// inner statements, never the outer one (a SQLite trigger's
+/// `BEGIN … END`, a Postgres `BEGIN ATOMIC … END` function body).
+///
+/// Neither body can nest another `BEGIN` (a trigger body and a `BEGIN
+/// ATOMIC` body hold plain statements only), so once the body is open only
+/// `CASE` … `END` nests inside it: a `begin` column in the body is a name,
+/// never a second opener.
+struct Block {
+    dialect: Dialect,
+    /// The statement's first keywords, upper-cased (at most three: enough to
+    /// read `CREATE [TEMP|TEMPORARY] TRIGGER`).
+    leading: Vec<String>,
+    /// The keyword before the current one (`BEGIN` before `ATOMIC`).
+    previous: Option<String>,
+    /// The statement is a SQLite `CREATE TRIGGER`, whose first `BEGIN`
+    /// opens its body.
+    trigger: bool,
+    /// The body is open: `;` no longer ends the statement until `depth`
+    /// returns to 0.
+    open: bool,
+    /// Unclosed `BEGIN` (the body's own) and `CASE` keywords.
+    depth: usize,
+}
+
+impl Block {
+    fn new(dialect: Dialect) -> Self {
+        Block {
+            dialect,
+            leading: Vec::new(),
+            previous: None,
+            trigger: false,
+            open: false,
+            depth: 0,
+        }
+    }
+
+    /// A `;` here ends the statement.
+    fn ends_at_semicolon(&self) -> bool {
+        self.depth == 0
+    }
+
+    fn word(&mut self, word: &str) {
+        let word = word.to_uppercase();
+        let leading = self.leading.len() < 3;
+        if leading {
+            self.leading.push(word.clone());
+        }
+        match word.as_str() {
+            "CASE" if self.open || self.trigger => self.depth += 1,
+            "END" if self.open || self.trigger => self.depth = self.depth.saturating_sub(1),
+            "BEGIN" if self.trigger && !self.open => {
+                self.open = true;
+                self.depth += 1;
+            }
+            "ATOMIC"
+                if self.dialect == Dialect::Postgres
+                    && !self.open
+                    && self.previous.as_deref() == Some("BEGIN") =>
+            {
+                // The `BEGIN` just read opens the body.
+                self.open = true;
+                self.depth += 1;
+            }
+            _ if leading && self.dialect == Dialect::Sqlite && self.opens_trigger() => {
+                self.trigger = true;
+            }
+            _ => {}
+        }
+        self.previous = Some(word);
+    }
+
+    /// The leading keywords read so far are `CREATE [TEMP|TEMPORARY] TRIGGER`.
+    fn opens_trigger(&self) -> bool {
+        match self.leading.as_slice() {
+            [create, trigger] => create == "CREATE" && trigger == "TRIGGER",
+            [create, temp, trigger] => {
+                create == "CREATE"
+                    && (temp == "TEMP" || temp == "TEMPORARY")
+                    && trigger == "TRIGGER"
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Cut a SQL step file into the statements the executor sends one at a time.
@@ -1900,13 +1990,27 @@ enum Lexical {
 /// quoted identifier, a comment and a dollar-quoted body (`DO $$ … $$`,
 /// `$tag$ … $tag$`). A chunk holding only comments and whitespace (the
 /// `-- ferro:` header lines, a `not-applicable` file) is no statement.
-pub fn split_statements(sql: &str) -> Vec<String> {
+///
+/// A compound body keeps its inner `;`s: on SQLite a statement that begins
+/// `CREATE [TEMP|TEMPORARY] TRIGGER` opens its body at its first `BEGIN`,
+/// and on Postgres `BEGIN ATOMIC` opens a SQL-standard function body. Inside
+/// the body `CASE` … `END` nest and the body's own `END` closes it; a `;`
+/// ends the statement only once they balance. Keywords are whole words
+/// outside strings, quoted identifiers (`"…"`, and on SQLite `` `…` `` and
+/// `[…]`), comments and dollar bodies, and never a qualified name's part
+/// (`new.end`). A plain `BEGIN;` anywhere else is a statement of its own.
+pub fn split_statements(sql: &str, dialect: Dialect) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut has_code = false;
     let mut state = Lexical::Code;
     let mut dollar: Option<String> = None;
+    let mut block = Block::new(dialect);
     let chars: Vec<char> = sql.chars().collect();
+    // Identifier characters, non-ASCII letters among them (`éend` is one
+    // word, not `é` then `end`).
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let sqlite = dialect == Dialect::Sqlite;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -1924,12 +2028,13 @@ pub fn split_statements(sql: &str) -> Vec<String> {
         }
         match state {
             Lexical::Code => match c {
-                ';' => {
+                ';' if block.ends_at_semicolon() => {
                     if has_code {
                         statements.push(current.trim().to_string());
                     }
                     current.clear();
                     has_code = false;
+                    block = Block::new(dialect);
                     i += 1;
                     continue;
                 }
@@ -1953,11 +2058,40 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                     }
                     has_code = true;
                 }
+                '`' if sqlite => {
+                    state = Lexical::Backtick;
+                    has_code = true;
+                }
+                '[' if sqlite => {
+                    state = Lexical::Bracket;
+                    has_code = true;
+                }
+                c if (c.is_alphabetic() || c == '_')
+                    && !i
+                        .checked_sub(1)
+                        .is_some_and(|at| is_word(chars[at]) || chars[at] == '$') =>
+                {
+                    let end = (i..chars.len())
+                        .find(|&at| !is_word(chars[at]))
+                        .unwrap_or(chars.len());
+                    let word: String = chars[i..end].iter().collect();
+                    // `new.end` names a column, never a keyword.
+                    let qualified = i > 0 && chars[i - 1] == '.';
+                    if !qualified {
+                        block.word(&word);
+                    }
+                    current.push_str(&word);
+                    has_code = true;
+                    i = end;
+                    continue;
+                }
                 c if !c.is_whitespace() => has_code = true,
                 _ => {}
             },
             Lexical::Single if c == '\'' => state = Lexical::Code,
             Lexical::Double if c == '"' => state = Lexical::Code,
+            Lexical::Backtick if c == '`' => state = Lexical::Code,
+            Lexical::Bracket if c == ']' => state = Lexical::Code,
             Lexical::LineComment if c == '\n' => state = Lexical::Code,
             Lexical::BlockComment if c == '*' && next == Some('/') => {
                 current.push_str("*/");
@@ -3228,23 +3362,164 @@ mod tests {
         assert_eq!(run_lock_key("public"), i64::from_be_bytes(bytes));
     }
 
+    const BOTH: [Dialect; 2] = [Dialect::Sqlite, Dialect::Postgres];
+
     #[test]
     fn the_splitter_keeps_dollar_bodies_quotes_and_comments_whole() {
         let sql = "-- ferro: destructive\n\nDO $$ BEGIN\n  CREATE TYPE \"s\" AS ENUM ('a;b');\n\
                    EXCEPTION WHEN duplicate_object THEN NULL; END $$;\n\n\
                    CREATE TABLE \"t;x\" (\"id\" integer); -- trailing; comment\n\
                    /* block; */ SELECT $tag$ ; $tag$;\nSELECT 'it''s; fine'";
+        for dialect in BOTH {
+            assert_eq!(
+                split_statements(sql, dialect),
+                [
+                    "-- ferro: destructive\n\nDO $$ BEGIN\n  CREATE TYPE \"s\" AS ENUM ('a;b');\n\
+                     EXCEPTION WHEN duplicate_object THEN NULL; END $$",
+                    "CREATE TABLE \"t;x\" (\"id\" integer)",
+                    "-- trailing; comment\n/* block; */ SELECT $tag$ ; $tag$",
+                    "SELECT 'it''s; fine'",
+                ]
+            );
+            assert!(split_statements("-- ferro: not-applicable\n", dialect).is_empty());
+            assert!(split_statements("\n  ;\n", dialect).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_splitter_keeps_a_sqlite_trigger_body_whole() {
+        let trigger = "CREATE TRIGGER \"t\" AFTER UPDATE ON \"author\" BEGIN\n  \
+                       UPDATE \"log\" SET \"n\" = \"n\" + 1;\n  \
+                       INSERT INTO \"audit\" (\"what\") VALUES ('end; begin');\nEND";
         assert_eq!(
-            split_statements(sql),
-            [
-                "-- ferro: destructive\n\nDO $$ BEGIN\n  CREATE TYPE \"s\" AS ENUM ('a;b');\n\
-                 EXCEPTION WHEN duplicate_object THEN NULL; END $$",
-                "CREATE TABLE \"t;x\" (\"id\" integer)",
-                "-- trailing; comment\n/* block; */ SELECT $tag$ ; $tag$",
-                "SELECT 'it''s; fine'",
-            ]
+            split_statements(&format!("{trigger};\nSELECT 1;"), Dialect::Sqlite),
+            [trigger, "SELECT 1"]
         );
-        assert!(split_statements("-- ferro: not-applicable\n").is_empty());
-        assert!(split_statements("\n  ;\n").is_empty());
+        let temp = "create temp trigger t2 before delete on author when old.id > 0 begin \
+                    delete from log; end";
+        assert_eq!(
+            split_statements(&format!("{temp};"), Dialect::Sqlite),
+            [temp]
+        );
+        let temporary = "CREATE TEMPORARY TRIGGER IF NOT EXISTS t3 AFTER INSERT ON author \
+                         BEGIN SELECT 1; END";
+        assert_eq!(
+            split_statements(&format!("{temporary};"), Dialect::Sqlite),
+            [temporary]
+        );
+    }
+
+    #[test]
+    fn the_splitter_counts_a_case_nested_in_a_trigger_body() {
+        let trigger = "CREATE TRIGGER t AFTER UPDATE ON author \
+                       WHEN CASE WHEN new.id > 0 THEN 1 ELSE 0 END BEGIN\n  \
+                       UPDATE log SET n = CASE WHEN n IS NULL THEN 1 ELSE n + 1 END;\n  \
+                       SELECT \"end\", [begin], `case` FROM log /* end; */; -- end;\nEND";
+        assert_eq!(
+            split_statements(&format!("{trigger};\nDELETE FROM log;"), Dialect::Sqlite),
+            [trigger, "DELETE FROM log"]
+        );
+    }
+
+    #[test]
+    fn a_begin_column_in_a_trigger_body_opens_nothing() {
+        // `begin` is a legal unquoted SQLite column name; the body holds no
+        // nested `BEGIN`, so it is a name and the next statement stands alone.
+        let trigger = "CREATE TRIGGER t AFTER UPDATE OF begin ON shift BEGIN\n  \
+                       UPDATE shift_log SET begin = new.begin;\n  \
+                       UPDATE shift_log SET n = n + 1 WHERE new.end > 0;\nEND";
+        let table = "CREATE TABLE \"shift_new\" (\"id\" integer)";
+        assert_eq!(
+            split_statements(&format!("{trigger};\n{table};"), Dialect::Sqlite),
+            [trigger, table]
+        );
+    }
+
+    #[test]
+    fn bracketed_and_non_ascii_words_are_no_keywords() {
+        // `[my end]` is a SQLite bracket-quoted identifier; `éend` and
+        // `endé` are single identifiers, not the keyword `END`.
+        let trigger = "CREATE TRIGGER t AFTER INSERT ON a BEGIN\n  \
+                       UPDATE b SET [my end] = 1, éend = 2, endé = 3;\n  \
+                       SELECT 1;\nEND";
+        assert_eq!(
+            split_statements(&format!("{trigger};\nSELECT 2;"), Dialect::Sqlite),
+            [trigger, "SELECT 2"]
+        );
+        let function = "CREATE FUNCTION f() RETURNS void LANGUAGE sql\nBEGIN ATOMIC\n  \
+                        UPDATE b SET éend = 2;\n  UPDATE b SET a = 1;\nEND";
+        assert_eq!(
+            split_statements(&format!("{function};\nSELECT 2;"), Dialect::Postgres),
+            [function, "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn a_trigger_with_no_inner_semicolon_ends_at_its_own() {
+        let body = "CREATE TRIGGER t AFTER INSERT ON a BEGIN SELECT 1; END";
+        assert_eq!(
+            split_statements(&format!("{body};\nSELECT 2;"), Dialect::Sqlite),
+            [body, "SELECT 2"]
+        );
+        // A Postgres trigger has no body: it ends at its `;`.
+        let trigger = "CREATE TRIGGER t AFTER UPDATE ON a FOR EACH ROW \
+                       WHEN (CASE WHEN new.x THEN true END) EXECUTE FUNCTION f()";
+        assert_eq!(
+            split_statements(&format!("{trigger};\nSELECT 2;"), Dialect::Postgres),
+            [trigger, "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn the_splitter_keeps_a_postgres_begin_atomic_body_whole() {
+        let function = "CREATE FUNCTION bump(a integer) RETURNS integer LANGUAGE sql\n\
+                        BEGIN ATOMIC\n  SELECT a + 1;\n  \
+                        SELECT CASE WHEN a > 0 THEN a ELSE 0 END;\nEND";
+        assert_eq!(
+            split_statements(&format!("{function};\nSELECT bump(1);"), Dialect::Postgres),
+            [function, "SELECT bump(1)"]
+        );
+    }
+
+    #[test]
+    fn end_if_and_end_loop_in_a_dollar_body_stay_inside_it() {
+        let function = "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$\nBEGIN\n  \
+                        IF true THEN\n    LOOP\n      EXIT;\n    END LOOP;\n  END IF;\nEND $$";
+        assert_eq!(
+            split_statements(&format!("{function};\nSELECT f();"), Dialect::Postgres),
+            [function, "SELECT f()"]
+        );
+    }
+
+    #[test]
+    fn the_splitter_still_cuts_a_plain_begin_and_commit() {
+        for dialect in BOTH {
+            assert_eq!(
+                split_statements(
+                    "BEGIN;\nUPDATE t SET backend = 1;\nCOMMIT;\n\
+                     SELECT CASE WHEN 1 = 1 THEN 'a' END;\nEND;",
+                    dialect
+                ),
+                [
+                    "BEGIN",
+                    "UPDATE t SET backend = 1",
+                    "COMMIT",
+                    "SELECT CASE WHEN 1 = 1 THEN 'a' END",
+                    "END",
+                ]
+            );
+            // A `trigger` that is not the statement's leading `CREATE …
+            // TRIGGER` opens no body.
+            assert_eq!(
+                split_statements(
+                    "DROP TRIGGER IF EXISTS t; SELECT begin_at FROM trigger_log;",
+                    dialect
+                ),
+                [
+                    "DROP TRIGGER IF EXISTS t",
+                    "SELECT begin_at FROM trigger_log"
+                ]
+            );
+        }
     }
 }

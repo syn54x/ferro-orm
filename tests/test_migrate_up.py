@@ -279,6 +279,53 @@ def test_a_failed_step_is_recorded_and_the_next_up_resumes_at_it(
     assert run("migrate", "status", "--url", db.url) == 0
 
 
+SQLITE_TRIGGER = """\
+CREATE TABLE "rename_log" ("n" integer NOT NULL, "what" text);
+INSERT INTO "rename_log" VALUES (0, NULL);
+CREATE TRIGGER "author_renamed" AFTER UPDATE OF "name" ON "author"
+BEGIN
+  UPDATE "rename_log" SET "n" = "n" + 1;
+  UPDATE "rename_log" SET "what" = CASE WHEN new."name" = 'end;' THEN 'semi' ELSE new."name" END;
+END;
+"""
+
+# A SQL-standard function body (`BEGIN ATOMIC … END`, Postgres 14+) holding two
+# statements, called from a trigger.
+POSTGRES_TRIGGER = """\
+CREATE TABLE "rename_log" ("n" integer NOT NULL, "what" text);
+INSERT INTO "rename_log" VALUES (0, NULL);
+CREATE FUNCTION "log_rename"(renamed text) RETURNS void LANGUAGE sql
+BEGIN ATOMIC
+  UPDATE "rename_log" SET "n" = "n" + 1;
+  UPDATE "rename_log" SET "what" = CASE WHEN renamed = 'end;' THEN 'semi' ELSE renamed END;
+END;
+CREATE FUNCTION "author_renamed"() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM "log_rename"(new."name");
+  RETURN new;
+END $$;
+CREATE TRIGGER "author_renamed" AFTER UPDATE OF "name" ON "author"
+  FOR EACH ROW EXECUTE FUNCTION "author_renamed"();
+"""
+
+
+def test_a_sql_step_creating_a_trigger_keeps_its_body_whole(project, pkg, db, capsys):
+    """A trigger body's inner ``;`` ends an inner statement, not the step's."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    body = SQLITE_TRIGGER if db.backend == "sqlite" else POSTGRES_TRIGGER
+    sql_step(project, "audit", body)
+
+    assert run("migrate", "up", "--url", db.url) == 0, capsys.readouterr().err
+    db.execute("""INSERT INTO "author" ("name", "status") VALUES ('ada', 'draft')""")
+    db.execute("""UPDATE "author" SET "name" = 'end;' WHERE "name" = 'ada'""")
+    db.execute("""UPDATE "author" SET "name" = 'grace' WHERE "name" = 'end;'""")
+
+    assert db.rows('SELECT "n", "what" FROM "rename_log"') == [(2, "grace")]
+    assert db.records()[1][9] is not None
+
+
 def test_create_index_concurrently_runs_in_a_no_transaction_step(
     project, pkg, db, capsys
 ):
