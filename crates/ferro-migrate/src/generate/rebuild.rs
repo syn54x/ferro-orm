@@ -284,7 +284,13 @@ pub fn render(
 pub fn rebuilt_tables(statements: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for statement in statements {
-        let Some(rest) = statement.trim_start().strip_prefix("CREATE TABLE ") else {
+        // A file's first statement carries its header lines.
+        let code = statement
+            .lines()
+            .skip_while(|line| line.trim().is_empty() || line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let Some(rest) = code.strip_prefix("CREATE TABLE ") else {
             continue;
         };
         let rest = rest.strip_prefix("IF NOT EXISTS ").unwrap_or(rest);
@@ -796,7 +802,9 @@ mod tests {
     #[test]
     fn the_rebuilt_tables_are_read_back_from_the_statements() {
         let statements = vec![
-            "CREATE TABLE IF NOT EXISTS \"_ferro_new_author\" ( \"id\" integer )".to_string(),
+            "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n\nCREATE TABLE IF NOT EXISTS \
+             \"_ferro_new_author\" ( \"id\" integer )"
+                .to_string(),
             "CREATE TABLE \"_ferro_new_post\" ( \"id\" integer )".to_string(),
             "CREATE TABLE IF NOT EXISTS \"tag\" ( \"id\" integer )".to_string(),
             "INSERT INTO \"_ferro_new_author\" SELECT 1".to_string(),

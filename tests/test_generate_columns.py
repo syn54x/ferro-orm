@@ -299,13 +299,19 @@ def test_a1_an_optional_foreign_key_round_trips(project, pkg, db):
             'ALTER TABLE "author" ADD COLUMN "team_id" integer '
             'REFERENCES "team"("id") ON DELETE SET NULL'
         ]
+        # SQLite cannot drop a column a table-level FOREIGN KEY names, the
+        # shape any rebuild of the table writes: the down is a rebuild (#526).
+        assert down.read_text().startswith("-- ferro: foreign-keys-off\n")
+        assert statements(down)[0].startswith(
+            'CREATE TABLE IF NOT EXISTS "_ferro_new_author"'
+        )
     else:
         # Today the plain ADD CONSTRAINT; ticket #527 stages it NOT VALID.
         assert sql[-1] == (
             'ALTER TABLE "author" ADD CONSTRAINT "fk_author_team_id_team" '
             'FOREIGN KEY ("team_id") REFERENCES "team" ("id") ON DELETE SET NULL'
         )
-    assert statements(down) == ['ALTER TABLE "author" DROP COLUMN "team_id"']
+        assert statements(down) == ['ALTER TABLE "author" DROP COLUMN "team_id"']
     round_trip(project, db)
 
 
@@ -399,11 +405,28 @@ def test_a4_a_dropped_not_null_column_comes_back_not_null_or_the_down_fails(
     assert plan_against(db, snapshot(project, 1), snapshot(project, 2)) == []
 
 
-def test_a4_a_dropped_not_null_column_on_sqlite_needs_a_rebuild(project, pkg):
-    err = refused(project, pkg, "sqlite", NICKNAME, AUTHOR)
-    assert err == (
-        "not generated yet: AddColumn on author needs a table rebuild (ticket #526)\n"
+def generated_sqlite_files(project: Path, pkg: str, before: str, after: str):
+    """Generate ``before``, then ``after``, for SQLite alone; returns
+    ``0002``'s up and down file texts."""
+    write_config(project, pkg, '["sqlite"]')
+    write_models(project, pkg, before)
+    new("create")
+    write_models(project, pkg, after)
+    new("edit")
+    return (
+        schema_file(project, 2, "up", "sqlite").read_text(),
+        schema_file(project, 2, "down", "sqlite").read_text(),
     )
+
+
+REBUILD = "-- ferro: foreign-keys-off\n"
+
+
+def test_a4_a_dropped_not_null_column_on_sqlite_comes_back_by_a_rebuild(project, pkg):
+    # Round trips: tests/test_generate_sqlite_rebuild.py (#526).
+    up, down = generated_sqlite_files(project, pkg, NICKNAME, AUTHOR)
+    assert up.startswith("-- ferro: destructive\n")
+    assert down.startswith(REBUILD + "-- ferro: data-dependent\n")
 
 
 # -- A6, A7b: a column's type and nullability on Postgres ---------------------------------
@@ -581,28 +604,26 @@ def test_f1_several_models_edited_at_once_share_one_step_parents_first(
 # -- refusals ------------------------------------------------------------------------------
 
 
-def test_a6_on_sqlite_is_refused_until_the_rebuild(project, pkg):
-    err = refused(
+def test_a6_on_sqlite_is_a_rebuild(project, pkg):
+    # Round trips: tests/test_generate_sqlite_rebuild.py (#526).
+    up, down = generated_sqlite_files(
         project,
         pkg,
-        "sqlite",
         AUTHOR + "    age: int | None = None\n",
         AUTHOR + "    age: str | None = None\n",
     )
-    assert err == (
-        "not generated yet: AlterColumnType on author needs a table "
-        "rebuild (ticket #526)\n"
-    )
+    assert up.startswith(REBUILD + "-- ferro: data-dependent\n")
+    assert 'CAST("age" AS varchar)' in up
+    assert down.startswith(REBUILD + "-- ferro: data-dependent\n")
 
 
-def test_a7b_on_sqlite_is_refused_until_the_rebuild(project, pkg):
-    err = refused(
-        project, pkg, "sqlite", NICKNAME, AUTHOR + "    nickname: str | None = None\n"
+def test_a7b_on_sqlite_is_a_rebuild(project, pkg):
+    # Round trips: tests/test_generate_sqlite_rebuild.py (#526).
+    up, down = generated_sqlite_files(
+        project, pkg, NICKNAME, AUTHOR + "    nickname: str | None = None\n"
     )
-    assert err == (
-        "not generated yet: AlterColumnNullability on author needs a "
-        "table rebuild (ticket #526)\n"
-    )
+    assert up.startswith(REBUILD + "\n")
+    assert down.startswith(REBUILD + "-- ferro: data-dependent\n")
 
 
 def test_a3_a_required_column_without_a_default_is_refused_until_the_backfill(
