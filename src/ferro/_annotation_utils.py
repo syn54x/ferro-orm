@@ -205,6 +205,10 @@ def _is_json_family(hint: Any) -> bool:
         return True
     if get_origin(hint) in (dict, list):
         return True
+    if get_origin(hint) in (Union, types.UnionType):
+        # ``dict[str, Any] | list[Any]``: a JSON column that may hold either.
+        members = [arg for arg in get_args(hint) if arg is not type(None)]
+        return bool(members) and all(_is_json_family(arg) for arg in members)
     return isinstance(hint, type) and issubclass(hint, pydantic.BaseModel)
 
 
@@ -250,6 +254,10 @@ def db_type_is_compatible(token: str, annotation: Any) -> bool:
     Caller must have already verified ``is_valid_db_type_token(token)``.
     """
     hint = _strip_optional_and_annotated(annotation)
+    if hint is Any:
+        # An ``Any``-typed column's storage is wholly its ``db_type``; its value
+        # is the wire-close primitive (ADR-0035).
+        return True
     if token in _STRING_FAMILY_TOKENS or _VARCHAR_RE.match(token):
         return _is_string_family(hint)
     if token in {"smallint", "int", "bigint"}:
