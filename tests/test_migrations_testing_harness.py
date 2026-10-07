@@ -31,6 +31,7 @@ import re
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 import ferro
 from ferro import _core
@@ -49,6 +50,7 @@ from tests.test_migrate_up import configure, db, migrations, new  # noqa: F401
 pytestmark = [
     pytest.mark.usefixtures("isolated_imports", "clean_registry"),
     pytest.mark.backend_matrix,
+    pytest.mark.asyncio,
 ]
 
 CREATE = """
@@ -120,7 +122,7 @@ def chain(project, pkg, db):
     return project
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def connected(chain, db):
     await ferro.connect(db.url)
     yield db
@@ -167,13 +169,13 @@ async def test_the_docstring_example_end_to_end(connected, migrations_settings):
         await models.Author(name="Ada").save()
     await h.apply("0003")
     async with h.models_at("0003") as models:
-        assert (await models.Author.where(lambda a: a.name == "Ada").first()).slug == (
-            "ada"
-        )
+        ada = await models.Author.where(lambda author: author.name == "Ada").first()
+        assert ada.slug == "ada"
     await h.revert_to("0002")
+    assert "slug" not in columns(connected, "hrn_author")
     result = await h.round_trip()
 
-    assert isinstance(result, RoundTripResult)
+    assert result.irreversible is None and result.reverted_to is None
 
 
 async def test_apply_through_applies_every_pending_migration_up_to_it_and_no_further(
@@ -210,14 +212,13 @@ async def test_models_at_is_that_one_snapshot_and_reaches_join_tables(connected)
     async with h.models_at("0002") as models:
         assert "slug" not in models.Author.model_fields
         assert models.rev == "0002_index_name"
-        join = [t for t in models.tables() if t not in ("hrn_author", "hrn_tag")]
-        assert len(join) == 1
-        link = models.table(join[0])
+        assert models.tables() == ["hrn_author", "hrn_author_tags", "hrn_tag"]
+        link = models.table("hrn_author_tags")
         author, tag = models.Author(name="Ada"), models.Tag(label="poetry")
         await author.save()
         await tag.save()
-        await link(author_id=author.id, tag_id=tag.id).save()
-        assert [(row.author_id, row.tag_id) for row in await link.all()] == [
+        await link(hrn_author_id=author.id, hrn_tag_id=tag.id).save()
+        assert [(row.hrn_author_id, row.hrn_tag_id) for row in await link.all()] == [
             (author.id, tag.id)
         ]
 
@@ -359,16 +360,21 @@ async def test_todays_classes_are_unreachable_inside_models_at_and_restored_afte
         with pytest.raises(SwappedOutModelError, match=r"models\.Author"):
             await author.all()
 
-    assert await author.all() == []
+    async with ferro.engines.session():
+        await author(name="Ada", slug="ada").save()
+        assert [a.slug for a in await author.all()] == ["ada"]
 
     with pytest.raises(RuntimeError, match="boom"):
         async with h.models_at("0002"):
             raise RuntimeError("boom")
 
-    assert await author.all() == []
+    async with ferro.engines.session():
+        assert [a.slug for a in await author.all()] == ["ada"]
 
 
-def test_harness_is_bound_once(chain):
-    h = harness(settings=FerroSettings(), database="default", using="elsewhere")
+async def test_the_harness_binds_without_a_connection_and_refuses_without_one(chain):
+    h = harness(settings=FerroSettings(), database="default")
 
     assert isinstance(h, Harness)
+    with pytest.raises(MigrationRefused, match="no default connection"):
+        await h.apply_through("0001")
