@@ -619,13 +619,13 @@ def _upgrade_plan(
                 f"{op['kind']} on {_subject(op)} needs a SQLite table rebuild, which an "
                 f"Alembic revision cannot write (batch mode has no foreign-key pragma "
                 f"handling, so the drop cascades into ON DELETE CASCADE children). "
-                f"Write this change as an in-house migration: `ferro migrate new`"
+                f"Write this change as a migration: `ferro migrate new`"
             )
         if _demands_values(op, verdict) and dialect == "sqlite":
             raise _refuse(
                 f"{op['kind']} on {_subject(op)} adds a NOT NULL column with no value "
                 f"for the rows already there, which SQLite cannot add in place. Give "
-                f"it a default, or write the change as an in-house migration, which "
+                f"it a default, or write the change as a migration, which "
                 f"generates the backfill: `ferro migrate new`"
             )
         op["verdict"] = verdict
@@ -754,7 +754,7 @@ if _HAS_ALEMBIC:
         live = _read_live(autogen_context.connection, tables)
         if live.tracking_tables:
             raise _refuse(
-                "this database is tracked by ferro's in-house migrations (it carries "
+                "this database is tracked by ferro migrations (it carries "
                 "the _ferro_migrations tracking table), so a change to ferro's models "
                 "is a migration `ferro migrate new` writes, not an Alembic revision. "
                 "A project whose Alembic chain still manages its own SQLAlchemy tables "
