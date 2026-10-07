@@ -1371,6 +1371,51 @@ def live_schema(url: str, tables: set[str]) -> dict:
     return _canonical({"schema": json.loads(live), "facts": json.loads(facts)})
 
 
+# -- AGENTS.md describes the emitters that ship ----------------------------------------
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def test_agents_md_names_the_migrations_door_its_pins_and_the_one_bridge_item():
+    agents = (REPO / "AGENTS.md").read_text()
+    i1 = agents[agents.index("## I-1:") : agents.index("## I-2:")]
+    emitters = i1[: i1.index("For a single model")]
+    assert "`src/ferro/migrations/`" in emitters
+    assert "`crates/ferro-migrate/src/generate/`" in emitters
+    for pin in ("(a)", "(b)", "(c)", "(d)", "(e)", "(f)"):
+        assert f"**{pin}**" in i1, pin
+    assert "translates the one planner's ops" in i1
+    # Items 11–17 are one item now: no per-family comparator, no slot rule.
+    assert "\n12. " not in i1
+    for gone in (
+        "_plan_check_addition",
+        "_plan_check_rebuild",
+        "_plan_check_drop",
+        "FerroRowSecurityOp",
+        "FerroEnumTypeIntroducedOp",
+    ):
+        assert gone not in agents, gone
+    assert "I-12" not in agents
+    assert "## I-13:" in agents
+    assert "every refusal" in agents[agents.index("## I-6:") : agents.index("## I-7:")]
+
+
+def test_no_test_or_doc_relies_on_a_comparator_slot():
+    """The comparators are gone (#533): nothing outside the ADRs (history)
+    still describes Alembic ``priority=LAST`` / ``FIRST`` slots."""
+    offenders = [
+        str(path.relative_to(REPO))
+        for root in ("tests", "docs")
+        for path in (REPO / root).rglob("*")
+        if path.is_file()
+        and path.suffix in {".py", ".md"}
+        and "adr" not in path.parts
+        and path.name != Path(__file__).name
+        and re.search(r"priority=(LAST|FIRST)", path.read_text())
+    ]
+    assert offenders == []
+
+
 def auto_migrate(url: str, name: str | None = None) -> None:
     """``connect(url, auto_migrate=True)``. SQLite's one warning for a table
     declaring row security (ADR-0014) is expected here, not reported."""
