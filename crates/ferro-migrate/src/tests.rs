@@ -302,6 +302,37 @@ fn plan_from_ir_detects_add_drop_and_alter_ops() {
     }));
 }
 
+/// A live SQLite `DATETIME` column (introspected token `timestamp`) against a
+/// declared `datetime` field (canonical `TimestampTz`, token `timestamptz`):
+/// both store as `DATETIME`, so the planner emits no `AlterColumnType` — the
+/// phantom `seen has type timestamp, snapshot says timestamptz` drift line.
+#[test]
+fn plan_from_ir_same_storage_datetime_is_not_a_type_change_on_sqlite() {
+    let live = SchemaColumn {
+        logical_type: "unknown".to_string(),
+        ..col("seen", "timestamp", false)
+    };
+    let declared = ir_col("seen", "datetime", None, false, false, false);
+    let old_ir = envelope(vec![schema_model("author", vec![live])]);
+    let new_ir = envelope(vec![schema_model("author", vec![declared])]);
+
+    let plan = plan_from_ir(
+        &old_ir,
+        &new_ir,
+        Dialect::Sqlite,
+        &LiveFacts::declared(),
+        destructive(),
+    );
+    assert!(
+        !plan.operations.contains(&MigrationOp::AlterColumnType {
+            table: "author".to_string(),
+            column: "seen".to_string(),
+        }),
+        "same-storage column planned a type change: {:?}",
+        plan.operations
+    );
+}
+
 #[test]
 fn plan_from_ir_add_and_drop_table() {
     let old_ir = envelope(vec![schema_model("legacy", vec![col("id", "int", false)])]);
