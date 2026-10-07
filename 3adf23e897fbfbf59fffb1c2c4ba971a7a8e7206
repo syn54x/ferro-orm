@@ -1,0 +1,1 @@
+verified 2026-10-07T00:54:59Z after review round 1 + rebase onto feat/migrations: cargo test 310/310; maturin develop; pytest test_ddl_lock_timeout test_migrate_up test_auto_migrate test_pass_recording test_settings --db-backends=sqlite,postgres 219 passed 22 skipped (dialect halves)
