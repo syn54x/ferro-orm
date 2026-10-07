@@ -46,6 +46,7 @@ from ferro.raw import execute
 from ferro.session import engines
 from tests._alembic_harness import (
     assert_statement_in_code,
+    autogen_opts,
     autogenerate,
     engine_for,
     run_revision,
@@ -656,9 +657,16 @@ async def test_ferros_tracking_tables_are_never_dropped(
     db_url, postgres_base_url, db_schema_name
 ):
     """The tracking tables no model declares are not tables a deleted model
-    left behind: a database carrying them is refused for
-    ``ferro migrate new``, never handed a ``drop_table`` of either."""
-    _bra_shop(with_order=False)
+    left behind: asked directly (below the tracked-database refusal),
+    ``_dropped_tables`` lists a deleted model's table and none of ferro's
+    tracking tables."""
+    from alembic.autogenerate.api import AutogenContext
+    from alembic.migration import MigrationContext
+
+    from ferro.migrations import alembic as bridge
+    from ferro.migrations import get_metadata
+
+    _bra_shop(with_order=True)
     await connect(db_url, auto_migrate=True)
     name = f"tr_{uuid.uuid4().hex}"
     await connect(db_url, name=name)
@@ -666,10 +674,23 @@ async def test_ferros_tracking_tables_are_never_dropped(
         await _core._ensure_tracking_tables(name, None)
     finally:
         await _core._disconnect(name)
+    _rewind_registry()
+    _bra_shop(with_order=False)
 
-    with pytest.raises(RuntimeError) as refused:
-        autogenerate(db_url, postgres_base_url, db_schema_name)
-    assert "`ferro migrate new`" in str(refused.value)
+    tracking = set(_core._tracking_table_names())
+    engine = engine_for(db_url, postgres_base_url)
+    try:
+        with engine.connect() as conn:
+            if db_schema_name is not None:
+                conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
+            live = set(sa.inspect(conn).get_table_names())
+            assert tracking <= live, live
+            context = MigrationContext.configure(conn, opts=autogen_opts())
+            autogen = AutogenContext(context, get_metadata(), opts=autogen_opts())
+            dropped = bridge._dropped_tables(autogen)
+    finally:
+        engine.dispose()
+    assert dropped == ["braorder"], dropped
 
 
 # ---------------------------------------------------------------------------
