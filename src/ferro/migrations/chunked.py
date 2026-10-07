@@ -31,7 +31,7 @@ own cursor (``revert_cursor``) until that last batch (ADR-0033).
 A failed down is recorded only where the database moved (the tracking
 table says where it stands now). A down that rolled back completely (an
 atomic down, a transactional SQL down, a chunked down failing on its first
-batch) leaves the record unchanged: the step stays ``installed`` and the
+batch) leaves the record unchanged: the step stays ``applied`` and the
 error is in the run's output. A down that left part of itself applied
 writes the error onto the record: a no-transaction SQL down, and a chunked
 down failing after a committed batch, which stays ``reverting`` at its

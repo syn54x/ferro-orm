@@ -9,7 +9,7 @@ nothing was recorded
 $ ferro migrate baseline 0006
 recorded 0001_create_author … 0006_add_teams as baseline (14 steps; 2 data steps listed, not run)
 $ ferro migrate status
-0006_add_teams      installed (baseline)
+0006_add_teams      applied (baseline)
 0007_nickname       pending
 ```
 

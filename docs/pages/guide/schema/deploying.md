@@ -136,10 +136,10 @@ Two different waits apply:
 $ ferro migrate status --steps
 default (sqlite) · main._ferro_migrations
 
-0001_create_author  installed
-  01_schema.up.sqlite.sql          installed
+0001_create_author  applied
+  01_schema.up.sqlite.sql          applied
 0002_author_slug    partial, 1 of 4 steps
-  01_expand.up.sqlite.sql          installed
+  01_expand.up.sqlite.sql          applied
   02_backfill_author.py            pending
   03_add_constraint.up.sqlite.sql  pending
   04_contract.up.sqlite.sql        pending  [data-dependent]
@@ -147,7 +147,7 @@ default (sqlite) · main._ferro_migrations
 
 | Exit code | Meaning |
 | :--- | :--- |
-| 0 | Everything is installed. |
+| 0 | Everything is applied. |
 | 3 | Something is pending: run `up`. |
 | 4 | Something needs a person: a failed or interrupted step, an edited file, a migration applied that the directory does not have. |
 
@@ -159,7 +159,7 @@ Every step record holds the checksum of the file this database ran (the up file,
 
 | The step on this database | An edited file |
 | :--- | :--- |
-| Finished | Refused by `up` and `require_applied()`; `status` reports it (`installed (different checksum)`, with both checksums) and exits 4. Restore the file, or accept a deliberate edit with `ferro migrate rerecord <migration>:<step>`. |
+| Finished | Refused by `up` and `require_applied()`; `status` reports it (`applied (different checksum)`, with both checksums) and exits 4. Restore the file, or accept a deliberate edit with `ferro migrate rerecord <migration>:<step>`. |
 | Started, not finished: an atomic data step, a transactional DDL step or a no-transaction step | Accepted: it committed nothing (or is safe to re-run), so the next `up` re-records the checksum, says so, and runs the edited file. |
 | A chunked data step whose batches already committed rows | Refused: choose `rerecord <migration>:<step> --continue` (keep those rows, resume from the cursor) or `--restart` (run every row again from the first). |
 | Never run | Free to edit. |

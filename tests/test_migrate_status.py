@@ -2,7 +2,7 @@
 """``ferro migrate status`` (#519): where a database stands, read-only.
 
 ``status`` takes no lock and creates nothing; it prints one line per fully
-installed or fully pending migration, expands the steps of any migration
+applied or fully pending migration, expands the steps of any migration
 that needs attention (or every one with ``--steps``), prints the same as a
 document with ``--json``, and exits 3 when anything is pending, 4 when
 anything needs attention.
@@ -72,7 +72,7 @@ def test_after_up_everything_is_installed_and_steps_expand_on_request(
 
     assert run("migrate", "status", "--url", db.url) == 0
     assert capsys.readouterr().out == (
-        f"{header(db)}\n\n0001_create_author  installed\n0002_second         installed\n"
+        f"{header(db)}\n\n0001_create_author  applied\n0002_second         applied\n"
     )
 
     assert run("migrate", "status", "--steps", "--url", db.url) == 0
@@ -80,10 +80,10 @@ def test_after_up_everything_is_installed_and_steps_expand_on_request(
     width = len(up_file)
     assert capsys.readouterr().out == (
         f"{header(db)}\n\n"
-        f"0001_create_author  installed\n"
-        f"  {up_file:<{width}}  installed\n"
-        f"0002_second         installed\n"
-        f"  {'01_second.up.sql':<{width}}  installed\n"
+        f"0001_create_author  applied\n"
+        f"  {up_file:<{width}}  applied\n"
+        f"0002_second         applied\n"
+        f"  {'01_second.up.sql':<{width}}  applied\n"
     )
 
     assert run("migrate", "status", "--json", "--url", db.url) == 0
@@ -95,8 +95,8 @@ def test_after_up_everything_is_installed_and_steps_expand_on_request(
         "0001_create_author",
         "0002_second",
     ]
-    assert document["migrations"][0]["state"] == "installed"
-    assert document["migrations"][0]["steps"][0]["state"] == "installed"
+    assert document["migrations"][0]["state"] == "applied"
+    assert document["migrations"][0]["steps"][0]["state"] == "applied"
 
 
 def test_a_part_applied_migration_expands_and_an_interrupted_step_needs_attention(
@@ -120,7 +120,7 @@ def test_a_part_applied_migration_expands_and_an_interrupted_step_needs_attentio
     )
 
 
-def test_an_edited_installed_step_shows_both_checksums(project, pkg, db, capsys):
+def test_an_edited_applied_step_shows_both_checksums(project, pkg, db, capsys):
     configure(project, pkg, db.backend)
     write_models(project, pkg, AUTHOR)
     new("create_author")
@@ -133,8 +133,8 @@ def test_an_edited_installed_step_shows_both_checksums(project, pkg, db, capsys)
     assert run("migrate", "status", "--url", db.url) == 4
     out = capsys.readouterr().out
     assert (
-        f"0001_create_author  installed (different checksum)\n"
-        f"  {up_file.name}  installed (different checksum)\n"
+        f"0001_create_author  applied (different checksum)\n"
+        f"  {up_file.name}  applied (different checksum)\n"
         f"    applied   sha384:{applied}\n"
         f"    on disk   sha384:{sha384(up_file)}\n"
     ) in out
@@ -149,4 +149,4 @@ def test_a_baselined_step_says_so(project, pkg, db, capsys):
     capsys.readouterr()
 
     assert run("migrate", "status", "--url", db.url) == 0
-    assert "0001_create_author  installed (baseline)\n" in capsys.readouterr().out
+    assert "0001_create_author  applied (baseline)\n" in capsys.readouterr().out

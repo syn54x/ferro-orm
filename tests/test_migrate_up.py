@@ -493,7 +493,7 @@ def test_a_database_ahead_of_the_directory_is_refused_unless_allowed(
     _refused_by_up_and_status(db, capsys, expected)
     report = asyncio.run(runner.status(settings, database, url=db.url))
     assert report.exit_code == 4
-    assert [m.state for m in report.migrations] == ["installed", "installed"]
+    assert [m.state for m in report.migrations] == ["applied", "applied"]
     assert report.ahead == ["0003_third"]
 
     allowed = asyncio.run(runner.up(settings, database, url=db.url, allow_ahead=True))

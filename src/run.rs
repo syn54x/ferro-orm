@@ -2652,7 +2652,7 @@ mod baseline_tests {
         );
 
         // What `up` and `status` make of those records: everything through
-        // the target installed (baseline), only 0003 left to apply.
+        // the target applied (baseline), only 0003 left to apply.
         let up = plan_run(
             &dir,
             &plan.records,
@@ -2673,8 +2673,8 @@ mod baseline_tests {
         assert_eq!(
             states,
             [
-                vec![StepState::InstalledBaseline, StepState::InstalledBaseline],
-                vec![StepState::InstalledBaseline],
+                vec![StepState::AppliedBaseline, StepState::AppliedBaseline],
+                vec![StepState::AppliedBaseline],
                 vec![StepState::Pending],
             ]
         );
