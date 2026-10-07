@@ -251,4 +251,4 @@ One-to-one relations (`unique=True`) already get an index; for multi-column inde
 - [Models & Fields](models-and-fields.md) — field declaration styles and constraints
 - [Queries](queries.md) — filtering on shadow FK columns, traversing relations, and reverse relations
 - [Mutations](mutations.md) — creating related records, cascade implications
-- [Schema Migrations](migrations.md) — how relationships appear in Alembic metadata
+- [Schema Management](schema/overview.md) — how foreign keys and join tables reach the database, through auto-migrate, [migrations](schema/migrations.md) or the [Alembic bridge](schema/alembic.md)

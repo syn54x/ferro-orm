@@ -239,18 +239,24 @@ Same shape, no session: everything inside the block runs on one connection and c
 
 ## Migrations
 
-Alembic works for both — Ferro ships a bridge that builds a SQLAlchemy `MetaData` from your registered Ferro models, so `alembic revision --autogenerate` keeps working after the switch. Point your `env.py` at it:
+Your Alembic chain keeps working through the switch. Ferro ships a bridge that builds a SQLAlchemy `MetaData` from your Ferro models, and its options keep Alembic's own comparator off Ferro's tables, so `alembic revision --autogenerate` writes the same changes Ferro's planner decides. Pass both in `env.py`:
 
 ```python
-# migrations/env.py
-import myapp.models  # noqa: F401  — import so all models register
+# alembic/env.py
+from alembic import context
 
-from ferro.migrations import get_metadata
+from ferro.migrations import ferro_options, get_metadata
 
-target_metadata = get_metadata()
+context.configure(
+    connection=connection,  # as generated
+    target_metadata=get_metadata(),
+    **ferro_options(),
+)
 ```
 
-Install the extra with `pip install "ferro-orm[alembic]"`. For development, `connect(url, auto_migrate=True)` creates tables without any migration files. See the [Schema Migrations guide](../guide/migrations.md) and the [Migrations API](../api/migrations.md).
+Install the extra with `pip install "ferro-orm[alembic]"`. The bridge is the right door while the project is in transition, or while Alembic still manages SQLAlchemy tables beside your Ferro models; see [Alembic](../guide/schema/alembic.md).
+
+Once the models are all Ferro, you can move to Ferro's own [migrations](../guide/schema/migrations.md) (`pip install "ferro-orm[cli]"`), which also write backfills and SQLite table rebuilds. Bring each database to `alembic upgrade head` and [baseline it](adopting-migrations.md#coming-from-alembic); no DDL runs. For development and tests, `connect(url, auto_migrate=True)` creates tables without any migration files. See [Schema Management](../guide/schema/overview.md) and the [Migrations API](../api/migrations.md).
 
 ## What Has No Ferro Equivalent Yet
 
@@ -267,4 +273,4 @@ For what's planned, see the [Roadmap](../roadmap.md). Where you hit a gap, `exec
 
 - [Quickstart Tutorial](../getting-started/quickstart.md) — Ferro end to end in a few minutes
 - [Queries guide](../guide/queries.md) — the full query-building API
-- [Schema Migrations guide](../guide/migrations.md) — the Alembic bridge in depth
+- [Schema Management](../guide/schema/overview.md) — auto-migrate, migrations and the Alembic bridge

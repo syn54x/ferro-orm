@@ -35,7 +35,7 @@ A Ferro model is a Pydantic model — annotated fields become columns, and defau
 
 `connect()` takes a database URL. `sqlite::memory:` is a throwaway in-memory database, useful for this tutorial and for tests. For a file-backed database use `sqlite:app.db?mode=rwc` (`rwc` = read/write/create), or a `postgres://...` URL for PostgreSQL.
 
-`auto_migrate=True` creates tables for every registered model on connect. Use it in development; for production schemas, use [Alembic migrations](../guide/migrations.md).
+`auto_migrate=True` creates tables for every registered model on connect. Use it in development and tests; for a database whose data you would mind losing, use [migrations](../guide/schema/migrations.md) (`ferro migrate new`, then `ferro migrate up`). [Schema Management](../guide/schema/overview.md) compares the two.
 
 ## Create Data
 
