@@ -1,0 +1,1 @@
+verified 2026-10-07T03:11:27Z: cargo test -p ferro-ddl-lowering -p ferro-migrate (148+217 ok); cargo test --no-default-features --features testing (323 ok); maturin develop; pytest staging/columns/migrate_up/sqlite_rebuild/pass_recording/cross_emitter_parity --db-backends=sqlite,postgres: 119 passed, 4 dialect skips
