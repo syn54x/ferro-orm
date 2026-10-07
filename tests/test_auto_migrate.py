@@ -2627,3 +2627,71 @@ async def test_a_new_table_referencing_a_renamed_one_is_created_after_the_rename
         assert [r["name"] for r in rows] == ["Bo"]
     ferro.reset_engine()
     assert await _trn_tables(db_url) == {"trnauthor", "trnbook"}
+
+
+def _define_trn_author_with_books_and_appendices() -> None:
+    from ferro import ForeignKey
+
+    # "TrnAppendix" sorts ahead of "TrnBook", the table it waits through, so
+    # a single pass over the models would see it before it knew to hold it.
+    class TrnAppendix(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        heading: str
+        book: Annotated["TrnBook", ForeignKey("appendices")]
+
+    class TrnBook(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        author: Annotated["TrnAuthor", ForeignKey("books")]
+        appendices: Relation[list["TrnAppendix"]] = BackRef()
+
+    class TrnAuthor(Model):
+        __ferro_renamed_from__ = "trnwriter"
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: Annotated[str, FerroField(index=True)]
+        books: Relation[list["TrnBook"]] = BackRef()
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_table_two_references_from_a_renamed_one_waits_for_the_rename_too(
+    db_url, clean_registry
+):
+    """``trnappendix`` references ``trnbook``, which references the renamed
+    ``trnauthor``: it waits on the rename through ``trnbook``, and is created
+    after it, once ``trnbook`` exists."""
+    await _trn_writer_with_rows(db_url)
+    _define_trn_author_with_books_and_appendices()
+
+    # Without migrate_updates none of the three is created, and the one
+    # warning names both dependents.
+    with pytest.warns(
+        UserWarning,
+        match=r'"trnauthor" was not created, nor "trnappendix" and "trnbook", '
+        r"which reference it",
+    ):
+        await ferro.connect(db_url, auto_migrate=True)
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnwriter"}
+
+    _rewind()
+    _define_trn_author_with_books_and_appendices()
+    messages = await _connect_capturing_logs(db_url, migrate_updates=True)
+    assert not [m for m in messages if m.endswith("' created")]
+    # Each table is created after the one it references: the appendix's
+    # foreign key would fail against a book that did not exist yet.
+    async with ferro.engines.session():
+        await execute(
+            'INSERT INTO "trnbook" ("title", "author_id") VALUES (\'Odes\', 2)'
+        )
+        await execute(
+            'INSERT INTO "trnappendix" ("heading", "book_id") VALUES (\'I\', 1)'
+        )
+        rows = await fetch_all(
+            'SELECT "trnauthor"."name" FROM "trnappendix" '
+            'JOIN "trnbook" ON "trnbook"."id" = "trnappendix"."book_id" '
+            'JOIN "trnauthor" ON "trnauthor"."id" = "trnbook"."author_id"'
+        )
+        assert [r["name"] for r in rows] == ["Bo"]
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnauthor", "trnbook", "trnappendix"}
