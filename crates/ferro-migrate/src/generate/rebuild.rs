@@ -87,6 +87,8 @@ pub fn needs_rebuild(op: &MigrationOp, direction: PlanDirection, ctx: &PlanConte
         | MigrationOp::CreateEnumType { .. }
         | MigrationOp::DropEnumType { .. }
         | MigrationOp::AddEnumLabel { .. }
+        | MigrationOp::RenameEnumLabel { .. }
+        | MigrationOp::RenameEnumType { .. }
         | MigrationOp::AddIndex { .. }
         | MigrationOp::DropIndex { .. }
         | MigrationOp::RebuildIndex { .. }

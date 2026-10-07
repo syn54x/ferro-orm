@@ -14,9 +14,10 @@ use ferro_ddl_lowering::{
     render_disable_row_security, render_drop_constraint, render_drop_index_sql,
     render_drop_row_policy, render_enable_row_security, render_force_row_security,
     render_no_force_row_security, render_pg_enum_add_value, render_pg_enum_create_type,
-    render_pg_enum_drop_type, render_rename_column, render_rename_constraint, render_rename_index,
-    render_rename_policy, render_rename_table, render_validate_constraint, resolve_column_storage,
-    row_policy_clauses, row_policy_rebuild_statements,
+    render_pg_enum_drop_type, render_pg_enum_rename_type, render_pg_enum_rename_value,
+    render_rename_column, render_rename_constraint, render_rename_index, render_rename_policy,
+    render_rename_table, render_sqlite_label_update, render_validate_constraint,
+    resolve_column_storage, row_policy_clauses, row_policy_rebuild_statements,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeSet, HashSet};
@@ -131,6 +132,26 @@ pub(crate) fn render_plan_in(
             MigrationOp::DropEnumType { type_name } => {
                 require_postgres(op, dialect)?;
                 out.statements.push(render_pg_enum_drop_type(type_name));
+            }
+            MigrationOp::RenameEnumLabel {
+                type_name,
+                old,
+                new,
+                columns,
+            } => match dialect {
+                Dialect::Postgres => out
+                    .statements
+                    .push(render_pg_enum_rename_value(type_name, old, new)),
+                // SQLite stores the labels as text in the rows.
+                Dialect::Sqlite => out.statements.extend(
+                    columns
+                        .iter()
+                        .map(|(table, column)| render_sqlite_label_update(table, column, old, new)),
+                ),
+            },
+            MigrationOp::RenameEnumType { old, new } => {
+                require_postgres(op, dialect)?;
+                out.statements.push(render_pg_enum_rename_type(old, new));
             }
             MigrationOp::AddTable { table } => {
                 let model = find_model(&new_models, table)?;

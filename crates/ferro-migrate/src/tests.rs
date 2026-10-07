@@ -4570,3 +4570,326 @@ mod renames {
         );
     }
 }
+
+/// Enum label renames (`__ferro_renamed_labels__`) and inferred enum type
+/// renames (ADR-0032; #529).
+mod enum_renames {
+    use super::*;
+    use crate::plan::{Hint, HintError, live_hints};
+    use std::collections::BTreeMap;
+
+    fn status(type_name: &str, labels: &[&str], hints: &[(&str, &str)]) -> SchemaColumn {
+        SchemaColumn {
+            enum_values: Some(labels.iter().map(|l| serde_json::json!(l)).collect()),
+            enum_type_name: Some(type_name.to_string()),
+            db_type: None,
+            enum_renamed_labels: hints
+                .iter()
+                .map(|(new, old)| (new.to_string(), old.to_string()))
+                .collect::<BTreeMap<_, _>>(),
+            ..col("status", "text", false)
+        }
+    }
+
+    /// `enmorder(id, status <type>)` and `enmrefund(id, status <type>)`.
+    fn orders(columns: [SchemaColumn; 2]) -> IrEnvelope<SchemaIrPayload> {
+        let [order, refund] = columns;
+        envelope(vec![
+            schema_model("enmorder", vec![pk_col("id", "integer"), order]),
+            schema_model("enmrefund", vec![pk_col("id", "integer"), refund]),
+        ])
+    }
+
+    fn both(column: SchemaColumn) -> IrEnvelope<SchemaIrPayload> {
+        orders([column.clone(), column])
+    }
+
+    fn plan(
+        old: &IrEnvelope<SchemaIrPayload>,
+        new: &IrEnvelope<SchemaIrPayload>,
+        dialect: Dialect,
+    ) -> MigrationPlan {
+        plan_from_ir(
+            old,
+            new,
+            dialect,
+            &LiveFacts::declared(),
+            PlanOptions { destructive: true },
+        )
+    }
+
+    fn columns() -> Vec<(String, String)> {
+        vec![
+            ("enmorder".to_string(), "status".to_string()),
+            ("enmrefund".to_string(), "status".to_string()),
+        ]
+    }
+
+    fn parent() -> IrEnvelope<SchemaIrPayload> {
+        both(status("orderstatus", &["paid", "canceled"], &[]))
+    }
+
+    fn relabelled() -> IrEnvelope<SchemaIrPayload> {
+        both(status(
+            "orderstatus",
+            &["paid", "cancelled"],
+            &[("cancelled", "canceled")],
+        ))
+    }
+
+    fn renames_a_type(ops: &[MigrationOp]) -> bool {
+        ops.iter()
+            .any(|op| matches!(op, MigrationOp::RenameEnumType { .. }))
+    }
+
+    #[test]
+    fn a_live_label_hint_plans_one_rename_over_every_column_of_the_type() {
+        assert_eq!(
+            live_hints(&parent().payload, &relabelled().payload).expect("no refusal"),
+            vec![Hint::Label {
+                type_name: "orderstatus".to_string(),
+                old: "canceled".to_string(),
+                new: "cancelled".to_string(),
+            }]
+        );
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            let plan = plan(&parent(), &relabelled(), dialect);
+            assert_eq!(
+                plan.operations,
+                vec![MigrationOp::RenameEnumLabel {
+                    type_name: "orderstatus".to_string(),
+                    old: "canceled".to_string(),
+                    new: "cancelled".to_string(),
+                    columns: columns(),
+                }],
+                "{dialect:?}"
+            );
+            assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+            assert!(
+                plan.always_warnings.is_empty(),
+                "{:?}",
+                plan.always_warnings
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_rename_renders_rename_value_on_postgres_and_an_update_per_column_on_sqlite() {
+        let pg = render_flat(
+            &plan(&parent(), &relabelled(), Dialect::Postgres),
+            &parent(),
+            &relabelled(),
+            Dialect::Postgres,
+        )
+        .expect("renders");
+        assert_eq!(
+            pg.statements,
+            ["ALTER TYPE \"orderstatus\" RENAME VALUE 'canceled' TO 'cancelled'"]
+        );
+        let sqlite = render_flat(
+            &plan(&parent(), &relabelled(), Dialect::Sqlite),
+            &parent(),
+            &relabelled(),
+            Dialect::Sqlite,
+        )
+        .expect("renders");
+        assert_eq!(
+            sqlite.statements,
+            [
+                "UPDATE \"enmorder\" SET \"status\" = 'cancelled' WHERE \"status\" = 'canceled'",
+                "UPDATE \"enmrefund\" SET \"status\" = 'cancelled' WHERE \"status\" = 'canceled'",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_label_hint_is_inert_once_the_parent_holds_the_new_label() {
+        assert_eq!(
+            live_hints(&relabelled().payload, &relabelled().payload).expect("no refusal"),
+            vec![]
+        );
+        assert!(plan(&relabelled(), &relabelled(), Dialect::Postgres).is_empty());
+        // A hint naming a label neither side holds is inert and silent.
+        let stray = both(status(
+            "orderstatus",
+            &["paid", "canceled"],
+            &[("void", "nulled")],
+        ));
+        assert_eq!(
+            live_hints(&parent().payload, &stray.payload).expect("no refusal"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_label_hint_whose_old_label_is_still_declared_is_refused_naming_it() {
+        let still = both(status(
+            "orderstatus",
+            &["paid", "canceled", "cancelled"],
+            &[("cancelled", "canceled")],
+        ));
+        let err = live_hints(&parent().payload, &still.payload).expect_err("refused");
+        assert_eq!(
+            err,
+            HintError::LabelStillDeclared {
+                type_name: "orderstatus".to_string(),
+                new: "cancelled".to_string(),
+                old: "canceled".to_string(),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "enum type \"orderstatus\" declares __ferro_renamed_labels__ {\"cancelled\": \
+             \"canceled\"}, but still declares the label \"canceled\": a label cannot be \
+             renamed from one the enum keeps; delete the hint or the old member"
+        );
+        // Checked live or not: the parent need not hold either label.
+        assert!(live_hints(&still.payload, &still.payload).is_err());
+    }
+
+    #[test]
+    fn two_labels_renamed_from_one_are_refused_naming_both() {
+        let twice = both(status(
+            "orderstatus",
+            &["paid", "cancelled", "voided"],
+            &[("cancelled", "canceled"), ("voided", "canceled")],
+        ));
+        let err = live_hints(&parent().payload, &twice.payload).expect_err("refused");
+        assert_eq!(
+            err.to_string(),
+            "enum type \"orderstatus\" declares labels \"cancelled\" and \"voided\" all \
+             renamed from \"canceled\": one label becomes one label; keep the hint on the \
+             label \"canceled\" became"
+        );
+    }
+
+    #[test]
+    fn every_column_moved_to_one_new_type_is_a_type_rename_on_postgres() {
+        let renamed = both(status("orderstate", &["paid", "canceled"], &[]));
+        let pg = plan(&parent(), &renamed, Dialect::Postgres);
+        assert_eq!(
+            pg.operations,
+            vec![MigrationOp::RenameEnumType {
+                old: "orderstatus".to_string(),
+                new: "orderstate".to_string(),
+            }]
+        );
+        assert!(pg.warnings.is_empty(), "{:?}", pg.warnings);
+        assert_eq!(
+            render_flat(&pg, &parent(), &renamed, Dialect::Postgres)
+                .expect("renders")
+                .statements,
+            ["ALTER TYPE \"orderstatus\" RENAME TO \"orderstate\""]
+        );
+        // SQLite has no enum types: nothing to do.
+        assert!(plan(&parent(), &renamed, Dialect::Sqlite).is_empty());
+        // The way back is the reverse rename.
+        assert_eq!(
+            plan(&renamed, &parent(), Dialect::Postgres).operations,
+            vec![MigrationOp::RenameEnumType {
+                old: "orderstate".to_string(),
+                new: "orderstatus".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_type_some_of_whose_columns_moved_is_no_rename_but_a_type_change() {
+        let split = orders([
+            status("orderstate", &["paid", "canceled"], &[]),
+            status("orderstatus", &["paid", "canceled"], &[]),
+        ]);
+        let ops = plan(&parent(), &split, Dialect::Postgres).operations;
+        assert!(!renames_a_type(&ops), "{ops:?}");
+        assert_eq!(
+            ops,
+            vec![MigrationOp::AlterColumnType {
+                table: "enmorder".to_string(),
+                column: "status".to_string(),
+            }]
+        );
+        // Columns moving to a type that already exists, or to two new types,
+        // are no rename either.
+        let existing = orders([
+            status("orderstatus", &["paid", "canceled"], &[]),
+            status("refundstatus", &["paid", "canceled"], &[]),
+        ]);
+        let moved_to_existing = orders([
+            status("refundstatus", &["paid", "canceled"], &[]),
+            status("refundstatus", &["paid", "canceled"], &[]),
+        ]);
+        let ops = plan(&existing, &moved_to_existing, Dialect::Postgres).operations;
+        assert!(!renames_a_type(&ops), "{ops:?}");
+        let two_types = orders([
+            status("orderstate", &["paid", "canceled"], &[]),
+            status("orderphase", &["paid", "canceled"], &[]),
+        ]);
+        let ops = plan(&parent(), &two_types, Dialect::Postgres).operations;
+        assert!(!renames_a_type(&ops), "{ops:?}");
+        // A column of the vanished type dropped in the same edit: not every
+        // column moved.
+        let one_dropped = envelope(vec![
+            schema_model(
+                "enmorder",
+                vec![
+                    pk_col("id", "integer"),
+                    status("orderstate", &["paid", "canceled"], &[]),
+                ],
+            ),
+            schema_model("enmrefund", vec![pk_col("id", "integer")]),
+        ]);
+        let ops = plan(&parent(), &one_dropped, Dialect::Postgres).operations;
+        assert!(!renames_a_type(&ops), "{ops:?}");
+    }
+
+    #[test]
+    fn a_type_rename_and_a_label_rename_in_one_edit_rename_the_type_first() {
+        let both_renamed = both(status(
+            "orderstate",
+            &["paid", "cancelled"],
+            &[("cancelled", "canceled")],
+        ));
+        let expected_type = MigrationOp::RenameEnumType {
+            old: "orderstatus".to_string(),
+            new: "orderstate".to_string(),
+        };
+        let expected_label = MigrationOp::RenameEnumLabel {
+            type_name: "orderstate".to_string(),
+            old: "canceled".to_string(),
+            new: "cancelled".to_string(),
+            columns: columns(),
+        };
+        assert_eq!(
+            plan(&parent(), &both_renamed, Dialect::Postgres).operations,
+            vec![expected_type, expected_label.clone()]
+        );
+        assert_eq!(
+            plan(&parent(), &both_renamed, Dialect::Sqlite).operations,
+            vec![expected_label]
+        );
+    }
+
+    #[test]
+    fn an_added_label_beside_a_renamed_one_is_still_added() {
+        let edited = both(status(
+            "orderstatus",
+            &["paid", "cancelled", "refunded"],
+            &[("cancelled", "canceled")],
+        ));
+        assert_eq!(
+            plan(&parent(), &edited, Dialect::Postgres).operations,
+            vec![
+                MigrationOp::RenameEnumLabel {
+                    type_name: "orderstatus".to_string(),
+                    old: "canceled".to_string(),
+                    new: "cancelled".to_string(),
+                    columns: columns(),
+                },
+                MigrationOp::AddEnumLabel {
+                    type_name: "orderstatus".to_string(),
+                    label: "refunded".to_string(),
+                },
+            ]
+        );
+    }
+}
