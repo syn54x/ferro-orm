@@ -32,7 +32,7 @@
 use super::{GenerateError, Rendering, refuse_unrendered, step_text};
 use crate::directory::Headers;
 use crate::{Dialect, MigrationOp, MigrationPlan, render_plan};
-use ferro_ddl_lowering::extra_enum_labels_warning;
+use ferro_ddl_lowering::{extra_enum_labels_warning, quote_label};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use std::collections::BTreeMap;
 
@@ -65,7 +65,7 @@ pub fn answered_by_labels_step(ops: &[MigrationOp]) -> Vec<String> {
 
 /// `'a'`, `'a' and 'b'`, `'a', 'b' and 'c'`.
 fn quoted_list(labels: &[String]) -> String {
-    let quoted: Vec<String> = labels.iter().map(|label| format!("'{label}'")).collect();
+    let quoted: Vec<String> = labels.iter().map(|label| quote_label(label)).collect();
     match quoted.as_slice() {
         [] => String::new(),
         [only] => only.clone(),

@@ -34,13 +34,13 @@ use super::renames;
 use super::{DESTRUCTIVE, GenerateError, refuse_unrendered, step_text};
 use crate::directory::Headers;
 use crate::plan::{
-    Hint, rename_ops, renamed_snapshot, renamed_table, reverse_hints, storage_hints,
+    self, Hint, rename_ops, renamed_snapshot, renamed_table, reverse_hints, storage_hints,
 };
 use crate::render::render_plan_in;
 use crate::{Dialect, LiveFacts, MigrationOp, MigrationPlan, RenderedOp, plan_from_ir};
 use ferro_ddl_lowering::ConstraintMode;
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Rendering;
 
@@ -131,14 +131,18 @@ fn may_fail_on_rows(
     }
 }
 
-/// Whether `ops` rewrite rows on `dialect`: a label rename on SQLite is an
-/// `UPDATE` of every column of the type, which the table's own constraints
-/// (a `db_check` still naming the old label) can reject.
-fn relabels_rows(ops: &[MigrationOp], dialect: Dialect) -> bool {
-    dialect == Dialect::Sqlite
-        && ops
-            .iter()
-            .any(|op| matches!(op, MigrationOp::RenameEnumLabel { .. }))
+/// Whether `ops` rewrite rows on `dialect`: a label rename over a column that
+/// keeps the label as text in its rows ([`plan::relabels_rows`], as `ir`
+/// declares the column) is an `UPDATE`, which the rows' constraints can reject.
+fn rewrites_rows(ops: &[MigrationOp], ir: &IrEnvelope<SchemaIrPayload>, dialect: Dialect) -> bool {
+    ops.iter().any(|op| {
+        let MigrationOp::RenameEnumLabel { columns, .. } = op else {
+            return false;
+        };
+        columns.iter().any(|(table, column)| {
+            find_column(ir, table, column).is_none_or(|col| plan::relabels_rows(col, dialect))
+        })
+    })
 }
 
 /// Whether `op` drops data.
@@ -256,6 +260,39 @@ fn statements(
     direction: PlanDirection,
 ) -> Result<(Vec<String>, bool), GenerateError> {
     let rebuilt = rebuild::tables_to_rebuild(&ops, old, new, dialect, direction);
+    // A table the step rebuilds relabels its rows in the rebuild's copy, where
+    // they meet the table's new check; its label rename leaves it out.
+    let mut relabels: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+    let ops: Vec<MigrationOp> = ops
+        .into_iter()
+        .filter_map(|op| match op {
+            MigrationOp::RenameEnumLabel {
+                type_name,
+                old: from,
+                new: to,
+                columns,
+            } => {
+                let (copied, updated): (Vec<_>, Vec<_>) = columns
+                    .into_iter()
+                    .partition(|(table, _)| rebuilt.contains(table));
+                for (table, column) in copied {
+                    relabels
+                        .entry(table)
+                        .or_default()
+                        .push((column, from.clone(), to.clone()));
+                }
+                (!updated.is_empty() || dialect == Dialect::Postgres).then_some(
+                    MigrationOp::RenameEnumLabel {
+                        type_name,
+                        old: from,
+                        new: to,
+                        columns: updated,
+                    },
+                )
+            }
+            other => Some(other),
+        })
+        .collect();
     let folded = |op: &MigrationOp| op.table().is_some_and(|table| rebuilt.contains(table));
     let native: Vec<MigrationOp> = ops.iter().filter(|op| !folded(op)).cloned().collect();
     let mut native = native_statements(
@@ -273,7 +310,8 @@ fn statements(
         match op.table().filter(|table| rebuilt.contains(*table)) {
             Some(table) => {
                 if written.insert(table) {
-                    out.extend(rebuild::render_table(table, old, new)?);
+                    let relabelled = relabels.get(table).map(Vec::as_slice).unwrap_or(&[]);
+                    out.extend(rebuild::render_table(table, old, new, relabelled)?);
                 }
             }
             None => out.extend(native.next().ok_or_else(|| {
@@ -381,7 +419,7 @@ pub fn render_down(
         foreign_keys_off: up_rebuilds,
         destructive: !up_statements.is_empty() && step_ops.iter().any(drops_data),
         data_dependent: !up_statements.is_empty()
-            && (relabels_rows(step_ops, dialect)
+            && (rewrites_rows(step_ops, &renamed_before, dialect)
                 || step_ops
                     .iter()
                     .any(|op| may_fail_on_rows(op, after, up_mode))),
@@ -390,7 +428,7 @@ pub fn render_down(
     };
 
     let down_mode = columns::constraint_mode(dialect, PlanDirection::Down);
-    let data_dependent = relabels_rows(&down_derived, dialect)
+    let data_dependent = rewrites_rows(&down_derived, &renamed_after, dialect)
         || inverse
             .iter()
             .any(|op| recreates(op, before) || may_fail_on_rows(op, before, down_mode));

@@ -4583,10 +4583,15 @@ mod enum_renames {
             enum_values: Some(labels.iter().map(|l| serde_json::json!(l)).collect()),
             enum_type_name: Some(type_name.to_string()),
             db_type: None,
-            enum_renamed_labels: hints
-                .iter()
-                .map(|(new, old)| (new.to_string(), old.to_string()))
-                .collect::<BTreeMap<_, _>>(),
+            enum_renamed_labels: (!hints.is_empty()).then(|| {
+                ferro_schema_ir::SchemaRenamedLabels {
+                    enum_class: "OrderStatus".to_string(),
+                    labels: hints
+                        .iter()
+                        .map(|(new, old)| (new.to_string(), old.to_string()))
+                        .collect::<BTreeMap<_, _>>(),
+                }
+            }),
             ..col("status", "text", false)
         }
     }
@@ -4739,6 +4744,7 @@ mod enum_renames {
         assert_eq!(
             err,
             HintError::LabelStillDeclared {
+                enum_class: "OrderStatus".to_string(),
                 type_name: "orderstatus".to_string(),
                 new: "cancelled".to_string(),
                 old: "canceled".to_string(),
@@ -4746,9 +4752,10 @@ mod enum_renames {
         );
         assert_eq!(
             err.to_string(),
-            "enum type \"orderstatus\" declares __ferro_renamed_labels__ {\"cancelled\": \
-             \"canceled\"}, but still declares the label \"canceled\": a label cannot be \
-             renamed from one the enum keeps; delete the hint or the old member"
+            "enum OrderStatus (type \"orderstatus\") declares __ferro_renamed_labels__ \
+             {\"cancelled\": \"canceled\"}, but OrderStatus still declares the label \
+             \"canceled\": a label cannot be renamed from one the enum keeps; delete the hint \
+             or the old member"
         );
         // Checked live or not: the parent need not hold either label.
         assert!(live_hints(&still.payload, &still.payload).is_err());
@@ -4764,7 +4771,7 @@ mod enum_renames {
         let err = live_hints(&parent().payload, &twice.payload).expect_err("refused");
         assert_eq!(
             err.to_string(),
-            "enum type \"orderstatus\" declares labels \"cancelled\" and \"voided\" all \
+            "enum OrderStatus (type \"orderstatus\") declares labels \"cancelled\" and \"voided\" all \
              renamed from \"canceled\": one label becomes one label; keep the hint on the \
              label \"canceled\" became"
         );

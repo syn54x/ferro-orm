@@ -179,11 +179,20 @@ pub struct SchemaColumn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renamed_from: Option<String>,
     /// Label rename hints (`__ferro_renamed_labels__` on the column's enum
-    /// class, new label → old label; ADR-0032). The IR carries an enum's
-    /// declaration on each column of it, as it does `enum_values`, so every
-    /// column of the type carries the same map. Absent when undeclared.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub enum_renamed_labels: BTreeMap<String, String>,
+    /// class; ADR-0032). The IR carries an enum's declaration on each column
+    /// of it, as it does `enum_values`, so every column of the type carries the
+    /// same hints. Absent when undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_renamed_labels: Option<SchemaRenamedLabels>,
+}
+
+/// An enum class's `__ferro_renamed_labels__` declaration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchemaRenamedLabels {
+    /// The enum class declaring them (`OrderStatus`), named in refusals.
+    pub enum_class: String,
+    /// New label → the label it was before.
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Foreign-key edge from `column` to `to_table.to_column`.
@@ -755,13 +764,19 @@ mod tests {
             "format": null,
             "enum_values": ["cancelled", "paid"],
             "enum_type_name": "orderstatus",
-            "enum_renamed_labels": {"cancelled": "canceled"},
+            "enum_renamed_labels": {
+                "enum_class": "OrderStatus",
+                "labels": {"cancelled": "canceled"},
+            },
         });
         let column: SchemaColumn =
             serde_json::from_value(declared.clone()).expect("column must deserialize");
         assert_eq!(
             column.enum_renamed_labels,
-            BTreeMap::from([("cancelled".to_string(), "canceled".to_string())])
+            Some(SchemaRenamedLabels {
+                enum_class: "OrderStatus".to_string(),
+                labels: BTreeMap::from([("cancelled".to_string(), "canceled".to_string())]),
+            })
         );
         assert_eq!(serde_json::to_value(&column).expect("serialize"), declared);
 
@@ -772,7 +787,7 @@ mod tests {
             .remove("enum_renamed_labels");
         let column: SchemaColumn =
             serde_json::from_value(plain.clone()).expect("a v2 column without hints loads");
-        assert!(column.enum_renamed_labels.is_empty());
+        assert_eq!(column.enum_renamed_labels, None);
         assert_eq!(
             serde_json::to_value(&column).expect("serialize"),
             plain,

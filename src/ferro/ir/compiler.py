@@ -110,9 +110,12 @@ def _column_ir_from_spec(spec: ColumnSpec) -> dict[str, Any]:
         column_ir["enum_type_name"] = spec.enum_type_name
     renamed_labels = declared_renamed_labels(spec.enum_class)
     # Absent, not empty, when undeclared: every existing envelope stays
-    # byte-identical (ADR-0032).
-    if renamed_labels:
-        column_ir["enum_renamed_labels"] = renamed_labels
+    # byte-identical (ADR-0032). The class rides along so a refusal names it.
+    if renamed_labels and spec.enum_class is not None:
+        column_ir["enum_renamed_labels"] = {
+            "enum_class": spec.enum_class.__name__,
+            "labels": renamed_labels,
+        }
     return column_ir
 
 

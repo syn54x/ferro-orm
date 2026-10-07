@@ -1991,10 +1991,15 @@ mod tests {
         let mut model = author();
         model.columns[2] = SchemaColumn {
             enum_type_name: Some(type_name.into()),
-            enum_renamed_labels: hints
-                .iter()
-                .map(|(new, old)| (new.to_string(), old.to_string()))
-                .collect(),
+            enum_renamed_labels: (!hints.is_empty()).then(|| {
+                ferro_schema_ir::SchemaRenamedLabels {
+                    enum_class: "Status".into(),
+                    labels: hints
+                        .iter()
+                        .map(|(new, old)| (new.to_string(), old.to_string()))
+                        .collect(),
+                }
+            }),
             ..status(labels)
         };
         model
@@ -2118,24 +2123,27 @@ mod tests {
         let parent = snapshot_of(&ir(vec![after.clone()]), None);
         assert_eq!(generate(Some(&parent), &ir(vec![after]), &BOTH), Ok(None));
 
-        // A longer spelling widens SQLite's column: the rows are relabelled,
-        // then the table is rebuilt at the new width, and back on the down.
+        // A longer spelling widens SQLite's column: the table is rebuilt at
+        // the new width, its rows relabelled as the rebuild copies them, and
+        // back the same way on the down.
         let wider = relabelled("status", &["draft", "published"], &[("published", "live")]);
         let migration = edit(vec![author()], vec![wider], &[Dialect::Sqlite]);
         let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert!(!sqlite.up.contains("UPDATE"), "{}", sqlite.up);
+        assert!(sqlite.headers.data_dependent && sqlite.headers.foreign_keys_off);
+        assert!(sqlite.up.contains("\"status\" varchar(9)"), "{}", sqlite.up);
         assert!(
-            sqlite.up.starts_with(
-                "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n\n\
-                 UPDATE \"author\" SET \"status\" = 'published' WHERE \"status\" = 'live';\n"
+            sqlite.up.contains(
+                "SELECT \"id\", \"name\", CASE \"status\" WHEN 'live' THEN 'published' \
+                 ELSE \"status\" END FROM \"author\""
             ),
             "{}",
             sqlite.up
         );
-        assert!(sqlite.up.contains("\"status\" varchar(9)"), "{}", sqlite.up);
         assert!(
-            sqlite.down.contains(
-                "UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'published'"
-            ),
+            sqlite
+                .down
+                .contains("CASE \"status\" WHEN 'published' THEN 'live' ELSE \"status\" END"),
             "{}",
             sqlite.down
         );
@@ -2144,6 +2152,95 @@ mod tests {
             "{}",
             sqlite.down
         );
+    }
+
+    /// `relabelled`, its `status` stored as text, with a `db_check` when
+    /// `checked`.
+    fn text_stored(labels: &[&str], hints: &[(&str, &str)], checked: bool) -> SchemaModel {
+        let mut model = relabelled("status", labels, hints);
+        model.columns[2].db_type = Some("text".into());
+        model.columns[2].db_type_explicit = Some(true);
+        if checked {
+            model.checks.push(ferro_schema_ir::SchemaCheck {
+                name: "ck_author_status".into(),
+                column: "status".into(),
+                values: labels.iter().map(|l| format!("'{l}'")).collect(),
+            });
+        }
+        model
+    }
+
+    #[test]
+    fn a_renamed_label_on_a_text_stored_enum_updates_its_rows_on_both_dialects() {
+        let update = |from: &str, to: &str| {
+            format!("UPDATE \"author\" SET \"status\" = '{to}' WHERE \"status\" = '{from}'")
+        };
+        let before = text_stored(&["draft", "live"], &[], false);
+        let after = text_stored(&["draft", "open"], &[("open", "live")], false);
+        let migration = edit(vec![before], vec![after.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_schema"]);
+        for dialect in BOTH {
+            let r = step(&migration, "01_schema", dialect);
+            assert_eq!(
+                r.up,
+                format!("-- ferro: data-dependent\n\n{};\n", update("live", "open")),
+                "{dialect:?}"
+            );
+            assert_eq!(
+                r.down,
+                format!("-- ferro: data-dependent\n\n{};\n", update("open", "live")),
+                "{dialect:?}"
+            );
+        }
+        let parent = snapshot_of(&ir(vec![after.clone()]), None);
+        assert_eq!(generate(Some(&parent), &ir(vec![after]), &BOTH), Ok(None));
+    }
+
+    #[test]
+    fn a_checked_text_stored_enum_relabels_between_its_check_s_drop_and_add() {
+        let before = text_stored(&["draft", "live"], &[], true);
+        let after = text_stored(&["draft", "open"], &[("open", "live")], true);
+        let migration = edit(vec![before], vec![after.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_schema"]);
+        // Postgres: the old check allows only the old label, so it goes
+        // first, and the new one is added (validated) over the new labels.
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        assert_eq!(
+            pg.up,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_status\";\n\n\
+             UPDATE \"author\" SET \"status\" = 'open' WHERE \"status\" = 'live';\n\n\
+             ALTER TABLE \"author\" ADD CONSTRAINT \"ck_author_status\" \
+             CHECK (\"status\" IN ('draft', 'open'));\n"
+        );
+        assert_eq!(
+            pg.down,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_status\";\n\n\
+             UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'open';\n\n\
+             ALTER TABLE \"author\" ADD CONSTRAINT \"ck_author_status\" \
+             CHECK (\"status\" IN ('draft', 'live'));\n"
+        );
+        // SQLite: the check lives in CREATE TABLE, so the table is rebuilt
+        // and its rows relabelled as they are copied under the new check.
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert!(!sqlite.up.contains("UPDATE"), "{}", sqlite.up);
+        assert!(
+            sqlite
+                .up
+                .contains("CASE \"status\" WHEN 'live' THEN 'open' ELSE \"status\" END"),
+            "{}",
+            sqlite.up
+        );
+        assert!(
+            sqlite
+                .down
+                .contains("CASE \"status\" WHEN 'open' THEN 'live' ELSE \"status\" END"),
+            "{}",
+            sqlite.down
+        );
+        let parent = snapshot_of(&ir(vec![after.clone()]), None);
+        assert_eq!(generate(Some(&parent), &ir(vec![after]), &BOTH), Ok(None));
     }
 
     #[test]
@@ -2155,9 +2252,10 @@ mod tests {
         );
         assert_eq!(
             refusal(vec![author()], vec![still], &BOTH),
-            "rename hint refused: enum type \"status\" declares __ferro_renamed_labels__ \
-             {\"published\": \"live\"}, but still declares the label \"live\": a label cannot \
-             be renamed from one the enum keeps; delete the hint or the old member"
+            "rename hint refused: enum Status (type \"status\") declares \
+             __ferro_renamed_labels__ {\"published\": \"live\"}, but Status still declares the \
+             label \"live\": a label cannot be renamed from one the enum keeps; delete the hint \
+             or the old member"
         );
     }
 

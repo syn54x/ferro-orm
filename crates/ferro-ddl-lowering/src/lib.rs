@@ -590,7 +590,9 @@ pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
 }
 
 /// One enum label as a SQL string literal: single-quoted, every `'` doubled.
-fn quote_label(label: &str) -> String {
+/// The one quoter for a label written into a statement, a check body or a
+/// header line.
+pub fn quote_label(label: &str) -> String {
     format!("'{}'", label.replace('\'', "''"))
 }
 
@@ -616,10 +618,10 @@ pub fn render_pg_enum_rename_type(old: &str, new: &str) -> String {
     )
 }
 
-/// The SQLite spelling of a label rename for one column of the type: SQLite
-/// stores enum labels as text in the rows, so the rows carrying `from` are
-/// rewritten to `to`.
-pub fn render_sqlite_label_update(table: &str, column: &str, from: &str, to: &str) -> String {
+/// A label rename for one column that stores the label as text in its rows
+/// (every enum column on SQLite; a `db_type="text"` one on Postgres): the rows
+/// carrying `from` are rewritten to `to`. Plain SQL on every dialect.
+pub fn render_label_update(table: &str, column: &str, from: &str, to: &str) -> String {
     let column = quote_ident(column);
     format!(
         "UPDATE {} SET {column} = {} WHERE {column} = {}",
@@ -627,6 +629,20 @@ pub fn render_sqlite_label_update(table: &str, column: &str, from: &str, to: &st
         quote_label(to),
         quote_label(from),
     )
+}
+
+/// The value a SQLite table rebuild copies into a text-stored enum column
+/// whose labels the same step renames: each `(from, to)` pair relabelled, every
+/// other value as it stands. The rebuild's copy is where the rows meet the
+/// table's new check, so the relabel happens there rather than in an `UPDATE`
+/// the old check would refuse.
+pub fn render_relabel_copy(column: &str, renames: &[(String, String)]) -> String {
+    let column = quote_ident(column);
+    let arms: Vec<String> = renames
+        .iter()
+        .map(|(from, to)| format!("WHEN {} THEN {}", quote_label(from), quote_label(to)))
+        .collect();
+    format!("CASE {column} {} ELSE {column} END", arms.join(" "))
 }
 
 /// How a generated revision brings a native enum type it introduces into
@@ -4710,13 +4726,25 @@ mod tests {
             "ALTER TYPE \"orderstatus\" RENAME TO \"orderstate\""
         );
         assert_eq!(
-            render_sqlite_label_update("order", "status", "canceled", "cancelled"),
+            render_label_update("order", "status", "canceled", "cancelled"),
             "UPDATE \"order\" SET \"status\" = 'cancelled' WHERE \"status\" = 'canceled'"
         );
         assert_eq!(
-            render_sqlite_label_update("o\"rder", "st", "it's", "its"),
+            render_label_update("o\"rder", "st", "it's", "its"),
             "UPDATE \"o\"\"rder\" SET \"st\" = 'its' WHERE \"st\" = 'it''s'"
         );
+        assert_eq!(
+            render_relabel_copy(
+                "status",
+                &[
+                    ("canceled".to_string(), "cancelled".to_string()),
+                    ("o'k".to_string(), "ok".to_string()),
+                ]
+            ),
+            "CASE \"status\" WHEN 'canceled' THEN 'cancelled' WHEN 'o''k' THEN 'ok' \
+             ELSE \"status\" END"
+        );
+        assert_eq!(quote_label("it's"), "'it''s'");
     }
 
     #[test]

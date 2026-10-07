@@ -234,18 +234,15 @@ def test_d3_a_renamed_label_relabels_every_row_both_ways(project, pkg, db):
     assert statements(step_file(project, "01_schema", "down", "postgres")) == [
         "ALTER TYPE \"enmorderstatus\" RENAME VALUE 'cancelled' TO 'canceled'"
     ]
-    # SQLite stores the label in the rows: an UPDATE of every column of the
-    # type, and the reverse UPDATE as the down. The column is text as wide as
-    # its longest label, so `cancelled` also widens it: a rebuild follows the
-    # UPDATEs, and narrows it back on the down.
-    assert statements(step_file(project, "01_schema", "up", "sqlite"))[:2] == [
-        'UPDATE "enmorder" SET "status" = \'cancelled\' WHERE "status" = \'canceled\'',
-        'UPDATE "enmrefund" SET "status" = \'cancelled\' WHERE "status" = \'canceled\'',
-    ]
-    assert statements(step_file(project, "01_schema", "down", "sqlite"))[:2] == [
-        'UPDATE "enmorder" SET "status" = \'canceled\' WHERE "status" = \'cancelled\'',
-        'UPDATE "enmrefund" SET "status" = \'canceled\' WHERE "status" = \'cancelled\'',
-    ]
+    # SQLite stores the label in the rows, in a column as wide as its longest
+    # label: `cancelled` widens both tables, so each is rebuilt and its rows
+    # are relabelled as the rebuild copies them, and back on the down.
+    up = step_file(project, "01_schema", "up", "sqlite").read_text()
+    down = step_file(project, "01_schema", "down", "sqlite").read_text()
+    assert "UPDATE" not in up and "UPDATE" not in down
+    relabel = "CASE \"status\" WHEN '{}' THEN '{}' ELSE \"status\" END"
+    assert up.count(relabel.format("canceled", "cancelled")) == 2
+    assert down.count(relabel.format("cancelled", "canceled")) == 2
 
     round_trip(project, db)
     assert statuses(db) == [(1, "cancelled"), (2, "paid"), (3, "cancelled")]
@@ -263,10 +260,87 @@ def test_d3_a_renamed_label_relabels_every_row_both_ways(project, pkg, db):
 def test_d3_a_hint_whose_old_label_is_still_declared_is_refused_naming_it(project, pkg):
     still = models(("paid", "canceled", "cancelled"), hint='{"cancelled": "canceled"}')
     err = refused(project, pkg, "postgres", models(), still)
-    assert "rename hint refused" in err
-    assert '"enmorderstatus"' in err
-    assert '__ferro_renamed_labels__ {"cancelled": "canceled"}' in err
-    assert 'still declares the label "canceled"' in err
+    assert (
+        'rename hint refused: enum EnmOrderStatus (type "enmorderstatus") declares '
+        '__ferro_renamed_labels__ {"cancelled": "canceled"}, but EnmOrderStatus still '
+        'declares the label "canceled"'
+    ) in err
+
+
+# -- D3 on an enum stored as text ---------------------------------------------------------
+
+
+def text_models(
+    labels: tuple[str, ...] = ("paid", "canceled"),
+    hint: str = "",
+    checked: bool = False,
+) -> str:
+    """``EnmOrder.status`` stored as text, with a ``db_check`` when ``checked``."""
+    members = "".join(f'    {label.upper()} = "{label}"\n' for label in labels)
+    renamed = f"    __ferro_renamed_labels__ = {hint}\n" if hint else ""
+    check = ", db_check=True" if checked else ""
+    return f"""
+class EnmOrderStatus(StrEnum):
+{renamed}{members}
+
+class EnmOrder(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    status: Annotated[EnmOrderStatus, FerroField(db_type="text"{check})]
+"""
+
+
+@backend_matrix
+@pytest.mark.parametrize("checked", [False, True], ids=["plain", "db_check"])
+def test_d3_a_renamed_label_on_a_text_stored_enum_updates_its_rows(
+    project, pkg, db, checked
+):
+    start(project, pkg, db, text_models(checked=checked))
+    db.execute(
+        "INSERT INTO \"enmorder\" (\"status\") VALUES ('canceled'), ('paid'), ('canceled')"
+    )
+    write_models(
+        project,
+        pkg,
+        text_models(("paid", "cancelled"), '{"cancelled": "canceled"}', checked),
+    )
+    new("rename_label")
+
+    assert step_files(project, 2) == files_of("01_schema")
+    pg_up = statements(step_file(project, "01_schema", "up", "postgres"))
+    update = (
+        'UPDATE "enmorder" SET "status" = \'cancelled\' WHERE "status" = \'canceled\''
+    )
+    if checked:
+        # The old check allows only the old label: dropped, rows relabelled,
+        # the new one added (validated) over them.
+        assert pg_up == [
+            'ALTER TABLE "enmorder" DROP CONSTRAINT "ck_enmorder_status"',
+            update,
+            'ALTER TABLE "enmorder" ADD CONSTRAINT "ck_enmorder_status" '
+            "CHECK (\"status\" IN ('paid', 'cancelled'))",
+        ]
+        # SQLite rebuilds the table, relabelling the rows as it copies them.
+        sqlite_up = step_file(project, "01_schema", "up", "sqlite").read_text()
+        assert "UPDATE" not in sqlite_up
+        assert (
+            "CASE \"status\" WHEN 'canceled' THEN 'cancelled' ELSE \"status\" END"
+            in sqlite_up
+        )
+    else:
+        assert pg_up == [update]
+        assert statements(step_file(project, "01_schema", "up", "sqlite")) == [update]
+    for backend in BOTH:
+        text = step_file(project, "01_schema", "up", backend).read_text()
+        assert "-- ferro: data-dependent" in text
+
+    round_trip(project, db)
+    assert statuses(db) == [(1, "cancelled"), (2, "paid"), (3, "cancelled")]
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert statuses(db) == [(1, "canceled"), (2, "paid"), (3, "canceled")]
+    assert run("migrate", "up", "--url", db.url) == 0
+
+    code, out, _ = _new_capturing("again")
+    assert (code, out) == (0, "no schema change: nothing written\n")
 
 
 # -- D4: an enum class renamed ------------------------------------------------------------
@@ -397,7 +471,8 @@ def test_the_hint_rides_every_column_of_its_enum_and_is_absent_when_undeclared(
     new("create")
     write_models(project, pkg, RENAMED)
     new("rename_label")
-    for number, expected in ((1, None), (2, {"cancelled": "canceled"})):
+    declared = {"enum_class": "EnmOrderStatus", "labels": {"cancelled": "canceled"}}
+    for number, expected in ((1, None), (2, declared)):
         columns = [
             column
             for model in snapshot(project, number)["payload"]["models"]
