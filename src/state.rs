@@ -1057,6 +1057,7 @@ mod install_registration_tests {
             enum_type_name: None,
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
+            default_factory: None,
         }
     }
 
@@ -1084,6 +1085,7 @@ mod install_registration_tests {
                     enum_type_name: None,
                     postgres_native_enum: false,
                     enum_renamed_labels: Default::default(),
+                    default_factory: None,
                 },
             ],
             foreign_keys: vec![],
@@ -1202,6 +1204,7 @@ mod model_meta_tests {
             enum_type_name: None,
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
+            default_factory: None,
         }]);
         assert_eq!(meta.pk_col, None);
         assert!(meta.pk_autoincrement);
@@ -1226,6 +1229,7 @@ mod model_meta_tests {
             enum_type_name: None,
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
+            default_factory: None,
         }]);
         assert_eq!(meta.pk_col.as_deref(), Some("id"));
         assert!(meta.pk_autoincrement);
@@ -1250,6 +1254,7 @@ mod model_meta_tests {
             enum_type_name: None,
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
+            default_factory: None,
         }]);
         assert_eq!(meta.pk_col.as_deref(), Some("id"));
         assert!(!meta.pk_autoincrement);
@@ -1275,6 +1280,7 @@ mod model_meta_tests {
                 enum_type_name: None,
                 postgres_native_enum: false,
                 enum_renamed_labels: Default::default(),
+                default_factory: None,
             },
             SchemaColumn {
                 renamed_from: None,
@@ -1293,6 +1299,7 @@ mod model_meta_tests {
                 enum_type_name: None,
                 postgres_native_enum: false,
                 enum_renamed_labels: Default::default(),
+                default_factory: None,
             },
         ]);
         assert_eq!(meta.pk_col.as_deref(), Some("b_id"));

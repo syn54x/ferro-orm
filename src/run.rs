@@ -378,13 +378,13 @@ pub async fn check_rebuild_preconditions(
     }
 }
 
-/// The schema snapshot a step's file starts from: going up, the parent
-/// migration's (`None` before the first migration); going down, the step's
-/// own migration's.
-fn starting_snapshot(
+/// The schema snapshots on either side of a step's migration, the one its
+/// file starts from first: going up, the parent migration's (`None` before
+/// the first migration) then the migration's own; going down, the other way.
+fn adjacent_snapshots(
     step: &PlannedStep,
     down: bool,
-) -> PyResult<Option<IrEnvelope<SchemaIrPayload>>> {
+) -> PyResult<[Option<IrEnvelope<SchemaIrPayload>>; 2]> {
     let shown = format!("{}/{}", step.migration_name, step.file);
     let directory = step
         .path
@@ -398,17 +398,17 @@ fn starting_snapshot(
         })?;
     let dir = MigrationsDir::read(directory)
         .map_err(|err| refused(format!("ferro migrate: {err}. Nothing was applied.")))?;
-    let number = if down {
-        Some(step.migration)
-    } else {
-        step.migration.checked_sub(1).filter(|n| *n > 0)
+    let parent = step.migration.checked_sub(1).filter(|n| *n > 0);
+    let snapshot = |number: Option<u16>| {
+        number.and_then(|number| {
+            dir.migrations
+                .iter()
+                .find(|migration| migration.number == number)
+                .map(|migration| migration.snapshot.ir.clone())
+        })
     };
-    Ok(number.and_then(|number| {
-        dir.migrations
-            .into_iter()
-            .find(|migration| migration.number == number)
-            .map(|migration| migration.snapshot.ir)
-    }))
+    let (own, parent) = (snapshot(Some(step.migration)), snapshot(parent));
+    Ok(if down { [own, parent] } else { [parent, own] })
 }
 
 /// Before a SQLite `foreign-keys-off` step, check every table its file
@@ -437,7 +437,7 @@ pub async fn check_rebuild_step(
         return Ok(());
     }
     let shown = format!("{}/{}", step.migration_name, step.file);
-    let snapshot = starting_snapshot(step, down)?;
+    let [snapshot, other] = adjacent_snapshots(step, down)?;
     let renames = step_table_renames(step, down)?;
     for table in tables {
         // A step that renames a table rebuilds it under its new name, after
@@ -450,9 +450,10 @@ pub async fn check_rebuild_step(
                 _ => None,
             })
             .unwrap_or_else(|| table.clone());
-        let model = snapshot
+        let mut model = snapshot
             .as_ref()
             .and_then(|ir| ir.payload.models.iter().find(|m| m.table_name == starting))
+            .cloned()
             .ok_or_else(|| {
                 refused(format!(
                     "ferro migrate: {shown} rebuilds table {}, which the schema snapshot it \
@@ -460,7 +461,21 @@ pub async fn check_rebuild_step(
                     quote_ident(&table)
                 ))
             })?;
-        check_rebuild_preconditions(engine, &starting, model).await?;
+        // A later step of the migration (a contract after its expand) finds
+        // the table as an earlier step left it: every column either side of
+        // the migration declares is a declared column (ADR-0025), never one
+        // the rebuild discards unannounced.
+        if let Some(other) = other
+            .as_ref()
+            .and_then(|ir| ir.payload.models.iter().find(|m| m.table_name == table))
+        {
+            for col in &other.columns {
+                if !model.columns.iter().any(|known| known.name == col.name) {
+                    model.columns.push(col.clone());
+                }
+            }
+        }
+        check_rebuild_preconditions(engine, &starting, &model).await?;
     }
     Ok(())
 }
@@ -1873,8 +1888,13 @@ pub async fn execute_sql_step(
             let error = match counted {
                 Some(failure) if !down => {
                     let resume_at = format!("{}:{:02}", step.migration_name, step.step);
-                    crate::errors::counted_failure_message(engine, &failure, &error, &resume_at)
-                        .await
+                    // A contract's recipe re-runs its migration's backfill.
+                    let rerun = crate::errors::backfill_rerun_step(&step.path)
+                        .map(|before_backfill| (step.migration, before_backfill));
+                    crate::errors::counted_failure_message(
+                        engine, &failure, &error, &resume_at, rerun,
+                    )
+                    .await
                 }
                 _ => error,
             };

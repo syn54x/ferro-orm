@@ -132,7 +132,10 @@ def _plan_from_ir(
     ...
 
 def _generate_migration(
-    parent_ir_json: str | None, target_ir_json: str, dialects: list[str]
+    parent_ir_json: str | None,
+    target_ir_json: str,
+    dialects: list[str],
+    options_json: str | None = None,
 ) -> str | None:
     """Generate the migration that turns the head snapshot into the declared modelset.
 

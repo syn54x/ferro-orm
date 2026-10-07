@@ -604,13 +604,26 @@ def test_a7b_on_sqlite_is_a_rebuild(project, pkg):
     assert down.startswith(REBUILD + "-- ferro: data-dependent\n")
 
 
-def test_a3_a_required_column_without_a_default_is_refused_until_the_backfill(
+def test_a3_a_required_column_without_a_default_is_expanded_backfilled_and_contracted(
     project, pkg
 ):
-    err = refused(project, pkg, "postgres", AUTHOR, AUTHOR + "    slug: str\n")
-    assert err == (
-        "not generated yet: AddColumn on author needs a backfill (ticket #534)\n"
-    )
+    # The steps, their files and their round trips: tests/test_generate_backfill.py.
+    write_config(project, pkg, '["postgres"]')
+    write_models(project, pkg, AUTHOR)
+    new("create")
+    write_models(project, pkg, AUTHOR + "    slug: str\n")
+    new("edit")
+    migration = next((project / "migrations").glob("0002_*"))
+    assert listing(migration) == [
+        "01_expand.down.postgres.sql",
+        "01_expand.up.postgres.sql",
+        "02_backfill_author.py",
+        "03_add_constraint.down.postgres.sql",
+        "03_add_constraint.up.postgres.sql",
+        "04_contract.down.postgres.sql",
+        "04_contract.up.postgres.sql",
+        "ir.json",
+    ]
 
 
 @pytest.mark.parametrize("dialect", ["postgres", "sqlite"])

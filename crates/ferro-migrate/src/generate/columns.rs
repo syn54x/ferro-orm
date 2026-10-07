@@ -4,7 +4,7 @@
 //! ```text
 //! class Author(Model):              ferro migrate new author_bio
 //!     bio: str | None = None   ──▶  AddColumn  author.bio  → schema, native
-//!     name: str                ──▶  AddColumn  author.name → needs a backfill (ticket #534)
+//!     name: str                ──▶  AddColumn  author.name → expand, backfill, contract
 //!     age: str  # was int      ──▶  AlterColumnType on SQLite → schema, a table rebuild
 //! ```
 //!
@@ -33,15 +33,15 @@ pub enum Phase {
     Labels,
     /// The one atomic DDL step of a migration that needs no data step.
     Schema,
-    /// Columns added nullable ahead of a backfill (ticket #534).
+    /// Columns added nullable ahead of a backfill ([`super::backfill`]).
     Expand,
-    /// A data step filling values existing rows lack (ticket #534).
+    /// A data step filling values existing rows lack.
     Backfill,
     /// One index built or dropped on an existing table (ticket #527).
     Index,
-    /// Postgres staged constraints installed `NOT VALID` (ticket #534).
+    /// Postgres staged `NOT NULL` checks installed `NOT VALID`.
     AddConstraint,
-    /// Validation and `SET NOT NULL` after a backfill (ticket #534).
+    /// Validation and `SET NOT NULL` after a backfill.
     Contract,
     /// Validation of staged constraints with no contract (ticket #527).
     Validate,
@@ -83,7 +83,8 @@ pub enum Needs {
     Native,
     /// A SQLite table rebuild ([`super::rebuild`]), in the same phase step.
     Rebuild,
-    /// Values for existing rows (ticket #534).
+    /// Values for existing rows ([`demands_values`]): the migration's
+    /// expand → backfill → contract.
     Backfill,
     /// Not generated.
     Refused(Refusal),
@@ -173,6 +174,29 @@ fn column<'a>(model: &'a SchemaModel, name: &str) -> Option<&'a SchemaColumn> {
 /// it is `NOT NULL` and declares no default to backfill them with.
 pub fn needs_values(col: &SchemaColumn) -> bool {
     !col.nullable && col.default.as_ref().is_none_or(serde_json::Value::is_null)
+}
+
+/// Whether `op`, in the file `ctx` describes, asks the rows its table already
+/// holds for a value no statement can supply: in an up file, on a table that
+/// exists before and after it, a new non-key column [`needs_values`] (A3,
+/// A2b, C1 required), or a nullable column made `NOT NULL` (A7a). A property
+/// of the models, never of the dialect: such an op is the migration's
+/// expand → backfill → contract ([`super::backfill`]).
+pub fn demands_values(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
+    if ctx.direction != PlanDirection::Up || !ctx.on_existing_table() {
+        return false;
+    }
+    match op {
+        MigrationOp::AddColumn { column, .. } => ctx
+            .column_after(column)
+            .is_some_and(|col| !col.primary_key && needs_values(col)),
+        MigrationOp::AlterColumnNullability { column, .. } => matches!(
+            (ctx.column_before(column), ctx.column_after(column)),
+            (Some(old), Some(new))
+                if old.nullable && !new.nullable && !old.primary_key && !new.primary_key
+        ),
+        _ => false,
+    }
 }
 
 /// Whether `col` is stored as a native Postgres enum type.
@@ -314,7 +338,7 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
             };
             if col.primary_key {
                 primary_key
-            } else if needs_values(col) && ctx.direction == PlanDirection::Up {
+            } else if demands_values(op, ctx) {
                 Needs::Backfill
             } else {
                 // A down putting back a dropped `NOT NULL` column on Postgres:
@@ -347,11 +371,12 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
             let (old, new) = (ctx.column_before(column), ctx.column_after(column));
             if old.is_some_and(|col| col.primary_key) || new.is_some_and(|col| col.primary_key) {
                 primary_key
+            } else if demands_values(op, ctx) {
+                // A7a: values for the NULL rows first, then the contract
+                // (ADR-0042 on Postgres; the contract's rebuild on SQLite).
+                Needs::Backfill
             } else if rebuild {
                 Needs::Rebuild
-            } else if new.is_some_and(|col| !col.nullable) && ctx.direction == PlanDirection::Up {
-                // ADR-0042: NOT NULL on Postgres is staged after a backfill.
-                Needs::Backfill
             } else {
                 Needs::Native
             }
@@ -810,12 +835,13 @@ mod tests {
                 PlanDirection::Down,
                 Needs::Rebuild,
             ),
+            // On SQLite too: the backfill comes first, the contract rebuilds.
             (
                 &optional,
                 &required,
                 Dialect::Sqlite,
                 PlanDirection::Up,
-                Needs::Rebuild,
+                Needs::Backfill,
             ),
         ];
         for (before, after, dialect, direction, expected) in cases {

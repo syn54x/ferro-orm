@@ -28,6 +28,7 @@
 //!                                             ALTER TABLE "author" ALTER COLUMN "bio" SET NOT NULL;
 //! ```
 
+use super::backfill;
 use super::columns::{self, Phase, PlanContext, PlanDirection};
 use super::rebuild;
 use super::renames;
@@ -163,34 +164,23 @@ fn relaxed(
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
 ) -> (IrEnvelope<SchemaIrPayload>, Vec<MigrationOp>) {
-    let mut relaxed = new.clone();
+    let mut loose = Vec::new();
     let mut tighten = Vec::new();
-    if dialect != Dialect::Postgres {
-        return (relaxed, tighten);
-    }
-    for op in ops {
-        let MigrationOp::AddColumn { table, column } = op else {
-            continue;
-        };
-        let Some(col) = relaxed
-            .payload
-            .models
-            .iter_mut()
-            .filter(|model| &model.table_name == table)
-            .flat_map(|model| model.columns.iter_mut())
-            .find(|col| &col.name == column)
-        else {
-            continue;
-        };
-        if columns::needs_values(col) {
-            col.nullable = true;
-            tighten.push(MigrationOp::AlterColumnNullability {
-                table: table.clone(),
-                column: column.clone(),
-            });
+    if dialect == Dialect::Postgres {
+        for op in ops {
+            let MigrationOp::AddColumn { table, column } = op else {
+                continue;
+            };
+            if find_column(new, table, column).is_some_and(columns::needs_values) {
+                loose.push((table.clone(), column.clone()));
+                tighten.push(MigrationOp::AlterColumnNullability {
+                    table: table.clone(),
+                    column: column.clone(),
+                });
+            }
         }
     }
-    (relaxed, tighten)
+    (backfill::relax_columns(new, &loose), tighten)
 }
 
 fn rendered(

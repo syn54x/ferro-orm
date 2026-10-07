@@ -364,23 +364,37 @@ def test_an_edit_that_renders_no_ddl_writes_nothing(project, pkg, capsys, edit):
 # -- refusals -----------------------------------------------------------------------
 
 
-def test_a_column_added_to_an_existing_table_is_refused_naming_its_ticket(
+def test_a_change_new_cannot_generate_yet_is_refused_naming_its_ticket(
     project, pkg, capsys
 ):
     write_config(project, pkg)
     write_models(project, pkg, AUTHOR)
     assert run("migrate", "new", "create_author") == 0
-    write_models(project, pkg, AUTHOR + "    bio: str\n")
+    write_models(project, pkg, AUTHOR.replace("    status: Status", "    status: str"))
     before = listing(project / "migrations")
     capsys.readouterr()
 
-    assert run("migrate", "new", "add_bio") == 1
+    assert run("migrate", "new", "status_text") == 1
 
-    assert (
-        "not generated yet: AddColumn on author needs a backfill (ticket #534)"
-        in capsys.readouterr().err
-    )
+    assert "(ticket #536)" in capsys.readouterr().err
     assert listing(project / "migrations") == before
+
+
+def test_a_backfill_to_write_names_the_command_that_skips_it(project, pkg, capsys):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    assert run("migrate", "new", "create_author") == 0
+    write_models(project, pkg, AUTHOR + "    bio: str\n")
+    capsys.readouterr()
+
+    assert run("migrate", "new", "add_bio") == 0
+
+    out = capsys.readouterr().out
+    assert (
+        "02_backfill_author.py needs writing where it says todo(...); if no author "
+        "needs a value, delete 0002_add_bio/ and run: ferro migrate new add_bio "
+        "--no-backfill author.bio"
+    ) in out, out
 
 
 def test_a_duplicate_number_is_refused_naming_both_directories(project, pkg, capsys):

@@ -86,14 +86,14 @@ def test_an_ungenerated_model_exits_3_naming_it(project, pkg, capsys):
 
 def test_a_change_new_cannot_generate_yet_is_still_ungenerated(project, pkg, capsys):
     _generated(project, pkg)
-    write_models(project, pkg, AUTHOR + "    bio: str\n")
+    write_models(project, pkg, AUTHOR.replace("    status: Status", "    status: str"))
     capsys.readouterr()
 
     assert run("migrate", "check") == 3
 
-    assert "not generated yet: AddColumn on author needs a backfill (ticket #534)" in (
-        capsys.readouterr().err
-    )
+    err = capsys.readouterr().err
+    assert "cannot generate it: not generated yet:" in err, err
+    assert "(ticket #536)" in err, err
 
 
 def test_no_migration_yet_is_an_ungenerated_change(project, pkg, capsys):

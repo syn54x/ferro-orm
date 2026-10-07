@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import json
 import warnings
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +34,7 @@ from .._core import (
     _load_snapshot,
     _store_snapshot,
 )
+from . import backfill_scaffold
 from .errors import MigrationRefused
 from .scaffold import TEMPLATES_DIR, step_name
 from .scaffold import data_step as scaffold_data_step
@@ -40,6 +42,7 @@ from .steps import StepRefused, scan_todos, unwritten
 from .layout import (
     SNAPSHOT_FILE,
     GeneratedMigration,
+    GeneratedStep,
     MigrationsDirectoryError,
     check_name,
     ensure_gitattributes,
@@ -139,6 +142,7 @@ def new(
     sql_step: str | None = None,
     data_step: str | None = None,
     data_only: bool = False,
+    no_backfill: Sequence[str] = (),
 ) -> Path | None:
     """Write the migration that brings ``database``'s migrations up to its models.
 
@@ -151,7 +155,12 @@ def new(
     ``NN_backfill_<model>.py`` whose ``up`` and ``down`` hold
     ``todo("write this step")`` (or the project's ``_templates/data_step.py``);
     with ``data_only`` the migration holds that step alone, whatever the
-    models changed, and a full copy of its parent's snapshot. Rendering warnings (a
+    models changed, and a full copy of its parent's snapshot. A change that
+    asks existing rows for values gets a generated backfill per model
+    (``NN_backfill_<model>.py``, ``todo`` where a value is missing);
+    ``no_backfill`` (``["author.slug"]``) replaces a model's backfill with a
+    generated guard step that fails the migration while any row still needs
+    a value. Rendering warnings (a
     dialect that skips a declaration, such as row security on SQLite) are
     issued as ``UserWarning``.
 
@@ -167,6 +176,7 @@ def new(
         sql_step=sql_step,
         data_step=data_step,
         data_only=data_only,
+        no_backfill=no_backfill,
     )
     if migration is None:
         return None
@@ -190,6 +200,7 @@ def prepare(
     sql_step: str | None = None,
     data_step: str | None = None,
     data_only: bool = False,
+    no_backfill: Sequence[str] = (),
 ) -> GeneratedMigration | None:
     """The migration :func:`new` would write, without writing it; ``None``
     for no schema change. Raises what :func:`new` raises."""
@@ -197,6 +208,11 @@ def prepare(
     check_name(name, "migration name")
     if sql_step is not None:
         check_name(sql_step, "--sql-step name")
+    if data_only and no_backfill:
+        raise MigrationsDirectoryError(
+            "--no-backfill replaces a generated backfill, and --data-only generates none; "
+            "drop one of them"
+        )
     if data_only and (data_step is None or sql_step is not None):
         raise MigrationsDirectoryError(
             "--data-only writes one data step and nothing else; name its model with "
@@ -210,8 +226,13 @@ def prepare(
     if not data_only:
         target = declared_modelset(database)
         try:
+            # The generator decides the guard (ADR-0037): it refuses a
+            # --no-backfill it cannot honour, naming the fix.
             raw = _generate_migration(
-                parent, json.dumps(target), list(database.dialects)
+                parent,
+                json.dumps(target),
+                list(database.dialects),
+                options_json=json.dumps({"no_backfill": list(no_backfill)}),
             )
         except ValueError as err:
             raise MigrationsDirectoryError(str(err)) from None
@@ -228,8 +249,11 @@ def prepare(
             number=number, name=name, steps=(), snapshot_json=_store_snapshot(parent)
         )
     else:
-        migration = GeneratedMigration.from_generated(
-            json.loads(raw), number=number, name=name
+        generated = json.loads(raw)
+        migration = _with_data_steps(
+            GeneratedMigration.from_generated(generated, number=number, name=name),
+            generated,
+            directory / TEMPLATES_DIR,
         )
     if sql_step is not None:
         migration = migration.with_sql_step(sql_step)
@@ -240,6 +264,81 @@ def prepare(
             scaffold_data_step(model, template_dir=directory / TEMPLATES_DIR),
         )
     return migration
+
+
+def _todo(column: str, reason: dict[str, Any], var: str, chunked: bool) -> str | None:
+    """The ``todo`` message for a factory column the backfill cannot pre-fill."""
+    if reason["kind"] != "default_factory":
+        return None
+    factory = reason["factory"]
+    if chunked:
+        return f"call {factory} for an existing {var}"
+    return (
+        f"one {column} for every existing {var} ({factory} was its default_factory; "
+        f"{var} has no single primary key to give each row its own)"
+    )
+
+
+def _with_data_steps(
+    migration: GeneratedMigration,
+    generated: dict[str, Any],
+    template_dir: Path,
+) -> GeneratedMigration:
+    """``migration`` with each generated data step's file written, as the
+    generator decided the step: the backfill scaffold, or (``guard``) the
+    guard. The step's name is the generator's."""
+    by_ordinal = {step["ordinal"]: step for step in generated["steps"]}
+    steps: list[GeneratedStep] = []
+    notes: list[str] = []
+    for step in migration.steps:
+        data = by_ordinal[step.ordinal].get("data")
+        if data is None:
+            steps.append(step)
+            continue
+        model, table = data["model"], data["table"]
+        columns = [column["name"] for column in data["columns"]]
+        name = step.name
+        if data["guard"]:
+            text = backfill_scaffold.guard(model, columns, template_dir=template_dir)
+        else:
+            skip = " ".join(f"--no-backfill {table}.{c}" for c in columns)
+            chunked = data["driver"] == "chunked"
+            prefill: dict[str, str] = {}
+            todos: dict[str, str] = {}
+            for column in data["columns"]:
+                reason = column["reason"]
+                if reason["kind"] == "default_factory" and chunked:
+                    call = backfill_scaffold.prefill_for(reason["factory"])
+                    if call is not None:
+                        prefill[column["name"]] = call
+                        continue
+                message = _todo(column["name"], reason, model.lower(), chunked)
+                if message is not None:
+                    todos[column["name"]] = message
+            text = backfill_scaffold.backfill(
+                model,
+                columns,
+                driver=data["driver"],
+                prefill=prefill,
+                template_dir=template_dir,
+                todos=todos,
+                key=data.get("key"),
+                reverse=data["reverse"],
+                skip=skip,
+            )
+            if len(prefill) < len(columns):
+                notes.append(
+                    f"{step.ordinal:02d}_{name}.py needs writing where it says todo(...); "
+                    f"if no {model.lower()} needs a value, delete {migration.dir_name}/ and "
+                    f"run: ferro migrate new {migration.name} {skip}"
+                )
+        steps.append(
+            GeneratedStep(
+                step.ordinal, name, "data", {f"{step.ordinal:02d}_{name}.py": text}
+            )
+        )
+    summary = "\n".join(line for line in (migration.summary, *notes) if line)
+    return replace(migration, steps=tuple(steps), summary=summary)
 
 
 def _snapshot_model(snapshot_json: str, name: str) -> str:
