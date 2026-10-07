@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .api import check, require_applied, status, up
+from .baseline import BaselineReport, baseline, remove_baseline
 from .drift import DriftReport, drift, render_op
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 
@@ -22,13 +23,16 @@ if TYPE_CHECKING:
     from .alembic import get_metadata, render_item
 
 __all__ = [
+    "BaselineReport",
     "DatabaseAheadError",
     "DriftReport",
     "MigrationRefused",
     "PendingMigrationsError",
+    "baseline",
     "check",
     "drift",
     "get_metadata",
+    "remove_baseline",
     "render_item",
     "render_op",
     "require_applied",

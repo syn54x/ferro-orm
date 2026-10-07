@@ -402,6 +402,75 @@ def drift(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
     return exit_codes.OK if report.clean else exit_codes.NEEDS_ATTENTION
 
 
+@migrate.command
+def baseline(
+    target: Annotated[
+        str | None,
+        Parameter(
+            help=(
+                "The last migration to record: 0006 or 0006_add_teams. Defaults "
+                "to the newest migration."
+            )
+        ),
+    ] = None,
+    *,
+    remove: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help=(
+                "Delete the records a baseline wrote instead (refused while a "
+                "migration a run applied stands above them)."
+            ),
+        ),
+    ] = False,
+    lock_timeout: Annotated[
+        str,
+        Parameter(
+            help=(
+                "How long to wait for another run's lock: 30s, 500ms, 1m, or a "
+                "number of seconds (0 refuses at once)."
+            )
+        ),
+    ] = "30s",
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
+    """Record migrations as applied on a database that already has their schema.
+
+    For a database auto-migrate or Alembic built before the project had
+    migrations: checks it against the target migration's schema snapshot,
+    as drift does, and records every step through the target (data steps
+    included, listed, not run) only when nothing differs. Prints the
+    differences and exits 4 otherwise, recording nothing; there is no flag
+    to record past them. Refused (exit 1) when the database already has
+    migration records.
+    """
+    import asyncio
+
+    from ..migrations.baseline import record, render_removed
+    from ..migrations.baseline import remove as remove_records
+
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    if remove:
+        if target is not None:
+            raise SettingsError(
+                "baseline --remove removes the whole baseline; drop the target"
+            )
+        removed = asyncio.run(
+            remove_records(database, url=glob.url, lock_timeout=lock_timeout)
+        )
+        print(render_removed(removed))
+        return exit_codes.OK
+    report = asyncio.run(
+        record(database, target=target, url=glob.url, lock_timeout=lock_timeout)
+    )
+    for warning in report.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(report.render())
+    return exit_codes.OK if report.drift is None else exit_codes.NEEDS_ATTENTION
+
+
 def _refuse_url(glob: Global, verb: str) -> None:
     if glob.url is not None:
         raise SettingsError(
