@@ -1720,3 +1720,595 @@ mod tests {
         assert!(sqlite.contains("rows_done          INTEGER,"));
     }
 }
+
+// -- baseline (#525) ---------------------------------------------------------------------
+//
+// ```text
+// $ ferro migrate baseline 0002
+// recorded 0001_create_author … 0002_add_teams as baseline (3 steps)
+// ```
+//
+// For that line the runner held the run lock, found no step records, checked
+// the database against `0002_add_teams`'s snapshot (the drift check, in
+// Python) and, the check being empty, wrote the [`plan_baseline`] records in
+// one transaction ([`write_baseline_records`]). `baseline --remove` deletes
+// them again ([`remove_baseline_records`]) while no run has applied anything
+// above them (ADR-0031).
+
+use ferro_migrate::directory::{MigrationsDir, StepDialect, StepKind};
+use ferro_migrate::run_plan::{RunRefusal, exec_mode};
+use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
+
+/// What `ferro migrate baseline` records: one finished record per step of
+/// every migration through the target, and what it tells the operator.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BaselinePlan {
+    /// `NNNN_<name>` of the target: the migration whose snapshot the
+    /// database is checked against.
+    pub target: String,
+    /// The target's schema snapshot.
+    pub snapshot: IrEnvelope<SchemaIrPayload>,
+    /// The records to write, by migration and step: finished, `origin =
+    /// baseline`, `duration_ms = 0`, `started_at = finished_at`.
+    pub records: Vec<StepRecord>,
+    /// `NNNN_<name>` of every migration recorded, in order.
+    pub recorded: Vec<String>,
+    /// `NNNN_<name>/<file>` of every data step recorded without running.
+    pub data_steps: Vec<String>,
+}
+
+fn baseline_directory_label(dir: &MigrationsDir) -> String {
+    dir.path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| dir.path.display().to_string())
+}
+
+/// The baseline of `dir` through `target` (`None`: the head; `"0006"`, `"6"`
+/// or `"0006_add_teams"`) on a `dialect` database whose tracking table holds
+/// `existing`: each record carries the file this dialect runs and its
+/// checksum, exactly as `up` would have recorded it, stamped `now`.
+///
+/// # Errors
+/// The operator's text, ending in what was recorded (nothing): a database
+/// that already has a record (naming `ferro migrate status`); a target the
+/// directory lacks (naming the directory); an empty directory; a step with
+/// no rendering for `dialect`, or headers it cannot honour.
+pub fn plan_baseline(
+    dir: &MigrationsDir,
+    existing: &[StepRecord],
+    dialect: Dialect,
+    target: Option<&str>,
+    now: &str,
+    ferro_version: &str,
+) -> Result<BaselinePlan, String> {
+    const NOTHING: &str = "Nothing was recorded.";
+    if !existing.is_empty() {
+        let names: std::collections::BTreeSet<&str> =
+            existing.iter().map(|r| r.migration_name.as_str()).collect();
+        return Err(format!(
+            "ferro migrate baseline: this database already has migration records ({}); \
+             baseline records migrations only on a database that has none. Run `ferro migrate \
+             status` to see where it stands. {NOTHING}",
+            names.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let label = baseline_directory_label(dir);
+    let Some(head) = dir.migrations.last() else {
+        return Err(format!(
+            "ferro migrate baseline: {label}/ holds no migration to record; generate the first \
+             with `ferro migrate new <name>`. {NOTHING}"
+        ));
+    };
+    let chosen = match target.map(str::trim) {
+        None => head,
+        Some(wanted) => dir
+            .migrations
+            .iter()
+            .find(|m| {
+                m.dir_name() == wanted
+                    || (wanted.chars().all(|c| c.is_ascii_digit())
+                        && wanted.parse::<u16>().ok() == Some(m.number))
+            })
+            .ok_or_else(|| {
+                format!(
+                    "ferro migrate baseline: {wanted} names no migration in {label}/: give a \
+                     migration number from 0001 to {:04}, or a migration's full name ({}). \
+                     {NOTHING}",
+                    head.number,
+                    head.dir_name()
+                )
+            })?,
+    };
+    let mut plan = BaselinePlan {
+        target: chosen.dir_name(),
+        snapshot: chosen.snapshot.ir.clone(),
+        records: Vec::new(),
+        recorded: Vec::new(),
+        data_steps: Vec::new(),
+    };
+    for migration in dir
+        .migrations
+        .iter()
+        .take_while(|m| m.number <= chosen.number)
+    {
+        let snapshot_checksum = encode_checksum(&migration.snapshot.checksum);
+        for step in &migration.steps {
+            // The file this dialect runs: its rendering, else the portable
+            // file (the run planner's choice; `up` refuses a record that
+            // names any other file as an edited applied step).
+            let file = step
+                .files
+                .get(&StepDialect::from(dialect))
+                .or_else(|| step.files.get(&StepDialect::Portable))
+                .ok_or_else(|| {
+                    let missing = RunRefusal::MissingRendering {
+                        migration: migration.number,
+                        step: step.ordinal,
+                        step_name: format!("{:02}_{}", step.ordinal, step.name),
+                        dialect: match dialect {
+                            Dialect::Postgres => "postgres",
+                            Dialect::Sqlite => "sqlite",
+                        },
+                        rendered_for: step.files.keys().filter_map(|d| d.suffix()).collect(),
+                    };
+                    format!("ferro migrate baseline: {missing} {NOTHING}")
+                })?;
+            let name = file
+                .up
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let shown = format!("{}/{name}", migration.dir_name());
+            let kind = if step.kind == StepKind::Data {
+                plan.data_steps.push(shown);
+                RecordKind::Atomic
+            } else {
+                exec_mode(&file.headers, dialect, &shown)
+                    .map_err(|refusal| match refusal {
+                        RunRefusal::BadHeaders { file, reason } => {
+                            format!("ferro migrate baseline: {file}: {reason}. {NOTHING}")
+                        }
+                        other => format!("ferro migrate baseline: {other}"),
+                    })?
+                    .record_kind()
+            };
+            plan.records.push(StepRecord {
+                migration: migration.number,
+                step: step.ordinal,
+                migration_name: migration.dir_name(),
+                file: name,
+                kind,
+                checksum: encode_checksum(&file.up_checksum),
+                snapshot_checksum: snapshot_checksum.clone(),
+                started_at: now.to_string(),
+                finished_at: Some(now.to_string()),
+                failed_at: None,
+                error: None,
+                resume_cursor: None,
+                rows_done: None,
+                duration_ms: 0,
+                ferro_version: ferro_version.to_string(),
+                origin: Origin::Baseline,
+                reverting: false,
+                revert_cursor: None,
+            });
+        }
+        plan.recorded.push(migration.dir_name());
+    }
+    Ok(plan)
+}
+
+/// [`plan_baseline`] stamped with the current time.
+///
+/// # Errors
+/// See [`plan_baseline`].
+pub fn plan_baseline_now(
+    dir: &MigrationsDir,
+    existing: &[StepRecord],
+    dialect: Dialect,
+    target: Option<&str>,
+    ferro_version: &str,
+) -> Result<BaselinePlan, String> {
+    plan_baseline(dir, existing, dialect, target, &now_iso(), ferro_version)
+}
+
+/// Which records `baseline --remove` deletes: every baseline-origin record,
+/// by migration and step — none when there is no baseline.
+///
+/// # Errors
+/// The operator's text when a run-origin record stands above the highest
+/// baselined migration, naming each such migration and the `down` that
+/// reverts it: removing the baseline under them would leave applied
+/// migrations above pending ones.
+pub fn baseline_removal(records: &[StepRecord]) -> Result<Vec<(u16, u8)>, String> {
+    let baselined = || records.iter().filter(|r| r.origin == Origin::Baseline);
+    let Some(floor) = baselined().max_by_key(|r| r.migration) else {
+        return Ok(Vec::new());
+    };
+    let above: std::collections::BTreeSet<&str> = records
+        .iter()
+        .filter(|r| r.origin == Origin::Run && r.migration > floor.migration)
+        .map(|r| r.migration_name.as_str())
+        .collect();
+    if !above.is_empty() {
+        let (verb, pronoun) = if above.len() == 1 {
+            ("was", "it")
+        } else {
+            ("were", "them")
+        };
+        return Err(format!(
+            "ferro migrate baseline --remove: {} {verb} applied by a run above the baseline at \
+             {}. Revert {pronoun} first with `ferro migrate down --to {:04}`, then remove the \
+             baseline. Nothing was removed.",
+            above.into_iter().collect::<Vec<_>>().join(", "),
+            floor.migration_name,
+            floor.migration
+        ));
+    }
+    Ok(baselined().map(|r| (r.migration, r.step)).collect())
+}
+
+/// Write a baseline's records ([`plan_baseline`]) in one transaction,
+/// creating the tracking tables first where they are missing. Called under
+/// the run lock, after the drift check found nothing.
+///
+/// # Errors
+/// A refusal for a record that is not a finished baseline record (nothing is
+/// written); a database error, after which nothing is written either.
+pub async fn write_baseline_records(
+    engine: &EngineHandle,
+    tracking_schema: Option<&str>,
+    records: &[StepRecord],
+) -> PyResult<()> {
+    if let Some(record) = records
+        .iter()
+        .find(|r| r.origin != Origin::Baseline || !r.is_finished() || r.error.is_some())
+    {
+        return Err(refused(format!(
+            "ferro migrate baseline: {} is not a finished baseline record; nothing was \
+             recorded.",
+            record.path()
+        )));
+    }
+    ensure_tracking_tables(engine, tracking_schema).await?;
+    let dialect = engine.backend();
+    let sql = upsert_sql(dialect, &Tracking::new(dialect, tracking_schema));
+    let mut conn = engine
+        .begin_transaction_connection()
+        .await
+        .map_err(|e| db_error("writing the baseline records", e))?;
+    let result: Result<(), sqlx::Error> = async {
+        for record in records {
+            conn.fetch_all_sql_unprepared_with_binds(&sql, &record_binds(record))
+                .await?;
+        }
+        conn.commit().await
+    }
+    .await;
+    if let Err(err) = result {
+        let _ = conn.rollback().await;
+        return Err(db_error("writing the baseline records", err));
+    }
+    Ok(())
+}
+
+/// Delete every baseline-origin record ([`baseline_removal`] decides), in
+/// one statement. Returns the `(migration, step)` of each record removed.
+/// Called under the run lock.
+///
+/// # Errors
+/// The newer-format refusal; the run-origin-above refusal (nothing is
+/// removed); a database error.
+pub async fn remove_baseline_records(
+    engine: &EngineHandle,
+    tracking_schema: Option<&str>,
+) -> PyResult<Vec<(u16, u8)>> {
+    let state = read_records(engine, tracking_schema).await?;
+    if let Some(refusal) = state.refusal {
+        return Err(refused(refusal));
+    }
+    let removed = baseline_removal(&state.records).map_err(refused)?;
+    if removed.is_empty() {
+        return Ok(removed);
+    }
+    let dialect = engine.backend();
+    engine
+        .fetch_all_sql_unprepared_with_binds(
+            &format!(
+                "DELETE FROM {} WHERE origin = {}",
+                Tracking::new(dialect, tracking_schema).table(TRACKING_TABLE),
+                param(dialect, 1)
+            ),
+            &[EngineBindValue::String(
+                Origin::Baseline.as_str().to_string(),
+            )],
+        )
+        .await
+        .map_err(|e| db_error("removing the baseline records", e))?;
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::*;
+    use ferro_migrate::directory::{
+        Headers, Migration, MigrationsDir, Step, StepDialect, StepFile, StepKind,
+    };
+    use ferro_migrate::run_plan::{RunRefusal, StepState, plan_run, run_status};
+    use ferro_migrate::snapshot::Snapshot;
+    use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
+    use std::collections::BTreeMap;
+
+    const NOW: &str = "2026-10-06T09:00:00.000000Z";
+
+    fn ir(tables: &[&str]) -> IrEnvelope<SchemaIrPayload> {
+        IrEnvelope {
+            ir_kind: "schema".into(),
+            ir_version: 1,
+            payload: SchemaIrPayload {
+                dialect_agnostic: true,
+                models: tables
+                    .iter()
+                    .map(|t| SchemaModel {
+                        model_name: t.to_string(),
+                        table_name: t.to_string(),
+                        columns: Vec::new(),
+                        foreign_keys: Vec::new(),
+                        indexes: Vec::new(),
+                        uniques: Vec::new(),
+                        checks: Vec::new(),
+                        table_checks: Vec::new(),
+                        row_security: None,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    fn file(name: &str, body: &str) -> StepFile {
+        StepFile {
+            up: PathBuf::from(format!("/m/{name}")),
+            down: Some(PathBuf::from(format!("/m/{name}.down"))),
+            up_checksum: sha384(body.as_bytes()),
+            headers: Headers::parse(body).unwrap_or_default(),
+            down_checksum: Some(sha384(b"SELECT 1;\n")),
+            down_headers: Headers::default(),
+        }
+    }
+
+    /// A generated step with one rendering per dialect.
+    fn ddl(ordinal: u8, body: &str) -> Step {
+        let mut files = BTreeMap::new();
+        for (dialect, suffix) in [
+            (StepDialect::Postgres, "postgres"),
+            (StepDialect::Sqlite, "sqlite"),
+        ] {
+            let name = format!("{ordinal:02}_schema.up.{suffix}.sql");
+            files.insert(dialect, file(&name, &format!("{body}-- {name}\n")));
+        }
+        Step {
+            ordinal,
+            name: "schema".into(),
+            kind: StepKind::Ddl,
+            files,
+        }
+    }
+
+    /// A hand-placed data step (`NN_backfill.py`).
+    fn data(ordinal: u8) -> Step {
+        let mut py = file(&format!("{ordinal:02}_backfill.py"), "# data\n");
+        py.down = None;
+        py.down_checksum = None;
+        Step {
+            ordinal,
+            name: "backfill".into(),
+            kind: StepKind::Data,
+            files: BTreeMap::from([(StepDialect::Portable, py)]),
+        }
+    }
+
+    fn dir(migrations: Vec<(&str, Vec<Step>, &[&str])>) -> MigrationsDir {
+        let mut out: Vec<Migration> = Vec::new();
+        for (i, (name, steps, tables)) in migrations.into_iter().enumerate() {
+            let parent = out.last().map(|m| m.snapshot.checksum);
+            let bytes = Snapshot::store(&ir(tables), parent).expect("store");
+            out.push(Migration {
+                number: u16::try_from(i + 1).expect("number"),
+                name: name.to_string(),
+                dir: PathBuf::from(format!("/migrations/{:04}_{name}", i + 1)),
+                steps,
+                snapshot: Snapshot::load(&bytes).expect("load"),
+            });
+        }
+        MigrationsDir {
+            path: PathBuf::from("/proj/migrations"),
+            migrations: out,
+        }
+    }
+
+    /// `0001` creates `author` and carries a data step; `0002` and `0003`
+    /// add a table each.
+    fn three() -> MigrationsDir {
+        dir(vec![
+            (
+                "create_author",
+                vec![ddl(1, "CREATE TABLE a (id int);\n"), data(2)],
+                &["author"],
+            ),
+            (
+                "add_teams",
+                vec![ddl(1, "CREATE TABLE t (id int);\n")],
+                &["author", "team"],
+            ),
+            (
+                "add_orgs",
+                vec![ddl(1, "CREATE TABLE o (id int);\n")],
+                &["author", "team", "org"],
+            ),
+        ])
+    }
+
+    fn records(dir: &MigrationsDir, target: &str) -> Vec<StepRecord> {
+        plan_baseline(dir, &[], Dialect::Sqlite, Some(target), NOW, "v")
+            .expect("plan")
+            .records
+    }
+
+    #[test]
+    fn a_baseline_records_every_step_up_to_the_target_as_finished_baseline_rows() {
+        let dir = three();
+        let plan =
+            plan_baseline(&dir, &[], Dialect::Sqlite, Some("0002"), NOW, "0.30.0").expect("plan");
+        assert_eq!(plan.target, "0002_add_teams");
+        assert_eq!(plan.recorded, ["0001_create_author", "0002_add_teams"]);
+        assert_eq!(plan.data_steps, ["0001_create_author/02_backfill.py"]);
+        assert_eq!(plan.snapshot, dir.migrations[1].snapshot.ir);
+        let keys: Vec<(u16, u8)> = plan.records.iter().map(|r| (r.migration, r.step)).collect();
+        assert_eq!(keys, [(1, 1), (1, 2), (2, 1)]);
+        for record in &plan.records {
+            assert_eq!(record.origin, Origin::Baseline);
+            assert_eq!(record.duration_ms, 0);
+            assert_eq!(record.started_at, NOW);
+            assert_eq!(record.finished_at.as_deref(), Some(NOW));
+            assert_eq!(record.ferro_version, "0.30.0");
+            assert_eq!(record.error, None);
+        }
+        assert_eq!(plan.records[0].file, "01_schema.up.sqlite.sql");
+        assert_eq!(plan.records[1].file, "02_backfill.py");
+        // Nothing ran, so a data step's kind steers nothing; a finished
+        // record is never resumed. A DDL step's is its mode's.
+        let kinds: Vec<RecordKind> = plan.records.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            [RecordKind::Ddl, RecordKind::Atomic, RecordKind::Ddl]
+        );
+
+        // What `up` and `status` make of those records: everything through
+        // the target installed (baseline), only 0003 left to apply.
+        let up =
+            plan_run(&dir, &plan.records, Dialect::Sqlite, Direction::Up, false).expect("up plans");
+        let pending: Vec<(u16, u8)> = up.steps.iter().map(|s| (s.migration, s.step)).collect();
+        assert_eq!(pending, [(3, 1)]);
+        let status = run_status(&dir, &plan.records, Dialect::Sqlite, false);
+        let states: Vec<Vec<StepState>> = status
+            .migrations
+            .iter()
+            .map(|m| m.steps.iter().map(|s| s.state).collect())
+            .collect();
+        assert_eq!(
+            states,
+            [
+                vec![StepState::InstalledBaseline, StepState::InstalledBaseline],
+                vec![StepState::InstalledBaseline],
+                vec![StepState::Pending],
+            ]
+        );
+    }
+
+    #[test]
+    fn the_target_defaults_to_the_head_and_reads_a_number_or_a_full_name() {
+        let dir = three();
+        let plan = |target| plan_baseline(&dir, &[], Dialect::Postgres, target, NOW, "v");
+        assert_eq!(plan(None).expect("head").target, "0003_add_orgs");
+        assert_eq!(
+            plan(Some("1")).expect("number").target,
+            "0001_create_author"
+        );
+        assert_eq!(
+            plan(Some("0002_add_teams")).expect("name").recorded,
+            ["0001_create_author", "0002_add_teams"]
+        );
+        assert_eq!(
+            plan(None).expect("head").records[0].file,
+            "01_schema.up.postgres.sql"
+        );
+    }
+
+    #[test]
+    fn a_target_the_directory_lacks_is_refused_naming_the_directory() {
+        let migrations = three();
+        for target in ["0009", "0002_add_tames", "latest"] {
+            let refusal = plan_baseline(&migrations, &[], Dialect::Sqlite, Some(target), NOW, "v")
+                .expect_err("refused");
+            assert_eq!(
+                refusal,
+                format!(
+                    "ferro migrate baseline: {target} names no migration in migrations/: \
+                     give a migration number from 0001 to 0003, or a migration's full name \
+                     (0003_add_orgs). Nothing was recorded."
+                )
+            );
+        }
+        let empty = dir(Vec::new());
+        assert_eq!(
+            plan_baseline(&empty, &[], Dialect::Sqlite, None, NOW, "v").expect_err("empty"),
+            "ferro migrate baseline: migrations/ holds no migration to record; generate the \
+             first with `ferro migrate new <name>`. Nothing was recorded."
+        );
+    }
+
+    #[test]
+    fn a_database_with_any_record_is_refused_naming_status() {
+        let dir = three();
+        let mut existing = records(&dir, "0001");
+        existing[1].origin = Origin::Run;
+        existing[1].finished_at = None;
+        let refusal =
+            plan_baseline(&dir, &existing, Dialect::Sqlite, None, NOW, "v").expect_err("refused");
+        assert_eq!(
+            refusal,
+            "ferro migrate baseline: this database already has migration records \
+             (0001_create_author); baseline records migrations only on a database that has \
+             none. Run `ferro migrate status` to see where it stands. Nothing was recorded."
+        );
+    }
+
+    #[test]
+    fn a_step_without_this_dialects_rendering_is_refused() {
+        let mut step = ddl(1, "CREATE TABLE a (id int);\n");
+        step.files.remove(&StepDialect::Sqlite);
+        let dir = dir(vec![("create_author", vec![step], &["author"])]);
+        let refusal =
+            plan_baseline(&dir, &[], Dialect::Sqlite, None, NOW, "v").expect_err("refused");
+        let missing = RunRefusal::MissingRendering {
+            migration: 1,
+            step: 1,
+            step_name: "01_schema".into(),
+            dialect: "sqlite",
+            rendered_for: vec!["postgres"],
+        };
+        assert_eq!(
+            refusal,
+            format!("ferro migrate baseline: {missing} Nothing was recorded.")
+        );
+    }
+
+    #[test]
+    fn removing_a_baseline_removes_its_records_and_nothing_else() {
+        let dir = three();
+        assert_eq!(
+            baseline_removal(&records(&dir, "0002")),
+            Ok(vec![(1, 1), (1, 2), (2, 1)])
+        );
+        assert_eq!(baseline_removal(&[]), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn removing_a_baseline_under_a_run_applied_above_it_is_refused_naming_it() {
+        let dir = three();
+        let mut standing = records(&dir, "0002");
+        let mut above = records(&dir, "0003").remove(3);
+        above.origin = Origin::Run;
+        standing.push(above);
+        assert_eq!(
+            baseline_removal(&standing),
+            Err(
+                "ferro migrate baseline --remove: 0003_add_orgs was applied by a run above \
+                 the baseline at 0002_add_teams. Revert it first with `ferro migrate down --to \
+                 0002`, then remove the baseline. Nothing was removed."
+                    .to_string()
+            )
+        );
+    }
+}

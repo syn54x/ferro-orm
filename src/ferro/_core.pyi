@@ -627,3 +627,41 @@ def _is_ferro_row_policy_name(name: str) -> bool:
 def _default_connection_name() -> str | None:
     """The default connection's name, or ``None`` when there is none."""
     ...
+
+# --- #525: baseline ---
+
+def _plan_baseline(
+    directory: str,
+    records_json: str,
+    dialect: str,
+    target: str | None = None,
+    ferro_version: str = "",
+) -> str:
+    """Plan ``ferro migrate baseline`` (ADR-0031). ``target`` is ``None``
+    (the head), a number (``"0006"``) or a full name (``"0006_add_teams"``).
+    Returns JSON ``{"target", "snapshot", "records", "recorded",
+    "data_steps"}``: the target's snapshot to check the database against, and
+    one finished ``origin='baseline'`` record per step through the target.
+    Raises ``RunRefused`` when records exist, the target is not in the
+    directory, or a step has no rendering for ``dialect``."""
+    ...
+
+async def _write_baseline_records(
+    using: str | None,
+    records_json: str,
+    tracking_schema: str | None = None,
+    lock: int | None = None,
+) -> None:
+    """Write ``_plan_baseline``'s records in one transaction, creating the
+    tracking tables where missing; verifies the run lock behind ``lock``."""
+    ...
+
+async def _remove_baseline_records(
+    using: str | None,
+    tracking_schema: str | None = None,
+    lock: int | None = None,
+) -> str:
+    """Delete every baseline-origin record; JSON ``[[migration, step], ...]``
+    of those removed. Raises ``RunRefused`` naming a run-origin migration
+    applied above the baseline."""
+    ...
