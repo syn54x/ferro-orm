@@ -47,6 +47,7 @@ from .layout import (
     check_name,
     ensure_gitattributes,
     read_migrations,
+    portable_sql_step,
     write_migration,
 )
 
@@ -151,10 +152,12 @@ def new(
     method edit: ADR-0027) and no ``sql_step`` was asked for. ``sql_step``
     appends a hand-written portable step (``NN_<sql_step>.up.sql`` /
     ``.down.sql``) holding ``-- write this step``. ``data_step`` (a model's
-    class name, ``Author``) appends a Python data step
+    class name, ``Author``) adds a Python data step
     ``NN_backfill_<model>.py`` whose ``up`` and ``down`` hold
-    ``todo("write this step")`` (or the project's ``_templates/data_step.py``);
-    with ``data_only`` the migration holds that step alone, whatever the
+    ``todo("write this step")`` (or the project's ``_templates/data_step.py``),
+    after every generated step but the contract: a column or table the
+    migration drops is dropped by the contract, after the data step, which
+    can still read it (ADR-0025); with ``data_only`` the migration holds that step alone, whatever the
     models changed, and a full copy of its parent's snapshot. A change that
     asks existing rows for values gets a generated backfill per model
     (``NN_backfill_<model>.py``, ``todo`` where a value is missing);
@@ -226,13 +229,21 @@ def prepare(
     if not data_only:
         target = declared_modelset(database)
         try:
-            # The generator decides the guard (ADR-0037): it refuses a
-            # --no-backfill it cannot honour, naming the fix.
+            # The generator decides the guard (ADR-0037), refusing a
+            # --no-backfill it cannot honour, and places the hand steps: a
+            # --data-step before the contract that drops what the step may
+            # read (ADR-0025), a --sql-step right before it.
             raw = _generate_migration(
                 parent,
                 json.dumps(target),
                 list(database.dialects),
-                options_json=json.dumps({"no_backfill": list(no_backfill)}),
+                options_json=json.dumps(
+                    {
+                        "no_backfill": list(no_backfill),
+                        "data_step": data_step,
+                        "sql_step": sql_step,
+                    }
+                ),
             )
         except ValueError as err:
             raise MigrationsDirectoryError(str(err)) from None
@@ -244,24 +255,25 @@ def prepare(
             raise MigrationsDirectoryError(
                 "a hand-written step needs a migration to follow; there is none"
             )
-        # No schema change: a full copy of the parent's snapshot.
+        # No schema change: a full copy of the parent's snapshot, and the hand
+        # steps alone, the SQL step first.
         migration = GeneratedMigration(
             number=number, name=name, steps=(), snapshot_json=_store_snapshot(parent)
         )
+        if sql_step is not None:
+            migration = migration.with_sql_step(sql_step)
+        if data_step is not None:
+            model = _snapshot_model(migration.snapshot_json, data_step)
+            migration = migration.with_data_step(
+                step_name(model),
+                scaffold_data_step(model, template_dir=directory / TEMPLATES_DIR),
+            )
     else:
         generated = json.loads(raw)
         migration = _with_data_steps(
             GeneratedMigration.from_generated(generated, number=number, name=name),
             generated,
             directory / TEMPLATES_DIR,
-        )
-    if sql_step is not None:
-        migration = migration.with_sql_step(sql_step)
-    if data_step is not None:
-        model = _snapshot_model(migration.snapshot_json, data_step)
-        migration = migration.with_data_step(
-            step_name(model),
-            scaffold_data_step(model, template_dir=directory / TEMPLATES_DIR),
         )
     return migration
 
@@ -284,13 +296,30 @@ def _with_data_steps(
     generated: dict[str, Any],
     template_dir: Path,
 ) -> GeneratedMigration:
-    """``migration`` with each generated data step's file written, as the
-    generator decided the step: the backfill scaffold, or (``guard``) the
-    guard. The step's name is the generator's."""
+    """``migration`` with each data step's file written, as the generator
+    decided the step: the backfill scaffold, (``guard``) the guard, or
+    (``hand_model``, ``--data-step``) the data step a person writes. The
+    step's name and place are the generator's."""
     by_ordinal = {step["ordinal"]: step for step in generated["steps"]}
     steps: list[GeneratedStep] = []
     notes: list[str] = []
     for step in migration.steps:
+        if step.kind == "portable_sql":
+            # A --sql-step the generator placed: its placeholder files.
+            steps.append(portable_sql_step(step.ordinal, step.name))
+            continue
+        hand = by_ordinal[step.ordinal].get("hand_model")
+        if hand is not None:
+            text = scaffold_data_step(hand, template_dir=template_dir)
+            steps.append(
+                GeneratedStep(
+                    step.ordinal,
+                    step.name,
+                    "data",
+                    {f"{step.ordinal:02d}_{step.name}.py": text},
+                )
+            )
+            continue
         data = by_ordinal[step.ordinal].get("data")
         if data is None:
             steps.append(step)

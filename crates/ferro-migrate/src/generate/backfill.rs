@@ -23,10 +23,24 @@
 //! check the expand staged `NOT VALID` (no separate validate step). The data
 //! steps carry their scaffold's inputs ([`DataStep`]); the Python side writes
 //! the file.
+//!
+//! A column or table the same migration drops is still there for the data
+//! steps (ADR-0025): every step before the contract sees it
+//! ([`with_drops_kept`]) and the contract drops it.
+//!
+//! ```text
+//! class Author(Model):                 0013_author_slug/
+//!     slug: str   # from name      ──▶   01_expand          ADD COLUMN "slug" varchar   (name stays)
+//!     # name: str   (dropped)            02_backfill_author author.slug = slugify(author.name)
+//!                                        03_add_constraint  …
+//!                                        04_contract        …; DROP COLUMN "name"
+//! ```
 
-use super::columns::{self, PlanContext, PlanDirection};
+use super::columns::{self, Phase, PlanContext, PlanDirection};
 use super::staging::StagedConstraint;
-use super::{GenerateError, GeneratedStep, Rendering, enums, find_model, rebuild, step_text};
+use super::{
+    GenerateError, GeneratedStep, Rendering, downs, enums, find_model, rebuild, staging, step_text,
+};
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::order::order_by_dependencies;
 use crate::plan::enum_declaration;
@@ -372,6 +386,141 @@ pub fn with_removed_labels(
     restored
 }
 
+/// `ir` with every op of `withheld` undone, as `before` declares what it
+/// removes: the schema the data steps run against, where the historical
+/// model's union (ADR-0025) still reads what the migration drops. `withheld`
+/// is exactly what the phase table sends to the contract
+/// ([`columns::waits_for_the_data_steps`]), and nothing else comes back: a
+/// dropped table; a dropped column at its place, with its foreign key (no op
+/// of its own: `DROP COLUMN` takes it); the index, unique or column check a
+/// held-back op drops with it. A removal the phase table leaves in the schema
+/// step (a table check over the column, a foreign key on a column that stays)
+/// stays removed. An enum type comes back with the columns that declare it.
+pub fn with_drops_kept(
+    ir: &IrEnvelope<SchemaIrPayload>,
+    before: &IrEnvelope<SchemaIrPayload>,
+    withheld: &[MigrationOp],
+) -> IrEnvelope<SchemaIrPayload> {
+    let mut kept = ir.clone();
+    // Tables and columns first: an index or check comes back onto them.
+    for op in withheld {
+        match op {
+            MigrationOp::DropTable { table } => {
+                if let (None, Some(old)) = (find_model(&kept, table), find_model(before, table)) {
+                    kept.payload.models.push(old.clone());
+                }
+            }
+            MigrationOp::DropColumn { table, column } => {
+                if let (Some(model), Some(old)) =
+                    (find_model_mut(&mut kept, table), find_model(before, table))
+                {
+                    keep_column(model, old, column);
+                }
+            }
+            _ => {}
+        }
+    }
+    for op in withheld {
+        let (table, name) = match op {
+            MigrationOp::DropIndex { table, name } | MigrationOp::DropCheck { table, name } => {
+                (table, name)
+            }
+            _ => continue,
+        };
+        let (Some(model), Some(old)) =
+            (find_model_mut(&mut kept, table), find_model(before, table))
+        else {
+            continue;
+        };
+        if matches!(op, MigrationOp::DropIndex { .. }) {
+            if !staging::declares_index(model, name) {
+                staging::restore_index(model, old, name);
+            }
+        } else if let Some(check) = old.checks.iter().find(|check| &check.name == name)
+            && !model.checks.iter().any(|c| &c.name == name)
+        {
+            model.checks.push(check.clone());
+        }
+    }
+    kept
+}
+
+fn find_model_mut<'a>(
+    ir: &'a mut IrEnvelope<SchemaIrPayload>,
+    table: &str,
+) -> Option<&'a mut SchemaModel> {
+    ir.payload
+        .models
+        .iter_mut()
+        .find(|model| model.table_name == table)
+}
+
+/// Put `old`'s column `name` back into `model`, after the column `old`
+/// declares before it, with its foreign key; its index and unique flags stay
+/// off until a held-back index drop puts its index back.
+fn keep_column(model: &mut SchemaModel, old: &SchemaModel, name: &str) {
+    let Some(at) = old.columns.iter().position(|col| col.name == name) else {
+        return;
+    };
+    if model.columns.iter().any(|col| col.name == name) {
+        return;
+    }
+    let place = old.columns[..at]
+        .iter()
+        .rev()
+        .find_map(|prev| model.columns.iter().position(|col| col.name == prev.name))
+        .map_or(0, |found| found + 1);
+    let mut col = old.columns[at].clone();
+    col.index = false;
+    col.unique = false;
+    model.columns.insert(place, col);
+    for fk in old.foreign_keys.iter().filter(|fk| fk.column == name) {
+        if !model.foreign_keys.iter().any(|f| f.column == fk.column) {
+            model.foreign_keys.push(fk.clone());
+        }
+    }
+}
+
+/// The data step a person writes over `model_name` (`ferro migrate new
+/// --data-step <Model>`), named `backfill_<model>`: its file is the Python
+/// side's to write ([`GeneratedStep::hand_model`]).
+///
+/// # Errors
+/// [`GenerateError::DataStep`] when `target` declares no model of that class
+/// name, listing those it does.
+pub fn hand_data_step(
+    target: &IrEnvelope<SchemaIrPayload>,
+    model_name: &str,
+) -> Result<GeneratedStep, GenerateError> {
+    let mut names: Vec<&str> = target
+        .payload
+        .models
+        .iter()
+        .map(|model| super::short_model_name(&model.model_name))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    if !names.contains(&model_name) {
+        let listed = if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        };
+        return Err(GenerateError::DataStep(format!(
+            "--data-step {model_name}: this migration's snapshot has no model \
+             '{model_name}'; it has: {listed}"
+        )));
+    }
+    Ok(GeneratedStep {
+        ordinal: 0,
+        name: format!("backfill_{}", model_name.to_lowercase()),
+        kind: StepKind::Data,
+        renderings: BTreeMap::new(),
+        data: None,
+        hand_model: Some(model_name.to_string()),
+    })
+}
+
 /// The prefix of every [`staged_not_null_name`]: what the runner reads a
 /// contract's failed `VALIDATE` off (`src/errors.rs`).
 pub const STAGED_NOT_NULL_PREFIX: &str = "_ferro_notnull_";
@@ -552,6 +701,7 @@ pub fn data_steps(
                     reverse: String::new(),
                     guard,
                 }),
+                hand_model: None,
             }
         })
         .collect())
@@ -672,6 +822,7 @@ pub fn add_constraint_step(demands: &[Demand], dialects: &[Dialect]) -> Option<G
         kind: StepKind::Ddl,
         renderings,
         data: None,
+        hand_model: None,
     })
 }
 
@@ -694,8 +845,10 @@ fn nullability(
     Ok(rendered.into_iter().flat_map(|op| op.statements).collect())
 }
 
-/// The contract step: `relaxed_target` (every demanded column nullable, as
-/// the index steps leave the schema) into `target`.
+/// The contract step: `kept_target` (every demanded column nullable, as the
+/// index steps leave the schema, and every table and column the migration
+/// drops still there, [`with_drops_kept`]) into `target`, through
+/// `relaxed_target` (`kept_target` without them).
 ///
 /// On Postgres (ADR-0042, ADR-0043) it validates each staged `NOT NULL`
 /// check — first, so a row written behind the backfill's cursor fails here
@@ -710,6 +863,15 @@ fn nullability(
 /// target shape, whose copy fails on a row that still holds `NULL`; its down
 /// rebuilds it back.
 ///
+/// Every op [`columns::waits_for_the_data_steps`] withheld (ADR-0025),
+/// `withheld` per dialect in `dialects`' order, drops here, after the data steps, as a migration without one drops it in its
+/// schema step ([`downs::render_step`]): `DROP COLUMN`, `DROP TABLE`, then
+/// the `DROP TYPE` that follows them, before a removed label's type swap (a
+/// column the swap would otherwise have to convert is gone). On SQLite a drop
+/// from a table the step rebuilds anyway folds into that one rebuild. The
+/// down puts each back as the parent declares it, a `NOT NULL` column under
+/// `data-dependent` (ADR-0033).
+///
 /// A removed enum label (D2) is the rest of `relaxed_target` → `target`
 /// ([`label_contract`]): on Postgres the swap-type recipe for a native type
 /// and the pass's own statements for the rest (a text enum's check rebuilt
@@ -723,6 +885,8 @@ fn nullability(
 pub fn contract_step(
     demands: &[Demand],
     staged: &[StagedConstraint],
+    withheld: &[Vec<MigrationOp>],
+    kept_target: &IrEnvelope<SchemaIrPayload>,
     relaxed_target: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
     dialects: &[Dialect],
@@ -734,7 +898,30 @@ pub fn contract_step(
         .collect();
     let demands = demands.as_slice();
     let mut renderings = BTreeMap::new();
-    for &dialect in dialects {
+    for (&dialect, held) in dialects.iter().zip(withheld) {
+        // The drops the phase table held back for the contract, rendered
+        // `kept_target` → `relaxed_target` but the SQLite check drop its
+        // `DROP COLUMN` carries.
+        let withheld: Vec<MigrationOp> = held
+            .iter()
+            .filter(|op| {
+                let ctx =
+                    PlanContext::of(op, kept_target, relaxed_target, dialect, PlanDirection::Up);
+                !columns::carried_by_its_column_drop(op, &ctx)
+            })
+            .cloned()
+            .collect();
+        let drops = |ops: &[MigrationOp]| {
+            downs::render_step(
+                ops,
+                kept_target,
+                relaxed_target,
+                dialect,
+                Phase::Contract,
+                &[],
+                true,
+            )
+        };
         let rendering = match dialect {
             Dialect::Postgres => {
                 let mut up = Vec::new();
@@ -758,8 +945,12 @@ pub fn contract_step(
                     ));
                 }
                 let (labels_up, labels_down) = label_contract(relaxed_target, target)?;
+                let prepared = !up.is_empty() || !labels_up.is_empty();
+                let dropped = drops(&withheld)?;
+                up.extend(dropped.up);
                 up.extend(labels_up);
                 down.extend(labels_down);
+                down.extend(dropped.down);
                 for d in demands {
                     down.push(render_staged_not_null(d));
                 }
@@ -771,10 +962,15 @@ pub fn contract_step(
                     down.extend(c.add.iter().cloned());
                 }
                 let up_headers = Headers {
-                    data_dependent: true,
+                    destructive: dropped.headers.destructive,
+                    data_dependent: prepared || dropped.headers.data_dependent,
                     ..Headers::default()
                 };
-                rendering((up, up_headers), (down, Headers::default()))
+                let down_headers = Headers {
+                    data_dependent: dropped.down_headers.data_dependent,
+                    ..Headers::default()
+                };
+                rendering((up, up_headers), (down, down_headers))
             }
             Dialect::Sqlite => {
                 let mut tables: Vec<String> = Vec::new();
@@ -792,31 +988,52 @@ pub fn contract_step(
                         tables.push(table.to_string());
                     }
                 }
-                let mut up = Vec::new();
-                let mut down = Vec::new();
+                // A drop from a table rebuilt here folds into its rebuild.
+                let (folded, native): (Vec<MigrationOp>, Vec<MigrationOp>) =
+                    withheld.into_iter().partition(|op| {
+                        op.table()
+                            .is_some_and(|table| tables.iter().any(|t| t == table))
+                    });
+                let dropped = drops(&native)?;
+                let mut rebuilt_up = Vec::new();
+                let mut rebuilt_down = Vec::new();
                 for table in &tables {
-                    let side = |ir, which: &str| {
-                        find_model(ir, table).ok_or_else(|| {
-                            GenerateError::Render(format!(
+                    for (ir, side) in [(kept_target, "expanded"), (target, "target")] {
+                        if find_model(ir, table).is_none() {
+                            return Err(GenerateError::Render(format!(
                                 "cannot contract table '{table}': it is missing from the \
-                                 {which} snapshot"
-                            ))
-                        })
-                    };
-                    let (loose, strict) =
-                        (side(relaxed_target, "expanded")?, side(target, "target")?);
-                    up.extend(rebuild::render(table, strict, loose, &[])?);
-                    down.extend(rebuild::render(table, loose, strict, &[])?);
+                                 {side} snapshot"
+                            )));
+                        }
+                    }
+                    rebuilt_up.extend(rebuild::render_table(table, kept_target, target, &[])?);
+                    rebuilt_down.extend(rebuild::render_table(table, target, kept_target, &[])?);
                 }
+                // The rebuild's down copies rows into a column the up dropped:
+                // a `NOT NULL` one fails on a populated table (ADR-0033).
+                let restores_not_null = folded.iter().any(|op| match op {
+                    MigrationOp::DropColumn { table, column } => find_model(kept_target, table)
+                        .and_then(|model| model.columns.iter().find(|col| &col.name == column))
+                        .is_some_and(|col| !col.nullable),
+                    _ => false,
+                });
                 let up_headers = Headers {
-                    foreign_keys_off: true,
-                    data_dependent: true,
+                    foreign_keys_off: !rebuilt_up.is_empty() || dropped.headers.foreign_keys_off,
+                    destructive: dropped.headers.destructive
+                        || (!rebuilt_up.is_empty() && folded.iter().any(downs::drops_data)),
+                    data_dependent: !rebuilt_up.is_empty() || dropped.headers.data_dependent,
                     ..Headers::default()
                 };
                 let down_headers = Headers {
-                    foreign_keys_off: true,
+                    foreign_keys_off: !rebuilt_down.is_empty()
+                        || dropped.down_headers.foreign_keys_off,
+                    data_dependent: restores_not_null || dropped.down_headers.data_dependent,
                     ..Headers::default()
                 };
+                let mut up = dropped.up;
+                up.extend(rebuilt_up);
+                let mut down = rebuilt_down;
+                down.extend(dropped.down);
                 rendering((up, up_headers), (down, down_headers))
             }
         };
@@ -828,6 +1045,7 @@ pub fn contract_step(
         kind: StepKind::Ddl,
         renderings,
         data: None,
+        hand_model: None,
     })
 }
 

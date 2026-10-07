@@ -41,6 +41,7 @@ __all__ = [
     "MigrationsDirectoryError",
     "ensure_gitattributes",
     "next_number",
+    "portable_sql_step",
     "read_migrations",
     "write_migration",
 ]
@@ -82,6 +83,21 @@ class GeneratedStep:
     ``data`` (a Python data step)."""
     files: dict[str, str] = field(default_factory=dict)
     """File name to its exact text."""
+
+
+def portable_sql_step(ordinal: int, name: str) -> GeneratedStep:
+    """The hand-written portable step ``NN_<name>`` (``new --sql-step``) at
+    ``ordinal``: its up and down files holding the placeholder."""
+    stem = f"{ordinal:02d}_{name}"
+    return GeneratedStep(
+        ordinal,
+        name,
+        "portable_sql",
+        {
+            f"{stem}.up.sql": SQL_STEP_PLACEHOLDER,
+            f"{stem}.down.sql": SQL_STEP_PLACEHOLDER,
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -126,21 +142,10 @@ class GeneratedMigration:
 
     def with_sql_step(self, name: str) -> GeneratedMigration:
         """This migration with a hand-written portable step appended."""
-        ordinal = len(self.steps) + 1
-        stem = f"{ordinal:02d}_{name}"
-        step = GeneratedStep(
-            ordinal,
-            name,
-            "portable_sql",
-            {
-                f"{stem}.up.sql": SQL_STEP_PLACEHOLDER,
-                f"{stem}.down.sql": SQL_STEP_PLACEHOLDER,
-            },
-        )
         return GeneratedMigration(
             number=self.number,
             name=self.name,
-            steps=(*self.steps, step),
+            steps=(*self.steps, portable_sql_step(len(self.steps) + 1, name)),
             snapshot_json=self.snapshot_json,
             summary=self.summary,
             warnings=self.warnings,
