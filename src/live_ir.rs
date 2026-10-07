@@ -44,10 +44,7 @@ pub(crate) fn live_tables_to_schema_ir(
 ) -> (IrEnvelope<SchemaIrPayload>, LiveFacts) {
     let mut tables = tables;
     tables.sort_by(|a, b| a.name.cmp(&b.name));
-    let mut facts = LiveFacts {
-        tables: BTreeMap::new(),
-        enum_labels,
-    };
+    let mut facts = LiveFacts::live(BTreeMap::new(), enum_labels);
     let models = tables
         .into_iter()
         .map(|table| {

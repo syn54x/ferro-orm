@@ -290,7 +290,8 @@ fn plan_from_ir_detects_add_drop_and_alter_ops() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(plan.operations.contains(&MigrationOp::AddColumn {
         table: "doc".to_string(),
         column: "status".to_string(),
@@ -329,7 +330,8 @@ fn plan_from_ir_same_storage_datetime_is_not_a_type_change_on_sqlite() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(
         !plan.operations.contains(&MigrationOp::AlterColumnType {
             table: "author".to_string(),
@@ -350,7 +352,8 @@ fn plan_from_ir_add_and_drop_table() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(plan.operations.contains(&MigrationOp::AddTable {
         table: "fresh".to_string(),
     }));
@@ -1213,7 +1216,8 @@ fn plan_from_ir_adds_missing_index() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(plan.operations.contains(&MigrationOp::AddIndex {
         table: "doc".into(), name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false
     }));
@@ -1231,7 +1235,8 @@ fn plan_from_ir_drops_orphaned_index() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(plan.operations.contains(&MigrationOp::DropIndex {
         table: "doc".into(),
         name: "idx_doc_a".into()
@@ -1299,7 +1304,8 @@ fn emit_sql_no_comment_placeholders_on_full_plan() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
         let result = render_flat(&plan, &old_ir, &new_ir, dialect).unwrap();
         assert_no_comment_placeholders(&result.statements);
@@ -1327,7 +1333,8 @@ fn plan_from_ir_composite_all_new_columns_emits_add_index() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(
         plan.operations.contains(&MigrationOp::AddIndex {
             table: "doc".to_string(),
@@ -1731,7 +1738,8 @@ fn plan_from_ir_single_column_new_index_is_skipped() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(
         !plan.operations.contains(&MigrationOp::AddIndex {
             table: "doc".to_string(),
@@ -2480,7 +2488,8 @@ fn plan_from_ir_rebuilds_fk_on_delete_drift() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         plan.operations,
         vec![MigrationOp::RebuildForeignKey {
@@ -2522,7 +2531,8 @@ fn plan_from_ir_fk_noop_when_definition_matches() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(
         plan.operations.is_empty(),
         "unexpected ops: {:?}",
@@ -2554,7 +2564,8 @@ fn plan_from_ir_adds_fk_missing_on_existing_column() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         plan.operations,
         vec![MigrationOp::AddForeignKey {
@@ -2592,7 +2603,8 @@ fn plan_from_ir_fk_on_new_column_rides_add_column() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         plan.operations,
         vec![MigrationOp::AddColumn {
@@ -2631,7 +2643,8 @@ fn plan_from_ir_warns_on_user_owned_fk_drift() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(
         plan.operations.is_empty(),
         "unexpected ops: {:?}",
@@ -2672,7 +2685,8 @@ fn plan_from_ir_unnamed_live_fk_drift_rebuilds_with_canonical_name() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         plan.operations,
         vec![MigrationOp::RebuildForeignKey {
@@ -3296,7 +3310,8 @@ fn whole_modelset_add_creates_types_first_then_parents_before_children() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         plan.operations,
         vec![
@@ -3331,7 +3346,8 @@ fn whole_modelset_add_creates_types_first_then_parents_before_children() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         sqlite.operations,
         vec![
@@ -3355,7 +3371,8 @@ fn whole_modelset_drop_removes_children_before_parents_then_their_types() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         plan.operations,
         vec![
@@ -3376,7 +3393,8 @@ fn whole_modelset_drop_removes_children_before_parents_then_their_types() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         updates_only(),
-    );
+    )
+    .expect("plan");
     assert!(kept.operations.is_empty(), "{:?}", kept.operations);
 }
 
@@ -3392,7 +3410,8 @@ fn label_addition_precedes_every_table_op_including_the_tables_using_the_type() 
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         plan.operations,
         vec![
@@ -3416,11 +3435,21 @@ fn label_addition_precedes_every_table_op_including_the_tables_using_the_type() 
 #[test]
 fn live_labels_come_from_the_facts_and_extras_only_warn() {
     let models = envelope(parent_child_models(&["draft", "archived"]));
-    let mut facts = LiveFacts::declared();
+    let mut facts = LiveFacts::live(Default::default(), Default::default());
     facts
         .enum_labels
         .insert("status".into(), vec!["draft".into(), "legacy".into()]);
-    let plan = plan_from_ir(&models, &models, Dialect::Postgres, &facts, destructive());
+    // The live side as introspection reads it: its enum columns native, and
+    // facts (here empty) for every table it holds.
+    let mut live = models.clone();
+    for model in &mut live.payload.models {
+        facts.tables.entry(model.table_name.clone()).or_default();
+        for col in &mut model.columns {
+            col.postgres_native_enum = col.enum_values.is_some();
+        }
+    }
+    let plan =
+        plan_from_ir(&live, &models, Dialect::Postgres, &facts, destructive()).expect("plan");
     assert_eq!(
         plan.operations,
         vec![MigrationOp::AddEnumLabel {
@@ -3477,7 +3506,8 @@ fn new_tables_create_every_enum_type_first_by_name_then_the_tables() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         PlanOptions::default(),
-    );
+    )
+    .expect("plan");
     let statements = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres)
         .expect("render")
         .statements;
@@ -3538,7 +3568,8 @@ fn identical_snapshots_with_a_unique_column_plan_nothing() {
                 dialect,
                 &LiveFacts::declared(),
                 PlanOptions { destructive },
-            );
+            )
+            .expect("plan");
             assert!(
                 plan.operations.is_empty(),
                 "{dialect:?} destructive={destructive}: {:?}",
@@ -3562,7 +3593,8 @@ fn identical_snapshots_with_checks_policies_and_types_plan_nothing() {
     });
     let both = envelope(vec![model]);
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-        let plan = plan_from_ir(&both, &both, dialect, &LiveFacts::declared(), destructive());
+        let plan = plan_from_ir(&both, &both, dialect, &LiveFacts::declared(), destructive())
+            .expect("plan");
         assert!(plan.is_empty(), "{dialect:?}: {:?}", plan.operations);
         assert!(plan.warnings.is_empty(), "{dialect:?}: {:?}", plan.warnings);
         assert!(
@@ -3605,7 +3637,7 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
     };
     let declared = envelope(vec![model]);
     let facts_with = |definition: &str| {
-        let mut facts = LiveFacts::declared();
+        let mut facts = LiveFacts::live(Default::default(), Default::default());
         facts.tables.insert(
             "cknamed".into(),
             LiveTableFacts {
@@ -3624,7 +3656,8 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
         Dialect::Postgres,
         &facts_with("CHECK (((name)::text <> ''::text))"),
         updates_only(),
-    );
+    )
+    .expect("plan");
     assert!(clean.operations.is_empty(), "{:?}", clean.operations);
 
     let drifted = plan_from_ir(
@@ -3633,7 +3666,8 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
         Dialect::Postgres,
         &facts_with("CHECK (((name)::text <> 'x'::text))"),
         updates_only(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         drifted.operations,
         vec![MigrationOp::RebuildCheck {
@@ -3666,7 +3700,7 @@ fn ledgerrow_with_leftovers() -> (IrEnvelope<SchemaIrPayload>, LiveFacts) {
     let mut live_model = ledgerrow_model_with_row_security(true);
     live_model.row_security = None;
     live_model.columns.push(col("legacy", "text", true));
-    let mut facts = LiveFacts::declared();
+    let mut facts = LiveFacts::live(Default::default(), Default::default());
     facts.tables.insert(
         "ledgerrow".into(),
         LiveTableFacts {
@@ -3694,7 +3728,8 @@ fn updates_only_plans_no_drop_and_keeps_every_leftover_warning() {
     let (live, facts) = ledgerrow_with_leftovers();
     let declared = envelope(vec![ledgerrow_model_with_row_security(true)]);
 
-    let kept = plan_from_ir(&live, &declared, Dialect::Postgres, &facts, updates_only());
+    let kept =
+        plan_from_ir(&live, &declared, Dialect::Postgres, &facts, updates_only()).expect("plan");
     assert!(kept.operations.is_empty(), "{:?}", kept.operations);
     assert!(
         kept.warnings
@@ -3711,7 +3746,8 @@ fn updates_only_plans_no_drop_and_keeps_every_leftover_warning() {
         kept.always_warnings
     );
 
-    let dropped = plan_from_ir(&live, &declared, Dialect::Postgres, &facts, destructive());
+    let dropped =
+        plan_from_ir(&live, &declared, Dialect::Postgres, &facts, destructive()).expect("plan");
     assert_eq!(
         dropped.operations,
         vec![
@@ -3757,7 +3793,7 @@ fn foreign_and_unverifiable_policies_plan_no_op_and_warn_as_the_pass_does() {
             live_policy("rls_ledgerrow_raw", "(ledger_id IS NULL)"),
         ],
     };
-    let mut facts = LiveFacts::declared();
+    let mut facts = LiveFacts::live(Default::default(), Default::default());
     facts.tables.insert(
         "ledgerrow".into(),
         LiveTableFacts {
@@ -3772,7 +3808,8 @@ fn foreign_and_unverifiable_policies_plan_no_op_and_warn_as_the_pass_does() {
         Dialect::Postgres,
         &facts,
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(plan.operations.is_empty(), "{:?}", plan.operations);
     let reconcile = ferro_ddl_lowering::plan_row_security_reconcile(
         &declared_model,
@@ -3819,7 +3856,7 @@ fn row_security_ops_render_byte_identical_to_the_reconcile_decision() {
     live_model.row_security = None;
     let live = envelope(vec![live_model]);
     let declared = envelope(vec![declared_model.clone()]);
-    let mut facts = LiveFacts::declared();
+    let mut facts = LiveFacts::live(Default::default(), Default::default());
     facts.tables.insert(
         "ledgerrow".into(),
         LiveTableFacts {
@@ -3828,7 +3865,8 @@ fn row_security_ops_render_byte_identical_to_the_reconcile_decision() {
         },
     );
     for options in [updates_only(), destructive()] {
-        let plan = plan_from_ir(&live, &declared, Dialect::Postgres, &facts, options);
+        let plan =
+            plan_from_ir(&live, &declared, Dialect::Postgres, &facts, options).expect("plan");
         let rendered = render_plan(&plan, &live, &declared, Dialect::Postgres).unwrap();
         let statements: Vec<String> = rendered.into_iter().flat_map(|op| op.statements).collect();
         let reconcile = ferro_ddl_lowering::plan_row_security_reconcile(
@@ -3870,7 +3908,8 @@ fn render_plan_renders_one_entry_per_op_with_its_own_statements_and_warnings() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     let rendered = render_plan(&plan, &old, &new, Dialect::Sqlite).unwrap();
     assert_eq!(rendered.len(), 1);
     assert_eq!(
@@ -3958,7 +3997,8 @@ fn existing_tables_follow_the_tables_their_foreign_keys_reference() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         tables_in_plan_order(&plan),
         vec!["grandparent", "parent", "child"]
@@ -3982,7 +4022,8 @@ fn a_self_reference_does_not_constrain_existing_table_order() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(
         tables_in_plan_order(&plan),
         vec!["external_child", "znode", "areferrer"],
@@ -4004,7 +4045,8 @@ fn a_foreign_key_cycle_keeps_every_table_in_name_order() {
         Dialect::Sqlite,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert_eq!(tables_in_plan_order(&plan), vec!["alpha", "beta"]);
 }
 
@@ -4036,7 +4078,8 @@ fn plan_from_ir_plans_a_primary_key_moving_between_columns() {
             dialect,
             &LiveFacts::declared(),
             destructive(),
-        );
+        )
+        .expect("plan");
         assert_eq!(plan.operations.first(), Some(&change), "{dialect:?}");
         // The pass warns and skips: no statement, one warning naming the
         // reviewed-migration door.
@@ -4057,7 +4100,8 @@ fn plan_from_ir_plans_a_primary_key_moving_between_columns() {
             dialect,
             &LiveFacts::declared(),
             destructive(),
-        );
+        )
+        .expect("plan");
         assert!(
             unchanged.operations.is_empty(),
             "{:?}",
@@ -4078,7 +4122,8 @@ fn plan_from_ir_plans_a_primary_key_moving_between_columns() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         destructive(),
-    );
+    )
+    .expect("plan");
     assert!(
         !plan
             .operations
@@ -4157,7 +4202,8 @@ fn the_passs_index_statements_are_byte_unchanged_by_the_modes() {
         Dialect::Postgres,
         &LiveFacts::declared(),
         PlanOptions { destructive: true },
-    );
+    )
+    .expect("plan");
     let pg = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(
         pg.statements.contains(
@@ -4265,6 +4311,7 @@ mod renames {
             &LiveFacts::declared(),
             PlanOptions { destructive: true },
         )
+        .expect("plan")
         .operations
     }
 
@@ -4281,7 +4328,8 @@ mod renames {
             Dialect::Postgres,
             &LiveFacts::declared(),
             PlanOptions { destructive: true },
-        );
+        )
+        .expect("plan");
         assert!(
             !plan.operations.iter().any(|op| matches!(
                 op,
@@ -4443,7 +4491,7 @@ mod renames {
     fn live_facts_follow_the_renames_so_the_pass_plans_only_the_renames() {
         // The reconciliation pass's shape: facts read from the live database
         // before the renames run, keyed and named the old way.
-        let mut facts = LiveFacts::declared();
+        let mut facts = LiveFacts::live(Default::default(), Default::default());
         facts.tables.insert(
             "writer".to_string(),
             crate::plan::LiveTableFacts {
@@ -4460,6 +4508,8 @@ mod renames {
         let mut live = parent();
         for model in &mut live.payload.models {
             model.checks.clear();
+            // A live side has facts for every table it holds.
+            facts.tables.entry(model.table_name.clone()).or_default();
         }
         let ops = plan_from_ir(
             &live,
@@ -4468,6 +4518,7 @@ mod renames {
             &facts,
             PlanOptions { destructive: true },
         )
+        .expect("plan")
         .operations;
         assert!(
             ops.contains(&MigrationOp::RenameConstraint {
@@ -4494,7 +4545,7 @@ mod renames {
         // Equal to the declaration under the old names: read as renamed, no
         // rebuild (pinned above). Unequal: kept as read, so the one drift
         // decision rebuilds it now, not on the next run.
-        let mut facts = LiveFacts::declared();
+        let mut facts = LiveFacts::live(Default::default(), Default::default());
         facts.tables.insert(
             "writer".to_string(),
             crate::plan::LiveTableFacts {
@@ -4510,6 +4561,8 @@ mod renames {
         let mut live = parent();
         for model in &mut live.payload.models {
             model.checks.clear();
+            // A live side has facts for every table it holds.
+            facts.tables.entry(model.table_name.clone()).or_default();
         }
         let ops = plan_from_ir(
             &live,
@@ -4518,6 +4571,7 @@ mod renames {
             &facts,
             PlanOptions { destructive: true },
         )
+        .expect("plan")
         .operations;
         let rename = ops
             .iter()
@@ -4683,6 +4737,7 @@ mod enum_renames {
             &LiveFacts::declared(),
             PlanOptions { destructive: true },
         )
+        .expect("plan")
     }
 
     fn columns() -> Vec<(String, String)> {
@@ -4974,4 +5029,195 @@ mod enum_renames {
             ]
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The old side is the caller's word (#531): a snapshot or a live database.
+// ---------------------------------------------------------------------------
+
+/// `ledgerrow` under a policy-less `RowSecurity(force=True)`, and without it.
+fn bare_row_security_pair() -> (IrEnvelope<SchemaIrPayload>, IrEnvelope<SchemaIrPayload>) {
+    let mut bare = ledgerrow_model_with_row_security(true);
+    if let Some(rs) = bare.row_security.as_mut() {
+        rs.policies.clear();
+    }
+    let mut none = bare.clone();
+    none.row_security = None;
+    (envelope(vec![bare]), envelope(vec![none]))
+}
+
+/// `ledgerrow` with one raw select policy reading `owner = '<who>'`.
+fn raw_policy_model(who: &str) -> IrEnvelope<SchemaIrPayload> {
+    let mut model = ledgerrow_model_with_row_security(true);
+    model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+        force: true,
+        policies: vec![ferro_schema_ir::SchemaRowPolicy {
+            name: "rls_ledgerrow_raw".to_string(),
+            command: ferro_schema_ir::RowPolicyCommand::Select,
+            restrictive: false,
+            expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                using: Some(format!("owner = '{who}'")),
+                with_check: None,
+            },
+        }],
+    });
+    envelope(vec![model])
+}
+
+fn ledgerrow_ops(plan: &MigrationPlan) -> Vec<MigrationOp> {
+    plan.operations.clone()
+}
+
+#[test]
+fn the_snapshot_side_tears_down_a_dropped_declaration_and_rebuilds_an_edited_raw_body() {
+    let (bare, none) = bare_row_security_pair();
+    let plan = plan_from_ir(
+        &bare,
+        &none,
+        Dialect::Postgres,
+        &LiveFacts::declared(),
+        destructive(),
+    )
+    .expect("plan");
+    assert_eq!(
+        ledgerrow_ops(&plan),
+        [
+            MigrationOp::NoForceRowSecurity {
+                table: "ledgerrow".into()
+            },
+            MigrationOp::DisableRowSecurity {
+                table: "ledgerrow".into()
+            },
+        ]
+    );
+    assert!(
+        plan.always_warnings.is_empty(),
+        "{:?}",
+        plan.always_warnings
+    );
+    let plan = plan_from_ir(
+        &raw_policy_model("ann"),
+        &raw_policy_model("bob"),
+        Dialect::Postgres,
+        &LiveFacts::declared(),
+        destructive(),
+    )
+    .expect("plan");
+    assert_eq!(
+        ledgerrow_ops(&plan),
+        [MigrationOp::RebuildRowPolicy {
+            table: "ledgerrow".into(),
+            name: "rls_ledgerrow_raw".into(),
+        }]
+    );
+    assert!(
+        plan.always_warnings.is_empty(),
+        "{:?}",
+        plan.always_warnings
+    );
+}
+
+#[test]
+fn the_live_side_keeps_the_pass_posture_for_the_same_two_shapes() {
+    // RLS on with no ferro-named policy: nothing says ferro set it, so the
+    // flags stay (ADR-0019) — the pass, unchanged.
+    let (_, none) = bare_row_security_pair();
+    let live_bare = LiveFacts::live(
+        std::collections::BTreeMap::from([(
+            "ledgerrow".to_string(),
+            crate::plan::LiveTableFacts {
+                row_security: ferro_ddl_lowering::LiveRowSecurity {
+                    enabled: true,
+                    forced: true,
+                    policies: Vec::new(),
+                },
+                ..Default::default()
+            },
+        )]),
+        std::collections::BTreeMap::new(),
+    );
+    // A live IR carries no row security: it is all facts.
+    let live_ir = none.clone();
+    let plan = plan_from_ir(
+        &live_ir,
+        &none,
+        Dialect::Postgres,
+        &live_bare,
+        destructive(),
+    )
+    .expect("plan");
+    assert_eq!(ledgerrow_ops(&plan), []);
+    // A raw body the catalog prints differently is unverifiable: reported,
+    // never rebuilt.
+    let new = raw_policy_model("bob");
+    let live_raw = LiveFacts::live(
+        std::collections::BTreeMap::from([(
+            "ledgerrow".to_string(),
+            crate::plan::LiveTableFacts {
+                row_security: ferro_ddl_lowering::LiveRowSecurity {
+                    enabled: true,
+                    forced: true,
+                    policies: vec![ferro_ddl_lowering::LiveRowPolicy {
+                        name: "rls_ledgerrow_raw".to_string(),
+                        command: ferro_ddl_lowering::row_policy_command_token(
+                            ferro_schema_ir::RowPolicyCommand::Select,
+                        )
+                        .to_string(),
+                        restrictive: false,
+                        using: Some("(owner = 'ann'::text)".to_string()),
+                        with_check: None,
+                        roles: Vec::new(),
+                        ferro_owned: true,
+                    }],
+                },
+                ..Default::default()
+            },
+        )]),
+        std::collections::BTreeMap::new(),
+    );
+    let plan =
+        plan_from_ir(&live_ir, &new, Dialect::Postgres, &live_raw, destructive()).expect("plan");
+    assert_eq!(ledgerrow_ops(&plan), []);
+    assert!(
+        plan.always_warnings
+            .iter()
+            .any(|w| w.contains("no longer matches")),
+        "{:?}",
+        plan.always_warnings
+    );
+}
+
+#[test]
+fn a_live_side_missing_a_tables_facts_is_an_error_naming_it() {
+    let (bare, none) = bare_row_security_pair();
+    let empty = LiveFacts::live(
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    );
+    assert_eq!(
+        plan_from_ir(&bare, &none, Dialect::Postgres, &empty, destructive()),
+        Err(crate::PlanError::MissingLiveFacts {
+            table: "ledgerrow".to_string()
+        })
+    );
+    // Facts read from JSON are always a live database's, even `{}`.
+    let wire: LiveFacts = serde_json::from_str("{}").expect("facts");
+    assert_eq!(wire.side(), crate::OldSide::Live);
+    assert!(plan_from_ir(&bare, &none, Dialect::Postgres, &wire, destructive()).is_err());
+    // The snapshot side reads no fact, even one a caller put there.
+    let mut declared = LiveFacts::declared();
+    declared.tables.insert(
+        "ledgerrow".to_string(),
+        crate::plan::LiveTableFacts::default(),
+    );
+    assert_eq!(
+        plan_from_ir(&bare, &none, Dialect::Postgres, &declared, destructive()),
+        plan_from_ir(
+            &bare,
+            &none,
+            Dialect::Postgres,
+            &LiveFacts::declared(),
+            destructive()
+        )
+    );
 }
