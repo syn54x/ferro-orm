@@ -909,7 +909,7 @@ fn label_contract(
     let (restored, backward): (Vec<_>, Vec<_>) = rest(backward)
         .into_iter()
         .partition(|op| matches!(op, MigrationOp::AddEnumLabel { .. }));
-    let mut down = restored_labels(&restored, relaxed_target, target);
+    let mut down = restored_labels(&restored, relaxed_target, target)?;
     down.extend(rendered(backward, target, relaxed_target)?);
     Ok((up, down))
 }
@@ -920,11 +920,15 @@ fn label_contract(
 /// order — its comparisons and `ORDER BY` — is the parent's again
 /// (ADR-0033). The position is [`positioned_missing_enum_labels`]'s, over
 /// the parent's labels and the labels `target` leaves the type.
+///
+/// # Errors
+/// [`GenerateError::Render`] naming the type when either side declares no
+/// native enum of that name: the down could not place the labels it restores.
 fn restored_labels(
     restored: &[MigrationOp],
     parent: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
-) -> Vec<String> {
+) -> Result<Vec<String>, GenerateError> {
     let mut types: Vec<&str> = Vec::new();
     for op in restored {
         if let MigrationOp::AddEnumLabel { type_name, .. } = op
@@ -941,8 +945,16 @@ fn restored_labels(
                     if t == type_name && l == label)
             })
         };
-        let declared = pg_enum_labels(parent, type_name).unwrap_or_default();
-        let present = pg_enum_labels(target, type_name).unwrap_or_default();
+        let labels_of = |ir, side: &str| {
+            pg_enum_labels(ir, type_name).ok_or_else(|| {
+                GenerateError::Render(format!(
+                    "the contract's down restores labels of enum type '{type_name}', which \
+                     the {side} does not declare as a native Postgres enum: it cannot place them"
+                ))
+            })
+        };
+        let declared = labels_of(parent, "parent")?;
+        let present = labels_of(target, "target")?;
         out.extend(
             positioned_missing_enum_labels(&declared, &present)
                 .into_iter()
@@ -950,7 +962,7 @@ fn restored_labels(
                 .map(|(label, at)| render_pg_enum_add_value_at(type_name, &label, at.as_ref())),
         );
     }
-    out
+    Ok(out)
 }
 
 /// The labels `ir` declares for the native enum type `type_name`.
@@ -988,6 +1000,20 @@ mod tests {
             .iter()
             .map(|(t, c)| (t.to_string(), c.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_restored_label_of_a_type_neither_side_declares_is_an_error_naming_it() {
+        let restored = [MigrationOp::AddEnumLabel {
+            type_name: "status".into(),
+            label: "gone".into(),
+        }];
+        let empty = ir(vec![]);
+        let err = restored_labels(&restored, &empty, &empty).expect_err("refused");
+        assert!(
+            matches!(&err, GenerateError::Render(message) if message.contains("'status'")),
+            "{err:?}"
+        );
     }
 
     #[test]

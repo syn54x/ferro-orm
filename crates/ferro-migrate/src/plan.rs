@@ -2987,9 +2987,6 @@ pub fn reverse_live_plan(
                     format!("the live database holds no labels for enum type {type_name}"),
                 )),
             },
-            MigrationOp::RenameEnumLabel { .. } | MigrationOp::RenameEnumType { .. } => {
-                operations.push(planned(swapped(op)))
-            }
             // Planned only between two snapshots (#536): never in a live plan.
             MigrationOp::RemoveEnumLabel { .. } => {
                 return Err(PlanError::SnapshotOnlyOp {
@@ -3170,12 +3167,15 @@ pub fn reverse_live_plan(
                     table: table.clone(),
                 }))
             }
-            // The renames ran first; they are undone last, below.
+            // The renames ran first; they are undone last, below, from the
+            // one list `is_rename` collects — never here too.
             MigrationOp::RenameTable { .. }
             | MigrationOp::RenameColumn { .. }
             | MigrationOp::RenameIndex { .. }
             | MigrationOp::RenameConstraint { .. }
-            | MigrationOp::RenamePolicy { .. } => {}
+            | MigrationOp::RenamePolicy { .. }
+            | MigrationOp::RenameEnumLabel { .. }
+            | MigrationOp::RenameEnumType { .. } => {}
         }
     }
     operations.extend(renames.iter().rev().map(|op| ReverseOp::Planned(swapped(op))));

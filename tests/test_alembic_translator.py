@@ -1003,3 +1003,78 @@ def test_get_metadata_without_a_configuration_renders_every_registered_model(
 def test_engine_helper_is_the_backend_the_url_names(tmp_path):
     engine = engine_for(f"sqlite:{tmp_path / 'x.db'}?mode=rwc", None)
     assert engine.dialect.name == "sqlite"
+
+
+# ---------------------------------------------------------------------------
+# A declared label rename: the downgrade renames it back once
+# ---------------------------------------------------------------------------
+
+
+def _trl_order(*, renamed: bool) -> None:
+    if renamed:
+
+        class TrlStatus(StrEnum):
+            __ferro_renamed_labels__: ClassVar = {"cancelled": "canceled"}
+            PAID = "paid"
+            CANCELLED = "cancelled"
+
+    else:
+
+        class TrlStatus(StrEnum):
+            PAID = "paid"
+            CANCELED = "canceled"
+
+    class TrlOrder(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        status: TrlStatus
+
+
+async def _trl_labels(db_url: str) -> list[str]:
+    from ferro.raw import fetch_all
+
+    await connect(db_url)
+    try:
+        async with engines.session():
+            rows = await fetch_all(
+                "SELECT e.enumlabel::text AS label FROM pg_enum e "
+                "JOIN pg_type t ON t.oid = e.enumtypid "
+                "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "WHERE t.typname = 'trlstatus' AND n.nspname = current_schema() "
+                "ORDER BY e.enumsortorder"
+            )
+    finally:
+        reset_engine()
+    return [r["label"] for r in rows]
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_label_rename_downgrade_renames_it_back_once(
+    db_url, postgres_base_url, db_schema_name
+):
+    """``__ferro_renamed_labels__ = {"cancelled": "canceled"}`` on a live
+    ``canceled``: the upgrade renames the label, and the downgrade renames it
+    back exactly once (a second ``RENAME VALUE 'cancelled'`` fails, the label
+    being ``canceled`` again), restoring the old label."""
+    _trl_order(renamed=False)
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await execute('INSERT INTO "trlorder" ("status") VALUES (\'canceled\')')
+    _rewind_registry()
+    _trl_order(renamed=True)
+
+    upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert upgrade.count("RENAME VALUE") == 1, upgrade
+    assert_statement_in_code(
+        "ALTER TYPE \"trlstatus\" RENAME VALUE 'canceled' TO 'cancelled'", upgrade
+    )
+    assert downgrade.count("RENAME VALUE") == 1, downgrade
+    assert_statement_in_code(
+        "ALTER TYPE \"trlstatus\" RENAME VALUE 'cancelled' TO 'canceled'", downgrade
+    )
+
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    assert await _trl_labels(db_url) == ["paid", "cancelled"]
+    run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
+    assert await _trl_labels(db_url) == ["paid", "canceled"]

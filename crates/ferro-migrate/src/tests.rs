@@ -5214,6 +5214,63 @@ mod enum_renames {
     }
 
     #[test]
+    fn the_reverse_of_a_live_enum_rename_undoes_each_rename_once() {
+        use crate::plan::{ReverseOp, reverse_live_plan};
+        let mut facts = LiveFacts::live(Default::default(), Default::default());
+        for table in ["enmorder", "enmrefund"] {
+            facts.tables.insert(table.to_string(), Default::default());
+        }
+        facts.enum_labels.insert(
+            "orderstatus".to_string(),
+            vec!["paid".to_string(), "canceled".to_string()],
+        );
+        let mut live = parent();
+        for model in &mut live.payload.models {
+            for col in &mut model.columns {
+                col.postgres_native_enum = col.enum_type_name.is_some();
+            }
+        }
+        let back = |type_name: &str| MigrationOp::RenameEnumLabel {
+            type_name: type_name.to_string(),
+            old: "cancelled".to_string(),
+            new: "canceled".to_string(),
+            columns: columns(),
+        };
+        let type_renamed = both(status(
+            "orderstate",
+            &["paid", "cancelled"],
+            &[("cancelled", "canceled")],
+        ));
+        for (declared, expected) in [
+            (relabelled(), vec![back("orderstatus")]),
+            (
+                type_renamed,
+                // The label back under the new type name, then the type.
+                vec![
+                    back("orderstate"),
+                    MigrationOp::RenameEnumType {
+                        old: "orderstate".to_string(),
+                        new: "orderstatus".to_string(),
+                    },
+                ],
+            ),
+        ] {
+            let forward = plan_from_ir(
+                &live,
+                &declared,
+                Dialect::Postgres,
+                &facts,
+                PlanOptions { destructive: true },
+            )
+            .expect("plan");
+            let reverse = reverse_live_plan(&forward, &live, &facts, &declared, Dialect::Postgres)
+                .expect("reverse");
+            let expected: Vec<ReverseOp> = expected.into_iter().map(ReverseOp::Planned).collect();
+            assert_eq!(reverse.operations, expected);
+        }
+    }
+
+    #[test]
     fn an_added_label_beside_a_renamed_one_is_still_added() {
         let edited = both(status(
             "orderstatus",
