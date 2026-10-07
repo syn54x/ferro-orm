@@ -208,6 +208,16 @@ pub(crate) fn log_lock_timeout_statement(subject: &str, sql: &str) {
     crate::log_debug(format!("{LOCK_TIMEOUT_LOG_PREFIX} '{subject}': {sql}"));
 }
 
+/// Prefix of the debug line logged before each row probe a SQLite label
+/// rename hint costs (`render_label_held_probe`). A line of its own: the
+/// probe reads rows and changes nothing, so the pass's DDL recordings read
+/// exactly what they did before, while the probe's cost stays observable.
+const LABEL_PROBE_LOG_PREFIX: &str = "Ferro Engine: auto-migrate reading rows of";
+
+fn log_label_probe(table: &str, sql: &str) {
+    crate::log_debug(format!("{LABEL_PROBE_LOG_PREFIX} '{table}': {sql}"));
+}
+
 /// Map a column-drop execution failure to a `PyErr` with a consistent,
 /// actionable message, on both dialects.
 fn map_drop_column_error(table_lower: &str, col_name: &str, e: sqlx::Error) -> PyErr {
@@ -645,11 +655,9 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
     };
     let backend = engine.backend();
     if !opts.updates {
-        // Rows a label rename strands are reported on every connect that
-        // reconciles nothing, too: nothing else would tell.
-        for warning in stranded_label_warnings(&engine, &modelset, tables_before_create).await? {
-            crate::emit_user_warning_always(&warning);
-        }
+        // The create pass stays silent about drift (ADR-0011, ADR-0047): a
+        // label rename's stranded rows are `migrate_updates`'s to report, so
+        // a plain connect reads no row for a hint.
         return Ok(());
     }
 
@@ -826,11 +834,16 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
 /// The warnings for the live label renames (`__ferro_renamed_labels__`) on
 /// SQLite, where every enum keeps its labels as text in the rows and the live
 /// side carries none, so the planner sees no label to rename. A hint is live
-/// (ADR-0032) while the database still holds its old label: a row of the
-/// column holds it ([`column_holds_label`]) or the column's `db_check` lists
-/// it. The pass changes the schema, never rows (ADR-0014), so a live hint is
-/// one warning naming `ferro migrate new`, whose migration relabels the rows;
-/// an inert one is silent. A refused hint is the planner's to report.
+/// (ADR-0032) while the database still holds its old label. A column with a
+/// `db_check` answers from the check alone, since it bounds every row: it
+/// lists the old label (live) or does not (inert), and no row is read. Only
+/// a column with no check is probed ([`column_holds_label`], logged with
+/// [`LABEL_PROBE_LOG_PREFIX`]). Called under `migrate_updates` only: the
+/// probe reads the whole column once nothing matches, which a plain connect
+/// must never pay for a hint that may stay (ADR-0047, ADR-0011, ADR-0032).
+/// The pass changes the schema, never rows (ADR-0014), so a live hint is one
+/// warning naming `ferro migrate new`, whose migration relabels the rows; an
+/// inert one is silent. A refused hint is the planner's to report.
 ///
 /// `existing` are the tables that stood before this connect's create pass, as
 /// they stand now; a declared column they lack (its rename still pending) is
@@ -869,8 +882,18 @@ async fn stranded_label_warnings(
             let check_name = db_check_constraint_name(table, &col.name);
             let check = checks.iter().find(|check| check.name == check_name);
             for (new, old) in &renamed.labels {
-                let held = check.is_some_and(|check| check_lists_label(&check.definition, old))
-                    || column_holds_label(engine, table, &col.name, old).await?;
+                // The check bounds every row, so it answers alone: no row is
+                // read for a checked column.
+                let held = match check {
+                    Some(check) => check_lists_label(&check.definition, old),
+                    None => {
+                        log_label_probe(
+                            table,
+                            &ferro_ddl_lowering::render_label_held_probe(table, &col.name, old),
+                        );
+                        column_holds_label(engine, table, &col.name, old).await?
+                    }
+                };
                 if held {
                     warnings.push(stranded_label_rename_warning(table, &col.name, old, new));
                 }
