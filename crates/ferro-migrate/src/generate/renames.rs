@@ -15,7 +15,7 @@
 //! ```
 //!
 //! The planner decides the renames ([`crate::plan::live_hints`],
-//! [`crate::plan::plan_from_ir_renaming`]); this module is the generator's
+//! [`crate::plan_from_ir`], which applies them); this module is the generator's
 //! side of them: the two refusals as a [`GenerateError`], which renames run
 //! natively before everything else in their step (a table's and a column's —
 //! the rest of the step, a SQLite rebuild included, reads the table under its

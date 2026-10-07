@@ -4112,7 +4112,7 @@ fn the_passs_index_statements_are_byte_unchanged_by_the_modes() {
 
 mod renames {
     use super::*;
-    use crate::plan::{Hint, HintError, live_hints, plan_from_ir_renaming};
+    use crate::plan::{Hint, HintError, live_hints};
 
     fn fk(column: &str, table: &str, to_table: &str) -> SchemaForeignKey {
         SchemaForeignKey {
@@ -4192,16 +4192,64 @@ mod renames {
         new: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
     ) -> Vec<MigrationOp> {
-        let hints = live_hints(&old.payload, &new.payload).expect("no refusal");
-        plan_from_ir_renaming(
+        plan_from_ir(
             old,
             new,
-            &hints,
             dialect,
             &LiveFacts::declared(),
             PlanOptions { destructive: true },
         )
         .operations
+    }
+
+    #[test]
+    fn a_refused_hint_renames_nothing_and_stands_as_a_warning_naming_both() {
+        let mut twice = target();
+        twice.payload.models[0].columns.push(SchemaColumn {
+            renamed_from: Some("name".to_string()),
+            ..col("display_name", "text", true)
+        });
+        let plan = plan_from_ir(
+            &parent(),
+            &twice,
+            Dialect::Postgres,
+            &LiveFacts::declared(),
+            PlanOptions { destructive: true },
+        );
+        assert!(
+            !plan.operations.iter().any(|op| matches!(
+                op,
+                MigrationOp::RenameTable { .. } | MigrationOp::RenameColumn { .. }
+            )),
+            "{:?}",
+            plan.operations
+        );
+        let warning = plan
+            .always_warnings
+            .iter()
+            .find(|w| w.starts_with("rename hint refused"))
+            .expect("the refusal stands");
+        assert!(warning.contains("author.full_name") && warning.contains("author.display_name"));
+    }
+
+    #[test]
+    fn a_plan_without_hints_is_unchanged_by_the_hint_pass() {
+        // The reconciliation pass's shape: a live `old` and a modelset that
+        // declares no hint plan exactly as before (#528).
+        let mut no_hints = target();
+        no_hints.payload.models[0].renamed_from = None;
+        no_hints.payload.models[0].columns[1].renamed_from = None;
+        let ops = plan(&parent(), &no_hints, Dialect::Postgres);
+        assert!(ops.contains(&MigrationOp::AddTable {
+            table: "author".to_string()
+        }));
+        assert!(ops.contains(&MigrationOp::DropTable {
+            table: "writer".to_string()
+        }));
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, MigrationOp::RenameTable { .. }))
+        );
     }
 
     #[test]

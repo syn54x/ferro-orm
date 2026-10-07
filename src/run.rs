@@ -25,6 +25,7 @@ use crate::backend::{
 use crate::ddl_exec::{Attempt, DdlError, DdlExecutor, StatementError, pool_connection};
 use ferro_ddl_lowering::Dialect;
 use ferro_migrate::generate::rebuild::rebuilt_tables;
+use ferro_migrate::plan::{Hint, live_hints, reverse_hints};
 use ferro_migrate::run_plan::{
     Direction, ExecMode, Origin, PlannedStep, RecordKind, StepRecord, TRACKING_FORMAT,
     check_format, run_lock_key, split_statements,
@@ -437,10 +438,21 @@ pub async fn check_rebuild_step(
     }
     let shown = format!("{}/{}", step.migration_name, step.file);
     let snapshot = starting_snapshot(step, down)?;
+    let renames = step_table_renames(step, down)?;
     for table in tables {
+        // A step that renames a table rebuilds it under its new name, after
+        // the rename (ADR-0032, ADR-0046); before the step runs it still has
+        // its starting name.
+        let starting = renames
+            .iter()
+            .find_map(|hint| match hint {
+                Hint::Table { old, new } if *new == table => Some(old.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| table.clone());
         let model = snapshot
             .as_ref()
-            .and_then(|ir| ir.payload.models.iter().find(|m| m.table_name == table))
+            .and_then(|ir| ir.payload.models.iter().find(|m| m.table_name == starting))
             .ok_or_else(|| {
                 refused(format!(
                     "ferro migrate: {shown} rebuilds table {}, which the schema snapshot it \
@@ -448,9 +460,56 @@ pub async fn check_rebuild_step(
                     quote_ident(&table)
                 ))
             })?;
-        check_rebuild_preconditions(engine, &table, model).await?;
+        check_rebuild_preconditions(engine, &starting, model).await?;
     }
     Ok(())
+}
+
+/// The table renames a step's migration makes, in the direction the file
+/// runs: the live rename hints of its snapshot against its parent's
+/// ([`live_hints`], the generator's own decision), reversed going down.
+///
+/// # Errors
+/// `RunRefused` when the migrations directory cannot be read, or when its
+/// snapshot carries a hint the generator refuses (a hand-edited `ir.json`).
+fn step_table_renames(step: &PlannedStep, down: bool) -> PyResult<Vec<Hint>> {
+    let shown = format!("{}/{}", step.migration_name, step.file);
+    let directory = step
+        .path
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| {
+            refused(format!(
+                "ferro migrate: cannot find the migrations directory of {shown}. Nothing was \
+                 applied."
+            ))
+        })?;
+    let dir = MigrationsDir::read(directory)
+        .map_err(|err| refused(format!("ferro migrate: {err}. Nothing was applied.")))?;
+    let snapshot_of = |number: u16| {
+        dir.migrations
+            .iter()
+            .find(|migration| migration.number == number)
+            .map(|migration| migration.snapshot.ir.payload.clone())
+    };
+    let Some(own) = snapshot_of(step.migration) else {
+        return Ok(Vec::new());
+    };
+    let parent = step
+        .migration
+        .checked_sub(1)
+        .and_then(snapshot_of)
+        .unwrap_or(SchemaIrPayload {
+            dialect_agnostic: own.dialect_agnostic,
+            models: Vec::new(),
+        });
+    let hints = live_hints(&parent, &own).map_err(|err| {
+        refused(format!(
+            "ferro migrate: {shown}: its schema snapshot carries a rename hint ferro refuses: \
+             {err}. Nothing was applied."
+        ))
+    })?;
+    Ok(if down { reverse_hints(&hints) } else { hints })
 }
 
 // -- the run lock --------------------------------------------------------------------

@@ -243,7 +243,48 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 ///    column drops.
 /// 4. (Destructive) dropped tables, children before parents, then the enum
 ///    types nothing declares any more.
+///
+/// Ahead of all of it, the renames `new`'s live rename hints declare
+/// ([`live_hints`], ADR-0032): table renames, column renames, then every
+/// derived index, constraint and (Postgres) policy name, the renamed tables'
+/// before the tables that reference them. Everything after is planned from
+/// `old` as the renames leave it, so a rename and a type change on one column
+/// are the rename, then the type change. A live IR declares no hint, so the
+/// plan from a declared `old` that already holds the new names, and every
+/// plan over a modelset without hints, is unchanged by them. A refused hint
+/// ([`HintError`]) applies no rename and stands in
+/// [`MigrationPlan::always_warnings`] naming both sides; the generator
+/// refuses it before writing anything.
 pub fn plan_from_ir(
+    old: &IrEnvelope<SchemaIrPayload>,
+    new: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+    facts: &LiveFacts,
+    options: PlanOptions,
+) -> MigrationPlan {
+    let hints = match live_hints(&old.payload, &new.payload) {
+        Ok(hints) => hints,
+        Err(refusal) => {
+            let mut plan = plan_named(old, new, dialect, facts, options);
+            plan.always_warnings
+                .push(format!("rename hint refused: {refusal}"));
+            return plan;
+        }
+    };
+    if hints.is_empty() {
+        return plan_named(old, new, dialect, facts, options);
+    }
+    let renamed = renamed_snapshot(old, &hints);
+    let mut plan = plan_named(&renamed, new, dialect, facts, options);
+    let mut operations = rename_ops(old, &renamed, dialect);
+    operations.append(&mut plan.operations);
+    plan.operations = operations;
+    plan
+}
+
+/// Every change [`plan_from_ir`] plans once the tables and columns of `old`
+/// and `new` are matched by name.
+fn plan_named(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
@@ -1438,36 +1479,6 @@ pub(crate) fn rename_ops(
         .into_iter()
         .flatten()
         .collect()
-}
-
-/// [`plan_from_ir`] with the live rename `hints` applied (ADR-0032): the rename
-/// ops ([`MigrationOp::RenameTable`], [`MigrationOp::RenameColumn`] and every
-/// derived [`MigrationOp::RenameIndex`] / [`MigrationOp::RenameConstraint`] /
-/// [`MigrationOp::RenamePolicy`]) first, then every other change planned from
-/// `old` as the renames leave it — so a rename and a type change on one
-/// column are a rename, then the type change.
-///
-/// The generator's door: `hints` come from [`live_hints`] against the
-/// previous snapshot. The reconciliation pass and the drift check plan with
-/// [`plan_from_ir`] (no hints): a rename is a migration's, decided by the
-/// snapshot it was generated against, never by a live database.
-pub fn plan_from_ir_renaming(
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
-    hints: &[Hint],
-    dialect: Dialect,
-    facts: &LiveFacts,
-    options: PlanOptions,
-) -> MigrationPlan {
-    if hints.is_empty() {
-        return plan_from_ir(old, new, dialect, facts, options);
-    }
-    let renamed = renamed_snapshot(old, hints);
-    let mut plan = plan_from_ir(&renamed, new, dialect, facts, options);
-    let mut operations = rename_ops(old, &renamed, dialect);
-    operations.append(&mut plan.operations);
-    plan.operations = operations;
-    plan
 }
 
 pub(crate) fn index_models(models: &[SchemaModel]) -> BTreeMap<String, &SchemaModel> {

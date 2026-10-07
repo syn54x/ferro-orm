@@ -472,6 +472,8 @@ def test_every_planner_op_kind_has_its_own_line():
             "unique": False,
             "from": ["id"],
             "to": ["name"],
+            "old": "ck_team_size",
+            "new": "ck_team_size_ok",
         }
         line = render_op(op)
         assert line and not line.startswith(f"{kind} on "), kind

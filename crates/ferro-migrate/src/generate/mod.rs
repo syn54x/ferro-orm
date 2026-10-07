@@ -33,7 +33,7 @@ pub mod renames;
 pub mod staging;
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
-use crate::plan::{HintError, rename_ops, renamed_snapshot};
+use crate::plan::{HintError, renamed_snapshot};
 use crate::snapshot::{Snapshot, SnapshotError};
 use crate::{
     Dialect, EmissionError, LiveFacts, MigrationOp, MigrationPlan, PlanOptions, RenderedOp,
@@ -521,8 +521,9 @@ pub fn generate(
     }
     let empty = empty_modelset(target);
     let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
-    // Declared renames (ADR-0032) run first in the schema step; every other
-    // change is planned from `before`, the parent as the renames leave it.
+    // Declared renames (ADR-0032): the planner puts them first; every other
+    // op reads its table from `before`, the parent as the renames leave it.
+    // A refused hint stops `new` here, before anything is written.
     let hints = renames::live(parent_ir, target)?;
     let renamed_parent = renamed_snapshot(parent_ir, &hints);
     let before = &renamed_parent;
@@ -530,7 +531,7 @@ pub fn generate(
     let mut changes = Vec::new();
     let mut suggestions = Vec::new();
     for &dialect in dialects {
-        let change = plan(before, target, dialect);
+        let change = plan(parent_ir, target, dialect);
         refuse_unsupported(
             &change,
             &plan(target, target, dialect),
@@ -552,9 +553,7 @@ pub fn generate(
                 suggestions.push(line);
             }
         }
-        let mut operations = rename_ops(parent_ir, before, dialect);
-        operations.extend(change.operations);
-        changes.push(operations);
+        changes.push(change.operations);
     }
 
     // The index steps come after every other step but the validate step,
@@ -565,16 +564,14 @@ pub fn generate(
     let mut ups = Vec::new();
     let mut downs = Vec::new();
     for &dialect in dialects {
-        let up = plan(before, &shape, dialect);
-        let mut operations = rename_ops(parent_ir, before, dialect);
-        operations.extend(rendered_ops(
+        let up = plan(parent_ir, &shape, dialect);
+        ups.push(rendered_ops(
             &up,
             before,
             &shape,
             dialect,
             PlanDirection::Up,
         ));
-        ups.push(operations);
         downs.push(plan(&shape, before, dialect));
     }
     if ups.iter().all(Vec::is_empty)

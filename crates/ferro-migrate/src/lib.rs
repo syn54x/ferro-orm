@@ -31,8 +31,7 @@ pub use generate::{CheckReport, GenerateError, GeneratedMigration, check_migrati
 pub use order::order_by_dependencies;
 pub use plan::{
     Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, live_hints, plan_check_drops,
-    plan_check_rebuilds, plan_from_ir, plan_from_ir_renaming, plan_index_rebuilds,
-    plan_missing_checks, plan_validations,
+    plan_check_rebuilds, plan_from_ir, plan_index_rebuilds, plan_missing_checks, plan_validations,
 };
 pub use render::{RenderedOp, render_plan, validate_schema_ir};
 pub use run_plan::{
@@ -109,7 +108,7 @@ pub enum MigrationOp {
     },
     /// A live rename hint renamed a table (ADR-0032) — `ALTER TABLE … RENAME
     /// TO`, native on both dialects. Planned only from declared hints
-    /// ([`plan::plan_from_ir_renaming`]), never inferred.
+    /// ([`plan::live_hints`], applied by [`plan_from_ir`]), never inferred.
     RenameTable {
         /// The table's name in the old snapshot.
         old: String,
