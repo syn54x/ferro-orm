@@ -976,6 +976,62 @@ pub fn _plan_reverse_from_ir(
     Ok(out.to_string())
 }
 
+/// One rendered op as plan JSON: the op, its `statements` and `warnings`,
+/// and an `AddTable`'s `row_security_statements`.
+fn rendered_op_json(rendered: RenderedOp) -> PyResult<serde_json::Value> {
+    let mut op = serde_json::to_value(&rendered.op).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
+    })?;
+    if let Some(fields) = op.as_object_mut() {
+        fields.insert("statements".into(), rendered.statements.into());
+        fields.insert("warnings".into(), rendered.warnings.into());
+        if matches!(rendered.op, MigrationOp::AddTable { .. }) {
+            fields.insert(
+                "row_security_statements".into(),
+                rendered.row_security_statements.into(),
+            );
+        }
+    }
+    Ok(op)
+}
+
+/// Render the planner ops `operations_json` (a plan's `operations`, extra
+/// keys ignored) as one plan from `old_ir_json` to `new_ir_json` on
+/// `dialect`, in the given order: `_plan_from_ir(..., render=True)` for a
+/// chosen subset of a plan. The Alembic bridge renders every op of its plan
+/// but those that demand values of existing rows, which the pass has no
+/// statement for and the revision writes as the plain Alembic op under
+/// `# ferro: data-dependent` (ADR-0041).
+///
+/// # Errors
+/// `ValueError` when a JSON argument is malformed, an envelope is not a
+/// `schema` IR, the dialect is unknown, or an op cannot render.
+#[pyfunction]
+#[pyo3(name = "_render_plan_ops")]
+pub fn _render_plan_ops(
+    old_ir_json: String,
+    new_ir_json: String,
+    dialect: String,
+    operations_json: String,
+) -> PyResult<String> {
+    let backend = parse_dialect(&dialect)?;
+    let old = parse_schema_envelope(&old_ir_json, "old_ir_json")?;
+    let new = parse_schema_envelope(&new_ir_json, "new_ir_json")?;
+    let operations: Vec<MigrationOp> = serde_json::from_str(&operations_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid operations_json: {e}"))
+    })?;
+    let plan = ferro_migrate::MigrationPlan {
+        operations,
+        ..Default::default()
+    };
+    let rendered: Vec<serde_json::Value> = render_plan(&plan, &old, &new, backend)
+        .map_err(emission_error)?
+        .into_iter()
+        .map(rendered_op_json)
+        .collect::<PyResult<_>>()?;
+    Ok(serde_json::Value::Array(rendered).to_string())
+}
+
 fn parse_schema_envelope(json: &str, what: &str) -> PyResult<IrEnvelope<SchemaIrPayload>> {
     let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_str(json)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid {what}: {e}")))?;
@@ -1039,20 +1095,7 @@ pub fn _plan_from_ir(
         render_plan(&plan, &old, &new, backend)
             .map_err(emission_error)?
             .into_iter()
-            .map(|rendered| {
-                let mut op = to_value(serde_json::to_value(&rendered.op))?;
-                if let Some(fields) = op.as_object_mut() {
-                    fields.insert("statements".into(), rendered.statements.into());
-                    fields.insert("warnings".into(), rendered.warnings.into());
-                    if matches!(rendered.op, MigrationOp::AddTable { .. }) {
-                        fields.insert(
-                            "row_security_statements".into(),
-                            rendered.row_security_statements.into(),
-                        );
-                    }
-                }
-                Ok(op)
-            })
+            .map(rendered_op_json)
             .collect::<PyResult<_>>()?
     } else {
         plan.operations

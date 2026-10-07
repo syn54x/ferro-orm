@@ -192,6 +192,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(migrate::_plan_from_ir, m)?)?;
     m.add_function(wrap_pyfunction!(migrate::_plan_reverse_from_ir, m)?)?;
+    m.add_function(wrap_pyfunction!(migrate::_render_plan_ops, m)?)?;
     m.add_function(wrap_pyfunction!(live_ir::_live_schema_ir, m)?)?;
     migrations_ffi::register(m)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_index_name, m)?)?;

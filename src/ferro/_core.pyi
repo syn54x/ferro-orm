@@ -108,6 +108,24 @@ def _render_migration_sql_for_test(
     """
     ...
 
+def _plan_reverse_from_ir(
+    live_json: str,
+    declared_json: str,
+    dialect: str,
+    options_json: str,
+    facts_json: str,
+    render: bool = True,
+) -> str:
+    """The reverse of the live-origin plan (``_plan_from_ir(live_json,
+    declared_json, ..., facts_json)``): what turns the database it leaves
+    back into the live one (ADR-0041). Same JSON shape as ``_plan_from_ir``
+    plus ``before`` (the live envelope under the forward plan's renames); a
+    step nothing undoes carries ``irreversible: {"reason": ...}``, a check or
+    policy put back from the catalog is a ``RestoreCheck`` /
+    ``RestoreRowPolicy``, a foreign key the forward plan added comes off as
+    ``DropForeignKey``."""
+    ...
+
 def _plan_from_ir(
     old_ir_json: str,
     new_ir_json: str,
@@ -129,24 +147,6 @@ def _plan_from_ir(
     also carries its ``statements`` and ``warnings`` for ``dialect`` — the
     byte-identical statements the reconciliation pass executes (I-1).
     """
-    ...
-
-def _plan_reverse_from_ir(
-    live_json: str,
-    declared_json: str,
-    dialect: str,
-    options_json: str,
-    facts_json: str,
-    render: bool = True,
-) -> str:
-    """The reverse of the live-origin plan (``_plan_from_ir(live_json,
-    declared_json, ..., facts_json)``): what turns the database it leaves
-    back into the live one (ADR-0041). Same JSON shape as ``_plan_from_ir``
-    plus ``before`` (the live envelope under the forward plan's renames); a
-    step nothing undoes carries ``irreversible: {"reason": ...}``, a check or
-    policy put back from the catalog is a ``RestoreCheck`` /
-    ``RestoreRowPolicy``, a foreign key the forward plan added comes off as
-    ``DropForeignKey``."""
     ...
 
 def _generate_migration(

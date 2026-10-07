@@ -133,3 +133,75 @@ def assert_statement_in_code(statement: str, code: str) -> None:
     themselves contain single-quoted SQL literals, e.g. the shorthand's
     ``current_setting('pinch.ledger_id', true)``."""
     assert repr(statement) in code, (statement, code)
+
+
+# -- either backend ----------------------------------------------------------------
+
+
+def engine_for(db_url: str, postgres_base_url: str | None) -> sa.Engine:
+    """A synchronous engine on the database behind ferro's ``db_url``."""
+    if db_url.startswith("sqlite:"):
+        return sa.create_engine(f"sqlite:///{db_url.split(':', 1)[1].split('?')[0]}")
+    assert postgres_base_url is not None
+    return sa.create_engine(sync_url(postgres_base_url))
+
+
+def autogenerate(
+    db_url: str,
+    postgres_base_url: str | None,
+    db_schema_name: str | None,
+    *,
+    extra_opts: dict | None = None,
+) -> tuple[str, str]:
+    """``alembic revision --autogenerate`` on either backend: the rendered
+    ``upgrade()`` and ``downgrade()`` bodies."""
+    from alembic.autogenerate import produce_migrations
+    from alembic.migration import MigrationContext
+
+    from ferro.migrations import get_metadata
+
+    metadata = get_metadata()
+    engine = engine_for(db_url, postgres_base_url)
+    try:
+        with engine.connect() as conn:
+            if db_schema_name is not None:
+                conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
+            ctx = MigrationContext.configure(conn, opts=autogen_opts(extra_opts))
+            script = produce_migrations(ctx, metadata)
+    finally:
+        engine.dispose()
+    return (
+        render_ops(script.upgrade_ops, extra_opts),
+        render_ops(script.downgrade_ops, extra_opts),
+    )
+
+
+def run_revision(
+    code: str,
+    db_url: str,
+    postgres_base_url: str | None,
+    db_schema_name: str | None,
+) -> None:
+    """:func:`run_generated_code` on either backend."""
+    if db_schema_name is not None and postgres_base_url is not None:
+        run_generated_code(code, postgres_base_url, db_schema_name)
+        return
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy.dialects import postgresql
+
+    module = f"def _ferro_generated():\n{code}\n"
+    engine = engine_for(db_url, None)
+    try:
+        with engine.connect() as conn:
+            ctx = MigrationContext.configure(conn)
+            namespace: dict = {
+                "op": Operations(ctx),
+                "sa": sa,
+                "postgresql": postgresql,
+            }
+            exec(compile(module, "<generated-revision>", "exec"), namespace)
+            with ctx.begin_transaction():
+                namespace["_ferro_generated"]()
+    finally:
+        engine.dispose()

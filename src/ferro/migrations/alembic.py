@@ -578,6 +578,13 @@ def _subject(op: Dict[str, Any]) -> str:
     return f"{table}.{op['column']}" if op.get("column") else table
 
 
+def _demands_values(op: Dict[str, Any], verdict: Dict[str, Any]) -> bool:
+    """A column added ``NOT NULL`` with no value for the rows already there:
+    the pass has no statement for it (it refuses the add), so the revision
+    writes the plain Alembic op, marked ``data-dependent``."""
+    return op["kind"] == "AddColumn" and verdict["needs"] == "backfill"
+
+
 def _upgrade_plan(
     live: _LiveDatabase, declared: Dict[str, Any], dialect: str
 ) -> Dict[str, Any]:
@@ -589,18 +596,13 @@ def _upgrade_plan(
     declared_json = json.dumps(declared)
     plan = json.loads(
         _core._plan_from_ir(
-            live.schema_ir, declared_json, dialect, _DESTRUCTIVE, True, live.facts
+            live.schema_ir, declared_json, dialect, _DESTRUCTIVE, False, live.facts
         )
     )
     for warning in plan["always_warnings"]:
         if warning.startswith("rename hint refused"):
             raise _refuse(warning)
-    # An op the pass renders to nothing at all (a SQLite type change whose
-    # storage is the same) is one the pass does not run: neither does the
-    # revision.
-    operations = plan["operations"] = [
-        op for op in plan["operations"] if op["statements"] or op["warnings"]
-    ]
+    operations = plan["operations"]
     verdicts = json.loads(
         _core._plan_step_verdicts(
             live.schema_ir, declared_json, dialect, "up", json.dumps(operations)
@@ -616,10 +618,43 @@ def _upgrade_plan(
                 f"handling, so the drop cascades into ON DELETE CASCADE children). "
                 f"Write this change as an in-house migration: `ferro migrate new`"
             )
-        if not op["statements"] and op["warnings"] and op["kind"] != "AddTable":
-            raise _refuse(op["warnings"][0])
+        if _demands_values(op, verdict) and dialect == "sqlite":
+            raise _refuse(
+                f"{op['kind']} on {_subject(op)} adds a NOT NULL column with no value "
+                f"for the rows already there, which SQLite cannot add in place. Give "
+                f"it a default, or write the change as an in-house migration, which "
+                f"generates the backfill: `ferro migrate new`"
+            )
         op["verdict"] = verdict
-    return {**plan, "target": declared, "dialect": dialect}
+    rendered = iter(
+        json.loads(
+            _core._render_plan_ops(
+                live.schema_ir,
+                declared_json,
+                dialect,
+                json.dumps(
+                    [op for op in operations if not _demands_values(op, op["verdict"])]
+                ),
+            )
+        )
+    )
+    kept = []
+    for op in operations:
+        if _demands_values(op, op["verdict"]):
+            kept.append({**op, "statements": [], "warnings": []})
+            continue
+        written = {**next(rendered), "verdict": op["verdict"]}
+        # An op the pass renders to nothing at all (a SQLite type change
+        # whose storage is the same) is one the pass does not run: neither
+        # does the revision. One it only warns about has no statement to
+        # write: refused with the renderer's reason.
+        if not written["statements"]:
+            if written["warnings"] and written["kind"] != "AddTable":
+                raise _refuse(written["warnings"][0])
+            if written["kind"] != "AddTable":
+                continue
+        kept.append(written)
+    return {**plan, "operations": kept, "target": declared, "dialect": dialect}
 
 
 def _downgrade_plan(

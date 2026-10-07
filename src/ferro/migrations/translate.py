@@ -42,6 +42,7 @@ __all__ = [
     "FerroExecuteOp",
     "FerroIrreversibleOp",
     "FerroMarkedOp",
+    "FerroRenameTableOp",
     "FerroRevisionOps",
     "FerroWarningOp",
     "translate",
@@ -91,6 +92,14 @@ class FerroWarningOp(ops.MigrateOperation):
 
     def to_diff_tuple(self) -> tuple[Any, ...]:
         return ("ferro_warning", self.warning)
+
+
+class FerroRenameTableOp(ops.RenameTableOp):
+    """``op.rename_table``: Alembic's own op, which its autogenerate never
+    proposes and so has no renderer of its own."""
+
+    def to_diff_tuple(self) -> tuple[Any, ...]:
+        return ("rename_table", self.table_name, self.new_table_name)
 
 
 class FerroIrreversibleOp(ops.MigrateOperation):
@@ -148,6 +157,11 @@ def _render_marked(autogen_context: Any, op: FerroMarkedOp) -> list[str]:
 @renderers.dispatch_for(FerroWarningOp)
 def _render_warning(autogen_context: Any, op: FerroWarningOp) -> list[str]:
     return [f"# ferro: {line}" for line in op.warning.splitlines()]
+
+
+@renderers.dispatch_for(FerroRenameTableOp)
+def _render_rename_table(autogen_context: Any, op: FerroRenameTableOp) -> str:
+    return f"op.rename_table({op.table_name!r}, {op.new_table_name!r})"
 
 
 @renderers.dispatch_for(FerroIrreversibleOp)
@@ -298,6 +312,29 @@ def _executed(
     ]
 
 
+def _foreign_key(
+    target: _Target, table: str, column: str
+) -> list[ops.MigrateOperation]:
+    """``op.create_foreign_key`` for the declared foreign key on
+    ``table.column``."""
+    fk = target.foreign_key(table, column)
+    if fk is None:
+        raise RuntimeError(
+            f"ferro: the plan adds a foreign key on {table}.{column} the models do "
+            "not declare; this is a ferro bug, please file an issue"
+        )
+    return [
+        ops.CreateForeignKeyOp(
+            fk.get("name"),
+            table,
+            fk["to_table"],
+            [column],
+            [fk.get("to_column") or "id"],
+            ondelete=fk.get("on_delete"),
+        )
+    ]
+
+
 def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
     """The Alembic op(s) for one planner op."""
     kind = op["kind"]
@@ -314,7 +351,7 @@ def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
     if kind == "DropTable":
         return [ops.DropTableOp(op["table"])]
     if kind == "RenameTable":
-        return [ops.RenameTableOp(op["old"], op["new"])]
+        return [FerroRenameTableOp(op["old"], op["new"])]
     if kind == "RenameColumn":
         return [ops.AlterColumnOp(op["table"], op["old"], modify_name=op["new"])]
     if kind == "AddColumn":
@@ -328,6 +365,14 @@ def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
             target.foreign_key(table, column) is not None
             or target.has_column_check(table, column)
         )
+        if not statements:
+            # No pass statement: a column that demands values of existing
+            # rows, written plain (and marked) with its foreign key.
+            return [ops.AddColumnOp(table, target.column(table, column))] + (
+                _foreign_key(target, table, column)
+                if target.foreign_key(table, column)
+                else []
+            )
         if declared.get("default") is not None or inline_constraints:
             return _executed(op)
         return [ops.AddColumnOp(table, target.column(table, column))] + _executed(
@@ -369,22 +414,7 @@ def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
     if kind == "DropIndex":
         return [ops.DropIndexOp(op["name"], table_name=op["table"])]
     if kind == "AddForeignKey":
-        table, column = op["table"], op["column"]
-        fk = target.foreign_key(table, column)
-        if fk is None:
-            raise RuntimeError(
-                f"ferro: the plan adds a foreign key on {table}.{column} the models do not declare"
-            )
-        return [
-            ops.CreateForeignKeyOp(
-                fk.get("name"),
-                table,
-                fk["to_table"],
-                [column],
-                [fk.get("to_column") or "id"],
-                ondelete=fk.get("on_delete"),
-            )
-        ]
+        return _foreign_key(target, op["table"], op["column"])
     if kind == "DropForeignKey":
         return [ops.DropConstraintOp(op["name"], op["table"], type_="foreignkey")]
     raise RuntimeError(
@@ -436,7 +466,8 @@ def translate(
         if irreversible is not None:
             out.append(FerroIrreversibleOp(irreversible["reason"]))
             continue
-        if not op["statements"]:
+        verdict = op.get("verdict") or {}
+        if not op["statements"] and verdict.get("needs") != "backfill":
             # The pass runs nothing for it on this dialect (row security of
             # a new SQLite table is its create's warning).
             continue
