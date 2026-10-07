@@ -44,6 +44,7 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
     run,
     write_models,
 )
+from tests.test_migrate_down import plan_against, snapshot
 from tests.test_migrate_up import configure, db, migrations, new  # noqa: F401
 
 pytestmark = [
@@ -243,6 +244,79 @@ def test_a_step_sees_the_union_and_never_todays_models(
     assert db.rows("SELECT nickname FROM author WHERE id = 1") == [("Ann",)]
     today = importlib.import_module(f"{pkg}.models").Author
     assert today.where(lambda author: author.id == 1) is not None
+
+
+def test_a_column_the_migration_drops_is_dropped_by_a_contract_after_the_step(
+    project, pkg, db, capsys
+):
+    # `name` is dropped and `slug` derived from it: the step must still read
+    # `name`, so the drop waits for a contract after it (ADR-0025).
+    applied_with_authors(project, pkg, db)
+    write_models(project, pkg, WITH_SLUG.replace("    name: str\n", ""))
+    new("slugs", "--data-step", "Author")
+    migration = migrations(project) / "0002_slugs"
+    backend = db.backend
+    assert sorted(path.name for path in migration.iterdir()) == [
+        f"01_schema.down.{backend}.sql",
+        f"01_schema.up.{backend}.sql",
+        "02_backfill_author.py",
+        f"03_contract.down.{backend}.sql",
+        f"03_contract.up.{backend}.sql",
+        "ir.json",
+    ]
+    assert (migration / f"01_schema.up.{backend}.sql").read_text() == (
+        'ALTER TABLE "author" ADD COLUMN "slug" varchar;\n'
+    )
+    assert (migration / f"03_contract.up.{backend}.sql").read_text() == (
+        '-- ferro: destructive\n\nALTER TABLE "author" DROP COLUMN "name";\n'
+    )
+    (migration / "02_backfill_author.py").write_text(BACKFILL)
+    capsys.readouterr()
+
+    assert run("migrate", "up", "--url", db.url) == 0, capsys.readouterr().err
+
+    out = capsys.readouterr().out.splitlines()
+    assert [line.split()[1] for line in out[:3]] == [
+        "01_schema",
+        "02_backfill_author",
+        "03_contract",
+    ]
+    assert db.rows("SELECT slug FROM author ORDER BY id") == [("ann-lee",), ("bo",)]
+    assert plan_against(db, snapshot(project, 2), snapshot(project, 1)) == []
+
+
+def test_a_sql_step_precedes_the_data_step_whether_or_not_the_models_changed(
+    project, pkg, db
+):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, MODELS)
+    new("create_author")
+    backend = db.backend
+
+    # The models drop `name`: the SQL step, the data step, then the contract.
+    write_models(project, pkg, WITH_SLUG.replace("    name: str\n", ""))
+    new("slugs", "--data-step", "Author", "--sql-step", "audit")
+    assert sorted(
+        path.name for path in (migrations(project) / "0002_slugs").iterdir()
+    ) == [
+        f"01_schema.down.{backend}.sql",
+        f"01_schema.up.{backend}.sql",
+        "02_audit.down.sql",
+        "02_audit.up.sql",
+        "03_backfill_author.py",
+        f"04_contract.down.{backend}.sql",
+        f"04_contract.up.{backend}.sql",
+        "ir.json",
+    ]
+    assert (migrations(project) / "0002_slugs" / "02_audit.up.sql").read_text() == (
+        "-- write this step\n"
+    )
+
+    # The models change nothing: the SQL step, then the data step.
+    new("again", "--data-step", "Author", "--sql-step", "audit")
+    assert sorted(
+        path.name for path in (migrations(project) / "0003_again").iterdir()
+    ) == ["01_audit.down.sql", "01_audit.up.sql", "02_backfill_author.py", "ir.json"]
 
 
 def test_a_nested_transaction_in_a_step_is_a_savepoint(project, pkg, db):
