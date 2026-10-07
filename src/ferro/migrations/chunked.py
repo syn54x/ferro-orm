@@ -28,6 +28,15 @@ finished record going up, or removes the record going down. A chunked down
 pages its own query the same way, marking the record ``reverting`` with its
 own cursor (``revert_cursor``) until that last batch (ADR-0033).
 
+A failed down is recorded only where the database moved (the tracking
+table says where it stands now). A down that rolled back completely (an
+atomic down, a transactional SQL down, a chunked down failing on its first
+batch) leaves the record unchanged: the step stays ``installed`` and the
+error is in the run's output. A down that left part of itself applied
+writes the error onto the record: a no-transaction SQL down, and a chunked
+down failing after a committed batch, which stays ``reverting`` at its
+cursor so ``up`` refuses until a ``down`` finishes it.
+
 The cursor is the last row's order-key tuple as JSON, each value in the form
 ``canonicalize_wire_scalar`` gives a query literal (I-13), so ``after()``
 compares a resumed cursor exactly as ``save()`` wrote the row.
@@ -180,10 +189,11 @@ async def run_chunked(
 
     Going up the cursor is ``resume_cursor`` and the last batch writes the
     finished record; going down it is ``revert_cursor`` with the record
-    marked ``reverting``, and the last batch removes the record. On SQLite
-    each batch's first statement is that record's write, so the batch holds
-    the write lock before it reads (the ``BEGIN IMMEDIATE`` discipline:
-    a read-then-write transaction cannot upgrade into ``SQLITE_BUSY``).
+    marked ``reverting``, and the last batch removes the record. Each batch
+    is ``transaction(immediate=True)``: on SQLite a ``BEGIN IMMEDIATE`` that
+    holds the write lock before the batch reads, so its read-then-write
+    cannot fail upgrading into ``SQLITE_BUSY`` (ADR-0024); on Postgres a
+    plain ``BEGIN``.
 
     Raises:
         BatchFailed: a batch raised; it rolled back, and what the record
@@ -208,23 +218,12 @@ async def run_chunked(
         if verify_lock is not None:
             await verify_lock()
         try:
-            async with transaction(using=using) as tx:
+            async with transaction(using=using, immediate=True) as tx:
                 route = resolve_operation_scope(using=None, session=None)
                 ctx = ctx_factory(tx)
                 query = shape.query(ctx.models)
                 if cursor is not None and keys is None:
                     keys, rows_done = decode_cursor(cursor, _order_key_types(query))
-                if ctx.dialect == "sqlite":
-                    await _core._write_cursor(
-                        using,
-                        migration,
-                        step,
-                        cursor,
-                        rows_done,
-                        down,
-                        tracking_schema,
-                        route,
-                    )
                 page = query if keys is None else query.after(keys)
                 batch = await page.limit(shape.batch_size).all()
                 if batch:

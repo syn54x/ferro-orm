@@ -29,6 +29,7 @@ import asyncio
 import importlib
 import json
 import re
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -536,3 +537,53 @@ def test_cursor_values_round_trip_through_the_wire_canonical_form():
     }
     assert json.loads(encoded)["keys"][0] == "2026-03-01T15:00:00Z"
     assert decode_cursor(encoded, types) == (keys, 2000)
+
+
+# -- the batch transaction ------------------------------------------------------------
+
+
+def test_an_immediate_transaction_holds_the_sqlite_write_lock_before_it_reads(db):
+    """Each batch is ``transaction(immediate=True)``: on SQLite the write
+    lock is held from ``BEGIN``, before the batch's first read."""
+
+    import ferro
+
+    if db.backend != "sqlite":
+        pytest.skip("BEGIN IMMEDIATE is SQLite's; on Postgres immediate is a no-op")
+    db.execute("CREATE TABLE chk_claim (id INTEGER PRIMARY KEY)")
+    path = db.url.removeprefix("sqlite:").split("?")[0]
+
+    def other_writer() -> str | None:
+        # Another process: SQLite's file locks are per process, so a writer
+        # in this one would never see the lock (and could corrupt the file).
+        script = textwrap.dedent(
+            f"""\
+            import sqlite3
+            conn = sqlite3.connect({path!r}, timeout=0, isolation_level=None)
+            try:
+                conn.execute("INSERT INTO chk_claim (id) VALUES (1)")
+                conn.execute("DELETE FROM chk_claim")
+            except sqlite3.OperationalError as err:
+                print(err)
+            """
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        return out or None
+
+    async def scenario() -> tuple[str | None, str | None]:
+        await ferro.connect(db.url, name="chk_immediate")
+        try:
+            async with ferro.transaction(using="chk_immediate", immediate=True):
+                held = other_writer()
+            async with ferro.transaction(using="chk_immediate"):
+                deferred = other_writer()
+        finally:
+            await ferro._core._disconnect("chk_immediate")
+        return held, deferred
+
+    held, deferred = asyncio.run(scenario())
+
+    assert held == "database is locked"
+    assert deferred is None, "a deferred BEGIN takes no lock before its first statement"
