@@ -1439,6 +1439,20 @@ pub fn row_policy_name(table_lower: &str, name: &str) -> String {
     truncate_identifier_bytes(&format!("rls_{table_lower}_{name}"), "_rls")
 }
 
+/// The short name `row_policy_name(table_lower, name)` was built from, read
+/// back off `name` by the same function (`None` when `name` is not one of
+/// `table_lower`'s). A truncated name yields its truncated tail.
+pub fn row_policy_short_name<'a>(table_lower: &str, name: &'a str) -> Option<&'a str> {
+    name.strip_prefix(row_policy_name(table_lower, "").as_str())
+}
+
+/// The suffix `table_check_constraint_name(table_lower, suffix)` was built
+/// from, read back off `name` by the same function (`None` when `name` is not
+/// one of `table_lower`'s). A truncated name yields its truncated tail.
+pub fn table_check_suffix<'a>(table_lower: &str, name: &'a str) -> Option<&'a str> {
+    name.strip_prefix(table_check_constraint_name(table_lower, "").as_str())
+}
+
 /// Whether a live policy name follows the ferro row-policy convention — the
 /// ownership test reconciliation uses; policies named any other way belong to
 /// the user and are never altered or dropped.
@@ -3587,6 +3601,17 @@ mod tests {
             drifted_check_names(&model, &live),
             vec!["ck_transfer_at_most_one_outflow".to_string()]
         );
+    }
+
+    #[test]
+    fn a_check_suffix_and_a_policy_short_name_read_back_through_their_naming_function() {
+        assert_eq!(
+            table_check_suffix("writer", "ck_writer_named"),
+            Some("named")
+        );
+        assert_eq!(table_check_suffix("writer", "ck_author_named"), None);
+        assert_eq!(row_policy_short_name("writer", "rls_writer_id"), Some("id"));
+        assert_eq!(row_policy_short_name("writer", "uq_writer_id"), None);
     }
 
     #[test]

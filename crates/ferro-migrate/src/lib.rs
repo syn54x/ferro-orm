@@ -129,6 +129,11 @@ pub enum MigrationOp {
     /// RENAME TO` on Postgres; on SQLite, which has no index rename, `DROP
     /// INDEX` then the `CREATE INDEX` under the new name.
     RenameIndex {
+        /// Owning table, by the name it has once any table rename ran. An
+        /// index name is schema-wide, but the op rides its table's unit: its
+        /// transaction in the reconciliation pass, its SQLite rebuild in a
+        /// generated step.
+        table: String,
         /// The index's old name.
         old: String,
         /// The index's new name.
@@ -334,17 +339,16 @@ pub enum MigrationOp {
 }
 
 impl MigrationOp {
-    /// The table this op changes, or `None` for an op on an enum type and for
-    /// [`MigrationOp::RenameIndex`] (an index name is schema-wide). A
+    /// The table this op changes, or `None` for an op on an enum type. A
     /// [`MigrationOp::RenameTable`] changes the table by its new name.
     pub fn table(&self) -> Option<&str> {
         match self {
             MigrationOp::AddEnumLabel { .. }
             | MigrationOp::CreateEnumType { .. }
-            | MigrationOp::DropEnumType { .. }
-            | MigrationOp::RenameIndex { .. } => None,
+            | MigrationOp::DropEnumType { .. } => None,
             MigrationOp::RenameTable { new, .. } => Some(new),
             MigrationOp::RenameColumn { table, .. }
+            | MigrationOp::RenameIndex { table, .. }
             | MigrationOp::RenameConstraint { table, .. }
             | MigrationOp::RenamePolicy { table, .. } => Some(table),
             MigrationOp::AddTable { table }

@@ -190,15 +190,17 @@ def test_a_column_rename_renames_its_index_and_check_and_round_trips_with_rows(
             'ALTER TABLE "author" RENAME CONSTRAINT "ck_author_kind" TO "ck_author_genre"',
         ]
     else:
-        # SQLite: the column renames are native, an index is dropped and
-        # built under its new name, and the check is renamed by the rebuild.
-        assert up[:6] == renames + [
-            'DROP INDEX IF EXISTS "idx_author_kind"',
-            'CREATE INDEX IF NOT EXISTS "idx_author_genre" ON "author" ("genre")',
-            'DROP INDEX IF EXISTS "idx_author_name"',
-            'CREATE INDEX IF NOT EXISTS "idx_author_full_name" ON "author" ("full_name")',
-        ]
+        # SQLite: the column renames are native; the check's new name needs
+        # the table rebuilt, and that one rebuild also builds the indexes
+        # under their new names (ADR-0046: one copy per table per step).
+        assert up[:2] == renames
         assert rebuilt(up) == ["author"]
+        assert 'CREATE INDEX IF NOT EXISTS "idx_author_genre" ON "author" ("genre")' in up
+        assert (
+            'CREATE INDEX IF NOT EXISTS "idx_author_full_name" ON "author" ("full_name")'
+            in up
+        )
+        assert not any("idx_author_kind" in sql or "idx_author_name" in sql for sql in up)
         assert any('CONSTRAINT "ck_author_genre"' in sql for sql in up)
         assert "-- ferro: foreign-keys-off" in schema_file(
             project, 2, "up", db.backend
@@ -237,6 +239,46 @@ def test_the_down_reverses_every_rename_in_the_reverse_shape(project, pkg, db):
     assert "destructive" not in schema_file(project, 2, "down", db.backend).read_text()
 
 
+INDEXED_BEFORE = IMPORTS + """
+class Author(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str = Field(index=True)
+"""
+
+INDEXED_AFTER = IMPORTS + """
+class Author(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    full_name: str = Field(index=True, renamed_from="name")
+"""
+
+
+@backend_matrix
+def test_an_index_renamed_on_a_table_no_rebuild_touches_is_dropped_and_built(
+    project, pkg, db
+):
+    start(project, pkg, db, INDEXED_BEFORE)
+    db.execute("INSERT INTO \"author\" (\"name\") VALUES ('Ann')")
+    write_models(project, pkg, INDEXED_AFTER)
+    new("author_full_name")
+
+    up = statements(schema_file(project, 2, "up", db.backend))
+    rename = 'ALTER TABLE "author" RENAME COLUMN "name" TO "full_name"'
+    if db.backend == "postgres":
+        assert up == [
+            rename,
+            'ALTER INDEX "idx_author_name" RENAME TO "idx_author_full_name"',
+        ]
+    else:
+        # SQLite has no index rename; nothing rebuilds this table.
+        assert up == [
+            rename,
+            'DROP INDEX IF EXISTS "idx_author_name"',
+            'CREATE INDEX IF NOT EXISTS "idx_author_full_name" ON "author" ("full_name")',
+        ]
+    round_trip(project, db)
+    assert db.rows('SELECT "full_name" FROM "author"') == [("Ann",)]
+
+
 # -- B3: rename a table -------------------------------------------------------------
 
 
@@ -259,24 +301,26 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
         'ALTER TABLE "author_tags" RENAME COLUMN "writer_id" TO "author_id"',
     ]
     if db.backend == "postgres":
+        # Table and column renames first, then each table's derived names
+        # together: the renamed tables', then the referencing table's.
         assert up == structural + [
             'ALTER INDEX "uq_writer_name" RENAME TO "uq_author_name"',
+            'ALTER TABLE "author" RENAME CONSTRAINT "ck_writer_named" TO "ck_author_named"',
+            'ALTER POLICY "rls_writer_id" ON "author" RENAME TO "rls_author_id"',
             'ALTER INDEX "idx_writer_tags_tag_id_writer_id" RENAME TO '
             '"idx_author_tags_tag_id_author_id"',
             'ALTER INDEX "uq_writer_tags_writer_id_tag_id" RENAME TO '
             '"uq_author_tags_author_id_tag_id"',
-            'ALTER TABLE "author" RENAME CONSTRAINT "ck_writer_named" TO "ck_author_named"',
             'ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_tag_id_tag" TO '
             '"fk_author_tags_tag_id_tag"',
             'ALTER TABLE "author_tags" RENAME CONSTRAINT "fk_writer_tags_writer_id_writer" '
             'TO "fk_author_tags_author_id_author"',
             'ALTER TABLE "book" RENAME CONSTRAINT "fk_book_writer_id_writer" TO '
             '"fk_book_writer_id_author"',
-            'ALTER POLICY "rls_writer_id" ON "author" RENAME TO "rls_author_id"',
         ]
     else:
         assert up[:3] == structural
-        assert 'DROP INDEX IF EXISTS "uq_writer_name"' in up
+        # `author`'s rebuild builds its unique under the new name.
         assert (
             'CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name")' in up
         )

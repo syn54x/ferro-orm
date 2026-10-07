@@ -244,9 +244,10 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 /// 4. (Destructive) dropped tables, children before parents, then the enum
 ///    types nothing declares any more.
 ///
-/// Ahead of all of it, the renames `new`'s live rename hints declare
-/// ([`live_hints`], ADR-0032): table renames, column renames, then every
-/// derived index, constraint and (Postgres) policy name, the renamed tables'
+/// Ahead of all of it — so a new table can reference a renamed one — the
+/// renames `new`'s live rename hints declare ([`live_hints`], ADR-0032), one
+/// unit per table ([`rename_ops`]): its table and column renames, then every
+/// derived index, constraint and (Postgres) policy name, the renamed tables
 /// before the tables that reference them. Everything after is planned from
 /// `old` as the renames leave it, so a rename and a type change on one column
 /// are the rename, then the type change. A live IR declares no hint, so the
@@ -275,11 +276,178 @@ pub fn plan_from_ir(
         return plan_named(old, new, dialect, facts, options);
     }
     let renamed = renamed_snapshot(old, &hints);
-    let mut plan = plan_named(&renamed, new, dialect, facts, options);
     let mut operations = rename_ops(old, &renamed, dialect);
+    fact_renames(&mut operations, facts, old, &hints, dialect);
+    let facts = renamed_facts(facts, &operations, new);
+    let mut plan = plan_named(&renamed, new, dialect, &facts, options);
     operations.append(&mut plan.operations);
     plan.operations = operations;
     plan
+}
+
+/// The renames of the names only a live database's [`LiveFacts`] carry — a
+/// live IR holds no check and no row policy — added to `ops`, each at the end
+/// of its table's unit so the table's renames stay one contiguous unit. Each
+/// ferro-owned check and `rls_` policy name is re-derived by the function
+/// that made it (a column check through `db_check_constraint_name`, a table
+/// check and a policy through their suffix), exactly as [`renamed_snapshot`]
+/// re-derives a declared one; a name an IR rename op already covers is left
+/// alone. With [`LiveFacts::declared`] there is nothing to add.
+fn fact_renames(
+    ops: &mut Vec<MigrationOp>,
+    facts: &LiveFacts,
+    old: &IrEnvelope<SchemaIrPayload>,
+    hints: &[Hint],
+    dialect: Dialect,
+) {
+    use ferro_ddl_lowering::{
+        db_check_constraint_name, row_policy_name, row_policy_short_name,
+        table_check_constraint_name, table_check_suffix,
+    };
+    let renames = Renames { hints };
+    let old_models = index_models(&old.payload.models);
+    for (t_old, live) in &facts.tables {
+        let Some(model) = old_models.get(t_old) else {
+            continue;
+        };
+        let t_new = renames.table(t_old).to_string();
+        let mut added = Vec::new();
+        for check in live.checks.iter().filter(|check| check.ferro_owned) {
+            let by_column = model.columns.iter().find_map(|col| {
+                (check.name == db_check_constraint_name(t_old, &col.name))
+                    .then(|| db_check_constraint_name(&t_new, renames.column(t_old, &col.name)))
+            });
+            let renamed = by_column.or_else(|| {
+                table_check_suffix(t_old, &check.name)
+                    .map(|suffix| table_check_constraint_name(&t_new, suffix))
+            });
+            if let Some(name) = renamed.filter(|name| *name != check.name) {
+                added.push(MigrationOp::RenameConstraint {
+                    table: t_new.clone(),
+                    old: check.name.clone(),
+                    new: name,
+                });
+            }
+        }
+        if dialect == Dialect::Postgres {
+            for policy in live.row_security.policies.iter().filter(|p| p.ferro_owned) {
+                if let Some(short) = row_policy_short_name(t_old, &policy.name) {
+                    let name = row_policy_name(&t_new, short);
+                    if name != policy.name {
+                        added.push(MigrationOp::RenamePolicy {
+                            table: t_new.clone(),
+                            old: policy.name.clone(),
+                            new: name,
+                        });
+                    }
+                }
+            }
+        }
+        added.retain(|op| !ops.contains(op));
+        if added.is_empty() {
+            continue;
+        }
+        let at = ops
+            .iter()
+            .rposition(|op| op.table() == Some(t_new.as_str()))
+            .map_or(ops.len(), |last| last + 1);
+        ops.splice(at..at, added);
+    }
+}
+
+/// `facts` as the rename `ops` leave the live database: each table under its
+/// new name, every renamed check, foreign key, index and policy under its new
+/// name. A rename carries every column reference with it (Postgres and SQLite
+/// both rewrite the bodies that name a renamed column), so on a table the
+/// renames touch each check and shorthand policy `new` declares under its
+/// renamed name reads as `new` renders it; a body that had drifted before the
+/// rename is read again, and rebuilt, on the next run. The facts of
+/// [`LiveFacts::declared`] carry no table and are returned unchanged.
+fn renamed_facts(
+    facts: &LiveFacts,
+    ops: &[MigrationOp],
+    new: &IrEnvelope<SchemaIrPayload>,
+) -> LiveFacts {
+    if facts.tables.is_empty() || ops.is_empty() {
+        return facts.clone();
+    }
+    let new_models = index_models(&new.payload.models);
+    let mut out = facts.clone();
+    for op in ops {
+        if let MigrationOp::RenameTable { old, new } = op
+            && let Some(table) = out.tables.remove(old)
+        {
+            out.tables.insert(new.clone(), table);
+        }
+    }
+    let touched: BTreeSet<&str> = ops.iter().filter_map(MigrationOp::table).collect();
+    for (table, live) in &mut out.tables {
+        if !touched.contains(table.as_str()) {
+            continue;
+        }
+        let renamed_name = |name: &str| {
+            ops.iter()
+                .find_map(|op| match op {
+                    MigrationOp::RenameIndex { table: t, old, new }
+                    | MigrationOp::RenameConstraint { table: t, old, new }
+                    | MigrationOp::RenamePolicy { table: t, old, new }
+                        if t == table && old == name =>
+                    {
+                        Some(new.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| name.to_string())
+        };
+        let declared = new_models.get(table.as_str()).copied();
+        for check in &mut live.checks {
+            check.name = renamed_name(&check.name);
+            let body = declared.and_then(|model| {
+                model
+                    .table_checks
+                    .iter()
+                    .find(|c| c.name == check.name)
+                    .map(render_table_check_body)
+                    .or_else(|| {
+                        model
+                            .checks
+                            .iter()
+                            .find(|c| c.name == check.name)
+                            .map(render_check_body)
+                    })
+            });
+            if let Some(body) = body {
+                check.definition = format!("CHECK ({body})");
+            }
+        }
+        for fk in &mut live.foreign_keys {
+            fk.name = renamed_name(&fk.name);
+        }
+        for index in &mut live.indexes {
+            index.name = renamed_name(&index.name);
+        }
+        for policy in &mut live.row_security.policies {
+            policy.name = renamed_name(&policy.name);
+            let declared_policy = declared.and_then(|model| {
+                let declaration = model.row_security.as_ref()?;
+                let policy_ir = declaration
+                    .policies
+                    .iter()
+                    .find(|p| p.name == policy.name)?;
+                matches!(
+                    policy_ir.expr,
+                    ferro_schema_ir::RowPolicyExpr::Setting { .. }
+                )
+                .then(|| row_policy_clauses(model, policy_ir).ok())
+                .flatten()
+            });
+            if let Some((using, with_check)) = declared_policy {
+                policy.using = using;
+                policy.with_check = with_check;
+            }
+        }
+    }
+    out
 }
 
 /// Every change [`plan_from_ir`] plans once the tables and columns of `old`
@@ -1266,7 +1434,8 @@ fn renamed_check_expr(
 fn renamed_model(model: &SchemaModel, renames: &Renames<'_>) -> SchemaModel {
     use ferro_ddl_lowering::{
         composite_index_name, composite_unique_index_name, db_check_constraint_name, fk_name,
-        row_policy_name, single_index_name, single_unique_index_name, table_check_constraint_name,
+        row_policy_name, row_policy_short_name, single_index_name, single_unique_index_name,
+        table_check_constraint_name, table_check_suffix,
     };
     let t_old = model.table_name.as_str();
     let t_new = renames.table(t_old).to_string();
@@ -1331,9 +1500,8 @@ fn renamed_model(model: &SchemaModel, renames: &Renames<'_>) -> SchemaModel {
         );
         check.column = c_new;
     }
-    let table_prefix = format!("ck_{t_old}_");
     for check in &mut out.table_checks {
-        if let Some(suffix) = check.name.strip_prefix(&table_prefix) {
+        if let Some(suffix) = table_check_suffix(t_old, &check.name) {
             check.name = rederived(
                 &check.name,
                 table_check_constraint_name(t_old, suffix),
@@ -1342,10 +1510,9 @@ fn renamed_model(model: &SchemaModel, renames: &Renames<'_>) -> SchemaModel {
         }
         check.predicate = renamed_check_expr(&check.predicate, &|c| col(c));
     }
-    let policy_prefix = format!("rls_{t_old}_");
     if let Some(declaration) = &mut out.row_security {
         for policy in &mut declaration.policies {
-            if let Some(short) = policy.name.strip_prefix(&policy_prefix) {
+            if let Some(short) = row_policy_short_name(t_old, &policy.name) {
                 policy.name = rederived(
                     &policy.name,
                     row_policy_name(t_old, short),
@@ -1384,9 +1551,11 @@ pub(crate) fn renamed_snapshot(
 }
 
 /// The rename ops that turn `old` into `renamed` (its [`renamed_snapshot`]),
-/// in one ordered set: every table rename, every column rename, then the
-/// derived names — indexes, constraints, policies (Postgres only) — of the
-/// renamed tables first and of the tables that reference them after.
+/// table by table — the renamed tables first, the tables that reference them
+/// after — each table's as one contiguous unit: its table rename, its column
+/// renames, then its derived names (indexes, constraints, Postgres policies).
+/// The reconciliation pass runs each table's consecutive ops in one
+/// transaction; a generated step runs every table and column rename first.
 pub(crate) fn rename_ops(
     old: &IrEnvelope<SchemaIrPayload>,
     renamed: &IrEnvelope<SchemaIrPayload>,
@@ -1408,19 +1577,18 @@ pub(crate) fn rename_ops(
     // Stable: the renamed tables' own names first, then referencing tables'.
     pairs.sort_by_key(|pair| !owns_a_rename(pair));
 
-    let (mut tables, mut columns, mut indexes, mut constraints, mut policies) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut out = Vec::new();
     for (o, r) in pairs {
         let table = r.table_name.clone();
         if o.table_name != r.table_name {
-            tables.push(MigrationOp::RenameTable {
+            out.push(MigrationOp::RenameTable {
                 old: o.table_name.clone(),
                 new: table.clone(),
             });
         }
         for (a, b) in o.columns.iter().zip(&r.columns) {
             if a.name != b.name {
-                columns.push(MigrationOp::RenameColumn {
+                out.push(MigrationOp::RenameColumn {
                     table: table.clone(),
                     old: a.name.clone(),
                     new: b.name.clone(),
@@ -1432,7 +1600,11 @@ pub(crate) fn rename_ops(
             .zip(emit::standalone_indexes(r))
         {
             if a != b {
-                indexes.push(MigrationOp::RenameIndex { old: a, new: b });
+                out.push(MigrationOp::RenameIndex {
+                    table: table.clone(),
+                    old: a,
+                    new: b,
+                });
             }
         }
         let fk_names = |m: &SchemaModel| -> Vec<String> {
@@ -1454,7 +1626,7 @@ pub(crate) fn rename_ops(
             .chain(check_names(o).into_iter().zip(check_names(r)))
         {
             if a != b {
-                constraints.push(MigrationOp::RenameConstraint {
+                out.push(MigrationOp::RenameConstraint {
                     table: table.clone(),
                     old: a,
                     new: b,
@@ -1466,7 +1638,7 @@ pub(crate) fn rename_ops(
         {
             for (pa, pb) in a.policies.iter().zip(&b.policies) {
                 if pa.name != pb.name {
-                    policies.push(MigrationOp::RenamePolicy {
+                    out.push(MigrationOp::RenamePolicy {
                         table: table.clone(),
                         old: pa.name.clone(),
                         new: pb.name.clone(),
@@ -1475,10 +1647,7 @@ pub(crate) fn rename_ops(
             }
         }
     }
-    [tables, columns, indexes, constraints, policies]
-        .into_iter()
-        .flatten()
-        .collect()
+    out
 }
 
 pub(crate) fn index_models(models: &[SchemaModel]) -> BTreeMap<String, &SchemaModel> {

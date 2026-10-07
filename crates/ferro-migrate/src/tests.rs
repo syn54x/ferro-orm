@@ -4354,6 +4354,7 @@ mod renames {
                 new: "full_name".to_string(),
             },
             MigrationOp::RenameIndex {
+                table: "author".to_string(),
                 old: "idx_writer_name".to_string(),
                 new: "idx_author_full_name".to_string(),
             },
@@ -4370,6 +4371,76 @@ mod renames {
         ];
         assert_eq!(plan(&parent(), &target(), Dialect::Postgres), expected);
         assert_eq!(plan(&parent(), &target(), Dialect::Sqlite), expected);
+    }
+
+    #[test]
+    fn live_facts_follow_the_renames_so_the_pass_plans_only_the_renames() {
+        // The reconciliation pass's shape: facts read from the live database
+        // before the renames run, keyed and named the old way.
+        let mut facts = LiveFacts::declared();
+        facts.tables.insert(
+            "writer".to_string(),
+            crate::plan::LiveTableFacts {
+                checks: vec![crate::plan::LiveCheckFact {
+                    name: "ck_writer_genre".to_string(),
+                    definition: "CHECK (\"genre\" IN ('novel', 'poem'))".to_string(),
+                    ferro_owned: true,
+                    validated: true,
+                }],
+                ..Default::default()
+            },
+        );
+        // A live IR carries no check: only the facts know `ck_writer_genre`.
+        let mut live = parent();
+        for model in &mut live.payload.models {
+            model.checks.clear();
+        }
+        let ops = plan_from_ir(
+            &live,
+            &target(),
+            Dialect::Postgres,
+            &facts,
+            PlanOptions { destructive: true },
+        )
+        .operations;
+        assert!(
+            ops.contains(&MigrationOp::RenameConstraint {
+                table: "author".to_string(),
+                old: "ck_writer_genre".to_string(),
+                new: "ck_author_genre".to_string(),
+            }),
+            "{ops:?}"
+        );
+        assert!(
+            ops.iter().all(|op| matches!(
+                op,
+                MigrationOp::RenameTable { .. }
+                    | MigrationOp::RenameColumn { .. }
+                    | MigrationOp::RenameIndex { .. }
+                    | MigrationOp::RenameConstraint { .. }
+            )),
+            "{ops:?}"
+        );
+    }
+
+    #[test]
+    fn each_tables_renames_are_one_contiguous_unit_naming_the_table() {
+        // The reconciliation pass runs a table's consecutive ops in one
+        // transaction: no rename op may be table-less, and one table's may
+        // not be split by another's.
+        let ops = plan(&parent(), &target(), Dialect::Postgres);
+        let tables: Vec<&str> = ops
+            .iter()
+            .map(|op| op.table().expect("every rename op names its table"))
+            .collect();
+        let mut seen: Vec<&str> = Vec::new();
+        for table in &tables {
+            if seen.last() != Some(table) {
+                assert!(!seen.contains(table), "{table} split: {tables:?}");
+                seen.push(table);
+            }
+        }
+        assert_eq!(seen, ["author", "book"]);
     }
 
     #[test]
@@ -4424,6 +4495,7 @@ mod renames {
         // its new name, by the statements every door uses.
         let index_only = MigrationPlan {
             operations: vec![MigrationOp::RenameIndex {
+                table: "author".to_string(),
                 old: "idx_writer_name".to_string(),
                 new: "idx_author_full_name".to_string(),
             }],

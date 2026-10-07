@@ -156,23 +156,19 @@ pub(crate) fn render_plan_in(
             MigrationOp::RenameColumn { table, old, new } => {
                 out.statements.push(render_rename_column(table, old, new));
             }
-            MigrationOp::RenameIndex { old, new } => match dialect {
+            MigrationOp::RenameIndex { table, old, new } => match dialect {
                 Dialect::Postgres => out.statements.push(render_rename_index(old, new)),
                 // SQLite has no index rename: drop it, then build it under its
                 // new name with the statement every door creates it with.
                 Dialect::Sqlite => {
-                    let (table, columns, unique) = new_models
-                        .values()
-                        .find_map(|model| {
-                            standalone_indexes(model)
-                                .into_iter()
-                                .find(|(name, _, _)| name == new)
-                                .map(|(_, columns, unique)| (&model.table_name, columns, unique))
-                        })
+                    let (columns, unique) = standalone_indexes(find_model(&new_models, table)?)
+                        .into_iter()
+                        .find(|(name, _, _)| name == new)
+                        .map(|(_, columns, unique)| (columns, unique))
                         .ok_or_else(|| EmissionError {
                             message: format!(
-                                "Index rename '{old}' → '{new}' has no index '{new}' in the \
-                                 declared IR"
+                                "Index rename '{old}' → '{new}' on table '{table}' has no index \
+                                 '{new}' in the declared IR"
                             ),
                         })?;
                     out.statements

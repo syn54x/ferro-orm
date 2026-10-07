@@ -2058,3 +2058,120 @@ async def test_validate_of_an_fk_with_violating_rows_raises_foreign_key_violatio
     await ferro.connect(db_url)
     async with ferro.engines.session():
         assert (await _pg_constraint(VF_FK))["convalidated"] is False
+
+
+# ---------------------------------------------------------------------------
+# A declared rename in the reconciliation pass (#528, ADR-0032)
+# ---------------------------------------------------------------------------
+
+
+class _FerroDebug(logging.Handler):
+    """Every ``ferro`` debug line, for counting the pass's table units."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+async def _connect_logging(db_url: str) -> list[str]:
+    logger = logging.getLogger("ferro")
+    handler = _FerroDebug()
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        await ferro.connect(db_url, migrate_updates=True)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+    return handler.messages
+
+
+def _define_hinted_pass_writer() -> None:
+    from enum import StrEnum
+
+    class PassGenre(StrEnum):
+        NOVEL = "novel"
+        POEM = "poem"
+
+    class PassWriter(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        full_name: Annotated[str, FerroField(index=True, renamed_from="name")]
+        genre: Annotated[
+            PassGenre,
+            FerroField(db_type="text", db_check=True, renamed_from="kind"),
+        ] = PassGenre.NOVEL
+
+
+def _rewind() -> None:
+    from ferro import clear_registry
+    from ferro.registry import REGISTRY
+
+    ferro.reset_engine()
+    clear_registry()
+    REGISTRY.reset_for_test()
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_in_one_unit(
+    db_url, db_backend, clean_registry
+):
+    from enum import StrEnum
+
+    class PassGenre(StrEnum):
+        NOVEL = "novel"
+        POEM = "poem"
+
+    class PassWriter(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: Annotated[str, FerroField(index=True)]
+        kind: Annotated[PassGenre, FerroField(db_type="text", db_check=True)] = (
+            PassGenre.NOVEL
+        )
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await execute(
+            'INSERT INTO "passwriter" ("name", "kind") VALUES (\'Ann\', \'poem\')'
+        )
+    _rewind()
+    _define_hinted_pass_writer()
+
+    if db_backend == "sqlite":
+        # SQLite cannot rename a constraint in place; only a generated
+        # migration's rebuild can.
+        with pytest.warns(UserWarning, match=r"ck_passwriter_kind.*ferro migrate new"):
+            messages = await _connect_logging(db_url)
+    else:
+        messages = await _connect_logging(db_url)
+
+    # One table, one unit: both column renames, the index rename and (on
+    # Postgres) the check rename ran together.
+    units = [m for m in messages if m.startswith("✅ Ferro Engine: Table 'passwriter'")]
+    assert len(units) == 1, units
+    assert "(4 statement(s)" in units[0], units
+    async with ferro.engines.session():
+        rows = await fetch_all('SELECT "full_name", "genre" FROM "passwriter"')
+        assert [(r["full_name"], r["genre"]) for r in rows] == [("Ann", "poem")]
+        if db_backend == "postgres":
+            checks = await fetch_all(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid = '\"passwriter\"'::regclass AND contype = 'c'"
+            )
+            assert [r["conname"] for r in checks] == ["ck_passwriter_genre"]
+    names = _live_index_names(db_url, db_backend, "passwriter")
+    assert "idx_passwriter_full_name" in names and "idx_passwriter_name" not in names
+
+    # The hint is inert once the live table holds the new names.
+    _rewind()
+    _define_hinted_pass_writer()
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        again = await _connect_logging(db_url)
+    assert not [m for m in again if m.startswith("✅ Ferro Engine: Table 'passwriter'")]
