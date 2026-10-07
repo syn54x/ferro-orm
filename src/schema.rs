@@ -741,4 +741,137 @@ mod tests {
         assert_eq!(result.chars().count(), 63);
         assert!(result.ends_with("_ck"));
     }
+
+    mod awaiting_rename {
+        use super::super::tables_awaiting_rename;
+        use ferro_schema_ir::{SchemaForeignKey, SchemaModel};
+        use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+        /// A bare model `table` that references each of `refs`, hinted as
+        /// renamed from `from` when given.
+        fn model(table: &str, refs: &[&str], from: Option<&str>) -> SchemaModel {
+            SchemaModel {
+                renamed_from: from.map(str::to_string),
+                model_name: table.to_string(),
+                table_name: table.to_string(),
+                columns: vec![],
+                foreign_keys: refs
+                    .iter()
+                    .map(|to| SchemaForeignKey {
+                        column: format!("{to}_id"),
+                        to_table: (*to).to_string(),
+                        to_column: "id".to_string(),
+                        on_delete: None,
+                        name: None,
+                        renamed_from: None,
+                    })
+                    .collect(),
+                indexes: vec![],
+                uniques: vec![],
+                checks: vec![],
+                table_checks: vec![],
+                row_security: None,
+            }
+        }
+
+        fn live(tables: &[&str]) -> HashSet<String> {
+            tables.iter().map(|t| (*t).to_string()).collect()
+        }
+
+        fn waiting(
+            models: &[SchemaModel],
+            live: &HashSet<String>,
+        ) -> BTreeMap<String, BTreeSet<String>> {
+            let refs: Vec<&SchemaModel> = models.iter().collect();
+            tables_awaiting_rename(&refs, live)
+        }
+
+        fn roots(entries: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
+            entries
+                .iter()
+                .map(|(table, on)| {
+                    (
+                        (*table).to_string(),
+                        on.iter().map(|t| (*t).to_string()).collect(),
+                    )
+                })
+                .collect()
+        }
+
+        #[test]
+        fn a_grandchild_waits_through_its_parent() {
+            // a (renamed from old_a) <- b <- c, declared child-first so one
+            // pass over the models cannot settle it.
+            let models = [
+                model("c", &["b"], None),
+                model("b", &["a"], None),
+                model("a", &[], Some("old_a")),
+            ];
+            assert_eq!(
+                waiting(&models, &live(&["old_a"])),
+                roots(&[("a", &["a"]), ("b", &["a"]), ("c", &["a"])])
+            );
+        }
+
+        #[test]
+        fn each_dependent_waits_on_the_root_it_descends_from() {
+            let models = [
+                model("both", &["ba", "cx"], None),
+                model("cx", &["x"], None),
+                model("ba", &["a"], None),
+                model("a", &[], Some("old_a")),
+                model("x", &[], Some("old_x")),
+            ];
+            assert_eq!(
+                waiting(&models, &live(&["old_a", "old_x"])),
+                roots(&[
+                    ("a", &["a"]),
+                    ("x", &["x"]),
+                    ("ba", &["a"]),
+                    ("cx", &["x"]),
+                    ("both", &["a", "x"]),
+                ])
+            );
+        }
+
+        #[test]
+        fn a_reference_cycle_between_held_tables_settles() {
+            // b <-> c, and b also references the renamed a.
+            let models = [
+                model("c", &["b"], None),
+                model("b", &["a", "c"], None),
+                model("a", &[], Some("old_a")),
+            ];
+            assert_eq!(
+                waiting(&models, &live(&["old_a"])),
+                roots(&[("a", &["a"]), ("b", &["a"]), ("c", &["a"])])
+            );
+        }
+
+        #[test]
+        fn a_table_referencing_only_a_non_held_table_is_not_held() {
+            let models = [
+                model("a", &[], Some("old_a")),
+                model("other", &[], None),
+                model("child", &["other"], None),
+            ];
+            assert_eq!(waiting(&models, &live(&["old_a"])), roots(&[("a", &["a"])]));
+        }
+
+        #[test]
+        fn a_live_table_never_waits_and_an_inert_hint_holds_nothing() {
+            // `b` is live already, so it is not held although it references
+            // `a`; `z`'s hint is inert (its old table is not live).
+            let models = [
+                model("a", &[], Some("old_a")),
+                model("b", &["a"], None),
+                model("z", &[], Some("old_z")),
+                model("zc", &["z"], None),
+            ];
+            assert_eq!(
+                waiting(&models, &live(&["old_a", "b"])),
+                roots(&[("a", &["a"])])
+            );
+        }
+    }
 }
