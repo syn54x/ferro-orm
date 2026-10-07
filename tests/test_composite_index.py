@@ -704,6 +704,8 @@ async def test_autogen_idempotent_after_first_apply(db_url):
     from alembic.migration import MigrationContext
     from sqlalchemy import create_engine
 
+    from ferro.migrations import ferro_options
+
     class IdxStable(Model):
         __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
             ("c", "d"),
@@ -720,7 +722,7 @@ async def test_autogen_idempotent_after_first_apply(db_url):
     metadata = get_metadata()
 
     with engine.connect() as conn:
-        ctx = MigrationContext.configure(conn)
+        ctx = MigrationContext.configure(conn, opts=ferro_options())
         diff = compare_metadata(ctx, metadata)
 
     relevant = [d for d in diff if "idx_idxstable" in str(d).lower()]

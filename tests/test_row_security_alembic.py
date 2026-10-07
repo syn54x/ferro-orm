@@ -600,7 +600,7 @@ def test_the_reconcile_seam_the_comparator_consumes_is_directly_pinned():
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_force_only_flip_proposes_just_no_force_and_its_downgrade_forces_again(
+async def test_force_only_flip_proposes_a_narrow_drop_op_labeled_force(
     db_url, postgres_base_url, db_schema_name
 ):
     """A live-declared model whose declaration still exists but no longer
