@@ -2,8 +2,6 @@
 
 A developer renames `Author.name` to `full_name`. A diff of the two schema snapshots sees a column that vanished and a column that appeared, and the DDL for that is `DROP COLUMN "name"` plus `ADD COLUMN "full_name"`: every author's name is gone. No diff can tell that from a rename. The developer has to say so, and says so on the model:
 
-Amended by ADR-0047 (2026-10-07): the reconciliation pass honours the same hints, with liveness read from the live database (old name live, new name absent) instead of the previous snapshot.
-
 ```python
 class Writer(Model):                                    # was Author
     __ferro_renamed_from__ = "author"                   # table
@@ -15,6 +13,8 @@ class Status(StrEnum):
 ```
 
 A rename hint is part of the declared modelset, so the migration's schema snapshot carries it and nothing else records the rename. One liveness rule serves the generator and the historical-model builder: a hint is **live** when the previous snapshot holds the old name and lacks the new one. A live hint renders `RENAME`; any other hint is inert, in the migration that follows and in every later one, so it can be left in the code or deleted without generating anything.
+
+Amended by ADR-0047 (2026-10-07): the reconciliation pass honours the same hints, with liveness read from the live database (old name live, new name absent) instead of the previous snapshot.
 
 A drop and an add with no hint are rendered as a drop and an add, marked destructive, and the generator's summary names `renamed_from`. The generator never matches a vanished column to a new one by type.
 
