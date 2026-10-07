@@ -537,6 +537,87 @@ def test_no_backfill_naming_a_column_nothing_backfills_is_refused(project, pkg, 
     assert "author also needs a value for bio" in capsys.readouterr().err
 
 
+# -- a column the backfill reads, dropped by the same migration (F1, ADR-0025) ---------
+
+NAMELESS = HEAD.replace("    name: Annotated[str, FerroField(unique=True)]\n", "")
+
+
+@backend_matrix
+def test_a_dropped_column_is_read_by_the_backfill_and_dropped_by_the_contract(
+    project, pkg, db, capsys
+):
+    start(project, pkg, db, HEAD, rows=3)
+
+    migration = generate(project, pkg, NAMELESS + REQUIRED_SLUG, "author_slug")
+
+    assert listing(migration) == sorted(
+        ddl_files("01_expand", "03_add_constraint", "04_contract")
+        + ["02_backfill_author.py", "ir.json"]
+    )
+    for dialect in ("postgres", "sqlite"):
+        assert text(migration, f"01_expand.up.{dialect}.sql") == (
+            'ALTER TABLE "author" ADD COLUMN "slug" varchar;\n'
+        )
+    assert text(migration, "04_contract.up.postgres.sql") == (
+        "-- ferro: destructive\n-- ferro: data-dependent\n\n"
+        'ALTER TABLE "author" VALIDATE CONSTRAINT "_ferro_notnull_author_slug";\n\n'
+        'ALTER TABLE "author" ALTER COLUMN "slug" SET NOT NULL;\n\n'
+        'ALTER TABLE "author" DROP CONSTRAINT "_ferro_notnull_author_slug";\n\n'
+        'DROP INDEX IF EXISTS "uq_author_name";\n\n'
+        'ALTER TABLE "author" DROP COLUMN "name";\n'
+    )
+    assert text(migration, "04_contract.down.postgres.sql").startswith(
+        "-- ferro: data-dependent\n\n"
+        'ALTER TABLE "author" ADD COLUMN "name" varchar;\n\n'
+        'CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name");\n\n'
+        'ALTER TABLE "author" ALTER COLUMN "name" SET NOT NULL;\n\n'
+    )
+    sqlite_contract = text(migration, "04_contract.up.sqlite.sql")
+    assert sqlite_contract.startswith(
+        "-- ferro: foreign-keys-off\n-- ferro: destructive\n-- ferro: data-dependent\n\n"
+        'CREATE TABLE IF NOT EXISTS "_ferro_new_author"'
+    )
+    assert '"name"' not in sqlite_contract
+    assert text(migration, "04_contract.down.sqlite.sql").startswith(
+        "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n\n"
+    )
+
+    # The backfill reads the column the migration drops.
+    write_value(
+        migration,
+        "02_backfill_author.py",
+        SLUG_TODO,
+        'author.name.replace("author-", "slug-")',
+    )
+    capsys.readouterr()
+    assert run("migrate", "up", "--url", db.url) == 0, capsys.readouterr().err
+    assert keys(db) == [(1, 1), *[(2, n) for n in range(1, 5)]]
+    assert db.rows("SELECT slug FROM author ORDER BY id") == [
+        ("slug-1",),
+        ("slug-2",),
+        ("slug-3",),
+    ]
+    assert clean(db, project, 2, 1)
+
+    # Down puts `name` back NOT NULL (ADR-0033): the rows it lost cannot
+    # satisfy it, so the contract's down fails, rolled back, naming the fix.
+    capsys.readouterr()
+    assert run("migrate", "down", "--yes", "--url", db.url) == 1
+    err = capsys.readouterr().err
+    assert f"0002_author_slug/04_contract.down.{db.backend}.sql failed" in err, err
+    assert "fix the file or the database and run `ferro migrate down` again" in err, err
+    assert "re-run the backfill" not in err, err
+    assert keys(db) == [(1, 1), *[(2, n) for n in range(1, 5)]]
+
+    # On an empty table the down reaches the parent snapshot exactly.
+    db.execute("DELETE FROM author")
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert keys(db) == [(1, 1)]
+    assert clean(db, project, 1, 2)
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert clean(db, project, 2, 1)
+
+
 # -- rows written behind the backfill's cursor ------------------------------------------
 
 LATE_ROW = """\

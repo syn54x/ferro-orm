@@ -295,6 +295,7 @@ pub fn index_step(op: &IndexOp, dialects: &[Dialect]) -> GeneratedStep {
         kind: StepKind::Ddl,
         renderings,
         data: None,
+        hand_model: None,
     }
 }
 
@@ -425,5 +426,6 @@ pub fn validate_step(constraints: &[StagedConstraint], dialects: &[Dialect]) -> 
         kind: StepKind::Ddl,
         renderings,
         data: None,
+        hand_model: None,
     }
 }

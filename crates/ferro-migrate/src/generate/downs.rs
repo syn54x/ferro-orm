@@ -315,11 +315,49 @@ fn statements(
     Ok((out, !rebuilt.is_empty()))
 }
 
+/// [`render_step`] as the step's two files.
+///
+/// # Errors
+/// What [`render_step`] raises.
+pub fn render_down(
+    step_ops: &[MigrationOp],
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+    phase: Phase,
+    hints: &[Hint],
+    data_steps: bool,
+) -> Result<Rendering, GenerateError> {
+    let step = render_step(step_ops, before, after, dialect, phase, hints, data_steps)?;
+    Ok(Rendering {
+        up: step_text(&step.headers, &step.up),
+        down: step_text(&step.down_headers, &step.down),
+        headers: step.headers,
+        down_headers: step.down_headers,
+    })
+}
+
+/// One step's statements and headers, both directions, before they are
+/// written as files: what a step that holds more than the planner's ops (the
+/// contract) composes with its own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StepStatements {
+    /// The up file's statements.
+    pub up: Vec<String>,
+    /// The up file's headers.
+    pub headers: Headers,
+    /// The down file's statements.
+    pub down: Vec<String>,
+    /// The down file's headers.
+    pub down_headers: Headers,
+}
+
 /// One generated step on `dialect`, both directions: the up file renders
 /// `step_ops` (planned `before → after`), and the down file renders the
 /// inverse — [`crate::plan_from_ir`]`(after, before)` with every drop planned,
 /// restricted to the tables and enum types `step_ops` touch and to the ops
-/// [`columns::assign`] puts in the step's `phase`.
+/// [`columns::assign`] puts in the step's `phase` in a migration that has
+/// (`data_steps`) or lacks a data step after its schema step.
 ///
 /// On Postgres the up adds every foreign key and check `NOT VALID`
 /// ([`columns::constraint_mode`], ADR-0043); the down restores the step's
@@ -336,14 +374,15 @@ fn statements(
 /// An op that cannot render (an [`crate::EmissionError`] from
 /// [`render_plan`]), or that renders only a warning
 /// ([`GenerateError::Unrenderable`]).
-pub fn render_down(
+pub fn render_step(
     step_ops: &[MigrationOp],
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     phase: Phase,
     hints: &[Hint],
-) -> Result<Rendering, GenerateError> {
+    data_steps: bool,
+) -> Result<StepStatements, GenerateError> {
     // A step holding the migration's renames (ADR-0032) runs its table and
     // column renames first; everything else in it reads the table under its
     // new names. Its down undoes them first the other way, then restores the
@@ -382,7 +421,8 @@ pub fn render_down(
         .into_iter()
         .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
         .filter(|op| {
-            let ctx = PlanContext::of(op, &planned_after, before, dialect, PlanDirection::Down);
+            let ctx = PlanContext::of(op, &planned_after, before, dialect, PlanDirection::Down)
+                .with_data_steps(data_steps);
             !columns::carried_by_its_column_drop(op, &ctx)
                 && columns::assign(op, &ctx).phase == phase
         })
@@ -448,10 +488,10 @@ pub fn render_down(
         ..Headers::default()
     };
 
-    Ok(Rendering {
-        up: step_text(&headers, &up_statements),
-        down: step_text(&down_headers, &down_statements),
+    Ok(StepStatements {
+        up: up_statements,
         headers,
+        down: down_statements,
         down_headers,
     })
 }
@@ -491,6 +531,7 @@ mod tests {
             dialect,
             Phase::Schema,
             &[],
+            false,
         )
         .expect("render")
     }
@@ -592,8 +633,16 @@ mod tests {
             .into_iter()
             .filter(|op| op.table() == Some("tag"))
             .collect();
-        let r = render_down(&ops, &before, &after, Dialect::Sqlite, Phase::Schema, &[])
-            .expect("render");
+        let r = render_down(
+            &ops,
+            &before,
+            &after,
+            Dialect::Sqlite,
+            Phase::Schema,
+            &[],
+            false,
+        )
+        .expect("render");
         assert_eq!(r.down, "DROP TABLE \"tag\";\n");
     }
 
@@ -606,6 +655,7 @@ mod tests {
             Dialect::Sqlite,
             Phase::Schema,
             &[],
+            false,
         )
         .expect("render");
         assert_eq!(r.up, "-- ferro: not-applicable\n");

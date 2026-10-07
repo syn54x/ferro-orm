@@ -41,7 +41,8 @@ pub enum Phase {
     Index,
     /// Postgres staged `NOT NULL` checks installed `NOT VALID`.
     AddConstraint,
-    /// Validation and `SET NOT NULL` after a backfill.
+    /// Validation and `SET NOT NULL` after a backfill, and every destructive
+    /// op of a migration with a data step ([`waits_for_the_data_steps`]).
     Contract,
     /// Validation of staged constraints with no contract (ticket #527).
     Validate,
@@ -131,6 +132,10 @@ pub struct PlanContext<'a> {
     pub before: Option<&'a SchemaModel>,
     /// The op's table as the file leaves it.
     pub after: Option<&'a SchemaModel>,
+    /// The migration has a data step after its schema step (a generated
+    /// backfill or guard, or one a person added): its destructive ops wait
+    /// for the contract ([`waits_for_the_data_steps`]).
+    pub data_steps: bool,
 }
 
 impl<'a> PlanContext<'a> {
@@ -157,7 +162,14 @@ impl<'a> PlanContext<'a> {
             direction,
             before,
             after,
+            data_steps: false,
         }
+    }
+
+    /// This context in a migration that has (`true`) or lacks a data step
+    /// after its schema step.
+    pub fn with_data_steps(self, data_steps: bool) -> Self {
+        PlanContext { data_steps, ..self }
     }
 
     fn column_before(&self, name: &str) -> Option<&'a SchemaColumn> {
@@ -265,19 +277,48 @@ pub fn carried_by_its_column_drop(op: &MigrationOp, ctx: &PlanContext<'_>) -> bo
         && goes_with_a_dropped_column(op, ctx)
 }
 
-/// Whether `op` builds an index over a column the same file adds: a down
-/// putting back a column the up dropped together with its index, which goes
-/// back with the column, as it went.
+/// Whether `op` puts back an index, a column check or a foreign key over a
+/// column the same file adds: a down putting back a column the up dropped
+/// together with them, which go back with the column, as they went.
 fn goes_with_an_added_column(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
     let (Some(before), Some(after)) = (ctx.before, ctx.after) else {
         return false;
     };
-    let MigrationOp::AddIndex { columns, .. } = op else {
+    let added = |name: &str| column(before, name).is_none() && column(after, name).is_some();
+    match op {
+        MigrationOp::AddIndex { columns, .. } => columns.iter().any(|name| added(name)),
+        MigrationOp::AddCheck { name, .. } => after
+            .checks
+            .iter()
+            .any(|check| &check.name == name && added(&check.column)),
+        MigrationOp::AddForeignKey { column, .. } => added(column),
+        _ => false,
+    }
+}
+
+/// Whether `op` waits for the contract step, after every data step, in the
+/// migration `ctx` describes (ADR-0025): in a migration with a data step, an
+/// up's op that drops data ([`super::downs::drops_data`]: a column, a table,
+/// the enum type that follows them) and what goes with a dropped column, so
+/// a data step still reads what the migration drops; in its down, the ops
+/// that put them back. Removals that discard no data (a foreign key, a check,
+/// an index, a relaxed `NOT NULL`) stay where they are, and a migration with
+/// no data step keeps its drops in its one schema step.
+pub fn waits_for_the_data_steps(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
+    if !ctx.data_steps {
         return false;
-    };
-    columns
-        .iter()
-        .any(|name| column(before, name).is_none() && column(after, name).is_some())
+    }
+    match ctx.direction {
+        PlanDirection::Up => super::downs::drops_data(op) || goes_with_a_dropped_column(op, ctx),
+        PlanDirection::Down => match op {
+            MigrationOp::AddTable { .. } => !ctx.table_exists_before && ctx.table_exists_after,
+            MigrationOp::CreateEnumType { .. } => true,
+            MigrationOp::AddColumn { column, .. } => {
+                ctx.on_existing_table() && ctx.column_before(column).is_none()
+            }
+            _ => goes_with_an_added_column(op, ctx),
+        },
+    }
 }
 
 /// Whether `op` builds or drops an index on a table that exists before and
@@ -323,6 +364,8 @@ pub fn assign(op: &MigrationOp, ctx: &PlanContext<'_>) -> StepAssignment {
         ctx.direction == PlanDirection::Down && matches!(op, MigrationOp::RemoveEnumLabel { .. });
     let phase = if matches!(op, MigrationOp::AddEnumLabel { .. }) || added_label_goes_back {
         Phase::Labels
+    } else if waits_for_the_data_steps(op, ctx) {
+        Phase::Contract
     } else if is_index_step(op, ctx) {
         Phase::Index
     } else {
@@ -764,6 +807,134 @@ mod tests {
                 "{dialect:?} {direction:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_drop_waits_for_the_contract_only_in_a_migration_with_a_data_step() {
+        let mut with_bio = author(vec![SchemaColumn {
+            index: true,
+            ..nullable("bio", "string")
+        }]);
+        with_bio.checks.push(SchemaCheck {
+            name: "ck_author_bio".into(),
+            column: "bio".into(),
+            values: vec!["'a'".into()],
+        });
+        with_bio.indexes.push(SchemaIndex {
+            name: "idx_author_bio".into(),
+            columns: vec!["bio".into()],
+            unique: false,
+        });
+        let without = author(vec![]);
+        let drop_index = MigrationOp::DropIndex {
+            table: "author".into(),
+            name: "idx_author_bio".into(),
+        };
+        let drop_check = MigrationOp::DropCheck {
+            table: "author".into(),
+            name: "ck_author_bio".into(),
+        };
+        let add_check = MigrationOp::AddCheck {
+            table: "author".into(),
+            name: "ck_author_bio".into(),
+        };
+        let (with_ir, without_ir) = (ir(vec![with_bio]), ir(vec![without]));
+        let empty = ir(vec![]);
+        // (op, before, after, direction): each a drop, or in a down what puts
+        // one back.
+        let cases = [
+            (drop("bio"), &with_ir, &without_ir, PlanDirection::Up),
+            (drop_index, &with_ir, &without_ir, PlanDirection::Up),
+            (drop_check, &with_ir, &without_ir, PlanDirection::Up),
+            (
+                MigrationOp::DropTable {
+                    table: "author".into(),
+                },
+                &with_ir,
+                &empty,
+                PlanDirection::Up,
+            ),
+            (
+                MigrationOp::DropEnumType {
+                    type_name: "status".into(),
+                },
+                &with_ir,
+                &empty,
+                PlanDirection::Up,
+            ),
+            (add("bio"), &without_ir, &with_ir, PlanDirection::Down),
+            (add_check, &without_ir, &with_ir, PlanDirection::Down),
+            (
+                MigrationOp::AddTable {
+                    table: "author".into(),
+                },
+                &empty,
+                &with_ir,
+                PlanDirection::Down,
+            ),
+        ];
+        for (op, before, after, direction) in &cases {
+            for dialect in DIALECTS {
+                let ctx = PlanContext::of(op, before, after, dialect, *direction);
+                assert_ne!(assign(op, &ctx).phase, Phase::Contract, "{op:?}");
+                let ctx = ctx.with_data_steps(true);
+                assert!(waits_for_the_data_steps(op, &ctx), "{op:?} {dialect:?}");
+                assert_eq!(assign(op, &ctx).phase, Phase::Contract, "{op:?}");
+            }
+        }
+        // What discards no data stays where it is: a check dropped from a
+        // column that stays, a relaxed NOT NULL, a new column or table.
+        let unchecked = ir(vec![author(vec![nullable("bio", "string")])]);
+        let checked = {
+            let mut model = author(vec![nullable("bio", "string")]);
+            model.checks.push(SchemaCheck {
+                name: "ck_author_bio".into(),
+                column: "bio".into(),
+                values: vec!["'a'".into()],
+            });
+            ir(vec![model])
+        };
+        let stays = [
+            (
+                MigrationOp::DropCheck {
+                    table: "author".into(),
+                    name: "ck_author_bio".into(),
+                },
+                &checked,
+                &unchecked,
+            ),
+            (add("bio"), &without_ir, &with_ir),
+            (
+                MigrationOp::AddTable {
+                    table: "author".into(),
+                },
+                &empty,
+                &with_ir,
+            ),
+        ];
+        for (op, before, after) in &stays {
+            let ctx = PlanContext::of(op, before, after, Dialect::Postgres, PlanDirection::Up)
+                .with_data_steps(true);
+            assert!(!waits_for_the_data_steps(op, &ctx), "{op:?}");
+        }
+        let relax = MigrationOp::AlterColumnNullability {
+            table: "author".into(),
+            column: "name".into(),
+        };
+        let loose = ir(vec![model(
+            "Author",
+            vec![pk(), nullable("name", "string")],
+        )]);
+        let strict = ir(vec![author(vec![])]);
+        let ctx = PlanContext::of(
+            &relax,
+            &strict,
+            &loose,
+            Dialect::Postgres,
+            PlanDirection::Up,
+        )
+        .with_data_steps(true);
+        assert!(!waits_for_the_data_steps(&relax, &ctx));
     }
 
     #[test]
