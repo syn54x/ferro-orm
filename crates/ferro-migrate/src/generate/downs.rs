@@ -324,9 +324,8 @@ fn statements(
 
 /// One generated step on `dialect`, both directions: the up file renders
 /// `step_ops` (planned `before → after`), and the down file renders the
-/// inverse — [`crate::plan_from_ir`]`(after, before)` with every drop planned
-/// and row security the step introduced torn down
-/// ([`super::row_security::with_teardown`]), restricted to the tables and enum types `step_ops` touch and to the ops
+/// inverse — [`crate::plan_from_ir`]`(after, before)` with every drop planned,
+/// restricted to the tables and enum types `step_ops` touch and to the ops
 /// [`columns::assign`] puts in the step's `phase`.
 ///
 /// On Postgres the up adds every foreign key and check `NOT VALID`

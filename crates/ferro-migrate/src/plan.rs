@@ -18,9 +18,10 @@ use crate::{
     PlanOptions, emit,
 };
 use ferro_ddl_lowering::{
-    EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, drifted_check_names,
-    enum_label_strings, enum_type_provenance, excess_row_security_flag_statements,
-    extra_check_names, extra_check_names_warning, extra_enum_labels, extra_enum_labels_warning,
+    EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, declared_row_policy_names,
+    drifted_check_names, dropped_row_security_warning, enum_label_strings, enum_type_provenance,
+    excess_row_security_flag_statements, extra_check_names, extra_check_names_warning,
+    extra_enum_labels, extra_enum_labels_warning, extra_row_policy_names_warning,
     fk_action_from_str, fk_action_sql, fk_name, is_ferro_fk_name, is_ferro_row_policy_name,
     missing_check_names, missing_enum_labels, missing_row_security_flag_statements,
     normalize_check_definition, normalize_row_policy_expr, plan_row_security_reconcile,
@@ -544,11 +545,15 @@ fn plan_named(
     }
 
     for (old_model, new_model) in order_existing_tables(&old_models, &new_models) {
-        let (old_view, table_facts) = match facts.tables.get(&new_model.table_name) {
-            Some(live) => (Cow::Borrowed(old_model), Cow::Borrowed(live)),
+        // A table with no live facts is read from the `old` snapshot: the
+        // planner is diffing two declared snapshots (the generator), never a
+        // live database (the pass reads facts for every live table).
+        let (old_view, table_facts, side) = match facts.tables.get(&new_model.table_name) {
+            Some(live) => (Cow::Borrowed(old_model), Cow::Borrowed(live), OldSide::Live),
             None => (
                 declared_live_view(old_model, dialect),
                 Cow::Owned(declared_table_facts(old_model)),
+                OldSide::Snapshot,
             ),
         };
         plan_existing_table(
@@ -556,6 +561,7 @@ fn plan_named(
             new_model,
             dialect,
             &table_facts,
+            side,
             options,
             &mut plan,
         );
@@ -600,11 +606,23 @@ fn order_existing_tables<'a>(
     )
 }
 
+/// What the `old` side of an existing table is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OldSide {
+    /// A live database, read through its facts (the reconciliation pass,
+    /// `drift`).
+    Live,
+    /// A declared snapshot (the generator): every artifact on it is ferro's
+    /// own declaration.
+    Snapshot,
+}
+
 fn plan_existing_table(
     old_model: &SchemaModel,
     new_model: &SchemaModel,
     dialect: Dialect,
     facts: &LiveTableFacts,
+    side: OldSide,
     options: PlanOptions,
     plan: &mut MigrationPlan,
 ) {
@@ -696,6 +714,7 @@ fn plan_existing_table(
         new_model,
         &facts.row_security,
         dialect,
+        side,
         options.destructive,
         &mut ops,
         &mut plan.always_warnings,
@@ -714,10 +733,24 @@ fn plan_existing_table(
 /// warnings — foreign and unverifiable policies, dropped declarations,
 /// teardowns — become the plan's always-warnings; a foreign policy and an
 /// unverifiable raw body are reported and never become an op.
+///
+/// Between two declared snapshots ([`OldSide::Snapshot`], the generator)
+/// the parent snapshot answers the two questions a live table cannot
+/// (ADR-0019, ADR-0033): a raw body that differs is the author's edit, since
+/// both texts are ferro's own copies of a declaration, so it is rebuilt like
+/// a shorthand one; and row security the parent declared was installed by
+/// ferro, so a declaration the target drops is torn down
+/// ([`snapshot_flag_teardown`]) whether or not a ferro-named policy is left
+/// to witness it. Every difference is then an op in a reviewed file, so the
+/// decision's reports of live conditions (unverifiable and replaced bodies,
+/// a teardown done) are not carried; a non-destructive plan still reports
+/// the removals it withholds.
+#[allow(clippy::too_many_arguments)]
 fn plan_row_security(
     model: &SchemaModel,
     live: &LiveRowSecurity,
     dialect: Dialect,
+    side: OldSide,
     destructive: bool,
     ops: &mut Vec<MigrationOp>,
     always_warnings: &mut Vec<String>,
@@ -728,11 +761,19 @@ fn plan_row_security(
     let Ok(decision) = plan_row_security_reconcile(model, live, dialect, destructive) else {
         return;
     };
-    always_warnings.extend(decision.warnings);
+    let table = model.table_name.as_str();
+    match side {
+        OldSide::Live => always_warnings.extend(decision.warnings),
+        OldSide::Snapshot if !destructive => always_warnings.extend(
+            dropped_row_security_warning(model, live)
+                .into_iter()
+                .chain(extra_row_policy_names_warning(table, &decision.extra)),
+        ),
+        OldSide::Snapshot => {}
+    }
     if dialect != Dialect::Postgres {
         return;
     }
-    let table = model.table_name.as_str();
     ops.extend(
         missing_row_security_flag_statements(model, live)
             .iter()
@@ -747,10 +788,16 @@ fn plan_row_security(
                 name,
             }),
     );
+    // Rebuilds in declaration order: drifted bodies, and on a snapshot the
+    // edited raw ones.
+    let rebuilt = |name: &String| {
+        decision.drifted.contains(name)
+            || (side == OldSide::Snapshot && decision.unverifiable.contains(name))
+    };
     ops.extend(
-        decision
-            .drifted
+        declared_row_policy_names(model)
             .into_iter()
+            .filter(rebuilt)
             .map(|name| MigrationOp::RebuildRowPolicy {
                 table: table.to_string(),
                 name,
@@ -766,11 +813,34 @@ fn plan_row_security(
                     name,
                 }),
         );
+        let teardown = match side {
+            OldSide::Live => excess_row_security_flag_statements(model, live),
+            OldSide::Snapshot => snapshot_flag_teardown(model, live),
+        };
         ops.extend(
-            excess_row_security_flag_statements(model, live)
+            teardown
                 .iter()
                 .filter_map(|statement| row_security_flag_op(table, statement)),
         );
+    }
+}
+
+/// The flag teardown a file between two snapshots owes: the pass's
+/// (`excess_row_security_flag_statements`), except that the parent snapshot
+/// declaring row security is itself the proof ferro installed it (ADR-0033) —
+/// the evidence the pass reads off a ferro-named policy — so a declaration
+/// the target drops clears `FORCE` and `ENABLE` even with no policy left.
+fn snapshot_flag_teardown(model: &SchemaModel, live: &LiveRowSecurity) -> Vec<String> {
+    let table = model.table_name.as_str();
+    match model.row_security {
+        None => [
+            live.forced.then(|| render_no_force_row_security(table)),
+            live.enabled.then(|| render_disable_row_security(table)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        Some(_) => excess_row_security_flag_statements(model, live),
     }
 }
 

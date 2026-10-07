@@ -333,25 +333,20 @@ const DESTRUCTIVE: PlanOptions = PlanOptions { destructive: true };
 
 /// Plan `old → new` on `dialect` as two declared snapshots: every drop is
 /// planned (a dropped model is always rendered, marked destructive; review is
-/// the gate), and row security `old` declares and `new` does not is torn
-/// down ([`row_security::with_teardown`]).
+/// the gate).
 fn plan(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
 ) -> MigrationPlan {
-    let mut plan = plan_from_ir(old, new, dialect, &LiveFacts::declared(), DESTRUCTIVE);
-    plan.operations = row_security::with_teardown(plan.operations, old, new, dialect);
-    plan
+    plan_from_ir(old, new, dialect, &LiveFacts::declared(), DESTRUCTIVE)
 }
 
 /// Every warning `plan` raises that planning `standing → standing` does not
 /// and that nothing answers: the reports this change caused, not the ones the
 /// models always raise. A leftover CHECK's report is answered by the plan's
-/// drop of it, a row-security teardown's by the teardown itself
-/// ([`row_security::answered_warnings`]); `answered` names the rest (a down's
-/// report of a label the up added, which the `labels` step's down already
-/// says stays).
+/// drop of it; `answered` names the rest (a down's report of a label the up
+/// added, which the `labels` step's down already says stays).
 fn change_warnings(
     plan: &MigrationPlan,
     standing: &MigrationPlan,
@@ -366,7 +361,6 @@ fn change_warnings(
     let answered: BTreeSet<String> = dropped_checks
         .iter()
         .filter_map(|(table, names)| extra_check_names_warning(table, names))
-        .chain(row_security::answered_warnings(&plan.operations))
         .chain(answered_elsewhere.iter().cloned())
         .collect();
     let already: BTreeSet<&String> = standing
@@ -1038,8 +1032,7 @@ mod tests {
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
     ) -> Vec<String> {
-        let pass = plan_from_ir(before, after, dialect, &LiveFacts::declared(), DESTRUCTIVE);
-        render_plan(&pass, before, after, dialect)
+        render_plan(&plan(before, after, dialect), before, after, dialect)
             .expect("render")
             .into_iter()
             .flat_map(|rendered| rendered.statements)
@@ -2454,14 +2447,7 @@ mod tests {
         assert_eq!(sqlite.down, NOT_APPLICABLE);
         // Every statement is the pass's for the same declaration (I-1 15–16).
         let (from, to) = (ir(vec![before.clone()]), ir(vec![after.clone()]));
-        let mut pass_up = pass(&from, &to, Dialect::Postgres);
-        pass_up.extend(teardown_pass_cannot_witness(&before, &after));
-        assert_eq!(pass_up, up);
-        assert_eq!(
-            row_security::render(&plan(&from, &to, Dialect::Postgres).operations, &from, &to)
-                .expect("render"),
-            up
-        );
+        assert_eq!(pass(&from, &to, Dialect::Postgres), up);
         // Applied, the target is no schema change; nor is the parent after
         // its down.
         let parent = snapshot_of(&to, None);
@@ -2471,22 +2457,6 @@ mod tests {
             generate(Some(&snapshot_of(&from, None)), &to, &[Dialect::Sqlite]),
             Ok(None)
         );
-    }
-
-    /// The flag teardown a file removing a policy-less declaration owes and the
-    /// pass, which reads ownership off ferro-named policies, does not plan.
-    fn teardown_pass_cannot_witness(before: &SchemaModel, after: &SchemaModel) -> Vec<String> {
-        match (&before.row_security, &after.row_security) {
-            (Some(declared), None) if declared.policies.is_empty() => {
-                let mut out = Vec::new();
-                if declared.force {
-                    out.push(no_force());
-                }
-                out.push(disable());
-                out
-            }
-            _ => Vec::new(),
-        }
     }
 
     #[test]
@@ -2570,7 +2540,8 @@ mod tests {
     #[test]
     fn a_declaration_with_no_policy_is_still_torn_down_by_the_migration_that_introduced_it() {
         // No ferro-named policy witnesses the flags, which the pass would
-        // leave alone; the parent snapshot shows the migration set them.
+        // leave alone on a live table; between two snapshots the planner reads
+        // the parent snapshot as the proof ferro set them (ADR-0033).
         let bare = order(Some((true, Vec::new())));
         assert_row_security_step(
             order(None),
@@ -2587,10 +2558,10 @@ mod tests {
     }
 
     #[test]
-    fn an_edited_raw_policy_body_is_refused_not_written() {
-        // The planner reads a raw body that differs as unverifiable (ADR-0019)
-        // and plans no op for it: `new` refuses rather than write a migration
-        // that leaves the old body standing.
+    fn an_edited_raw_policy_body_is_rebuilt_and_its_down_restores_the_parents() {
+        // Unverifiable is a live-only category (ADR-0019): between two
+        // snapshots both bodies are the author's declared text, so an edit is
+        // a rebuild like a shorthand body's.
         let raw = |body: &str| SchemaRowPolicy {
             name: "rls_order_raw".into(),
             command: RowPolicyCommand::Select,
@@ -2602,9 +2573,54 @@ mod tests {
         };
         let before = order(Some((true, vec![raw("owner = 'a'")])));
         let after = order(Some((true, vec![raw("owner = 'b'")])));
-        let err = refusal(vec![before], vec![after], &BOTH);
-        assert!(err.starts_with("not generated yet:"), "{err}");
-        assert!(err.contains("'rls_order_raw'"), "{err}");
+        assert_row_security_step(
+            before.clone(),
+            after.clone(),
+            &[
+                drop_policy("rls_order_raw"),
+                create_policy(&after, &raw("owner = 'b'")),
+            ],
+            &[
+                drop_policy("rls_order_raw"),
+                create_policy(&before, &raw("owner = 'a'")),
+            ],
+        );
+        let migration = edit(vec![before], vec![after], &BOTH);
+        assert!(migration.warnings.is_empty(), "{:?}", migration.warnings);
+    }
+
+    #[test]
+    fn row_security_lands_after_the_tables_column_and_check_changes() {
+        // A new column and a check over it: the check is staged `NOT VALID`
+        // in the schema step after the column, row security after both, and
+        // the validation is its own later step.
+        let mut checked = order(None);
+        checked.columns.push(optional("note", "string"));
+        checked.checks.push(ferro_schema_ir::SchemaCheck {
+            name: "ck_order_note".into(),
+            column: "note".into(),
+            values: vec!["'a'".into(), "'b'".into()],
+        });
+        let after = SchemaModel {
+            row_security: order(Some((true, vec![tenant_policy("app.tenant")]))).row_security,
+            ..checked
+        };
+        let migration = edit(vec![order(None)], vec![after.clone()], &[Dialect::Postgres]);
+        assert_eq!(step_names(&migration), ["01_schema", "02_validate"]);
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        let at = |needle: &str| {
+            pg.up
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {}", pg.up))
+        };
+        assert!(at("ADD COLUMN \"note\"") < at("ADD CONSTRAINT \"ck_order_note\""));
+        assert!(at("ADD CONSTRAINT \"ck_order_note\"") < at("ENABLE ROW LEVEL SECURITY"));
+        let down_at = |needle: &str| {
+            pg.down
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {}", pg.down))
+        };
+        assert!(down_at("DISABLE ROW LEVEL SECURITY") < down_at("DROP COLUMN \"note\""));
     }
 
     #[test]
