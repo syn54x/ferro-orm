@@ -46,6 +46,7 @@ from ferro.raw import execute
 from ferro.session import engines
 from tests._alembic_harness import (
     assert_statement_in_code,
+    autogen_opts,
     autogenerate,
     engine_for,
     run_revision,
@@ -623,6 +624,76 @@ async def test_a_live_table_the_projects_name_filter_excludes_is_never_dropped(
         extra_opts={"include_name": include_name},
     )
     assert "bra_named" not in upgrade + downgrade, upgrade
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version_table", [None, "bra_alembic_version"])
+async def test_the_version_table_is_never_dropped(
+    db_url, postgres_base_url, db_schema_name, version_table
+):
+    """A database Alembic manages carries its version table, which no
+    metadata declares: deleting a model never drops it, under the default
+    name or the project's own ``version_table``."""
+    _bra_shop(with_order=False)
+    await connect(db_url, auto_migrate=True)
+    name = version_table or "alembic_version"
+    async with engines.session():
+        await execute(f'CREATE TABLE "{name}" ("version_num" varchar(32) NOT NULL)')
+
+    upgrade, downgrade = autogenerate(
+        db_url,
+        postgres_base_url,
+        db_schema_name,
+        extra_opts={"version_table": version_table} if version_table else None,
+    )
+    assert name not in upgrade + downgrade, upgrade
+    assert "drop_table" not in upgrade, upgrade
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_ferros_tracking_tables_are_never_dropped(
+    db_url, postgres_base_url, db_schema_name
+):
+    """The tracking tables no model declares are not tables a deleted model
+    left behind: asked directly (below the tracked-database refusal),
+    ``_dropped_tables`` lists a deleted model's table and none of ferro's
+    tracking tables."""
+    from alembic.autogenerate.api import AutogenContext
+    from alembic.migration import MigrationContext
+
+    from ferro.migrations import alembic as bridge
+    from ferro.migrations import get_metadata
+
+    _bra_shop(with_order=True)
+    await connect(db_url, auto_migrate=True)
+    name = f"tr_{uuid.uuid4().hex}"
+    await connect(db_url, name=name)
+    try:
+        await _core._ensure_tracking_tables(name, None)
+    finally:
+        await _core._disconnect(name)
+    _rewind_registry()
+    _bra_shop(with_order=False)
+
+    tracking = set(_core._tracking_table_names())
+    engine = engine_for(db_url, postgres_base_url)
+    try:
+        with engine.connect() as conn:
+            if db_schema_name is not None:
+                conn.execute(sa.text(f'SET search_path TO "{db_schema_name}"'))
+            live = set(sa.inspect(conn).get_table_names())
+            assert tracking <= live, live
+            # No ferro object filter: it also hides the tracking tables, so
+            # only the finder's own skip is under test.
+            opts = autogen_opts({"include_object": None})
+            context = MigrationContext.configure(conn, opts=opts)
+            autogen = AutogenContext(context, get_metadata(), opts=opts)
+            dropped = bridge._dropped_tables(autogen)
+    finally:
+        engine.dispose()
+    assert dropped == ["braorder"], dropped
 
 
 # ---------------------------------------------------------------------------

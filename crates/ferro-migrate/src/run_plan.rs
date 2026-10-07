@@ -1699,11 +1699,11 @@ pub fn rerecord_plan(
 #[serde(rename_all = "snake_case")]
 pub enum StepState {
     /// Finished, file unchanged.
-    Installed,
+    Applied,
     /// Finished, but the file on disk changed since.
-    InstalledDifferentChecksum,
+    AppliedDifferentChecksum,
     /// Recorded by `ferro migrate baseline`.
-    InstalledBaseline,
+    AppliedBaseline,
     /// No finished record.
     Pending,
     /// Not finished, and a run holds the lock.
@@ -1722,7 +1722,7 @@ impl StepState {
     pub fn needs_attention(self) -> bool {
         matches!(
             self,
-            StepState::InstalledDifferentChecksum
+            StepState::AppliedDifferentChecksum
                 | StepState::Failed
                 | StepState::Interrupted
                 | StepState::Reverting
@@ -1733,9 +1733,9 @@ impl StepState {
     pub fn is_pending(self) -> bool {
         !matches!(
             self,
-            StepState::Installed
-                | StepState::InstalledDifferentChecksum
-                | StepState::InstalledBaseline
+            StepState::Applied
+                | StepState::AppliedDifferentChecksum
+                | StepState::AppliedBaseline
         )
     }
 }
@@ -1818,13 +1818,13 @@ pub fn run_status(
                 // record stands until a `down` reverts it.
                 Some(r) if r.is_finished() && r.error.is_some() => StepState::Failed,
                 Some(r) if r.is_finished() && r.origin == Origin::Baseline => {
-                    StepState::InstalledBaseline
+                    StepState::AppliedBaseline
                 }
                 Some(r) if r.is_finished() => {
                     if Some(&r.checksum) == on_disk.as_ref() && r.file == name {
-                        StepState::Installed
+                        StepState::Applied
                     } else {
-                        StepState::InstalledDifferentChecksum
+                        StepState::AppliedDifferentChecksum
                     }
                 }
                 Some(r) if r.error.is_some() => StepState::Failed,
@@ -2984,8 +2984,8 @@ mod tests {
         assert_eq!(
             states,
             [
-                StepState::Installed,
-                StepState::Installed,
+                StepState::Applied,
+                StepState::Applied,
                 StepState::Failed
             ]
         );
@@ -3178,8 +3178,8 @@ mod tests {
         assert_eq!(
             states,
             [
-                vec![StepState::Installed],
-                vec![StepState::Installed, StepState::Failed, StepState::Pending]
+                vec![StepState::Applied],
+                vec![StepState::Applied, StepState::Failed, StepState::Pending]
             ]
         );
         assert_eq!(
@@ -3203,11 +3203,11 @@ mod tests {
         let status = run_status(&dir, &[baseline, edited], Dialect::Sqlite, false, None);
         assert_eq!(
             status.migrations[0].steps[0].state,
-            StepState::InstalledBaseline
+            StepState::AppliedBaseline
         );
         assert_eq!(
             status.migrations[1].steps[0].state,
-            StepState::InstalledDifferentChecksum
+            StepState::AppliedDifferentChecksum
         );
         assert!(
             status
