@@ -39,7 +39,6 @@ from ferro.migrations.steps import (
 from ferro.registry import REGISTRY
 from ferro.settings import FerroSettings
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
-    isolated_imports,
     pkg,
     project,
     run,

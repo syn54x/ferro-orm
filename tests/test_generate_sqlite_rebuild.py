@@ -50,7 +50,6 @@ from tests.test_migrate_down import (  # noqa: F401 - fixtures
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     LIBRARY,
-    isolated_imports,
     pkg,
     project,
     run,

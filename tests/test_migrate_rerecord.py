@@ -45,7 +45,6 @@ from tests.test_chunked_steps import (
 )
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
-    isolated_imports,
     pkg,
     project,
     run,

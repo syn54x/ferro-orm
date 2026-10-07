@@ -31,7 +31,6 @@ from ferro import _core
 from ferro.migrations import DriftReport, MigrationRefused, render_op
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
-    isolated_imports,
     pkg,
     project,
     run,
