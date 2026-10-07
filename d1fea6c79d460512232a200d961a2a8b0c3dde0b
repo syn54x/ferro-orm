@@ -1,0 +1,1 @@
+verified 2026-10-07: cargo test -p ferro-schema-ir -p ferro-ddl-lowering -p ferro-migrate (151+248+44 passed); uv run maturin develop; uv run pytest tests/test_generate_enums.py tests/test_label_addition.py tests/test_cross_emitter_parity.py tests/test_generate_renames.py --db-backends=sqlite,postgres (48 passed, 0 skipped)
