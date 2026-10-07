@@ -578,9 +578,11 @@ pub fn _write_cursor(
             }
             None => {
                 let engine = crate::state::engine_for_connection(using)?;
-                let mut conn = crate::ddl_exec::pool_connection(&engine).await.map_err(|e| {
-                    crate::errors::map_db_error("writing the chunked step's cursor", e)
-                })?;
+                let mut conn = crate::ddl_exec::pool_connection(&engine)
+                    .await
+                    .map_err(|e| {
+                        crate::errors::map_db_error("writing the chunked step's cursor", e)
+                    })?;
                 crate::run::write_cursor(
                     &mut conn, schema, migration, step, cursor, rows_done, reverting,
                 )
