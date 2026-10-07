@@ -2291,10 +2291,10 @@ async def test_a_label_rename_on_sqlite_warns_and_leaves_the_rows(
 ):
     """SQLite keeps an enum's labels as text in its rows. The pass never
     rewrites rows (ADR-0014), so a live label rename (a row holds the old
-    label) is one warning naming `ferro migrate new`, under
-    ``migrate_updates`` and plain ``auto_migrate`` alike, and the rows stay
-    as they are. On Postgres the native type renames its label in place,
-    unchanged by this (#538, D3)."""
+    label) is one warning naming `ferro migrate new` under
+    ``migrate_updates``; plain ``auto_migrate`` reconciles nothing and says
+    nothing (ADR-0011). The rows stay as they are either way. On Postgres the
+    native type renames its label in place, unchanged by this (#538, D3)."""
     _define_pd3_order(renamed=False)
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
@@ -2317,7 +2317,8 @@ async def test_a_label_rename_on_sqlite_warns_and_leaves_the_rows(
                 "ORDER BY e.enumsortorder"
             )
     if db_backend == "sqlite":
-        assert len(_stranded(messages)) == 1, messages
+        stranded = 1 if "migrate_updates" in flags else 0
+        assert len(_stranded(messages)) == stranded, messages
         assert statuses == ["canceled", "paid"]
         return
     assert _stranded(messages) == [], messages
@@ -2351,6 +2352,123 @@ async def test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_
     async with ferro.engines.session():
         rows = await fetch_all('SELECT "status" FROM "pd3order" ORDER BY "id"')
     assert [r["status"] for r in rows] == (["canceled", "paid"] if held else ["paid"])
+
+
+# The row probe a SQLite label-rename hint may cost (ADR-0047; ADR-0011: the
+# create pass stays silent about drift). The probe reads a whole unindexed
+# column once nothing matches, so it runs only under ``migrate_updates``, and
+# only for a column with no ``db_check`` (whose listing already answers).
+
+_PD3_PROBE = (
+    "Ferro Engine: auto-migrate reading rows of 'pd3order': "
+    'SELECT 1 FROM "pd3order" WHERE "status" = \'canceled\' LIMIT 1'
+)
+
+
+class _LabelProbes(logging.Handler):
+    """Collect every row probe auto-migrate logs, in order."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if message.startswith("Ferro Engine: auto-migrate reading rows of "):
+            self.lines.append(message)
+
+
+async def _pd3_connect_probed(db_url: str, **flags) -> tuple[list[str], list[str]]:
+    """``_pd3_connect`` with fresh models; also the row probes it logged."""
+    logger = logging.getLogger("ferro")
+    handler = _LabelProbes()
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        messages = await _pd3_connect(db_url, **flags)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+    return messages, handler.lines
+
+
+async def _pd3_live_hint(db_url: str, checked: bool, labels: str) -> None:
+    """A ``pd3order`` built by the parent model holding ``labels`` rows, and
+    the renamed model registered."""
+    _define_pd3_order(renamed=False, checked=checked)
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await execute(f'INSERT INTO "pd3order" ("status") VALUES {labels}')
+    _rewind()
+    _define_pd3_order(renamed=True, checked=checked)
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_a_plain_auto_migrate_connect_reads_no_rows_for_a_label_hint(
+    db_url, clean_registry
+):
+    """Plain ``auto_migrate`` reconciles nothing, so it neither probes the
+    hinted column nor warns, even while a row holds the old label."""
+    await _pd3_live_hint(db_url, checked=False, labels="('canceled'), ('paid')")
+
+    messages, probes = await _pd3_connect_probed(db_url, auto_migrate=True)
+
+    assert probes == []
+    assert _stranded(messages) == [], messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+@pytest.mark.parametrize("built_by", ["parent", "renamed"])
+async def test_a_checked_column_decides_a_label_hint_from_its_check_alone(
+    db_url, clean_registry, built_by
+):
+    """A ``db_check`` column's check lists every label a row may hold: a check
+    still listing the old label is a live hint (one warning), a check listing
+    only the new one an inert hint (silent). Either way no row is read."""
+    if built_by == "parent":
+        await _pd3_live_hint(db_url, checked=True, labels="('canceled'), ('paid')")
+    else:
+        _define_pd3_order(renamed=True, checked=True)
+        await ferro.connect(db_url, auto_migrate=True)
+        async with ferro.engines.session():
+            await execute('INSERT INTO "pd3order" ("status") VALUES (\'cancelled\')')
+        _rewind()
+        _define_pd3_order(renamed=True, checked=True)
+
+    messages, probes = await _pd3_connect_probed(db_url, migrate_updates=True)
+
+    assert probes == []
+    assert len(_stranded(messages)) == (1 if built_by == "parent" else 0), messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_an_unchecked_column_probes_its_rows_for_a_label_hint(
+    db_url, clean_registry
+):
+    """With no check to read, ``migrate_updates`` probes the rows: a warning
+    while one holds the old label, silence once none does."""
+    await _pd3_live_hint(db_url, checked=False, labels="('canceled'), ('paid')")
+
+    messages, probes = await _pd3_connect_probed(db_url, migrate_updates=True)
+
+    assert probes == [_PD3_PROBE]
+    assert len(_stranded(messages)) == 1, messages
+
+    async with ferro.engines.session():
+        await execute(
+            'UPDATE "pd3order" SET "status" = \'cancelled\' WHERE "status" = \'canceled\''
+        )
+    _rewind()
+    _define_pd3_order(renamed=True)
+
+    messages, probes = await _pd3_connect_probed(db_url, migrate_updates=True)
+
+    assert probes == [_PD3_PROBE]
+    assert _stranded(messages) == [], messages
 
 
 # ---------------------------------------------------------------------------
