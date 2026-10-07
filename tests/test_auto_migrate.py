@@ -2813,3 +2813,40 @@ async def test_a_table_two_references_from_a_renamed_one_waits_for_the_rename_to
         assert [r["name"] for r in rows] == ["Bo"]
     ferro.reset_engine()
     assert await _trn_tables(db_url) == {"trnauthor", "trnbook", "trnappendix"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_a_live_label_rename_on_postgres_is_only_the_rename(db_url, clean_registry):
+    """``__ferro_renamed_labels__ = {"cancelled": "canceled"}`` on a live
+    Postgres type is one ``ALTER TYPE … RENAME VALUE`` and nothing else: the
+    renamed type already holds ``cancelled``, so no ``ADD VALUE 'cancelled'``
+    follows, and ``canceled`` is gone, so no warning calls it a label the
+    model no longer declares."""
+    import warnings
+
+    _define_pd3_order(renamed=False)
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await execute("INSERT INTO \"pd3order\" (\"status\") VALUES ('canceled')")
+    _rewind()
+    _define_pd3_order(renamed=True)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        logs = await _connect_capturing_logs(db_url, migrate_updates=True)
+
+    executed = [
+        line.split("': ", 1)[1]
+        for line in logs
+        if line.startswith("Ferro Engine: auto-migrate executing on")
+    ]
+    assert [sql for sql in executed if "ALTER TYPE" in sql] == [
+        "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'"
+    ], executed
+    assert not [
+        str(w.message) for w in caught if "no longer declares" in str(w.message)
+    ], [str(w.message) for w in caught]
+    async with ferro.engines.session():
+        rows = await fetch_all('SELECT "status" FROM "pd3order"')
+    assert [r["status"] for r in rows] == ["cancelled"]

@@ -24,6 +24,7 @@ use crate::directory::{
     DirectoryError, Headers, Migration, MigrationsDir, SNAPSHOT_FILE, Step, StepDialect, StepFile,
     StepKind,
 };
+use crate::plan::and_list;
 use crate::snapshot::{Snapshot, encode_checksum, sha384};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -598,14 +599,6 @@ fn no_continue_reason(recorded: &[String], on_disk: Option<&[String]>) -> &'stat
         }
         Some([]) => "the edited file's up is no longer @chunked",
         _ => "the edited file pages over different order keys than its cursor",
-    }
-}
-
-fn and_list(items: &[String]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => one.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
     }
 }
 

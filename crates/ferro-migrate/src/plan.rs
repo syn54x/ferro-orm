@@ -520,16 +520,42 @@ fn renamed_facts(
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
 ) -> LiveFacts {
-    if facts.tables.is_empty() || ops.is_empty() {
+    if (facts.tables.is_empty() && facts.enum_labels.is_empty()) || ops.is_empty() {
         return facts.clone();
     }
     let new_models = index_models(&new.payload.models);
     let mut out = facts.clone();
     for op in ops {
-        if let MigrationOp::RenameTable { old, new } = op
-            && let Some(table) = out.tables.remove(old)
-        {
-            out.tables.insert(new.clone(), table);
+        match op {
+            MigrationOp::RenameTable { old, new } => {
+                if let Some(table) = out.tables.remove(old) {
+                    out.tables.insert(new.clone(), table);
+                }
+            }
+            // A native type renames in place (its label list moves with it),
+            // and a label rename relabels the type's one entry: the rows
+            // follow, so the type holds the new spelling and no longer the
+            // old. A label stored as text renames no type and is no fact.
+            MigrationOp::RenameEnumType { old, new } => {
+                if let Some(labels) = out.enum_labels.remove(old) {
+                    out.enum_labels.insert(new.clone(), labels);
+                }
+            }
+            MigrationOp::RenameEnumLabel {
+                type_name,
+                old,
+                new,
+                ..
+            } => {
+                if let Some(label) = out
+                    .enum_labels
+                    .get_mut(type_name)
+                    .and_then(|labels| labels.iter_mut().find(|label| *label == old))
+                {
+                    label.clone_from(new);
+                }
+            }
+            _ => {}
         }
     }
     let touched: BTreeSet<&str> = ops.iter().filter_map(MigrationOp::table).collect();
@@ -1555,8 +1581,9 @@ pub enum HintError {
     },
 }
 
-/// `"a"`, `"a" and "b"`, `"a", "b" and "c"`.
-fn and_list(names: &[String]) -> String {
+/// `"a"`, `"a" and "b"`, `"a", "b" and "c"`: the crate's one list joiner,
+/// for every refusal and warning that names several things.
+pub(crate) fn and_list(names: &[String]) -> String {
     match names {
         [] => String::new(),
         [only] => only.clone(),
@@ -2764,7 +2791,11 @@ impl ReverseOp {
     }
 }
 
-fn is_rename(op: &MigrationOp) -> bool {
+/// Whether `op` is a rename op: a table, column, index, constraint, policy,
+/// enum label or enum type rename. The crate's one test — the live facts a
+/// plan's renames carry ([`renamed_facts`]), the reverse's renames and the
+/// generator's rename steps all read it.
+pub fn is_rename(op: &MigrationOp) -> bool {
     matches!(
         op,
         MigrationOp::RenameTable { .. }
@@ -2772,6 +2803,8 @@ fn is_rename(op: &MigrationOp) -> bool {
             | MigrationOp::RenameIndex { .. }
             | MigrationOp::RenameConstraint { .. }
             | MigrationOp::RenamePolicy { .. }
+            | MigrationOp::RenameEnumLabel { .. }
+            | MigrationOp::RenameEnumType { .. }
     )
 }
 
@@ -2954,9 +2987,6 @@ pub fn reverse_live_plan(
                     format!("the live database holds no labels for enum type {type_name}"),
                 )),
             },
-            MigrationOp::RenameEnumLabel { .. } | MigrationOp::RenameEnumType { .. } => {
-                operations.push(planned(swapped(op)))
-            }
             // Planned only between two snapshots (#536): never in a live plan.
             MigrationOp::RemoveEnumLabel { .. } => {
                 return Err(PlanError::SnapshotOnlyOp {
@@ -3137,12 +3167,15 @@ pub fn reverse_live_plan(
                     table: table.clone(),
                 }))
             }
-            // The renames ran first; they are undone last, below.
+            // The renames ran first; they are undone last, below, from the
+            // one list `is_rename` collects — never here too.
             MigrationOp::RenameTable { .. }
             | MigrationOp::RenameColumn { .. }
             | MigrationOp::RenameIndex { .. }
             | MigrationOp::RenameConstraint { .. }
-            | MigrationOp::RenamePolicy { .. } => {}
+            | MigrationOp::RenamePolicy { .. }
+            | MigrationOp::RenameEnumLabel { .. }
+            | MigrationOp::RenameEnumType { .. } => {}
         }
     }
     operations.extend(renames.iter().rev().map(|op| ReverseOp::Planned(swapped(op))));
