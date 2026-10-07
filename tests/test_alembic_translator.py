@@ -426,6 +426,182 @@ async def test_a_label_addition_is_irreversible_in_the_downgrade(
 
 
 # ---------------------------------------------------------------------------
+# A dropped required column: its downgrade demands values too
+# ---------------------------------------------------------------------------
+
+
+def _bra_author_with_nickname() -> None:
+    class BraAuthor(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        nickname: str
+
+
+def _bra_author() -> None:
+    class BraAuthor(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_dropped_required_column_comes_back_marked_data_dependent(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Dropping ``nickname: str`` (``NOT NULL``, no default): putting it back
+    asks the rows already there for a value no statement supplies, so the
+    downgrade writes the plain ``add_column`` under ``# ferro:
+    data-dependent``, exactly as an upgrade adding it would — not the
+    planner's raw "Cannot add NOT NULL column" error. On an empty table it
+    reaches the old models."""
+    _bra_author_with_nickname()
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+    _bra_author()
+
+    upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert "op.drop_column('braauthor', 'nickname')" in upgrade, upgrade
+    lines = downgrade.splitlines()
+    add_at = next(
+        i for i, line in enumerate(lines) if "op.add_column('braauthor'" in line
+    )
+    assert lines[add_at - 1].strip() == (
+        "# ferro: data-dependent (fails while braauthor has rows; ferro migrations "
+        "generate the backfill: `ferro migrate new`)"
+    ), downgrade
+    assert "sa.Column('nickname', sa.String(), nullable=False)" in lines[add_at], (
+        downgrade
+    )
+    assert "op.execute" not in downgrade, downgrade
+
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    assert await _drift(db_url) == []
+    run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
+    _rewind_registry()
+    _bra_author_with_nickname()
+    assert await _drift(db_url) == []
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_a_dropped_required_column_is_irreversible_on_sqlite(
+    db_url, postgres_base_url, db_schema_name
+):
+    """SQLite cannot add a ``NOT NULL`` column with no default even to an
+    empty table: the downgrade says so and names ``ferro migrate new``."""
+    _bra_author_with_nickname()
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+    _bra_author()
+
+    _, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert "raise RuntimeError(" in downgrade, downgrade
+    assert "braauthor.nickname" in downgrade, downgrade
+    assert "`ferro migrate new`" in downgrade, downgrade
+    assert "op.add_column" not in downgrade, downgrade
+
+
+# ---------------------------------------------------------------------------
+# A dropped model takes the enum type only it used
+# ---------------------------------------------------------------------------
+
+
+class BraOrderKind(StrEnum):
+    POST = "post"
+    COURIER = "courier"
+
+
+def _bra_shop(*, with_order: bool) -> None:
+    class BraCustomer(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+
+    if with_order:
+
+        class BraOrder(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            kind: BraOrderKind = BraOrderKind.POST
+
+
+DROP_KIND = 'DROP TYPE "braorderkind"'
+
+
+async def _enum_types(db_url: str) -> list[str]:
+    name = f"bra_{uuid.uuid4().hex}"
+    await connect(db_url, name=name)
+    try:
+        _, facts = await _core._live_schema_ir(name, json.dumps([]))
+    finally:
+        await _core._disconnect(name)
+    return sorted(json.loads(facts)["enum_labels"])
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_dropped_model_drops_its_enum_type_and_the_downgrade_recreates_it(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Deleting ``BraOrder``, whose ``kind`` is the native enum
+    ``braorderkind`` no other model uses: the revision drops the table and
+    then the type (the pass's ``DROP TYPE``), and the downgrade creates the
+    type before the table that needs it. The round trip leaves no type
+    behind and puts back the old schema."""
+    _bra_shop(with_order=True)
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+    _bra_shop(with_order=False)
+
+    upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert upgrade.count("op.drop_table(") == 1, upgrade
+    drop_table_at = upgrade.index("op.drop_table('braorder')")
+    assert_statement_in_code(DROP_KIND, upgrade)
+    assert drop_table_at < upgrade.index(repr(DROP_KIND)), upgrade
+    create_type_at = downgrade.index("CREATE TYPE")
+    assert "braorderkind" in downgrade[create_type_at:].splitlines()[0], downgrade
+    assert create_type_at < downgrade.index("op.create_table('braorder'"), downgrade
+
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    assert await _drift(db_url) == []
+    assert "braorderkind" not in await _enum_types(db_url)
+
+    run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
+    assert "braorderkind" in await _enum_types(db_url)
+    _rewind_registry()
+    _bra_shop(with_order=True)
+    assert await _drift(db_url) == []
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_live_table_the_projects_filter_excludes_is_never_dropped(
+    db_url, postgres_base_url, db_schema_name
+):
+    """A live table no metadata declares is dropped only when Alembic's own
+    comparison would drop it: one the project's ``include_object`` keeps out
+    of autogenerate stays out of the revision."""
+    _bra_shop(with_order=False)
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await execute('CREATE TABLE "bra_foreign" ("id" integer PRIMARY KEY)')
+
+    def project_filter(obj, name, type_, reflected, compare_to):
+        return not (type_ == "table" and name == "bra_foreign")
+
+    from ferro.migrations import ferro_options
+
+    upgrade, downgrade = autogenerate(
+        db_url,
+        postgres_base_url,
+        db_schema_name,
+        extra_opts=ferro_options(include_object=project_filter),
+    )
+    assert "bra_foreign" not in upgrade + downgrade, upgrade
+
+
+# ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------
 

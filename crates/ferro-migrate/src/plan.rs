@@ -3123,12 +3123,19 @@ pub fn reverse_live_plan(
 /// restore through the `ferro_ddl_lowering` renderers, an irreversible step
 /// to no statement.
 ///
+/// `unrendered` holds the indexes of the steps the caller writes itself and
+/// the renderer leaves at no statement: a re-added column that demands values
+/// of existing rows, which the pass has no statement for and the Alembic
+/// bridge writes as the plain op under `# ferro: data-dependent` — the same
+/// subset its upgrade leaves out of `render_plan` (ADR-0041).
+///
 /// # Errors
 /// An [`crate::EmissionError`] when a planned step cannot render.
 pub fn render_reverse_plan(
     plan: &ReversePlan,
     declared: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
+    unrendered: &BTreeSet<usize>,
 ) -> Result<Vec<RenderedReverseOp>, crate::EmissionError> {
     use ferro_ddl_lowering::{
         render_check_restore, render_create_row_policy, render_drop_constraint,
@@ -3140,8 +3147,11 @@ pub fn render_reverse_plan(
     let planned: Vec<MigrationOp> = plan
         .operations
         .iter()
-        .filter_map(|op| match op {
-            ReverseOp::Planned(op) if !is_rename(op) => Some(op.clone()),
+        .enumerate()
+        .filter_map(|(index, op)| match op {
+            ReverseOp::Planned(op) if !is_rename(op) && !unrendered.contains(&index) => {
+                Some(op.clone())
+            }
             _ => None,
         })
         .collect();
@@ -3158,8 +3168,9 @@ pub fn render_reverse_plan(
     let before_models = index_models(&plan.before.payload.models);
 
     let mut out = Vec::with_capacity(plan.operations.len());
-    for op in &plan.operations {
+    for (index, op) in plan.operations.iter().enumerate() {
         let (statements, warnings) = match op {
+            _ if unrendered.contains(&index) => (Vec::new(), Vec::new()),
             ReverseOp::Planned(planned) if is_rename(planned) => {
                 rename_statements(planned, &plan.before, dialect)?
             }
@@ -3338,7 +3349,7 @@ mod reverse_tests {
     ) -> Vec<Vec<String>> {
         let reverse = reverse_live_plan(forward, live, facts, declared, Dialect::Postgres)
             .expect("reverse plan");
-        render_reverse_plan(&reverse, declared, Dialect::Postgres)
+        render_reverse_plan(&reverse, declared, Dialect::Postgres, &BTreeSet::new())
             .expect("renders")
             .into_iter()
             .map(|op| op.statements)
@@ -3426,6 +3437,59 @@ mod reverse_tests {
                 vec!["ALTER TABLE \"card\" DROP CONSTRAINT \"ck_card_flavor_set\"".to_string()],
                 vec!["ALTER TABLE \"card\" DROP COLUMN \"flavor\"".to_string()],
             ]
+        );
+    }
+
+    #[test]
+    fn a_re_added_required_column_is_left_to_the_caller_when_unrendered() {
+        // Dropping `nickname: str` (NOT NULL, no default): its reverse
+        // re-adds a column existing rows hold no value for. The renderer has
+        // no statement for it; the caller names it unrendered and writes it.
+        let live = envelope(vec![card(vec![
+            column("id", "int", false),
+            column("nickname", "varchar", false),
+            column("bio", "varchar", true),
+        ])]);
+        let declared = envelope(vec![card(vec![column("id", "int", false)])]);
+        let facts = live_facts(LiveTableFacts::default());
+        let forward = plan_from_ir(
+            &live,
+            &declared,
+            Dialect::Postgres,
+            &facts,
+            PlanOptions { destructive: true },
+        )
+        .expect("forward");
+        let reverse = reverse_live_plan(&forward, &live, &facts, &declared, Dialect::Postgres)
+            .expect("reverse plan");
+        let nickname = reverse
+            .operations
+            .iter()
+            .position(|op| {
+                op == &ReverseOp::Planned(MigrationOp::AddColumn {
+                    table: "card".into(),
+                    column: "nickname".into(),
+                })
+            })
+            .expect("the re-add is planned");
+
+        let err = render_reverse_plan(&reverse, &declared, Dialect::Postgres, &BTreeSet::new())
+            .expect_err("no statement backfills existing rows");
+        assert!(err.message.contains("card.nickname"), "{}", err.message);
+
+        let rendered = render_reverse_plan(
+            &reverse,
+            &declared,
+            Dialect::Postgres,
+            &BTreeSet::from([nickname]),
+        )
+        .expect("renders the rest");
+        assert_eq!(rendered.len(), reverse.operations.len());
+        assert!(rendered[nickname].statements.is_empty());
+        assert!(
+            rendered.iter().any(|op| op.statements
+                == vec!["ALTER TABLE \"card\" ADD COLUMN \"bio\" varchar".to_string()]),
+            "{rendered:?}"
         );
     }
 
