@@ -164,7 +164,9 @@ def test_the_cli_reference_quotes_each_database_free_refusal() -> None:
 
 
 @pytest.mark.parametrize("refusal", sorted(REFUSALS))
-def test_a_quoted_refusal_is_the_text_ferro_prints(refusal: str, tmp_path: Path) -> None:
+def test_a_quoted_refusal_is_the_text_ferro_prints(
+    refusal: str, tmp_path: Path
+) -> None:
     project = tmp_path / "app"
     project.mkdir()
     arrange, args = REFUSALS[refusal]
@@ -182,7 +184,9 @@ def test_a_quoted_refusal_is_the_text_ferro_prints(refusal: str, tmp_path: Path)
 
 
 def test_the_api_page_documents_every_public_name_of_ferro_migrations() -> None:
-    targets = re.findall(r"^::: (ferro\.migrations\.[\w.]+)", API_PAGE.read_text(), re.M)
+    targets = re.findall(
+        r"^::: (ferro\.migrations\.[\w.]+)", API_PAGE.read_text(), re.M
+    )
     documented = sorted(
         target.rsplit(".", 1)[1]
         for target in targets
