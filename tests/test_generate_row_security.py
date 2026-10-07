@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import uuid
 from collections.abc import Iterator
@@ -46,7 +47,10 @@ from tests.test_generate_columns import (  # noqa: F401 - fixtures
     round_trip,
 )
 from tests.test_migrate_down import (  # noqa: F401 - fixtures
+    empty_snapshot,
+    keys,
     migration_dir,
+    plan_against,
     snapshot,
 )
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
@@ -267,8 +271,9 @@ def test_e1_added_row_security_enables_forces_creates_and_its_down_tears_it_down
 # -- B1: a new table with row security ------------------------------------------------
 
 
+@backend_matrix
 def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_the_table_alone(
-    project, pkg
+    project, pkg, db
 ):
     write_config(project, pkg)
     write_models(project, pkg, models())
@@ -285,6 +290,20 @@ def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_the_t
         f'DROP TABLE "{TABLE}"'
     ]
     assert "POLICY" not in step_file(project, 1, "up", "sqlite").read_text()
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert plan_against(db, snapshot(project, 1), empty_snapshot(project)) == []
+    if db.backend == "postgres":
+        db.execute(
+            f'INSERT INTO "{TABLE}" ("tenant_id", "owner") VALUES '
+            f"('{TENANT_A}', 'ann'), ('{TENANT_B}', 'cyd')"
+        )
+        with tenant_role(db) as role:
+            assert visible(db, role, {"app.tenant": TENANT_B}) == ["cyd"]
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert keys(db) == []
+    assert TABLE not in db.tables()
+    assert plan_against(db, empty_snapshot(project), snapshot(project, 1)) == []
 
 
 # -- E2: a policy body changed ---------------------------------------------------------
@@ -370,6 +389,52 @@ def test_a_second_policy_is_its_create_policy_alone_and_its_down_drops_it_alone(
             assert visible(db, role, {"app.tenant": TENANT_A, "app.owner": "bob"}) == [
                 "bob"
             ]
+
+
+# -- a raw policy body edited ------------------------------------------------------------
+
+
+def raw(owner: str) -> str:
+    return f'RowPolicy(name="raw", command="select", using="\\"owner\\" = \'{owner}\'")'
+
+
+@backend_matrix
+def test_an_edited_raw_body_is_rebuilt_and_its_down_restores_the_parents_body(
+    project, pkg, db
+):
+    start(project, pkg, db, models(raw("ann")))
+    old_create = create_policy(
+        statements(step_file(project, 1, "up", "postgres")), "rls_rlsorder_raw"
+    )
+    write_models(project, pkg, models(raw("bob")))
+    code, out, err = _new_capturing_all("raw_owner")
+    assert code == 0, err
+    # Unverifiable is a live-only category (ADR-0019): no such report here.
+    assert "no longer matches" not in err
+    up = statements(step_file(project, 2, "up", "postgres"))
+    down = statements(step_file(project, 2, "down", "postgres"))
+    new_create = json.loads(_core._plan_row_security(json.dumps(model_ir(project, 2))))[
+        "statements"
+    ][-1]
+    assert "'bob'" in new_create
+    assert up == [drop_policy("rls_rlsorder_raw"), new_create]
+    assert down == [drop_policy("rls_rlsorder_raw"), old_create]
+    for direction in ("up", "down"):
+        assert step_file(project, 2, direction, "sqlite").read_text() == NOT_APPLICABLE
+
+    round_trip(project, db)
+    if db.backend == "postgres":
+        with tenant_role(db) as role:
+            assert visible(db, role, {}) == ["bob"]
+            assert run("migrate", "down", "--yes", "--url", db.url) == 0
+            assert visible(db, role, {}) == ["ann"]
+
+
+def _new_capturing_all(name: str) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = run("migrate", "new", name)
+    return code, out.getvalue(), err.getvalue()
 
 
 # -- SQLite-only projects ---------------------------------------------------------------
