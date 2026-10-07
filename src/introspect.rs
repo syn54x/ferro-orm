@@ -625,6 +625,22 @@ async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<
     Ok(out)
 }
 
+/// Whether any row of `table` holds `label` in `column`
+/// (`ferro_ddl_lowering::render_label_held_probe`, one existence query).
+pub async fn column_holds_label(
+    engine: &EngineHandle,
+    table: &str,
+    column: &str,
+    label: &str,
+) -> PyResult<bool> {
+    let sql = ferro_ddl_lowering::render_label_held_probe(table, column, label);
+    let rows = engine
+        .fetch_all_sql_unprepared(&sql)
+        .await
+        .map_err(|e| introspection_error("label probe", table, e))?;
+    Ok(!rows.is_empty())
+}
+
 /// Read every named CHECK constraint on `table`, ferro-owned or user-owned.
 pub async fn live_table_checks(
     engine: &EngineHandle,

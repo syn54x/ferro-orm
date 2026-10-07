@@ -17,8 +17,9 @@
 use crate::backend::{EngineBindValue, EngineHandle};
 use crate::ddl_exec::{DdlError, DdlExecutor, DdlFailure};
 use crate::introspect::{
-    LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
-    quote_ident, sqlite_indexes_covering_column,
+    LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, column_holds_label,
+    connected_role_bypasses_row_security, live_table_checks, live_table_columns, quote_ident,
+    sqlite_indexes_covering_column,
 };
 use crate::live_ir::{LiveTable, live_schema_ir, live_table_renames, live_tables_to_schema_ir};
 use crate::run::{
@@ -632,10 +633,6 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
     let ddl = DdlExecutor::new(opts.ddl_lock_timeout);
     let created = internal_create_tables(engine.clone(), opts.updates, &ddl).await?;
     let tables_before_create = &created.existing;
-    if !opts.updates {
-        return Ok(());
-    }
-
     let modelset = {
         let guard = crate::state::SCHEMA_IR_MODELSET.read().map_err(|_| {
             pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
@@ -647,6 +644,14 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
         })?
     };
     let backend = engine.backend();
+    if !opts.updates {
+        // Rows a label rename strands are reported on every connect that
+        // reconciles nothing, too: nothing else would tell.
+        for warning in stranded_label_warnings(&engine, &modelset, tables_before_create).await? {
+            crate::emit_user_warning_always(&warning);
+        }
+        return Ok(());
+    }
 
     // ADR-0010: the reconciliation pass owns tables that already existed. A
     // table the create pass built in this same run is already exactly the
@@ -803,6 +808,12 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
     for warning in &warnings {
         crate::emit_user_warning(warning);
     }
+    // After the renames ran, so each table and column is read by its
+    // declared name.
+    let reconciled: HashSet<String> = reconciled.into_iter().map(str::to_string).collect();
+    for warning in stranded_label_warnings(&engine, &modelset, &reconciled).await? {
+        crate::emit_user_warning_always(&warning);
+    }
     // Row-security notes describe whether THIS connect left rows fenced, so
     // the warning registry must never quiet them down after the first boot.
     for warning in &plan.always_warnings {
@@ -810,6 +821,63 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
     }
 
     Ok(())
+}
+
+/// The warnings for the live label renames (`__ferro_renamed_labels__`) on
+/// SQLite, where every enum keeps its labels as text in the rows and the live
+/// side carries none, so the planner sees no label to rename. A hint is live
+/// (ADR-0032) while the database still holds its old label: a row of the
+/// column holds it ([`column_holds_label`]) or the column's `db_check` lists
+/// it. The pass changes the schema, never rows (ADR-0014), so a live hint is
+/// one warning naming `ferro migrate new`, whose migration relabels the rows;
+/// an inert one is silent. A refused hint is the planner's to report.
+///
+/// `existing` are the tables that stood before this connect's create pass, as
+/// they stand now; a declared column they lack (its rename still pending) is
+/// not read.
+async fn stranded_label_warnings(
+    engine: &EngineHandle,
+    modelset: &IrEnvelope<SchemaIrPayload>,
+    existing: &HashSet<String>,
+) -> PyResult<Vec<String>> {
+    use ferro_ddl_lowering::{
+        check_lists_label, db_check_constraint_name, stranded_label_rename_warning,
+    };
+    let mut warnings = Vec::new();
+    if engine.backend() != Dialect::Sqlite
+        || ferro_migrate::plan::refuse_hints(&modelset.payload).is_err()
+    {
+        return Ok(warnings);
+    }
+    for model in &modelset.payload.models {
+        let table = model.table_name.as_str();
+        let hinted: Vec<_> = model
+            .columns
+            .iter()
+            .filter_map(|col| Some((col, col.enum_renamed_labels.as_ref()?)))
+            .filter(|(_, renamed)| !renamed.labels.is_empty())
+            .collect();
+        if hinted.is_empty() || !existing.contains(table) {
+            continue;
+        }
+        let live_columns = live_table_columns(engine, table).await?.unwrap_or_default();
+        let checks = live_table_checks(engine, table).await?;
+        for (col, renamed) in hinted {
+            if !live_columns.iter().any(|live| live.name == col.name) {
+                continue;
+            }
+            let check_name = db_check_constraint_name(table, &col.name);
+            let check = checks.iter().find(|check| check.name == check_name);
+            for (new, old) in &renamed.labels {
+                let held = check.is_some_and(|check| check_lists_label(&check.definition, old))
+                    || column_holds_label(engine, table, &col.name, old).await?;
+                if held {
+                    warnings.push(stranded_label_rename_warning(table, &col.name, old, new));
+                }
+            }
+        }
+    }
+    Ok(warnings)
 }
 
 /// An `AddTable` the create pass executed: every add but those of the tables

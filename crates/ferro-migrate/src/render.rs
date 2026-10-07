@@ -6,7 +6,7 @@ use crate::emit::{
     emit_add_column, emit_alter_column_nullability, emit_alter_column_type, find_column,
     find_foreign_key, find_model, render_add_fk_sql, render_index_sql, standalone_indexes,
 };
-use crate::plan::{index_models, relabels_rows};
+use crate::plan::{index_models, planned_before, relabels_rows};
 use crate::{Dialect, EmissionError, MigrationOp, MigrationPlan, render_create_table};
 use ferro_ddl_lowering::{
     ConstraintMode, IndexMode, ResolvedStorage, fk_action_from_str, fk_action_sql, quote_ident,
@@ -77,7 +77,8 @@ pub fn validate_schema_ir(ir: &IrEnvelope<SchemaIrPayload>) -> Result<(), Emissi
 
 /// Render every op of `plan` for `dialect`, in plan order. `old` and `new`
 /// are the snapshots the plan was decided from: an op reads the declaration it
-/// creates from `new` and the live shape it changes from `old`.
+/// creates from `new` and the live shape it changes from `old` as the plan's
+/// renames leave it ([`crate::plan::planned_before`]).
 ///
 /// A native enum type a `CreateEnumType` op of this plan creates is created
 /// there and only there; an `AddTable` / `AddColumn` of any other native enum
@@ -109,6 +110,10 @@ pub(crate) fn render_plan_in(
 ) -> Result<Vec<RenderedOp>, EmissionError> {
     validate_schema_ir(old)?;
     validate_schema_ir(new)?;
+    // Every op of a plan with renames names its table and columns as the
+    // renames leave them: it reads `old` as the planner left it.
+    let old = planned_before(old, new, dialect);
+    let old = old.as_ref();
     let old_models = index_models(&old.payload.models);
     let new_models = index_models(&new.payload.models);
     // A type this plan creates, or that `old` already declares, needs no

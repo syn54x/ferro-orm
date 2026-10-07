@@ -392,11 +392,43 @@ pub fn plan_from_ir(
     let mut operations = rename_ops(old, &renamed, dialect);
     fact_renames(&mut operations, facts, old, &hints, dialect);
     let facts = renamed_facts(facts, &operations, new, dialect);
-    let renamed = renamed_snapshot(old, &storage_hints(&hints, dialect));
+    let renamed = before_renamed_by(old, &hints, dialect);
     let mut plan = plan_named(&renamed, new, dialect, &facts, options)?;
     operations.append(&mut plan.operations);
     plan.operations = operations;
     Ok(plan)
+}
+
+/// `old` as the renames [`plan_from_ir`]`(old, new, dialect, …)` plans leave
+/// it: the side every op of that plan but the renames was decided against,
+/// and so the side every consumer reads an op's table from — rendering
+/// ([`crate::render_plan`]), the reverse ([`reverse_live_plan`]) and the
+/// generator's step assignment. A type change of a renamed column names the
+/// column by its new name, which only this side holds.
+///
+/// Borrowed when `new` declares no live hint (or a refused one, which
+/// renames nothing), so a side that already holds the new names — a
+/// generator's renamed parent — is its own.
+pub fn planned_before<'a>(
+    old: &'a IrEnvelope<SchemaIrPayload>,
+    new: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+) -> Cow<'a, IrEnvelope<SchemaIrPayload>> {
+    match live_hints(&old.payload, &new.payload) {
+        Ok(hints) if !hints.is_empty() => Cow::Owned(before_renamed_by(old, &hints, dialect)),
+        _ => Cow::Borrowed(old),
+    }
+}
+
+/// `old` as the live `hints` leave it on `dialect`: [`planned_before`]'s one
+/// derivation ([`storage_hints`] keeps a SQLite label hint out, the rows'
+/// update is not a rename of the schema).
+fn before_renamed_by(
+    old: &IrEnvelope<SchemaIrPayload>,
+    hints: &[Hint],
+    dialect: Dialect,
+) -> IrEnvelope<SchemaIrPayload> {
+    renamed_snapshot(old, &storage_hints(hints, dialect))
 }
 
 /// The renames of the names only a live database's [`LiveFacts`] carry — a
@@ -2826,8 +2858,7 @@ pub fn reverse_live_plan(
     dialect: Dialect,
 ) -> Result<ReversePlan, PlanError> {
     facts.cover(live)?;
-    let hints = live_hints(&live.payload, &declared.payload).unwrap_or_default();
-    let before = renamed_snapshot(live, &storage_hints(&hints, dialect));
+    let before = planned_before(live, declared, dialect).into_owned();
     let renames: Vec<MigrationOp> = forward
         .operations
         .iter()

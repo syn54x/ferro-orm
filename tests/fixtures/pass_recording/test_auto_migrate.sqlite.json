@@ -18,6 +18,54 @@
       "table \"trnauthor\" declares __ferro_renamed_from__ = \"trnwriter\", and the database holds \"trnwriter\" and no \"trnauthor\": \"trnauthor\" was not created. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new."
     ]
   },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_and_leaves_the_rows[sqlite-plain]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" varchar(8) NOT NULL )"
+    ],
+    "warnings": [
+      "Column 'pd3order.status' still holds the enum label 'canceled', which the model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps enum labels as text in the rows, and auto-migrate changes the schema, never the rows: they keep 'canceled', which the model no longer reads or writes. Generate the migration that relabels them with `ferro migrate new`."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_and_leaves_the_rows[sqlite-updates]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" varchar(8) NOT NULL )"
+    ],
+    "warnings": [
+      "Column 'pd3order.status' still holds the enum label 'canceled', which the model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps enum labels as text in the rows, and auto-migrate changes the schema, never the rows: they keep 'canceled', which the model no longer reads or writes. Generate the migration that relabels them with `ferro migrate new`."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-db_check-a-row]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" text NOT NULL CONSTRAINT \"ck_pd3order_status\" CHECK (\"status\" IN ('paid', 'canceled')) )"
+    ],
+    "warnings": [
+      "CHECK constraint 'ck_pd3order_status' on table 'pd3order' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate.",
+      "Column 'pd3order.status' still holds the enum label 'canceled', which the model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps enum labels as text in the rows, and auto-migrate changes the schema, never the rows: they keep 'canceled', which the model no longer reads or writes. Generate the migration that relabels them with `ferro migrate new`."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-db_check-no-row]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" text NOT NULL CONSTRAINT \"ck_pd3order_status\" CHECK (\"status\" IN ('paid', 'canceled')) )"
+    ],
+    "warnings": [
+      "CHECK constraint 'ck_pd3order_status' on table 'pd3order' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate.",
+      "Column 'pd3order.status' still holds the enum label 'canceled', which the model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps enum labels as text in the rows, and auto-migrate changes the schema, never the rows: they keep 'canceled', which the model no longer reads or writes. Generate the migration that relabels them with `ferro migrate new`."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-plain-a-row]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" varchar(8) NOT NULL )"
+    ],
+    "warnings": [
+      "Column 'pd3order.status' still holds the enum label 'canceled', which the model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps enum labels as text in the rows, and auto-migrate changes the schema, never the rows: they keep 'canceled', which the model no longer reads or writes. Generate the migration that relabels them with `ferro migrate new`."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-plain-no-row]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" varchar(8) NOT NULL )"
+    ],
+    "warnings": []
+  },
   "tests/test_auto_migrate.py::test_a_new_table_referencing_a_renamed_one_is_created_after_the_rename[sqlite]": {
     "statements": [
       "'trnwriter': CREATE TABLE IF NOT EXISTS \"trnwriter\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
@@ -162,6 +210,15 @@
       "'vfpost': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_vfpost_slug\" ON \"vfpost\" (\"slug\")"
     ],
     "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_renames_a_hinted_column_and_then_changes_its_type[sqlite]": {
+    "statements": [
+      "'pf2author': CREATE TABLE IF NOT EXISTS \"pf2author\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" integer NOT NULL )",
+      "'pf2author': ALTER TABLE \"pf2author\" RENAME COLUMN \"name\" TO \"full_name\""
+    ],
+    "warnings": [
+      "Column 'pf2author.full_name' is declared 'int' in the database but the model expects 'varchar'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column."
+    ]
   },
   "tests/test_auto_migrate.py::test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_in_one_unit[sqlite]": {
     "statements": [
