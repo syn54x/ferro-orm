@@ -365,6 +365,7 @@ mod tests {
 
     fn ir_col(name: &str, logical_type: &str) -> SchemaColumn {
         SchemaColumn {
+            renamed_from: None,
             name: name.to_string(),
             logical_type: logical_type.to_string(),
             db_type: None,

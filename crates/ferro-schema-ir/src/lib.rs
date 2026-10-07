@@ -65,6 +65,13 @@ pub struct SchemaModel {
     /// Row security declaration (`__ferro_rls__`), absent when undeclared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_security: Option<SchemaRowSecurity>,
+    /// Rename hint (`__ferro_renamed_from__`, schema `ir_version` 2): the
+    /// table this model's table was called before (ADR-0032). Absent when
+    /// undeclared. Not a schema change by itself: the generator renders a
+    /// rename only while the previous snapshot holds this name and lacks
+    /// `table_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 /// A model's row security declaration: the table flags plus its row policies.
@@ -165,6 +172,11 @@ pub struct SchemaColumn {
     /// Live introspection only: column is a Postgres native enum UDT.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub postgres_native_enum: bool,
+    /// Rename hint (`Field(renamed_from=…)`, or the shadow column of a
+    /// `ForeignKey(renamed_from=…)`; schema `ir_version` 2): the column this
+    /// one was called before (ADR-0032). Absent when undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 /// Foreign-key edge from `column` to `to_table.to_column`.
@@ -180,6 +192,13 @@ pub struct SchemaForeignKey {
     pub on_delete: Option<String>,
     /// Explicit constraint name when provided.
     pub name: Option<String>,
+    /// Rename hint (`ForeignKey(renamed_from=…)`; schema `ir_version` 2): the
+    /// relation *field* this foreign key was declared under before. Its
+    /// shadow column's own [`SchemaColumn::renamed_from`] carries the column
+    /// rename the planner acts on; this records the declaration. Absent when
+    /// undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 /// B-tree index definition.
@@ -683,6 +702,37 @@ pub struct HydrationAbi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_rename_hints_v2_roundtrip() {
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/schema_rename_hints_v2.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("schema fixture must parse");
+        let ir = parsed.get("ir").cloned().expect("fixture must contain ir");
+        let envelope: IrEnvelope<SchemaIrPayload> =
+            serde_json::from_value(ir.clone()).expect("schema IR v2 must deserialize");
+        assert_eq!(envelope.ir_version, 2);
+        let book = envelope
+            .payload
+            .models
+            .iter()
+            .find(|model| model.table_name == "book")
+            .expect("book model");
+        assert_eq!(book.renamed_from.as_deref(), Some("volume"));
+        let hint = |name: &str| {
+            book.columns
+                .iter()
+                .find(|col| col.name == name)
+                .and_then(|col| col.renamed_from.as_deref())
+        };
+        assert_eq!(hint("full_name"), Some("name"));
+        assert_eq!(hint("house_id"), Some("press_id"));
+        assert_eq!(hint("id"), None);
+        assert_eq!(book.foreign_keys[0].renamed_from.as_deref(), Some("press"));
+        let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
+        assert_eq!(encoded, ir, "schema v2 round-trip must not drift");
+    }
 
     #[test]
     fn schema_fixture_roundtrip() {

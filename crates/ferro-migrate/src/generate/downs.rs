@@ -30,8 +30,10 @@
 
 use super::columns::{self, Phase, PlanContext, PlanDirection};
 use super::rebuild;
+use super::renames;
 use super::{DESTRUCTIVE, GenerateError, refuse_unrendered, step_text};
 use crate::directory::Headers;
+use crate::plan::{Hint, rename_ops, renamed_snapshot, renamed_table, reverse_hints};
 use crate::render::render_plan_in;
 use crate::{Dialect, LiveFacts, MigrationOp, MigrationPlan, RenderedOp, plan_from_ir};
 use ferro_ddl_lowering::ConstraintMode;
@@ -293,23 +295,68 @@ pub fn render_down(
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     phase: Phase,
+    hints: &[Hint],
 ) -> Result<Rendering, GenerateError> {
-    let subjects: BTreeSet<Subject> = step_ops.iter().filter_map(subject).collect();
-    let inverse: Vec<MigrationOp> =
-        plan_from_ir(after, before, dialect, &LiveFacts::declared(), DESTRUCTIVE)
-            .operations
+    // A step holding the migration's renames (ADR-0032) runs its table and
+    // column renames first; everything else in it reads the table under its
+    // new names. Its down undoes them first the other way, then restores the
+    // rest under the parent's names (ADR-0033).
+    let hints: &[Hint] = if step_ops.iter().any(renames::is_rename) {
+        hints
+    } else {
+        &[]
+    };
+    let renamed_before = renamed_snapshot(before, hints);
+    let reverse = reverse_hints(hints);
+    let renamed_after = renamed_snapshot(after, &reverse);
+    let (up_structural, up_rest): (Vec<MigrationOp>, Vec<MigrationOp>) =
+        step_ops.iter().cloned().partition(renames::is_structural);
+    let (down_structural, down_derived): (Vec<MigrationOp>, Vec<MigrationOp>) =
+        rename_ops(after, &renamed_after, dialect)
             .into_iter()
-            .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
-            .filter(|op| {
-                let ctx = PlanContext::of(op, after, before, dialect, PlanDirection::Down);
-                !columns::carried_by_its_column_drop(op, &ctx)
-                    && columns::assign(op, &ctx).phase == phase
-            })
-            .collect();
+            .filter(|_| !hints.is_empty())
+            .partition(renames::is_structural);
+
+    // The step's tables by the names the down restores them under.
+    let subjects: BTreeSet<Subject> = step_ops
+        .iter()
+        .filter_map(subject)
+        .map(|s| match s {
+            Subject::Table(table) => Subject::Table(renamed_table(&reverse, &table)),
+            other => other,
+        })
+        .collect();
+    let inverse: Vec<MigrationOp> = plan_from_ir(
+        &renamed_after,
+        before,
+        dialect,
+        &LiveFacts::declared(),
+        DESTRUCTIVE,
+    )
+    .operations
+    .into_iter()
+    .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
+    .filter(|op| {
+        let ctx = PlanContext::of(op, &renamed_after, before, dialect, PlanDirection::Down);
+        !columns::carried_by_its_column_drop(op, &ctx) && columns::assign(op, &ctx).phase == phase
+    })
+    .collect();
 
     let up_mode = columns::constraint_mode(dialect, PlanDirection::Up);
-    let (up_statements, up_rebuilds) =
-        statements(step_ops.to_vec(), before, after, dialect, PlanDirection::Up)?;
+    let mut up_statements: Vec<String> = native_statements(
+        up_structural,
+        before,
+        &renamed_before,
+        dialect,
+        false,
+        up_mode,
+    )?
+    .into_iter()
+    .flatten()
+    .collect();
+    let (rest, up_rebuilds) =
+        statements(up_rest, &renamed_before, after, dialect, PlanDirection::Up)?;
+    up_statements.extend(rest);
     let headers = Headers {
         foreign_keys_off: up_rebuilds,
         destructive: !up_statements.is_empty() && step_ops.iter().any(drops_data),
@@ -325,8 +372,27 @@ pub fn render_down(
     let data_dependent = inverse
         .iter()
         .any(|op| recreates(op, before) || may_fail_on_rows(op, before, down_mode));
-    let (down_statements, down_rebuilds) =
-        statements(inverse, after, before, dialect, PlanDirection::Down)?;
+    let mut down_statements: Vec<String> = native_statements(
+        down_structural,
+        after,
+        &renamed_after,
+        dialect,
+        false,
+        down_mode,
+    )?
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut down_ops = down_derived;
+    down_ops.extend(inverse);
+    let (rest, down_rebuilds) = statements(
+        down_ops,
+        &renamed_after,
+        before,
+        dialect,
+        PlanDirection::Down,
+    )?;
+    down_statements.extend(rest);
     let down_headers = Headers {
         foreign_keys_off: down_rebuilds,
         data_dependent: !down_statements.is_empty() && data_dependent,
@@ -375,6 +441,7 @@ mod tests {
             after,
             dialect,
             Phase::Schema,
+            &[],
         )
         .expect("render")
     }
@@ -476,7 +543,8 @@ mod tests {
             .into_iter()
             .filter(|op| op.table() == Some("tag"))
             .collect();
-        let r = render_down(&ops, &before, &after, Dialect::Sqlite, Phase::Schema).expect("render");
+        let r = render_down(&ops, &before, &after, Dialect::Sqlite, Phase::Schema, &[])
+            .expect("render");
         assert_eq!(r.down, "DROP TABLE \"tag\";\n");
     }
 
@@ -488,6 +556,7 @@ mod tests {
             &ir(vec![]),
             Dialect::Sqlite,
             Phase::Schema,
+            &[],
         )
         .expect("render");
         assert_eq!(r.up, "-- ferro: not-applicable\n");

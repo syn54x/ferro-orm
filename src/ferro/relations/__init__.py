@@ -3,9 +3,44 @@ from typing import ForwardRef
 from .._shadow_fk_types import pk_python_type_for_model, reconcile_shadow_fk_types
 from ..base import ForeignKey, ManyToManyRelation
 from ..columns import fk_shadow_spec
-from ..ir.compiler import compile_model_schema_ir, register_model_with_ir
+from ..ir.compiler import (
+    RenameHints,
+    compile_model_schema_ir,
+    register_model_with_ir,
+)
 from ..registry import REGISTRY
 from .descriptors import RelationshipDescriptor
+
+
+def _default_join_table(source_table: str, field_name: str) -> str:
+    """A ``ManyToMany``'s join table when ``through=`` is not set."""
+    return f"{source_table}_{field_name}"
+
+
+def _join_column(table: str) -> str:
+    """The join table's column that points at ``table``."""
+    return f"{table}_id"
+
+
+def _join_table_rename_hints(
+    source_model: type, target_model: type, field_name: str, through: str | None
+) -> RenameHints:
+    """What a join table and its columns were called before its source or
+    target model's declared table rename (ADR-0032), named by the same two
+    functions that name them now, so a table rename drags its join table."""
+    source_prev = getattr(source_model, "__ferro_renamed_from__", None)
+    target_prev = getattr(target_model, "__ferro_renamed_from__", None)
+    columns: dict[str, str] = {}
+    if source_prev is not None:
+        columns[_join_column(source_model.__ferro_table__)] = _join_column(source_prev)
+    if target_prev is not None:
+        columns[_join_column(target_model.__ferro_table__)] = _join_column(target_prev)
+    table = (
+        _default_join_table(source_prev, field_name)
+        if source_prev is not None and not through
+        else None
+    )
+    return RenameHints(table=table, columns=columns)
 
 
 def resolve_relationships():
@@ -63,7 +98,7 @@ def resolve_relationships():
             # Resolve join table
             if not rel.through:
                 # Default join table name: source table + field name.
-                join_table = f"{source_table}_{field_name}"
+                join_table = _default_join_table(source_table, field_name)
             else:
                 join_table = rel.through
 
@@ -76,8 +111,11 @@ def resolve_relationships():
                         "__ferro_table__ on the model to resolve the collision."
                     )
 
-            source_col = f"{source_table}_id"
-            target_col = f"{target_table}_id"
+            source_col = _join_column(source_table)
+            target_col = _join_column(target_table)
+            join_hints = _join_table_rename_hints(
+                source_model, target_model, field_name, rel.through
+            )
 
             # Inject M2M descriptors into BOTH sides
             # Source -> Target
@@ -130,6 +168,7 @@ def resolve_relationships():
                 join_table,
                 composite_uniques=composite_uniques,
                 composite_indexes=composite_indexes,
+                rename_hints=join_hints,
             )
             REGISTRY.add_join_table(
                 join_table,
@@ -137,6 +176,7 @@ def resolve_relationships():
                     "columns": join_columns,
                     "composite_uniques": composite_uniques,
                     "composite_indexes": composite_indexes,
+                    "rename_hints": join_hints,
                 },
             )
 

@@ -59,6 +59,15 @@ def _validate_nullable_option(nullable: FerroNullable, owner: str) -> FerroNulla
     raise TypeError(f"{owner} nullable must be 'infer', True, or False")
 
 
+def _validate_renamed_from(renamed_from: str | None, owner: str) -> str | None:
+    """Validate a rename hint: ``None`` or a non-empty name (ADR-0032)."""
+    if renamed_from is None:
+        return None
+    if isinstance(renamed_from, str) and renamed_from:
+        return renamed_from
+    raise TypeError(f"{owner} renamed_from must be a non-empty str or None")
+
+
 class FerroField:
     """Store database column metadata for a model field
 
@@ -102,6 +111,7 @@ class FerroField:
         nullable: FerroNullable = "infer",
         db_type: DbType | None = None,
         db_check: bool = False,
+        renamed_from: str | None = None,
     ):
         """Initialize field metadata options
 
@@ -113,6 +123,10 @@ class FerroField:
             unique: Set to True to enforce **single-column** uniqueness only.
             index: Set to True to create a database index.
             nullable: See :class:`FerroField` attribute ``nullable`` in the class docstring.
+            renamed_from: The column's previous name. ``ferro migrate new``
+                renders ``RENAME COLUMN`` while the previous migration still
+                holds that name; afterwards the hint is inert and may stay or
+                be deleted (ADR-0032).
 
         Examples:
             >>> from typing import Annotated
@@ -129,6 +143,7 @@ class FerroField:
         self.nullable = _validate_nullable_option(nullable, "FerroField")
         self.db_type = db_type
         self.db_check = db_check
+        self.renamed_from = _validate_renamed_from(renamed_from, "FerroField")
 
 
 class ForeignKey:
@@ -164,6 +179,7 @@ class ForeignKey:
         unique: bool = False,
         index: bool = False,
         nullable: FerroNullable = "infer",
+        renamed_from: str | None = None,
     ):
         """Initialize foreign-key relationship metadata
 
@@ -180,6 +196,10 @@ class ForeignKey:
                 ``*_id`` column. Useful for tenant FKs queried on every list
                 endpoint where Postgres does not auto-index the FK column.
             nullable: See :class:`ForeignKey` class docstring.
+            renamed_from: The relation field's previous name. Its shadow
+                ``<field>_id`` column is renamed with it (``press`` →
+                ``house`` renames ``press_id`` to ``house_id``), together with
+                its ``fk_`` constraint (ADR-0032).
 
         Examples:
             >>> from typing import Annotated
@@ -200,6 +220,7 @@ class ForeignKey:
         self.unique = unique
         self.index = index
         self.nullable = _validate_nullable_option(nullable, "ForeignKey")
+        self.renamed_from = _validate_renamed_from(renamed_from, "ForeignKey")
         if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
             raise ValueError(
                 "ForeignKey(on_delete='SET NULL') requires nullable=True or 'infer'"

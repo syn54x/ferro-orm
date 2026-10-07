@@ -1,0 +1,111 @@
+{
+  "vector_name": "schema_rename_hints_v2",
+  "domain": "schema",
+  "expect_valid": true,
+  "fingerprint": "572f2ee4b59e65346ec2a364d8032263a3dbacfe51f3392179adb51054677ee4",
+  "ir": {
+    "ir_kind": "schema",
+    "ir_version": 2,
+    "payload": {
+      "dialect_agnostic": true,
+      "models": [
+        {
+          "model_name": "tests.test_generate_renames.build_rename_hint_models.<locals>.Book",
+          "table_name": "book",
+          "columns": [
+            {
+              "name": "full_name",
+              "logical_type": "string",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": true,
+              "default": null,
+              "format": null,
+              "renamed_from": "name"
+            },
+            {
+              "name": "house_id",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null,
+              "renamed_from": "press_id"
+            },
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "subtitle",
+              "logical_type": "string",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null,
+              "renamed_from": "tagline"
+            }
+          ],
+          "foreign_keys": [
+            {
+              "column": "house_id",
+              "to_table": "publisher",
+              "to_column": "id",
+              "on_delete": "CASCADE",
+              "name": "fk_book_house_id_publisher",
+              "renamed_from": "press"
+            }
+          ],
+          "indexes": [
+            {
+              "name": "idx_book_full_name",
+              "columns": [
+                "full_name"
+              ],
+              "unique": false
+            }
+          ],
+          "uniques": [],
+          "checks": [],
+          "renamed_from": "volume"
+        },
+        {
+          "model_name": "tests.test_generate_renames.build_rename_hint_models.<locals>.Publisher",
+          "table_name": "publisher",
+          "columns": [
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            }
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "uniques": [],
+          "checks": []
+        }
+      ]
+    }
+  }
+}
