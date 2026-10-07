@@ -4,7 +4,7 @@
 
 use crate::emit::{
     emit_add_column, emit_alter_column_nullability, emit_alter_column_type, find_column,
-    find_foreign_key, find_model, render_add_fk_sql, render_index_sql,
+    find_foreign_key, find_model, render_add_fk_sql, render_index_sql, standalone_indexes,
 };
 use crate::plan::index_models;
 use crate::{Dialect, EmissionError, MigrationOp, MigrationPlan, render_create_table};
@@ -14,7 +14,8 @@ use ferro_ddl_lowering::{
     render_disable_row_security, render_drop_constraint, render_drop_index_sql,
     render_drop_row_policy, render_enable_row_security, render_force_row_security,
     render_no_force_row_security, render_pg_enum_add_value, render_pg_enum_create_type,
-    render_pg_enum_drop_type, render_validate_constraint, resolve_column_storage,
+    render_pg_enum_drop_type, render_rename_column, render_rename_constraint, render_rename_index,
+    render_rename_policy, render_rename_table, render_validate_constraint, resolve_column_storage,
     row_policy_clauses, row_policy_rebuild_statements,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
@@ -148,6 +149,57 @@ pub(crate) fn render_plan_in(
             MigrationOp::DropTable { table } => {
                 out.statements
                     .push(format!("DROP TABLE {}", quote_ident(table)));
+            }
+            MigrationOp::RenameTable { old, new } => {
+                out.statements.push(render_rename_table(old, new));
+            }
+            MigrationOp::RenameColumn { table, old, new } => {
+                out.statements.push(render_rename_column(table, old, new));
+            }
+            MigrationOp::RenameIndex { old, new } => match dialect {
+                Dialect::Postgres => out.statements.push(render_rename_index(old, new)),
+                // SQLite has no index rename: drop it, then build it under its
+                // new name with the statement every door creates it with.
+                Dialect::Sqlite => {
+                    let (table, columns, unique) = new_models
+                        .values()
+                        .find_map(|model| {
+                            standalone_indexes(model)
+                                .into_iter()
+                                .find(|(name, _, _)| name == new)
+                                .map(|(_, columns, unique)| (&model.table_name, columns, unique))
+                        })
+                        .ok_or_else(|| EmissionError {
+                            message: format!(
+                                "Index rename '{old}' → '{new}' has no index '{new}' in the \
+                                 declared IR"
+                            ),
+                        })?;
+                    out.statements
+                        .push(render_drop_index_sql(old, IndexMode::Plain));
+                    out.statements.push(render_index_sql(
+                        table,
+                        new,
+                        &columns,
+                        unique,
+                        dialect,
+                        IndexMode::Plain,
+                    ));
+                }
+            },
+            MigrationOp::RenameConstraint { table, old, new } => match dialect {
+                Dialect::Postgres => out
+                    .statements
+                    .push(render_rename_constraint(table, old, new)),
+                Dialect::Sqlite => out.warnings.push(format!(
+                    "Constraint '{old}' on '{table}' is now named '{new}', and SQLite cannot \
+                     rename a table constraint in place; `ferro migrate new` renames it by \
+                     rebuilding the table."
+                )),
+            },
+            MigrationOp::RenamePolicy { table, old, new } => {
+                require_postgres(op, dialect)?;
+                out.statements.push(render_rename_policy(table, old, new));
             }
             MigrationOp::AddColumn { table, column } => {
                 let model = find_model(&new_models, table)?;

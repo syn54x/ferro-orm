@@ -955,6 +955,64 @@ pub fn render_drop_constraint(table: &str, name: &str) -> String {
     )
 }
 
+/// `ALTER TABLE "old" RENAME TO "new"` — a declared table rename (ADR-0032).
+/// Native on both dialects; SQLite (3.26+) rewrites the foreign keys of every
+/// table that references it.
+pub fn render_rename_table(old: &str, new: &str) -> String {
+    format!(
+        "ALTER TABLE {} RENAME TO {}",
+        quote_ident(old),
+        quote_ident(new)
+    )
+}
+
+/// `ALTER TABLE "t" RENAME COLUMN "old" TO "new"` — a declared column rename
+/// (ADR-0032). Native on both dialects; SQLite (3.25+) rewrites the indexes
+/// and checks that name the column.
+pub fn render_rename_column(table: &str, old: &str, new: &str) -> String {
+    format!(
+        "ALTER TABLE {} RENAME COLUMN {} TO {}",
+        quote_ident(table),
+        quote_ident(old),
+        quote_ident(new)
+    )
+}
+
+/// `ALTER INDEX "old" RENAME TO "new"` — an `idx_` / `uq_` name a rename
+/// drags (ADR-0032). Postgres only: SQLite has no index rename, so it drops
+/// the index and creates it under the new name.
+pub fn render_rename_index(old: &str, new: &str) -> String {
+    format!(
+        "ALTER INDEX {} RENAME TO {}",
+        quote_ident(old),
+        quote_ident(new)
+    )
+}
+
+/// `ALTER TABLE "t" RENAME CONSTRAINT "old" TO "new"` — a `ck_` / `fk_` name
+/// a rename drags (ADR-0032). Postgres only: SQLite renames a table
+/// constraint by rebuilding the table (ADR-0046).
+pub fn render_rename_constraint(table: &str, old: &str, new: &str) -> String {
+    format!(
+        "ALTER TABLE {} RENAME CONSTRAINT {} TO {}",
+        quote_ident(table),
+        quote_ident(old),
+        quote_ident(new)
+    )
+}
+
+/// `ALTER POLICY "old" ON "t" RENAME TO "new"` — an `rls_` name a table rename
+/// drags (ADR-0032). Postgres only, like every row-security statement
+/// (ADR-0014).
+pub fn render_rename_policy(table: &str, old: &str, new: &str) -> String {
+    format!(
+        "ALTER POLICY {} ON {} RENAME TO {}",
+        quote_ident(old),
+        quote_ident(table),
+        quote_ident(new)
+    )
+}
+
 /// The outcome of emitting one CHECK constraint for one dialect.
 ///
 /// At most one of `statement` / `inline` is set: a standalone statement the
@@ -3528,6 +3586,40 @@ mod tests {
         assert_eq!(
             drifted_check_names(&model, &live),
             vec!["ck_transfer_at_most_one_outflow".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_five_rename_renderers_are_one_statement_each() {
+        assert_eq!(
+            render_rename_table("writer", "author"),
+            "ALTER TABLE \"writer\" RENAME TO \"author\""
+        );
+        assert_eq!(
+            render_rename_column("author", "name", "full_name"),
+            "ALTER TABLE \"author\" RENAME COLUMN \"name\" TO \"full_name\""
+        );
+        assert_eq!(
+            render_rename_index("idx_writer_name", "idx_author_full_name"),
+            "ALTER INDEX \"idx_writer_name\" RENAME TO \"idx_author_full_name\""
+        );
+        assert_eq!(
+            render_rename_constraint(
+                "book",
+                "fk_book_writer_id_writer",
+                "fk_book_writer_id_author"
+            ),
+            "ALTER TABLE \"book\" RENAME CONSTRAINT \"fk_book_writer_id_writer\" TO \
+             \"fk_book_writer_id_author\""
+        );
+        assert_eq!(
+            render_rename_policy("author", "rls_writer_owner", "rls_author_owner"),
+            "ALTER POLICY \"rls_writer_owner\" ON \"author\" RENAME TO \"rls_author_owner\""
+        );
+        // Identifiers are quoted by the one quoting rule.
+        assert_eq!(
+            render_rename_table("a\"b", "c"),
+            "ALTER TABLE \"a\"\"b\" RENAME TO \"c\""
         );
     }
 

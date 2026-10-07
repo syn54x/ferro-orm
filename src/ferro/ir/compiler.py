@@ -378,11 +378,14 @@ def register_model_with_ir(
     *,
     composite_uniques: Sequence[Sequence[str]] = (),
     composite_indexes: Sequence[Sequence[str]] = (),
+    rename_hints: RenameHints | None = None,
 ) -> dict[str, Any]:
     """Compile SchemaIR once from column specs and persist the envelope.
 
     Single registration bundle for join tables and any other producer that
-    already has fully-formed column specs in hand (#236).
+    already has fully-formed column specs in hand (#236). ``rename_hints`` is
+    what a join table was called before its source or target table's rename
+    (ADR-0032), derived by the code that names it.
     """
     return _compile_and_persist_model_envelope(
         model_name,
@@ -390,6 +393,7 @@ def register_model_with_ir(
         table_name=table_name,
         composite_uniques=composite_uniques,
         composite_indexes=composite_indexes,
+        rename_hints=rename_hints,
     )
 
 
@@ -522,6 +526,7 @@ def _register_join_table_bundle(table_name: str, bundle: dict[str, Any]) -> None
         table_name,
         composite_uniques=bundle["composite_uniques"],
         composite_indexes=bundle["composite_indexes"],
+        rename_hints=bundle.get("rename_hints"),
     )
 
 

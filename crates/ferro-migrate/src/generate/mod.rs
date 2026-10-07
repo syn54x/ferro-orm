@@ -29,9 +29,11 @@
 pub mod columns;
 pub mod downs;
 pub mod rebuild;
+pub mod renames;
 pub mod staging;
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
+use crate::plan::{HintError, rename_ops, renamed_snapshot};
 use crate::snapshot::{Snapshot, SnapshotError};
 use crate::{
     Dialect, EmissionError, LiveFacts, MigrationOp, MigrationPlan, PlanOptions, RenderedOp,
@@ -137,6 +139,9 @@ pub enum GenerateError {
     },
     /// No target dialect was given.
     NoDialects,
+    /// A declared rename hint `new` refuses (ADR-0032): its old name is still
+    /// declared, or two hints claim one old name.
+    Hint(HintError),
     /// An op could not render.
     Render(String),
 }
@@ -179,6 +184,7 @@ impl std::fmt::Display for GenerateError {
                 f,
                 "no target dialect: the database's config needs dialects = [...]"
             ),
+            GenerateError::Hint(err) => write!(f, "rename hint refused: {err}"),
             GenerateError::Render(message) => f.write_str(message),
         }
     }
@@ -515,46 +521,61 @@ pub fn generate(
     }
     let empty = empty_modelset(target);
     let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
+    // Declared renames (ADR-0032) run first in the schema step; every other
+    // change is planned from `before`, the parent as the renames leave it.
+    let hints = renames::live(parent_ir, target)?;
+    let renamed_parent = renamed_snapshot(parent_ir, &hints);
+    let before = &renamed_parent;
 
     let mut changes = Vec::new();
+    let mut suggestions = Vec::new();
     for &dialect in dialects {
-        let change = plan(parent_ir, target, dialect);
+        let change = plan(before, target, dialect);
         refuse_unsupported(
             &change,
             &plan(target, target, dialect),
-            parent_ir,
+            before,
             target,
             dialect,
             PlanDirection::Up,
         )?;
         refuse_unsupported(
-            &plan(target, parent_ir, dialect),
-            &plan(parent_ir, parent_ir, dialect),
+            &plan(target, before, dialect),
+            &plan(before, before, dialect),
             target,
-            parent_ir,
+            before,
             dialect,
             PlanDirection::Down,
         )?;
-        changes.push(change.operations);
+        for line in renames::suggestions(&change.operations, before, target) {
+            if !suggestions.contains(&line) {
+                suggestions.push(line);
+            }
+        }
+        let mut operations = rename_ops(parent_ir, before, dialect);
+        operations.extend(change.operations);
+        changes.push(operations);
     }
 
     // The index steps come after every other step but the validate step,
     // and turn `shape` into the target; every earlier step turns the parent
     // into `shape` (ADR-0044, ADR-0046).
-    let index_ops = staging::index_ops(parent_ir, target);
-    let shape = staging::schema_shape(parent_ir, target, &index_ops);
+    let index_ops = staging::index_ops(before, target);
+    let shape = staging::schema_shape(before, target, &index_ops);
     let mut ups = Vec::new();
     let mut downs = Vec::new();
     for &dialect in dialects {
-        let up = plan(parent_ir, &shape, dialect);
-        ups.push(rendered_ops(
+        let up = plan(before, &shape, dialect);
+        let mut operations = rename_ops(parent_ir, before, dialect);
+        operations.extend(rendered_ops(
             &up,
-            parent_ir,
+            before,
             &shape,
             dialect,
             PlanDirection::Up,
         ));
-        downs.push(plan(&shape, parent_ir, dialect));
+        ups.push(operations);
+        downs.push(plan(&shape, before, dialect));
     }
     if ups.iter().all(Vec::is_empty)
         && downs.iter().all(MigrationPlan::is_empty)
@@ -566,16 +587,10 @@ pub fn generate(
     let mut phases = BTreeSet::new();
     for (&dialect, (up, down)) in dialects.iter().zip(ups.iter().zip(&downs)) {
         for op in up {
-            phases.insert(phase_of(op, parent_ir, &shape, dialect, PlanDirection::Up)?);
+            phases.insert(phase_of(op, before, &shape, dialect, PlanDirection::Up)?);
         }
         for op in &down.operations {
-            phases.insert(phase_of(
-                op,
-                &shape,
-                parent_ir,
-                dialect,
-                PlanDirection::Down,
-            )?);
+            phases.insert(phase_of(op, &shape, before, dialect, PlanDirection::Down)?);
         }
     }
     if phases.contains(&Phase::Index) {
@@ -588,8 +603,8 @@ pub fn generate(
     let mut warnings = Vec::new();
     let mut staged = Vec::new();
     for (&dialect, up) in dialects.iter().zip(&ups) {
-        render_warnings(up, parent_ir, &shape, dialect, &mut warnings)?;
-        for constraint in staging::staged_constraints(up, parent_ir, &shape, dialect)? {
+        render_warnings(up, before, &shape, dialect, &mut warnings)?;
+        for constraint in staging::staged_constraints(up, before, &shape, dialect)? {
             if !staged.contains(&constraint) {
                 staged.push(constraint);
             }
@@ -602,13 +617,13 @@ pub fn generate(
         for (&dialect, up) in dialects.iter().zip(&ups) {
             let mut step_ops = Vec::new();
             for op in up {
-                if phase_of(op, parent_ir, &shape, dialect, PlanDirection::Up)? == phase {
+                if phase_of(op, before, &shape, dialect, PlanDirection::Up)? == phase {
                     step_ops.push(op.clone());
                 }
             }
             renderings.insert(
                 StepDialect::from(dialect),
-                downs::render_down(&step_ops, parent_ir, &shape, dialect, phase)?,
+                downs::render_down(&step_ops, parent_ir, &shape, dialect, phase, &hints)?,
             );
         }
         steps.push(GeneratedStep {
@@ -644,7 +659,11 @@ pub fn generate(
         steps,
         snapshot,
         snapshot_json,
-        summary: summarize(&changes, parent_ir, target),
+        summary: std::iter::once(summarize(&changes, parent_ir, target))
+            .chain(suggestions)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
         warnings,
     }))
 }

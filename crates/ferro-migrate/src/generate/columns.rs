@@ -290,6 +290,13 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
         | MigrationOp::DropTable { .. }
         | MigrationOp::CreateEnumType { .. }
         | MigrationOp::DropEnumType { .. } => Needs::Native,
+        // A declared rename (ADR-0032): native on both dialects but a
+        // constraint's, which SQLite renames by rebuilding the table.
+        MigrationOp::RenameTable { .. }
+        | MigrationOp::RenameColumn { .. }
+        | MigrationOp::RenameIndex { .. }
+        | MigrationOp::RenamePolicy { .. } => Needs::Native,
+        MigrationOp::RenameConstraint { .. } => native_or_rebuild,
         // A label added to a type that already exists cannot be reversed by
         // a down (Postgres drops no enum label).
         MigrationOp::AddEnumLabel { .. } => refused(529),

@@ -4107,3 +4107,290 @@ fn the_passs_index_statements_are_byte_unchanged_by_the_modes() {
             .any(|sql| sql.contains("CONCURRENTLY") || sql.contains("NOT VALID"))
     );
 }
+
+// -- rename hints (#528, ADR-0032) ----------------------------------------------------
+
+mod renames {
+    use super::*;
+    use crate::plan::{Hint, HintError, live_hints, plan_from_ir_renaming};
+
+    fn fk(column: &str, table: &str, to_table: &str) -> SchemaForeignKey {
+        SchemaForeignKey {
+            column: column.to_string(),
+            to_table: to_table.to_string(),
+            to_column: "id".to_string(),
+            on_delete: Some("CASCADE".to_string()),
+            name: Some(ferro_ddl_lowering::fk_name(table, column, to_table)),
+            renamed_from: None,
+        }
+    }
+
+    /// `writer(id, name idx, genre ck)` and `book(id, writer_id → writer)`.
+    fn parent() -> IrEnvelope<SchemaIrPayload> {
+        let mut writer = schema_model(
+            "writer",
+            vec![
+                pk_col("id", "integer"),
+                col_with_flags("name", "text", false, false, true, None),
+                col("genre", "text", false),
+            ],
+        );
+        writer.indexes = vec![SchemaIndex {
+            name: "idx_writer_name".to_string(),
+            columns: vec!["name".to_string()],
+            unique: false,
+        }];
+        writer.checks = vec![SchemaCheck {
+            name: "ck_writer_genre".to_string(),
+            column: "genre".to_string(),
+            values: vec!["'novel'".to_string(), "'poem'".to_string()],
+        }];
+        let mut book = schema_model(
+            "book",
+            vec![pk_col("id", "integer"), col("writer_id", "integer", false)],
+        );
+        book.foreign_keys = vec![fk("writer_id", "book", "writer")];
+        envelope(vec![book, writer])
+    }
+
+    /// The same schema with `writer` declared as `author`
+    /// (`__ferro_renamed_from__ = "writer"`) and `name` as `full_name`
+    /// (`renamed_from="name"`).
+    fn target() -> IrEnvelope<SchemaIrPayload> {
+        let mut author = schema_model(
+            "author",
+            vec![
+                pk_col("id", "integer"),
+                SchemaColumn {
+                    renamed_from: Some("name".to_string()),
+                    ..col_with_flags("full_name", "text", false, false, true, None)
+                },
+                col("genre", "text", false),
+            ],
+        );
+        author.renamed_from = Some("writer".to_string());
+        author.indexes = vec![SchemaIndex {
+            name: "idx_author_full_name".to_string(),
+            columns: vec!["full_name".to_string()],
+            unique: false,
+        }];
+        author.checks = vec![SchemaCheck {
+            name: "ck_author_genre".to_string(),
+            column: "genre".to_string(),
+            values: vec!["'novel'".to_string(), "'poem'".to_string()],
+        }];
+        let mut book = schema_model(
+            "book",
+            vec![pk_col("id", "integer"), col("writer_id", "integer", false)],
+        );
+        book.foreign_keys = vec![fk("writer_id", "book", "author")];
+        envelope(vec![author, book])
+    }
+
+    fn plan(
+        old: &IrEnvelope<SchemaIrPayload>,
+        new: &IrEnvelope<SchemaIrPayload>,
+        dialect: Dialect,
+    ) -> Vec<MigrationOp> {
+        let hints = live_hints(&old.payload, &new.payload).expect("no refusal");
+        plan_from_ir_renaming(
+            old,
+            new,
+            &hints,
+            dialect,
+            &LiveFacts::declared(),
+            PlanOptions { destructive: true },
+        )
+        .operations
+    }
+
+    #[test]
+    fn a_hint_is_live_while_the_parent_holds_the_old_name_and_lacks_the_new_one() {
+        assert_eq!(
+            live_hints(&parent().payload, &target().payload).expect("no refusal"),
+            vec![
+                Hint::Table {
+                    old: "writer".to_string(),
+                    new: "author".to_string(),
+                },
+                // A column hint inside a renamed table resolves against the
+                // old table.
+                Hint::Column {
+                    table: "author".to_string(),
+                    old: "name".to_string(),
+                    new: "full_name".to_string(),
+                },
+            ]
+        );
+        // After its migration the parent holds the new names: inert.
+        assert_eq!(
+            live_hints(&target().payload, &target().payload).expect("no refusal"),
+            vec![]
+        );
+        // A hint naming something neither side holds is inert and silent.
+        let mut stray = target();
+        stray.payload.models[0].renamed_from = Some("scribe".to_string());
+        stray.payload.models[0].columns[1].renamed_from = Some("moniker".to_string());
+        assert_eq!(
+            live_hints(&target().payload, &stray.payload).expect("no refusal"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_hint_whose_old_name_is_still_declared_is_refused_naming_both() {
+        let mut still = target();
+        still.payload.models[0]
+            .columns
+            .push(col("name", "text", false));
+        let err = live_hints(&parent().payload, &still.payload).expect_err("refused");
+        assert_eq!(
+            err,
+            HintError::OldStillDeclared {
+                table: "author".to_string(),
+                field: Some("full_name".to_string()),
+                old: "name".to_string(),
+            }
+        );
+        let message = err.to_string();
+        assert!(message.contains("author.full_name"), "{message}");
+        assert!(message.contains("renamed_from=\"name\""), "{message}");
+
+        let mut table_still = target();
+        table_still
+            .payload
+            .models
+            .push(schema_model("writer", vec![pk_col("id", "integer")]));
+        let err = live_hints(&parent().payload, &table_still.payload).expect_err("refused");
+        assert_eq!(
+            err,
+            HintError::OldStillDeclared {
+                table: "author".to_string(),
+                field: None,
+                old: "writer".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn two_hints_claiming_one_old_name_are_refused_naming_both() {
+        let mut twice = target();
+        twice.payload.models[0].columns.push(SchemaColumn {
+            renamed_from: Some("name".to_string()),
+            ..col("display_name", "text", true)
+        });
+        let err = live_hints(&parent().payload, &twice.payload).expect_err("refused");
+        assert_eq!(
+            err,
+            HintError::Ambiguous {
+                table: Some("author".to_string()),
+                old: "name".to_string(),
+                claimants: vec!["full_name".to_string(), "display_name".to_string()],
+            }
+        );
+        let message = err.to_string();
+        assert!(message.contains("author.full_name"), "{message}");
+        assert!(message.contains("author.display_name"), "{message}");
+    }
+
+    #[test]
+    fn a_table_rename_drags_every_derived_name_in_one_ordered_set() {
+        let expected = vec![
+            MigrationOp::RenameTable {
+                old: "writer".to_string(),
+                new: "author".to_string(),
+            },
+            MigrationOp::RenameColumn {
+                table: "author".to_string(),
+                old: "name".to_string(),
+                new: "full_name".to_string(),
+            },
+            MigrationOp::RenameIndex {
+                old: "idx_writer_name".to_string(),
+                new: "idx_author_full_name".to_string(),
+            },
+            MigrationOp::RenameConstraint {
+                table: "author".to_string(),
+                old: "ck_writer_genre".to_string(),
+                new: "ck_author_genre".to_string(),
+            },
+            MigrationOp::RenameConstraint {
+                table: "book".to_string(),
+                old: "fk_book_writer_id_writer".to_string(),
+                new: "fk_book_writer_id_author".to_string(),
+            },
+        ];
+        assert_eq!(plan(&parent(), &target(), Dialect::Postgres), expected);
+        assert_eq!(plan(&parent(), &target(), Dialect::Sqlite), expected);
+    }
+
+    #[test]
+    fn a_rename_and_a_type_change_on_one_column_plan_the_rename_first() {
+        let mut changed = target();
+        changed.payload.models[0].columns[1].db_type = Some("varchar(80)".to_string());
+        let ops = plan(&parent(), &changed, Dialect::Postgres);
+        let type_change = MigrationOp::AlterColumnType {
+            table: "author".to_string(),
+            column: "full_name".to_string(),
+        };
+        assert_eq!(ops.last(), Some(&type_change), "{ops:?}");
+        assert!(matches!(ops[0], MigrationOp::RenameTable { .. }), "{ops:?}");
+    }
+
+    #[test]
+    fn an_inert_hint_plans_nothing() {
+        assert_eq!(plan(&target(), &target(), Dialect::Postgres), vec![]);
+        let mut deleted = target();
+        deleted.payload.models[0].renamed_from = None;
+        deleted.payload.models[0].columns[1].renamed_from = None;
+        assert_eq!(plan(&target(), &deleted, Dialect::Postgres), vec![]);
+    }
+
+    #[test]
+    fn the_rename_ops_render_through_the_one_renderer_per_statement() {
+        let ops = plan(&parent(), &target(), Dialect::Postgres);
+        let rendered = render_plan(
+            &MigrationPlan {
+                operations: ops,
+                ..MigrationPlan::default()
+            },
+            &parent(),
+            &target(),
+            Dialect::Postgres,
+        )
+        .expect("renders");
+        let statements: Vec<String> = rendered.into_iter().flat_map(|op| op.statements).collect();
+        assert_eq!(
+            statements,
+            [
+                "ALTER TABLE \"writer\" RENAME TO \"author\"",
+                "ALTER TABLE \"author\" RENAME COLUMN \"name\" TO \"full_name\"",
+                "ALTER INDEX \"idx_writer_name\" RENAME TO \"idx_author_full_name\"",
+                "ALTER TABLE \"author\" RENAME CONSTRAINT \"ck_writer_genre\" TO \"ck_author_genre\"",
+                "ALTER TABLE \"book\" RENAME CONSTRAINT \"fk_book_writer_id_writer\" TO \
+                 \"fk_book_writer_id_author\"",
+            ]
+        );
+
+        // SQLite has no index rename: the index is dropped and created under
+        // its new name, by the statements every door uses.
+        let index_only = MigrationPlan {
+            operations: vec![MigrationOp::RenameIndex {
+                old: "idx_writer_name".to_string(),
+                new: "idx_author_full_name".to_string(),
+            }],
+            ..MigrationPlan::default()
+        };
+        let sqlite = render_plan(&index_only, &parent(), &target(), Dialect::Sqlite)
+            .expect("renders")
+            .remove(0)
+            .statements;
+        assert_eq!(
+            sqlite,
+            [
+                "DROP INDEX IF EXISTS \"idx_writer_name\"",
+                "CREATE INDEX IF NOT EXISTS \"idx_author_full_name\" ON \"author\" (\"full_name\")",
+            ]
+        );
+    }
+}

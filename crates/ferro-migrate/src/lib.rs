@@ -17,7 +17,7 @@ pub mod directory;
 mod emit;
 pub mod generate;
 mod order;
-mod plan;
+pub mod plan;
 mod render;
 pub mod run_plan;
 pub mod snapshot;
@@ -30,8 +30,9 @@ pub use ferro_ddl_lowering::Dialect;
 pub use generate::{CheckReport, GenerateError, GeneratedMigration, check_migrations, generate};
 pub use order::order_by_dependencies;
 pub use plan::{
-    LiveCheckFact, LiveFacts, LiveTableFacts, plan_check_drops, plan_check_rebuilds, plan_from_ir,
-    plan_index_rebuilds, plan_missing_checks, plan_validations,
+    Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, live_hints, plan_check_drops,
+    plan_check_rebuilds, plan_from_ir, plan_from_ir_renaming, plan_index_rebuilds,
+    plan_missing_checks, plan_validations,
 };
 pub use render::{RenderedOp, render_plan, validate_schema_ir};
 pub use run_plan::{
@@ -105,6 +106,54 @@ pub enum MigrationOp {
     DropTable {
         /// Table to drop.
         table: String,
+    },
+    /// A live rename hint renamed a table (ADR-0032) — `ALTER TABLE … RENAME
+    /// TO`, native on both dialects. Planned only from declared hints
+    /// ([`plan::plan_from_ir_renaming`]), never inferred.
+    RenameTable {
+        /// The table's name in the old snapshot.
+        old: String,
+        /// The table's name in the new one.
+        new: String,
+    },
+    /// A live rename hint renamed a column (ADR-0032) — `ALTER TABLE … RENAME
+    /// COLUMN`, native on both dialects.
+    RenameColumn {
+        /// Owning table, by the name it has once any table rename ran.
+        table: String,
+        /// The column's old name.
+        old: String,
+        /// The column's new name.
+        new: String,
+    },
+    /// An `idx_` / `uq_` name a rename drags (ADR-0032) — `ALTER INDEX …
+    /// RENAME TO` on Postgres; on SQLite, which has no index rename, `DROP
+    /// INDEX` then the `CREATE INDEX` under the new name.
+    RenameIndex {
+        /// The index's old name.
+        old: String,
+        /// The index's new name.
+        new: String,
+    },
+    /// A `ck_` / `fk_` name a rename drags (ADR-0032) — `ALTER TABLE … RENAME
+    /// CONSTRAINT` on Postgres; a table rebuild on SQLite (ADR-0046).
+    RenameConstraint {
+        /// Owning table, by the name it has once any table rename ran.
+        table: String,
+        /// The constraint's old name.
+        old: String,
+        /// The constraint's new name.
+        new: String,
+    },
+    /// An `rls_` name a table rename drags (ADR-0032) — `ALTER POLICY … RENAME
+    /// TO`. Postgres only, like every row-security op (ADR-0014).
+    RenamePolicy {
+        /// Owning table, by the name it has once any table rename ran.
+        table: String,
+        /// The policy's old name.
+        old: String,
+        /// The policy's new name.
+        new: String,
     },
     /// A column exists on the model in the new IR but not in the live/old IR.
     AddColumn {
@@ -286,12 +335,19 @@ pub enum MigrationOp {
 }
 
 impl MigrationOp {
-    /// The table this op changes, or `None` for an op on an enum type.
+    /// The table this op changes, or `None` for an op on an enum type and for
+    /// [`MigrationOp::RenameIndex`] (an index name is schema-wide). A
+    /// [`MigrationOp::RenameTable`] changes the table by its new name.
     pub fn table(&self) -> Option<&str> {
         match self {
             MigrationOp::AddEnumLabel { .. }
             | MigrationOp::CreateEnumType { .. }
-            | MigrationOp::DropEnumType { .. } => None,
+            | MigrationOp::DropEnumType { .. }
+            | MigrationOp::RenameIndex { .. } => None,
+            MigrationOp::RenameTable { new, .. } => Some(new),
+            MigrationOp::RenameColumn { table, .. }
+            | MigrationOp::RenameConstraint { table, .. }
+            | MigrationOp::RenamePolicy { table, .. } => Some(table),
             MigrationOp::AddTable { table }
             | MigrationOp::DropTable { table }
             | MigrationOp::AddColumn { table, .. }
