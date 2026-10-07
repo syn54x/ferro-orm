@@ -589,6 +589,46 @@ pub fn render_pg_enum_add_value(type_name: &str, label: &str) -> String {
     )
 }
 
+/// One enum label as a SQL string literal: single-quoted, every `'` doubled.
+fn quote_label(label: &str) -> String {
+    format!("'{}'", label.replace('\'', "''"))
+}
+
+/// One `ALTER TYPE … RENAME VALUE` for a declared label rename
+/// (`__ferro_renamed_labels__`, ADR-0032). Postgres 10+; the rows holding the
+/// label follow it, since they store the label's OID, not its text.
+pub fn render_pg_enum_rename_value(type_name: &str, old: &str, new: &str) -> String {
+    format!(
+        "ALTER TYPE {} RENAME VALUE {} TO {}",
+        quote_ident(type_name),
+        quote_label(old),
+        quote_label(new),
+    )
+}
+
+/// One `ALTER TYPE … RENAME TO` for an enum type whose every column moved to
+/// one new type name (ADR-0032: inferred from the columns, no hint).
+pub fn render_pg_enum_rename_type(old: &str, new: &str) -> String {
+    format!(
+        "ALTER TYPE {} RENAME TO {}",
+        quote_ident(old),
+        quote_ident(new)
+    )
+}
+
+/// The SQLite spelling of a label rename for one column of the type: SQLite
+/// stores enum labels as text in the rows, so the rows carrying `from` are
+/// rewritten to `to`.
+pub fn render_sqlite_label_update(table: &str, column: &str, from: &str, to: &str) -> String {
+    let column = quote_ident(column);
+    format!(
+        "UPDATE {} SET {column} = {} WHERE {column} = {}",
+        quote_ident(table),
+        quote_label(to),
+        quote_label(from),
+    )
+}
+
 /// How a generated revision brings a native enum type it introduces into
 /// being (#439). SQLAlchemy creates a named enum type inline with
 /// `create_table` and nowhere else: an `add_column` of the type runs against
@@ -4648,6 +4688,30 @@ mod tests {
         assert_eq!(
             render_pg_enum_add_value("od'd", "it's"),
             "ALTER TYPE \"od'd\" ADD VALUE IF NOT EXISTS 'it''s'"
+        );
+    }
+
+    #[test]
+    fn enum_label_and_type_renames_are_pinned_and_escape() {
+        assert_eq!(
+            render_pg_enum_rename_value("orderstatus", "canceled", "cancelled"),
+            "ALTER TYPE \"orderstatus\" RENAME VALUE 'canceled' TO 'cancelled'"
+        );
+        assert_eq!(
+            render_pg_enum_rename_value("Od\"d", "it's", "its"),
+            "ALTER TYPE \"Od\"\"d\" RENAME VALUE 'it''s' TO 'its'"
+        );
+        assert_eq!(
+            render_pg_enum_rename_type("orderstatus", "orderstate"),
+            "ALTER TYPE \"orderstatus\" RENAME TO \"orderstate\""
+        );
+        assert_eq!(
+            render_sqlite_label_update("order", "status", "canceled", "cancelled"),
+            "UPDATE \"order\" SET \"status\" = 'cancelled' WHERE \"status\" = 'canceled'"
+        );
+        assert_eq!(
+            render_sqlite_label_update("o\"rder", "st", "it's", "its"),
+            "UPDATE \"o\"\"rder\" SET \"st\" = 'its' WHERE \"st\" = 'it''s'"
         );
     }
 
