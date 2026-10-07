@@ -18,6 +18,56 @@
       "table \"trnauthor\" declares __ferro_renamed_from__ = \"trnwriter\", and the database holds \"trnwriter\" and no \"trnauthor\": \"trnauthor\" was not created. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new."
     ]
   },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_and_leaves_the_rows[postgres-plain]": {
+    "statements": [
+      "'pd3order': DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'pd3status' AND n.nspname = current_schema()) THEN CREATE TYPE \"pd3status\" AS ENUM ('paid', 'canceled'); END IF; END $$",
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" serial PRIMARY KEY NOT NULL, \"status\" pd3status NOT NULL )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_and_leaves_the_rows[postgres-updates]": {
+    "statements": [
+      "'pd3order': DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'pd3status' AND n.nspname = current_schema()) THEN CREATE TYPE \"pd3status\" AS ENUM ('paid', 'canceled'); END IF; END $$",
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" serial PRIMARY KEY NOT NULL, \"status\" pd3status NOT NULL )",
+      "'': ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'",
+      "'pd3status': ALTER TYPE \"pd3status\" ADD VALUE IF NOT EXISTS 'cancelled'"
+    ],
+    "warnings": [
+      "Enum type 'pd3status' has label(s) 'canceled' that the model no longer declares. Label addition is append-only: ferro never removes enum labels (existing rows may still hold them). Remove or rename labels with a reviewed Alembic migration."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-db_check-a-row]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" text NOT NULL CONSTRAINT \"ck_pd3order_status\" CHECK (\"status\" IN ('paid', 'canceled')) )"
+    ],
+    "warnings": [
+      "CHECK constraint 'ck_pd3order_status' on table 'pd3order' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate.",
+      "Column 'pd3order.status' still holds the enum label 'canceled', which the model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps enum labels as text in the rows, and auto-migrate changes the schema, never the rows: they keep 'canceled', which the model no longer reads or writes. Generate the migration that relabels them with `ferro migrate new`."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-db_check-no-row]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" text NOT NULL CONSTRAINT \"ck_pd3order_status\" CHECK (\"status\" IN ('paid', 'canceled')) )"
+    ],
+    "warnings": [
+      "CHECK constraint 'ck_pd3order_status' on table 'pd3order' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate.",
+      "Column 'pd3order.status' still holds the enum label 'canceled', which the model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps enum labels as text in the rows, and auto-migrate changes the schema, never the rows: they keep 'canceled', which the model no longer reads or writes. Generate the migration that relabels them with `ferro migrate new`."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-plain-a-row]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" varchar(8) NOT NULL )"
+    ],
+    "warnings": [
+      "Column 'pd3order.status' still holds the enum label 'canceled', which the model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps enum labels as text in the rows, and auto-migrate changes the schema, never the rows: they keep 'canceled', which the model no longer reads or writes. Generate the migration that relabels them with `ferro migrate new`."
+    ]
+  },
+  "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-plain-no-row]": {
+    "statements": [
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" varchar(8) NOT NULL )"
+    ],
+    "warnings": []
+  },
   "tests/test_auto_migrate.py::test_a_new_table_referencing_a_renamed_one_is_created_after_the_rename[postgres]": {
     "statements": [
       "'trnwriter': CREATE TABLE IF NOT EXISTS \"trnwriter\" ( \"id\" serial PRIMARY KEY NOT NULL, \"name\" varchar NOT NULL )",
@@ -180,6 +230,14 @@
       "'fkdriftaccount': CREATE TABLE IF NOT EXISTS \"fkdriftaccount\" ( \"connection_id\" integer, \"id\" serial PRIMARY KEY NOT NULL, CONSTRAINT \"fk_fkdriftaccount_connection_id_fkdriftconn\" FOREIGN KEY (\"connection_id\") REFERENCES \"fkdriftconn\" (\"id\") ON DELETE CASCADE )",
       "'fkdriftaccount': ALTER TABLE \"fkdriftaccount\" DROP CONSTRAINT \"fk_fkdriftaccount_connection_id_fkdriftconn\"",
       "'fkdriftaccount': ALTER TABLE \"fkdriftaccount\" ADD CONSTRAINT \"fk_fkdriftaccount_connection_id_fkdriftconn\" FOREIGN KEY (\"connection_id\") REFERENCES \"fkdriftconn\" (\"id\") ON DELETE SET NULL"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_renames_a_hinted_column_and_then_changes_its_type[postgres]": {
+    "statements": [
+      "'pf2author': CREATE TABLE IF NOT EXISTS \"pf2author\" ( \"id\" serial PRIMARY KEY NOT NULL, \"name\" integer NOT NULL )",
+      "'pf2author': ALTER TABLE \"pf2author\" RENAME COLUMN \"name\" TO \"full_name\"",
+      "'pf2author': ALTER TABLE \"pf2author\" ALTER COLUMN \"full_name\" TYPE varchar USING \"full_name\"::varchar"
     ],
     "warnings": []
   },

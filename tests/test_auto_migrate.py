@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -2175,6 +2176,181 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
         warnings.simplefilter("ignore")
         again = await _connect_logging(db_url)
     assert not [m for m in again if m.startswith("✅ Ferro Engine: Table 'passwriter'")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_migrate_updates_renames_a_hinted_column_and_then_changes_its_type(
+    db_url, db_backend, clean_registry
+):
+    """``name: int`` becomes ``full_name: str`` with ``renamed_from="name"``:
+    the pass renames the column, then changes its type under the new name
+    (#538, F2) — never a refusal that the column is missing."""
+
+    class Pf2Author(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: int
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await execute('INSERT INTO "pf2author" ("name") VALUES (42)')
+    _rewind()
+
+    class Pf2Author(Model):  # noqa: F811 - the edited model
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        full_name: Annotated[str, FerroField(renamed_from="name")]
+
+    if db_backend == "sqlite":
+        # SQLite renames in place but cannot change a type in place: the
+        # type change is the pass's usual warning (ADR-0014).
+        with pytest.warns(
+            UserWarning, match=r"pf2author\.full_name.*ferro migrate new"
+        ):
+            await ferro.connect(db_url, migrate_updates=True)
+    else:
+        await ferro.connect(db_url, migrate_updates=True)
+
+    async with ferro.engines.session():
+        rows = await fetch_all('SELECT "full_name" FROM "pf2author"')
+        assert [str(r["full_name"]) for r in rows] == ["42"]
+        if db_backend == "postgres":
+            types = await fetch_all(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'pf2author' "
+                "AND column_name IN ('name', 'full_name')"
+            )
+            assert [(r["column_name"], r["data_type"]) for r in types] == [
+                ("full_name", "character varying")
+            ]
+
+
+# ---------------------------------------------------------------------------
+# A declared label rename in the pass (#538, D3; ADR-0032, ADR-0014)
+# ---------------------------------------------------------------------------
+
+
+def _define_pd3_order(renamed: bool, checked: bool = False) -> None:
+    """``Pd3Order.status`` of ``paid``/``canceled``; ``renamed``: of
+    ``paid``/``cancelled`` with the hint ``{"cancelled": "canceled"}``.
+    ``checked``: stored as text with its ``db_check``."""
+    from enum import StrEnum
+
+    if renamed:
+
+        class Pd3Status(StrEnum):
+            __ferro_renamed_labels__ = {"cancelled": "canceled"}
+            PAID = "paid"
+            CANCELLED = "cancelled"
+
+    else:
+
+        class Pd3Status(StrEnum):
+            PAID = "paid"
+            CANCELED = "canceled"
+
+    if checked:
+
+        class Pd3Order(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            status: Annotated[Pd3Status, FerroField(db_type="text", db_check=True)]
+
+    else:
+
+        class Pd3Order(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            status: Pd3Status
+
+
+_PD3_STRANDED = (
+    r"Column 'pd3order\.status' still holds the enum label 'canceled', which the "
+    r"model now declares as 'cancelled' .*`ferro migrate new`"
+)
+
+
+async def _pd3_connect(db_url: str, **flags) -> list[str]:
+    """Connect with ``flags``; every warning's text, and the label-rename
+    warnings among them."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        await ferro.connect(db_url, **flags)
+    return [str(w.message) for w in caught]
+
+
+def _stranded(messages: list[str]) -> list[str]:
+    return [m for m in messages if re.search(_PD3_STRANDED, m)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "flags", [{"migrate_updates": True}, {"auto_migrate": True}], ids=["updates", "plain"]
+)
+async def test_a_label_rename_on_sqlite_warns_and_leaves_the_rows(
+    db_url, db_backend, clean_registry, flags
+):
+    """SQLite keeps an enum's labels as text in its rows. The pass never
+    rewrites rows (ADR-0014), so a live label rename (a row holds the old
+    label) is one warning naming `ferro migrate new`, under
+    ``migrate_updates`` and plain ``auto_migrate`` alike, and the rows stay
+    as they are. On Postgres the native type renames its label in place,
+    unchanged by this (#538, D3)."""
+    _define_pd3_order(renamed=False)
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await execute(
+            "INSERT INTO \"pd3order\" (\"status\") VALUES ('canceled'), ('paid')"
+        )
+    _rewind()
+    _define_pd3_order(renamed=True)
+
+    messages = await _pd3_connect(db_url, **flags)
+
+    async with ferro.engines.session():
+        rows = await fetch_all('SELECT "status" FROM "pd3order" ORDER BY "id"')
+        statuses = [r["status"] for r in rows]
+        if db_backend == "postgres":
+            labels = await fetch_all(
+                "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid "
+                "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "WHERE t.typname = 'pd3status' AND n.nspname = current_schema() "
+                "ORDER BY e.enumsortorder"
+            )
+    if db_backend == "sqlite":
+        assert len(_stranded(messages)) == 1, messages
+        assert statuses == ["canceled", "paid"]
+        return
+    assert _stranded(messages) == [], messages
+    if "migrate_updates" in flags:
+        assert statuses == ["cancelled", "paid"]
+        assert [r["enumlabel"] for r in labels] == ["paid", "cancelled"]
+    else:
+        assert statuses == ["canceled", "paid"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+@pytest.mark.parametrize("held", [False, True], ids=["no-row", "a-row"])
+@pytest.mark.parametrize("checked", [False, True], ids=["plain", "db_check"])
+async def test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label(
+    db_url, clean_registry, checked, held
+):
+    """The hint is live while a row holds the old label or the column's
+    ``db_check`` still lists it (ADR-0032); otherwise it is inert and silent."""
+    _define_pd3_order(renamed=False, checked=checked)
+    await ferro.connect(db_url, auto_migrate=True)
+    values = "('canceled'), ('paid')" if held else "('paid')"
+    async with ferro.engines.session():
+        await execute(f'INSERT INTO "pd3order" ("status") VALUES {values}')
+    _rewind()
+    _define_pd3_order(renamed=True, checked=checked)
+
+    messages = await _pd3_connect(db_url, migrate_updates=True)
+
+    assert len(_stranded(messages)) == (1 if held or checked else 0), messages
+    async with ferro.engines.session():
+        rows = await fetch_all('SELECT "status" FROM "pd3order" ORDER BY "id"')
+    assert [r["status"] for r in rows] == (["canceled", "paid"] if held else ["paid"])
 
 
 # ---------------------------------------------------------------------------
