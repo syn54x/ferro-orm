@@ -165,7 +165,28 @@ pub(crate) enum CountedFailure {
         /// The index.
         index: String,
     },
+    /// A contract met a row that still holds `NULL` in a column it makes
+    /// required (ADR-0040, ADR-0042): on Postgres the `VALIDATE` of the
+    /// staged `_ferro_notnull_*` check (`23514`; the column is read off the
+    /// catalog), on SQLite the rebuild's copy into the `NOT NULL` column
+    /// (`NOT NULL constraint failed: _ferro_new_<table>.<column>`).
+    NotNull {
+        /// The table.
+        table: String,
+        /// The column, when the error names it (SQLite).
+        column: Option<String>,
+        /// The staged check, when the error names it (Postgres).
+        constraint: Option<String>,
+    },
 }
+
+/// The prefix of the check that stages `NOT NULL` on Postgres; the
+/// generator's `backfill::staged_not_null_name` writes it.
+const STAGED_NOT_NULL_PREFIX: &str = "_ferro_notnull_";
+
+/// The prefix of the table a SQLite rebuild copies into; the generator's
+/// `rebuild::NEW_TABLE_PREFIX`.
+const REBUILD_TABLE_PREFIX: &str = "_ferro_new_";
 
 /// The counted failure `statement` raised with `sqlstate`, naming `table`
 /// and `constraint` (the database's error fields), or `None` when it is no
@@ -187,6 +208,13 @@ pub(crate) fn counted_failure_of(
     let validates =
         statement.starts_with("ALTER TABLE ") && statement.contains(" VALIDATE CONSTRAINT ");
     match sqlstate? {
+        "23514" if validates && constraint.starts_with(STAGED_NOT_NULL_PREFIX) => {
+            Some(CountedFailure::NotNull {
+                table,
+                column: None,
+                constraint: Some(constraint),
+            })
+        }
         "23514" | "23503" if validates => Some(CountedFailure::Validate { table, constraint }),
         "23505" if statement.starts_with("CREATE UNIQUE INDEX ") => {
             Some(CountedFailure::UniqueBuild {
@@ -198,8 +226,32 @@ pub(crate) fn counted_failure_of(
     }
 }
 
-/// [`counted_failure_of`] for the database error `err` that `statement`
-/// raised.
+/// The SQLite contract failure `statement` raised with `message`: a
+/// rebuild's `INSERT INTO "_ferro_new_<table>" …` copy refused by `NOT NULL
+/// constraint failed: _ferro_new_<table>.<column>`, or `None`.
+pub(crate) fn not_null_copy_failure_of(statement: &str, message: &str) -> Option<CountedFailure> {
+    let code = statement
+        .lines()
+        .skip_while(|line| line.trim().is_empty() || line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let copied = code
+        .strip_prefix("INSERT INTO \"")?
+        .strip_prefix(REBUILD_TABLE_PREFIX)?
+        .split_once('"')?
+        .0;
+    let failed = message.strip_prefix("NOT NULL constraint failed: ")?;
+    let (table, column) = failed.trim().split_once('.')?;
+    let table = table.strip_prefix(REBUILD_TABLE_PREFIX)?;
+    (table == copied).then(|| CountedFailure::NotNull {
+        table: table.to_string(),
+        column: Some(column.to_string()),
+        constraint: None,
+    })
+}
+
+/// [`counted_failure_of`] (or, on SQLite, [`not_null_copy_failure_of`])
+/// for the database error `err` that `statement` raised.
 pub(crate) fn counted_failure_of_error(
     statement: Option<&str>,
     err: &sqlx::Error,
@@ -207,12 +259,9 @@ pub(crate) fn counted_failure_of_error(
     let sqlx::Error::Database(db) = err else {
         return None;
     };
-    counted_failure_of(
-        statement?,
-        db.code().as_deref(),
-        db.table(),
-        db.constraint(),
-    )
+    let statement = statement?;
+    counted_failure_of(statement, db.code().as_deref(), db.table(), db.constraint())
+        .or_else(|| not_null_copy_failure_of(statement, db.message()))
 }
 
 fn quoted(ident: &str) -> String {
@@ -314,6 +363,58 @@ pub(crate) fn unique_build_failure_message(index: &str, count: i64, resume_at: &
     )
 }
 
+/// `2 rows still have NULL "slug" in "author"; run ferro migrate down --to
+/// 0012:01 then ferro migrate up to re-run the backfill`: a contract that met
+/// rows written behind its migration's backfill (ADR-0040). The recipe
+/// reverts every step after `expand_step` of `migration` (the backfill's
+/// down reverses nothing, so only its record goes) and `up` re-runs the
+/// backfill, whose query selects exactly the rows still needing a value.
+/// `expand_step` is `0` when the backfill is the migration's first step:
+/// the recipe then reverts to the migration before it.
+pub(crate) fn map_contract_failure(
+    table: &str,
+    column: &str,
+    count: i64,
+    migration: u16,
+    expand_step: u8,
+) -> String {
+    let (rows, have) = if count == 1 {
+        ("row", "has")
+    } else {
+        ("rows", "have")
+    };
+    let target = if expand_step == 0 {
+        format!("{:04}", migration.saturating_sub(1))
+    } else {
+        format!("{migration:04}:{expand_step:02}")
+    };
+    format!(
+        "{count} {rows} still {have} NULL \"{column}\" in \"{table}\"; run ferro migrate down \
+         --to {target} then ferro migrate up to re-run the backfill"
+    )
+}
+
+/// The step a contract's recipe reverts to in the migration whose step file
+/// is `step_path`: the step before its first data step (`NN_<name>.py`),
+/// the backfill the recipe re-runs; `None` when the migration has no data
+/// step.
+pub(crate) fn backfill_rerun_step(step_path: &std::path::Path) -> Option<u8> {
+    let dir = step_path.parent()?;
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            let stem = name.strip_suffix(".py")?;
+            let (number, _) = stem.split_once('_')?;
+            if number.len() != 2 {
+                return None;
+            }
+            number.parse::<u8>().ok()
+        })
+        .min()
+        .map(|first| first.saturating_sub(1))
+}
+
 fn first_text(rows: &[crate::backend::EngineRow], column: &str) -> Option<String> {
     let (_, value) = rows
         .first()?
@@ -384,11 +485,56 @@ pub(crate) async fn violation_count(
                 .collect();
             (!columns.is_empty()).then(|| duplicate_count_sql(table, &columns))
         }
+        CountedFailure::NotNull { table, .. } => not_null_column(engine, failure)
+            .await?
+            .map(|column| not_null_count_sql(table, &column)),
     };
     let Some(sql) = sql else {
         return Ok(None);
     };
     Ok(first_count(&engine.fetch_all_sql_unprepared(&sql).await?))
+}
+
+/// The rows of `table` whose `column` is still `NULL`.
+pub(crate) fn not_null_count_sql(table: &str, column: &str) -> String {
+    format!(
+        "SELECT count(*) FROM {} WHERE {} IS NULL",
+        quoted(table),
+        quoted(column)
+    )
+}
+
+/// The column a [`CountedFailure::NotNull`] names: SQLite's error names it;
+/// Postgres's staged check is read off the catalog (its one column).
+async fn not_null_column(
+    engine: &crate::backend::EngineHandle,
+    failure: &CountedFailure,
+) -> Result<Option<String>, sqlx::Error> {
+    use crate::backend::EngineBindValue;
+    let CountedFailure::NotNull {
+        table,
+        column,
+        constraint,
+    } = failure
+    else {
+        return Ok(None);
+    };
+    if let Some(column) = column {
+        return Ok(Some(column.clone()));
+    }
+    let Some(constraint) = constraint else {
+        return Ok(None);
+    };
+    let facts = engine
+        .fetch_all_sql_unprepared_with_binds(
+            CONSTRAINT_FACTS_SQL,
+            &[
+                EngineBindValue::String(constraint.clone()),
+                EngineBindValue::String(quoted(table)),
+            ],
+        )
+        .await?;
+    Ok(first_text(&facts, "column_name"))
 }
 
 /// The failure text for `failure` given what counting it gave (`counted`):
@@ -405,6 +551,7 @@ pub(crate) fn counted_failure_text(
     let name = match failure {
         CountedFailure::Validate { constraint, .. } => constraint,
         CountedFailure::UniqueBuild { index, .. } => index,
+        CountedFailure::NotNull { table, .. } => table,
     };
     match counted {
         Ok(Some(count)) => match failure {
@@ -412,6 +559,10 @@ pub(crate) fn counted_failure_text(
             CountedFailure::UniqueBuild { .. } => {
                 unique_build_failure_message(name, count, resume_at)
             }
+            CountedFailure::NotNull { .. } => format!(
+                "{original} ({count} rows of \"{name}\" still hold NULL); give them a value and \
+                 run ferro migrate up to resume at {resume_at}"
+            ),
         },
         Ok(None) => format!(
             "{original} (the offending rows could not be counted: the catalog no longer \
@@ -424,13 +575,70 @@ pub(crate) fn counted_failure_text(
     }
 }
 
-/// [`counted_failure_text`] for `failure`, counted on `engine` now.
+/// The failure text of a contract that met `NULL` rows in `table`, given
+/// what counting them gave (`counted`: the column and its `NULL` rows):
+/// [`map_contract_failure`]'s count and recipe when `rerun` (the migration
+/// and the step before its backfill) is known; otherwise the database's own
+/// `original` message with the count, or with why it is missing.
+pub(crate) fn contract_failure_text(
+    table: &str,
+    counted: Result<Option<(String, i64)>, String>,
+    original: &str,
+    resume_at: &str,
+    rerun: Option<(u16, u8)>,
+) -> String {
+    match (counted, rerun) {
+        (Ok(Some((column, count))), Some((migration, expand_step))) => {
+            map_contract_failure(table, &column, count, migration, expand_step)
+        }
+        (Ok(Some((column, count))), None) => format!(
+            "{original} ({count} rows still hold NULL \"{column}\" in \"{table}\"); give them a \
+             value and run ferro migrate up to resume at {resume_at}"
+        ),
+        (Ok(None), _) => format!(
+            "{original} (the NULL rows could not be counted: the catalog no longer describes \
+             the staged check on \"{table}\"); give them a value and run ferro migrate up to \
+             resume at {resume_at}"
+        ),
+        (Err(err), _) => format!(
+            "{original} (counting the NULL rows failed: {err}); give them a value and run ferro \
+             migrate up to resume at {resume_at}"
+        ),
+    }
+}
+
+/// The column a contract's `NULL` rows hold and how many there are, counted
+/// on `engine` now.
+async fn null_rows(
+    engine: &crate::backend::EngineHandle,
+    failure: &CountedFailure,
+    table: &str,
+) -> Result<Option<(String, i64)>, sqlx::Error> {
+    let Some(column) = not_null_column(engine, failure).await? else {
+        return Ok(None);
+    };
+    let rows = engine
+        .fetch_all_sql_unprepared(&not_null_count_sql(table, &column))
+        .await?;
+    Ok(first_count(&rows).map(|count| (column, count)))
+}
+
+/// [`counted_failure_text`] for `failure`, counted on `engine` now; a
+/// contract's [`contract_failure_text`], whose recipe re-runs the backfill
+/// after `rerun` (`(migration, step before the backfill)`).
 pub(crate) async fn counted_failure_message(
     engine: &crate::backend::EngineHandle,
     failure: &CountedFailure,
     original: &str,
     resume_at: &str,
+    rerun: Option<(u16, u8)>,
 ) -> String {
+    if let CountedFailure::NotNull { table, .. } = failure {
+        let counted = null_rows(engine, failure, table)
+            .await
+            .map_err(|err| err.to_string());
+        return contract_failure_text(table, counted, original, resume_at, rerun);
+    }
     let counted = violation_count(engine, failure)
         .await
         .map_err(|err| err.to_string());
@@ -561,6 +769,109 @@ mod counted_failure_tests {
         assert!(
             counted_failure_text(&failure, Ok(None), original, "0005_x:03").starts_with(original)
         );
+    }
+
+    #[test]
+    fn a_contract_failure_is_read_off_the_staged_check_or_the_rebuilds_copy() {
+        let validate = "ALTER TABLE \"author\" VALIDATE CONSTRAINT \"_ferro_notnull_author_slug\"";
+        assert_eq!(
+            counted_failure_of(
+                &format!("-- ferro: data-dependent\n\n{validate}"),
+                Some("23514"),
+                Some("author"),
+                Some("_ferro_notnull_author_slug")
+            ),
+            Some(CountedFailure::NotNull {
+                table: "author".into(),
+                column: None,
+                constraint: Some("_ferro_notnull_author_slug".into()),
+            })
+        );
+        let copy = "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n\nINSERT INTO \
+                    \"_ferro_new_author\" (\"id\", \"slug\") SELECT \"id\", \"slug\" FROM \"author\"";
+        assert_eq!(
+            not_null_copy_failure_of(copy, "NOT NULL constraint failed: _ferro_new_author.slug"),
+            Some(CountedFailure::NotNull {
+                table: "author".into(),
+                column: Some("slug".into()),
+                constraint: None,
+            })
+        );
+        // Another statement, another table, another failure: not a contract.
+        assert_eq!(
+            not_null_copy_failure_of(
+                "INSERT INTO \"author\" (\"slug\") VALUES (NULL)",
+                "NOT NULL constraint failed: author.slug"
+            ),
+            None
+        );
+        assert_eq!(
+            not_null_copy_failure_of(copy, "CHECK constraint failed: ck_author_slug"),
+            None
+        );
+        assert_eq!(
+            not_null_count_sql("author", "slug"),
+            "SELECT count(*) FROM \"author\" WHERE \"slug\" IS NULL"
+        );
+    }
+
+    #[test]
+    fn a_contract_failure_names_the_count_and_the_recipe_that_re_runs_the_backfill() {
+        assert_eq!(
+            map_contract_failure("author", "slug", 2, 12, 1),
+            "2 rows still have NULL \"slug\" in \"author\"; run ferro migrate down --to \
+             0012:01 then ferro migrate up to re-run the backfill"
+        );
+        // A backfill that is the migration's first step: back to the one before.
+        assert_eq!(
+            map_contract_failure("author", "slug", 1, 12, 0),
+            "1 row still has NULL \"slug\" in \"author\"; run ferro migrate down --to 0011 \
+             then ferro migrate up to re-run the backfill"
+        );
+        let original = "check constraint \"_ferro_notnull_author_slug\" is violated by some row";
+        assert_eq!(
+            contract_failure_text(
+                "author",
+                Ok(Some(("slug".into(), 2))),
+                original,
+                "0012_x:05",
+                Some((12, 1))
+            ),
+            map_contract_failure("author", "slug", 2, 12, 1)
+        );
+        assert!(
+            contract_failure_text("author", Err("gone".into()), original, "0012_x:05", None)
+                .starts_with(original)
+        );
+    }
+
+    #[test]
+    fn the_rerun_step_is_the_one_before_the_first_data_step() {
+        let dir = std::env::temp_dir().join(format!("ferro-rerun-{}", std::process::id()));
+        let migration = dir.join("0012_author_slug");
+        std::fs::create_dir_all(&migration).expect("mkdir");
+        for name in [
+            "01_expand.up.postgres.sql",
+            "02_backfill_author.py",
+            "03_backfill_post.py",
+            "04_contract.up.postgres.sql",
+        ] {
+            std::fs::write(migration.join(name), "").expect("write");
+        }
+        let contract = migration.join("04_contract.up.postgres.sql");
+        assert_eq!(backfill_rerun_step(&contract), Some(1));
+        std::fs::remove_file(migration.join("01_expand.up.postgres.sql")).expect("rm");
+        std::fs::rename(
+            migration.join("02_backfill_author.py"),
+            migration.join("01_backfill_author.py"),
+        )
+        .expect("mv");
+        assert_eq!(backfill_rerun_step(&contract), Some(0));
+        for name in ["01_backfill_author.py", "03_backfill_post.py"] {
+            std::fs::remove_file(migration.join(name)).expect("rm");
+        }
+        assert_eq!(backfill_rerun_step(&contract), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

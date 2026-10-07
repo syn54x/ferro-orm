@@ -1873,8 +1873,13 @@ pub async fn execute_sql_step(
             let error = match counted {
                 Some(failure) if !down => {
                     let resume_at = format!("{}:{:02}", step.migration_name, step.step);
-                    crate::errors::counted_failure_message(engine, &failure, &error, &resume_at)
-                        .await
+                    // A contract's recipe re-runs its migration's backfill.
+                    let rerun = crate::errors::backfill_rerun_step(&step.path)
+                        .map(|before_backfill| (step.migration, before_backfill));
+                    crate::errors::counted_failure_message(
+                        engine, &failure, &error, &resume_at, rerun,
+                    )
+                    .await
                 }
                 _ => error,
             };
