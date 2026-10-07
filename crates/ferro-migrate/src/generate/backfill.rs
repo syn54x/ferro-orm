@@ -26,7 +26,7 @@
 
 use super::columns::{self, PlanContext, PlanDirection};
 use super::staging::StagedConstraint;
-use super::{GenerateError, GeneratedStep, Rendering, enums, rebuild, step_text};
+use super::{GenerateError, GeneratedStep, Rendering, enums, find_model, rebuild, step_text};
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::order::order_by_dependencies;
 use crate::plan::enum_declaration;
@@ -115,13 +115,6 @@ pub struct Demand {
     pub reason: Reason,
     /// How the table's backfill runs.
     pub driver: Driver,
-}
-
-fn find_model<'a>(ir: &'a IrEnvelope<SchemaIrPayload>, table: &str) -> Option<&'a SchemaModel> {
-    ir.payload
-        .models
-        .iter()
-        .find(|model| model.table_name == table)
 }
 
 fn driver_of(model: &SchemaModel) -> Driver {

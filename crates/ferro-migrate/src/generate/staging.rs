@@ -25,7 +25,7 @@
 //! [`ConstraintMode::NotValid`], and `render_validate_constraint`.
 
 use super::columns::{PlanContext, PlanDirection, stages_constraints};
-use super::{GenerateError, GeneratedStep, Rendering, step_text};
+use super::{GenerateError, GeneratedStep, Rendering, find_model, step_text};
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::emit::{
     added_column_indexes, find_foreign_key, fk_constraint_name, render_add_fk_sql,
@@ -86,13 +86,6 @@ fn declared_indexes(model: &SchemaModel) -> Vec<IndexDef> {
             unique,
         })
         .collect()
-}
-
-fn find_model<'a>(ir: &'a IrEnvelope<SchemaIrPayload>, table: &str) -> Option<&'a SchemaModel> {
-    ir.payload
-        .models
-        .iter()
-        .find(|model| model.table_name == table)
 }
 
 /// The index steps of the migration turning `parent` into `target`: every

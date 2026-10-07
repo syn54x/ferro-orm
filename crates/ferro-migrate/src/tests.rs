@@ -5148,6 +5148,72 @@ mod enum_renames {
     }
 
     #[test]
+    fn live_labels_follow_the_renames_so_the_pass_plans_only_the_renames() {
+        // The reconciliation pass's shape: the live type's labels read before
+        // the renames run, under the old type name and the old spellings.
+        let live_facts = || {
+            let mut facts = LiveFacts::live(Default::default(), Default::default());
+            for table in ["enmorder", "enmrefund"] {
+                facts.tables.insert(table.to_string(), Default::default());
+            }
+            facts.enum_labels.insert(
+                "orderstatus".to_string(),
+                vec!["paid".to_string(), "canceled".to_string()],
+            );
+            facts
+        };
+        let label = |type_name: &str| MigrationOp::RenameEnumLabel {
+            type_name: type_name.to_string(),
+            old: "canceled".to_string(),
+            new: "cancelled".to_string(),
+            columns: columns(),
+        };
+        let both_renamed = both(status(
+            "orderstate",
+            &["paid", "cancelled"],
+            &[("cancelled", "canceled")],
+        ));
+        for (target, expected) in [
+            (relabelled(), vec![label("orderstatus")]),
+            (
+                both_renamed,
+                vec![
+                    MigrationOp::RenameEnumType {
+                        old: "orderstatus".to_string(),
+                        new: "orderstate".to_string(),
+                    },
+                    label("orderstate"),
+                ],
+            ),
+        ] {
+            // A live IR reads each column of the type as the native enum it is.
+            let mut live = parent();
+            for model in &mut live.payload.models {
+                for col in &mut model.columns {
+                    col.postgres_native_enum = col.enum_type_name.is_some();
+                }
+            }
+            let plan = plan_from_ir(
+                &live,
+                &target,
+                Dialect::Postgres,
+                &live_facts(),
+                PlanOptions { destructive: true },
+            )
+            .expect("plan");
+            // No `ADD VALUE 'cancelled'` the rename already made, and no
+            // warning that `canceled` is a label the model no longer declares.
+            assert_eq!(plan.operations, expected);
+            assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+            assert!(
+                plan.always_warnings.is_empty(),
+                "{:?}",
+                plan.always_warnings
+            );
+        }
+    }
+
+    #[test]
     fn an_added_label_beside_a_renamed_one_is_still_added() {
         let edited = both(status(
             "orderstatus",

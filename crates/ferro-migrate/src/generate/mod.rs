@@ -46,9 +46,18 @@ use crate::{
 };
 use columns::{Needs, Phase, PlanContext, PlanDirection, Refusal, StepAssignment};
 use ferro_ddl_lowering::extra_check_names_warning;
-use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
+use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+/// The model of `ir` whose table is `table`: the generator's one lookup by
+/// table name over a whole envelope.
+fn find_model<'a>(ir: &'a IrEnvelope<SchemaIrPayload>, table: &str) -> Option<&'a SchemaModel> {
+    ir.payload
+        .models
+        .iter()
+        .find(|model| model.table_name == table)
+}
 
 /// One dialect's up and down file of a generated step, as written to disk.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]

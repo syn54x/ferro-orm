@@ -38,19 +38,9 @@ pub fn live(
     live_hints(&parent.payload, &target.payload).map_err(GenerateError::Hint)
 }
 
-/// Whether `op` is a rename op.
-pub fn is_rename(op: &MigrationOp) -> bool {
-    matches!(
-        op,
-        MigrationOp::RenameTable { .. }
-            | MigrationOp::RenameColumn { .. }
-            | MigrationOp::RenameIndex { .. }
-            | MigrationOp::RenameConstraint { .. }
-            | MigrationOp::RenamePolicy { .. }
-            | MigrationOp::RenameEnumLabel { .. }
-            | MigrationOp::RenameEnumType { .. }
-    )
-}
+/// Whether `op` is a rename op: the planner's one test, which decides the
+/// renames it plans first.
+pub use crate::plan::is_rename;
 
 /// Whether `op` renames a table or a column: native on every dialect, and run
 /// first in its step, so every other statement of the step — a derived
