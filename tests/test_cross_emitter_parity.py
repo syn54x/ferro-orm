@@ -57,6 +57,7 @@ import sys
 import uuid
 from collections import Counter
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, ClassVar
@@ -950,3 +951,268 @@ def test_the_staged_not_null_normalizes_to_nothing_and_set_not_null_stays():
 def test_a_plain_statement_is_its_own_twin():
     plain = 'ALTER TABLE "author" ADD COLUMN "bio" varchar'
     assert normalize_online_shape(plain) == plain
+
+
+# -- which cases each online shape appears in -----------------------------------------
+# Pins (b)–(d) run over the cases that carry their shape. The lists are
+# explicit so a reader sees the coverage, and pinned against what the
+# generator writes so they cannot go stale.
+
+REBUILD_CASES = (
+    "A2b-required-column-with-a-factory",
+    "A3-required-column-without-a-default",
+    "A4-drop-a-required-column",
+    "A5-rename-a-column",
+    "A6-change-a-type",
+    "A7a-make-a-column-required",
+    "A7b-make-a-column-optional",
+    "A10-add-a-table-check",
+    "A10-change-a-table-check",
+    "A10-drop-a-table-check",
+    "B3-rename-a-model",
+    "C1-add-an-optional-foreign-key",
+    "C1-add-a-required-foreign-key",
+    "C2-drop-a-foreign-key-column",
+    "C3-retarget-a-foreign-key",
+    "D3-rename-a-label",
+    "F2-a-rename-and-a-type-change",
+    "F3-a-type-change-and-a-new-index",
+)
+"""SQLite table rebuilds, in an up or a down file. Postgres never rebuilds."""
+INDEX_STEP_CASES = (
+    "A3-required-column-without-a-default",
+    "A9-add-a-unique",
+    "A9-drop-a-unique",
+    "F3-a-type-change-and-a-new-index",
+)
+"""Postgres index steps (``CONCURRENTLY``, no transaction)."""
+LABEL_CASES = ("D1-add-a-label", "D1-add-a-label-and-a-column-of-its-type")
+TYPE_CREATION_CASES = ("A1-optional-enum-column", "B1-new-model-with-a-new-type")
+VALIDATE_CASES = (
+    "A1-optional-checked-column",
+    "A10-add-a-table-check",
+    "A10-change-a-table-check",
+    "C1-add-an-optional-foreign-key",
+    "C3-retarget-a-foreign-key",
+)
+"""Postgres ``NOT VALID`` adds and their validate step."""
+
+
+def _ddl_steps(door: Door) -> list[str]:
+    return [stem for stem in door.stems if not door.is_data(stem)]
+
+
+def _rebuilds(door: Door, dialect: str) -> list[tuple[str, str, Rebuild]]:
+    """Every table rebuild of ``0002`` on ``dialect``: (step, direction,
+    rebuild)."""
+    return [
+        (stem, direction, rebuild)
+        for stem in _ddl_steps(door)
+        for direction in ("up", "down")
+        for rebuild in _split_rebuilds(door.statements(stem, direction, dialect))[1]
+        if rebuild.table is not None
+    ]
+
+
+def _index_steps(door: Door) -> list[str]:
+    """``0002``'s Postgres index steps: no-transaction, built concurrently."""
+    return [
+        stem
+        for stem in _ddl_steps(door)
+        if door.text(stem, "up", "postgres").startswith("-- ferro: no-transaction\n")
+    ]
+
+
+def _postgres_up(door: Door) -> list[str]:
+    return [
+        sql
+        for stem in _ddl_steps(door)
+        for sql in door.statements(stem, "up", "postgres")
+    ]
+
+
+def _shapes_written(door: Door) -> dict[str, bool]:
+    postgres_up = _postgres_up(door)
+    return {
+        "rebuild": bool(_rebuilds(door, "sqlite")),
+        "postgres_rebuild": bool(_rebuilds(door, "postgres")),
+        "index_step": bool(_index_steps(door)),
+        "label": any(" ADD VALUE IF NOT EXISTS " in sql for sql in postgres_up),
+        "type_creation": any(
+            sql.startswith("DO $$") and " CREATE TYPE " in sql for sql in postgres_up
+        ),
+        "validate": any(stem.endswith("_validate") for stem in door.stems),
+    }
+
+
+def test_each_online_shape_list_is_every_case_that_writes_it(doors):
+    written: dict[str, list[str]] = {}
+    for case_id in CASE_IDS:
+        for shape, present in _shapes_written(doors(case_id)).items():
+            if present:
+                written.setdefault(shape, []).append(case_id)
+    assert written == {
+        "rebuild": list(REBUILD_CASES),
+        "index_step": list(INDEX_STEP_CASES),
+        "label": list(LABEL_CASES),
+        "type_creation": list(TYPE_CREATION_CASES),
+        "validate": list(VALIDATE_CASES),
+    }
+
+
+# -- pin (b): a rebuild's CREATE TABLE is the create pass's ---------------------------
+
+
+def create_pass(shape: dict, dialect: str, table: str) -> list[str]:
+    """What the create pass runs for ``table`` as ``shape`` declares it: its
+    ``CREATE TABLE`` and its indexes."""
+    return next(
+        op["statements"]
+        for op in _plan(_empty(shape), shape, dialect)
+        if op["kind"] == "AddTable" and op["table"] == table
+    )
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+@pytest.mark.parametrize("case_id", REBUILD_CASES)
+def test_pin_b_a_rebuild_creates_the_shape_its_step_leaves_as_the_create_pass(
+    doors, case_id, dialect
+):
+    """The rebuild's ``CREATE TABLE "_ferro_new_<t>"`` is byte for byte the
+    create pass's ``CREATE TABLE "<t>"`` for the shape the step leaves (the
+    relaxed shape for an expand, the target for a contract, the parent going
+    down), and the indexes it re-creates are the create pass's (ADR-0046) but
+    the ones a later index step of the migration builds.
+    Postgres alters every one of these in place: it writes no rebuild."""
+    door = doors(case_id)
+    if dialect == "postgres":
+        assert _rebuilds(door, "postgres") == []
+        return
+    rebuilds = _rebuilds(door, "sqlite")
+    assert rebuilds
+    for stem, direction, rebuild in rebuilds:
+        table = rebuild.table
+        assert table is not None
+        create, *indexes = create_pass(
+            door.shape_left(stem, direction), "sqlite", table
+        )
+        # An index a later index step builds is that step's (ADR-0044).
+        later = {f'"{s.split("_", 1)[1]}"' for s in _index_steps(door) if s > stem}
+        indexes = [i for i in indexes if i.split(" ON ")[0].split()[-1] not in later]
+        where = f"{case_id} {stem}.{direction}"
+        assert (
+            rebuild.create.replace(f'"_ferro_new_{table}"', f'"{table}"', 1) == create
+        ), where
+        assert rebuild.indexes == indexes, where
+
+
+# -- pin (c): a concurrent build is the pass's statement but for one token ------------
+
+
+def _changed_tokens(plain: str, online: str) -> list[tuple[list[str], list[str]]]:
+    a, b = plain.split(), online.split()
+    matcher = SequenceMatcher(None, a, b, autojunk=False)
+    return [
+        (a[i1:i2], b[j1:j2])
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    ]
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+@pytest.mark.parametrize("case_id", INDEX_STEP_CASES)
+def test_pin_c_a_concurrent_index_statement_is_the_pass_but_for_one_token(
+    doors, case_id, dialect
+):
+    """ADR-0044: the index step's ``CREATE [UNIQUE] INDEX CONCURRENTLY`` is
+    the pass's ``CREATE [UNIQUE] INDEX IF NOT EXISTS`` with that one token
+    swapped, and its ``DROP INDEX CONCURRENTLY IF EXISTS`` the pass's ``DROP
+    INDEX IF EXISTS`` plus it. SQLite's index step is the pass's statement
+    itself."""
+    door = doors(case_id)
+    planned = pass_statements(door, dialect)
+    if dialect == "sqlite":
+        for stem in _index_steps(door):
+            for sql in door.statements(stem, "up", "sqlite"):
+                assert sql in planned, (case_id, sql)
+        return
+    online = [
+        sql
+        for stem in _index_steps(door)
+        for sql in _plain_twins_kept_online(door.statements(stem, "up", "postgres"))
+    ]
+    assert online
+    for sql in online:
+        name = re.search(r'(?:CONCURRENTLY|EXISTS) ("[^"]+")', sql)[1]
+        verb = sql.split(" ", 1)[0]
+        plain = next(p for p in planned if p.startswith(verb) and f"{name} " in f"{p} ")
+        expected = (
+            [(["IF", "NOT", "EXISTS"], ["CONCURRENTLY"])]
+            if verb == "CREATE"
+            else [([], ["CONCURRENTLY"])]
+        )
+        assert _changed_tokens(plain, sql) == expected, (case_id, plain, sql)
+
+
+def _plain_twins_kept_online(statements: list[str]) -> list[str]:
+    """An index step's statements but the crash-leftover guard, as written."""
+    kept = []
+    for i, sql in enumerate(statements):
+        following = statements[i + 1] if i + 1 < len(statements) else ""
+        name = sql.removeprefix("DROP INDEX CONCURRENTLY IF EXISTS ")
+        if (
+            name != sql
+            and following.startswith("CREATE")
+            and f" {name} ON " in following
+        ):
+            continue
+        kept.append(sql)
+    return kept
+
+
+# -- pin (d): validate, label addition and type creation go through one renderer -----
+
+
+def _pass_statements_of(door: Door, dialect: str, kind: str) -> list[str]:
+    return [
+        sql
+        for plan in door.pass_plans(dialect)
+        for op in plan
+        if op["kind"] == kind
+        for sql in op["statements"]
+    ]
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+@pytest.mark.parametrize("case_id", LABEL_CASES)
+def test_pin_d_the_label_addition_is_the_pass_statement(doors, case_id, dialect):
+    """The ``labels`` step runs the pass's ``ALTER TYPE … ADD VALUE IF NOT
+    EXISTS`` (``render_pg_enum_add_value``, ADR-0011). SQLite stores labels
+    as text: the step is not-applicable and the pass plans no addition."""
+    door = doors(case_id)
+    labels = next(stem for stem in door.stems if stem.endswith("_labels"))
+    planned = _pass_statements_of(door, dialect, "AddEnumLabel")
+    if dialect == "sqlite":
+        assert door.text(labels, "up", "sqlite") == "-- ferro: not-applicable\n"
+        assert planned == []
+        return
+    assert door.statements(labels, "up", "postgres") == planned
+    assert planned
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+@pytest.mark.parametrize("case_id", TYPE_CREATION_CASES)
+def test_pin_d_the_type_creation_is_the_pass_statement(doors, case_id, dialect):
+    """A type the migration introduces is created by the pass's guarded
+    ``CREATE TYPE`` (``render_pg_enum_create_type``, ADR-0041), never a
+    second rendering. SQLite has no enum types: neither side creates one."""
+    door = doors(case_id)
+    created = [
+        sql
+        for stem in _ddl_steps(door)
+        for sql in door.statements(stem, "up", dialect)
+        if " CREATE TYPE " in sql
+    ]
+    planned = _pass_statements_of(door, dialect, "CreateEnumType")
+    assert created == planned
+    assert bool(planned) is (dialect == "postgres")
