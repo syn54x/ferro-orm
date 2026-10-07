@@ -177,6 +177,13 @@ pub(crate) fn counted_failure_of(
     constraint: Option<&str>,
 ) -> Option<CountedFailure> {
     let (table, constraint) = (table?.to_string(), constraint?.to_string());
+    // A file's first statement carries the file's `-- ferro:` header lines.
+    let statement = statement
+        .lines()
+        .skip_while(|line| line.trim().is_empty() || line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let statement = statement.as_str();
     let validates =
         statement.starts_with("ALTER TABLE ") && statement.contains(" VALIDATE CONSTRAINT ");
     match sqlstate? {
@@ -448,6 +455,16 @@ mod counted_failure_tests {
                 table: "author".into(),
                 constraint: "ck_author_email_nonempty".into(),
             })
+        );
+        // A file's first statement carries the file's header lines.
+        assert!(
+            counted_failure_of(
+                &format!("-- ferro: data-dependent\n\n{validate}"),
+                Some("23514"),
+                Some("author"),
+                Some("ck_author_email_nonempty")
+            )
+            .is_some()
         );
         assert!(matches!(
             counted_failure_of(
