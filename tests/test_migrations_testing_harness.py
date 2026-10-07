@@ -386,6 +386,30 @@ async def test_an_irreversible_step_ends_the_downward_walk_and_the_chain_reappli
     assert {m for m, _ in applied(db)} == {1, 2, 3}
 
 
+async def test_an_irreversible_data_step_is_reported_from_the_same_refusal(
+    chain, connected
+):
+    (step,) = migration_dir(chain, "0003").glob("*.py")
+    step.write_text(
+        BACKFILL.replace(
+            "from ferro.migrations import atomic, nothing_to_reverse",
+            "from ferro.migrations import atomic, irreversible",
+        ).replace(
+            '@nothing_to_reverse("slugs are derived; nothing to put back")',
+            '@irreversible("slugs were hand-edited since")',
+        )
+    )
+
+    result = await harness().round_trip()
+
+    assert result.reverted_to == "0003_add_slug"
+    assert result.irreversible == (
+        "0003_add_slug",
+        step.name.removesuffix(".py"),
+        "slugs were hand-edited since",
+    )
+
+
 async def test_drift_by_hand_is_refused_with_the_lines(connected):
     h = harness()
     await h.apply_through("0003")

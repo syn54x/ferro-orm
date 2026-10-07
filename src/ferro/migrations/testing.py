@@ -73,9 +73,16 @@ if TYPE_CHECKING:
 __all__ = ["Harness", "RoundTripResult", "harness"]
 
 _MIGRATION = re.compile(r"(\d{4})(_\w+)?")
-# The one spelling both producers of the refusal use: the run planner
-# (`RunRefusal::Irreversible`) and the runner's data-step loader.
-_IRREVERSIBLE = re.compile(r"ferro migrate: (\d{4}):(\d{2}) is irreversible: (.+)")
+# The irreversible-step refusal, verbatim: a contract text fixed by the #469
+# resolution and rendered by `RunRefusal::Irreversible`'s `Display` (and, for a
+# data step, by the runner's loader in the same words); pinned by
+# tests/test_migrate_down.py. #537 gives `RunRefused` its kind, migration, step
+# and reason, and this match moves over to them.
+_IRREVERSIBLE_REFUSAL = re.compile(
+    r"ferro migrate: (\d{4}):(\d{2}) is irreversible: (.+)\n"
+    r"There is no flag to skip it: to revert past it, write the step's down in "
+    r"place of the declaration\. Nothing was reverted\."
+)
 _APPLIED = {"installed", "installed (baseline)", "installed (different checksum)"}
 
 
@@ -418,7 +425,7 @@ def _stands(chain: list[_Migration], at: int) -> str:
 def _irreversible(refusal: str, chain: list[_Migration]) -> tuple[str, str, str] | None:
     """``(migration, step, reason)`` when ``refusal`` is the runner's
     irreversible-step refusal, else ``None``."""
-    match = _IRREVERSIBLE.match(refusal.splitlines()[0])
+    match = _IRREVERSIBLE_REFUSAL.fullmatch(refusal)
     if match is None:
         return None
     number, ordinal, reason = int(match.group(1)), int(match.group(2)), match.group(3)
